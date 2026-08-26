@@ -943,7 +943,7 @@ test('6.4 canonical casing: ctrl+A == ctrl+a; SPACE/Space are printable', () => 
   for (const spelling of ['SPACE', 'Space']) {
     const direct = parseUserKeybindings({ 'app.todo.toggle': spelling })
     assert.deepEqual(direct.bindings, {}, `${spelling} direct must be rejected`)
-    assert.ok(direct.diagnostics.some(message => message.includes('plain printable')),
+    assert.ok(direct.diagnostics.some(message => message.includes('text-producing')),
       `no printable rejection for ${spelling}: ${direct.diagnostics.join(' | ')}`)
     const leader = parseUserKeybindings({ leader: spelling, bindings: { 'app.tasks.open': '<leader>t' } })
     assert.equal(leader.leader, undefined, `${spelling} leader must be rejected`)
@@ -1090,11 +1090,11 @@ test('7.3 the registry rejects plain printable keys (space/letters) at registrat
   assert.throws(() => registry.register(
     { id: 'space', key: { key: 'space', ctrl: false, alt: false, shift: false, super: false }, action: 'open-search', description: 'space' },
     'plugin',
-  ), /printable/, 'the spacebar must be rejected at registration')
+  ), /text-producing/, 'the spacebar must be rejected at registration')
   assert.throws(() => registry.register(
     { id: 'letter', key: { key: 'a', ctrl: false, alt: false, shift: false, super: false }, action: 'open-search', description: 'a' },
     'plugin',
-  ), /printable/, 'a bare letter must be rejected at registration')
+  ), /text-producing/, 'a bare letter must be rejected at registration')
   // A MODIFIED chord stays bindable (it really reaches the plugin stage).
   registry.register(
     { id: 'ctrl-space', key: { key: 'space', ctrl: true, alt: false, shift: false, super: false }, action: 'open-search', description: 'chord' },
@@ -1190,4 +1190,75 @@ test('7.6 the registry REJECTS legacy C0 alias keys (ctrl+i / ctrl+h / ctrl+_ / 
   assert.ok(LEGACY_COLLISION_KEY_IDS.has('ctrl+h'))
   assert.ok(LEGACY_COLLISION_KEY_IDS.has('ctrl+_'))
   assert.ok(LEGACY_COLLISION_KEY_IDS.has('ctrl+-'))
+})
+
+test('7.7 the registry rejects SHIFT-only text keys and non-grammar key names', async () => {
+  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const registry = new KeybindingRegistry()
+  // Shift+A is TEXT on every protocol: legacy terminals deliver the raw
+  // 'A' byte, Kitty CSI-u normalizes it to 'a'+shift — either way the
+  // editor must receive it, so a plugin binding on it would steal the
+  // user's typing on some terminals and stay dead on others (round-17
+  // finding: the printable guard used to treat ANY shift as a chord).
+  const textKeys = [
+    { key: 'a', ctrl: false, alt: false, shift: true, super: false },
+    { key: 'space', ctrl: false, alt: false, shift: true, super: false },
+    { key: '1', ctrl: false, alt: false, shift: true, super: false },
+    { key: '/', ctrl: false, alt: false, shift: true, super: false },
+  ]
+  for (const key of textKeys) {
+    assert.throws(() => registry.register(
+      { id: `shift-${key.key}`, key, action: 'open-search', description: 'shift' },
+      'plugin',
+    ), /text-producing/, `shift+${key.key} must be rejected at registration`)
+  }
+  // A key name the fork grammar can never produce is a dead binding
+  // (parseKey can never emit it — the router's only runtime identity
+  // source) — rejected at registration (round-17 finding).
+  for (const key of ['definitely-not-a-key', 'f13', 'something-random']) {
+    assert.throws(() => registry.register(
+      { id: `bad-${key}`, key: { key, ctrl: true, alt: false, shift: false, super: false }, action: 'open-search', description: 'bad' },
+      'plugin',
+    ), /not a valid key/, `"${key}" must be grammar-rejected`)
+  }
+  assert.equal(registry.snapshot().bindings.length, 0)
+})
+
+test('7.7b shift+letter routes to the EDITOR on every protocol (legacy and CSI-u)', () => {
+  const router = new InputRouter()
+  const context = {
+    questionActive: false,
+    approvalActive: false,
+    viewerInputMode: 'none' as const,
+    hasOverlay: false,
+    searchActive: false,
+    hostDeclined: false,
+  }
+  // The strongest probe: a plugin binding exists for EVERY normalized key
+  // — text-producing keys must still never reach the plugin stage.
+  const alwaysPlugin = (): 'open-search' => 'open-search'
+  assert.equal(router.route('A', context, alwaysPlugin).kind, 'editor',
+    'legacy uppercase A types into the editor, never a plugin action')
+  assert.equal(router.route('\x1b[97;2u', context, alwaysPlugin).kind, 'editor',
+    'Kitty CSI-u Shift+A types into the editor, never a plugin action')
+  // Named non-text keys stay bindable chords.
+  assert.equal(router.route('\x1b[Z', context, alwaysPlugin).kind, 'plugin-action',
+    'Shift+Tab is a named chord, not text — it may reach the plugin stage')
+})
+
+test('7.7c shift-only text keys are rejected for USER configs and leaders too', () => {
+  // The SAME text-producing policy applies to the user config parser:
+  // matchesKey('A','shift+a') is TRUE on legacy terminals (probe-verified),
+  // so a Host binding on shift+a would steal every typed uppercase A.
+  const direct = parseUserKeybindings({ 'app.todo.toggle': 'shift+a' })
+  assert.deepEqual(direct.bindings, {}, 'shift+a must not bind a Host action')
+  assert.ok(direct.diagnostics.some(message => message.includes('text-producing')),
+    `no text-producing rejection: ${direct.diagnostics.join(' | ')}`)
+  const leader = parseUserKeybindings({ leader: 'shift+s', bindings: { 'app.tasks.open': '<leader>t' } })
+  assert.equal(leader.leader, undefined, 'a text-producing leader must be rejected')
+  // Named non-text keys keep their chords (shift+tab is the permission
+  // cycle default; shift+f5 is a plain chord).
+  const named = parseUserKeybindings({ 'app.transcript.toggleExpand': 'shift+f5' })
+  assert.deepEqual(named.bindings, { 'app.transcript.toggleExpand': 'shift+f5' })
+  assert.ok(!named.diagnostics.some(message => message.includes('text-producing')))
 })

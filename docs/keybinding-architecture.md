@@ -343,9 +343,15 @@ submit never fires on Enter or LF (LF is a newline).
 registry REJECTS at registration: (a) any action string outside the
 public `TuiAction` set (the runtime whitelist `TUI_ACTIONS` — a
 JS/`as any` plugin can never register `app.exit.request` and reach the
-Host dispatcher), and (b) plain printable keys (the spacebar and bare
-letters never reach the plugin stage — the router keeps them with the
-editor's text entry; modified chords stay bindable), and (c) the legacy
+Host dispatcher), (b) TEXT-PRODUCING keys — bare letters, digits,
+symbols and the spacebar, WITH OR WITHOUT Shift (round-17 finding:
+Shift+A is the raw `A` byte on legacy terminals and `a`+shift on Kitty,
+so the old shift-means-chord guard let a plugin steal typing on some
+terminals; the shared `isTextProducingKeyId` policy treats shift-only
+printables as text on every protocol — the router and the registry
+agree, and the user config parser rejects them too), (c) non-grammar
+key names (the runtime parser can never produce them — `f13`,
+arbitrary strings — round-17 finding), and (d) the legacy
 C0 collisions — the registry shares the config parser's legacy inventory
 (`isLegacyCollisionKeyId`), so `ctrl+i`/`ctrl+h`/`ctrl+_`/`ctrl+-`/
 `ctrl+[`/`ctrl+j`/`ctrl+m` registrations are rejected too (on a legacy
@@ -378,7 +384,7 @@ The read model is ONE projection: `keysFor`/`keyHint`/
 working submit remap never leaves the replaced Enter advertised), and a
 CONDITIONAL top claim never permanently hides its context fallback.
 
-Final gates: 2491 bundle tests, 985 fork tests, 11 docs tests,
+Final gates: 2494 bundle tests, 985 fork tests, 11 docs tests,
 typecheck (fork + bundle), `check-host-keybindings` gate (all quote
 styles, either casing), `git diff --check` — all green. The final
 convergence review round was accepted with no findings.

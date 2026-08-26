@@ -73,7 +73,7 @@ test('plain printable bound to a Host action → rejected', () => {
   const parsed = parseUserKeybindings({ 'app.todo.toggle': 'x' })
   assert.deepEqual(parsed.bindings, {})
   assert.equal(parsed.diagnostics.length, 1)
-  assert.ok(parsed.diagnostics[0]!.includes('plain printable'))
+  assert.ok(parsed.diagnostics[0]!.includes('text-producing'))
 })
 
 test('non-configurable action → rejected', () => {
@@ -147,7 +147,7 @@ test('the space key is printable: rejected as a leader and as a direct binding',
   assert.ok(asLeader.diagnostics.some(message => message.includes('invalid leader key')))
   const asBinding = parseUserKeybindings({ 'app.todo.toggle': 'space' })
   assert.deepEqual(asBinding.bindings, {})
-  assert.ok(asBinding.diagnostics.some(message => message.includes('plain printable key')))
+  assert.ok(asBinding.diagnostics.some(message => message.includes('text-producing key')))
   // A MODIFIED space stays bindable (ctrl+space is a chord, not typing).
   const chord = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+space' })
   assert.deepEqual(chord.bindings, { 'app.todo.toggle': 'ctrl+space' })

@@ -662,7 +662,22 @@ test('M5: the keybinding registry rejects non-public actions and printable keys 
       id: 'bad-space',
       key: { key: 'space', ctrl: false, alt: false, shift: false, super: false },
       action: 'open-search',
-    }), /printable/, 'a printable key must be rejected through the public path')
+    }), /text-producing/, 'a text-producing key must be rejected through the public path')
+    // Shift-only text keys are text on every protocol (Shift+A is the 'A'
+    // byte on legacy, 'a'+shift on Kitty) — rejected like unmodified ones
+    // (round-17 finding: they used to steal typing on Kitty).
+    assert.throws(() => service.registerKeybinding({
+      id: 'bad-shift-a',
+      key: { key: 'a', ctrl: false, alt: false, shift: true, super: false },
+      action: 'open-search',
+    }), /text-producing/, 'Shift+A must be rejected through the public path')
+    // A key name the fork grammar can never produce can never fire:
+    // rejected at registration (round-17 finding).
+    assert.throws(() => service.registerKeybinding({
+      id: 'bad-name',
+      key: { key: 'definitely-not-a-key', ctrl: true, alt: false, shift: false, super: false },
+      action: 'open-search',
+    }), /not a valid key/, 'a non-grammar key name must be rejected through the public path')
     // A legacy C0 alias (Ctrl+I is the Tab byte on legacy terminals) can
     // never fire through the plugin stage either: rejected through the
     // public path, sharing the config parser's legacy inventory (round-13
