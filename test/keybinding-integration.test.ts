@@ -679,26 +679,30 @@ test('closing a viewer with Esc disarms the main-session double-Esc window (PR r
   app.stop()
 })
 
-test('a SHADOWED leader-only submit restores the builtin Enter (PR review P1)', () => {
+test('a SHADOWED leader-only submit is inert — no fabricated Enter fallback (review round 37)', () => {
   const manager = new HostKeybindingManager()
   // leader: ctrl+f collides with app.transcript.search — the leader is
   // shadowed, so the <leader>s submit sequence can never fire. The
-  // builtin Enter must be restored (fail-soft), NOT disabled alongside
-  // the dead leader.
+  // leader-only declaration REPLACED the builtin Enter in the unified
+  // model, so a dead leader leaves submit with NO trigger — the
+  // diagnostic explains why (no fabricated fallback: the codebase rule
+  // for conflicted/shadowed overrides, convergence §4.4; a restored
+  // Enter would silently re-add a key the user explicitly removed).
   manager.setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+f',
     bindings: { 'app.input.submit': '<leader>s' },
   }))
   assert.equal(manager.leaderMachine(), undefined, 'the colliding leader is disabled')
   assert.ok(manager.diagnosticsList().some(message => message.includes('active host key')))
-  assert.deepEqual(manager.editorSubmitKeysFor(), ['enter'], 'the dead leader-only submit restores Enter')
-  assert.equal(manager.keyHint('app.input.submit'), 'Enter', 'the UI advertises the restored Enter')
+  assert.deepEqual(manager.editorSubmitKeysFor(), [], 'the dead leader-only submit is inert (no fabricated Enter)')
+  assert.equal(manager.keyHint('app.input.submit'), '', 'the UI advertises nothing for the dead leader-only submit')
 })
 
-test('an AMBIGUOUS leader-only submit restores the builtin Enter (PR review P1)', () => {
+test('an AMBIGUOUS leader-only submit is inert — no fabricated Enter fallback (review round 37)', () => {
   const manager = new HostKeybindingManager()
   // Two actions bound to the same completing key <leader>s: ambiguous —
-  // neither fires. The submit sequence is dead, so Enter must be restored.
+  // neither fires. The leader-only declaration replaced Enter; the dead
+  // sequence leaves submit with no trigger (the diagnostic explains).
   manager.setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: {
@@ -708,6 +712,6 @@ test('an AMBIGUOUS leader-only submit restores the builtin Enter (PR review P1)'
   }))
   assert.equal(manager.leaderMachine()?.leaderBindings.length ?? 0, 0, 'the ambiguous sequence is dropped')
   assert.ok(manager.diagnosticsList().some(message => message.includes('ambiguous leader sequence')))
-  assert.deepEqual(manager.editorSubmitKeysFor(), ['enter'], 'the ambiguous leader-only submit restores Enter')
-  assert.equal(manager.keyHint('app.input.submit'), 'Enter', 'the UI advertises the restored Enter')
+  assert.deepEqual(manager.editorSubmitKeysFor(), [], 'the ambiguous leader-only submit is inert (no fabricated Enter)')
+  assert.equal(manager.keyHint('app.input.submit'), '', 'the UI advertises nothing for the dead leader-only submit')
 })

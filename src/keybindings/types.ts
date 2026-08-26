@@ -132,19 +132,29 @@ export interface AppKeybindingDefinition {
 
 /**
  * The user-facing value of one action in the settings document (plan §12):
- * - a string: a single key;
- * - an array: multiple keys;
- * - `false`: disable the user binding for this action (the action keeps
- *   its builtin default unless the user ALSO disabled it — see
- *   {@link UserKeybindingsConfig} semantics in config.ts);
+ * - a string: a single key (REPLACES the action's builtin default keys);
+ * - an array: multiple keys (REPLACE the builtin defaults; a LEADER-ONLY
+ *   declaration is an EMPTY array — the parser emits it for an action
+ *   configured ONLY with `<leader>X` sequences, so the builtin default is
+ *   replaced by the leader trigger);
+ * - `false`: DISABLE the action's effective keys entirely (no builtin, no
+ *   user key, no leader sequence — every trigger is removed);
  * - a `<leader>X` string: a leader-sequence binding (M6).
+ *
+ * The unified override contract (review round 37): absent = builtin
+ * default; any user declaration (direct, leader-only, direct + leader)
+ * REPLACES the builtin default keys of that action; composition
+ * affordances stay additive (a conditional trigger like the empty-editor
+ * `↓` tasks browser is never removed by a remap — only `false` removes
+ * every trigger of an action).
  */
 export type UserKeybindingValue = KeyId | readonly KeyId[] | false
 
 /**
- * The user keybinding overrides (plan §13). `false` DISABLES the action's
- * user binding; the action then falls back to its builtin default keys
- * (the plan's fail-soft rule: a bad entry never disables the whole map).
+ * The user keybinding overrides (plan §13). Any entry is a DECLARATION
+ * whose keys REPLACE the action's builtin default keys (direct keys,
+ * leader-only empty-array marker, or both via the leader sequences);
+ * `false` REMOVES every trigger of the action (builtin included).
  */
 export type UserKeybindingsConfig = Partial<Record<AppKeybindingId, UserKeybindingValue>>
 

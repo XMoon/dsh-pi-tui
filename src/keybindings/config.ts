@@ -332,7 +332,19 @@ export function parseUserKeybindings(
       }
       keys.push(canonicalEntry)
     }
-    if (keys.length > 0) bindings[action] = keys.length === 1 ? keys[0]! : keys
+    if (keys.length > 0) {
+      bindings[action] = keys.length === 1 ? keys[0]! : keys
+    } else if (leaderBindings.some(binding => binding.action === action)) {
+      // A LEADER-ONLY declaration (no direct keys, only `<leader>X`
+      // sequences): record an EMPTY-ARRAY marker so the effective keymap
+      // sees a USER DECLARATION and REPLACES the builtin default for this
+      // action (review round 37 — the unified override contract: absent =
+      // builtin, direct = replace, leader-only = replace, direct+leader =
+      // both user triggers with the builtin removed, false = remove all).
+      // The empty array compiles no direct rules but suppresses the
+      // builtin; the leader sequences live in `leaderBindings`.
+      bindings[action] = []
+    }
   }
 
   // A leader sequence without a leader key is inert: warn once.

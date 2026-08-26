@@ -985,6 +985,103 @@ test('6.5b a LEADER-ONLY submit override removes the builtin Enter from the snap
   assert.deepEqual(binding!.leaderKeys, ['s'], 'the leader sequence is carried')
 })
 
+// ── 6.6 unified override contract: leader-only REPLACES the builtin (round 37) ──
+
+test('6.6a leader-only REPLACES the builtin direct key of a normal Host action', async () => {
+  // Round 37 contract: absent = builtin; any user declaration (direct,
+  // leader-only, direct + leader) REPLACES the builtin. `app.todo.toggle:
+  // <leader>t` must make Leader T fire and Ctrl+T STOP firing.
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.todo.toggle': '<leader>t' },
+  }))
+  // The builtin Ctrl+T is gone — the leader-only declaration replaced it.
+  assert.deepEqual(manager.keysFor('app.todo.toggle'), [], 'the builtin Ctrl+T must NOT be advertised')
+  assert.deepEqual(manager.leaderKeysFor('app.todo.toggle'), ['t'], 'the leader sequence is the only trigger')
+  assert.equal(manager.keyHint('app.todo.toggle'), 'Leader T')
+  // Runtime: Ctrl+T no longer toggles the todo panel; Leader T does.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+  })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.todo.toggle': '<leader>t' },
+  }))
+  await vt.waitForRender()
+  vt.sendInput('\x14') // ctrl+t — the OLD builtin
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelVisible(), false, 'Ctrl+T must no longer toggle the todo panel (the leader-only declaration replaced the builtin)')
+  vt.sendInput('\x18') // leader
+  await vt.waitForRender()
+  vt.sendInput('t')
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelVisible(), true, 'Leader T must toggle the todo panel (the leader-only trigger)')
+  app.stop()
+})
+
+test('6.6b leader-only REPLACES the builtin steer key (Ctrl+S no longer steers)', async () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.input.steer': '<leader>s' },
+  }))
+  assert.deepEqual(manager.keysFor('app.input.steer'), [], 'the builtin Ctrl+S must NOT be advertised')
+  assert.deepEqual(manager.leaderKeysFor('app.input.steer'), ['s'], 'the leader sequence is the only steer trigger')
+  const vt = new VirtualTerminal(80, 24)
+  const steered: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSteer: (text: string) => steered.push(text),
+  })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.input.steer': '<leader>s' },
+  }))
+  await vt.waitForRender()
+  vt.sendInput('\x13') // ctrl+s — the OLD builtin
+  await vt.waitForRender()
+  assert.deepEqual(steered, [], 'Ctrl+S must no longer steer (the leader-only declaration replaced the builtin)')
+  app.setDraft('draft')
+  vt.sendInput('\x18') // leader
+  await vt.waitForRender()
+  vt.sendInput('s')
+  await vt.waitForRender()
+  assert.deepEqual(steered, ['draft'], 'Leader S must steer')
+  app.stop()
+})
+
+test('6.6c leader-only submit: the unified model carries NO Enter (resolve/matches/editorSync/snapshot)', () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.input.submit': '<leader>s' },
+  }))
+  // The reviewer's required quartet: the unified model itself must not
+  // declare the builtin Enter — not just the manager projection.
+  assert.equal(manager.resolve('\r', editorContext), undefined, 'resolve(Enter) must be undefined (the unified model has no Enter submit rule)')
+  assert.equal(manager.matches('\r', 'app.input.submit'), false, 'matches(Enter, submit) must be false')
+  assert.deepEqual(manager.editorSubmitKeysFor(), [], 'the editor sync carries no Enter')
+  const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.input.submit')
+  assert.ok(binding !== undefined)
+  assert.deepEqual(binding!.keys, [], 'the snapshot carries no Enter')
+  // A direct+leader mix keeps the direct key AND the leader (both user
+  // triggers; the builtin is removed).
+  const mixed = new HostKeybindingManager()
+  mixed.setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.input.submit': ['ctrl+z', '<leader>s'] },
+  }))
+  assert.equal(mixed.resolve('\x1a', editorContext)?.action, 'app.input.submit', 'the direct ctrl+z still resolves')
+  assert.equal(mixed.resolve('\r', editorContext), undefined, 'Enter is gone from the unified model')
+  assert.deepEqual(mixed.editorSubmitKeysFor(), ['ctrl+z'], 'the direct key survives; no Enter')
+})
+
 test('6.6 a conditional top rule does not permanently hide the fallback in the read model', () => {
   const manager = new HostKeybindingManager()
   manager.setUserConfiguration(parseUserKeybindings({ 'app.tasks.open': 'ctrl+s' }))

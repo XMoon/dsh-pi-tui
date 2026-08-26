@@ -208,6 +208,11 @@ dsh-pi-tui:
 
 - 普通可打印键永远不能绑定到 Host action(会吞掉输入);坏配置只是
   警告,绝不会导致启动失败(fail-soft)。
+- 任何用户声明都会**替换**该 action 的内置默认键:`app.input.steer:
+  ctrl+x` 让 Ctrl+X steer、Ctrl+S 不再 steer;仅 leader 的
+  `app.todo.toggle: <leader>t` 让 Leader T 成为唯一切换触发(Ctrl+T
+  失效);`['ctrl+z', '<leader>s']` 同时保留两个用户触发;`false`
+  移除该 action 的全部触发。
 - `DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有用户覆盖(仅使用内置默认)。
 - `/keybindings` 显示生效表;`/keybindings conflicts` 列出冲突(同键 +
   作用域重叠 + 同优先级——绝不静默 last-write-wins);`/keybindings

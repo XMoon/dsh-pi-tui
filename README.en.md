@@ -211,6 +211,11 @@ dsh-pi-tui:
 - A plain printable key can never be bound to a Host action (it would
   swallow typing); a bad entry is a warning, never a startup failure
   (fail-soft).
+- Any user declaration REPLACES the action's builtin default keys:
+  `app.input.steer: ctrl+x` makes Ctrl+X steer and Ctrl+S stop steering;
+  a leader-only `app.todo.toggle: <leader>t` makes Leader T the only
+  toggle trigger (Ctrl+T stops); `['ctrl+z', '<leader>s']` keeps both
+  USER triggers; `false` removes every trigger of the action.
 - `DSH_PI_TUI_SAFE_KEYBINDINGS=1` ignores all user overrides (builtin
   defaults only).
 - `/keybindings` shows the effective table; `/keybindings conflicts`

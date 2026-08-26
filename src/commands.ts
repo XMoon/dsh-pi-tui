@@ -1245,7 +1245,7 @@ export function registerTuiCommands(
           },
           {
             id: 'busy-enter',
-            label: 'Enter while busy',
+            label: 'Submit while busy',
             description: `Steer injects the draft into the running turn; ${keyHint('app.input.queue')} uses the other behavior`,
             currentValue: tuiSettings?.get().busyEnter ?? 'queue',
             values: ['queue', 'steer'],
@@ -2882,10 +2882,10 @@ export function registerTuiCommands(
         const label = keybindings.keysLabelFor(action)
         return label === '' ? '—' : label
       }
-      const rows: SettingItem[] = [        { id: 'k-enter', label: keysLabel('app.input.submit'), description: 'Submit (steers the running turn while busy when Enter while busy is Steer; skill commands steer too, UI commands run locally)', currentValue: '' },
-        { id: 'k-queue', label: keysLabel('app.input.queue'), description: 'Queue the draft while the agent is busy (the opposite of Enter while busy)', currentValue: '' },
+      const rows: SettingItem[] = [        { id: 'k-enter', label: keysLabel('app.input.submit'), description: 'Submit the draft; while the agent is busy, delivery follows the "Submit while busy" preference (skill commands steer too, UI commands run locally)', currentValue: '' },
+        { id: 'k-queue', label: keysLabel('app.input.queue'), description: 'Queue the draft while the agent is busy (the opposite of "Submit while busy")', currentValue: '' },
         { id: 'k-exit', label: keysLabel('app.exit.request'), description: 'Quit the TUI (flushes the session)', currentValue: '' },
-        { id: 'k-cancel', label: keysLabel('app.agent.interrupt'), description: 'Cancel the active turn / tool / shell command (one Esc while the agent is busy; double-Esc while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
+        { id: 'k-cancel', label: keysLabel('app.agent.interrupt'), description: 'Cancel the active turn / tool / shell command (one interrupt while the agent is busy; press the interrupt action twice while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
         { id: 'k-fold', label: keysLabel('app.transcript.toggleExpand'), description: `Expand/collapse recent tool and system output; in regular Focus it reveals the recent Thoughts; in fullscreen Focus it bulk-expands the recent Thoughts or collapses them all (per-card detail stays mouse-owned). Thinking detail is ${keysLabel('app.transcript.toggleThinking')}`, currentValue: '' },
         { id: 'k-todo', label: keysLabel('app.todo.toggle'), description: 'Toggle the todo panel', currentValue: '' },
         { id: 'k-think', label: keysLabel('app.transcript.toggleThinking'), description: 'Collapse/expand thinking blocks (detail level — blocks stay visible)', currentValue: '' },

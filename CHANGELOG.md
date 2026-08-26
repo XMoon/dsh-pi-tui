@@ -25,14 +25,21 @@
   settings 命名空间的 `keybindings` 字段配置覆盖,然后执行 `/keybindings
   reload` 应用(显式 reload——改设置后执行 reload 即生效,无需重启):
   字符串表示单个按键,数组表示多个按键,`false` 禁用某 action 的
-  按键,`leader` 键加 `<leader>X` 序列支持多键绑定(M6)。普通可打印键
-  永远不能绑定到 Host action;坏配置只是警告,绝不会导致启动失败
-  (fail-soft);冲突(同键 + 作用域重叠 + 同优先级)会被诊断并停用——
-  绝不静默 last-write-wins。`DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有
-  用户覆盖。`/keybindings` 显示生效表,`/keybindings conflicts` 列出
-  冲突,`/keybindings reload` 重新读取设置(fail-soft——读取异常时保留
-  last-known-good keymap 并报告错误),`/keybindings reset` 通过
-  settings 服务清除覆盖并立即重建运行中的 keymap。
+  按键,`leader` 键加 `<leader>X` 序列支持多键绑定(M6)。任何用户声明
+  都会**替换**该 action 的内置默认键(仅 leader 的绑定是唯一触发而
+  非叠加在内置键之上;直接 + leader 混合保留两个用户触发;`false`
+  移除全部触发)。普通可打印键永远不能绑定到 Host action;坏配置只是
+  警告,绝不会导致启动失败(fail-soft);冲突(同键 + 作用域重叠 +
+  同优先级)会被诊断并停用——绝不静默 last-write-wins。
+  `DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有用户覆盖。`/keybindings`
+  显示生效表,`/keybindings conflicts` 列出冲突,`/keybindings reload`
+  重新读取设置(fail-soft——读取异常时保留 last-known-good keymap 并
+  报告错误),`/keybindings reset` 通过 settings 服务清除覆盖并立即
+  重建运行中的 keymap。
+- **`/help` 与 `/settings` 的按键文案改为语义化。** help 行描述语义
+  action(如"按两次 interrupt action"取代"double-Esc"),忙碌偏好改为
+  "Submit while busy"——绝不再写会因改键而过时的物理 Enter/Esc 文案;
+  标签列始终展示生效按键。
 - **子代理查看器守卫改为基于 action。** continuable 查看器按 action id
   (而非物理键)阻止父级 action,因此改键后的父级快捷键在查看器内依然
   被阻止——会话安全不再与物理键列表耦合。
