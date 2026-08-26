@@ -135,12 +135,28 @@ export function isPlainPrintableKey(key: KeyId): boolean {
  * - `ctrl+h` is the BACKSPACE byte (0x08) — same class as ctrl+i;
  * - `ctrl+_` is the 0x1f byte — the fork maps Ctrl+- to the SAME 0x1f
  *   (rawCtrlChar('-') = 31, the same physical US key as _), so ctrl+_ and
- *   ctrl+- are one physical legacy byte.
+ *   ctrl+- are ONE physical legacy byte — BOTH spellings are rejected
+ *   (round-16 finding: ctrl+- used to bypass the inventory while its
+ *   twin ctrl+_ was rejected);
+ * - `ctrl+-` is the fork editor's undo key, and on legacy terminals its
+ *   byte IS the 0x1f above — indistinguishable from ctrl+_.
  * A binding that depends on the terminal protocol to be distinguishable
- * from a fixed key is unsupported: rejected with a diagnostic. */
-const LEGACY_COLLISION_KEYS = new Set(
-  ['ctrl+[', 'ctrl+j', 'ctrl+m', 'ctrl+i', 'ctrl+h', 'ctrl+_'].map(key => canonicalizeKeyId(key as KeyId)),
+ * from a fixed key is unsupported: rejected with a diagnostic.
+ *
+ * The inventory is SHARED (round-13 finding): the config parser AND the
+ * Stable plugin registry (KeybindingRegistry.register) must reject the
+ * SAME canonical key ids — a plugin registration on ctrl+i would
+ * otherwise resolve in the EffectiveKeymap but never match the router's
+ * normalized plugin lookup (\t normalizes to `tab`, not `ctrl+i`). */
+export const LEGACY_COLLISION_KEY_IDS: ReadonlySet<string> = new Set(
+  ['ctrl+[', 'ctrl+j', 'ctrl+m', 'ctrl+i', 'ctrl+h', 'ctrl+_', 'ctrl+-'].map(key => canonicalizeKeyId(key as KeyId)),
 )
+
+/** Whether one CANONICAL key id is a legacy-terminal collision (the
+ * shared policy of the config parser and the plugin registry). */
+export function isLegacyCollisionKeyId(key: KeyId): boolean {
+  return LEGACY_COLLISION_KEY_IDS.has(canonicalizeKeyId(key))
+}
 
 /** The NON-CONFIGURABLE overlay/component default keys (plan §3.3 fixed
  * overlay contracts: search close/next/previous, question/tasks flows).
@@ -197,7 +213,7 @@ export function parseUserKeybindings(
       const canonicalLeader = canonicalizeKeyId(leaderValue as KeyId)
       if (isPlainPrintableKey(canonicalLeader)) {
         diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — a plain printable leader would swallow typing — ignored`)
-      } else if (LEGACY_COLLISION_KEYS.has(canonicalLeader)) {
+      } else if (LEGACY_COLLISION_KEY_IDS.has(canonicalLeader)) {
         // Legacy terminal collisions are REJECTED for the leader prefix too
         // (convergence finding): a leader on ctrl+[ / ctrl+j / ctrl+m would
         // swallow the lifecycle Esc/Enter on legacy terminals.
@@ -281,7 +297,7 @@ export function parseUserKeybindings(
         // Legacy terminal collisions are REJECTED for completions too
         // (convergence finding): a completion on ctrl+[ / ctrl+j / ctrl+m
         // would swallow the lifecycle Esc/Enter on legacy terminals.
-        if (LEGACY_COLLISION_KEYS.has(canonicalCompleting)) {
+        if (LEGACY_COLLISION_KEY_IDS.has(canonicalCompleting)) {
           diagnostics.push(`keybindings: "${actionId}" binds a "<leader>${completing}" sequence — it collides with a fixed key on legacy terminals — ignored`)
           continue
         }
@@ -315,8 +331,8 @@ export function parseUserKeybindings(
       // Legacy terminal collisions are REJECTED (convergence §4.5 +
       // round-12 finding): a binding indistinguishable from a fixed key
       // on legacy terminals is unsupported, never a warning.
-      if (LEGACY_COLLISION_KEYS.has(canonicalEntry)) {
-        diagnostics.push(`keybindings: "${actionId}" cannot bind "${entry}" — it collides with a fixed key on legacy terminals (Ctrl+[ is Esc; Ctrl+J/M is Enter; Ctrl+I/H are Tab/Backspace; Ctrl+_ is Ctrl+-) — ignored`)
+      if (LEGACY_COLLISION_KEY_IDS.has(canonicalEntry)) {
+        diagnostics.push(`keybindings: "${actionId}" cannot bind "${entry}" — it collides with a fixed key on legacy terminals (Ctrl+[ is Esc; Ctrl+J/M is Enter; Ctrl+I/H are Tab/Backspace; Ctrl+_ and Ctrl+- are one key) — ignored`)
         continue
       }
       // The fork editor CONSUMES its own editing bindings BEFORE the

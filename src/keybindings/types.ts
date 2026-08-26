@@ -120,11 +120,13 @@ export interface AppKeybindingDefinition {
    * real host behavior; 'reserved' is NOT implemented in this version —
    * never user-configurable, never a bindable no-op. */
   readonly availability?: 'implemented' | 'reserved'
-  /** Whether the HOST ladder consumes this action's keys. `false` marks
-   * actions whose default key belongs to a focused component (e.g. Enter
-   * stays with the fork editor's submit path — paste-burst/backslash
-   * semantics); the builtin rule is then NOT compiled, but a user override
-   * still is (a custom submit key routes through submitDraft). */
+  /** Execution owner hint: whether the HOST ladder consumes this action's
+   * keys. `false` marks EDITOR-OWNED actions (submit): the builtin AND
+   * user direct bindings BOTH compile into the effective model as
+   * owner=editor rules, participate in conflict/shadow/winner selection,
+   * but execution is deferred to the fork editor (the effective keys
+   * sync into its `tui.input.submit` via onEditorSubmitSync), preserving
+   * paste-burst and backslash-newline semantics. */
   readonly hostResolved?: boolean
 }
 

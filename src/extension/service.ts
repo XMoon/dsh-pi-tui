@@ -243,10 +243,13 @@ export interface PiTuiExtensionService {
    */
   registerSetting(contribution: TuiSettingContribution): TuiSettingHandle
   /**
-   * Register a keybinding (M5, metadata only): normalized key → semantic
-   * action. Routing is Host-owned (the InputRouter lands in M6); until
-   * then the binding is recorded and reported. Reserved host keys are
-   * rejected. Owned by the calling fiber.
+   * Register a keybinding (M5): normalized key → public semantic action.
+   * The registry validates the contribution (public TuiAction whitelist,
+   * reserved keys, plain printables, legacy C0 collisions) and its
+   * records feed the LIVE InputRouter lookups + the runner's
+   * effective-keymap plugin rules (M6); routing precedence stays
+   * Host-owned. Rejections throw loudly; the binding is owned by the
+   * calling fiber.
    * @param contribution - the binding contribution.
    */
   registerKeybinding(contribution: TuiKeybindingContribution): TuiKeybindingHandle
@@ -938,9 +941,11 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   }
 
   /**
-   * Register a keybinding (M5, metadata only — routing lands in M6).
-   * Fiber-bound; owner unload removes the binding. Reserved host keys are
-   * rejected.
+   * Register a keybinding (M5): normalized key → public semantic action.
+   * Fiber-bound; owner unload removes the binding. The registry rejects
+   * loudly: non-public actions, reserved host keys, plain printables and
+   * legacy C0 collisions. The records feed the live InputRouter lookups
+   * and the runner's effective-keymap plugin rules (M6).
    */
   registerKeybinding(contribution: TuiKeybindingContribution): TuiKeybindingHandle {
     const caller = this.ctx

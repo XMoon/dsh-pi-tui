@@ -577,7 +577,11 @@ export type TuiAction =
   | 'toggle-fullscreen'
   | 'cycle-permission'
 
-/** One keybinding contribution (M5 metadata only; routing in M6). */
+/** One keybinding contribution (M5): a normalized key + one of the
+ * PUBLIC semantic actions. The registry validates and canonicalizes it
+ * (action whitelist, reserved keys, plain printables, legacy C0
+ * collisions); the records feed the LIVE InputRouter lookups and the
+ * runner's effective-keymap plugin rules (M6). */
 export interface TuiKeybindingContribution {
   readonly id: string
   readonly key: NormalizedKey

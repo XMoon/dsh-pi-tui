@@ -1,10 +1,11 @@
 /**
- * The keybinding registry (M5, plan §10 item 5): plugin keybinding
- * METADATA only — the actual routing is Host-owned (the InputRouter, M6).
- * A plugin declares a normalized key + a semantic ACTION; the host maps
- * actions to its own execution paths. The registry stores the declared
- * bindings; the InputRouter (M6) resolves them against the fixed
- * precedence ladder.
+ * The keybinding registry (M5, plan §10 item 5): the Stable plugin
+ * keybinding REGISTRATION boundary — a plugin declares a normalized key
+ * + a public semantic ACTION; the registry validates, canonicalizes and
+ * stores it, and the live InputRouter (M6) resolves raw input against
+ * it (`actionFor`). The routing precedence itself stays Host-owned (the
+ * InputRouter ladder), and the runner syncs the registry snapshot into
+ * the effective keymap (plugin rules, lowest priority).
  *
  * Contract (plan §11):
  * - keys are NORMALIZED (the host's key identity — never raw escape
@@ -38,6 +39,7 @@
 import { describeKey, type NormalizedKey, type TuiAction, type TuiKeybindingContribution, type TuiKeybindingHandle, type TuiKeybindingRegistrySnapshot } from './extension/public-types.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
 import { canonicalizeKeyId } from './keybindings/key-identity.ts'
+import { isLegacyCollisionKeyId } from './keybindings/config.ts'
 import { PROTECTED_HOST_ACTIONS } from './keybindings/definitions.ts'
 
 export { PROTECTED_HOST_ACTIONS }
@@ -112,10 +114,13 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 'g', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+G external editor
   { key: 'r', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+R input-history search
   { key: 'v', ctrl: true, alt: false, shift: false, super: false },     // Ctrl+V clipboard image intake
-  // Ctrl+J is deliberately NOT reserved/bound: legacy terminals send it
-  // as LF, which the editor treats as Enter, so the chord was unreliable
-  // in practice — the task browser is reached via ↓ (empty editor) and
-  // `/tasks` instead, and a plugin may bind Ctrl+J itself.
+  // Ctrl+J is deliberately NOT reserved: legacy terminals send it as LF,
+  // which the editor treats as Enter, so the chord was unreliable in
+  // practice — the task browser is reached via ↓ (empty editor) and
+  // `/tasks` instead. The LEGACY-COLLISION policy (shared with the config
+  // parser — isLegacyCollisionKeyId) rejects a plugin registration on it
+  // anyway: on a legacy terminal the byte IS Enter, so the binding could
+  // never fire through the router's normalized lookup (round-13 finding).
   { key: 'enter', ctrl: true, alt: false, shift: false, super: false }, // Ctrl+Enter queue
   { key: 'enter', ctrl: false, alt: false, shift: false, super: false }, // Enter submit
   { key: 'escape', ctrl: false, alt: false, shift: false, super: false }, // Esc cancel
@@ -136,6 +141,20 @@ function keyEquals(left: NormalizedKey, right: NormalizedKey): boolean {
     && left.shift === right.shift && left.super === right.super
 }
 
+/** The CANONICAL KeyId of one normalized key (modifiers in the fixed
+ * ctrl→shift→alt→super order, base aliases collapsed). The single
+ * identity used by duplicate detection, the reserved/printable/legacy
+ * policy checks and the runtime lookups. */
+function canonicalNormalizedKeyId(key: NormalizedKey): KeyId {
+  const parts: string[] = []
+  if (key.ctrl) parts.push('ctrl')
+  if (key.shift) parts.push('shift')
+  if (key.alt) parts.push('alt')
+  if (key.super) parts.push('super')
+  parts.push(key.key)
+  return canonicalizeKeyId(parts.join('+') as KeyId)
+}
+
 /** Canonicalize a NORMALIZED key (the plugin public shape): collapse
  * base-key aliases (esc→escape, return→enter) and order modifiers
  * ctrl→shift→alt→super, so a plugin registering `esc` or `return` is
@@ -143,13 +162,7 @@ function keyEquals(left: NormalizedKey, right: NormalizedKey): boolean {
  * detection sees one identity (convergence finding). The public
  * NormalizedKey contract is unchanged. */
 function canonicalNormalizedKey(key: NormalizedKey): NormalizedKey {
-  const parts: string[] = []
-  if (key.ctrl) parts.push('ctrl')
-  if (key.shift) parts.push('shift')
-  if (key.alt) parts.push('alt')
-  if (key.super) parts.push('super')
-  parts.push(key.key)
-  const canonicalKeyId = canonicalizeKeyId(parts.join('+') as KeyId)
+  const canonicalKeyId = canonicalNormalizedKeyId(key)
   const canonicalParts = canonicalKeyId.split('+')
   const base = canonicalParts[canonicalParts.length - 1]!
   return {
@@ -162,9 +175,11 @@ function canonicalNormalizedKey(key: NormalizedKey): NormalizedKey {
 }
 
 /**
- * The keybinding registry (metadata only until the InputRouter lands in
- * M6). One instance backs the runner; the extension service exposes
- * registration; the InputRouter consults {@link actionFor}.
+ * The keybinding registry: the Stable registration boundary (M5) whose
+ * records feed the LIVE InputRouter lookups and the runner's effective-
+ * keymap plugin rules (M6). One instance backs the runner; the extension
+ * service exposes registration; the InputRouter consults
+ * {@link actionFor}.
  */
 export class KeybindingRegistry {
   private readonly records = new Map<string, BindingRecord>()
@@ -229,6 +244,18 @@ export class KeybindingRegistry {
     if (isPlainPrintableNormalizedKey(canonicalKey)) {
       throw new Error(
         `keybinding for "${describeKey(canonicalKey)}" is a plain printable key and cannot be bound by a plugin (it would never reach the plugin stage)`,
+      )
+    }
+    // LEGACY C0 COLLISION REJECTION (round-13 finding): the registry
+    // shares the config parser's legacy inventory — on a legacy terminal
+    // ctrl+i IS the Tab byte, ctrl+h the Backspace byte and ctrl+_ the
+    // 0x1f byte shared with ctrl+-. The EffectiveKeymap would resolve
+    // such a registration (matchesKey accepts the raw byte), but the
+    // router's plugin stage normalizes \t to `tab` and could never match
+    // it — an advertised plugin rule that can never fire.
+    if (isLegacyCollisionKeyId(canonicalNormalizedKeyId(canonicalKey))) {
+      throw new Error(
+        `keybinding for "${describeKey(canonicalKey)}" collides with a fixed key on legacy terminals (Ctrl+[ is Esc; Ctrl+J/M is Enter; Ctrl+I/H are Tab/Backspace; Ctrl+_ and Ctrl+- are one key) and cannot be claimed by a plugin`,
       )
     }
     if (isReservedHostKey(canonicalKey)) {

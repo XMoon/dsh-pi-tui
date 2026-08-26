@@ -663,6 +663,16 @@ test('M5: the keybinding registry rejects non-public actions and printable keys 
       key: { key: 'space', ctrl: false, alt: false, shift: false, super: false },
       action: 'open-search',
     }), /printable/, 'a printable key must be rejected through the public path')
+    // A legacy C0 alias (Ctrl+I is the Tab byte on legacy terminals) can
+    // never fire through the plugin stage either: rejected through the
+    // public path, sharing the config parser's legacy inventory (round-13
+    // finding — the EffectiveKeymap would resolve it but the router's
+    // normalized lookup never would).
+    assert.throws(() => service.registerKeybinding({
+      id: 'bad-legacy',
+      key: { key: 'i', ctrl: true, alt: false, shift: false, super: false },
+      action: 'open-search',
+    }), /legacy terminal/, 'a legacy C0 key must be rejected through the public path')
     // A public action + modified chord registers fine.
     const handle = service.registerKeybinding({
       id: 'good',
