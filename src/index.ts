@@ -5049,7 +5049,11 @@ export function apply(ctx: Context, config: Config): void {
         }
       } else {
         // Neither a plugin theme nor a custom file: the selection is gone
-        // (unloaded plugin) — fall back to the built-in dark palette.
+        // (unloaded plugin) — fall back to the built-in dark palette. The
+        // plugin selection is cleared TOO: a stale record must never
+        // trigger a fallback when some unrelated theme unloads later
+        // (the review's P2).
+        app.clearActivePluginTheme()
         app.applyTheme('dark')
       }
       app.trackTerminalTheme(false)

@@ -363,3 +363,53 @@ test('the theme-unload hook fires with the SELECTABLE name (the host\'s unload-f
     }
   }
 })
+
+test('the invocation-time command health capture resolves a command registered AFTER submit (the dispatch window)', async () => {
+  // The review's P2: the dispatch re-captures the command health ref at
+  // INVOCATION time — it must NOT be gated on the submit-time id. A
+  // plugin that registers during the async ensureSession phase is
+  // therefore covered. This is the mechanism-level repro of that window:
+  // a capture BEFORE registration is undefined, and a capture AFTER the
+  // plugin appears resolves — exactly what the dispatch's second capture
+  // relies on.
+  const { Context } = await import('@deepseek-ai/cordis')
+  const Loader = (await import('@deepseek-ai/cordis-plugin-loader')).default
+  const { apply: applyExtensionHost } = await import('../src/extensions.ts')
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = ctx.plugin((c) => {
+      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+    })
+    await startup
+    await ctx.plugin(applyExtensionHost)
+    const service = ctx.get('piTuiExtensions') as unknown as {
+      registerCommand(contribution: { id: string; name: string; description: string; execution: 'local' }): unknown
+      commands: { idFor(name: string): string | undefined }
+      _recordRegistryHealthRef(slot: string, id: string): { slot: string; id: string; owner: string } | undefined
+    }
+    // SUBMIT time: the command is not registered yet — a submit-time
+    // capture is undefined (the old gate short-circuited here and the
+    // invocation was never health-tracked).
+    assert.equal(service.commands.idFor('deploy'), undefined, 'pre-registration: no command id')
+    assert.equal(service._recordRegistryHealthRef('command', 'deploy'), undefined)
+    // The plugin loads during the async phase (HMR / first registration).
+    const fiber = ctx.plugin({ name: 'late-command', apply(c) {
+      const svc = c.get('piTuiExtensions') as unknown as { registerCommand(contribution: { id: string; name: string; description: string; execution: 'local' }): unknown }
+      svc.registerCommand({ id: 'deploy-cmd', name: 'deploy', description: 'deploy', execution: 'local' })
+    } })
+    await fiber
+    // INVOCATION time: the re-capture resolves — the dispatched command
+    // is the new owner's, and its failures land on it.
+    const id = service.commands.idFor('deploy')
+    assert.equal(id, 'deploy-cmd')
+    const ref = service._recordRegistryHealthRef('command', id)
+    assert.ok(ref !== undefined, 'the invocation-time capture must resolve the late-registered command')
+    assert.ok(ref.owner.endsWith(':late-command'), `the ref must name the late-registering owner: ${ref.owner}`)
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
