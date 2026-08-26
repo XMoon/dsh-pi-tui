@@ -33,7 +33,7 @@ handler.
 | `context.ts` | `deriveKeybindingContext`: the resolver's context, built in ONE place per surface. `editorEmpty` is a LAZY getter — the live editor is only read when a rule predicate needs it (the input path must not add a draft read per keystroke) |
 | `effective-keymap.ts` | The rule compiler + resolver: builtin (100) / composition (100) / user (200) / plugin (10) priorities; conflict detection; `includeScopes` (the HOST keymap resolves the non-capturing scopes only) |
 | `conflicts.ts` | The conflict model: same key + overlapping scope + same priority. Capturing scopes (question/approval/overlay/search/viewer/tasks) are mutually exclusive surfaces — they never conflict with non-capturing scopes or each other |
-| `config.ts` | The user settings parser: string / array / `false` / `<leader>X`; unknown action, invalid key, plain-printable-to-host-action and terminal-unreliable (Ctrl+J/M) diagnostics; fail-soft |
+| `config.ts` | The user settings parser: string / array / `false` / `<leader>X`; unknown action, invalid key, plain-printable-to-host-action and the SHARED legacy-terminal collision inventory (Ctrl+[ / Ctrl+J/M / Ctrl+I/H / Ctrl+_/-) diagnostics; fail-soft |
 | `manager.ts` | The stateful facade: user config, safe mode, plugin rules, leader machine, diagnostics, snapshot |
 | `action-dispatcher.ts` | The semantic action → host method router (`AppActionHost`). The dispatcher NEVER re-implements business state |
 | `leader.ts` | The M6 leader state machine: pending prefix, timeout, ambiguous prefix, cancel, paste/typing isolation |
@@ -324,9 +324,10 @@ registrations are rejected as the reserved `escape`/`enter`).
 **Legacy terminal collisions are rejected everywhere.** `ctrl+[` (Esc),
 `ctrl+j`/`ctrl+m` (Enter), `ctrl+i` (the Tab byte — `matchesKey('\t',
 'ctrl+i')` is true, so a Host binding fires on Tab presses on legacy
-terminals), `ctrl+h` (the Backspace byte) and `ctrl+_` (the same 0x1f
-byte the fork's rawCtrlChar maps Ctrl+- to) are rejected as direct
-bindings, leader prefixes and leader completions — a binding
+terminals), `ctrl+h` (the Backspace byte) and `ctrl+_`/`ctrl+-` (ONE
+0x1f byte — the fork's rawCtrlChar maps Ctrl+- to the same 31 as
+Ctrl+_, so both spellings are rejected, round-16 finding) are rejected
+as direct bindings, leader prefixes and leader completions — a binding
 indistinguishable from a fixed key on legacy terminals is unsupported,
 never a warning.
 
@@ -344,7 +345,13 @@ public `TuiAction` set (the runtime whitelist `TUI_ACTIONS` — a
 JS/`as any` plugin can never register `app.exit.request` and reach the
 Host dispatcher), and (b) plain printable keys (the spacebar and bare
 letters never reach the plugin stage — the router keeps them with the
-editor's text entry; modified chords stay bindable). The owner-aware
+editor's text entry; modified chords stay bindable), and (c) the legacy
+C0 collisions — the registry shares the config parser's legacy inventory
+(`isLegacyCollisionKeyId`), so `ctrl+i`/`ctrl+h`/`ctrl+_`/`ctrl+-`/
+`ctrl+[`/`ctrl+j`/`ctrl+m` registrations are rejected too (on a legacy
+terminal the raw byte is Tab/Backspace/0x1f/Esc/Enter — the router's
+normalized plugin lookup could never match it; the old "a plugin may
+claim Ctrl+J" exception is gone, round-13/16 findings). The owner-aware
 dispatcher NEVER routes a plugin-owner winner into the
 AppActionDispatcher: only 'host' winners execute Host-private actions,
 'editor' winners go to the fork editor, and 'plugin' winners continue to
@@ -371,7 +378,7 @@ The read model is ONE projection: `keysFor`/`keyHint`/
 working submit remap never leaves the replaced Enter advertised), and a
 CONDITIONAL top claim never permanently hides its context fallback.
 
-Final gates: 2490 bundle tests, 985 fork tests, 11 docs tests,
+Final gates: 2491 bundle tests, 985 fork tests, 11 docs tests,
 typecheck (fork + bundle), `check-host-keybindings` gate (all quote
 styles, either casing), `git diff --check` — all green. The final
 convergence review round was accepted with no findings.

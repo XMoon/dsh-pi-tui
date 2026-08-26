@@ -496,9 +496,10 @@ test('KeybindingRegistry: reserved host keys are rejected (full lifecycle invent
     { key: 'g', ctrl: true, shift: false },
     { key: 'r', ctrl: true, shift: false },   // Ctrl+R input-history search
     { key: 'v', ctrl: true, shift: false },   // Ctrl+V clipboard image intake
-    // Ctrl+J is deliberately NOT reserved anymore: legacy terminals send
-    // it as LF (the editor's Enter), so the host dropped the binding and a
-    // plugin may claim the chord itself.
+    // Ctrl+J is NOT in the reserved inventory (the host no longer binds
+    // it — legacy LF ambiguity), but the SHARED legacy-collision policy
+    // rejects a plugin registration on it anyway (round-13 finding): on a
+    // legacy terminal the byte IS Enter, so the binding could never fire.
     { key: 'enter', ctrl: true, shift: false },
   ]
   for (let index = 0; index < reserved.length; index++) {
@@ -535,15 +536,16 @@ test('KeybindingRegistry: reserved host keys are rejected (full lifecycle invent
       action: 'open-search',
     }, 'o'), /reserved/, `${binding.alt ? 'Alt+' : 'Shift+'}${binding.key} must be reserved`)
   }
-  // Ctrl+J is free for plugins: the host no longer binds it (legacy LF
-  // ambiguity), so a plugin registration must NOT be rejected.
-  const handle = registry.register({
+  // Ctrl+J is NOT free for plugins either (round-13 finding): on legacy
+  // terminals it IS the LF/Enter byte — the registry shares the config
+  // parser's legacy-collision policy, so the registration is rejected
+  // (the router's normalized lookup could never match the raw byte, and
+  // the editor would consume it first).
+  assert.throws(() => registry.register({
     id: 'k-ctrl-j',
     key: { key: 'j', ctrl: true, alt: false, shift: false, super: false },
     action: 'open-search',
-  }, 'o')
-  assert.ok(handle !== undefined, 'a plugin must be able to claim Ctrl+J')
-  handle.dispose()
+  }, 'o'), /legacy terminal/, 'Ctrl+J must be rejected as a legacy collision, not claimable')
 })
 
 test('KeybindingRegistry: duplicate keys conflict; unload removes bindings', () => {

@@ -850,7 +850,7 @@ test('6.2 submit on fork-editor PRE-SUBMIT keys is rejected (they can never fire
   // (round-9 finding: submit: tab silently stayed autocomplete).
   const preSubmit = [
     'tab', 'backspace', 'delete', 'ctrl+a', 'ctrl+e', 'ctrl+u', 'ctrl+k',
-    'ctrl+w', 'ctrl+y', 'ctrl+c', 'ctrl+d', 'ctrl+-', 'alt+backspace',
+    'ctrl+w', 'ctrl+y', 'ctrl+c', 'ctrl+d', 'alt+backspace',
     'alt+delete', 'alt+d', 'alt+y', 'alt+b', 'alt+f', 'alt+left', 'alt+right',
     'ctrl+left', 'ctrl+right', 'home', 'end', 'ctrl+home', 'ctrl+end',
     'shift+backspace', 'shift+delete',
@@ -1120,13 +1120,16 @@ test('7.4 a live plugin key disables a colliding leader prefix (never a silent s
   assert.ok(manager.keysFor('app.tasks.open').includes('ctrl+alt+x'), 'the plugin binding stays effective')
 })
 
-test('7.5 legacy C0 aliases are rejected everywhere (ctrl+i / ctrl+h / ctrl+_)', () => {
+test('7.5 legacy C0 aliases are rejected everywhere (ctrl+i / ctrl+h / ctrl+_ / ctrl+-)', () => {
   // On legacy terminals Ctrl+I is the Tab byte (0x09), Ctrl+H is
   // Backspace (0x08) and Ctrl+_ / Ctrl+- are 0x1f — indistinguishable
   // from the editor's own keys, so a binding on them is protocol-
   // dependent and unsupported (review finding — same class as
-  // ctrl+[/ctrl+j/ctrl+m).
-  for (const key of ['ctrl+i', 'ctrl+h', 'ctrl+_']) {
+  // ctrl+[/ctrl+j/ctrl+m). ctrl+- shares the 0x1f byte with ctrl+_ (the
+  // fork's rawCtrlChar maps - to 31), so BOTH spellings of the one
+  // legacy key are rejected (round-16 finding: ctrl+- used to bypass the
+  // inventory).
+  for (const key of ['ctrl+i', 'ctrl+h', 'ctrl+_', 'ctrl+-']) {
     const direct = parseUserKeybindings({ 'app.todo.toggle': key })
     assert.deepEqual(direct.bindings, {}, `"${key}" direct must be rejected`)
     assert.ok(direct.diagnostics.some(message => message.includes('legacy terminals')),
@@ -1150,4 +1153,41 @@ test('7.5b the C0 byte premise: raw \\t / \\x08 / \\x1f are the legacy spellings
   assert.ok(matchesKey('\x08', 'backspace' as never), '…and the same byte is Backspace for the editor')
   assert.ok(matchesKey('\x1f', 'ctrl+_' as never), 'Ctrl+_ is the 0x1f byte')
   assert.ok(matchesKey('\x1f', 'ctrl+-' as never), 'Ctrl+- is the SAME 0x1f byte (the fork maps - to _)')
+})
+
+test('7.6 the registry REJECTS legacy C0 alias keys (ctrl+i / ctrl+h / ctrl+_ / ctrl+-)', async () => {
+  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const registry = new KeybindingRegistry()
+  // On a legacy terminal the registry key `ctrl+i` is the Tab byte: the
+  // EffectiveKeymap resolves it (matchesKey('\t','ctrl+i') is true), but
+  // the router's plugin stage normalizes \t to `tab` and can never match
+  // the registration — an advertised plugin rule that can never fire
+  // (round-13 finding: the legacy inventory was user-config-only). The
+  // registry shares the SAME policy as the config parser — including
+  // ctrl+- (the 0x1f twin of ctrl+_, round-16 finding).
+  const legacyKeys = [
+    { key: 'i', ctrl: true, alt: false, shift: false, super: false },
+    { key: 'h', ctrl: true, alt: false, shift: false, super: false },
+    { key: '_', ctrl: true, alt: false, shift: false, super: false },
+    { key: '-', ctrl: true, alt: false, shift: false, super: false },
+  ]
+  for (const key of legacyKeys) {
+    assert.throws(() => registry.register(
+      { id: `legacy-${key.key}`, key, action: 'open-search', description: 'legacy' },
+      'plugin',
+    ), /legacy terminal/, `ctrl+${key.key} must be rejected at registration`)
+  }
+  // The rejected keys never entered the registry.
+  assert.equal(registry.snapshot().bindings.length, 0)
+  // The canonical identity of the registered key is one shared policy:
+  // the config parser and the registry reject the SAME key ids.
+  const { isLegacyCollisionKeyId, LEGACY_COLLISION_KEY_IDS } = await import('../src/keybindings/config.ts')
+  assert.ok(isLegacyCollisionKeyId('ctrl+i' as never))
+  assert.ok(isLegacyCollisionKeyId('ctrl+h' as never))
+  assert.ok(isLegacyCollisionKeyId('ctrl+_' as never))
+  assert.ok(isLegacyCollisionKeyId('ctrl+-' as never))
+  assert.ok(LEGACY_COLLISION_KEY_IDS.has('ctrl+i'))
+  assert.ok(LEGACY_COLLISION_KEY_IDS.has('ctrl+h'))
+  assert.ok(LEGACY_COLLISION_KEY_IDS.has('ctrl+_'))
+  assert.ok(LEGACY_COLLISION_KEY_IDS.has('ctrl+-'))
 })
