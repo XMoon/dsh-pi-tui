@@ -359,7 +359,7 @@ test('a STALE child timeout never kills the CURRENT child (generation-scoped kil
   const runner = new FooterCommandRunner({
     // A child that traps TERM and keeps running (the close event never
     // fires promptly, so its timeout stays armed).
-    config: { ...CONFIG, refreshIntervalMs: 0, timeoutMs: 200, command: 'sh -c "trap \\"\\" TERM; sleep 30"' },
+    config: { ...CONFIG, refreshIntervalMs: 0, timeoutMs: 200, command: 'trap "" TERM; sleep 3' },
     snapshot: () => emptyStatusSnapshot(),
     width: () => 100,
     height: () => 30,
