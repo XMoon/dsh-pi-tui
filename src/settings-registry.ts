@@ -110,6 +110,12 @@ export class SettingsRegistry {
     }
   }
 
+  /** The owning fiber of one setting id (the health bridge resolves
+   * owners here — the runner never passes owners around). */
+  ownerOf(id: string): string | undefined {
+    return this.records.get(id)?.owner
+  }
+
   /** The rows in deterministic order (order ASC, id ASC). */
   rows(): readonly SettingRecord[] {
     return [...this.records.values()]

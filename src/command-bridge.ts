@@ -167,6 +167,13 @@ export class CommandBridge {
     }
   }
 
+  /** The owning fiber of one contribution id (the runner-facing health
+   * bridge resolves owners HERE — the runner never passes owners
+   * around, which is what keeps the bridge protocol stable). */
+  ownerOf(id: string): string | undefined {
+    return this.contributions.get(id)?.owner
+  }
+
   /** Whether a command name is EFFECTIVELY local (static core set OR a
    * live dynamic local contribution). The static set stays the baseline —
    * the bridge only ADDS dynamic ownership. */

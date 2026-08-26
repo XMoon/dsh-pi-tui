@@ -1624,13 +1624,59 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.unstableSurfaceSeam = { surfaceId, handle }
   }
 
-  /** Runner-only callback health bridges. */
-  _recordRegistryError(slot: string, id: string, owner: string, error: unknown): void {
-    this.recordRegistryError(slot, id, owner, error)
+  /**
+   * Runner-only callback health bridges. The signatures are DELIBERATELY
+   * owner-less (the runner's structural type in index.ts mirrors them
+   * exactly — a previous owner-threaded signature drifted from the
+   * runner's copy and every call site silently misaligned: the Error
+   * object landed in the `owner` slot and the health record never
+   * matched). The owner is resolved HERE from the registry's own record
+   * by (slot, id) — the registries know their owners, the runner never
+   * guesses — and an unknown id is skipped (a ghost error must not mint a
+   * health record).
+   */
+  _recordRegistryError(slot: string, id: string, error: unknown): void {
+    const identity = this.registryIdentity(slot, id)
+    if (identity === undefined) return
+    this.recordRegistryError(slot, identity.id, identity.owner, error)
   }
 
-  _clearRegistryError(slot: string, id: string, owner: string): void {
-    this.clearRegistryError(slot, id, owner)
+  _clearRegistryError(slot: string, id: string): void {
+    const identity = this.registryIdentity(slot, id)
+    if (identity === undefined) return
+    this.clearRegistryError(slot, identity.id, identity.owner)
+  }
+
+  /** The identity ({id, owner}) of one external-registry contribution,
+   * resolved by (slot, id). The theme registry additionally matches the
+   * SELECTABLE name AND normalizes it to the contribution id (the runner
+   * addresses themes by name, health records them by id — resolving only
+   * the owner would still miss the record). */
+  private registryIdentity(slot: string, idOrName: string): { id: string; owner: string } | undefined {
+    switch (slot) {
+      case 'command': {
+        const owner = this.commands.ownerOf(idOrName)
+        return owner === undefined ? undefined : { id: idOrName, owner }
+      }
+      case 'theme': return this.themes.identityOf(idOrName)
+      case 'autocomplete': {
+        const owner = this.autocomplete.ownerOf(idOrName)
+        return owner === undefined ? undefined : { id: idOrName, owner }
+      }
+      case 'setting': {
+        const owner = this.settings.ownerOf(idOrName)
+        return owner === undefined ? undefined : { id: idOrName, owner }
+      }
+      case 'keybinding': {
+        const owner = this.keybindings.ownerOf(idOrName)
+        return owner === undefined ? undefined : { id: idOrName, owner }
+      }
+      case 'editor': {
+        const owner = this.editors.ownerOf(idOrName)
+        return owner === undefined ? undefined : { id: idOrName, owner }
+      }
+      default: return undefined
+    }
   }
 
   /** Test hook: the number of live subscription RECORDS (F1/F5 — an owner

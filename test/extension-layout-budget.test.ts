@@ -45,6 +45,47 @@ function attach(host: SurfaceHost, width = 80): void {
   })
 }
 
+test('same-id widgets from TWO owners coexist and stay independent (owner-scoped compile cache)', async () => {
+  // The owner-scoped identity contract: the same local id under two
+  // owners is legal, and BOTH widgets must render — the outlet's compile
+  // cache is keyed by owner+id (an id-only key made the two owners
+  // overwrite each other's compiled tree on every refresh, and an
+  // id-only prune set dropped the survivor's tree when the other owner
+  // disposed; the review's P2).
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  const handleA = ledger.register('input.widget.above', { id: 'status', order: 0 }, {
+    view: { kind: 'text', spans: [{ text: 'widget-A' }] },
+  }, 'owner-a')
+  ledger.register('input.widget.above', { id: 'status', order: 1 }, {
+    view: { kind: 'text', spans: [{ text: 'widget-B' }] },
+  }, 'owner-b')
+  host.refreshOutlets()
+  await settle()
+  let text = host.widgetsAboveText()
+  assert.ok(text.includes('widget-A') && text.includes('widget-B'),
+    `both owner widgets must render:\n${text}`)
+  // A content change on B (replace bumps the ledger revision → the outlet
+  // refresh re-runs) must not disturb A's tree.
+  handleA.replace({ view: { kind: 'text', spans: [{ text: 'widget-A2' }] } })
+  host.refreshOutlets()
+  await settle()
+  text = host.widgetsAboveText()
+  assert.ok(text.includes('widget-A2') && text.includes('widget-B'),
+    `both owner widgets must survive a revision bump:\n${text}`)
+  // Dispose owner-a: only B remains (owner-scoped pruning drops exactly
+  // the removed identity, never the survivor's tree).
+  handleA.dispose()
+  host.refreshOutlets()
+  await settle()
+  text = host.widgetsAboveText()
+  assert.ok(!text.includes('widget-A2'), 'the disposed owner widget must disappear')
+  assert.ok(text.includes('widget-B'), 'the surviving owner must keep rendering')
+  app.stop()
+})
+
 test('header badges are bounded by the host width budget and truncated ANSI-safely', async () => {
   const ledger = new ExtensionLedger(() => {})
   const { vt, app, host } = makeApp(ledger)

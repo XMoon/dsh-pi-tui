@@ -92,6 +92,12 @@ export class AutocompleteRegistry {
     }
   }
 
+  /** The owning fiber of one provider id (the health bridge resolves
+   * owners here — the runner never passes owners around). */
+  ownerOf(id: string): string | undefined {
+    return this.records.get(id)?.owner
+  }
+
   /**
    * Ask the plugin providers for suggestions, in registration order. The
    * FIRST non-null result wins (deterministic; the host's own provider

@@ -60,7 +60,10 @@ export class WidgetOutlet {
    * compiler contract promises reference-stable trees; the cache makes
    * the promise real). Invalidation: the ledger revision bumps on every
    * register/replace/dispose, so a stale identity key never survives a
-   * contribution change. */
+   * contribution change. The key is the OWNER-SCOPED identity
+   * (`owner\0id` — the ledger allows two owners to share a local id, and
+   * an id-only key would make them overwrite each other's compiled tree
+   * on every refresh; the review's P2). */
   private readonly compiledNodes = new Map<string, { value: InputWidget; node: ReturnType<typeof compileView> }>()
   // Cache entries are additionally checked by value identity in refresh(); a
   // same-id replace therefore cannot reuse the old compiled tree.
@@ -109,13 +112,14 @@ export class WidgetOutlet {
         // P2-03: compile once per contribution identity; an EMPTY view is
         // cached too (abdication is re-derived from the ledger value each
         // pass — a replace() recompiles through the new record).
-        const cached = this.compiledNodes.get(record.id)
+        const cacheKey = `${record.owner}\u0000${record.id}`
+        const cached = this.compiledNodes.get(cacheKey)
         let node: ReturnType<typeof compileView>
         if (cached !== undefined && cached.value === widget) {
           node = cached.node
         } else {
           node = compileView(widget?.view)
-          this.compiledNodes.set(record.id, { value: widget, node })
+          this.compiledNodes.set(cacheKey, { value: widget, node })
         }
         if (node.isEmpty) {
           this.ledger.clearError(this.slot, record.id, record.owner)
@@ -140,11 +144,13 @@ export class WidgetOutlet {
       }
     }
     // P2-03: prune cache entries whose contribution left the ledger (a
-    // removed contribution's compiled tree must not linger).
+    // removed contribution's compiled tree must not linger). The live set
+    // uses the SAME owner-scoped keys (an id-only set would keep a stale
+    // tree alive when the OTHER owner with the same id was removed).
     if (this.compiledNodes.size > snapshot.records.length) {
-      const live = new Set(snapshot.records.map(record => record.id))
-      for (const id of [...this.compiledNodes.keys()]) {
-        if (!live.has(id)) this.compiledNodes.delete(id)
+      const live = new Set(snapshot.records.map(record => `${record.owner}\u0000${record.id}`))
+      for (const key of [...this.compiledNodes.keys()]) {
+        if (!live.has(key)) this.compiledNodes.delete(key)
       }
     }
     // Host row budget (plan §19): drop whole widgets in ASCENDING

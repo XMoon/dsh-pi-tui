@@ -167,3 +167,59 @@ test('M11: a large transcript with extension renderers stays healthy (plan §23)
   }
   app.stop()
 })
+
+test('the runner health bridge is OWNER-LESS: (slot, id, error) resolves the owner internally and the record lands', async () => {
+  // The review's P2: the service's runner-facing bridges must NOT carry an
+  // owner parameter — the runner's structural copy (index.ts) is the
+  // authoritative protocol, and a drift silently misaligns EVERY call
+  // site (the Error object lands in the owner slot and the health record
+  // never matches). The owner is resolved HERE from the registry's own
+  // record by (slot, id) — including the theme registry's SELECTABLE
+  // name, which the runner addresses themes by.
+  const { Context } = await import('@deepseek-ai/cordis')
+  const Loader = (await import('@deepseek-ai/cordis-plugin-loader')).default
+  const { apply: applyExtensionHost } = await import('../src/extensions.ts')
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = ctx.plugin((c) => {
+      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+    })
+    await startup
+    await ctx.plugin(applyExtensionHost)
+    const service = ctx.get('piTuiExtensions') as unknown as {
+      registerTheme(contribution: { id: string; name: string; palette: unknown }): unknown
+      _recordRegistryError(slot: string, id: string, error: unknown): void
+      _clearRegistryError(slot: string, id: string): void
+      _ledger(): { healthSnapshot(): Array<{ id: string; owner: string; state: string; lastError?: string }> }
+    }
+    const themeFiber = ctx.plugin({ name: 'health-owner', apply(c) {
+      const svc = c.get('piTuiExtensions') as unknown as { registerTheme(c: { id: string; name: string; palette: unknown }): unknown }
+      svc.registerTheme({ id: 'health-theme', name: 'Health Theme', palette: {} })
+    } })
+    await themeFiber
+    // The runner-facing protocol: (slot, id, error) — no owner slot. The
+    // record must land keyed by the CONTRIBUTION id with the owner
+    // resolved from the theme NAME.
+    service._recordRegistryError('theme', 'Health Theme', new Error('palette boom'))
+    const health = service._ledger().healthSnapshot()
+    const record = health.find(entry => entry.id === 'health-theme')
+    assert.ok(record !== undefined, 'the bridge must land the record (owner resolved internally)')
+    assert.ok(record.owner.endsWith(':health-owner'), `the resolved owner must be the registering fiber: ${record.owner}`)
+    assert.equal(record.state, 'failed')
+    assert.equal(record.lastError, 'palette boom')
+    // Recovery through the same owner-less bridge clears exactly this
+    // record.
+    service._clearRegistryError('theme', 'Health Theme')
+    const after = service._ledger().healthSnapshot().find(entry => entry.id === 'health-theme')
+    assert.equal(after?.state, 'active', 'the owner-less clear must recover the record')
+    // An UNKNOWN id is skipped: a ghost error must not mint a record.
+    service._recordRegistryError('theme', 'No Such Theme', new Error('ghost'))
+    assert.equal(service._ledger().healthSnapshot().length, 1, 'a ghost error must not mint a health record')
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})

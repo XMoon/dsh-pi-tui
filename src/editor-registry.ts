@@ -125,6 +125,12 @@ export class EditorRegistry {
     }
   }
 
+  /** The owning fiber of one editor id (the health bridge resolves
+   * owners here — the runner never passes owners around). */
+  ownerOf(id: string): string | undefined {
+    return this.records.get(id)?.owner
+  }
+
   /** The current winner (lowest priority), or undefined (host default). */
   winner(): EditorRecord | undefined {
     let best: EditorRecord | undefined

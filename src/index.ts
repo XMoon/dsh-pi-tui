@@ -2535,6 +2535,10 @@ export function apply(ctx: Context, config: Config): void {
       readonly renderers: import('./renderer-registry.ts').RendererRegistry
       readonly editors: import('./editor-registry.ts').EditorRegistry
       _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
+      // Deliberately OWNER-LESS (the service resolves the owner from its
+      // registries by (slot, id)): this shape is the authoritative bridge
+      // protocol — keep it in sync with the service's implementations, a
+      // drift silently misaligns every callback (the review's P2).
       _recordRegistryError(slot: string, id: string, error: unknown): void
       _clearRegistryError(slot: string, id: string): void
       attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string, requestRender?: (force?: boolean) => void): void

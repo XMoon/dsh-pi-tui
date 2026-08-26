@@ -177,6 +177,10 @@ TUI 使用 DSH 提供的模型和设置服务。
 | `custom` | 版本化 `footerLayout`(见下) |
 | `command` | 用户配置的命令渲染状态表面(见下) |
 
+前三个值可在 `/settings` 面板选择;`command` **不在面板中**——它只能
+通过 USER 层设置文档(`footer: "command"` + `footerCommand`)启用,
+`/settings` 的 Status line 行只有 `default / compact / custom` 三个选项。
+
 `/footer` 是交互式配置器:开关条目、在左/右区域间移动、排序、
 切换行、循环 formatter,并实时预览由真实 Footer 引擎合成的效果。
 `Enter` 保存(持久化),`Esc` 取消且不影响当前生效布局。无会话时
