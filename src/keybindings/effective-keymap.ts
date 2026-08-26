@@ -18,7 +18,8 @@
  */
 
 import { matchesKey, type KeyId } from '@xmoon76/pi-tui'
-import { detectConflicts } from './conflicts.ts'
+import { detectConflicts, scopesOverlap } from './conflicts.ts'
+import { canonicalizeKeyId } from './key-identity.ts'
 import { formatKeyId } from './hints.ts'
 import type {
   AppKeybindingDefinition,
@@ -104,6 +105,14 @@ export class EffectiveKeymap {
   rebuild(): void {
     const rules: EffectiveBindingRule[] = []
     const diagnostics: string[] = []
+    // Same-action + same-canonical-key declarations DEDUPE (plan §6.1):
+    // `['ctrl+s', 'ctrl+s']` (or alias spellings of one key) is ONE
+    // trigger, never a self-conflict. Tracked by action+canonicalKey; the
+    // FIRST declaration (highest source priority among identical ones)
+    // wins. This runs before conflict detection so a duplicated key never
+    // deactivates itself.
+    const isDuplicate = (action: string, key: KeyId): boolean =>
+      rules.some(rule => rule.action === action && rule.key === key)
     // The conditional predicate of one action (the composition rules):
     // a USER override of a conditional action must keep the SAME
     // predicate — e.g. a remap of app.tasks.open must not open the task
@@ -129,13 +138,15 @@ export class EffectiveKeymap {
         const predicate = predicateByAction.get(definition.id)
         const keys = Array.isArray(userValue) ? userValue : [userValue]
         for (const key of keys) {
-          rules.push({ ...this.rule(definition, key, 'user', PRIORITY.user), ...predicate === undefined ? {} : { predicate } })
+          const rule = { ...this.rule(definition, key, 'user', PRIORITY.user), ...predicate === undefined ? {} : { predicate } }
+          if (!isDuplicate(rule.action, rule.key)) rules.push(rule)
         }
         continue
       }
       if (definition.hostResolved === false) continue
       for (const key of definition.defaultKeys) {
-        rules.push(this.rule(definition, key, 'builtin', PRIORITY.builtin))
+        const rule = this.rule(definition, key, 'builtin', PRIORITY.builtin)
+        if (!isDuplicate(rule.action, rule.key)) rules.push(rule)
       }
     }
     // 3. Composition (conditional affordance) rules. Skipped when the user
@@ -145,31 +156,62 @@ export class EffectiveKeymap {
       if (definition === undefined) continue
       if (this.includeScopes !== undefined && !this.includeScopes.has(definition.scope)) continue
       if (!this.safeMode && this.userBindings[composition.action] === false) continue
-      rules.push({
-        id: `${composition.action}@composition`,
+      const compositionRule = {
+        id: `${composition.action}@composition:${canonicalizeKeyId(composition.key)}`,
         action: composition.action,
-        key: composition.key,
-        source: 'composition',
+        key: canonicalizeKeyId(composition.key),
+        source: 'composition' as const,
         scope: definition.scope,
         priority: PRIORITY.composition,
         predicate: composition.predicate,
-      })
+      }
+      if (!isDuplicate(compositionRule.action, compositionRule.key)) rules.push(compositionRule)
     }
     // 4. Plugin contributions (lowest priority; never beats a Host rule).
     for (const plugin of this.pluginRules) {
-      rules.push({
+      const pluginRule = {
         id: plugin.id,
         action: plugin.action,
-        key: plugin.key,
-        source: 'plugin',
-        scope: 'global',
+        key: canonicalizeKeyId(plugin.key),
+        source: 'plugin' as const,
+        scope: 'global' as const,
         priority: PRIORITY.plugin,
-      })
+      }
+      if (!isDuplicate(pluginRule.action, pluginRule.key)) rules.push(pluginRule)
     }
     // 5. Conflict detection: deactivate conflicting rules, report them.
     const { conflicts, deactivated } = detectConflicts(rules)
     this.conflicts = conflicts
-    this.activeRules = rules.filter(rule => !deactivated.has(rule.id))
+    // 6. PRIORITY SHADOW (plan §6.2, convergence §4.3): for each key, the
+    // highest-priority tier that still has a live (non-deactivated) rule
+    // wins; every LOWER-priority rule on the same key with an OVERLAPPING
+    // scope is SHADOWED — it must never appear in resolve/keysFor/keyHint/
+    // snapshot, because the runtime can never fire it. (The higher tier
+    // may itself be fully conflict-deactivated; then the next tier
+    // survives — plan §6.3 — provided its rules were DECLARED, never a
+    // fabricated builtin fallback.)
+    const shadowed = new Set<string>()
+    {
+      const byKey = new Map<KeyId, EffectiveBindingRule[]>()
+      for (const rule of rules) {
+        if (deactivated.has(rule.id)) continue
+        const list = byKey.get(rule.key) ?? []
+        list.push(rule)
+        byKey.set(rule.key, list)
+      }
+      for (const keyRules of byKey.values()) {
+        if (keyRules.length < 2) continue
+        const maxPriority = Math.max(...keyRules.map(rule => rule.priority))
+        for (const rule of keyRules) {
+          if (rule.priority >= maxPriority) continue
+          // Only shadow when the scopes actually overlap with a winner.
+          const winnerOverlaps = keyRules.some(winner =>
+            winner.priority === maxPriority && scopesOverlap(rule.scope, winner.scope))
+          if (winnerOverlaps) shadowed.add(rule.id)
+        }
+      }
+    }
+    this.activeRules = rules.filter(rule => !deactivated.has(rule.id) && !shadowed.has(rule.id))
     for (const conflict of conflicts) {
       const names = conflict.actions.map(entry => `${entry.ruleId} (${entry.scope}, ${entry.source})`).join(' vs ')
       diagnostics.push(`keybinding conflict on ${formatKeyId(conflict.key)}: ${names} — neither binding was activated`)
@@ -189,10 +231,15 @@ export class EffectiveKeymap {
     // (review finding: a shared `${action}@${source}` id chained the
     // deactivation across every key of the action, and the resolve
     // tie-break could not tell the rules apart either).
+    // The key is CANONICALIZED at compile time: every spelling of one
+    // physical key (esc/escape, ctrl+shift+p / shift+ctrl+p) becomes the
+    // SAME rule key, so conflict detection, dedupe, the leader collision
+    // and the read model all share one identity (convergence contract).
+    const canonical = canonicalizeKeyId(key)
     return {
-      id: `${definition.id}@${source}:${key}`,
+      id: `${definition.id}@${source}:${canonical}`,
       action: definition.id,
-      key,
+      key: canonical,
       source,
       scope: definition.scope,
       priority,
@@ -293,6 +340,23 @@ export class EffectiveKeymap {
       if (rule.action === action) keys.add(rule.key)
     }
     return [...keys]
+  }
+
+  /** Whether one action can fire in the CURRENT context (convergence
+   * §4.7/§8.3): the action has at least one effective rule whose
+   * predicate passes. Used by the leader machine before dispatching a
+   * completion — a leader sequence is another TRIGGER of the same
+   * semantic action and must obey the action's context predicate (e.g.
+   * the empty-editor ↓ tasks affordance), never a predicate bypass.
+   * Actions with no effective rules cannot activate. */
+  canActivate(action: string, context: KeybindingContext): boolean {
+    let sawRule = false
+    for (const rule of this.activeRules) {
+      if (rule.action !== action) continue
+      sawRule = true
+      if (rule.predicate === undefined || rule.predicate(context)) return true
+    }
+    return sawRule ? false : false
   }
 
   /** The primary (first) effective key of one action, or undefined. */

@@ -116,6 +116,10 @@ export interface AppKeybindingDefinition {
   readonly scope: KeybindingScope
   /** Whether the user may override this action's keys (M3). */
   readonly configurable: boolean
+  /** Availability tier (convergence §7): 'implemented' (default) has
+   * real host behavior; 'reserved' is NOT implemented in this version —
+   * never user-configurable, never a bindable no-op. */
+  readonly availability?: 'implemented' | 'reserved'
   /** Whether the HOST ladder consumes this action's keys. `false` marks
    * actions whose default key belongs to a focused component (e.g. Enter
    * stays with the fork editor's submit path — paste-burst/backslash

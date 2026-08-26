@@ -28,6 +28,7 @@
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'
+import { canonicalizeKeyId } from './key-identity.ts'
 import { APP_KEYBINDINGS, NON_CONFIGURABLE_ACTIONS } from './definitions.ts'
 import type { AppKeybindingId, LeaderBinding, LeaderConfig, UserKeybindingValue, UserKeybindingsConfig } from './types.ts'
 
@@ -80,7 +81,7 @@ export function isPlainPrintableKey(key: KeyId): boolean {
 /** Terminal-unreliable combinations (plan §13 item 5): legacy terminals
  * send Ctrl+J as LF (Enter) and Ctrl+M as CR (Enter), so binding them is
  * a silent no-op on those terminals. Warned, not rejected. */
-const TERMINAL_UNRELIABLE_KEYS = new Set(['ctrl+j', 'ctrl+m'])
+const TERMINAL_UNRELIABLE_KEYS = new Set(['ctrl+j', 'ctrl+m'].map(key => canonicalizeKeyId(key as KeyId)))
 
 /** The NON-CONFIGURABLE overlay/component default keys (plan §3.3 fixed
  * overlay contracts: search close/next/previous, question/tasks flows).
@@ -90,7 +91,8 @@ const TERMINAL_UNRELIABLE_KEYS = new Set(['ctrl+j', 'ctrl+m'])
 const FIXED_OVERLAY_KEYS = new Set(
   Object.values(APP_KEYBINDINGS)
     .filter(definition => !definition.configurable)
-    .flatMap(definition => definition.defaultKeys),
+    .flatMap(definition => definition.defaultKeys)
+    .map(canonicalizeKeyId),
 )
 
 /** The parsed, validated user configuration. */
@@ -130,7 +132,7 @@ export function parseUserKeybindings(
   const leaderValue = doc[LEADER_KEY]
   if (leaderValue !== undefined) {
     if (typeof leaderValue === 'string' && isValidKeyId(leaderValue) && !isPlainPrintableKey(leaderValue)) {
-      leader = { key: leaderValue, timeoutMs: options.leaderTimeoutMs ?? DEFAULT_LEADER_TIMEOUT_MS }
+      leader = { key: canonicalizeKeyId(leaderValue as KeyId), timeoutMs: options.leaderTimeoutMs ?? DEFAULT_LEADER_TIMEOUT_MS }
     } else {
       diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — ignored`)
     }
@@ -196,7 +198,15 @@ export function parseUserKeybindings(
           diagnostics.push(`keybindings: "${actionId}" has an invalid leader sequence "${entry}" — ignored`)
           continue
         }
-        leaderBindings.push({ action, key: completing })
+        // Esc (aliases included) is the leader's pending-CANCEL fixed
+        // contract — a completion on it could never fire (convergence
+        // contract §4.6a). Rejected at the parser.
+        const canonicalCompleting = canonicalizeKeyId(completing as KeyId)
+        if (canonicalCompleting === 'escape') {
+          diagnostics.push(`keybindings: "${actionId}" binds a "<leader>escape" sequence — Esc is the leader cancel key and cannot be a completion — ignored`)
+          continue
+        }
+        leaderBindings.push({ action, key: canonicalCompleting })
         continue
       }
       if (!isValidKeyId(entry)) {
@@ -207,7 +217,8 @@ export function parseUserKeybindings(
         diagnostics.push(`keybindings: "${actionId}" cannot bind the plain printable key "${entry}" to a Host action — ignored`)
         continue
       }
-      if (TERMINAL_UNRELIABLE_KEYS.has(entry)) {
+      const canonicalEntry = canonicalizeKeyId(entry as KeyId)
+      if (TERMINAL_UNRELIABLE_KEYS.has(canonicalEntry)) {
         diagnostics.push(`keybindings: "${actionId}" binds "${entry}", which legacy terminals report as Enter — the binding may not fire there`)
       }
       // Fixed overlay-key precedence (review finding): a configurable
@@ -215,10 +226,10 @@ export function parseUserKeybindings(
       // while that overlay is open (e.g. the search toggle remapped to
       // Enter collides with search.next). The binding still works
       // outside the overlay; warned, never silently dropped.
-      if (FIXED_OVERLAY_KEYS.has(entry)) {
+      if (FIXED_OVERLAY_KEYS.has(canonicalEntry)) {
         diagnostics.push(`keybindings: "${actionId}" binds "${entry}", which a non-configurable overlay owns while it is open — the overlay wins there`)
       }
-      keys.push(entry)
+      keys.push(canonicalEntry)
     }
     if (keys.length > 0) bindings[action] = keys.length === 1 ? keys[0]! : keys
   }

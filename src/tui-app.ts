@@ -2067,6 +2067,16 @@ export class TuiApp {
           && VIEWER_BLOCKED_PARENT_ACTIONS.has(action as AppKeybindingId)) {
           return true
         }
+        // A leader completion is another TRIGGER of the same semantic
+        // action and MUST obey the action's context predicate — never a
+        // predicate bypass (convergence §4.7: `<leader>t` opens the task
+        // browser only when the direct ↓ affordance would). A
+        // predicate-failed completion is reported as NOT consumed so the
+        // completing key falls through (never fires the action out of
+        // context).
+        if (!this.keybindings.canActivate(action as AppKeybindingId, this.keybindingContext())) {
+          return false
+        }
         // The dispatch result propagates to the feed consumer: an action
         // that DECLINES (pasteMedia without a handler, unbound history
         // search) must fall through like a direct key — the completing
@@ -2801,15 +2811,20 @@ export class TuiApp {
     // preserves that ordering exactly; do not move the keymap after the
     // advanced captures without re-reviewing the tradeoff.
     const resolution = this.keybindings.resolve(data, this.keybindingContext())
+    let hostDeclined = false
     if (resolution !== undefined) {
       const consumed = this.dispatchResolvedAction(resolution.action as AppKeybindingId, data, resolution.key)
       if (consumed) return { consume: true }
+      // The HOST dispatcher declined (e.g. pasteMedia without a handler):
+      // the key must reach the editor/plugin remainder — never be
+      // re-reserved by the same host action (convergence §6/§4.9).
+      hostDeclined = true
     }
     // M6: the router first determines whether a capturing path owns the key.
     // A replacement editor gets the first chance for editor-routed input;
     // only an explicit decline is eligible for a plugin binding. The host
     // editor keeps the normal last-stage plugin binding behavior.
-    const context = this.inputRouterContext()
+    const context = { ...this.inputRouterContext(), hostDeclined }
     const replacement = this.seatEditor().handleInput
     // A generic managed overlay owns the focused component. Do not probe the
     // seat editor or plugin bindings here; returning undefined lets pi-tui
@@ -2904,11 +2919,15 @@ export class TuiApp {
     return this.actionDispatcher.dispatch(action, key)
   }
 
-  /** The Esc path (app.agent.interrupt): autocomplete/replacement-editor
-   * pass-through, the runner's single-Esc modes, the busy single-Esc
-   * cancel, the shell-mode exit pass-through, and the idle double-Esc
-   * cancel/rewind. Returns undefined when the key must fall through
-   * (autocomplete open, replacement editor). */
+  /** The semantic interrupt core (app.agent.interrupt): the runner's
+   * single-Esc modes, the busy single-Esc cancel, and the idle double
+   * -Esc cancel/rewind. A REMAPPED interrupt key (e.g. Ctrl+X) takes
+   * THIS path — it must not inherit the physical-Escape editor seams
+   * (autocomplete pass-through, replacement-editor Esc, shell-mode
+   * exit); those belong to the physical Escape key alone (convergence
+   * §5/§4.8). Returns whether the key was consumed (undefined = fall
+   * through). */
+
   /** Whether one raw input is the EFFECTIVE submit key (app.input.submit —
    * a user remap moves submission to the new key; Shift+Enter stays the
    * newline, never a submit). The fork editor owns the actual submit
@@ -2920,17 +2939,7 @@ export class TuiApp {
     return this.keybindings.editorSubmitKeysFor().some(key => matchesKey(data, key))
   }
 
-  private handleEscapeKey(data: string): TuiInputListenerResult | undefined {
-    // Overlays (pickers, settings) own Esc while they are up.
-    if (this.activeScreen.hasOverlayEntries) return undefined
-    // Autocomplete owns Esc while the dropdown is open: let the editor
-    // close it (TuiEditor intercepts; kimi parity). Without this the
-    // app-level consume swallows Esc and the dropdown cannot close.
-    // Capability-detected: a REPLACEMENT editor with its own dropdown
-    // gets the same pass-through (its focused component handles Esc).
-    if ((this.seatEditor() as { isShowingAutocomplete?: () => boolean }).isShowingAutocomplete?.() === true) {
-      return undefined
-    }
+  private handleInterruptAction(data: string): TuiInputListenerResult | undefined {
     // The host may consume the first Esc (runner-owned modes like the
     // subagent viewer); otherwise it arms the double-Esc cancel. A
     // CONSUMED Esc is a fresh action: it disarms any pending window (a
@@ -2951,6 +2960,52 @@ export class TuiApp {
       this.lastEscapeAt = undefined
       this.events.onCancel?.()
       return { consume: true }
+    }
+    const now = Date.now()
+    if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
+      this.lastEscapeAt = undefined
+      // Conversation rewind (pi parity): an EMPTY editor opens the rewind
+      // picker; a non-empty draft keeps the historical cancel semantics —
+      // a half-written draft is never dragged into a rewind (plan Case C).
+      // A host without rewind keeps the cancel for both cases.
+      if (this.seatEditor().getText().trim() === '' && this.events.onRewind !== undefined) {
+        this.events.onRewind()
+      } else {
+        this.events.onCancel?.()
+      }
+    } else {
+      this.lastEscapeAt = now
+    }
+    return { consume: true }
+  }
+
+  /** The PHYSICAL Escape path (app.agent.interrupt on the escape key):
+   * the editor-owned Escape seams (overlay pass-through, autocomplete
+   * pass-through, replacement-editor Esc, shell-mode exit) run FIRST,
+   * then the semantic interrupt core. A REMAPPED interrupt key bypasses
+   * this and goes straight to {@link handleInterruptAction} (convergence
+   * §5 — only physical Escape owns the Escape-specific editor behavior).
+   * Returns undefined when the key must fall through. */
+  private handleEscapeKey(data: string): TuiInputListenerResult | undefined {
+    // The BUSY cancel keeps its Host-owned priority over EVERY physical
+    // Escape seam (shell-mode exit, replacement-editor Esc): a busy Esc
+    // must stop the agent, never vanish into a shell-mode exit or a
+    // plugin's modal handling (convergence §5 — the priority order is
+    // preserved from the pre-split ladder).
+    if (this.busy) {
+      this.lastEscapeAt = undefined
+      this.events.onCancel?.()
+      return { consume: true }
+    }
+    // Overlays (pickers, settings) own Esc while they are up.
+    if (this.activeScreen.hasOverlayEntries) return undefined
+    // Autocomplete owns Esc while the dropdown is open: let the editor
+    // close it (TuiEditor intercepts; kimi parity). Without this the
+    // app-level consume swallows Esc and the dropdown cannot close.
+    // Capability-detected: a REPLACEMENT editor with its own dropdown
+    // gets the same pass-through (its focused component handles Esc).
+    if ((this.seatEditor() as { isShowingAutocomplete?: () => boolean }).isShowingAutocomplete?.() === true) {
+      return undefined
     }
     // P1-6: a REPLACEMENT editor owns Esc for its own modal state
     // machine (vim normal-mode entry) — route it through the editor
@@ -2978,22 +3033,8 @@ export class TuiApp {
     if (this.seatEditor().id === 'host' && this.editor.getInputMode() !== 'prompt' && this.seatEditor().getText() === '') {
       return undefined
     }
-    const now = Date.now()
-    if (this.lastEscapeAt !== undefined && now - this.lastEscapeAt < TuiApp.ESCAPE_CANCEL_WINDOW_MS) {
-      this.lastEscapeAt = undefined
-      // Conversation rewind (pi parity): an EMPTY editor opens the rewind
-      // picker; a non-empty draft keeps the historical cancel semantics —
-      // a half-written draft is never dragged into a rewind (plan Case C).
-      // A host without rewind keeps the cancel for both cases.
-      if (this.seatEditor().getText().trim() === '' && this.events.onRewind !== undefined) {
-        this.events.onRewind()
-      } else {
-        this.events.onCancel?.()
-      }
-    } else {
-      this.lastEscapeAt = now
-    }
-    return { consume: true }
+    // After the physical-Escape editor seams, the semantic core runs.
+    return this.handleInterruptAction(data)
   }
 
   /** The exit path (app.exit.request): Ctrl+C keeps the clear-then-exit
@@ -3058,17 +3099,18 @@ export class TuiApp {
       submitDraft: (forceQueue = false) => {
         if (forceQueue) {
           // The busy-Enter opposite chord (web busyEnter parity): without
-          // a wired onQueueSubmit the key falls through to the editor
-          // instead of dropping the draft; an EMPTY draft falls through
-          // too — plain Enter on an empty editor does not submit, and an
-          // empty chord would otherwise dispatch a session-creating empty
-          // followup.
-          if (this.events.onQueueSubmit === undefined) return false
+          // a wired onQueueSubmit, or with an EMPTY draft, the chord is a
+          // HOST-GUARDED NO-OP — the host OWNS Ctrl+Enter and consumes it
+          // (an empty chord would otherwise dispatch a session-creating
+          // empty followup). Guard no-ops stay host-owned; only GENUINE
+          // feature absence (pasteMedia with no handler) declines to the
+          // remainder (convergence §4.9).
+          if (this.events.onQueueSubmit === undefined) return true
           // Emptiness is judged on the SERIALIZED wire form: a bare
           // `!` / `!!` shell mode has an empty BODY but a non-empty wire
           // form, and must reach the queue protocol like the literal
           // prefix did before the mode feature.
-          if (this.serializeSeatDraft(this.seatEditor().getText()).trim() === '') return false
+          if (this.serializeSeatDraft(this.seatEditor().getText()).trim() === '') return true
         }
         this.submitDraft(forceQueue)
         return true
@@ -3186,12 +3228,15 @@ export class TuiApp {
         return true
       },
       openHistorySearch: () => {
-        // Input-history search: unbound (no historySearchSource)
-        // falls through to the editor like any un-reserved key; the
-        // continuable subagent viewer keeps its OWN live editor — the
-        // chord is a no-op there (never the child draft, never the parent
-        // draft).
-        if (this.historySearchSource === undefined || this.viewerMode !== undefined) return false
+        // Input-history search: unbound (no historySearchSource) is a
+        // HOST-GUARDED NO-OP — the host owns Ctrl+R and consumes it even
+        // when there is nothing to search; it must NEVER fall through to a
+        // plugin for that reason (convergence §4.9: only GENUINE feature
+        // absence — pasteMedia with no handler — declines to the
+        // remainder; a guard no-op stays host-owned). The continuable
+        // subagent viewer keeps its OWN live editor — the chord is a
+        // no-op there (never the child draft, never the parent draft).
+        if (this.historySearchSource === undefined || this.viewerMode !== undefined) return true
         this.openHistorySearch()
         return true
       },

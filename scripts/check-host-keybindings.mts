@@ -52,8 +52,10 @@ const CHORD_PATTERN = /matchesKey\(\s*data\s*,\s*'(?:ctrl|alt|shift)\+/
 
 /** A chord label inside a quoted string literal (user-facing text).
  * Matches BOTH casing styles ('Ctrl+O' and 'ctrl+o' — the fold hints
- * used the lowercase form and slipped past the gate once). */
-const STRING_CHORD_PATTERN = /'(?:[^'\\]|\\.)*?(?:(?:Ctrl|Alt|Shift)|(?:ctrl|alt|shift))\+/
+ * used the lowercase form and slipped past the gate once) and ALL THREE
+ * quote styles (single, double, backtick — convergence §14: a remap lies
+ * whichever quoting the string uses). */
+const STRING_CHORD_PATTERN = /(?:'[^'\\]*|"[^"\\]*|`[^`\\]*)(?:(?:Ctrl|Alt|Shift)|(?:ctrl|alt|shift))\+/
 
 /** The sanctioned seams (matched by trimmed line content). */
 const ALLOWLIST = [
