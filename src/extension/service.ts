@@ -420,16 +420,16 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.ledger.trackHealth(slot, id, owner)
   }
 
-  private untrackRegistryHealth(slot: string, id: string): void {
-    this.ledger.untrackHealth(slot, id)
+  private untrackRegistryHealth(slot: string, id: string, owner: string): void {
+    this.ledger.untrackHealth(slot, id, owner)
   }
 
-  private recordRegistryError(slot: string, id: string, error: unknown): void {
-    this.ledger.recordExternalError(slot, id, safeHealthMessage(error))
+  private recordRegistryError(slot: string, id: string, owner: string, error: unknown): void {
+    this.ledger.recordExternalError(slot, id, owner, safeHealthMessage(error))
   }
 
-  private clearRegistryError(slot: string, id: string): void {
-    this.ledger.clearExternalError(slot, id)
+  private clearRegistryError(slot: string, id: string, owner: string): void {
+    this.ledger.clearExternalError(slot, id, owner)
   }
 
   /** The attached SurfaceHost's state bridge, wired by the runner (M3). */
@@ -492,9 +492,9 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       () => this.batcher.invalidate(),
       {
         track: (id, owner) => this.ledger.trackHealth('advanced.input.capture', id, owner),
-        untrack: (id) => this.ledger.untrackHealth('advanced.input.capture', id),
-        recordError: (id, message) => this.ledger.recordExternalError('advanced.input.capture', id, message),
-        clearError: (id) => this.ledger.clearExternalError('advanced.input.capture', id),
+        untrack: (id, owner) => this.ledger.untrackHealth('advanced.input.capture', id, owner),
+        recordError: (id, owner, message) => this.ledger.recordExternalError('advanced.input.capture', id, owner, message),
+        clearError: (id, owner) => this.ledger.clearExternalError('advanced.input.capture', id, owner),
       },
     )
     // Phase 3: the unstable raw capture registry. Health rides the ledger
@@ -504,9 +504,9 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       () => this.batcher.invalidate(),
       {
         track: (id, owner) => this.ledger.trackHealth('unstable.input.raw', id, owner),
-        untrack: (id) => this.ledger.untrackHealth('unstable.input.raw', id),
-        recordError: (id, message) => this.ledger.recordExternalError('unstable.input.raw', id, message),
-        clearError: (id) => this.ledger.clearExternalError('unstable.input.raw', id),
+        untrack: (id, owner) => this.ledger.untrackHealth('unstable.input.raw', id, owner),
+        recordError: (id, owner, message) => this.ledger.recordExternalError('unstable.input.raw', id, owner, message),
+        clearError: (id, owner) => this.ledger.clearExternalError('unstable.input.raw', id, owner),
       },
     )
   }
@@ -792,9 +792,11 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const caller = this.ctx
     const owner = caller.fiber.name
     // The chrome.footer.item canonical key is ext:<owner>/<id> — the
-    // owner's `/` (an npm scoped plugin name) is ESCAPED to `~` in the
-    // key, so only the ID must be `/`-free (the key is used whole, never
-    // parsed). An id with control characters is the same injection class
+    // owner's `/` (an npm scoped plugin name) is percent-ENCODED in the
+    // key (encodeURIComponent — injective, so a literal `~` owner can
+    // never collide with an encoded slash owner), so only the ID must be
+    // `/`-free (the key is used whole, never parsed). An id with control
+    // characters is the same injection class
     // as a malicious layout (the configurator renders raw ids as labels
     // for unknown items — and this id gets PERSISTED into user layouts):
     // reject both at registration.
@@ -853,18 +855,18 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     try {
       dispose = caller.fiber.effect(() => () => {
         outcome.handle.dispose()
-        this.untrackRegistryHealth('command', contribution.id)
+        this.untrackRegistryHealth('command', contribution.id, owner)
       }, 'piTuiExtensions.registerCommand()')
     } catch (error) {
       outcome.handle.dispose()
-      this.untrackRegistryHealth('command', contribution.id)
+      this.untrackRegistryHealth('command', contribution.id, owner)
       throw error
     }
     return {
       id: outcome.handle.id,
       dispose: () => {
         outcome.handle.dispose()
-        this.untrackRegistryHealth('command', contribution.id)
+        this.untrackRegistryHealth('command', contribution.id, owner)
         dispose()
       },
     }
@@ -883,18 +885,18 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
-        this.untrackRegistryHealth('theme', contribution.id)
+        this.untrackRegistryHealth('theme', contribution.id, owner)
       }, 'piTuiExtensions.registerTheme()')
     } catch (error) {
       handle.dispose()
-      this.untrackRegistryHealth('theme', contribution.id)
+      this.untrackRegistryHealth('theme', contribution.id, owner)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
-        this.untrackRegistryHealth('theme', contribution.id)
+        this.untrackRegistryHealth('theme', contribution.id, owner)
         dispose()
       },
     }
@@ -913,18 +915,18 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
-        this.untrackRegistryHealth('autocomplete', contribution.id)
+        this.untrackRegistryHealth('autocomplete', contribution.id, owner)
       }, 'piTuiExtensions.registerAutocomplete()')
     } catch (error) {
       handle.dispose()
-      this.untrackRegistryHealth('autocomplete', contribution.id)
+      this.untrackRegistryHealth('autocomplete', contribution.id, owner)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
-        this.untrackRegistryHealth('autocomplete', contribution.id)
+        this.untrackRegistryHealth('autocomplete', contribution.id, owner)
         dispose()
       },
     }
@@ -943,11 +945,11 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
-        this.untrackRegistryHealth('setting', contribution.id)
+        this.untrackRegistryHealth('setting', contribution.id, owner)
       }, 'piTuiExtensions.registerSetting()')
     } catch (error) {
       handle.dispose()
-      this.untrackRegistryHealth('setting', contribution.id)
+      this.untrackRegistryHealth('setting', contribution.id, owner)
       throw error
     }
     return {
@@ -955,7 +957,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       setValue: (value: string) => handle.setValue(value),
       dispose: () => {
         handle.dispose()
-        this.untrackRegistryHealth('setting', contribution.id)
+        this.untrackRegistryHealth('setting', contribution.id, owner)
         dispose()
       },
     }
@@ -977,18 +979,18 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
-        this.untrackRegistryHealth('keybinding', contribution.id)
+        this.untrackRegistryHealth('keybinding', contribution.id, owner)
       }, 'piTuiExtensions.registerKeybinding()')
     } catch (error) {
       handle.dispose()
-      this.untrackRegistryHealth('keybinding', contribution.id)
+      this.untrackRegistryHealth('keybinding', contribution.id, owner)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
-        this.untrackRegistryHealth('keybinding', contribution.id)
+        this.untrackRegistryHealth('keybinding', contribution.id, owner)
         dispose()
       },
     }
@@ -1010,18 +1012,18 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
-        this.ledger.untrackHealth('transcript.message.renderer', contribution.id)
+        this.ledger.untrackHealth('transcript.message.renderer', contribution.id, owner)
       }, 'piTuiExtensions.registerMessageRenderer()')
     } catch (error) {
       handle.dispose()
-      this.ledger.untrackHealth('transcript.message.renderer', contribution.id)
+      this.ledger.untrackHealth('transcript.message.renderer', contribution.id, owner)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
-        this.ledger.untrackHealth('transcript.message.renderer', contribution.id)
+        this.ledger.untrackHealth('transcript.message.renderer', contribution.id, owner)
         dispose()
       },
     }
@@ -1041,18 +1043,18 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
-        this.ledger.untrackHealth('transcript.tool.renderer', contribution.id)
+        this.ledger.untrackHealth('transcript.tool.renderer', contribution.id, owner)
       }, 'piTuiExtensions.registerToolRenderer()')
     } catch (error) {
       handle.dispose()
-      this.ledger.untrackHealth('transcript.tool.renderer', contribution.id)
+      this.ledger.untrackHealth('transcript.tool.renderer', contribution.id, owner)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
-        this.ledger.untrackHealth('transcript.tool.renderer', contribution.id)
+        this.ledger.untrackHealth('transcript.tool.renderer', contribution.id, owner)
         dispose()
       },
     }
@@ -1143,18 +1145,18 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     try {
       dispose = caller.fiber.effect(() => () => {
         handle.dispose()
-        this.untrackRegistryHealth('editor', contribution.id)
+        this.untrackRegistryHealth('editor', contribution.id, owner)
       }, 'piTuiExtensions.registerEditor()')
     } catch (error) {
       handle.dispose()
-      this.untrackRegistryHealth('editor', contribution.id)
+      this.untrackRegistryHealth('editor', contribution.id, owner)
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
         handle.dispose()
-        this.untrackRegistryHealth('editor', contribution.id)
+        this.untrackRegistryHealth('editor', contribution.id, owner)
         dispose()
       },
     }
@@ -1623,12 +1625,12 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   }
 
   /** Runner-only callback health bridges. */
-  _recordRegistryError(slot: string, id: string, error: unknown): void {
-    this.recordRegistryError(slot, id, error)
+  _recordRegistryError(slot: string, id: string, owner: string, error: unknown): void {
+    this.recordRegistryError(slot, id, owner, error)
   }
 
-  _clearRegistryError(slot: string, id: string): void {
-    this.clearRegistryError(slot, id)
+  _clearRegistryError(slot: string, id: string, owner: string): void {
+    this.clearRegistryError(slot, id, owner)
   }
 
   /** Test hook: the number of live subscription RECORDS (F1/F5 — an owner

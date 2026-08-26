@@ -50,7 +50,7 @@ test('RendererRegistry: a throwing message renderer is isolated and the chain co
     id: 'worker',
     render: () => textView('worked'),
   }, 'b')
-  const result = registry.renderMessage({ kind: 'assistant', turn: 0, text: 'x' }, (id, error) => {
+  const result = registry.renderMessage({ kind: 'assistant', turn: 0, text: 'x' }, (id, _owner, error) => {
     errors.push(`${id}:${error instanceof Error ? error.message : String(error)}`)
   })
   assert.ok(result !== undefined)
@@ -388,9 +388,9 @@ test('TuiApp: a failed renderer RECOVERS and its health record clears (P1-08)', 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.setRendererErrorSink(({ id, error }) => {
-    ledger.recordError('transcript.renderer', id, String(error))
+    ledger.recordError('transcript.renderer', id, 'plugin', String(error))
   })
-  app.setRendererRecoveredSink(({ id }) => ledger.clearError('transcript.renderer', id))
+  app.setRendererRecoveredSink(({ id }) => ledger.clearError('transcript.renderer', id, 'plugin'))
   app.start()
   await vt.waitForRender()
   const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: 'out', status: 'ok' as const }

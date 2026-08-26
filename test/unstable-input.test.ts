@@ -117,7 +117,7 @@ test('a throwing handler is isolated and FAILS OPEN (the chunk passes through)',
   const health = new UnstableInputRegistry(() => {}, {
     track: () => {},
     untrack: () => {},
-    recordError: (id, message) => errors.push(`${id}:${message}`),
+    recordError: (id, _owner, message) => errors.push(`${id}:${message}`),
     clearError: () => {},
   })
   health.register(throwing.spec, 'owner')
@@ -157,7 +157,7 @@ test('the when gate controls consultation; a throwing gate is skipped and record
   const health = new UnstableInputRegistry(() => {}, {
     track: () => {},
     untrack: () => {},
-    recordError: (id, message) => errors.push(`${id}:${message}`),
+    recordError: (id, _owner, message) => errors.push(`${id}:${message}`),
     clearError: () => {},
   })
   health.register(throwing.spec, 'owner')

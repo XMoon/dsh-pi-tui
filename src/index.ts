@@ -4844,17 +4844,17 @@ export function apply(ctx: Context, config: Config): void {
       // health ledger — observable via /status diagnostics, never
       // swallowed. Safe single-line message (no stack traces, hostile
       // toString handled — the plan's error policy §18).
-      app.setRendererErrorSink(({ id, error, slot }) => {
+      app.setRendererErrorSink(({ id, error, slot, owner }) => {
         const message = safeErrorMessage(error).replace(/\s+/g, ' ').slice(0, 200)
         const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
-        extensionService._ledger().recordError(healthSlot, id, message)
+        extensionService._ledger().recordError(healthSlot, id, owner, message)
       })
       // M7 (P1-08): a renderer that renders successfully after a failure
       // RECOVERS — clear its health record (the next failure starts a NEW
       // error generation).
-      app.setRendererRecoveredSink(({ id, slot }) => {
+      app.setRendererRecoveredSink(({ id, slot, owner }) => {
         const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
-        extensionService._ledger().clearError(healthSlot, id)
+        extensionService._ledger().clearError(healthSlot, id, owner)
       })
       // M8: the managed-overlay mount seam (plan §13.3) — the plugin
       // supplies an ExtensionView; the host compiles + mounts it through
@@ -5012,18 +5012,17 @@ export function apply(ctx: Context, config: Config): void {
         // field itself is overwritten by 'command', so the user's last
         // native mode is persisted separately (a compact user's fallback
         // must survive a restart as compact, never silently become the
-        // full default — the review's P2). 'custom' additionally restores
-        // the persisted footerLayout; a failed command then falls back to
-        // the user's OWN surface (M5 contract). A runtime switch
-        // re-applies the same state the memory already holds (no visible
-        // change); an absent/invalid fallback keeps the current state.
+        // full default — the review's P2). The switch is COMPLETE:
+        // 'default' and an invalid custom layout explicitly restore the
+        // builtin default, so a runtime reload with a changed document
+        // never falls back to whatever the memory happened to hold.
         const fallback = resolveCommandFooterFallback(doc)
         if (fallback.mode === 'compact') {
           app.setFooterPreset('compact')
           app.setFooterLayout(undefined)
-        } else if (fallback.mode === 'custom' && fallback.layout !== undefined) {
+        } else {
           app.setFooterPreset('full')
-          app.setFooterLayout(fallback.layout)
+          app.setFooterLayout(fallback.mode === 'custom' ? fallback.layout : undefined)
         }
         // The trust gate: the COMMAND must live in the USER layer of the
         // settings descriptor (never the merged/project value), AND the

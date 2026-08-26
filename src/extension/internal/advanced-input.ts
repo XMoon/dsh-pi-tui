@@ -53,9 +53,9 @@ export interface AdvancedInputRegistrySnapshot {
 /** The registry's health hooks (wired by the service to the ledger). */
 export interface AdvancedInputHealth {
   track(id: string, owner: string): void
-  untrack(id: string): void
-  recordError(id: string, message: string): void
-  clearError(id: string): void
+  untrack(id: string, owner: string): void
+  recordError(id: string, owner: string, message: string): void
+  clearError(id: string, owner: string): void
 }
 
 /**
@@ -128,7 +128,7 @@ export class AdvancedInputRegistry {
     if (this.records.get(record.id) === record) this.records.delete(record.id)
     this.revision += 1
     this.onInvalidate()
-    this.health?.untrack(record.id)
+    this.health?.untrack(record.id, record.owner)
   }
 
   /** Dispose every capture owned by one fiber (owner unload). */
@@ -211,20 +211,20 @@ export class AdvancedInputRegistry {
     } catch (error) {
       // A throwing gate is treated as false (the capture is skipped) and
       // recorded — it can never stall the Host input path.
-      this.health?.recordError(record.id, safeMessage(error))
+      this.health?.recordError(record.id, record.owner, safeMessage(error))
       return false
     }
     try {
       const consumed = record.handle(event)
       if (consumed === true) {
-        this.health?.clearError(record.id)
+        this.health?.clearError(record.id, record.owner)
         return true
       }
       return false
     } catch (error) {
       // Fail-open: a throwing handler never consumes; the event continues
       // down the Host ladder. Recorded for /status diagnostics.
-      this.health?.recordError(record.id, safeMessage(error))
+      this.health?.recordError(record.id, record.owner, safeMessage(error))
       return false
     }
   }

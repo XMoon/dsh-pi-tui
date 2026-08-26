@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { getEventListeners } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FooterCommandRunner, KILL_GRACE_MS, type FooterCommandConfig } from '../src/footer/command-runner.ts'
@@ -676,4 +677,26 @@ test('a child writing LOTS of stderr completes (the pipe is drained, never misju
     'for (let i = 0; i < 400; i++) process.stderr.write("s".repeat(4096)); process.stdout.write("ok\\n")',
   )
   assert.deepEqual(rows, ['ok'], `the child must not block on a full stderr pipe:\n${JSON.stringify(rows)}`)
+})
+
+test('dispose REMOVES the abort listener (a process-wide signal must not retain disposed runners)', () => {
+  // The review's P2: command-mode toggling disposes a runner per arm; if
+  // dispose() kept the abort listener, the long-lived process signal
+  // would retain every disposed runner until the process aborts.
+  const controller = new AbortController()
+  const runner = new FooterCommandRunner({
+    config: CONFIG,
+    snapshot: () => emptyStatusSnapshot(),
+    width: () => 100,
+    height: () => 30,
+    onOutput: () => {},
+    signal: controller.signal,
+  })
+  const listenersBefore = getEventListeners(controller.signal, 'abort').length
+  assert.equal(listenersBefore, 1, 'the runner must hold exactly one abort listener while live')
+  runner.dispose()
+  const listenersAfter = getEventListeners(controller.signal, 'abort').length
+  assert.equal(listenersAfter, 0, 'dispose must release the abort listener')
+  // An abort after dispose is a harmless no-op (idempotent dispose).
+  controller.abort()
 })

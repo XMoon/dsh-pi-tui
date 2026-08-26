@@ -97,6 +97,10 @@ export class FooterCommandRunner {
   private timer: NodeJS.Timeout | undefined
   private errorGeneration = 0
   private disposed = false
+  /** The abort listener, kept as a field so dispose() can remove it: a
+   * long-lived process-wide signal must not retain every disposed runner
+   * (the review's P2 — command mode toggling creates a runner per arm). */
+  private readonly onAbort = (): void => this.dispose()
 
   constructor(options: FooterCommandRunnerOptions) {
     this.options = options
@@ -105,7 +109,7 @@ export class FooterCommandRunner {
       this.disposed = true
       return
     }
-    options.signal.addEventListener('abort', () => this.dispose(), { once: true })
+    options.signal.addEventListener('abort', this.onAbort, { once: true })
   }
 
   /** Request a refresh: at most one start per refresh interval; requests
@@ -342,10 +346,13 @@ export class FooterCommandRunner {
     })
   }
 
-  /** Dispose: terminate the child, drop the coalescing timer. */
+  /** Dispose: terminate the child, drop the coalescing timer, and release
+   * the abort listener (a disposed runner must not stay referenced by the
+   * process-wide signal). */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.options.signal.removeEventListener('abort', this.onAbort)
     this.killChild()
     if (this.timer !== undefined) clearTimeout(this.timer)
   }

@@ -148,6 +148,10 @@ test('/footer is sessionless and opens the configurator; Enter saves and persist
   assert.equal(applied.length, 1, 'Enter must apply the layout')
   assert.equal(applied[0]!.footer, 'custom')
   assert.equal(settings.doc.footer, 'custom', 'the settings document must persist')
+  // Saving a custom layout IS a native-mode change: footerFallbackMode
+  // must ride along, or a later command-mode restart would fall back to
+  // the mode the user had BEFORE opening /footer (the review's P2).
+  assert.equal(settings.doc.footerFallbackMode, 'custom', 'the fallback mode must persist as custom')
   const saved = settings.doc.footerLayout as { rows: Array<{ left: Array<{ id: string }> }> }
   assert.ok(!saved.rows[0]!.left.some(ref => ref.id === 'view-scope'), 'the persisted layout must reflect the toggle')
   assert.equal(app.getFooterMode(), 'custom', 'the app must apply the custom layout')
