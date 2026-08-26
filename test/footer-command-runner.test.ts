@@ -123,7 +123,13 @@ test('coalescing: requests within the interval produce ONE spawn', async () => {
   while (spawns < 2 && Date.now() < waitUntil) {
     await new Promise(resolve => setTimeout(resolve, 20))
   }
-  // Exactly one coalesced second spawn: no third.
+  // EXACTLY one coalesced second spawn — never a third. A third spawn
+  // could only fire after ANOTHER full interval (500ms) from the second
+  // start; the 200ms observation window here (from the second spawn's
+  // close) is far inside that, so it cannot produce a false fail (a
+  // third spawn would need the 500ms timer to fire ~2.5x early). This
+  // is a NEGATIVE assertion — "no event" cannot be event-driven; the
+  // window is bounded well under the interval by construction.
   await new Promise(resolve => setTimeout(resolve, 200))
   assert.equal(spawns, 2, `two coalesced requests must produce exactly ONE extra spawn, saw ${spawns}: ${JSON.stringify(outputs)}`)
   // The second spawn is the coalesced one: it cannot have STARTED before
@@ -435,8 +441,11 @@ test('a config switch to a SHORTER interval never spawns from a stale coalesced 
   }
   assert.ok(outputs.some(rows => rows?.includes('b')), 'the new config must commit')
   const countAtCommit = outputs.length
-  // A stale 100s timer would still be armed: if the immediate branch did
-  // not clear it, it eventually fires and spawns a THIRD command.
+  // A stale 200ms timer would still be armed: if the immediate branch
+  // did not clear it, it fires ~100ms after the switch and spawns a
+  // THIRD command. The 120ms window here covers that firing point; a
+  // correct clear produces no change in the window (a negative
+  // assertion — "no event" cannot be event-driven).
   await new Promise(resolve => setTimeout(resolve, 120))
   assert.equal(outputs.length, countAtCommit, `no extra spawn from a stale timer: ${JSON.stringify(outputs)}`)
   runner.dispose()
@@ -459,4 +468,12 @@ test('an already-aborted signal never spawns a child', async () => {
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(outputs, 0, 'an aborted runner must never spawn')
   runner.dispose()
+})
+
+test('a child writing LOTS of stderr completes (the pipe is drained, never misjudged as a timeout)', async () => {
+  const rows = await runOnce(
+    { ...CONFIG, timeoutMs: 10000 },
+    'for (let i = 0; i < 400; i++) process.stderr.write("s".repeat(4096)); process.stdout.write("ok\\n")',
+  )
+  assert.deepEqual(rows, ['ok'], `the child must not block on a full stderr pipe:\n${JSON.stringify(rows)}`)
 })
