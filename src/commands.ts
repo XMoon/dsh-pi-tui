@@ -41,7 +41,6 @@ import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { renderTranscriptMarkdown, textOf } from './transcript.ts'
 import {
-  MAX_PICKER_SESSIONS,
   TITLE_BATCH_SIZE,
   TITLE_FIRST_BATCH,
   buildSessionTree,
@@ -118,18 +117,20 @@ function metaOf(cwd: string, presetId: string | undefined): Record<string, unkno
  * workspace (the sessionCwd the whole surface follows); `all` lists every
  * main session, grouped by its workspace. Exported so the scope contract
  * is unit-testable without a runner.
- * @param shown - the picker rows, newest first (already capped).
+ * @param rows - the picker rows, newest first (the FULL row set — a main
+ *   session beyond any read-window is still listed here, so the title
+ *   loader must cover every row this function can show).
  * @param currentCwd - the live session's workspace.
  * @param header - the picker header prefix (`sessions` / `resume`).
  * @param itemFor - the row → picker item mapper (titles + current marker).
  */
 export function sessionPickerCategories(
-  shown: readonly SessionPickerRow[],
+  rows: readonly SessionPickerRow[],
   currentCwd: string,
   header: string,
   itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem,
 ): PickerCategory[] {
-  const mainRows = shown.filter(row => row.origin !== 'subagent')
+  const mainRows = rows.filter(row => row.origin !== 'subagent')
   return [
     {
       id: 'current',
@@ -1520,11 +1521,9 @@ export function registerTuiCommands(
     if (rows === undefined) return { kind: 'error', text: 'session persistence unavailable' }
     if (rows.length === 0) return { kind: 'error', text: 'no persisted sessions' }
     // The picker opens instantly on the headers; titles land in the
-    // background below. The cap keeps the TITLE read bounded — the category
-    // scopes below still see the FULL row set, so "All directories" really
-    // lists every main session (round-1 review finding: the old code capped
-    // the rows themselves at MAX_PICKER_SESSIONS).
-    const shown = rows.slice(0, MAX_PICKER_SESSIONS)
+    // background below. The category scopes see the FULL row set, so "All
+    // directories" really lists every main session (round-1 review finding:
+    // the old code capped the rows themselves at MAX_PICKER_SESSIONS).
     // Live title map: the background loader fills it, and the category
     // factories re-read it on every activation (Tab cycle, refresh).
     const titlesById = new Map<string, string>()
@@ -1567,6 +1566,14 @@ export function registerTuiCommands(
     // unchanged. Cancellations (TUI quit, the abort signal) are debug-level
     // through the unified entry; a real batch failure lands in diagnostics
     // instead of being swallowed.
+    //
+    // The batches cover MAIN rows only (the categories never show subagents)
+    // and the FULL main-row set — NOT the `shown` window: the category scopes
+    // see every main session (round-1 review finding), so a session beyond
+    // MAX_PICKER_SESSIONS that IS displayed (e.g. an old session in the
+    // "Current directory" scope) would otherwise never get a title read and
+    // would show a bare short id forever.
+    const mainRows = rows.filter(row => row.origin !== 'subagent')
     detach('session titles', async () => {
       const loadBatch = async (batch: SessionPickerRow[]): Promise<void> => {
         const titles = await runner.sessionReader.titles(batch, signal)
@@ -1574,9 +1581,9 @@ export function registerTuiCommands(
         for (const [id, title] of titles) titlesById.set(id, title)
         picker.refresh?.()
       }
-      await loadBatch(shown.slice(0, TITLE_FIRST_BATCH))
-      for (let offset = TITLE_FIRST_BATCH; offset < shown.length; offset += TITLE_BATCH_SIZE) {
-        await loadBatch(shown.slice(offset, offset + TITLE_BATCH_SIZE))
+      await loadBatch(mainRows.slice(0, TITLE_FIRST_BATCH))
+      for (let offset = TITLE_FIRST_BATCH; offset < mainRows.length; offset += TITLE_BATCH_SIZE) {
+        await loadBatch(mainRows.slice(offset, offset + TITLE_BATCH_SIZE))
       }
     })
     return { kind: 'success' }

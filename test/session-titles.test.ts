@@ -13,6 +13,8 @@ import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+// Carries the `session/title` event map augmentation into the test program.
+import type {} from '@deepseek-ai/dsh-session-title'
 import {
   TITLE_BATCH_SIZE,
   TITLE_FIRST_BATCH,
@@ -140,4 +142,144 @@ test('loadSessionTitleBatch honors an aborted signal through the engine path', a
     loadSessionTitleBatch(query as never, undefined, undefined, [{ id: 'session-a' }], controller.signal),
     /abort/i,
   )
+})
+
+// ── per-session failure isolation: rejected engine reads are NEVER
+//    silently dropped AND never retried behind the engine's back — the
+//    engine's cold path already runs the same persistence inspection, so
+//    a fallback would reproduce the identical failure (PERSISTENCE_FAILED
+//    / CORRUPT_SESSION) or bypass its header-identity guard
+//    (SOURCE_CONFLICT). The rejection is surfaced as an info diagnostic
+//    carrying the engine's code and reason instead. ──────────────────────
+
+/** A title event minimal enough for foldSessionTitle. */
+function titleEvent(title: string, seq = 1, time = 1000): SessionEvent<'session/title'> {
+  return {
+    type: 'session/title',
+    seq,
+    time,
+    data: { title, messageSeqs: [seq], source: { kind: 'user' } },
+  } as SessionEvent<'session/title'>
+}
+
+/** A query engine returning fulfilled titles except for the given ids. */
+function mixedQuery(rejectedIds: readonly string[]) {
+  return {
+    readTitleSnapshots: async (ids: readonly string[]) =>
+      ids.map(id => rejectedIds.includes(String(id))
+        ? { sessionId: String(id), status: 'rejected' as const, reason: new Error('engine boom') }
+        : { sessionId: String(id), status: 'fulfilled' as const, value: { session: {}, title: { title: 'alpha title' } } }),
+  }
+}
+
+/** A diag recorder asserting the info channel is used (default-visible). */
+function recordingDiag() {
+  const diagnostics: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  return {
+    diagnostics,
+    diag: {
+      info: (message: string, fields?: Record<string, unknown>) => diagnostics.push({ message, fields }),
+    },
+  }
+}
+
+test('a rejected engine read stays untitled and never touches persistence', async () => {
+  let inspected = 0
+  const persistence = {
+    inspect: async () => {
+      inspected += 1
+      return { events: [titleEvent('beta title')] }
+    },
+  }
+  const { diagnostics, diag } = recordingDiag()
+  const titles = await loadSessionTitleBatch(
+    mixedQuery(['session-b']) as never,
+    persistence as never,
+    undefined,
+    [{ id: 'session-a' }, { id: 'session-b' }],
+    undefined,
+    diag,
+  )
+  assert.equal(titles.get('session-a'), 'alpha title')
+  assert.equal(titles.has('session-b'), false, 'a rejected read must leave the row untitled')
+  assert.equal(inspected, 0, 'persistence must never be consulted behind the engine')
+  assert.equal(diagnostics.length, 1, 'the rejection must land exactly one diagnostic')
+  assert.equal(diagnostics[0]!.message, 'session title unavailable')
+  assert.equal(diagnostics[0]!.fields?.session, 'session-b')
+  assert.equal(diagnostics[0]!.fields?.code, 'UNKNOWN', 'a plain Error reason carries no engine code')
+  assert.match(String(diagnostics[0]!.fields?.reason), /engine boom/, 'the real engine reason must be preserved')
+})
+
+test('a rejected read exposes the engine error code at info level', async () => {
+  const { diagnostics, diag } = recordingDiag()
+  const query = {
+    readTitleSnapshots: async (ids: readonly string[]) =>
+      ids.map(id => ({
+        sessionId: String(id),
+        status: 'rejected' as const,
+        reason: Object.assign(new Error('session source headers conflict'), { code: 'SESSION_QUERY_SOURCE_CONFLICT' }),
+      })),
+  }
+  await loadSessionTitleBatch(query as never, undefined, undefined, [{ id: 'session-a' }], undefined, diag)
+  assert.equal(diagnostics.length, 1)
+  assert.equal(diagnostics[0]!.fields?.code, 'SESSION_QUERY_SOURCE_CONFLICT', 'the engine code must be exposed')
+  assert.match(String(diagnostics[0]!.fields?.reason), /headers conflict/)
+})
+
+test('only rejected reads produce diagnostics (fulfilled rows are silent)', async () => {
+  const { diagnostics, diag } = recordingDiag()
+  const query = {
+    readTitleSnapshots: async (ids: readonly string[]) =>
+      ids.map(id => String(id) === 'session-b'
+        ? { sessionId: String(id), status: 'rejected' as const, reason: new Error('boom') }
+        : String(id) === 'session-c'
+          ? { sessionId: String(id), status: 'fulfilled' as const, value: { session: {} } }
+          : { sessionId: String(id), status: 'fulfilled' as const, value: { session: {}, title: { title: 'alpha title' } } }),
+  }
+  const titles = await loadSessionTitleBatch(
+    query as never,
+    undefined,
+    undefined,
+    [{ id: 'session-a' }, { id: 'session-b' }, { id: 'session-c' }],
+    undefined,
+    diag,
+  )
+  assert.equal(titles.get('session-a'), 'alpha title')
+  assert.equal(titles.has('session-c'), false, 'a genuinely untitled session stays untitled')
+  assert.equal(diagnostics.length, 1, 'only the rejected session may be diagnosed')
+  assert.equal(diagnostics[0]!.fields?.session, 'session-b')
+})
+
+test('a fulfilled read without a title never falls back to persistence', async () => {
+  let inspected = 0
+  const persistence = {
+    inspect: async () => {
+      inspected += 1
+      return { events: [] }
+    },
+  }
+  const query = {
+    readTitleSnapshots: async (ids: readonly string[]) =>
+      ids.map(id => ({ sessionId: String(id), status: 'fulfilled' as const, value: { session: {} } })),
+  }
+  const titles = await loadSessionTitleBatch(query as never, persistence as never, undefined, [{ id: 'session-a' }])
+  assert.equal(titles.has('session-a'), false, 'a genuinely untitled session stays untitled')
+  assert.equal(inspected, 0, 'fulfilled-without-title must not trigger the fallback')
+})
+
+test('an aborted signal never starts the persistence fallback', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  let inspected = 0
+  const persistence = {
+    inspect: async () => {
+      inspected += 1
+      return { events: [] }
+    },
+  }
+  await assert.rejects(
+    loadSessionTitleBatch(mixedQuery(['session-a']) as never, persistence as never, undefined, [{ id: 'session-a' }], controller.signal),
+    /abort/i,
+  )
+  assert.equal(inspected, 0, 'the fallback must never start on an aborted signal')
 })

@@ -186,8 +186,11 @@ test('loadSessionTitles honors an aborted signal', async () => {
   )
 })
 
-test('MAX_PICKER_SESSIONS keeps the title batch bounded', () => {
-  assert.ok(Number.isInteger(MAX_PICKER_SESSIONS) && MAX_PICKER_SESSIONS > 0)
+test('MAX_PICKER_SESSIONS keeps its legacy exported value', () => {
+  // The constant no longer caps the title reads (the picker loads titles
+  // for every main row it can display), but it stays exported and pinned
+  // as a documented legacy value.
+  assert.equal(MAX_PICKER_SESSIONS, 200)
 })
 
 // ── headless picker behavior through the virtual terminal ────────────────

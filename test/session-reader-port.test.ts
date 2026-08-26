@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { DirectSessionReader, type HostContextLike, type SessionPersistenceLike } from '../src/runtime/direct/session-direct.ts'
 import type { SessionQueryLike } from '../src/sessions.ts'
 
@@ -122,6 +123,61 @@ test('titles delegates to the title batch loader through the query engine', asyn
   }))
   const titles = await reader.titles([{ id: 'session-a', createdAt: 100, live: false }])
   assert.equal(titles.get('session-a'), 'title-of-session-a')
+})
+
+test('titles never consults persistence behind the engine, even for rejected reads', async () => {
+  // The engine's cold path already performs the same persistence
+  // inspection behind its consistency guards; a rejected read must NOT be
+  // retried by the adapter (port contract — the engine decides).
+  let inspected = 0
+  const reader = new DirectSessionReader(host({
+    sessionQuery: {
+      listSessions: async () => [],
+      readTitleSnapshots: async (ids: readonly SessionId[]) =>
+        ids.map(id => String(id) === 'session-broken'
+          ? { sessionId: String(id), status: 'rejected' as const, reason: new Error('engine boom') }
+          : { sessionId: String(id), status: 'fulfilled' as const, value: { title: { title: `title-of-${id}` } } }),
+    },
+    sessionPersistence: {
+      list: async () => [],
+      readRaw: async () => undefined,
+      inspect: async () => {
+        inspected += 1
+        return { events: [] }
+      },
+    },
+  }))
+  const titles = await reader.titles([
+    { id: 'session-ok', createdAt: 100, live: false },
+    { id: 'session-broken', createdAt: 90, live: false },
+  ])
+  assert.equal(titles.get('session-ok'), 'title-of-session-ok')
+  assert.equal(titles.has('session-broken'), false, 'a rejected read must leave the row untitled')
+  assert.equal(inspected, 0, 'persistence must never be consulted behind the engine')
+})
+
+test('titles reports rejected engine reads at INFO with the engine code and reason', async () => {
+  const diagnostics: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  const reader = new DirectSessionReader(host({
+    sessionQuery: {
+      listSessions: async () => [],
+      readTitleSnapshots: async (ids: readonly SessionId[]) =>
+        ids.map(id => ({
+          sessionId: String(id),
+          status: 'rejected' as const,
+          reason: Object.assign(new Error('corrupt log'), { code: 'SESSION_QUERY_CORRUPT_SESSION' }),
+        })),
+    },
+    sessionPersistence: persistence([header('session-broken', 90)]),
+  }), undefined, {
+    info: (message: string, fields?: Record<string, unknown>) => diagnostics.push({ message, fields }),
+  })
+  const titles = await reader.titles([{ id: 'session-broken', createdAt: 90, live: false }])
+  assert.equal(titles.has('session-broken'), false)
+  assert.equal(diagnostics.length, 1, 'the rejection must land in diagnostics')
+  assert.equal(diagnostics[0]!.message, 'session title unavailable')
+  assert.equal(diagnostics[0]!.fields?.code, 'SESSION_QUERY_CORRUPT_SESSION', 'the engine code must be exposed')
+  assert.match(String(diagnostics[0]!.fields?.reason), /corrupt log/, 'the engine reason must be preserved')
 })
 
 test('readExportData preserves a REJECTED log read as an error with the diagnostic', async () => {
