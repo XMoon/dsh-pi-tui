@@ -21,6 +21,12 @@ const BASE_KEY_LABELS: Record<string, string> = {
   end: 'End',
   pageUp: 'PageUp',
   pageDown: 'PageDown',
+  // The canonical form lowercases named keys (pageUp → pageup, pageDown →
+  // pagedown — convergence: the runtime parser lowercases, so the keymap
+  // identity matches it). The DISPLAY mapping must cover both spellings so
+  // hints always render PageUp/PageDown.
+  pageup: 'PageUp',
+  pagedown: 'PageDown',
   up: 'Up',
   down: 'Down',
   left: 'Left',

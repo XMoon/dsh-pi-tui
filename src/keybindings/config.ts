@@ -51,13 +51,21 @@ const BASE_KEYS = new Set([
 
 const MODIFIERS = new Set(['ctrl', 'shift', 'alt', 'super'])
 
+/** Case-insensitive view of the base-key grammar: `pageUp` and `pageup`
+ * are the SAME physical key (the canonical identity is lowercase). */
+const BASE_KEYS_LOWER = new Set([...BASE_KEYS].map(key => key.toLowerCase()))
+
 /** Whether a string is a valid KeyId (the fork's grammar). */
 export function isValidKeyId(value: string): value is KeyId {
   if (value === '') return false
   const parts = value.split('+')
   if (parts.length === 0) return false
   const base = parts[parts.length - 1]!
-  if (!BASE_KEYS.has(base)) return false
+  // Named keys are CASE-INSENSITIVE at parse time: the fork grammar
+  // spells pageUp/pageDown with camelCase, but the canonical identity is
+  // lowercase (pageup) — accept either spelling (convergence: one
+  // physical key has one canonical identity).
+  if (!BASE_KEYS.has(base) && !BASE_KEYS_LOWER.has(base.toLowerCase())) return false
   for (let index = 0; index < parts.length - 1; index += 1) {
     if (!MODIFIERS.has(parts[index]!)) return false
   }

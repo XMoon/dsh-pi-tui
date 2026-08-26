@@ -700,3 +700,29 @@ test('5.11 a reserved key ALIAS (esc/return) is rejected at registration', async
     'plugin',
   ), /reserved by the host/, 'return is the reserved enter and must be rejected')
 })
+
+test('5.12 canonical named keys still display as PageUp/PageDown', async () => {
+  const { formatKeyId, formatKeyList } = await import('../src/keybindings/hints.ts')
+  const { canonicalizeKeyId } = await import('../src/keybindings/key-identity.ts')
+  assert.equal(canonicalizeKeyId('pageUp' as never), 'pageup')
+  assert.equal(canonicalizeKeyId('pageDown' as never), 'pagedown')
+  // The DISPLAY of the canonical form must be the proper label (a
+  // lowercase canonical key must not leak into UI hints).
+  assert.equal(formatKeyId('pageup' as never), 'PageUp')
+  assert.equal(formatKeyId('pagedown' as never), 'PageDown')
+  assert.equal(formatKeyList(['pageup'] as never), 'PageUp')
+  // The keymap's canonical rules and the hint renderers agree. The user
+  // writes the fork-grammar spelling (pageUp); the parser canonicalizes it
+  // to pageup internally and the hint renders PageUp.
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': 'pageUp' }))
+  assert.equal(manager.keyHint('app.transcript.toggleExpand'), 'PageUp',
+    'a canonical pageup binding must be advertised as PageUp')
+  assert.deepEqual(manager.keysFor('app.transcript.toggleExpand'), ['pageup'])
+  // The LOWERCASE spelling (pageup) is the same physical key at parse
+  // time — one canonical identity regardless of casing.
+  const lower = new HostKeybindingManager()
+  lower.setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': 'pageup' }))
+  assert.deepEqual(lower.keysFor('app.transcript.toggleExpand'), ['pageup'])
+  assert.equal(lower.keyHint('app.transcript.toggleExpand'), 'PageUp')
+})
