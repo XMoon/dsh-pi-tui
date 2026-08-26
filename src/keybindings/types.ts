@@ -177,6 +177,15 @@ export interface KeybindingContext {
 /** Where an effective rule came from (plan §7). */
 export type KeybindingSource = 'builtin' | 'plugin' | 'composition' | 'user'
 
+/** Who EXECUTES a rule's key (convergence §3). `editor` rules are the
+ * fork-editor-owned submit triggers: they participate in the unified
+ * model (canonical/conflict/shadow/snapshot/read-model) but are NEVER
+ * resolved by the HOST ladder — `resolve`/`hostResolves`/
+ * `hostActiveKeys`/`hostKeysFor` exclude them, and the fork editor (via
+ * `onEditorSubmitSync`) executes them, preserving paste-burst and
+ * backslash-newline semantics. */
+export type RuleOwner = 'host' | 'editor' | 'plugin'
+
 /** One compiled rule of the effective keymap (plan §7). */
 export interface EffectiveBindingRule {
   readonly id: string
@@ -185,6 +194,9 @@ export interface EffectiveBindingRule {
   readonly source: KeybindingSource
   readonly scope: KeybindingScope
   readonly priority: number
+  /** The executor: 'host' (Host ladder), 'editor' (fork editor-owned),
+   * or 'plugin' (a Stable plugin binding). */
+  readonly owner: RuleOwner
   /** Optional context predicate (e.g. the empty-editor ↓ affordance). */
   readonly predicate?: (context: KeybindingContext) => boolean
 }

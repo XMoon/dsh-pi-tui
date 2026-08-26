@@ -2649,16 +2649,15 @@ export class TuiApp {
     // of Esc would trip the double-Esc cancel. The framework already filters
     // releases for the focused component; listeners are on their own.
     if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
-    // The double-action window is a CONSECUTIVE-press chord: any real
-    // key press between the two presses of the interrupt trigger disarms
-    // it (review E12 — `Esc → Left → Esc` must not rewind). Releases/
-    // repeats already returned above, so only genuine presses reach this
-    // line. The disarming key is the PHYSICAL Escape key OR the
-    // EFFECTIVE interrupt trigger (a remapped Ctrl+X keeps its own
-    // consecutive-press semantics — two Ctrl+X presses in the window
-    // still fire the idle double action; convergence §5 finding).
-    if (!matchesKey(data, 'escape')
-      && !this.keybindings.matches(data, 'app.agent.interrupt')) this.lastEscapeAt = undefined
+    // The double-action window is a CONSECUTIVE-press chord of the
+    // EFFECTIVE interrupt trigger: any OTHER key between the two presses
+    // disarms it (review E12 — `Esc → Left → Esc` must not rewind;
+    // convergence §4 finding — after a remap, the physical Esc is just
+    // another key, so `Ctrl+X → Esc → Ctrl+X` must NOT fire the double
+    // action; the default Escape matches app.agent.interrupt naturally).
+    // Releases/repeats already returned above, so only genuine presses
+    // reach this line.
+    if (!this.keybindings.matches(data, 'app.agent.interrupt')) this.lastEscapeAt = undefined
     if (this.activeQuestions !== undefined) {
       return this.handleQuestionKey(data)
     }

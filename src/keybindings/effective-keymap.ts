@@ -30,6 +30,7 @@ import type {
   KeybindingScope,
   KeybindingSource,
   KeymapSnapshot,
+  RuleOwner,
   UserKeybindingsConfig,
 } from './types.ts'
 
@@ -87,7 +88,15 @@ export class EffectiveKeymap {
   private readonly includeScopes: ReadonlySet<KeybindingScope> | undefined
 
   private revision = 0
+  /** The full resolution set: every non-deactivated rule (shadowed rules
+   * stay — the resolver picks the highest-priority predicate-passing
+   * candidate, so a conditional top trigger with a false predicate lets a
+   * shadowed lower rule fire in context). */
   private activeRules: EffectiveBindingRule[] = []
+  /** The READ-MODEL set: top triggers only (shadowed rules excluded) —
+   * keysFor/keyHint/snapshot/hostActiveKeys/hostKeysFor/editorKeysFor
+   * report these (convergence §4.3). */
+  private topTriggerRules: EffectiveBindingRule[] = []
   private conflicts: ReturnType<typeof detectConflicts>['conflicts'] = []
 
   constructor(options: EffectiveKeymapOptions) {
@@ -141,9 +150,34 @@ export class EffectiveKeymap {
           const rule = { ...this.rule(definition, key, 'user', PRIORITY.user), ...predicate === undefined ? {} : { predicate } }
           if (!isDuplicate(rule.action, rule.key)) rules.push(rule)
         }
+        // For an EDITOR-OWNED action (submit) the BUILTIN also compiles as
+        // an owner=editor rule: the user override (priority 200) shadows it
+        // when effective, but if the override CONFLICTS away (e.g.
+        // submit=ctrl+x vs history=ctrl+x), the builtin Enter survives the
+        // shadow as the fail-soft (convergence §4.5 — no fabricated
+        // fallback: the builtin was always a declared rule, it just gets
+        // shadowed by a WORKING override). Explicit `false` was handled
+        // above and skips this entirely.
+        if (definition.hostResolved === false) {
+          for (const key of definition.defaultKeys) {
+            const rule = this.rule(definition, key, 'builtin', PRIORITY.builtin)
+            if (!isDuplicate(rule.action, rule.key)) rules.push(rule)
+          }
+        }
         continue
       }
-      if (definition.hostResolved === false) continue
+      if (definition.hostResolved === false) {
+        // The editor-owned defaults (submit's Enter) DO compile — as
+        // owner=editor rules — so the unified model sees them
+        // (conflict/shadow/read-model); the Host resolver excludes them
+        // (convergence §3 finding: submit participates in the model, the
+        // fork editor executes it).
+        for (const key of definition.defaultKeys) {
+          const rule = this.rule(definition, key, 'builtin', PRIORITY.builtin)
+          if (!isDuplicate(rule.action, rule.key)) rules.push(rule)
+        }
+        continue
+      }
       for (const key of definition.defaultKeys) {
         const rule = this.rule(definition, key, 'builtin', PRIORITY.builtin)
         if (!isDuplicate(rule.action, rule.key)) rules.push(rule)
@@ -163,6 +197,7 @@ export class EffectiveKeymap {
         source: 'composition' as const,
         scope: definition.scope,
         priority: PRIORITY.composition,
+        owner: 'host' as const,
         predicate: composition.predicate,
       }
       if (!isDuplicate(compositionRule.action, compositionRule.key)) rules.push(compositionRule)
@@ -176,6 +211,7 @@ export class EffectiveKeymap {
         source: 'plugin' as const,
         scope: 'global' as const,
         priority: PRIORITY.plugin,
+        owner: 'plugin' as const,
       }
       if (!isDuplicate(pluginRule.action, pluginRule.key)) rules.push(pluginRule)
     }
@@ -184,12 +220,17 @@ export class EffectiveKeymap {
     this.conflicts = conflicts
     // 6. PRIORITY SHADOW (plan §6.2, convergence §4.3): for each key, the
     // highest-priority tier that still has a live (non-deactivated) rule
-    // wins; every LOWER-priority rule on the same key with an OVERLAPPING
-    // scope is SHADOWED — it must never appear in resolve/keysFor/keyHint/
-    // snapshot, because the runtime can never fire it. (The higher tier
-    // may itself be fully conflict-deactivated; then the next tier
-    // survives — plan §6.3 — provided its rules were DECLARED, never a
-    // fabricated builtin fallback.)
+    // is the TOP TRIGGER; every LOWER-priority rule on the same key with
+    // an OVERLAPPING scope is SHADOWED for the READ MODEL. Shadowed rules
+    // STAY in the resolution set, because shadowing is CONTEXT-AWARE: a
+    // conditional high-priority rule whose predicate is FALSE in a given
+    // context must NOT block the lower rule from firing (convergence §4.3
+    // finding — the resolver picks the highest-priority predicate-passing
+    // candidate). Read-model APIs (keysFor/keyHint/snapshot/
+    // hostActiveKeys/hostKeysFor/editorKeysFor) report the TOP TRIGGER
+    // only. (The higher tier may itself be fully conflict-deactivated;
+    // then the next tier is the top — plan §6.3 — provided its rules were
+    // DECLARED, never a fabricated builtin fallback.)
     const shadowed = new Set<string>()
     {
       const byKey = new Map<KeyId, EffectiveBindingRule[]>()
@@ -211,7 +252,12 @@ export class EffectiveKeymap {
         }
       }
     }
-    this.activeRules = rules.filter(rule => !deactivated.has(rule.id) && !shadowed.has(rule.id))
+    // Resolution set: every non-deactivated rule (shadowed rules stay —
+    // the resolver's predicate-aware priority pick may need them as
+    // context fallbacks).
+    this.activeRules = rules.filter(rule => !deactivated.has(rule.id))
+    // Read-model set: top triggers only (shadowed rules excluded).
+    this.topTriggerRules = rules.filter(rule => !deactivated.has(rule.id) && !shadowed.has(rule.id))
     for (const conflict of conflicts) {
       const names = conflict.actions.map(entry => `${entry.ruleId} (${entry.scope}, ${entry.source})`).join(' vs ')
       diagnostics.push(`keybinding conflict on ${formatKeyId(conflict.key)}: ${names} — neither binding was activated`)
@@ -235,7 +281,12 @@ export class EffectiveKeymap {
     // physical key (esc/escape, ctrl+shift+p / shift+ctrl+p) becomes the
     // SAME rule key, so conflict detection, dedupe, the leader collision
     // and the read model all share one identity (convergence contract).
+    // OWNER: a hostResolved:false definition's keys are EXECUTED BY THE
+    // FORK EDITOR (the unified model's editor-owned tier — submit) — they
+    // never resolve in the Host ladder, but they participate in
+    // conflict/shadow/read-model (convergence §3 finding).
     const canonical = canonicalizeKeyId(key)
+    const owner: RuleOwner = definition.hostResolved === false ? 'editor' : 'host'
     return {
       id: `${definition.id}@${source}:${canonical}`,
       action: definition.id,
@@ -243,6 +294,7 @@ export class EffectiveKeymap {
       source,
       scope: definition.scope,
       priority,
+      owner,
     }
   }
 
@@ -252,6 +304,12 @@ export class EffectiveKeymap {
   resolve(data: string, context: KeybindingContext): KeybindingResolution | undefined {
     let best: EffectiveBindingRule | undefined
     for (const rule of this.activeRules) {
+      // Editor-owned rules (submit's Enter) never resolve in the HOST
+      // ladder — the fork editor executes them (convergence §3).
+      // PLUGIN rules DO resolve here at priority 10 (they always lose to
+      // a host rule); the caller's dispatcher falls through to the plugin
+      // stage when the resolved action is a plugin action.
+      if (rule.owner === 'editor') continue
       if (!matchesKey(data, rule.key)) continue
       if (rule.predicate !== undefined && !rule.predicate(context)) continue
       if (best === undefined
@@ -273,18 +331,27 @@ export class EffectiveKeymap {
    * (context predicates are NOT applied — use {@link resolve} when the
    * rule is conditional). */
   matches(data: string, action: string): boolean {
-    for (const rule of this.activeRules) {
+    for (const rule of this.topTriggerRules) {
       if (rule.action !== action) continue
       if (matchesKey(data, rule.key)) return true
     }
     return false
   }
 
-  /** The effective keys of one action (all sources). */
+  /** The effective keys of one action (all sources, top triggers only —
+   * a shadowed lower rule is never advertised, convergence §4.3). For an
+   * EDITOR-OWNED action with a working user override, the builtin default
+   * is replaced (not advertised alongside). */
   keysFor(action: string): KeyId[] {
     const keys = new Set<KeyId>()
-    for (const rule of this.activeRules) {
-      if (rule.action === action) keys.add(rule.key)
+    let sawUser = false
+    for (const rule of this.topTriggerRules) {
+      if (rule.action === action && rule.source === 'user') sawUser = true
+    }
+    for (const rule of this.topTriggerRules) {
+      if (rule.action !== action) continue
+      if (sawUser && rule.owner === 'editor' && rule.source !== 'user') continue
+      keys.add(rule.key)
     }
     return [...keys]
   }
@@ -309,8 +376,8 @@ export class EffectiveKeymap {
    * finding). */
   hostActiveKeys(): KeyId[] {
     const keys = new Set<KeyId>()
-    for (const rule of this.activeRules) {
-      if (rule.source === 'plugin') continue
+    for (const rule of this.topTriggerRules) {
+      if (rule.owner !== 'host') continue
       keys.add(rule.key)
     }
     return [...keys]
@@ -322,7 +389,7 @@ export class EffectiveKeymap {
    * dispatch stage (PR review finding). */
   hostResolves(data: string, context: KeybindingContext): boolean {
     for (const rule of this.activeRules) {
-      if (rule.source === 'plugin') continue
+      if (rule.owner !== 'host') continue
       if (!matchesKey(data, rule.key)) continue
       if (rule.predicate !== undefined && !rule.predicate(context)) continue
       return true
@@ -335,8 +402,8 @@ export class EffectiveKeymap {
    * replacement of the host's key; PR review finding). */
   hostKeysFor(action: string): KeyId[] {
     const keys = new Set<KeyId>()
-    for (const rule of this.activeRules) {
-      if (rule.source === 'plugin') continue
+    for (const rule of this.topTriggerRules) {
+      if (rule.owner !== 'host') continue
       if (rule.action === action) keys.add(rule.key)
     }
     return [...keys]
@@ -350,13 +417,57 @@ export class EffectiveKeymap {
    * the empty-editor ↓ tasks affordance), never a predicate bypass.
    * Actions with no effective rules cannot activate. */
   canActivate(action: string, context: KeybindingContext): boolean {
-    let sawRule = false
+    // ACTION AVAILABILITY (convergence §4.7 finding): whether the
+    // semantic action MAY fire in the current context — INDEPENDENT of
+    // whether a direct trigger currently survives. A leader-only action
+    // (no direct rules — e.g. app.transcript.toggleFullscreen) is still
+    // available; a direct key that got shadowed/conflicted does NOT make
+    // the action unavailable to its OTHER triggers (leader sequences).
+    //
+    // The availability is the action's context PREDICATE set (the
+    // composition affordances like the empty-editor ↓ tasks rule):
+    // every applicable predicate must be satisfiable. An action with NO
+    // predicates is always available (the caller already checked
+    // disabled/reserved).
+    const definition = this.definitions[action]
+    if (definition === undefined) return false
+    const predicates = this.compositionRules
+      .filter(composition => composition.action === action)
+      .map(composition => composition.predicate)
+    // Any unconditional effective rule makes the action available too
+    // (a user direct binding with no predicate).
     for (const rule of this.activeRules) {
       if (rule.action !== action) continue
-      sawRule = true
-      if (rule.predicate === undefined || rule.predicate(context)) return true
+      if (rule.predicate === undefined) return true
     }
-    return sawRule ? false : false
+    if (predicates.length === 0) return true
+    return predicates.some(predicate => predicate(context))
+  }
+
+  /** The effective EDITOR-OWNED keys of one action (owner=editor — the
+   * fork editor executes them; convergence §3). Used by
+   * `editorSubmitKeysFor` so the sync and the read model derive ONLY from
+   * effective editor rules, never the raw config. */
+  editorKeysFor(action: string): KeyId[] {
+    const keys = new Set<KeyId>()
+    let sawUser = false
+    for (const rule of this.topTriggerRules) {
+      if (rule.owner !== 'editor') continue
+      if (rule.action !== action) continue
+      if (rule.source === 'user') sawUser = true
+    }
+    for (const rule of this.topTriggerRules) {
+      if (rule.owner !== 'editor') continue
+      if (rule.action !== action) continue
+      // A WORKING user override REPLACES the builtin default for the same
+      // action (they are alternative triggers, not same-key shadowing):
+      // with an effective user rule, the builtin is not advertised — the
+      // override is the trigger. If the override CONFLICTED away (not in
+      // topTriggerRules), the builtin survives as the fail-soft.
+      if (sawUser && rule.source !== 'user') continue
+      keys.add(rule.key)
+    }
+    return [...keys]
   }
 
   /** The primary (first) effective key of one action, or undefined. */
@@ -379,7 +490,7 @@ export class EffectiveKeymap {
   /** The immutable read model (plan §2 M2). */
   snapshot(): KeymapSnapshot {
     const byAction = new Map<string, { keys: KeyId[]; scope: string; source: KeybindingSource }>()
-    for (const rule of this.activeRules) {
+    for (const rule of this.topTriggerRules) {
       const entry = byAction.get(rule.action) ?? { keys: [], scope: rule.scope, source: rule.source }
       entry.keys.push(rule.key)
       byAction.set(rule.action, entry)

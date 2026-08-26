@@ -248,25 +248,32 @@ test('4.10 a real armed window is disarmed by the viewer-close Esc', async () =>
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    onSingleEscape: () => { singleEscapes += 1; return singleEscapes === 1 ? false : true },
+    // First main Esc declines (arms the window); EVERY viewer-close Esc
+    // consumes (run the close path). The FINAL main Esc declines again —
+    // handleInterruptAction must then genuinely check (and find disarmed)
+    // lastEscapeAt.
+    onSingleEscape: () => { singleEscapes += 1; return singleEscapes === 2 ? true : false },
     onCancel: () => { cancels += 1 },
   })
   app.start()
-  // First main Esc: NOT consumed → handleEscapeKey ARMS the window.
+  // First main Esc: not consumed → handleInterruptAction ARMS the window.
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(singleEscapes, 1)
-  // Open + close the read-only viewer with Esc (the close is consumed).
+  // Open + close the read-only viewer with Esc (the close consumes).
   app.setViewerMode({ parentSessionId: 's', childSessionId: 'c', label: 'c', mode: 'one-shot', activity: 'inactive' })
   await vt.waitForRender()
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(singleEscapes, 2, 'the viewer-close Esc ran the close path')
-  // Back in main: the next Esc must RE-ARM (not read as a double-Esc).
+  // REALLY return to main: the viewer is gone, so the next Esc enters
+  // handleInterruptAction (not the viewer-close branch).
+  app.setViewerMode(undefined)
+  await vt.waitForRender()
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.equal(singleEscapes, 3)
-  assert.equal(cancels, 0, 'a stale window must not cancel after the viewer close')
+  assert.equal(singleEscapes, 3, 'the third Esc runs the main interrupt path (viewer closed)')
+  assert.equal(cancels, 0, 'a stale window must not cancel after the viewer close disarmed it')
   app.stop()
 })
 
@@ -425,4 +432,116 @@ test('5.3 Shift+Enter cannot be bound to submit (the editor newline key)', () =>
   const aliased = parseUserKeybindings({ 'app.input.submit': 'shift+return' })
   assert.deepEqual(aliased.bindings, {})
   assert.ok(aliased.diagnostics.some(message => message.includes('newline')))
+})
+
+// ── 4.5 submit participates in conflict (P1 finding) ──────────────────────
+
+test('4.5a a CONFLICTED submit override fails soft back to the builtin Enter', () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    'app.input.submit': 'ctrl+x',
+    'app.history.search': 'ctrl+x',
+  }))
+  // Both user rules conflict on ctrl+x: neither fires — but the dead
+  // override must NOT disable Enter (fail-soft on the EFFECTIVE rules).
+  assert.ok(manager.diagnosticsList().some(message => message.includes('conflict')))
+  assert.deepEqual(manager.editorSubmitKeysFor(), ['enter'],
+    'a conflicted submit override must restore the builtin Enter')
+  assert.equal(manager.keyHint('app.input.submit'), 'Enter')
+  assert.equal(manager.resolve('\x18', editorContext), undefined, 'the conflicted ctrl+x fires nothing')
+})
+
+test('4.5b an explicit false submit stays strictly disabled', () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({ 'app.input.submit': false }))
+  assert.deepEqual(manager.editorSubmitKeysFor(), [], 'false must strictly disable submit')
+  assert.equal(manager.keyHint('app.input.submit'), '')
+})
+
+test('4.5c another action taking Enter does NOT leave submit advertised', () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({ 'app.todo.toggle': 'enter' }))
+  // Todo (user, 200) shadows the builtin submit Enter (editor, 100): the
+  // runtime resolves Enter to Todo; submit must NOT advertise Enter.
+  assert.equal(manager.resolve('\r', editorContext)?.action, 'app.todo.toggle')
+  assert.deepEqual(manager.editorSubmitKeysFor(), [],
+    'a shadowed submit Enter must not be advertised')
+  assert.equal(manager.keyHint('app.input.submit'), '')
+})
+
+// ── leader-only action actually EXECUTES (P1 finding) ────────────────────
+
+test('4.6c a leader-only action actually fires its completion', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let fullscreenToggles = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+  })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.transcript.toggleFullscreen': '<leader>n' },
+  }))
+  await vt.waitForRender()
+  vt.sendInput('\x18') // leader
+  await vt.waitForRender()
+  vt.sendInput('n')
+  await vt.waitForRender()
+  assert.ok(app.isFullscreen(), 'the leader-only action must actually fire (fullscreen on)')
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('n')
+  await vt.waitForRender()
+  assert.ok(!app.isFullscreen(), 'the leader-only action fires again (fullscreen off)')
+  app.stop()
+})
+
+// ── priority shadow respects predicates (P2 finding) ──────────────────────
+
+test('4.3b a conditional high-priority rule does not shadow a lower rule when its predicate is false', () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({ 'app.tasks.open': 'ctrl+s' }))
+  // tasks.open (user, 200) inherits the empty-editor+tasks predicate;
+  // steer (builtin, 100) is on ctrl+s. When the tasks predicate is false
+  // (editor non-empty / no tasks), Ctrl+S must still STEER.
+  const contextWithTasks = deriveKeybindingContext({ focusedSeat: 'editor', editorEmpty: true, tasksActive: true })
+  const contextNoTasks = deriveKeybindingContext({ focusedSeat: 'editor', editorEmpty: false, tasksActive: false })
+  assert.equal(manager.resolve('\x13', contextWithTasks)?.action, 'app.tasks.open', 'predicate holds → tasks')
+  assert.equal(manager.resolve('\x13', contextNoTasks)?.action, 'app.input.steer',
+    'predicate false → the shadowed lower rule fires (context-aware shadow)')
+})
+
+// ── remapped interrupt double-window (P2 finding) ─────────────────────────
+
+test('4.8b Ctrl+X → Esc → Ctrl+X does NOT fire the idle double action', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let rewinds = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onRewind: () => { rewinds += 1 },
+  })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' }))
+  await vt.waitForRender()
+  vt.sendInput('\x18') // ctrl+x — arm the interrupt window
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // a DIFFERENT key (physical Esc is no longer the trigger)
+  await vt.waitForRender()
+  vt.sendInput('\x18') // ctrl+x again — must NOT read as a second consecutive trigger
+  await vt.waitForRender()
+  assert.equal(rewinds, 0, 'an intervening non-trigger key must disarm the window')
+  app.stop()
+})
+
+// ── legacy collisions rejected (P2 finding) ───────────────────────────────
+
+test('4.11b legacy terminal collisions are rejected bindings', () => {
+  for (const key of ['ctrl+[', 'ctrl+j', 'ctrl+m']) {
+    const parsed = parseUserKeybindings({ 'app.todo.toggle': key })
+    assert.deepEqual(parsed.bindings, {}, `"${key}" must be rejected`)
+    assert.ok(parsed.diagnostics.some(message => message.includes('legacy terminals') || message.includes('collides')),
+      `no rejection diagnostic for "${key}": ${parsed.diagnostics.join(' | ')}`)
+  }
 })

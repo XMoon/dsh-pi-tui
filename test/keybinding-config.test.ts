@@ -153,10 +153,15 @@ test('the space key is printable: rejected as a leader and as a direct binding',
   assert.deepEqual(chord.bindings, { 'app.todo.toggle': 'ctrl+space' })
 })
 
-test('terminal-unreliable keys warn but stay', () => {
-  const parsed = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+j' })
-  assert.deepEqual(parsed.bindings, { 'app.todo.toggle': 'ctrl+j' })
-  assert.ok(parsed.diagnostics.some(message => message.includes('legacy terminals')))
+test('legacy terminal collisions are REJECTED bindings', () => {
+  // Convergence §4.5: a key indistinguishable from a lifecycle key on
+  // legacy terminals is unsupported — rejected with a diagnostic.
+  for (const key of ['ctrl+[', 'ctrl+j', 'ctrl+m']) {
+    const parsed = parseUserKeybindings({ 'app.todo.toggle': key })
+    assert.deepEqual(parsed.bindings, {}, `"${key}" must be rejected`)
+    assert.ok(parsed.diagnostics.some(message => message.includes('legacy terminals') || message.includes('collides')),
+      `no rejection diagnostic for "${key}": ${parsed.diagnostics.join(' | ')}`)
+  }
 })
 
 test('nested bindings map merges with top-level entries', () => {
