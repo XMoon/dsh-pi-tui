@@ -13,8 +13,8 @@
  * - every physical row is dimmed (the legacy footer's final pass).
  *
  * The composer consumes ONLY the StatusSnapshot + the host-owned surface
- * context (editor emptiness, extension chrome text) — never business
- * state (plan §2.2).
+ * context (task-browser availability — the exact ↓ routing gate — and the
+ * extension chrome text) — never business state (plan §2.2).
  * @module @xmoon76/dsh-pi-tui/footer/composer
  */
 
