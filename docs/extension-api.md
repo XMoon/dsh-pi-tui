@@ -175,7 +175,13 @@ plugin unloads (it resolves nothing — the built-in fallback, never
 silently the same-named file). The registry's read-side view exposes
 `selectableValues()` / `paletteForSelectable(value)` /
 `displayNameForSelectable(value)` / `hasSelectable(value)` for the
-picker; the bare `name` is a display label, never an identity.
+picker; the bare `name` is a display label, never an identity. The
+`/settings` picker carries the identity end-to-end: every picker row's
+id IS the source-qualified value (display labels are unique per row —
+builtin/file/plugin collisions are source-tagged — but are presentational
+only and never round-tripped back to an identity at confirm time, so an
+HMR unload between open and confirm can never redirect a selection to a
+same-named new contribution).
 
 ## Configurable footer items (M4)
 
