@@ -163,8 +163,9 @@ importance) that
 becomes a first-class citizen of the footer configurator — users can
 show/hide, reorder and zone-place it like any builtin item. The
 `FooterSegment.minWidth` is the item's minimum renderable width (never
-truncated below it — the segment is the SINGLE authority; there is no
-top-level minWidth duplicate). Dynamic
+truncated below it — it is the authority when both are set; the legacy
+top-level `FooterItemContribution.minWidth` is DEPRECATED and honored
+only when the segment carries none). Dynamic
 updates use the standard `handle.replace(...)` / `handle.invalidate()`
 pattern (async producer → cache → replace plain data → host render).
 

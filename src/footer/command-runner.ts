@@ -9,6 +9,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { truncateToWidth } from '@xmoon76/pi-tui'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
@@ -49,6 +50,25 @@ export const MIN_COMMAND_REFRESH_MS = 1000
  * TERM-resistant child (e.g. `trap "" TERM`) must not leak as a detached
  * orphan — the escalation is the hard kill that actually reclaims it. */
 export const KILL_GRACE_MS = 500
+
+/** A process's starttime (the /proc/&lt;pid&gt;/stat field 22 — a stable
+ * process identity). The group-reuse guard reads it: when a group leader
+ * dies its pid slot is freed IMMEDIATELY, so a pgid we captured can be
+ * reallocated to an UNRELATED process before the escalation fires — a
+ * different starttime under the same numeric pid proves the reuse, and
+ * the group must then never be signalled. Undefined when /proc is
+ * unavailable (non-Linux) or the entry is gone. */
+function statStarttime(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    // The comm field (2) may contain spaces/parens — slice past the LAST
+    // ')' before splitting; starttime is field 22, index 19 after comm.
+    const afterComm = stat.slice(stat.lastIndexOf(')') + 2).trim()
+    return afterComm.split(' ')[19]
+  } catch {
+    return undefined
+  }
+}
 
 /** The footer command runner. */
 export class FooterCommandRunner {
@@ -231,6 +251,10 @@ export class FooterCommandRunner {
     if (child === undefined || this.terminating.has(child)) return
     this.terminating.add(child)
     const pgid = child.pid
+    // The leader's starttime, captured WHILE it is alive: the escalation
+    // later proves the numeric pgid still identifies OUR group (a reused
+    // pid carries a different starttime).
+    const leaderStarttime = pgid === undefined ? undefined : statStarttime(pgid)
     /** Whether ANY member of the captured process group still exists. */
     const groupAlive = (): boolean => {
       if (pgid === undefined) return false
@@ -257,9 +281,25 @@ export class FooterCommandRunner {
     }
     signalGroup('SIGTERM')
     const escalation = setTimeout(() => {
+      if (pgid === undefined) return
       // The GROUP probe, never a leader check: the leader may already
       // have closed while a TERM-resistant descendant still runs.
       if (!groupAlive()) return
+      // Pgid-reuse guard (the review's P1): once the leader is dead its
+      // pid slot is free, and a fast pid allocator can hand the SAME
+      // numeric pgid to an unrelated process before the grace fires —
+      // that group must never receive OUR SIGKILL. The group is provably
+      // ours while the leader is alive, or when the pid slot is
+      // unallocated (a group whose leader pid is free can only hold the
+      // leader's own descendants — no unrelated process can join it), or
+      // when the current occupant is still the SAME process (a not-yet-
+      // reaped leader zombie). A reallocated pid with a different
+      // starttime skips the kill (a descendant may leak — the safe
+      // failure).
+      if (leaderStarttime !== undefined && (child.exitCode !== null || child.signalCode !== null)) {
+        const current = statStarttime(pgid)
+        if (current !== undefined && current !== leaderStarttime) return
+      }
       signalGroup('SIGKILL')
     }, KILL_GRACE_MS)
     child.once('close', () => {

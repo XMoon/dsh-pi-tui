@@ -559,6 +559,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   let saved = false
   for (let step = 0; step < 12 && !saved; step += 1) {
     vt.sendInput('\r')
+    await vt.waitForRender()
     const deadline = Date.now() + 250
     while (settings.doc.footerFallbackMode === undefined && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 10))
@@ -566,7 +567,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     saved = settings.doc.footerFallbackMode !== undefined
     if (!saved) {
       vt.sendInput('\x1b[B')
-      await new Promise(resolve => setTimeout(resolve, 30))
+      await vt.waitForRender()
     }
   }
   assert.equal(settings.doc.footer, 'compact', 'the mode must persist')
