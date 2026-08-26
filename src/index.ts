@@ -2541,6 +2541,9 @@ export function apply(ctx: Context, config: Config): void {
       // settle time; the review's P2 generation fence). This shape is the
       // authoritative bridge protocol — keep it in sync with the
       // service's implementations.
+      // Theme-unload notification (the selected-plugin-theme fallback):
+      // called with the SELECTABLE name of every theme that unloads.
+      setThemeUnloadedHook(hook: (name: string) => void): void
       _recordRegistryHealthRef(slot: string, id: string): { slot: string; id: string; owner: string } | undefined
       _recordRegistryError(ref: { slot: string; id: string; owner: string }, error: unknown): void
       _clearRegistryError(ref: { slot: string; id: string; owner: string }): void
@@ -3481,9 +3484,9 @@ export function apply(ctx: Context, config: Config): void {
             // actually about to run (a submit-time capture could name a
             // long-gone owner after an HMR reload, silently dropping the
             // new owner's real failures; the review's P2).
-            const liveCommandId = extensionCommandId === undefined || extensionService === undefined
+            const liveCommandId = parsedAtSubmit === undefined || extensionService === undefined
               ? undefined
-              : extensionService.commands.idFor(parsedAtSubmit?.name ?? '')
+              : extensionService.commands.idFor(parsedAtSubmit.name)
             commandHealthRef = liveCommandId === undefined
               ? undefined
               : extensionService?._recordRegistryHealthRef('command', liveCommandId)
@@ -4082,6 +4085,17 @@ export function apply(ctx: Context, config: Config): void {
     extensionService = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as typeof extensionService
     if (extensionService !== undefined) {
       extensionHost = new SurfaceHost(extensionService._ledger(), () => app.requestRender())
+      // Selected-plugin-theme fallback (the review's P2): when the theme
+      // currently applied unloads (HMR), the host must restore the
+      // builtin dark palette — the registry alone only removes the
+      // record and repaints, leaving the dead plugin's palette on screen.
+      extensionService.setThemeUnloadedHook((name) => {
+        if (app.activePluginTheme() === name) {
+          app.clearActivePluginTheme()
+          app.applyTheme('dark')
+          app.trackTerminalTheme(false)
+        }
+      })
     }
     // The durable-image loader (plan M8/M10): history images resolve through
     // `ctx.attachments.readImage` only — never the draft store. The read
@@ -4306,7 +4320,7 @@ export function apply(ctx: Context, config: Config): void {
         // NAME-addressed (the unified theme protocol — see identityOf).
         const themeRef = extensionService?._recordRegistryHealthRef('theme', name)
         try {
-          app.applyPalette(palette)
+          app.applyPluginPalette(name, palette)
           if (themeRef !== undefined) extensionService?._clearRegistryError(themeRef)
         } catch (error) {
           if (themeRef !== undefined) extensionService?._recordRegistryError(themeRef, error)
@@ -5023,7 +5037,11 @@ export function apply(ctx: Context, config: Config): void {
       const themeRef = extensionService?._recordRegistryHealthRef('theme', name)
       if (palette !== undefined) {
         try {
-          app.applyPalette(palette)
+          if (pluginPalette !== undefined) app.applyPluginPalette(name, pluginPalette)
+          else {
+            app.clearActivePluginTheme()
+            app.applyPalette(palette)
+          }
           if (pluginPalette !== undefined && themeRef !== undefined) extensionService?._clearRegistryError(themeRef)
         } catch (error) {
           if (themeRef !== undefined) extensionService?._recordRegistryError(themeRef, error)

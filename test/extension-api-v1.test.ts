@@ -315,3 +315,51 @@ test('a captured health ref is a GENERATION FENCE: stale settlements never land 
     }
   }
 })
+
+test('the theme-unload hook fires with the SELECTABLE name (the host\'s unload-fallback trigger)', async () => {
+  // The review's P2: when the currently-applied plugin theme unloads, the
+  // HOST must restore the builtin palette — the registry alone only
+  // removes the record and repaints. The service notifies the runner's
+  // hook (which owns the selection knowledge) with the theme NAME on
+  // EVERY unload path (fiber unload, explicit dispose).
+  const { Context } = await import('@deepseek-ai/cordis')
+  const Loader = (await import('@deepseek-ai/cordis-plugin-loader')).default
+  const { apply: applyExtensionHost } = await import('../src/extensions.ts')
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = ctx.plugin((c) => {
+      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+    })
+    await startup
+    await ctx.plugin(applyExtensionHost)
+    const service = ctx.get('piTuiExtensions') as unknown as {
+      registerTheme(contribution: { id: string; name: string; palette: unknown }): { id: string; dispose(): void }
+      setThemeUnloadedHook(hook: (name: string) => void): void
+    }
+    const unloaded: string[] = []
+    service.setThemeUnloadedHook(name => unloaded.push(name))
+    const fiber = ctx.plugin({ name: 'theme-unload', apply(c) {
+      const svc = c.get('piTuiExtensions') as unknown as { registerTheme(c: { id: string; name: string; palette: unknown }): { id: string; dispose(): void } }
+      svc.registerTheme({ id: 't1', name: 'Foo Theme', palette: {} })
+    } })
+    await fiber
+    // Fiber unload: the hook fires with the SELECTABLE name.
+    await (fiber as { dispose(): Promise<void> }).dispose()
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.ok(unloaded.includes('Foo Theme'), `the hook must receive the selectable name on owner unload: ${unloaded}`)
+    // Explicit dispose: the hook fires too. (The same theme may notify
+    // again when its fiber's effect disposer runs at teardown — the host
+    // fallback is idempotent: only a name matching the LIVE selection
+    // triggers the restore, so repeats are no-ops.)
+    const handle = service.registerTheme({ id: 't2', name: 'Bar Theme', palette: {} })
+    handle.dispose()
+    assert.ok(unloaded.includes('Bar Theme'), `the hook must receive the selectable name on explicit dispose: ${unloaded}`)
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})

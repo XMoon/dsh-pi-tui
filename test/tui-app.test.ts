@@ -1523,3 +1523,22 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
   assert.equal(blankCount, 1, `exactly one blank row between cards:\n${view.join('\n')}`)
   app.stop()
 })
+
+test('applyPluginPalette records the live plugin-theme selection (the unload-fallback source)', () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  assert.equal(app.activePluginTheme(), undefined, 'no selection before any plugin theme applies')
+  app.applyPluginPalette('Foo', {
+    primary: '#000', accent: '#000', text: '#000', textStrong: '#000', textDim: '#000',
+    textMuted: '#000', border: '#000', borderFocus: '#000', success: '#000', warning: '#000',
+    error: '#000', diffAdded: '#000', diffRemoved: '#000', roleUser: '#000', roleUserBg: '#000',
+    roleAssistant: '#000', shellMode: '#000',
+  } as never)
+  assert.equal(app.activePluginTheme(), 'Foo', 'a plugin palette must record its selectable name')
+  // A builtin/custom-file theme clears the selection (no unload fallback
+  // applies to it) — the review's P2 contract.
+  app.clearActivePluginTheme()
+  assert.equal(app.activePluginTheme(), undefined)
+  app.stop()
+})
