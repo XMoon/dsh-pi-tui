@@ -18,7 +18,8 @@
 
 import type { SessionEvent, SessionHeader, JsonValue } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { contextEmoji, contextProvenance, contextSummary } from './context.ts'
+import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
+import type { IconSemantic } from './icons.ts'
 import { firstLine, latestLine } from './present.ts'
 import { StepUsageAccumulator, totalTokens, type TokenUsageTotals } from './token-usage.ts'
 // The command/run + command/done event merge (SessionEventMap extension).
@@ -48,10 +49,11 @@ export type TranscriptMessage =
   /**
    * Injected context (system reminders, skill content) from non-user sources.
    * Labeled entries carry the Web-provenance producer name (e.g. AGENTS.md,
-   * @deepseek-ai/dsh-system-prompt, skill-catalog), a source-kind emoji, and,
-   * for notice forms, the producer's one-line summary.
+   * @deepseek-ai/dsh-system-prompt, skill-catalog), a source-kind icon
+   * SEMANTIC (never a concrete glyph — the renderer resolves the palette),
+   * and, for notice forms, the producer's one-line summary.
    */
-  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; emoji?: string }
+  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; icon?: IconSemantic }
   | {
     kind: 'tool'
     turn: number
@@ -986,17 +988,18 @@ export class TranscriptFolder {
           this.appendItem({ kind: 'user', turn: this.currentTurn, text, content: blocks })
         } else {
           // Injected context: name the producer the way the Web row does
-          // (contextProvenance), plus a notice form's one-line account.
+          // (contextProvenance), plus a notice form's one-line account. The
+          // fold stores the icon SEMANTIC (never the concrete glyph), so a
+          // live icon-style switch repaints already-folded cards.
           const provenance = contextProvenance(event.data.source)
           const summary = contextSummary(event.data.source)
-          const emoji = contextEmoji(event.data.source)
           this.appendItem({
             kind: 'system',
             turn: this.currentTurn,
             text,
             ...provenance.label === null ? {} : { label: provenance.label },
             ...summary === null ? {} : { summary },
-            emoji,
+            icon: contextIconSemantic(event.data.source),
           })
           // Focus aggregation: injected context (skill-invocation,
           // skill-catalog, system reminders) is orchestration, NOT one of

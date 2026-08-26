@@ -26,6 +26,7 @@ import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
+import { iconStyleOf } from './icons.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
@@ -1200,6 +1201,15 @@ export function registerTuiCommands(
             values: ['auto', 'dark', 'light', ...customThemeNames(), ...(runner.extensions?.themes.names() ?? [])],
           },
           {
+            id: 'icon-style',
+            label: 'Icon style',
+            description: 'Choose between emoji, compact symbols, or minimal structural markers',
+            // The fallback applies HERE too: an invalid/missing persisted
+            // value must never render as a row outside the values list.
+            currentValue: iconStyleOf(tuiSettings?.get().iconStyle),
+            values: ['emoji', 'symbols', 'minimal'],
+          },
+          {
             id: 'expand',
             label: 'Tool output',
             description: 'Whether recent tool/system entries start expanded',
@@ -1403,6 +1413,19 @@ export function registerTuiCommands(
               const settings = tuiSettings
               if (settings !== undefined) {
                 detach('settings busy enter write', () => settings.replace({ ...settings.get(), busyEnter: value }) as Promise<unknown>, { notify: true })
+              }
+            }
+          } else if (id === 'icon-style') {
+            if (value === 'emoji' || value === 'symbols' || value === 'minimal') {
+              // The visual preference applies FIRST — the UI must not wait
+              // for disk persistence (same policy as theme/focus). A
+              // persistence failure keeps this session's preference and
+              // notifies through the shared error policy; the next start
+              // restores the persisted value.
+              app.setIconStyle(value)
+              const settings = tuiSettings
+              if (settings !== undefined) {
+                detach('settings icon style write', () => settings.replace({ ...settings.get(), iconStyle: value }) as Promise<unknown>, { notify: true })
               }
             }
           } else if (id === 'local-shell-sandbox') {

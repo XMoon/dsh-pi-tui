@@ -14,6 +14,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-session'
 import type {
   FileDiff, ToolCallView, ToolResult, ToolResultView, WebFetchResultView, WebSearchResultView,
 } from '@deepseek-ai/dsh-tools'
+import { type IconSemantic } from './icons.ts'
 
 /** Figma row titles per variant (design literals, not translatable copy). */
 const VARIANT_TITLES = {
@@ -346,39 +347,43 @@ export function classifyTool(name: string): ToolVariant {
   return TOOL_VARIANTS[name] ?? 'others'
 }
 
-/** Emoji per exact tool name, for synthetic cards without a registry entry. */
-const TOOL_EMOJIS: Record<string, string> = {
-  shell: '🖥️',
-  subagent: '🤖',
-  workflow: '🧵',
-  'workflow-member': '🤖',
-  error: '❌',
-  interrupted: '⏹️',
-  ask_user_question: '❓',
+/** The structural icon semantic per exact tool name, for synthetic cards
+ * without a registry entry (the glyph itself resolves through
+ * src/icons.ts — fold state never stores a concrete emoji/symbol). */
+const TOOL_SEMANTICS: Record<string, IconSemantic> = {
+  shell: 'tool-shell',
+  subagent: 'subagent',
+  workflow: 'workflow',
+  'workflow-member': 'subagent',
+  error: 'error',
+  interrupted: 'interrupted',
+  ask_user_question: 'question',
 }
 
-/** Emoji per row variant, applied to every registered tool of that class. */
-const VARIANT_EMOJIS: Record<ToolVariant, string> = {
-  read: '📖',
-  search: '🔍',
-  bash: '🖥️',
-  write: '📝',
-  edit: '✏️',
-  code: '⚙️',
-  others: '🛠️',
+/** The icon semantic per row variant, applied to every registered tool of
+ * that class. */
+const VARIANT_SEMANTICS: Record<ToolVariant, IconSemantic> = {
+  read: 'tool-read',
+  search: 'tool-search',
+  bash: 'tool-shell',
+  write: 'tool-write',
+  edit: 'tool-edit',
+  code: 'tool-code',
+  others: 'tool-generic',
 }
 
 /**
- * The card header's leading emoji: exact-name entries first (synthetic
- * cards), then slash commands (a control action, not a tool), then the
- * tool's row-variant icon, then the generic wrench.
+ * The card header's leading icon semantic: exact-name entries first
+ * (synthetic cards), then slash commands (a control action, not a tool),
+ * then the tool's row-variant semantic, then the generic tool. The renderer
+ * resolves the glyph through `iconFor(semantic, iconStyle)`.
  * @param name - the tool name.
  */
-export function toolEmoji(name: string): string {
-  const exact = TOOL_EMOJIS[name]
+export function toolIconSemantic(name: string): IconSemantic {
+  const exact = TOOL_SEMANTICS[name]
   if (exact !== undefined) return exact
-  if (name.startsWith('/')) return '🎛️'
-  return VARIANT_EMOJIS[classifyTool(name)]
+  if (name.startsWith('/')) return 'slash-command'
+  return VARIANT_SEMANTICS[classifyTool(name)]
 }
 
 /** The rendered card header: design title plus the relativized args summary. */

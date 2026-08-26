@@ -320,10 +320,11 @@ test('/settings shows the Home/End keys row; an invalid persisted value falls ba
   const t = setupSettings({ homeEndKeys: 'garbage' })
   await t.run()
   await t.view()
-  // Rows without a session: theme, expand, thinking, footer, busy-enter,
-  // local-shell-sandbox, home-end-keys, fullscreen, separator, cwd — the
-  // home-end-keys row is the 7th, below the panel's visible fold.
-  for (let i = 0; i < 6; i += 1) t.vt.sendInput('\x1b[B')
+  // Rows without a session: theme, icon-style, expand, thinking, footer,
+  // busy-enter, local-shell-sandbox, home-end-keys, fullscreen,
+  // separator, cwd — the home-end-keys row is the 8th, below the panel's
+  // visible fold.
+  for (let i = 0; i < 7; i += 1) t.vt.sendInput('\x1b[B')
   const view = await t.view()
   assert.ok(view.includes('Home/End keys'), `row missing:\n${view}`)
   assert.ok(view.includes('viewport'), `an invalid persisted value must fall back to viewport:\n${view}`)
@@ -336,10 +337,10 @@ test('the Home/End keys row toggle applies the preset immediately and persists',
   const t = setupSettings({ homeEndKeys: 'viewport' })
   await t.run()
   await t.view()
-  // Rows without a session: theme, expand, thinking, footer, busy-enter,
-  // local-shell-sandbox, home-end-keys, fullscreen, separator, cwd — the
-  // home-end-keys row is the 7th.
-  for (let i = 0; i < 6; i += 1) t.vt.sendInput('\x1b[B')
+  // Rows without a session: theme, icon-style, expand, thinking, footer,
+  // busy-enter, local-shell-sandbox, home-end-keys, fullscreen, separator,
+  // cwd — the home-end-keys row is the 8th.
+  for (let i = 0; i < 7; i += 1) t.vt.sendInput('\x1b[B')
   t.vt.sendInput('\r') // toggle viewport -> input
   await t.view()
   const resolved = getKeybindings().getResolvedBindings()

@@ -100,6 +100,7 @@ import { ImageInputError } from './image/errors.ts'
 import { clipboardBackendOf, commandOnPath, createClipboardRunner, readClipboardImage, type ClipboardEnvironment } from './image/clipboard.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from './clipboard.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
+import { iconStyleOf } from './icons.ts'
 import { checkImageLimits } from './image/intake.ts'
 import { ImageLoadError } from './image/errors.ts'
 import { ImageLoader } from './image/loader.ts'
@@ -1413,12 +1414,16 @@ export function apply(ctx: Context, config: Config): void {
         // Focus Mode: 'on' collapses turn-intermediate activity into a
         // live Thought block (default 'off' — Focus OFF == current UI).
         focusMode: z.string(),
+        // Icon style: 'emoji' (default) or 'symbols' — the first-party
+        // structural icon palette (see src/icons.ts). A persisted invalid
+        // value fails safe to emoji at consumption.
+        iconStyle: z.string(),
       }),
       // `history` used to live here (a per-cwd map in the settings
       // document). It moved to $DSH_HOME/user-history/*.jsonl (see
       // history.ts); the schema deliberately no longer carries it, so the
       // stored section drops the key on the next settings write.
-      { base: { theme: 'auto', footer: 'full', fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' } },
+      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' } },
     )
     // The ONE authoritative Focus runtime state (plan §5): restored from
     // the persisted document BEFORE the first compose/resume below, mutated
@@ -4249,6 +4254,10 @@ export function apply(ctx: Context, config: Config): void {
       imageTheme: { fallbackColor: color.textDim },
       present,
       workspaceRoot: cwd,
+      // The structural icon palette: read ONCE at startup from the
+      // persisted document; runtime switches go through app.setIconStyle
+      // (the /settings write path) — never a deep settings read per render.
+      iconStyle: iconStyleOf(tuiSettings?.get().iconStyle),
       extensionHost,
       // Issue #7: the fullscreen drag selection copies through the SAME
       // shared policy as /copy (tmux → platform helper → OSC 52) — a bare

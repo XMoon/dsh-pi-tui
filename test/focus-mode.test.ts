@@ -24,6 +24,7 @@ import {
   FocusActivityComponent,
   focusCollapsedBody,
   focusDisclosureIcon,
+  focusDisclosureSemantic,
   focusDurationText,
   focusStatusLabel,
   focusToolStatParts,
@@ -1263,6 +1264,23 @@ test('the whale icon encodes ONLY the disclosure state (plan §2/§39)', () => {
   assert.ok(!header.includes('◐') && !header.includes('▸') && !header.includes('▾') && !header.includes('⚠'), header)
 })
 
+test('the disclosure resolves per icon style and is NEVER hidden under minimal (plan §34.7)', () => {
+  // Semantic resolution is separate from the glyph.
+  assert.equal(focusDisclosureSemantic(false), 'disclosure-collapsed')
+  assert.equal(focusDisclosureSemantic(true), 'disclosure-expanded')
+  const failed = activityOf(0, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'E', message: 'boom' } } }, 2000, 1),
+  ])!
+  assert.equal(formatFocusHeaderLine(failed, false, () => 3000, 120, 'emoji'), '🐋 Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, true, () => 3000, 120, 'emoji'), '🐳 Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, false, () => 3000, 120, 'symbols'), '▸ Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, true, () => 3000, 120, 'symbols'), '▾ Failed after 1s')
+  // Minimal is an interaction affordance, never a decorative icon.
+  assert.equal(formatFocusHeaderLine(failed, false, () => 3000, 120, 'minimal'), '▸ Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, true, () => 3000, 120, 'minimal'), '▾ Failed after 1s')
+})
+
 test('tool stats sort count-desc/name-asc, cap at 3 types, +N counts TYPES', () => {
   const tools = new Map<string, number>([['read', 7], ['search', 4], ['bash', 3], ['grep', 2]])
   const parts = focusToolStatParts(tools, 16)
@@ -1387,6 +1405,22 @@ test('the component renders an indented muted card and refreshes duration live',
   assert.ok(live.render(80)[0]!.includes('🐋 Thought 11s'))
   const later = new FocusActivityComponent({ activity: running, expanded: false, now: () => 14000 })
   assert.ok(later.render(80)[0]!.includes('🐋 Thought 13s'))
+})
+
+test('the symbols/minimal disclosure keeps every narrow width inside the terminal', () => {
+  const folder = new TranscriptFolder()
+  folder.apply(completedTurn(0, 0, 1000))
+  const activity = folder.turnActivity(0)!
+  for (const iconStyle of ['symbols', 'minimal'] as const) {
+    for (const width of [1, 2, 3, 4, 8]) {
+      for (const expanded of [false, true]) {
+        const component = new FocusActivityComponent({ activity, expanded, now: () => 35000, iconStyle })
+        for (const line of component.render(width)) {
+          assert.ok(visibleWidth(line) <= width, `row wider than ${width} cols under ${iconStyle} (${expanded ? 'expanded' : 'collapsed'}): ${JSON.stringify(line)}`)
+        }
+      }
+    }
+  }
 })
 
 test('the Tool display is presenter-first with a static fallback (plan §9/§43)', () => {

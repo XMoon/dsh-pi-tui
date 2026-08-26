@@ -1,7 +1,7 @@
 /**
  * The animated busy indicator shown on the row directly above the editor
  * while the agent works (a turn is streaming or a tool is running): two
- * whale emojis alternate before a dim Working label, mirroring pi's
+ * frames alternate before a dim Working label, mirroring pi's
  * WorkingStatusIndicator placement. A Text subclass whose idle text renders
  * zero rows, so the row disappears entirely when idle.
  *
@@ -9,14 +9,30 @@
  * the main screen stops rendering while the alt screen (fullscreen) is
  * active, so a captured `TuiMainScreen` would freeze the animation at the
  * first frame. The callback routes to whichever screen is active.
+ *
+ * Frames follow the icon style through {@link workingFramesFor}: the whale
+ * pair under `emoji`, the `• / ◦` pair under `symbols` AND `minimal`
+ * (minimal removes static icons — it does not change animation semantics).
+ * An EXPLICIT `frames` option (an extension/advanced custom indicator) is
+ * never overwritten by an icon-style change.
  * @module @xmoon76/dsh-pi-tui/working
  */
 
 import { Text } from '@xmoon76/pi-tui'
+import type { IconStyle } from './icons.ts'
 import { color } from './theme.ts'
 
+/** The DEFAULT animation frames for one icon style. `symbols` and
+ * `minimal` share the low-noise pair — a reduced-motion preference would
+ * be its own setting, never smuggled into the icon style. */
+export function workingFramesFor(style: IconStyle): readonly string[] {
+  return style === 'emoji' ? ['🐋', '🐳'] : ['•', '◦']
+}
+
 export interface WorkingIndicatorOptions {
-  /** Animation frames, alternated in order; defaults to the whale pair. */
+  /** Animation frames, alternated in order; defaults to the icon-style
+   * pair. An EXPLICIT value is a custom indicator and is preserved across
+   * icon-style switches (setIconStyleFrames never overwrites it). */
   frames?: string[]
   /** Frame interval in milliseconds; injectable so tests stay fast. */
   intervalMs?: number
@@ -39,7 +55,10 @@ export interface WorkingIndicatorAnimation {
  */
 export class WorkingIndicator extends Text {
   private readonly requestRender: () => void
-  private readonly frames: string[]
+  private frames: string[]
+  /** An EXPLICIT caller-provided frame set — icon-style switches must never
+   * overwrite a custom indicator (plan §13.2). */
+  private readonly customFrames: readonly string[] | undefined
   private readonly intervalMs: number
   private message: string
   private currentFrame = 0
@@ -51,9 +70,28 @@ export class WorkingIndicator extends Text {
   constructor(requestRender: () => void, options: WorkingIndicatorOptions = {}) {
     super('', 0, 0)
     this.requestRender = requestRender
-    this.frames = options.frames ?? ['🐋', '🐳']
+    this.customFrames = options.frames
+    this.frames = [...(options.frames ?? workingFramesFor('emoji'))]
     this.intervalMs = options.intervalMs ?? 500
     this.message = options.message ?? 'Working...'
+  }
+
+  /** Replace the animation frames at runtime (an active indicator repaints
+   * with the new set immediately; the frame position is clamped). This is
+   * the generic setter — extension/advanced custom indicators can keep
+   * swapping frames through it. */
+  setFrames(frames: readonly string[]): void {
+    this.frames = [...frames]
+    if (this.currentFrame >= this.frames.length) this.currentFrame = 0
+    if (this.active) this.updateDisplay()
+  }
+
+  /** Follow an icon-style frame set ONLY when no explicit custom frames
+   * were provided — the user's iconStyle must never overwrite a
+   * third-party/explicit custom working indicator (plan §13.2). */
+  setIconStyleFrames(frames: readonly string[]): void {
+    if (this.customFrames !== undefined) return
+    this.setFrames(frames)
   }
 
   /** Override the label after the animated frame (Phase 4: the advanced
