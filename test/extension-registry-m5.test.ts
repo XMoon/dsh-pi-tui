@@ -312,7 +312,7 @@ test('AutocompleteRegistry: null providers fall through; a throwing provider is 
     id: 'worker',
     provider: provider(async () => ({ items: [{ value: 'work', label: 'work' }], prefix: 'w' })),
   }, 'c')
-  const result = await registry.suggest({ lines: [], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal }, (id, error) => {
+  const result = await registry.suggest({ lines: [], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal }, (id, _owner, error) => {
     errors.push(`${id}:${error instanceof Error ? error.message : String(error)}`)
   })
   assert.equal(result?.items[0]?.value, 'work', 'the chain continues past null + throw')

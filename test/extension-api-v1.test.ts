@@ -168,14 +168,12 @@ test('M11: a large transcript with extension renderers stays healthy (plan §23)
   app.stop()
 })
 
-test('the runner health bridge is OWNER-LESS: (slot, id, error) resolves the owner internally and the record lands', async () => {
-  // The review's P2: the service's runner-facing bridges must NOT carry an
-  // owner parameter — the runner's structural copy (index.ts) is the
-  // authoritative protocol, and a drift silently misaligns EVERY call
-  // site (the Error object lands in the owner slot and the health record
-  // never matches). The owner is resolved HERE from the registry's own
-  // record by (slot, id) — including the theme registry's SELECTABLE
-  // name, which the runner addresses themes by.
+test('the runner health bridge is a CAPTURED REF: (slot, id) at invocation start, settlement against the ref', async () => {
+  // The review's P2: the runner-facing protocol is a captured identity —
+  // capture {slot, id, owner} at INVOCATION START and report settlements
+  // against the ref (an HMR reload may replace the id with a new owner
+  // by settle time; resolving from the LIVE registry at settle time
+  // lands stale errors on the reloaded plugin).
   const { Context } = await import('@deepseek-ai/cordis')
   const Loader = (await import('@deepseek-ai/cordis-plugin-loader')).default
   const { apply: applyExtensionHost } = await import('../src/extensions.ts')
@@ -190,8 +188,9 @@ test('the runner health bridge is OWNER-LESS: (slot, id, error) resolves the own
     await ctx.plugin(applyExtensionHost)
     const service = ctx.get('piTuiExtensions') as unknown as {
       registerTheme(contribution: { id: string; name: string; palette: unknown }): unknown
-      _recordRegistryError(slot: string, id: string, error: unknown): void
-      _clearRegistryError(slot: string, id: string): void
+      _recordRegistryHealthRef(slot: string, id: string): { slot: string; id: string; owner: string } | undefined
+      _recordRegistryError(ref: { slot: string; id: string; owner: string }, error: unknown): void
+      _clearRegistryError(ref: { slot: string; id: string; owner: string }): void
       _ledger(): { healthSnapshot(): Array<{ id: string; owner: string; state: string; lastError?: string }> }
     }
     const themeFiber = ctx.plugin({ name: 'health-owner', apply(c) {
@@ -199,38 +198,117 @@ test('the runner health bridge is OWNER-LESS: (slot, id, error) resolves the own
       svc.registerTheme({ id: 'health-theme', name: 'Health Theme', palette: {} })
     } })
     await themeFiber
-    // The runner-facing protocol: (slot, id, error) — no owner slot. The
-    // record must land keyed by the CONTRIBUTION id with the owner
-    // resolved from the theme NAME.
-    service._recordRegistryError('theme', 'Health Theme', new Error('palette boom'))
+    // Capture at invocation start (NAME-addressed, the unified theme
+    // protocol); the settlement reports against the captured ref.
+    const ref = service._recordRegistryHealthRef('theme', 'Health Theme')
+    assert.ok(ref !== undefined, 'the capture must resolve the live contribution')
+    assert.equal(ref.id, 'health-theme', 'the ref must carry the normalized contribution id')
+    assert.ok(ref.owner.endsWith(':health-owner'), `the ref must carry the invoking owner: ${ref.owner}`)
+    service._recordRegistryError(ref, new Error('palette boom'))
     const health = service._ledger().healthSnapshot()
     const record = health.find(entry => entry.id === 'health-theme')
-    assert.ok(record !== undefined, 'the bridge must land the record (owner resolved internally)')
-    assert.ok(record.owner.endsWith(':health-owner'), `the resolved owner must be the registering fiber: ${record.owner}`)
+    assert.ok(record !== undefined, 'the ref settlement must land the record')
     assert.equal(record.state, 'failed')
     assert.equal(record.lastError, 'palette boom')
-    // Recovery through the same owner-less bridge clears exactly this
-    // record.
-    service._clearRegistryError('theme', 'Health Theme')
+    // Recovery through the same captured ref clears exactly this record.
+    service._clearRegistryError(ref)
     const after = service._ledger().healthSnapshot().find(entry => entry.id === 'health-theme')
-    assert.equal(after?.state, 'active', 'the owner-less clear must recover the record')
-    // An UNKNOWN id is skipped: a ghost error must not mint a record.
-    service._recordRegistryError('theme', 'No Such Theme', new Error('ghost'))
+    assert.equal(after?.state, 'active', 'the ref clear must recover the record')
+    // An UNKNOWN id yields no ref: the caller skips health reporting —
+    // a ghost error must not mint a record.
+    assert.equal(service._recordRegistryHealthRef('theme', 'No Such Theme'), undefined)
     assert.equal(service._ledger().healthSnapshot().length, 1, 'a ghost error must not mint a health record')
     // The name/id cross-resolution (the review's P2): another theme whose
     // CONTRIBUTION ID equals this theme's SELECTABLE name must not shadow
-    // it — the name matches FIRST (an id-first lookup would land the
-    // error on the wrong owner).
+    // it — the name-addressed protocol resolves the NAME only.
     const secondFiber = ctx.plugin({ name: 'id-clash-owner', apply(c) {
       const svc = c.get('piTuiExtensions') as unknown as { registerTheme(c: { id: string; name: string; palette: unknown }): unknown }
       svc.registerTheme({ id: 'Health Theme', name: 'other-name', palette: {} })
     } })
     await secondFiber
-    service._recordRegistryError('theme', 'Health Theme', new Error('name-first boom'))
+    const clashRef = service._recordRegistryHealthRef('theme', 'Health Theme')
+    assert.ok(clashRef !== undefined)
+    service._recordRegistryError(clashRef, new Error('name-first boom'))
     const clash = service._ledger().healthSnapshot().find(entry => entry.id === 'health-theme')
     assert.equal(clash?.lastError, 'name-first boom',
-      'the selectable-name match must win over a same-string contribution id')
+      'the name-addressed capture must win over a same-string contribution id')
     assert.ok(clash?.owner.endsWith(':health-owner'), `the error must land on the NAMED theme's owner: ${clash?.owner}`)
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('a captured health ref is a GENERATION FENCE: stale settlements never land on a reloaded owner', async () => {
+  // The review's P2 HMR scenario: owner A starts an async contribution
+  // (the ref is captured against A), A unloads and B reloads under the
+  // SAME id — A's stale settlement (error OR success) must never mint a
+  // record for B nor clear B's real failure.
+  const { Context } = await import('@deepseek-ai/cordis')
+  const Loader = (await import('@deepseek-ai/cordis-plugin-loader')).default
+  const { apply: applyExtensionHost } = await import('../src/extensions.ts')
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = ctx.plugin((c) => {
+      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+    })
+    await startup
+    await ctx.plugin(applyExtensionHost)
+    const service = ctx.get('piTuiExtensions') as unknown as {
+      registerTheme(contribution: { id: string; name: string; palette: unknown }): unknown
+      _recordRegistryHealthRef(slot: string, id: string): { slot: string; id: string; owner: string } | undefined
+      _recordRegistryError(ref: { slot: string; id: string; owner: string }, error: unknown): void
+      _clearRegistryError(ref: { slot: string; id: string; owner: string }): void
+      _ledger(): { healthSnapshot(): Array<{ id: string; owner: string; state: string; lastError?: string }> }
+    }
+    // Owner A registers the theme and an async invocation captures its ref.
+    const fiberA = ctx.plugin({ name: 'gen-a', apply(c) {
+      const svc = c.get('piTuiExtensions') as unknown as { registerTheme(c: { id: string; name: string; palette: unknown }): unknown }
+      svc.registerTheme({ id: 'gen-theme', name: 'Gen Theme', palette: {} })
+    } })
+    await fiberA
+    const refA = service._recordRegistryHealthRef('theme', 'Gen Theme')
+    assert.ok(refA !== undefined)
+    // HMR: A unloads (its health record is untracked), B reloads the
+    // same theme id under a NEW owner.
+    await (fiberA as { dispose(): Promise<void> }).dispose()
+    await Promise.resolve()
+    await Promise.resolve()
+    const fiberB = ctx.plugin({ name: 'gen-b', apply(c) {
+      const svc = c.get('piTuiExtensions') as unknown as { registerTheme(c: { id: string; name: string; palette: unknown }): unknown }
+      svc.registerTheme({ id: 'gen-theme', name: 'Gen Theme', palette: {} })
+    } })
+    await fiberB
+    const refB = service._recordRegistryHealthRef('theme', 'Gen Theme')
+    assert.ok(refB !== undefined)
+    assert.notEqual(refB.owner, refA.owner, 'the reloaded owner must differ from the captured one')
+    // A's STALE failure settles: the captured ref must not mint a NEW
+    // record (A's health was untracked on dispose) and must not mark B's
+    // fresh record failed.
+    service._recordRegistryError(refA, new Error('stale boom'))
+    let health = service._ledger().healthSnapshot()
+    let record = health.find(entry => entry.id === 'gen-theme')
+    assert.equal(health.filter(entry => entry.id === 'gen-theme').length, 1,
+      'the stale settlement must not mint an extra health record')
+    assert.equal(record?.state, 'active', 'the stale settlement must not fail the reloaded owner\'s record')
+    assert.equal(record?.lastError, undefined, 'the stale error message must not reach the reloaded owner')
+    // B's REAL failure lands on B and stays: A's stale SUCCESS settling
+    // afterwards must not clear it.
+    service._recordRegistryError(refB, new Error('real boom'))
+    health = service._ledger().healthSnapshot()
+    record = health.find(entry => entry.id === 'gen-theme')
+    assert.ok(record !== undefined && record.state === 'failed' && record.lastError === 'real boom')
+    service._clearRegistryError(refA)
+    health = service._ledger().healthSnapshot()
+    record = health.find(entry => entry.id === 'gen-theme')
+    assert.equal(record?.state, 'failed', 'a stale clear must never clear the reloaded owner\'s real failure')
+    assert.equal(record?.lastError, 'real boom')
+    // B's own recovery still works.
+    service._clearRegistryError(refB)
+    assert.equal(service._ledger().healthSnapshot().find(entry => entry.id === 'gen-theme')?.state, 'active')
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())

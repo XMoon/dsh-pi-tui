@@ -1625,26 +1625,29 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   }
 
   /**
-   * Runner-only callback health bridges. The signatures are DELIBERATELY
-   * owner-less (the runner's structural type in index.ts mirrors them
-   * exactly — a previous owner-threaded signature drifted from the
-   * runner's copy and every call site silently misaligned: the Error
-   * object landed in the `owner` slot and the health record never
-   * matched). The owner is resolved HERE from the registry's own record
-   * by (slot, id) — the registries know their owners, the runner never
-   * guesses — and an unknown id is skipped (a ghost error must not mint a
-   * health record).
+   * Runner-only callback health bridges. The protocol is a CAPTURED REF:
+   * the runner captures the identity ({slot, id, owner}) at INVOCATION
+   * START via {@link _recordRegistryHealthRef} and reports the settlement
+   * against that ref — NEVER against the live registry (an HMR reload may
+   * have replaced the same id with a NEW owner by settle time, and a
+   * stale error/success would land on the reloaded plugin; the review's
+   * P2 generation fence). A ref whose owner has since unloaded is a
+   * natural no-op: the owner-scoped health record was untracked on
+   * dispose, so the report finds nothing — stale settlements can never
+   * mint records nor clear the NEW owner's real failures.
    */
-  _recordRegistryError(slot: string, id: string, error: unknown): void {
+  _recordRegistryHealthRef(slot: string, id: string): { slot: string; id: string; owner: string } | undefined {
     const identity = this.registryIdentity(slot, id)
-    if (identity === undefined) return
-    this.recordRegistryError(slot, identity.id, identity.owner, error)
+    if (identity === undefined) return undefined
+    return { slot, id: identity.id, owner: identity.owner }
   }
 
-  _clearRegistryError(slot: string, id: string): void {
-    const identity = this.registryIdentity(slot, id)
-    if (identity === undefined) return
-    this.clearRegistryError(slot, identity.id, identity.owner)
+  _recordRegistryError(ref: { slot: string; id: string; owner: string }, error: unknown): void {
+    this.recordRegistryError(ref.slot, ref.id, ref.owner, error)
+  }
+
+  _clearRegistryError(ref: { slot: string; id: string; owner: string }): void {
+    this.clearRegistryError(ref.slot, ref.id, ref.owner)
   }
 
   /** The identity ({id, owner}) of one external-registry contribution,
