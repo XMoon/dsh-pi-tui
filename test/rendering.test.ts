@@ -14,6 +14,7 @@ import {
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent } from '../src/tui-app.ts'
 import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
+import type { TurnActivity } from '../src/transcript.ts'
 import { Text, visibleWidth, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -2097,6 +2098,82 @@ test('setIconStyleFrames never overwrites an explicit custom frame set', () => {
   indicator.start()
   assert.ok(renders[renders.length - 1]!.includes('❄️'), `custom frames must survive an icon-style switch:\n${renders.join('\n')}`)
   indicator.dispose()
+})
+
+test('setFrames to an empty set clears the running interval (no stale tick, no modulo-zero)', async () => {
+  const renders: string[] = []
+  const capture = (): void => { renders.push(indicator.render(80).join('')) }
+  const indicator = new WorkingIndicator(capture, { frames: ['🐋', '🐳'], intervalMs: 10 })
+  indicator.start()
+  const afterStart = renders.length
+  // Shrink the ACTIVE indicator to zero frames: it repaints once with the
+  // new (empty) set, and the interval MUST be cleared — no ticks after.
+  indicator.setFrames([])
+  const afterSet = renders.length
+  assert.ok(afterSet > afterStart, 'an active indicator must repaint with the new frame set')
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.equal(renders.length, afterSet, `the interval must be cleared for a zero-frame set:\n${renders.join('\n')}`)
+  // Growing back re-arms the animation.
+  indicator.setFrames(['🐋', '🐳'])
+  const afterGrow = renders.length
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.ok(renders.length > afterGrow, 'the interval must re-arm when frames grow back')
+  indicator.dispose()
+})
+
+test('fullscreen cards and the Focus disclosure repaint across an icon style switch', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  t.after(() => app.stop())
+  app.start()
+  const activity: TurnActivity = {
+    turn: 0,
+    startedAt: 1000,
+    endedAt: 6000,
+    completed: true,
+    reason: { kind: 'completed' },
+    tools: new Map(),
+    toolCalls: 0,
+    assistantMessages: 0,
+    revision: 0,
+  }
+  app.setTranscript(
+    [
+      { kind: 'user', turn: 0, text: 'hello' },
+      { kind: 'tool', turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' },
+      { kind: 'system', turn: 0, text: '# AGENTS.md', label: 'AGENTS.md', icon: 'context-file' },
+    ],
+    new Map([[0, activity]]),
+  )
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🐋 Thought'), `emoji collapsed disclosure missing in fullscreen:\n${view}`)
+  // Open the Thought: the fullscreen secondaries default compact, so the
+  // tool/context headers are visible in the same frame.
+  app.toggleFocusTurn(0)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🐳 Thought'), `emoji expanded disclosure missing in fullscreen:\n${view}`)
+  assert.ok(view.includes('📖  Read /ws/src/foo.ts'), `emoji read icon missing in fullscreen:\n${view}`)
+  assert.ok(view.includes('📄  Context injection AGENTS.md'), `emoji context icon missing in fullscreen:\n${view}`)
+  // Symbols: the SAME fullscreen session repaints with the new palette —
+  // no stale frame, no reload.
+  app.setIconStyle('symbols')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('▾ Thought'), `symbols disclosure missing after fullscreen switch:\n${view}`)
+  assert.ok(view.includes('▤  Read /ws/src/foo.ts'), `symbols read icon missing after fullscreen switch:\n${view}`)
+  assert.ok(view.includes('▤  Context injection AGENTS.md'), `symbols context icon missing after fullscreen switch:\n${view}`)
+  // Minimal: decorative icons vanish (no dangling space), the disclosure
+  // affordance survives.
+  app.setIconStyle('minimal')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  const lines = view.split('\n').map(stripTerminalSequences)
+  assert.ok(lines.some(line => line.startsWith('Read /ws/src/foo.ts')), `minimal read header missing in fullscreen:\n${view}`)
+  assert.ok(view.includes('▾ Thought'), `minimal disclosure must survive in fullscreen:\n${view}`)
 })
 
 

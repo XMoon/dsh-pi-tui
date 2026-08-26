@@ -54,9 +54,19 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     find: () => undefined,
     execute: async () => undefined,
   } as never)
-  // The fake document starts from the FULL default shape (an old
-  // settings file may lack iconStyle — that case is tested separately).
-  const settings = fakeSettings({ theme: 'auto', iconStyle: options.iconStyle ?? 'emoji', footer: 'full', fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' })
+  // The fake document starts from the FULL default shape. When no
+  // iconStyle is passed, the field is OMITTED entirely — the exact shape
+  // of an old settings file written before the preference existed.
+  const settings = fakeSettings({
+    theme: 'auto',
+    footer: 'full',
+    fullscreen: 'on',
+    busyEnter: 'queue',
+    localShellSandbox: 'bypass',
+    homeEndKeys: 'viewport',
+    focusMode: 'off',
+    ...(options.iconStyle === undefined ? {} : { iconStyle: options.iconStyle }),
+  })
   const runner: TuiCommandRunner = {
     ctx,
     app,
