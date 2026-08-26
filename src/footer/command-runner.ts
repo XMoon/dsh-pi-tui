@@ -70,6 +70,23 @@ function statStarttime(pid: number): string | undefined {
   }
 }
 
+/** A process's parent pid (the /proc/&lt;pid&gt;/stat field 4) — the SECOND
+ * identity factor of the group-reuse guard. The leader was spawned by
+ * THIS process, so while it exists (live or as an unreaped zombie — the
+ * runner is alive, so the zombie is never reparented) its ppid is our
+ * own pid. A same-starttime stranger (jiffy-granularity collisions in
+ * exotic pid-namespace setups) is rejected here. */
+function statPpid(pid: number): number | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const after = stat.slice(stat.lastIndexOf(')') + 2).trim()
+    const ppid = Number.parseInt(after.split(' ')[1]!, 10)
+    return Number.isFinite(ppid) ? ppid : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** The footer command runner. */
 export class FooterCommandRunner {
   private readonly options: FooterCommandRunnerOptions
@@ -293,12 +310,22 @@ export class FooterCommandRunner {
       // unallocated (a group whose leader pid is free can only hold the
       // leader's own descendants — no unrelated process can join it), or
       // when the current occupant is still the SAME process (a not-yet-
-      // reaped leader zombie). A reallocated pid with a different
-      // starttime skips the kill (a descendant may leak — the safe
-      // failure).
+      // reaped leader zombie). Identity is verified by TWO factors:
+      // 1. starttime (the PRIMARY factor — it also catches the
+      //    inter-generation reuse where OUR OWN next spawn takes the old
+      //    pid: that child's ppid is this process too, so a ppid-only
+      //    check would let the kill through and kill the CURRENT child);
+      // 2. ppid (the SECOND factor — the leader was spawned by THIS
+      //    process, so a live/zombie leader always carries our ppid; a
+      //    same-starttime stranger, the jiffy-granularity corner, is
+      //    rejected here).
       if (leaderStarttime !== undefined && (child.exitCode !== null || child.signalCode !== null)) {
         const current = statStarttime(pgid)
         if (current !== undefined && current !== leaderStarttime) return
+        if (current !== undefined) {
+          const ppid = statPpid(pgid)
+          if (ppid !== undefined && ppid !== process.pid) return
+        }
       }
       signalGroup('SIGKILL')
     }, KILL_GRACE_MS)
