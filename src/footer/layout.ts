@@ -224,8 +224,10 @@ export interface FooterFallbackResolution {
 /** M5: resolve the command surface's native fallback from the PERSISTED
  * document. The resolution is explicit and restart-proof: 'compact' keeps
  * the compact preset; 'custom' uses the persisted custom layout (an
- * invalid one degrades to the builtin default); 'default' (or an absent
- * field — existing documents predate the field) keeps the current state.
+ * invalid one degrades to the builtin default — the APPLY side then
+ * resets to the full preset); 'default' (or an absent field — existing
+ * documents predate the field) resolves to the builtin default, which the
+ * apply side restores EXPLICITLY (never "whatever the memory holds").
  * Never reads in-memory state. */
 export function resolveCommandFooterFallback(doc: { footerFallbackMode?: unknown; footerLayout?: unknown } | undefined): FooterFallbackResolution {
   if (doc?.footerFallbackMode === 'compact') return { mode: 'compact', layout: undefined }
