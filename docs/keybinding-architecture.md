@@ -281,11 +281,34 @@ no-ops.
 **Remapped interrupt is semantic.** Only the physical Escape key runs
 the editor Escape seams; a remapped interrupt key goes straight to the
 semantic core AND keeps its own consecutive-press idle semantics (its
-first press does not disarm its own double-action window). Shift+Enter
-can never be bound to submit (the fork editor's fixed newline key —
-parser-rejected, aliases included).
+first press does not disarm its own double-action window; an intervening
+non-trigger key does). Shift+Enter can never be bound to submit (the
+fork editor's fixed newline key — parser-rejected, aliases included).
 
-Final gates: 2455 bundle tests, 985 fork tests, 11 docs tests,
+**Canonical identity is case-insensitive everywhere.** `canonicalizeKeyId`
+lowercases before the alias map (`ESC`→`esc`→`escape`,
+`ctrl+RETURN`→`ctrl+enter`), named keys canonicalize to lowercase
+(`pageUp`→`pageup`, displayed as `PageUp` — the runtime parser
+lowercases, the fork's matchesKey is case-insensitive), config parsing
+accepts either named-key casing, and the registry canonicalizes the
+plugin NormalizedKey shape at register/storage/lookup (including the
+reserved-key check, which runs AFTER canonicalization so `esc`/`return`
+registrations are rejected as the reserved `escape`/`enter`).
+
+**Legacy terminal collisions are rejected everywhere.** `ctrl+[` (Esc)
+and `ctrl+j`/`ctrl+m` (Enter) are rejected as direct bindings, leader
+prefixes and leader completions — a binding indistinguishable from a
+lifecycle key on legacy terminals is unsupported, never a warning.
+
+**Dynamic plugin lifecycle + edge hardening.** Plugin keybinding rules
+resync on every registry register/dispose (subscribe), plugin rule ids
+are namespaced (`plugin:…`) so they can never deactivate a host rule,
+the manager's leaderTimeoutMs is applied, and stop() cancels a pending
+leader + clears the interrupt double-action window. The host editor
+submits ONLY through the synced `tui.input.submit` binding — a disabled
+submit never fires on Enter or LF (LF is a newline).
+
+Final gates: 2474 bundle tests, 985 fork tests, 11 docs tests,
 typecheck (fork + bundle), `check-host-keybindings` gate (all quote
 styles, either casing), `git diff --check` — all green. The final
 convergence review round was accepted with no findings.
