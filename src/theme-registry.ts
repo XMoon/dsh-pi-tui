@@ -98,19 +98,16 @@ export class ThemeRegistry {
     }
   }
 
-  /** The identity ({id, owner}) of one theme. The bridge's ONLY caller
-   * (the runner) addresses themes by the SELECTABLE name, so the NAME is
-   * matched FIRST — an id-first lookup would misresolve when one theme's
-   * name equals another's id (the review's P2: health errors/clears would
-   * land on the wrong owner). The contribution id is the fallback (and
-   * normalizes the name to the record's id, which health records by). */
-  identityOf(idOrName: string): { id: string; owner: string } | undefined {
+  /** The identity ({id, owner}) of one theme, resolved by the SELECTABLE
+   * name ONLY — the unified bridge protocol addresses themes by name
+   * (the /settings picker and the startup/advanced apply paths all pass
+   * the selectable value; a mixed name/id lookup is inherently ambiguous
+   * because one theme's name may equal another's id — the review's P2). */
+  identityOf(name: string): { id: string; owner: string } | undefined {
     for (const record of this.records.values()) {
       if (record.disposed) continue
-      if (record.name === idOrName) return { id: record.id, owner: record.owner }
+      if (record.name === name) return { id: record.id, owner: record.owner }
     }
-    const byId = this.records.get(idOrName)
-    if (byId !== undefined && !byId.disposed) return { id: byId.id, owner: byId.owner }
     return undefined
   }
 

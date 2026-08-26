@@ -115,8 +115,8 @@ export class AutocompleteRegistry {
    */
   async suggest(
     query: TuiAutocompleteQuery,
-    onError?: (id: string, error: unknown) => void,
-    onSuccess?: (id: string) => void,
+    onError?: (id: string, owner: string, error: unknown) => void,
+    onSuccess?: (id: string, owner: string) => void,
   ): Promise<TuiAutocompleteSuggestions | null> {
     this.epoch += 1
     const requestEpoch = this.epoch
@@ -151,14 +151,18 @@ export class AutocompleteRegistry {
           if (requestEpoch !== this.epoch) return null
           // A provider returning null is still a successful invocation: it
           // abdicates to the next provider, so a prior failure generation
-          // must be cleared before the chain continues.
-          onSuccess?.(record.id)
+          // must be cleared before the chain continues. The OWNER rides
+          // the callback — `record` is THIS request's snapshot (an HMR
+          // reload cannot redirect a stale settlement to the new owner;
+          // the review's P2 generation fence).
+          onSuccess?.(record.id, record.owner)
           if (result !== null) return result
         } catch (error) {
           if (combined.signal.aborted) return null
           // Per-provider isolation: a throwing provider never aborts the
           // chain. The error is recorded (health) and the next provider runs.
-          onError?.(record.id, error)
+          // The owner is the SNAPSHOT's owner (see onSuccess).
+          onError?.(record.id, record.owner, error)
         }
       }
       return null

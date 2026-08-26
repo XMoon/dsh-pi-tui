@@ -2535,12 +2535,15 @@ export function apply(ctx: Context, config: Config): void {
       readonly renderers: import('./renderer-registry.ts').RendererRegistry
       readonly editors: import('./editor-registry.ts').EditorRegistry
       _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
-      // Deliberately OWNER-LESS (the service resolves the owner from its
-      // registries by (slot, id)): this shape is the authoritative bridge
-      // protocol — keep it in sync with the service's implementations, a
-      // drift silently misaligns every callback (the review's P2).
-      _recordRegistryError(slot: string, id: string, error: unknown): void
-      _clearRegistryError(slot: string, id: string): void
+      // The REF protocol: capture the identity at INVOCATION START and
+      // report settlements against the captured ref — never the live
+      // registry (an HMR reload may replace the id with a new owner by
+      // settle time; the review's P2 generation fence). This shape is the
+      // authoritative bridge protocol — keep it in sync with the
+      // service's implementations.
+      _recordRegistryHealthRef(slot: string, id: string): { slot: string; id: string; owner: string } | undefined
+      _recordRegistryError(ref: { slot: string; id: string; owner: string }, error: unknown): void
+      _clearRegistryError(ref: { slot: string; id: string; owner: string }): void
       attachSurface(bridge: { subscribe(listener: (state: never) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string, requestRender?: (force?: boolean) => void): void
       detachSurface(surfaceId?: string): void
       // Phase 2: the ADVANCED seam (the `extensions/advanced` facade's
@@ -3365,6 +3368,12 @@ export function apply(ctx: Context, config: Config): void {
       const extensionCommandId = parsedAtSubmit === undefined
         ? undefined
         : extensionService?.commands.idFor(parsedAtSubmit.name)
+      // Capture the health identity NOW (submit time): the settlement
+      // below may arrive after an HMR reload replaced this id with a new
+      // owner — the stale result must never land on the reloaded plugin.
+      const extensionCommandRef = extensionCommandId === undefined || extensionService === undefined
+        ? undefined
+        : extensionService._recordRegistryHealthRef('command', extensionCommandId)
       const wasAdvertised = parsedAtSubmit !== undefined && wasAdvertisedClaim?.(parsedAtSubmit.name) === true
       // An owned workflow: the chain's outcome drives the editor draft, the
       // notices and the queue — runOwned (AGENTS.md), never a bare void.
@@ -3468,8 +3477,8 @@ export function apply(ctx: Context, config: Config): void {
             diag,
             sessionId: () => agent.session.id,
             onResult: (execution) => {
-              if (extensionCommandId !== undefined && execution !== undefined) {
-                extensionService?._clearRegistryError('command', extensionCommandId)
+              if (extensionCommandRef !== undefined && execution !== undefined) {
+                extensionService?._clearRegistryError(extensionCommandRef)
               }
               // A command the surface advertised (e.g. from the startup
               // probe) but the real session's catalog lacks: consume the
@@ -3561,7 +3570,7 @@ export function apply(ctx: Context, config: Config): void {
             },
             onError: (error) => {
               fallbackPin()
-              if (extensionCommandId !== undefined) extensionService?._recordRegistryError('command', extensionCommandId, error)
+              if (extensionCommandRef !== undefined) extensionService?._recordRegistryError(extensionCommandRef, error)
               const message = safeErrorMessage(error)
               try {
                 ctx.logger.error(`tui-runner: command execution failed: ${message}`)
@@ -3630,6 +3639,11 @@ export function apply(ctx: Context, config: Config): void {
       // commands service is the fallback for core commands.
       const bridgeHandler = extensionService?.commands.handlerFor(parsed.name)
       const bridgeCommandId = extensionService?.commands.idFor(parsed.name)
+      // Captured at INVOCATION START (same generation fence as the
+      // session command path).
+      const bridgeCommandRef = bridgeCommandId === undefined || extensionService === undefined
+        ? undefined
+        : extensionService._recordRegistryHealthRef('command', bridgeCommandId)
       const commands = ctx.get('commands')
       const definition = commands?.find(undefined as unknown as Agent, parsed.name)
       if (bridgeHandler === undefined && (commands === undefined || definition === undefined)) {
@@ -3664,14 +3678,14 @@ export function apply(ctx: Context, config: Config): void {
         sessionId: () => liveAgent?.session.id,
         onResult: (result) => {
           if (result !== undefined && result.kind === 'error') {
-            if (bridgeCommandId !== undefined) extensionService?._recordRegistryError('command', bridgeCommandId, new Error(result.text))
+            if (bridgeCommandRef !== undefined) extensionService?._recordRegistryError(bridgeCommandRef, new Error(result.text))
             app.notify(result.text)
-          } else if (bridgeCommandId !== undefined) {
-            extensionService?._clearRegistryError('command', bridgeCommandId)
+          } else if (bridgeCommandRef !== undefined) {
+            extensionService?._clearRegistryError(bridgeCommandRef)
           }
         },
         onError: (error) => {
-          if (bridgeCommandId !== undefined) extensionService?._recordRegistryError('command', bridgeCommandId, error)
+          if (bridgeCommandRef !== undefined) extensionService?._recordRegistryError(bridgeCommandRef, error)
           const message = safeErrorMessage(error)
           try {
             ctx.logger.error(`tui-runner: local command failed: ${message}`)
@@ -4256,10 +4270,16 @@ export function apply(ctx: Context, config: Config): void {
         steerNow(text, false, makeSteerPersist(text))
       },
       onExtensionError: ({ slot, id, error }) => {
-        try { extensionService?._recordRegistryError(slot, id, error) } catch {}
+        try {
+          const ref = extensionService?._recordRegistryHealthRef(slot, id)
+          if (ref !== undefined) extensionService?._recordRegistryError(ref, error)
+        } catch {}
       },
       onExtensionRecovered: ({ slot, id }) => {
-        try { extensionService?._clearRegistryError(slot, id) } catch {}
+        try {
+          const ref = extensionService?._recordRegistryHealthRef(slot, id)
+          if (ref !== undefined) extensionService?._clearRegistryError(ref)
+        } catch {}
       },
       // Phase 4: the advanced host-state setTheme for a NON-built-in name
       // (a registered plugin theme). The runner resolves the palette
@@ -4268,11 +4288,13 @@ export function apply(ctx: Context, config: Config): void {
       onAdvancedSetTheme: (name) => {
         const palette = extensionService?.themes.paletteFor(name)
         if (palette === undefined) return
+        // NAME-addressed (the unified theme protocol — see identityOf).
+        const themeRef = extensionService?._recordRegistryHealthRef('theme', name)
         try {
           app.applyPalette(palette)
-          extensionService?._clearRegistryError('theme', name)
+          if (themeRef !== undefined) extensionService?._clearRegistryError(themeRef)
         } catch (error) {
-          extensionService?._recordRegistryError('theme', name, error)
+          if (themeRef !== undefined) extensionService?._recordRegistryError(themeRef, error)
           app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
         }
       },
@@ -4982,12 +5004,14 @@ export function apply(ctx: Context, config: Config): void {
       const pluginPalette = extensionService?.themes.paletteFor(name)
       const customPalette = loadCustomTheme(name)
       const palette = pluginPalette ?? customPalette
+      // NAME-addressed (the unified theme protocol).
+      const themeRef = extensionService?._recordRegistryHealthRef('theme', name)
       if (palette !== undefined) {
         try {
           app.applyPalette(palette)
-          if (pluginPalette !== undefined) extensionService?._clearRegistryError('theme', name)
+          if (pluginPalette !== undefined && themeRef !== undefined) extensionService?._clearRegistryError(themeRef)
         } catch (error) {
-          if (pluginPalette !== undefined) extensionService?._recordRegistryError('theme', name, error)
+          if (themeRef !== undefined) extensionService?._recordRegistryError(themeRef, error)
           app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
         }
       } else {
@@ -5844,8 +5868,8 @@ export function apply(ctx: Context, config: Config): void {
           health: () => extensionService._ledger().healthSnapshot(),
         }
       },
-      recordExtensionError: (slot, id, error) => extensionService?._recordRegistryError(slot, id, error),
-      clearExtensionError: (slot, id) => extensionService?._clearRegistryError(slot, id),
+      recordExtensionError: (ref, error) => extensionService?._recordRegistryError(ref, error),
+      clearExtensionError: (ref) => extensionService?._clearRegistryError(ref),
       /** The live session's workspace cwd (header), falling back to the
        * process cwd before any session exists; the footer/welcome/
        * completions/history follow it so a session switch updates the

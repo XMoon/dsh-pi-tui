@@ -108,8 +108,10 @@ function stubRunner(options: {
   tuiSettings?: TuiSettingsLike
   applyFooterSettings?: () => void
   extensions?: TuiCommandRunner['extensions']
-  recordExtensionError?: (slot: string, id: string, error: unknown) => void
-  clearExtensionError?: (slot: string, id: string) => void
+  recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
+  clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
+  /** Defaults to a pass-through capture (the test themes use id === name). */
+  captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
 }): { runner: TuiCommandRunner; pending: { value: string | undefined }; refreshes: CatalogRefreshRequest[] } {
   const pending = { value: undefined as string | undefined }
   const refreshes: CatalogRefreshRequest[] = []
@@ -183,6 +185,13 @@ function stubRunner(options: {
     enterView: async () => {},
     requestExit: () => {},
     extensions: options.extensions,
+    captureExtensionHealthRef: options.captureExtensionHealthRef
+      ?? ((slot, id) => {
+        // Real-service semantics: only a REGISTERED plugin theme resolves
+        // (a custom-file name must not produce a health ref).
+        const themes = options.extensions?.themes as { paletteFor?: (name: string) => unknown } | undefined
+        return themes?.paletteFor?.(id) !== undefined ? { slot, id, owner: 'test-owner' } : undefined
+      }),
     recordExtensionError: options.recordExtensionError,
     clearExtensionError: options.clearExtensionError,
     exit: () => {},
@@ -209,8 +218,9 @@ function setup(options: {
   settings?: { get(ns: string): unknown; mutate(ns: string, patch: unknown[]): Promise<unknown> }
   tuiSettings?: TuiSettingsLike
   extensions?: TuiCommandRunner['extensions']
-  recordExtensionError?: (slot: string, id: string, error: unknown) => void
-  clearExtensionError?: (slot: string, id: string) => void
+  recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
+  clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
+  captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
   width?: number
 }) {
   const ctx = new Context()
@@ -233,6 +243,13 @@ function setup(options: {
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
     extensions: options.extensions,
+    captureExtensionHealthRef: options.captureExtensionHealthRef
+      ?? ((slot, id) => {
+        // Real-service semantics: only a REGISTERED plugin theme resolves
+        // (a custom-file name must not produce a health ref).
+        const themes = options.extensions?.themes as { paletteFor?: (name: string) => unknown } | undefined
+        return themes?.paletteFor?.(id) !== undefined ? { slot, id, owner: 'test-owner' } : undefined
+      }),
     recordExtensionError: options.recordExtensionError,
     clearExtensionError: options.clearExtensionError,
   })
@@ -508,8 +525,8 @@ test('/reload custom file theme applies without touching plugin health', async (
     const t = setup({
       tuiSettings: reloadSettings(`custom:${name}`),
       extensions: themeExtensions(() => undefined),
-      clearExtensionError: (_slot, id) => cleared.push(id),
-      recordExtensionError: (_slot, id) => recorded.push(id),
+      clearExtensionError: (ref) => cleared.push(ref.id),
+      recordExtensionError: (ref) => recorded.push(ref.id),
     })
     const result = await t.runCommand('reload') as { kind: string }
     assert.equal(result.kind, 'success')
@@ -531,7 +548,7 @@ test('/reload custom file theme failure does not record plugin health', async ()
     const t = setup({
       tuiSettings: reloadSettings(`custom:${name}`),
       extensions: themeExtensions(() => undefined),
-      recordExtensionError: (_slot, id) => recorded.push(id),
+      recordExtensionError: (ref) => recorded.push(ref.id),
     })
     t.app.applyPalette = () => { throw new Error('custom palette failed') }
     const result = await t.runCommand('reload') as { kind: string }
@@ -550,8 +567,8 @@ test('/reload plugin theme failure records and later success clears its health',
   const t = setup({
     tuiSettings: reloadSettings(`custom:${name}`),
     extensions: themeExtensions(candidate => candidate === name ? darkColors : undefined),
-    recordExtensionError: (_slot, id) => recorded.push(id),
-    clearExtensionError: (_slot, id) => cleared.push(id),
+    recordExtensionError: (ref) => recorded.push(ref.id),
+    clearExtensionError: (ref) => cleared.push(ref.id),
   })
   t.app.applyPalette = () => { throw new Error('plugin palette failed') }
   await t.runCommand('reload')
@@ -568,7 +585,7 @@ test('/reload unknown theme does not create plugin health', async () => {
   const t = setup({
     tuiSettings: reloadSettings(`custom:${name}`),
     extensions: themeExtensions(() => undefined),
-    recordExtensionError: (_slot, id) => recorded.push(id),
+    recordExtensionError: (ref) => recorded.push(ref.id),
   })
   const result = await t.runCommand('reload') as { kind: string }
   assert.equal(result.kind, 'success')

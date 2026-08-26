@@ -323,9 +323,16 @@ export interface TuiCommandRunner {
    */
   sessionCwd(): string
   signal: AbortSignal
-  /** M11: callback-health bridge for extension registries. */
-  recordExtensionError?: (slot: string, id: string, error: unknown) => void
-  clearExtensionError?: (slot: string, id: string) => void
+  /** M11: callback-health bridge for extension registries. The REF
+   * protocol: capture the identity ({slot, id, owner}) at INVOCATION
+   * START via {@link TuiCommandRunner.captureExtensionHealthRef} and
+   * report settlements against the captured ref — never the live
+   * registry (an HMR reload may replace the id with a new owner by
+   * settle time; a stale settlement must not land on the reloaded
+   * plugin — the review's P2 generation fence). */
+  captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
+  recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
+  clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
   /** The runner's monotonic session generation; bumped on every session
    * swap. Late async work must re-check it before committing state. */
   readonly sessionGeneration: number
@@ -950,6 +957,7 @@ export function registerTuiCommands(
   const commands = runner.commandRegistry
   const recordExtensionError = runner.recordExtensionError
   const clearExtensionError = runner.clearExtensionError
+  const captureExtensionHealthRef = runner.captureExtensionHealthRef
   // The commands service is part of the base layer; its absence means the
   // TUI commands cannot be registered at all — the caller surfaces this.
   if (commands === undefined) throw new Error('commands service unavailable')
@@ -1044,14 +1052,14 @@ export function registerTuiCommands(
       extensionAutocomplete === undefined
         ? undefined
         : async (query) => {
-            const result = await extensionAutocomplete.suggest(query, (id, error) => {
-              recordExtensionError?.('autocomplete', id, error)
+            const result = await extensionAutocomplete.suggest(query, (id, owner, error) => {
+              recordExtensionError?.({ slot: 'autocomplete', id, owner }, error)
               try {
                 ctx.logger.warn(`tui-runner: autocomplete provider ${id} failed: ${safeErrorMessage(error)}`)
               } catch {
                 // The cordis logger must not block completion.
               }
-            }, id => clearExtensionError?.('autocomplete', id))
+            }, (id, owner) => clearExtensionError?.({ slot: 'autocomplete', id, owner }))
             if (result === null) return null
             return { items: [...result.items], prefix: result.prefix }
           },
@@ -1367,20 +1375,24 @@ export function registerTuiCommands(
                 // never applies itself). Custom files resolve as before.
                 const themes = runner.extensions?.themes
                 const pluginPalette = themes?.paletteFor(value)
-                const pluginId = pluginPalette === undefined ? undefined : ((themes as { idFor?: (name: string) => string | undefined }).idFor?.(value) ?? value)
                 const palette = pluginPalette ?? loadCustomTheme(value)
+                // NAME-addressed (the unified theme protocol — the health
+                // bridge resolves the selectable name only; converting to
+                // the contribution id here re-introduced the name/id
+                // ambiguity the review flagged).
+                const themeRef = captureExtensionHealthRef?.('theme', value)
                 if (palette !== undefined) {
                   try {
                     app.applyPalette(palette)
-                    if (pluginId !== undefined) clearExtensionError?.('theme', pluginId)
+                    if (themeRef !== undefined) clearExtensionError?.(themeRef)
                     app.trackTerminalTheme(false)
                   } catch (error) {
-                    if (pluginId !== undefined) recordExtensionError?.('theme', pluginId, error)
+                    if (themeRef !== undefined) recordExtensionError?.(themeRef, error)
                     app.notify(`theme ${value} failed: ${safeErrorMessage(error)}`, 'error')
                     return
                   }
                 } else {
-                  if (pluginId !== undefined) recordExtensionError?.('theme', pluginId, new Error('theme not found'))
+                  if (themeRef !== undefined) recordExtensionError?.(themeRef, new Error('theme not found'))
                   app.notify(`theme ${value} not found`, 'error')
                   return
                 }
@@ -1403,16 +1415,21 @@ export function registerTuiCommands(
             const settingId = id.slice('ext-setting:'.length)
             const previous = extSettings?.rows().find(row => row.id === settingId)?.currentValue
             if (extSettings !== undefined) {
+              // Captured BEFORE the async apply starts: an HMR reload may
+              // replace this id with a new owner while onChange is in
+              // flight — the settlement must report against the INVOKING
+              // owner, never the reloaded one (the review's P2 fence).
+              const settingRef = captureExtensionHealthRef?.('setting', settingId)
               detach('extension setting apply', () => extSettings.apply(settingId, value).then(accepted => {
                 if (!accepted) {
-                  recordExtensionError?.('setting', settingId, new Error('setting rejected'))
+                  if (settingRef !== undefined) recordExtensionError?.(settingRef, new Error('setting rejected'))
                   if (previous !== undefined) revert(previous)
                   app.notify('setting rejected', 'error')
                 } else {
-                  clearExtensionError?.('setting', settingId)
+                  if (settingRef !== undefined) clearExtensionError?.(settingRef)
                 }
               }).catch(error => {
-                recordExtensionError?.('setting', settingId, error)
+                if (settingRef !== undefined) recordExtensionError?.(settingRef, error)
                 throw error
               }))
             }
@@ -2135,17 +2152,16 @@ export function registerTuiCommands(
           const name = reloadTheme.slice('custom:'.length)
           const themes = runner.extensions?.themes
           const pluginPalette = themes?.paletteFor(name)
-          const pluginId = pluginPalette === undefined
-            ? undefined
-            : (themes?.idFor?.(name) ?? name)
           const customPalette = loadCustomTheme(name)
           const palette = pluginPalette ?? customPalette
+          // NAME-addressed (the unified theme protocol).
+          const themeRef = captureExtensionHealthRef?.('theme', name)
           if (palette !== undefined) {
             try {
               app.applyPalette(palette)
-              if (pluginId !== undefined) clearExtensionError?.('theme', pluginId)
+              if (themeRef !== undefined) clearExtensionError?.(themeRef)
             } catch (error) {
-              if (pluginId !== undefined) recordExtensionError?.('theme', pluginId, error)
+              if (themeRef !== undefined) recordExtensionError?.(themeRef, error)
               else app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
             }
           } else {
