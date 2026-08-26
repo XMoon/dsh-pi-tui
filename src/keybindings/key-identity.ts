@@ -41,7 +41,12 @@ const MODIFIER_ORDER: readonly string[] = ['ctrl', 'shift', 'alt', 'super']
  * 'return'         -> 'enter'
  * 'shift+ctrl+p'   -> 'ctrl+shift+p'
  * 'alt+ctrl+x'     -> 'ctrl+alt+x'
- * 'pageUp'         -> 'pageUp'        (named-key casing preserved)
+ * 'pageUp'         -> 'pageup'       (named keys canonicalize to
+ *                                    lowercase — the runtime parser
+ *                                    lowercases, so the canonical form
+ *                                    must match; the fork's matchesKey
+ *                                    is case-insensitive, convergence
+ *                                    finding)
  * ```
  * @param key - the raw KeyId.
  * @returns the canonical KeyId.
@@ -50,13 +55,15 @@ export function canonicalizeKeyId(key: KeyId): KeyId {
   const raw = key as string
   if (raw === '' || !raw.includes('+')) {
     const aliased = BASE_KEY_ALIASES[raw] ?? raw
-    return aliased as KeyId
+    return (aliased.length === 1 ? aliased : aliased.toLowerCase()) as KeyId
   }
   const parts = raw.split('+')
   const base = parts[parts.length - 1]!
   const modifiers = parts.slice(0, -1)
-  // Collapse the base alias first, then order the modifiers.
-  const canonicalBase = BASE_KEY_ALIASES[base] ?? base
+  // Collapse the base alias first, then order the modifiers. Named keys
+  // canonicalize to LOWERCASE so the keymap identity matches the runtime
+  // parser's lowercased normalized keys (pageUp/pageup are the same key).
+  const canonicalBase = BASE_KEY_ALIASES[base] ?? (base.length === 1 ? base : base.toLowerCase())
   const ordered = MODIFIER_ORDER.filter(modifier => modifiers.includes(modifier))
   // A modifier not in the fixed order is impossible per the fork grammar,
   // but keep it appended (defensive — never drop an unknown modifier).
