@@ -30,5 +30,11 @@ export function deriveRunnerPermission(
   agent: AgentSessionLike | undefined,
 ): string | undefined {
   if (permission === undefined || agent === undefined) return undefined
-  return permission.current(agent.session.events)
+  try {
+    return permission.current(agent.session.events)
+  } catch {
+    // A throwing permission service must DEGRADE (undefined = clear the
+    // stale fact), never interrupt the status refresh.
+    return undefined
+  }
 }

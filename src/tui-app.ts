@@ -8926,9 +8926,12 @@ export class TuiApp {
    * instruction surface still merges on top. */
   private commandRows: string[] | undefined
 
-  /** Set the footer density preset and repaint. */
+  /** Set the footer density preset and repaint. Switching the preset
+   * means the user selected a BUILTIN layout: any active custom layout
+   * is cleared (the composer renders the preset layout). */
   setFooterPreset(preset: 'full' | 'compact'): void {
     this.footerPreset = preset
+    this.customFooterLayout = undefined
     // Extension footer segments honor the density preset (F-18): low-
     // importance segments drop in compact mode.
     this.extensionHost?.setFooterCompact(preset === 'compact')
