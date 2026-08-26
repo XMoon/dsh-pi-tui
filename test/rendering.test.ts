@@ -12,6 +12,7 @@ import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../src/present.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
+import { iconFor } from '../src/icons.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent } from '../src/tui-app.ts'
 import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
 import type { TurnActivity } from '../src/transcript.ts'
@@ -2056,12 +2057,15 @@ test('the same folded messages repaint across emoji → symbols → minimal → 
 })
 
 test('working indicator frames follow the icon style; custom frames survive switches', async (t) => {
-  // The default frame pairs per style (emoji keeps the whale pair;
-  // symbols and minimal share the low-noise pair — minimal removes static
-  // icons, not animation semantics).
-  assert.deepEqual(workingFramesFor('emoji'), ['🐋', '🐳'])
-  assert.deepEqual(workingFramesFor('symbols'), ['•', '◦'])
-  assert.deepEqual(workingFramesFor('minimal'), ['•', '◦'])
+  // The default frames DERIVE from the icon registry — a drift between
+  // workingFramesFor and the palette is impossible by construction (the
+  // registry's EAW-safe gate therefore also guards the running glyphs).
+  for (const style of ['emoji', 'symbols', 'minimal'] as const) {
+    assert.deepEqual(workingFramesFor(style), [
+      iconFor('working-a', style),
+      iconFor('working-b', style),
+    ], `frames for ${style}`)
+  }
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
   t.after(() => app.stop())
@@ -2079,13 +2083,13 @@ test('working indicator frames follow the icon style; custom frames survive swit
   app.setIconStyle('symbols')
   await vt.waitForRender()
   line = workingLine()
-  assert.ok(line !== undefined && (line.includes('•') || line.includes('◦')), `symbols frame missing:\n${vt.getViewport().join('\n')}`)
+  assert.ok(line !== undefined && (line.includes('∙') || line.includes('◦')), `symbols frame missing:\n${vt.getViewport().join('\n')}`)
   assert.ok(!line.includes('🐋') && !line.includes('🐳'), `whale frames survived the switch:\n${line}`)
   // Minimal shares the same animation pair.
   app.setIconStyle('minimal')
   await vt.waitForRender()
   line = workingLine()
-  assert.ok(line !== undefined && (line.includes('•') || line.includes('◦')), `minimal frame missing:\n${line}`)
+  assert.ok(line !== undefined && (line.includes('∙') || line.includes('◦')), `minimal frame missing:\n${line}`)
   app.setWorking(false)
   app.stop()
 })

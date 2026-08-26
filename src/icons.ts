@@ -7,15 +7,18 @@
  * hard-coded emoji string scattered across renderers. The three palettes:
  *
  * - `emoji` — the legacy colorful set (the default; before == after).
- * - `symbols` — a small, monochrome, terminal-safe set whose glyphs all
- *   measure ONE cell under the fork's `visibleWidth()` (enforced by
- *   test/icons.test.ts). Colors never live here: the renderer's existing
- *   semantic color context (header title, error, textDim, ...) paints the
- *   glyph.
+ * - `symbols` — a small, monochrome, terminal-safe set. EVERY glyph is
+ *   verified by a TWO-LAYER width gate in test/icons.test.ts: it must
+ *   measure ONE cell under the fork's `visibleWidth()` AND carry a
+ *   Unicode East Asian Width class of neutral/narrow/halfwidth —
+ *   EAW-ambiguous glyphs are rejected because CJK-width terminals
+ *   (VTE/WezTerm `cjk-ambiguous-width`) may paint them two cells.
+ *   Colors never live here: the renderer's existing semantic color
+ *   context (header title, error, textDim, ...) paints the glyph.
  * - `minimal` — NOT a third skin: ordinary decorative icons are hidden
  *   (empty glyph) and only state/interaction markers survive (error,
  *   interrupted, question, disclosure, working). The working pair is the
- *   same `• / ◦` as symbols — minimal's calm comes from REMOVING static
+ *   same `∙ / ◦` as symbols — minimal's calm comes from REMOVING static
  *   icons, never from changing animation semantics (a reduced-motion
  *   preference would be its own setting).
  *
@@ -28,10 +31,10 @@
  * SEMANTIC, resolved at render time), no user/assistant/tool-content
  * rewriting, no font dependencies. The header brand whale and the
  * welcome-card brand line stay emoji-only — they are brand identity,
- * not registry semantics. The image ATTACHMENT marker resolves through
- * the registry at RENDER time (the folded flat text keeps the emoji
- * fact for search/export; the marker is TUI-owned text, never a
- * user-typed emoji).
+ * not registry semantics. The image attachment marker is deliberately
+ * NOT part of the registry (the plan defers it): a string-level marker
+ * swap would rewrite user-typed `🖼️` in their own messages, so the
+ * marker stays the constant emoji fact.
  * @module @xmoon76/dsh-pi-tui/icons
  */
 
@@ -102,7 +105,7 @@ export const ALL_ICON_SEMANTICS: readonly IconSemantic[] = [
 /** The full palette: semantic × style. The emoji column is the historical
  * glyph EXACTLY (default behavior must not change); the symbols column is
  * the compact monochrome vocabulary (see the plan for the design notes —
- * ◆/◇ express agent/workflow hierarchy, ▸/▾ disclosure state, •/◦ the
+ * the diamond/flow glyphs express agent/workflow hierarchy, ▸/▾ disclosure state, ∙/◦ the
  * working pair, all mirroring upstream pi/kimi/opencode conventions). */
 const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
   emoji: {

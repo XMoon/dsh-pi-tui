@@ -13,8 +13,8 @@
   切换。** Emoji 是默认且与之前完全一致;Symbols 用一套少量、单格
   (1-cell)的 Unicode 符号表达同样的语义(tool card、context card、
   Focus disclosure、Working 指示);Minimal 隐藏普通装饰性图标,只保留
-  真正有状态或交互价值的 marker(`×` error、`■` interrupted、`?`
-  question、`▸/▾` disclosure、`•/◦` working)。图标统一收敛到 semantic
+  真正有状态或交互价值的 marker(`⨯` error、`∎` interrupted、`?`
+  question、`▸/▾` disclosure、`∙/◦` working)。图标统一收敛到 semantic
   registry(`src/icons.ts`):fold 状态只保存 semantic identity,不保存
   最终 glyph,所以 `/settings` 切换后同一运行实例内已渲染的卡片立即换
   图标,无需重启或重新加载会话;第三方扩展、用户/assistant/tool 内容
