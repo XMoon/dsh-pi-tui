@@ -23,7 +23,13 @@
  * @module @xmoon76/dsh-pi-tui/footer/configurator
  */
 
-import { matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
+import {
+  decodePrintableKey,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+} from '@xmoon76/pi-tui'
 import { color } from '../theme.ts'
 import type { StatusSnapshot } from '../status/types.ts'
 import { FooterComposer, renderSpans } from './composer.ts'
@@ -73,6 +79,12 @@ export class FooterConfiguratorPanel implements Component {
   /** The body scrollport's top offset (stable across renders — the cursor
    * scrolls the body minimally; the fixed shell never moves). */
   private scrollTop = 0
+  /** Bracketed-paste buffering (the fork's Input-component pattern):
+   * `isInPaste` between the \x1b[200~/\x1b[201~ markers, `pasteBuffer`
+   * accumulating the chunks — the markers (and the content) may split
+   * across terminal chunks. */
+  private isInPaste = false
+  private pasteBuffer = ''
   /** The fork dispatches input to the focused component's handleInput. */
   readonly handleInput: (data: string) => void
 
@@ -98,20 +110,32 @@ export class FooterConfiguratorPanel implements Component {
         this.model.activate()
         return
       }
-      // Text-input pages swallow printable keys FIRST (space is a query
-      // character there, never the remove action). Any non-escape chunk
-      // is text — including a paste burst (the model strips control
-      // characters and enforces the parser's bounds).
+      // Text-input pages swallow text keys FIRST (space is a query
+      // character there, never the remove action). Text arrives in three
+      // shapes — a plain printable chunk, a Kitty CSI-u / modifyOtherKeys
+      // encoded printable (contains ESC!), and bracketed-paste bursts
+      // (start marker, content, end marker — all ESC-led) — so "contains
+      // ESC" is NOT a printable test: decodePrintableKey + the paste
+      // protocol decide, exactly like the fork's Input component.
       const textMode = state.mode === 'add' || (state.mode === 'advanced' && state.editing)
       if (textMode) {
         if (matchesKey(data, 'backspace')) {
           this.model.backspace()
           return
         }
-        if (!data.includes('\x1b')) {
-          this.model.text(data)
+        if (this.feedPaste(data)) return
+        // A plain printable chunk (one character OR a coalesced burst —
+        // fast typists and non-bracketed pastes deliver multi-char runs)
+        // is text: the model strips control characters and enforces the
+        // parser's bounds.
+        const printable = decodePrintableKey(data)
+          ?? (data.length >= 1 && !/[\u0000-\u001f\u007f-\u009f]/.test(data) ? data : undefined)
+        if (printable !== undefined) {
+          this.model.text(printable)
           return
         }
+        // A non-printable, unmatched chunk in text mode falls through to
+        // the navigation keys below (arrows move the add list).
       }
       if (state.mode === 'rows' && matchesKey(data, 's')) {
         // The Row Selector is the save point: S persists the draft.
@@ -176,33 +200,90 @@ export class FooterConfiguratorPanel implements Component {
     // getter already leaves room for the Frame's border rows.
     const budget = Math.max(1, this.maxVisible())
     const rule = color.border('─'.repeat(Math.max(0, width - 2)))
-    const chrome = [
+    const head = [
       color.textStrong(this.title(state)),
       color.textMuted(this.help(state)),
-      color.textStrong('Preview'),
-      ...this.previewLines(width),
-      rule,
     ]
     const pre = this.preLines(state)
     const tail = this.tailLines(state)
     const body = this.bodyLines(state, width)
-    const scrollBudget = Math.max(0, budget - chrome.length - pre.length - tail.length)
-    const head = [...chrome, ...pre]
-    if (scrollBudget === 0) {
+    const previewRows = this.previewLines(width)
+    // The EDITABLE body wins over the preview on a short terminal: the
+    // fixed shell is title + help (+ rule + the add page's pinned
+    // lines), the body keeps up to TWO rows (all of them when fewer) and
+    // the PREVIEW compresses to whatever remains — a footer preview can
+    // legally reach 4 physical rows, and letting it eat the shell would
+    // leave a configurator with zero editable rows visible. The preview
+    // block keeps its label only while at least one preview row fits;
+    // a hidden remainder is marked with an ellipsis.
+    const fixedCount = head.length + pre.length + tail.length + 1
+    const left = budget - fixedCount
+    if (left <= 0) {
       // A tiny terminal: the fixed shell wins, the body drops (the Frame
       // borders stay visible — the physical minimum).
-      return head.slice(0, budget).map(line => truncateToWidth(line, Math.max(1, width), '…'))
+      return [...head, ...pre].slice(0, budget).map(line => truncateToWidth(line, Math.max(1, width), '…'))
     }
+    const bodyMin = Math.min(body.lines.length, 2)
+    let bodyBudget: number
+    let previewBlock: string[]
+    if (left <= bodyMin + 1) {
+      // No room for a meaningful preview — the editable rows take it all.
+      bodyBudget = Math.min(body.lines.length, Math.max(1, left))
+      previewBlock = []
+    } else {
+      const previewCount = Math.min(previewRows.length, left - bodyMin - 1)
+      bodyBudget = left - 1 - previewCount
+      previewBlock = previewCount > 0
+        ? [
+            color.textStrong('Preview'),
+            ...previewRows.slice(0, previewCount).map((line, index) =>
+              index === previewCount - 1 && previewRows.length > previewCount ? `${line}…` : line),
+          ]
+        : []
+    }
+    const scrollBudget = Math.max(1, Math.min(bodyBudget, body.lines.length))
     this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
     if (body.cursor < this.scrollTop) this.scrollTop = body.cursor
     if (body.cursor >= this.scrollTop + scrollBudget) this.scrollTop = body.cursor - scrollBudget + 1
     this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
-    return [...head, ...body.lines.slice(this.scrollTop, this.scrollTop + scrollBudget), ...tail]
-      .map(line => truncateToWidth(line, Math.max(1, width), '…'))
+    return [
+      ...head,
+      ...previewBlock,
+      rule,
+      ...pre,
+      ...body.lines.slice(this.scrollTop, this.scrollTop + scrollBudget),
+      ...tail,
+    ].map(line => truncateToWidth(line, Math.max(1, width), '…'))
+  }
+
+  /** Feed one chunk through the bracketed-paste protocol. Returns true
+   * when the chunk was consumed as paste traffic (a start marker,
+   * buffered content, or the end marker) — the markers and the content
+   * may split across terminal chunks. A completed paste feeds the WHOLE
+   * content to the model as one text input (the model strips control
+   * characters and enforces the parser's bounds). */
+  private feedPaste(data: string): boolean {
+    if (data.includes('\x1b[200~')) {
+      this.isInPaste = true
+      this.pasteBuffer = ''
+      data = data.replace('\x1b[200~', '')
+    }
+    if (!this.isInPaste) return false
+    this.pasteBuffer += data
+    const endIndex = this.pasteBuffer.indexOf('\x1b[201~')
+    if (endIndex === -1) return true
+    const content = this.pasteBuffer.substring(0, endIndex)
+    const remaining = this.pasteBuffer.substring(endIndex + '\x1b[201~'.length)
+    this.isInPaste = false
+    this.pasteBuffer = ''
+    this.model.text(content)
+    // A trailing chunk after the end marker is ordinary input again.
+    if (remaining !== '') this.handleInput(remaining)
+    return true
   }
 
   /** The page title (the header). */
-  private title(state: { mode: string; rowIndex: number; cursor: number }): string {
+  private title(state: { mode: string; rowIndex: number; cursor: number; addSide: 'left' | 'right' }): string {
     switch (state.mode) {
       case 'row':
         return `Edit Row ${state.rowIndex + 1}`
@@ -217,7 +298,10 @@ export class FooterConfiguratorPanel implements Component {
       case 'advanced':
         return `Advanced · ${this.itemLabel(state.rowIndex, state.cursor)}`
       case 'add':
-        return `Add Item → Row ${state.rowIndex + 1}`
+        // The side is decided when the picker opens (the cursor item's
+        // zone): showing it spares the user guessing where the item will
+        // land.
+        return `Add Item → Row ${state.rowIndex + 1} · ${state.addSide === 'left' ? 'Left' : 'Right'}`
       default:
         return 'Configure Footer'
     }

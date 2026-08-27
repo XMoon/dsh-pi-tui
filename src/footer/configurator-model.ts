@@ -505,7 +505,11 @@ export class FooterConfiguratorModel {
         const matches = this.addMatches()
         const id = matches[Math.min(this.pickerIndex, matches.length - 1)]
         if (id === undefined) return
-        this.addAvailable(id, this.addSide)
+        const added = this.addAvailable(id, this.addSide)
+        // ccstatusline parity: a SUCCESSFUL add closes the picker and
+        // lands the cursor on the added item. A cap-refused add stays in
+        // the picker (the '(row is full…)' notice explains why).
+        if (added) this.mode = 'row'
         return
       }
     }
@@ -541,10 +545,15 @@ export class FooterConfiguratorModel {
         this.mode = 'row'
         return true
       case 'item':
+        this.mode = 'row'
+        return true
       case 'style':
       case 'tone':
       case 'advanced':
-        this.mode = 'row'
+        // The pickers hang off the ITEM EDITOR (row → item → picker):
+        // Esc returns exactly one level up, matching the page hierarchy
+        // and the help's "Esc Back".
+        this.mode = 'item'
         return true
     }
   }
