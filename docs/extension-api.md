@@ -181,11 +181,19 @@ id IS the source-qualified value (display labels are unique per row —
 builtin/file/plugin collisions are source-tagged — but are presentational
 only and never round-tripped back to an identity at confirm time, so an
 HMR unload between open and confirm can never redirect a selection to a
-same-named new contribution). The vendored SettingsList submenu contract
+same-named new contribution). The `← current` marker compares the
+selection's source-qualified IDENTITY against the live row values — a
+same-labeled row from another source (a file created while a plugin theme
+is selected) can never steal the marker. The choice commit is
+transactional: only a successful apply moves the current choice and the
+outer row; a stale selection (the contribution unloaded between open and
+confirm) or an apply failure rolls both back to the previous choice — a
+failed pick can never fake a current selection nor steal an in-flight
+`auto` terminal detection. The vendored SettingsList submenu contract
 writes the RAW selected value into the outer row's display; the host
 rewrites it back to the friendly label through the openSettings
 updateValue seam after a successful apply, so the panel never shows a raw
-`plugin:` string and a re-open marks the right `← current`.
+`plugin:` string.
 
 ## Configurable footer items (M4)
 

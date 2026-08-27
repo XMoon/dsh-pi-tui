@@ -33,7 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user-mimicked `(file)`/`(plugin)` suffixes). After a pick the outer row
   is rewritten back to the friendly label through the openSettings
   updateValue seam (never a raw `plugin:` string), and a re-open marks
-  the right `← current`.
+  the `← current` row by the CURRENT selection's source-qualified
+  identity — not a display string, so a same-named file theme created
+  while the panel is open can never steal the marker. The choice commit
+  is transactional: only a SUCCESSFUL apply moves the current choice and
+  the outer row; a stale selection (the contribution unloaded between
+  open and confirm) or an apply failure rolls both back to the previous
+  choice — a failed pick can never fake a current selection nor steal an
+  in-flight `auto` terminal detection.
 - **The theme-unload hook is now generation-leased.** The runner's
   `setThemeUnloadedHook` returns a disposer, and only the CURRENT
   generation's disposer clears the callback — an old runner's HMR cleanup

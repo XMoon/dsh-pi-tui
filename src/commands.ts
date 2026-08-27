@@ -1201,7 +1201,12 @@ export function registerTuiCommands(
       // moment an OSC 11 reply lands the doc may still hold the PREVIOUS
       // theme — a doc-based guard would wrongly refuse a just-selected
       // `auto` (and wrongly apply over a just-selected explicit theme).
-      let lastThemeChoice = theme
+      // The choice is the SOURCE-QUALIFIED IDENTITY (normalized — a legacy
+      // `custom:X` doc value becomes `file:X`), never a display label: the
+      // submenu's `← current` marker compares this identity against the
+      // live row values (the review's P3 — the current-state identity must
+      // not be a display string a dynamic same-named source can mimic).
+      let lastThemeChoice = normalizePersistedTheme(theme)
       // The permission-presets service owns the composed preset table and the
       // persisted default for new sessions (settings namespace 'permission').
       // Both panel rows degrade gracefully when the service is absent.
@@ -1241,12 +1246,16 @@ export function registerTuiCommands(
             // never share the value namespace of a custom FILE of the same
             // name, and the identity is carried end-to-end, never
             // round-tripped through the display label). The submenu
-            // receives the outer row's CURRENT display name (the fork
-            // passes the LIVE item.currentValue — after a previous pick in
-            // the same panel session it is the NEW selection, so
-            // `← current` follows the latest choice — the review's P3).
+            // receives the runner's own synchronous `lastThemeChoice`
+            // IDENTITY (never the fork's outer currentValue — that string
+            // is the FRIENDLY DISPLAY, purely presentational after the
+            // updateValue rewrite, and a display-label comparison would
+            // let a same-named row from ANOTHER source steal the
+            // `← current` marker — the review's P3). A re-open after a
+            // successful pick sees the committed identity; a FAILED pick
+            // keeps the previous one.
             currentValue: themeDisplayName,
-            submenu: (currentValue, done) => new ThemeSubmenu(currentValue, runner.extensions?.themes, (picked) => {
+            submenu: (_currentValue, done) => new ThemeSubmenu(lastThemeChoice, runner.extensions?.themes, (picked) => {
               if (picked !== undefined) done(picked)
               else done()
             }),
@@ -1378,25 +1387,61 @@ export function registerTuiCommands(
             // no display-label round-trip, so an HMR unload between open
             // and confirm can never redirect the selection to a same-named
             // new contribution). The value is applied and persisted as-is.
+            //
+            // TRANSACTIONAL CHOICE COMMIT (the review's P2): the fork's
+            // SettingsList already wrote the RAW selected value into the
+            // outer row BEFORE this callback runs, so a FAILED selection
+            // (the contribution unloaded between open and confirm — the
+            // HMR window — or an apply error) must roll the visible row
+            // AND `lastThemeChoice` back to the previous choice. A failed
+            // pick can never fake a current selection (the next re-open
+            // would mark a row that was never applied) and can never steal
+            // an in-flight `auto` detection whose guard reads
+            // `lastThemeChoice`.
             const qualified = value
             if (qualified !== undefined) {
-              lastThemeChoice = qualified
+              const previousChoice = lastThemeChoice
+              // SUCCESS only: commit the choice and rewrite the fork's raw
+              // write back to the FRIENDLY label (the openSettings
+              // updateValue seam — the row must never show a raw
+              // `plugin:owner/id`, and a re-open must mark the right row).
+              const commit = (): void => {
+                lastThemeChoice = qualified
+                revert(themeDisplayNameOf(qualified, runner.extensions?.themes))
+              }
+              // FAILURE only: restore the PREVIOUS choice's friendly
+              // display; `lastThemeChoice` stays untouched.
+              const rollback = (): void => {
+                revert(themeDisplayNameOf(previousChoice, runner.extensions?.themes))
+              }
               if (qualified === 'auto') {
                 // The settled detection applies only while the preference is
                 // STILL auto — a late result must never override a theme the
                 // user picked while the query was in flight (rapid cycling).
                 // The guard reads the synchronous lastThemeChoice, NOT the
                 // persisted doc (whose write is asynchronous and may lag the
-                // query settlement by hundreds of ms).
+                // query settlement by hundreds of ms). `auto` has no
+                // fallible apply step (starting the detection IS the
+                // apply): the choice commits BEFORE the query starts, so
+                // the guard already sees the new choice if a reply raced
+                // in synchronously.
                 app.clearActivePluginTheme()
+                commit()
                 detach('theme autodetect', () => app.autoDetectTheme({
                   shouldApply: () => lastThemeChoice === 'auto',
                 }))
                 app.trackTerminalTheme(true)
               } else if (qualified === 'dark' || qualified === 'light') {
-                app.clearActivePluginTheme()
-                app.applyTheme(qualified)
-                app.trackTerminalTheme(false)
+                try {
+                  app.clearActivePluginTheme()
+                  app.applyTheme(qualified)
+                  app.trackTerminalTheme(false)
+                } catch (error) {
+                  app.notify(`theme ${value} failed: ${safeErrorMessage(error)}`, 'error')
+                  rollback()
+                  return
+                }
+                commit()
               } else {
                 // M5: a plugin-registered theme applies through the host's
                 // applyPalette (the ONLY application path — the registry
@@ -1408,46 +1453,41 @@ export function registerTuiCommands(
                 // VALUE-addressed (the unified theme protocol — the health
                 // bridge resolves the selectable value only).
                 const themeRef = captureExtensionHealthRef?.('theme', qualified)
-                if (selection !== undefined) {
-                  try {
-                    // A PLUGIN palette records the selection (the unload
-                    // fallback restores builtin dark when it disappears);
-                    // a custom FILE clears it.
-                    if (selection.kind === 'plugin') app.applyPluginPalette(selection.value, selection.palette)
-                    else {
-                      app.clearActivePluginTheme()
-                      app.applyPalette(selection.palette)
-                    }
-                    if (themeRef !== undefined) clearExtensionError?.(themeRef)
-                    app.trackTerminalTheme(false)
-                  } catch (error) {
-                    if (themeRef !== undefined) recordExtensionError?.(themeRef, error)
-                    app.notify(`theme ${value} failed: ${safeErrorMessage(error)}`, 'error')
-                    return
-                  }
-                } else {
+                if (selection === undefined) {
+                  // A stale selection (the source unloaded between open and
+                  // confirm): notify, record health, roll the row AND the
+                  // choice back — never commit.
                   if (themeRef !== undefined) recordExtensionError?.(themeRef, new Error('theme not found'))
                   app.notify(`theme ${value} not found`, 'error')
+                  rollback()
                   return
                 }
+                try {
+                  // A PLUGIN palette records the selection (the unload
+                  // fallback restores builtin dark when it disappears);
+                  // a custom FILE clears it.
+                  if (selection.kind === 'plugin') app.applyPluginPalette(selection.value, selection.palette)
+                  else {
+                    app.clearActivePluginTheme()
+                    app.applyPalette(selection.palette)
+                  }
+                  if (themeRef !== undefined) clearExtensionError?.(themeRef)
+                  app.trackTerminalTheme(false)
+                } catch (error) {
+                  if (themeRef !== undefined) recordExtensionError?.(themeRef, error)
+                  app.notify(`theme ${value} failed: ${safeErrorMessage(error)}`, 'error')
+                  rollback()
+                  return
+                }
+                // Spread the current doc: a replace is wholesale, so the
+                // other preference keys must ride along. The persisted value
+                // IS the source-qualified identity.
+                const settings = tuiSettings
+                if (settings !== undefined) {
+                  detach('settings theme write', () => settings.replace({ ...settings.get(), theme: qualified }) as Promise<unknown>, { notify: true })
+                }
+                commit()
               }
-              // Spread the current doc: a replace is wholesale, so the
-              // other preference keys must ride along. The persisted value
-              // IS the source-qualified identity.
-              const settings = tuiSettings
-              if (settings !== undefined) {
-                detach('settings theme write', () => settings.replace({ ...settings.get(), theme: qualified }) as Promise<unknown>, { notify: true })
-              }
-              // The fork's SettingsList submenu contract writes the RAW
-              // selected value into the outer row's currentValue
-              // (`item.currentValue = selectedValue` BEFORE onChange) — so
-              // the theme row would display `plugin:acme/solarized` until
-              // the panel closes. Rewrite it back to the FRIENDLY label
-              // through the openSettings updateValue seam (the revert
-              // callback), so the visible row stays `Solarized` and a
-              // re-open of the submenu marks the right `← current` (the
-              // review's P2).
-              revert(themeDisplayNameOf(qualified, runner.extensions?.themes))
             }
           } else if (id.startsWith('ext-setting:')) {
             // M5: a plugin-registered settings row change. The row's own

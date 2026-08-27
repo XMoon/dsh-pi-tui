@@ -26,7 +26,12 @@
   重载后也不会被重定向到同名新贡献);label 在 builtin/file/plugin 三方
   及人为带 `(file)`/`(plugin)` 后缀的文件名下都保证唯一。选中后外层
   设置行通过 openSettings 的 updateValue seam 显示回友好名(绝不显示
-  裸 `plugin:` 串),再次打开 submenu 时 `← current` 正确跟随最新选择。
+  裸 `plugin:` 串),再次打开 submenu 时 `← current` 按当前选择的
+  source-qualified identity 比较、而不是 display 字符串——设置面板打开
+  期间新建的同名文件主题绝不可能冒领当前标记。选择提交是事务式的:
+  只有真正 apply 成功才更新"当前选择"并改写外层行;stale 选择(确认前
+  贡献已卸载)或 apply 失败会把外层行与当前选择一并回滚到上一个选择,
+  失败的选取既不会伪造当前态,也不会抢走进行中的 `auto` 终端检测。
 - **Theme-unload hook 增加 generation lease。** runner 的
   `setThemeUnloadedHook` 现在返回一个 disposer,且只有当前 generation
   的 disposer 能清除回调——旧 runner 的 HMR cleanup 永远不会清掉新
