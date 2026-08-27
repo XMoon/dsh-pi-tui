@@ -12,6 +12,7 @@ import test from 'node:test'
 import {
   editorModeFromHistoryEntry,
   serializeEditorInput,
+  serializedDraftHasPayload,
   shellPrefixForMode,
 } from '../src/editor-input-mode.ts'
 
@@ -61,4 +62,19 @@ test('serialize and decode round-trip', () => {
     const serialized = serializeEditorInput(mode, body)
     assert.deepEqual(editorModeFromHistoryEntry(serialized), { mode, text: body })
   }
+})
+
+test('serializedDraftHasPayload: the shared empty-input verdict', () => {
+  // Plain empty + whitespace-only: no payload.
+  assert.equal(serializedDraftHasPayload(''), false)
+  assert.equal(serializedDraftHasPayload('   '), false)
+  assert.equal(serializedDraftHasPayload('\n\t '), false)
+  // A bare shell prefix IS payload (§7.6: never killed by an empty guard).
+  assert.equal(serializedDraftHasPayload('!'), true)
+  assert.equal(serializedDraftHasPayload('!!'), true)
+  assert.equal(serializedDraftHasPayload('!pwd'), true)
+  assert.equal(serializedDraftHasPayload('!!pwd'), true)
+  // Normal prompts are payload.
+  assert.equal(serializedDraftHasPayload('hello'), true)
+  assert.equal(serializedDraftHasPayload('  hello  '), true)
 })

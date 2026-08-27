@@ -1387,6 +1387,42 @@ test('submitDraft with an empty draft and no image stays a no-op even with the g
   app.stop()
 })
 
+test('HOST EDITOR Enter with an image-only draft still submits (empty gate mirror, F1)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    isImageDraft: () => true,
+  })
+  app.start()
+  await vt.waitForRender()
+  // Physical Enter on the host editor with an empty body + staged images:
+  // the empty guard must NOT swallow it — the image verdict is consulted
+  // exactly like submitDraft consults it (the two host-owned submit paths
+  // must agree on what counts as a payload).
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [''], 'image-only Enter must fire onSubmit')
+  app.stop()
+})
+
+test('HOST EDITOR Enter with NO image and an empty body stays a no-op (isImageDraft=false)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+    isImageDraft: () => false,
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [], 'an empty Enter with no image payload must never submit')
+  app.stop()
+})
+
 test('ctrl+v routes to onClipboardPaste and consumes the key', async () => {
   const vt = new VirtualTerminal(100, 24)
   let pasted = 0
