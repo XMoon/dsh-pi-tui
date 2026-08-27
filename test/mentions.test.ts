@@ -335,7 +335,7 @@ test('the provider completes /image arguments through the fork command branch', 
   assert.ok(result.items.some(item => item.value === 'file-one.txt'), `file missing:\n${JSON.stringify(result.items)}`)
 })
 
-test('MentionProvider lets Tab file-complete a trailing-space PATH argument only', () => {
+test('the provider lets Tab file-complete an explicit PATH argument only (plan §2.1)', () => {
   const root = fixtureWorkspace()
   const provider = new MentionProvider(
     [
@@ -346,13 +346,29 @@ test('MentionProvider lets Tab file-complete a trailing-space PATH argument only
     fallbackSeam(),
   )
   assert.equal(provider.shouldTriggerFileCompletion(['/image'], 0, 6), false, 'a bare command name stays command completion')
-  assert.equal(provider.shouldTriggerFileCompletion(['/image '], 0, 7), true, 'a trailing-space PATH argument is a file-completion site (the fork trims it away)')
-  assert.equal(provider.shouldTriggerFileCompletion(['/image\t'], 0, 7), true, 'a trailing-TAB PATH argument is a file-completion site too (tab is a fork path delimiter)')
+  assert.equal(provider.shouldTriggerFileCompletion(['/image '], 0, 7), true, 'a trailing-space PATH argument is a file-completion site')
+  assert.equal(provider.shouldTriggerFileCompletion(['/image\t'], 0, 7), true, 'a trailing-TAB PATH argument is a file-completion site too')
   assert.equal(provider.shouldTriggerFileCompletion(['/image\tfo'], 0, 9), true, 'a TAB-separated PATH argument completes files')
-  assert.equal(provider.shouldTriggerFileCompletion(['/help '], 0, 6), false, 'a NON-path command keeps the fork judgment (a trailing space never lists files)')
-  assert.equal(provider.shouldTriggerFileCompletion(['/help\t'], 0, 6), false, 'a NON-path command keeps the fork judgment for a trailing TAB too')
-  assert.equal(provider.shouldTriggerFileCompletion(['/help foo'], 0, 9), true, 'non-path commands keep the fork behavior for real arguments')
-  assert.equal(provider.shouldTriggerFileCompletion(['see /tmp/'], 0, 9), true, 'plain path lines keep the fork behavior')
+  assert.equal(provider.shouldTriggerFileCompletion(['/help '], 0, 6), true, 'a non-file command still runs the request (the extension chain is consulted — only the HOST file branch is closed)')
+  assert.equal(provider.shouldTriggerFileCompletion(['/help\t'], 0, 6), true, 'a NON-file command keeps the request for a trailing TAB too')
+  assert.equal(provider.shouldTriggerFileCompletion(['/help foo'], 0, 9), true, 'a NON-file command argument still runs the request')
+  assert.equal(provider.shouldTriggerFileCompletion(['see /tmp/'], 0, 9), true, 'a plain path line still runs the request')
+  assert.equal(provider.shouldTriggerFileCompletion(['foo'], 0, 3), true, 'an ordinary word still runs the request')
+  assert.equal(provider.shouldTriggerFileCompletion(['./foo'], 0, 5), true, 'a `./` path still runs the request')
+  // THE PROOF (plan §2.1): the HOST's own file branch stays closed for
+  // every ordinary position — a forced request never produces a host file
+  // dropdown there.
+  const probe = new MentionProvider([{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }], root, fallbackSeam())
+  return Promise.all([
+    probe.getSuggestions(['/help foo'], 0, 9, { signal: abort, force: true }),
+    probe.getSuggestions(['see /tmp/'], 0, 9, { signal: abort, force: true }),
+    probe.getSuggestions(['foo'], 0, 3, { signal: abort, force: true }),
+    probe.getSuggestions(['./foo'], 0, 5, { signal: abort, force: true }),
+  ]).then((results) => {
+    for (const result of results) {
+      assert.equal(result, null, 'an ordinary position must never open the HOST file dropdown')
+    }
+  })
 })
 
 // ── send-time mention canonicalization (the 2026-08-22 plan, item 7) ─────

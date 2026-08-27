@@ -193,10 +193,16 @@ test('shouldTriggerFileCompletion allows Tab on a leading / in a shell mode', as
   // (no space); the virtual prefix keeps the fork's judgment on the
   // serialized line, where `/usr/lo` is a path.
   assert.equal(provider.shouldTriggerFileCompletion(['/usr/lo'], 0, 7), true)
-  // Prompt mode keeps the fork's judgment (a bare slash command blocks Tab).
+  // Prompt mode: a leading `/` without a space is a slash-command NAME
+  // shape — the gate fast-fails to the fork's judgment (never file
+  // completion), and the host's own file branch is closed for the
+  // ordinary position in getSuggestions (plan §2.1).
   const { source: promptSource } = modeSource('prompt')
   const promptProvider = new MentionProvider([], root, null, promptSource)
   assert.equal(promptProvider.shouldTriggerFileCompletion(['/usr/lo'], 0, 7), false)
+  // The gate's PROOF: the host's own completion stays quiet in prompt mode.
+  assert.equal(await promptProvider.getSuggestions(['/usr/lo'], 0, 7, { signal: abort, force: true }), null,
+    'an ordinary prompt position must never open the HOST file dropdown')
 })
 
 // --- injected-runner determinism (review finding 4/5: failed runs must not
