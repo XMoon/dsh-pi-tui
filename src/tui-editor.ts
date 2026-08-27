@@ -23,7 +23,7 @@
 
 import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type EditorTheme, type TUI } from '@xmoon76/pi-tui'
 import { color } from './theme.ts'
-import { extractAtPrefix } from './mentions.ts'
+import { classifyFileCompletionContext, FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input-mode.ts'
 
 /** The fork's private autocomplete surface (runtime methods; kimi's
@@ -38,18 +38,11 @@ interface AutocompleteInternals {
  * three prompts (`❯ `, `! `, `!!`) are exactly this wide. */
 const PROMPT_WIDTH = 2
 
-/** Whether the text before the cursor is a slash-command line WITH an
- * argument position (`/cmd <arg>`): the command name is the first
- * whitespace-delimited (space OR tab — the fork's path delimiters) token
- * after the leading `/`; anything after it is the argument the completion
- * re-trigger targets. */
-function isSlashCommandArgument(textBeforeCursor: string): boolean {
-  const trimmed = textBeforeCursor.trimStart()
-  if (!trimmed.startsWith('/')) return false
-  const separatorIndex = trimmed.search(/[ \t]/)
-  if (separatorIndex <= 0) return false
-  const commandName = trimmed.slice(1, separatorIndex)
-  return commandName !== '' && !commandName.includes('/')
+/** Whether the cursor sits in a declared path-argument position (`/image
+ * <arg>`): the classifier's `image-argument` kind, which the reopen gate
+ * consumes (plan §11 — ONE classifier, never a per-command hardcode). */
+function isFileArgumentContext(textBeforeCursor: string): boolean {
+  return classifyFileCompletionContext(textBeforeCursor, FILE_ARGUMENT_COMMANDS).kind !== 'none'
 }
 
 /**
@@ -430,7 +423,11 @@ export class TuiEditor extends Editor {
     if (this.isShowingAutocomplete()) return
     const { line, col } = this.getCursor()
     const textBeforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
-    if (textBeforeCursor.endsWith('/') && (extractAtPrefix(textBeforeCursor) !== null || isSlashCommandArgument(textBeforeCursor))) {
+    // ONE classifier (plan §11): `@dir/` mentions AND `/image dir/` arguments
+    // reopen through the same directory-shaped context gate — never a
+    // per-command hardcode, and never a plain trailing `/` (a `see /tmp/`
+    // position stays closed).
+    if (textBeforeCursor.endsWith('/') && isFileArgumentContext(textBeforeCursor)) {
       ;(this as unknown as AutocompleteInternals)
         .requestAutocomplete({ force: false, explicitTab: false })
     }
