@@ -170,6 +170,31 @@ The runner seeds the recall history from the LAUNCH cwd at boot too, so ↑
 works immediately in a new window; `initLiveSession` replaces it when the
 first session is born (and on every session switch).
 
+### Editor recall scope: session-first (↑/↓), cwd-first (Ctrl+R)
+
+The EDITOR's ↑/↓ recall is session-scoped once a live session exists:
+`initLiveSession` seeds it with **only the rows whose `sessionId` matches
+the live session** (`recallHistoryForSession` in `src/history.ts`) —
+resuming session A in a shared cwd never recalls session B's inputs. With
+no live session (fresh/deferred start) the recall pool is the whole cwd
+file, v1 legacy rows included. Explicitly **no automatic fallback**: when
+the session's rows run out, ↑ stops (it never silently switches to cwd
+history — the scope would become invisible to the user).
+
+Two invariants that must never be conflated:
+
+- The **recall projection** is the session filter — the EDITOR's ↑/↓ pool.
+- The **persistence dedupe anchor** (`lastHistoryContent`) stays the cwd
+  file's ACTUAL last row. Resuming session A after session B wrote `bar`
+  keeps the dedupe anchor at `bar` even though ↑ only shows session A's
+  rows — dedupe stays per-file, never per-session.
+
+v1 legacy rows (no `sessionId`) never participate in a live session's
+recall — they are not guessed into any session. Ctrl+R remains the
+broader search (its `Current directory` / `All directories` scopes cover
+legacy rows; `Current session` filters to the live session exactly like
+the editor recall).
+
 ## Migration
 
 One-time, at boot: the legacy `history` map inside the `dsh-pi-tui`

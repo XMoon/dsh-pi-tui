@@ -198,6 +198,39 @@ export function loadHistoryFile(file: string): string[] {
 }
 
 /**
+ * Project the editor ↑/↓ recall for ONE session identity (session-scoped
+ * history, the recall-scope contract in docs/input-history.md):
+ *
+ * - `sessionId === undefined` (fresh / deferred start, no live session):
+ *   the ENTIRE cwd file is the recall pool (the historical behavior — v1
+ *   legacy rows and every session's rows all participate).
+ * - a live session id: ONLY the rows that carry exactly that sessionId.
+ *   v1 legacy rows (no sessionId) are NEVER guessed into a session — they
+ *   stay reachable through Ctrl+R (`Current directory` / `All
+ *   directories`), exactly like rows of other sessions.
+ *
+ * The canonical CWD file and its last row are unchanged (persistence
+ * dedupe stays cwd-scoped, {@link appendHistoryRecord}); this function
+ * only projects the editor's recall.
+ *
+ * @param records - the parsed canonical records, file order (oldest first).
+ * @param sessionId - the live session id, or undefined for no-session cwd recall.
+ * @param limit - the recall cap (defaults to {@link HISTORY_RECALL_LIMIT}).
+ * @returns the matching contents of the latest `limit` rows, oldest first
+ *   (callers seed the editor newest-first with `.reverse()`).
+ */
+export function recallHistoryForSession(
+  records: readonly ParsedHistoryRecord[],
+  sessionId: string | undefined,
+  limit = HISTORY_RECALL_LIMIT,
+): string[] {
+  const scoped = sessionId === undefined
+    ? records
+    : records.filter(record => record.sessionId === sessionId)
+  return scoped.slice(-limit).map(record => record.content)
+}
+
+/**
  * Append one canonical (v2) history record to a history file. An empty
  * content and a repeat of `lastContent` (the newest known row) are skipped,
  * like shell history. Multi-line submissions are stored as one JSON line

@@ -117,7 +117,7 @@ import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner 
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
-import { appendHistoryLine, historyFilePath, loadHistoryFile } from './history.ts'
+import { appendHistoryLine, historyFilePath, loadHistoryFile, loadHistoryRecords, recallHistoryForSession } from './history.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from './history-persist.ts'
 import { FileHistorySearchSource } from './history-search.ts'
 import { safeErrorMessage } from './error-boundary.ts'
@@ -5598,16 +5598,21 @@ export function apply(ctx: Context, config: Config): void {
       // or subagents on screen until the next registry event.
       refreshTasks()
       refreshAgents()
-      // The recall history is per-workspace: REPLACE it with the live
-      // session's persisted entries from the cwd's JSONL history file
-      // (editor history AND the persistence mirror), so switching sessions
-      // never recalls the old workspace's inputs nor writes them back
-      // under the new cwd. The file is oldest-first; TuiApp's recall API
-      // takes newest-first, so the loaded entries are reversed here.
+      // The recall history is per-workspace AND per-session: REPLACE it
+      // with the live session's rows ONLY (the CWD file's rows filtered to
+      // this sessionId — session-scoped editor recall), so ↑/↓ in a live
+      // session never recalls another session's inputs from the same cwd.
+      // The CANONICAL last row stays the cwd file's actual last row (the
+      // persistence dedupe anchor stays cwd-scoped — docs/input-history.md);
+      // only the EDITOR's recall is the session projection.
       const historyCwd = sessionCwd()
-      const historyEntries = loadHistoryFile(historyFilePath(dshHome(process.env), historyCwd))
-      lastHistoryContent = historyEntries.at(-1)
-      app.resetInputHistory([...historyEntries].reverse())
+      const historyFile = historyFilePath(dshHome(process.env), historyCwd)
+      const historyRecords = loadHistoryRecords(historyFile)
+      lastHistoryContent = historyRecords.at(-1)?.content
+      // File order is oldest-first; TuiApp's recall API takes newest-first,
+      // so the session-filtered projection is reversed at the seed.
+      const sessionRecall = recallHistoryForSession(historyRecords, agent.session.id)
+      app.resetInputHistory([...sessionRecall].reverse())
       setTerminalTitle(`dsh-pi-tui · ${shortCwd(sessionCwd())} · ${agent.session.id}`)
       updateWelcomeCard()
       registerCommands({ snapshot: initialSnapshot, skills: initialSkills })
