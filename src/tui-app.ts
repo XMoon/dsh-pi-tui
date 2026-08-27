@@ -9186,12 +9186,13 @@ export class TuiApp {
     const getMode = (): EditorInputMode => this.editor.getInputMode()
     const delegated: import('@xmoon76/pi-tui').AutocompleteProvider = {
       async getSuggestions(lines, cursorLine, cursorCol, options) {
-        // THIS delegated request's generation: minted synchronously at
-        // entry and passed to the host entry (getSuggestionsForGeneration),
-        // so both the host result AND the extension's answer bind to THIS
-        // request — never to a newer one that started while the extension
-        // was in flight.
+        // THIS delegated request's generation AND scope: minted/captured
+        // synchronously at entry (before ANY await), so both the host
+        // result and the extension's answer bind to THIS request — never to
+        // a newer one that started while the extension was in flight, and
+        // never to a session/workspace that switched mid-request.
         const requestGeneration = base.mintRequestGeneration()
+        const requestScope = base.scopeAtRequestTime()
         const host = await base.getSuggestionsForGeneration(requestGeneration, lines, cursorLine, cursorCol, options)
         if (host !== null) return host
         // Preserve the shell-mode natural-trigger suppression: a leading
@@ -9230,9 +9231,10 @@ export class TuiApp {
         // The EXTENSION's suggestions bind the host's stale fence too:
         // the base provider owns the apply-time document/cursor snapshot,
         // and a list the extension produced must be computed against the
-        // SAME editor state (plan §9.2 — a stale ext accept must never
-        // modify a later edit either).
-        return base.captureRequestSnapshot(requestGeneration, lines, cursorLine, cursorCol, result)
+        // SAME editor state + scope (plan §9.2 — a stale ext accept must
+        // never modify a later edit, and an old session's candidate must
+        // never be accepted under a switched session).
+        return base.captureRequestSnapshot(requestGeneration, requestScope, lines, cursorLine, cursorCol, result)
       },
       applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
         // A Stable plugin computes its prefix on the WIRE document it
