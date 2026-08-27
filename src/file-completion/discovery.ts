@@ -100,8 +100,14 @@ export function listDirectChildren(baseDir: string): RawDiscoveryEntry[] {
  * direct children are always complete (a root-level `src/` must be found),
  * deeper entries are capped at MAX_FALLBACK_SCAN. Paths are relative to
  * baseDir (`sub/deep.ts`); `.git` is skipped (kimi parity); symlinked
- * directories are NOT descended (cycle safety). */
-export function scanSubtree(baseDir: string, signal?: AbortSignal): RawDiscoveryEntry[] {
+ * directories are NOT descended (cycle safety).
+ *
+ * ASYNC (plan §25): the `/image` fuzzy fallback runs on the EDITOR path,
+ * so a synchronous whole-tree traversal would block the editor's event
+ * loop per keystroke. The scan yields to the event loop between directory
+ * levels and checks the AbortSignal inside the loop — the editor stays
+ * responsive and a cancelled request stops the traversal promptly. */
+export async function scanSubtree(baseDir: string, signal?: AbortSignal): Promise<RawDiscoveryEntry[]> {
   const candidates: RawDiscoveryEntry[] = []
   let firstEntries
   try {
@@ -117,10 +123,10 @@ export function scanSubtree(baseDir: string, signal?: AbortSignal): RawDiscovery
     candidates.push({ path, isDirectory: entryIsDirectory(baseDir, entry.name, entry) })
     if (entry.isDirectory()) stack.push(path)
   }
-  // Deeper levels: bounded.
+  // Deeper levels: bounded, async, abort-aware.
   let scanned = 0
   while (stack.length > 0 && scanned < MAX_FALLBACK_SCAN) {
-    if (signal?.aborted === true) break
+    if ((signal?.aborted ?? false)) break
     const relativeDir = stack.pop() ?? ''
     let entries
     try {
@@ -139,6 +145,10 @@ export function scanSubtree(baseDir: string, signal?: AbortSignal): RawDiscovery
       candidates.push({ path, isDirectory: entryIsDirectory(join(baseDir, relativeDir), entry.name, entry) })
       if (entry.isDirectory() && !entry.isSymbolicLink()) stack.push(path)
     }
+    // Yield to the event loop between directory levels: the editor stays
+    // responsive during a large-tree fallback (plan §25 — never a
+    // synchronous full-tree traversal on the editor path).
+    if (stack.length > 0) await new Promise<void>(resolve => setImmediate(resolve))
   }
   return candidates
 }
@@ -267,7 +277,10 @@ export async function discoverForQuery(
     // fd FAILURE (not a valid empty result): fall back to the bounded scan.
     if (entries !== null) return entries.map(toCandidate)
   }
-  const entries = scanSubtree(query.searchBase, signal)
+  // The bounded fallback is ASYNC + abort-aware (plan §25): the scan
+  // yields between directory levels and stops on abort, so a large-tree
+  // `/image` fuzzy query never blocks the editor event loop.
+  const entries = await scanSubtree(query.searchBase, signal)
   if (signal.aborted === true) return []
   return entries.map(toCandidate)
 }
