@@ -12,7 +12,8 @@ import test from 'node:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { customThemesDir, darkColors } from '../src/theme.ts'
+import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
+import { customThemesDir, darkColors, settingsListTheme } from '../src/theme.ts'
 import { ThemeRegistry } from '../src/theme-registry.ts'
 import { themePickerRows } from '../src/theme-source.ts'
 import { ThemeSubmenu, themeDisplayName } from '../src/theme-menu.ts'
@@ -207,4 +208,123 @@ test('a selection made before an HMR unload keeps its ORIGINAL identity (never r
   assert.equal(registry.paletteForSelectable('plugin:owner-a/solarized'), undefined,
     'after A unloads the old identity resolves nothing (deterministic fallback)')
   handleB.dispose()
+})
+test('INTEGRATION: the vendored SettingsList submenu chain keeps the outer row FRIENDLY and the reopen marker correct (the review\'s P2)', () => {
+  // Reviewer's exact repro, driven through the REAL fork SettingsList:
+  // 1. the theme row opens a ThemeSubmenu; picking a plugin row fires the
+  //    fork's done contract — `item.currentValue = selectedValue` (RAW
+  //    identity) then outer onChange(selectedValue).
+  // 2. the /settings handler (commands.ts) applies the value AND calls
+  //    revert(friendlyLabel) — the openSettings updateValue seam — so the
+  //    outer row displays the friendly name, never `plugin:acme/solarized`.
+  // 3. reopening the submenu passes the LIVE outer currentValue (now the
+  //    friendly label) → the correct row carries `← current`.
+  const registry = new ThemeRegistry()
+  pluginTheme(registry, 'solarized', 'Solarized')
+  pluginTheme(registry, 'nord', 'Nord')
+
+  // The outer row as the /settings handler builds it (commands.ts shape):
+  // currentValue holds the FRIENDLY label; submenu is the ThemeSubmenu.
+  const outerItems: SettingItem[] = [{
+    id: 'theme',
+    label: 'Theme',
+    currentValue: 'auto',
+    submenu: (currentValue, done) => new ThemeSubmenu(currentValue, registry, (picked) => {
+      if (picked !== undefined) done(picked)
+      else done()
+    }),
+  }]
+
+  // A faithful miniature of TuiApp.openSettings: the fork ALREADY mutated
+  // the row's currentValue to the raw selected value before onChange; the
+  // revert callback rewrites the DISPLAYED value (updateValue).
+  const applied: string[] = []
+  let settledValue: string | undefined
+  let list: SettingsList | undefined
+  list = new SettingsList(
+    outerItems,
+    6,
+    settingsListTheme(),
+    (_id, value) => {
+      // The fork has written the RAW identity into the row.
+      assert.equal(outerItems[0]?.currentValue, value,
+        'the fork contract: item.currentValue = raw selected value BEFORE onChange')
+      // The /settings handler's behavior: apply the identity (persist),
+      // then rewrite the display back to the friendly label.
+      applied.push(value)
+      settledValue = value
+      const friendly = themeDisplayName(value, registry)
+      list?.updateValue('theme', friendly)
+    },
+    () => {},
+    { enableSearch: true },
+  )
+  const outer = (): string => list!.render(80).join('\n')
+
+  // Open the Theme submenu and select the Solarized plugin row.
+  list!.handleInput('\r') // activate the theme row → submenu opens
+  let rendered = list!.render(80).join('\n')
+  // The submenu shows the plugin label, not the raw identity.
+  assert.ok(rendered.includes('Solarized'), `submenu shows the friendly label:\n${rendered}`)
+  assert.ok(!rendered.includes('plugin:acme'), `submenu never shows a raw identity:\n${rendered}`)
+  // The submenu is a SettingsList; its first row is 'auto'. Move down to
+  // Solarized (auto, dark, light, then plugin rows sorted: Nord, Solarized)
+  // — the submenu's own handleInput consumes everything now.
+  list!.handleInput('\x1b[B') // dark
+  list!.handleInput('\x1b[B') // light
+  list!.handleInput('\x1b[B') // Nord
+  list!.handleInput('\x1b[B') // Solarized
+  list!.handleInput('\r') // select Solarized → done(plugin:acme-plugin/solarized)
+  // After the pick: the applied identity is the source-qualified value.
+  assert.deepEqual(applied, ['plugin:acme-plugin/solarized'])
+  assert.equal(settledValue, 'plugin:acme-plugin/solarized')
+  // The OUTER row displays the FRIENDLY label (the revert/updateValue
+  // seam rewrote it) — never the raw identity.
+  rendered = outer()
+  assert.ok(rendered.includes('Theme') && rendered.includes('Solarized'), `outer row shows the friendly label:\n${rendered}`)
+  assert.ok(!rendered.includes('plugin:acme-plugin/solarized'), `outer row must NOT show the raw identity:\n${rendered}`)
+
+  // Reopen the submenu: the fork passes the LIVE outer currentValue (the
+  // friendly label after the rewrite); the Solarized row carries
+  // `← current` (not the panel-open 'auto').
+  list!.handleInput('\r') // reopen
+  rendered = list!.render(80).join('\n')
+  assert.ok(rendered.includes('← current'), `the reopen marks a current row:\n${rendered}`)
+  // Exactly the Solarized label row is marked.
+  const markedLines = rendered.split('\n').filter(line => line.includes('Solarized'))
+  assert.ok(markedLines.some(line => line.includes('← current')), `Solarized row is the current one:\n${rendered}`)
+  const nordMarked = rendered.split('\n').filter(line => line.includes('Nord') && line.includes('← current'))
+  assert.equal(nordMarked.length, 0, `Nord must not be marked:\n${rendered}`)
+})
+
+test('the claim algorithm disambiguates a GENERATED suffix against a same-source real name (the review\'s P3/P2)', async () => {
+  // Reviewer's repro: a plugin whose REAL display name is `X (plugin)`
+  // collides with the GENERATED label of another plugin `X` (which was
+  // itself tagged against a file `X`). Same source ('plugin'), so the old
+  // `used.get(label) !== source` guard skipped it — two rows looked
+  // identical. The fixed claim tags until unique regardless of source.
+  const registry = new ThemeRegistry()
+  // File rows come first: X.json claims bare 'X' (customThemeNames reads
+  // the FILE BASENAME — the content name is irrelevant to the picker).
+  const filePath = join(customThemesDir(), 'X.json')
+  mkdirSync(customThemesDir(), { recursive: true })
+  writeFileSync(filePath, JSON.stringify({ name: 'X', colors: { primary: '#334455' } }))
+  try {
+    // Plugin A: id a, name 'X' → collides with the FILE's 'X' → tagged
+    // 'X (plugin)'.
+    registry.register({ id: 'a', name: 'X', palette: { text: '#111111' } as never }, 'oa', 'pluginA')
+    // Plugin B: id b, name 'X (plugin)' (a REAL display name) → must be
+    // tagged AGAIN (e.g. 'X (plugin 2)'), never a duplicate label.
+    registry.register({ id: 'b', name: 'X (plugin)', palette: { text: '#222222' } as never }, 'ob', 'pluginB')
+    const rows = themePickerRows(registry)
+    const labels = rows.map(row => row.displayName)
+    assert.equal(new Set(labels).size, labels.length, `labels must be unique: ${JSON.stringify(rows)}`)
+    const xPlugin = rows.find(row => row.value === 'plugin:pluginA/a')
+    const xPluginTagged = rows.find(row => row.value === 'plugin:pluginB/b')
+    assert.equal(xPlugin?.displayName, 'X (plugin)')
+    assert.ok(xPluginTagged !== undefined && xPluginTagged.displayName !== 'X (plugin)',
+      `the second plugin must get a unique label, got ${xPluginTagged?.displayName}`)
+  } finally {
+    rmSync(filePath, { force: true })
+  }
 })

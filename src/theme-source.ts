@@ -129,35 +129,42 @@ export function themePickerRows(themes: ThemeRegistry | undefined): readonly {
   // taken suffixed label is tagged again, never silently duplicated.
   const used = new Map<string, 'builtin' | 'file' | 'plugin'>()
   const claim = (
-    value: string,
     displayName: string,
     source: 'builtin' | 'file' | 'plugin',
   ): string => {
-    let label = displayName
-    if (used.has(label) && used.get(label) !== source) {
-      label = `${displayName} (${source})`
-      // A file may already be named `X (plugin)`; keep tagging until the
-      // label is unique (the suffix is a label, never an identity).
-      let n = 2
-      while (used.has(label)) {
-        label = `${displayName} (${source} ${n})`
-        n += 1
-      }
+    // ANY taken label forces a new unique one — regardless of whether the
+    // previous holder is the SAME source (the review's P3/P2: a generated
+    // `X (plugin)` suffix label can collide with ANOTHER plugin's real
+    // display name `X (plugin)`; original names are unique within a source
+    // by the registry/filesystem, but GENERATED labels have no such
+    // guarantee). Keep tagging until the label is unique.
+    if (!used.has(displayName)) {
+      used.set(displayName, source)
+      return displayName
+    }
+    // The plain label is taken: tag with the source, then keep tagging
+    // until unique (a file may already be named `X (plugin)`; the suffix
+    // is a label, never an identity).
+    let label = `${displayName} (${source})`
+    let n = 2
+    while (used.has(label)) {
+      label = `${displayName} (${source} ${n})`
+      n += 1
     }
     used.set(label, source)
     return label
   }
   const claimedBuiltins = builtins.map(row => ({
     value: row.value,
-    displayName: claim(row.value, row.displayName, 'builtin'),
+    displayName: claim(row.displayName, 'builtin'),
   }))
   const claimedFiles = files.map(row => ({
     value: row.value,
-    displayName: claim(row.value, row.displayName, 'file'),
+    displayName: claim(row.displayName, 'file'),
   }))
   const claimedPlugins = plugins.map(row => ({
     value: row.value,
-    displayName: claim(row.value, row.displayName, 'plugin'),
+    displayName: claim(row.displayName, 'plugin'),
   }))
   return [...claimedBuiltins, ...claimedFiles, ...claimedPlugins]
 }

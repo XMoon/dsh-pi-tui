@@ -1438,6 +1438,16 @@ export function registerTuiCommands(
               if (settings !== undefined) {
                 detach('settings theme write', () => settings.replace({ ...settings.get(), theme: qualified }) as Promise<unknown>, { notify: true })
               }
+              // The fork's SettingsList submenu contract writes the RAW
+              // selected value into the outer row's currentValue
+              // (`item.currentValue = selectedValue` BEFORE onChange) — so
+              // the theme row would display `plugin:acme/solarized` until
+              // the panel closes. Rewrite it back to the FRIENDLY label
+              // through the openSettings updateValue seam (the revert
+              // callback), so the visible row stays `Solarized` and a
+              // re-open of the submenu marks the right `← current` (the
+              // review's P2).
+              revert(themeDisplayNameOf(qualified, runner.extensions?.themes))
             }
           } else if (id.startsWith('ext-setting:')) {
             // M5: a plugin-registered settings row change. The row's own

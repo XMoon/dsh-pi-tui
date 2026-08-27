@@ -25,7 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry read side gained `selectableValues()` /
   `paletteForSelectable()` / `displayNameForSelectable()` /
   `hasSelectable()`; the health protocol addresses themes by selectable
-  value only.
+  value only. The `/settings` theme picker carries the identity end-to-end
+  (row ids ARE the source-qualified values; display labels are
+  presentational only and never round-trip back — a selection frozen at
+  open time is never redirected to a same-named new contribution under
+  HMR, and labels are unique across builtin/file/plugin including
+  user-mimicked `(file)`/`(plugin)` suffixes). After a pick the outer row
+  is rewritten back to the friendly label through the openSettings
+  updateValue seam (never a raw `plugin:` string), and a re-open marks
+  the right `← current`.
 - **The theme-unload hook is now generation-leased.** The runner's
   `setThemeUnloadedHook` returns a disposer, and only the CURRENT
   generation's disposer clears the callback — an old runner's HMR cleanup
