@@ -78,8 +78,9 @@ function entryIsDirectory(
 }
 
 /** The DIRECT children of one directory (a scoped listing): paths are
- * bare entry names. A missing/unreadable directory yields [] (the caller
- * shows nothing — never a crash). */
+ * bare entry names. `.git` is skipped (consistent with fd and the
+ * recursive scan — a `@` or `/image` listing never presents VCS
+ * internals). A missing/unreadable directory yields [] (never a crash). */
 export function listDirectChildren(baseDir: string): RawDiscoveryEntry[] {
   let entries
   try {
@@ -89,6 +90,7 @@ export function listDirectChildren(baseDir: string): RawDiscoveryEntry[] {
   }
   const out: RawDiscoveryEntry[] = []
   for (const entry of entries) {
+    if (entry.name === '.git') continue
     out.push({ path: entry.name, isDirectory: entryIsDirectory(baseDir, entry.name, entry) })
   }
   return out
@@ -145,13 +147,15 @@ export function scanSubtree(baseDir: string, signal?: AbortSignal): RawDiscovery
  * `--base-directory`; directories are classified against the fs (fd's
  * default print format does not guarantee a trailing `/` — the fork's
  * rule: statSync follows symlinks, so a symlink dir still completes with
- * `/`). A failed/aborted run yields [] (never a crash). */
+ * `/`). Returns NULL on fd FAILURE (non-zero exit, spawn error — NOT a
+ * valid empty result: the caller falls back to the bounded scan), `[]` on
+ * a genuine no-match or an abort. */
 export function discoverWithFd(
   fdPath: string,
   baseDir: string,
   term: string,
   signal: AbortSignal,
-): Promise<RawDiscoveryEntry[]> {
+): Promise<RawDiscoveryEntry[] | null> {
   const args = [
     '--base-directory', baseDir,
     '--max-results', String(MAX_FD_RESULTS),
@@ -166,8 +170,13 @@ export function discoverWithFd(
   // fd matches the query against the basename by default (substring,
   // smart-case): for a basename term that is exactly the scoring model's
   // input. A scoped query runs inside its own baseDir, so the term never
-  // contains a separator here — no --full-path needed.
-  if (term !== '') args.push(term)
+  // contains a separator here — no --full-path needed. fd's default
+  // pattern is a REGEX — a user's literal term containing regex
+  // metacharacters (`foo[1].ts`, `a+b.ts`) would silently match nothing,
+  // so the term is escaped to its literal form (the completion contract
+  // is substring matching of the literal text, not regex). The filenames
+  // themselves (candidate paths fd prints) are taken VERBATIM.
+  if (term !== '') args.push(escapeFdRegex(term))
   return new Promise((resolve) => {
     if (signal.aborted) {
       resolve([])
@@ -176,7 +185,8 @@ export function discoverWithFd(
     const child = spawn(fdPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let settled = false
-    const settle = (results: RawDiscoveryEntry[]): void => {
+    let failed = false
+    const settle = (results: RawDiscoveryEntry[] | null): void => {
       if (settled) return
       settled = true
       signal.removeEventListener('abort', onAbort)
@@ -188,10 +198,17 @@ export function discoverWithFd(
     signal.addEventListener('abort', onAbort, { once: true })
     child.stdout.setEncoding('utf-8')
     child.stdout.on('data', (chunk: string) => { stdout += chunk })
-    child.on('error', () => settle([]))
+    child.on('error', () => settle(null))
     child.on('close', (code) => {
-      if (signal.aborted || code !== 0 || !stdout) {
+      if (signal.aborted) {
         settle([])
+        return
+      }
+      if (code !== 0) {
+        // fd FAILED (missing binary race, malformed invocation, cwd
+        // permission): NOT a valid empty result — the bounded scan
+        // fallback must answer (plan §6.2 fd-first-fallback).
+        settle(null)
         return
       }
       const lines = stdout.trim().split('\n').filter((line) => line !== '')
@@ -240,11 +257,19 @@ export async function discoverForQuery(
   if (source.fdPath !== null && !query.winAbsolute) {
     const entries = await discoverWithFd(source.fdPath, query.searchBase, query.searchTerm, signal)
     if (signal.aborted) return []
-    return entries.map(toCandidate)
+    // fd FAILURE (not a valid empty result): fall back to the bounded scan.
+    if (entries !== null) return entries.map(toCandidate)
   }
   const entries = scanSubtree(query.searchBase, signal)
   if (signal.aborted === true) return []
   return entries.map(toCandidate)
+}
+
+/** Escape regex metacharacters for fd's default regex pattern: the
+ * completion term is a LITERAL substring (the scoring model's input), so
+ * a filename containing `[`, `+`, `.` etc. must match as literal text. */
+function escapeFdRegex(term: string): string {
+  return term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 /** Map one raw discovery fact onto the detached candidate DTO. */

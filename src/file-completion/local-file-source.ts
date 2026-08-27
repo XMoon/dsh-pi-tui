@@ -16,10 +16,11 @@ import { resolveFdPath } from './discovery.ts'
 export class LocalFileSource implements DiscoverySource {
   private readonly fdPathValue: string | null
 
-  /** @param fdPath - the Client's fd/fdfind executable; defaults to the
-   *   PATH probe; tests inject `null` to pin the bounded fallback. */
-  constructor(fdPath: string | null = resolveFdPath()) {
-    this.fdPathValue = fdPath
+  /** @param fdPath - the Client's fd/fdfind executable; `undefined` (the
+   *   default) probes PATH, `null` FORCES the bounded fallback (no fd), a
+   *   string pins one finder. */
+  constructor(fdPath: string | null | undefined = undefined) {
+    this.fdPathValue = fdPath === undefined ? resolveFdPath() : fdPath
   }
 
   get fdPath(): string | null {

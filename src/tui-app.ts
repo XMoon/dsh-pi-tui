@@ -9188,6 +9188,11 @@ export class TuiApp {
       async getSuggestions(lines, cursorLine, cursorCol, options) {
         const host = await base.getSuggestions(lines, cursorLine, cursorCol, options)
         if (host !== null) return host
+        // The generation of THIS host request (minted by the host call
+        // above): the extension's answer binds to it — a newer request
+        // that started while the extension was in flight must not be
+        // overwritten by its late result.
+        const requestGeneration = base.captureRequestGeneration()
         // Preserve the shell-mode natural-trigger suppression: a leading
         // `/` on ANY line of a shell-mode document is a PATH, and the
         // host provider deliberately stays quiet until Tab — the plugin
@@ -9226,7 +9231,7 @@ export class TuiApp {
         // and a list the extension produced must be computed against the
         // SAME editor state (plan §9.2 — a stale ext accept must never
         // modify a later edit either).
-        return base.captureRequestSnapshot(lines, cursorLine, cursorCol, result)
+        return base.captureRequestSnapshot(requestGeneration, lines, cursorLine, cursorCol, result)
       },
       applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
         // A Stable plugin computes its prefix on the WIRE document it

@@ -256,6 +256,14 @@ export class MentionProvider implements AutocompleteProvider {
    * document (the prefix-only fence misses edits elsewhere on the line,
    * e.g. `hello @foo` → `world @foo`). */
   private requestSnapshot: { lines: readonly string[]; cursorLine: number; cursorCol: number; mode: EditorInputMode } | null = null
+  /** The monotonically increasing request generation (plan §9.2 latest-
+   * only): minted at REQUEST START (getSuggestions entry). A result —
+   * host OR extension — captures its snapshot ONLY IF its minted
+   * generation is still the latest; a late answer from an older request
+   * (a provider that ignores AbortSignal) can never overwrite a NEWER
+   * request's snapshot, so the next legitimate accept is not wrongly
+   * fenced. */
+  private requestGeneration = 0
 
   constructor(
     slashCommands: readonly SlashCommand[],
@@ -263,7 +271,7 @@ export class MentionProvider implements AutocompleteProvider {
     fileReferences: HostReferencesSeam | null,
     inputModeSource: () => EditorInputMode = () => 'prompt',
     scope: MentionScope | (() => MentionScope) = { kind: 'workspace', cwd: workDir },
-    localFdPath: string | null = null,
+    localFdPath: string | null | undefined = undefined,
   ) {
     this.workDir = workDir
     this.fileReferences = fileReferences ?? NO_HOST_REFERENCES
@@ -271,11 +279,13 @@ export class MentionProvider implements AutocompleteProvider {
     this.scopeOf = typeof scope === 'function' ? scope : () => scope
     this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, null)
     this.pathArgumentCommands = FILE_ARGUMENT_COMMANDS
-    // `/image`'s discovery source: the CLIENT's own filesystem. `localFdPath`
-    // is a test pin (null = the bounded local fallback, deterministic);
-    // the DEFAULT is the PATH probe (fd then fdfind — plan §12), so the
-    // installed surface shares the finder with `@`.
-    this.localSource = new LocalFileSource(localFdPath === null ? resolveFdPath() : localFdPath)
+    // `/image`'s discovery source: the CLIENT's own filesystem.
+    // `localFdPath` is a test/API pin: UNDEFINED (the default) probes PATH
+    // (fd then fdfind — plan §12), `null` FORCES the bounded local
+    // fallback (deterministic tests), a string pins the finder.
+    this.localSource = localFdPath === undefined
+      ? new LocalFileSource(resolveFdPath())
+      : new LocalFileSource(localFdPath)
   }
 
   /** The virtual serialized line for a shell-mode editor position on the
@@ -317,6 +327,11 @@ export class MentionProvider implements AutocompleteProvider {
   ): Promise<AutocompleteSuggestions | null> {
     const currentLine = lines[cursorLine] ?? ''
     const textBeforeCursor = currentLine.slice(0, cursorCol)
+    // Mint THIS request's generation: the snapshot capture below only
+    // binds when this call is still the latest (a late result from an
+    // older request — a provider or the extension chain ignoring
+    // AbortSignal — must never overwrite a newer request's snapshot).
+    const generation = ++this.requestGeneration
     // 1. The SHELL-BRIDGE grammar first (a `!` line's first word is a
     // command name; a path position falls through). The bridge never
     // competes with file completion.
@@ -341,10 +356,10 @@ export class MentionProvider implements AutocompleteProvider {
       : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands)
 
     if (context.kind === 'mention') {
-      return this.withRequestSnapshot(lines, cursorLine, cursorCol, await this.completeMention(context.query, options.signal))
+      return this.withRequestSnapshot(generation, lines, cursorLine, cursorCol, await this.completeMention(context.query, options.signal))
     }
     if (context.kind === 'image-argument') {
-      return this.withRequestSnapshot(lines, cursorLine, cursorCol, await this.completeImageArgument(context.query, options.signal))
+      return this.withRequestSnapshot(generation, lines, cursorLine, cursorCol, await this.completeImageArgument(context.query, options.signal))
     }
 
     // 3. Shell-mode natural-trigger suppression (mirrors the pre-plan
@@ -364,7 +379,7 @@ export class MentionProvider implements AutocompleteProvider {
     if (semantic !== null || literalShellLine) {
       try {
         const result = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
-        return this.withRequestSnapshot(lines, cursorLine, cursorCol, result)
+        return this.withRequestSnapshot(generation, lines, cursorLine, cursorCol, result)
       } catch {
         return null
       }
@@ -464,13 +479,18 @@ export class MentionProvider implements AutocompleteProvider {
   /** Capture the request state right before a non-null suggestion result
    * is returned: the apply fence later requires the EXACT same document +
    * cursor + mode (plan §9.2 — the strong stale check). A null result
-   * clears the snapshot (nothing to accept). */
+   * clears the snapshot (nothing to accept). ONLY the LATEST request
+   * binds: a result minted for an OLDER generation (a late answer from a
+   * provider/extension that ignored AbortSignal) is dropped, so it cannot
+   * fence a newer request. */
   private withRequestSnapshot<T extends AutocompleteSuggestions | null>(
+    generation: number,
     lines: readonly string[],
     cursorLine: number,
     cursorCol: number,
     result: T,
   ): T {
+    if (generation !== this.requestGeneration) return result
     if (result === null) this.requestSnapshot = null
     else this.requestSnapshot = {
       lines: [...lines],
@@ -484,14 +504,26 @@ export class MentionProvider implements AutocompleteProvider {
   /** PUBLIC test/app seam (plan §9.2): the DELEGATING provider (the app's
    * M5 wrap) captures the host snapshot when the EXTENSION chain answers —
    * the base provider still owns the stale fence, but a suggestion list it
-   * did not produce must bind the state it was computed against. */
+   * did not produce must bind the state it was computed against. The
+   * DELEGATED call passes the generation minted by its own host
+   * getSuggestions (the `captureRequestGeneration` seam): a late
+   * extension answer from an OLDER request — a newer request already
+   * started — does not bind (exactly like a late host result). */
   captureRequestSnapshot(
+    generation: number,
     lines: readonly string[],
     cursorLine: number,
     cursorCol: number,
     result: AutocompleteSuggestions | null,
   ): AutocompleteSuggestions | null {
-    return this.withRequestSnapshot(lines, cursorLine, cursorCol, result)
+    return this.withRequestSnapshot(generation, lines, cursorLine, cursorCol, result)
+  }
+
+  /** The generation the host's getSuggestions call minted (the delegated
+   * wrap reads it right after the host settles, so the extension's answer
+   * binds to THIS request — even if a newer one started mid-await). */
+  captureRequestGeneration(): number {
+    return this.requestGeneration
   }
 
   /** Whether the editor state still EXACTLY matches the request that
