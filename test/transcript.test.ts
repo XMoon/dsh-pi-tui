@@ -1190,11 +1190,54 @@ test('a replacement does not disturb consecutive-read grouping or the window sum
   assert.equal(afterTools.length, 1, 'the group must not gain a member')
   assert.equal(afterTools[0]?.args, '2 files', 'the group card must keep "2 files"')
   assert.ok((afterTools[0]?.result ?? '').includes('aaa') && (afterTools[0]?.result ?? '').includes('bbb'), 'the grouped result must keep both originals')
-  // The window summary counts grouped cards, and the replacement must not
-  // change the collapsed history's tool count.
-  const windowed = foldTranscript([...events, rawEvent('compaction/prune', { shadowedRange: { start: 2, end: 2 }, shadowedSeqs: [2], shadowedTokenCount: 1 }, 5), pruneReplacement(6, 'r1', 'aaa-pruned', 2)], { maxTurns: 5 })
-  assert.equal(windowed[0]?.kind, 'tool', 'one recent turn fits the window; no summary noise')
-  assert.equal(windowed.filter(message => message.kind === 'tool').length, 1, 'the windowed view keeps exactly the grouped read card')
+})
+
+test('window summaries stay identical across a prune replacement', () => {
+  const readResult = (seq: number, callId: string, text: string): SessionEvent => surfaceEvent('tool/result', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId(`msg-${seq}`),
+      role: 'user',
+      content: [{
+        type: 'tool-result',
+        toolCallId: CallId(callId),
+        content: [{ type: 'text', text }],
+      }],
+      source: { kind: 'tool', callId: CallId(callId) },
+    },
+  }, seq, 'append')
+  // Three turns: turn 0 = one grouped read pair, turn 1 = a bash call,
+  // turn 2 = a user prompt. A maxTurns=2 window collapses turn 0.
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    readResult(2, 'r1', 'aaa'),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
+    readResult(4, 'r2', 'bbb'),
+    event('turn/start', { turn: 1 }, 5),
+    event('tool/call', { turn: 1, step: 0, callId: CallId('b1'), name: 'bash', arguments: '{}' }, 6),
+    toolResult(7, 'b1', 'bash result'),
+    event('turn/start', { turn: 2 }, 8),
+    surfaceEvent('user/message', {
+      id: MessageId('msg-9'), role: 'user',
+      content: [{ type: 'text', text: 'newest question' }],
+      source: { kind: 'user' },
+    }, 9, 'append'),
+  ]
+  const before = foldTranscript(events, { maxTurns: 2 })
+  const summary = before[0]
+  assert.ok(summary !== undefined && summary.kind === 'summary', `expected a leading summary:\n${JSON.stringify(before)}`)
+  assert.ok(summary.text.includes('1 earlier turn'), `summary text:\n${summary.text}`)
+  assert.ok(summary.text.includes('1 tool call'), `summary must collapse the grouped read pair as ONE card:\n${summary.text}`)
+  // A prune replacement of the first read lands at the tail (the original
+  // accident's shape — the ghost card appears at the transcript tail).
+  const after = foldTranscript([
+    ...events,
+    rawEvent('compaction/prune', { shadowedRange: { start: 2, end: 2 }, shadowedSeqs: [2], shadowedTokenCount: 1 }, 10),
+    pruneReplacement(11, 'r1', 'aaa-pruned', 2),
+  ], { maxTurns: 2 })
+  assert.deepEqual(after, before, 'the windowed projection must be byte-identical after a replacement')
 })
 
 test('a replacement assistant/message does not mutate Focus activity', () => {
