@@ -120,16 +120,16 @@ export function imageArgumentOf(
   if (separatorIndex <= 0) return undefined
   const commandName = trimmedStart.slice(1, separatorIndex)
   if (!pathArgumentCommands.has(commandName)) return undefined
-  // The argument is everything after the FIRST separator character. The
-  // fork's combined provider hands the argument branch the same slice
+  // The argument is everything after the FIRST separator character AFTER
+  // THE COMMAND NAME — i.e. on the TRIMMED string, then translated back to
+  // the ORIGINAL line (leading whitespace before `/image` is indentation,
+  // not a separator; searching the original string for the first
+  // whitespace would match that indentation and fail the <= 0 guard).
+  // The fork's combined provider hands the argument branch the same slice
   // (textBeforeCursor.slice(spaceIndex + 1)), so leading separator
   // whitespace belongs to the ARGUMENT and the completed value keeps it.
-  // The textBeforeCursor is trimmed at the start, but the argument slice
-  // must start at the ORIGINAL separator (first whitespace of the ORIGINAL
-  // line, not the trimmed one) — the separator search above ran on the
-  // trimmed string, so re-find it on the original.
-  const originalSeparator = textBeforeCursor.search(SLASH_SEPARATOR)
-  if (originalSeparator <= 0) return undefined
+  const trimOffset = textBeforeCursor.length - textBeforeCursor.trimStart().length
+  const originalSeparator = trimOffset + separatorIndex
   return textBeforeCursor.slice(originalSeparator + 1)
 }
 

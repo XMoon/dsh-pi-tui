@@ -444,7 +444,13 @@ export class MentionProvider implements AutocompleteProvider {
       quoted = true
       token = token.slice(1)
       const close = token.indexOf('"')
-      if (close !== -1) token = token.slice(0, close)
+      if (close !== -1) {
+        // A CLOSED quote: the token is complete — completing further is
+        // wrong, and if ANYTHING follows the closing quote (`/image "my"foo`)
+        // the fork's whole-argument-range apply would delete that text.
+        // Stay quiet (the dropdown is closed in this state anyway).
+        return null
+      }
     } else if (token.includes(' ') || token.includes('\t')) {
       // Unquoted: a space is a word boundary — completing a later word
       // would clobber the earlier ones (the fork's whole-range apply).
