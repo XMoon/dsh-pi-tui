@@ -9,13 +9,13 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
-import { customThemesDir, darkColors, settingsListTheme } from '../src/theme.ts'
+import { customThemesDir, darkColors, loadCustomTheme, settingsListTheme } from '../src/theme.ts'
 import { ThemeRegistry } from '../src/theme-registry.ts'
-import { themePickerRows } from '../src/theme-source.ts'
+import { resolveThemeSelection, themePickerRows } from '../src/theme-source.ts'
 import { ThemeSubmenu, themeDisplayName } from '../src/theme-menu.ts'
 
 /** Register one plugin theme into a fresh registry. */
@@ -329,6 +329,62 @@ test('INTEGRATION: the vendored SettingsList submenu chain keeps the outer row F
   assert.ok(markedLines.some(line => line.includes('← current')), `Solarized row is the current one:\n${rendered}`)
   const nordMarked = rendered.split('\n').filter(line => line.includes('Nord') && line.includes('← current'))
   assert.equal(nordMarked.length, 0, `Nord must not be marked:\n${rendered}`)
+})
+
+test('a persisted `file:` value with traversal can never read outside the themes directory (the review\'s P2 security hardening)', () => {
+  // A `file:<name>` value survives in the settings document, so the name is
+  // UNTRUSTED input: `..`, path separators, control characters and empty
+  // names must resolve NOTHING (the deterministic missing-theme fallback),
+  // never a file outside ~/.dsh-pi-tui/themes.
+  const traversal = [
+    'file:../../etc/passwd',
+    'file:..',
+    'file:.',
+    'file:../sibling.json',
+    'file:sub/dir',
+    'file:sub\\dir',
+    'file:',
+    'file:a\u0000b',
+    'file:a\u001fb',
+  ]
+  for (const value of traversal) {
+    assert.equal(resolveThemeSelection(value, undefined), undefined,
+      `a traversal/unsafe file value must not resolve: ${JSON.stringify(value)}`)
+  }
+  // loadCustomTheme itself refuses unsafe names at the fs seam (the
+  // single shared loader).
+  assert.equal(loadCustomTheme('../../etc/passwd'), undefined)
+  assert.equal(loadCustomTheme('..'), undefined)
+  assert.equal(loadCustomTheme('sub/dir'), undefined)
+  assert.equal(loadCustomTheme(''), undefined)
+  // Safe names still work end-to-end.
+  const name = `safe-${randomUUID()}`
+  const filePath = join(customThemesDir(), `${name}.json`)
+  mkdirSync(customThemesDir(), { recursive: true })
+  writeFileSync(filePath, JSON.stringify({ name, colors: { primary: '#010203' } }))
+  try {
+    const selection = resolveThemeSelection(`file:${name}`, undefined)
+    assert.ok(selection !== undefined, 'a legitimate directory-local file still resolves')
+    assert.equal(selection.kind, 'file')
+    // A symlink inside the themes directory pointing OUTSIDE it is not
+    // honored (the themes directory is the trust boundary — the probe
+    // target lives in the PARENT directory, never inside the themes dir).
+    const outside = join(dirname(customThemesDir()), `dsh-pi-tui-escape-probe-${randomUUID()}.json`)
+    writeFileSync(outside, JSON.stringify({ name: 'outside', colors: { primary: '#040506' } }))
+    const linkPath = join(customThemesDir(), `link-${randomUUID()}.json`)
+    try {
+      symlinkSync(outside, linkPath)
+      const linkName = linkPath.slice(customThemesDir().length + 1, -'.json'.length)
+      const linkSelection = resolveThemeSelection(`file:${linkName}`, undefined)
+      assert.equal(linkSelection, undefined,
+        'a symlink escaping the themes directory must not resolve')
+    } finally {
+      rmSync(linkPath, { force: true })
+      rmSync(outside, { force: true })
+    }
+  } finally {
+    rmSync(filePath, { force: true })
+  }
 })
 
 test('the claim algorithm disambiguates a GENERATED suffix against a same-source real name (the review\'s P3/P2)', async () => {
