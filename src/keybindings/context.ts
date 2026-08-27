@@ -20,6 +20,10 @@ export interface KeybindingContextState {
    * rule predicate needs it — the live editor must not be read on every
    * keystroke). */
   readonly editorEmpty?: boolean | (() => boolean)
+  /** A boolean, or a LAZY thunk (same lazy contract as editorEmpty).
+   * Defaults to true: a context that does not know the editor's input
+   * mode keeps the affordance behavior unchanged. */
+  readonly editorPromptMode?: boolean | (() => boolean)
   readonly autocompleteActive?: boolean
   readonly tasksActive?: boolean
   readonly focusedSeat?: 'editor' | 'overlay' | 'editor-panel' | 'none'
@@ -31,6 +35,7 @@ export interface KeybindingContextState {
  * directly. */
 export function deriveKeybindingContext(state: KeybindingContextState = {}): KeybindingContext {
   const editorEmpty = state.editorEmpty ?? true
+  const editorPromptMode = state.editorPromptMode ?? true
   return {
     focusedSeat: state.focusedSeat ?? 'editor',
     questionActive: state.questionActive ?? false,
@@ -44,6 +49,9 @@ export function deriveKeybindingContext(state: KeybindingContextState = {}): Key
     // read per printable key). The getter defers to the thunk.
     get editorEmpty() {
       return typeof editorEmpty === 'function' ? editorEmpty() : editorEmpty
+    },
+    get editorPromptMode() {
+      return typeof editorPromptMode === 'function' ? editorPromptMode() : editorPromptMode
     },
     autocompleteActive: state.autocompleteActive ?? false,
     tasksActive: state.tasksActive ?? false,

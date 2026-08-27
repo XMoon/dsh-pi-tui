@@ -3408,6 +3408,9 @@ export class TuiApp {
       overlayActive: this.activeScreen.hasOverlayEntries,
       agentRunning: this.busy,
       editorEmpty: () => this.seatEditor().getText().trim() === '',
+      // LAZY like editorEmpty: the VISIBLE seat editor's input mode decides
+      // (a plugin editor is prompt semantics — see seatInputMode).
+      editorPromptMode: () => this.seatInputMode() === 'prompt',
       autocompleteActive: (this.seatEditor() as { isShowingAutocomplete?: () => boolean }).isShowingAutocomplete?.() === true,
       tasksActive: this.tasksActive,
     })
