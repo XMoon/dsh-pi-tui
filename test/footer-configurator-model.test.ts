@@ -182,8 +182,11 @@ test('Move Mode: M enters, ↑↓ reorder within the zone, Enter/Esc exits', () 
   assert.deepEqual(state.layout.rows[0]!.right.map(ref => ref.id), [], 'the right zone is untouched')
   m.activate()
   assert.equal(m.state().mode, 'row')
-  // Esc also exits Move Mode.
+  // Esc exits Move Mode back to the row editor (the plan's "Enter/Esc
+  // Done") — never straight to the Row Selector.
   m.startMove()
+  m.cancel()
+  assert.equal(m.state().mode, 'row')
   m.cancel()
   assert.equal(m.state().mode, 'rows', 'Esc from a row page returns to the Row Selector')
 })

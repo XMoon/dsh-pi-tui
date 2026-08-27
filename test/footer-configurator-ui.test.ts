@@ -165,6 +165,14 @@ test('M enters Move Mode; arrows reorder; Enter exits', async () => {
   vt.sendInput('\r') // exit Move Mode
   await vt.waitForRender()
   assert.equal(model.state().mode, 'row')
+  // Esc exits Move Mode back to the row editor too (never a page skip to
+  // the Row Selector — the plan's "Enter/Esc Done").
+  vt.sendInput('m')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Edit Row 1'), `Move Mode's Esc must return to the row editor:\n${view}`)
   app.stop()
 })
 
@@ -312,6 +320,51 @@ test('an UNKNOWN item id renders its label SANITIZED (control chars never reach 
   assert.ok(!view.includes('\u001b'), `an ESC must never reach the panel:\n${view}`)
   assert.ok(!view.includes('\u0007'), `a BEL must never reach the panel:\n${view}`)
   assert.ok(view.includes('ext:gone/'), `the sanitized label must still show the id text:\n${view}`)
+  app.stop()
+})
+
+test('KNOWN-item ref fields are sanitized too (prefix/suffix/format display boundaries)', async () => {
+  const { vt, app } = startApp()
+  // The item must actually RENDER in the preview (a model badge needs a
+  // model in the snapshot).
+  app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
+  // The parser rejects control characters in ids/prefix/suffix but
+  // ACCEPTS unknown format strings, and the model accepts any
+  // FooterLayoutV1 — the panel is the last display boundary, so a
+  // hand-built ref must not paint ESC/OSC sequences through the style
+  // column, the item preview or the pickers.
+  const model = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{
+      left: [{
+        id: 'model',
+        prefix: 'P\u001b]52;c;bWFsaWNpb3Vz\u0007',
+        suffix: 'S\u001b[2J',
+        format: 'ba\u001bdge',
+      }],
+      right: [],
+    }],
+  }, app.getFooterItemRegistry())
+  app.openFooterConfigurator({
+    model,
+    registry: app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1 (the style column shows the format)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\u001b'), `an ESC must never reach the row page:\n${view}`)
+  assert.ok(!view.includes('\u0007'), `a BEL must never reach the row page:\n${view}`)
+  assert.ok(view.includes('Badge'), `the sanitized style keeps its readable text:\n${view}`)
+  // The item editor's preview renders the DECORATED item (prefix/suffix
+  // applied): the same strip must hold there.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\u001b') && !view.includes('\u0007'), `the item pages must sanitize the decoration too:\n${view}`)
+  assert.ok(view.includes('bWFsaWNpb3Vz'), `the readable prefix residue stays visible:\n${view}`)
   app.stop()
 })
 

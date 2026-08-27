@@ -279,7 +279,7 @@ export class FooterConfiguratorPanel implements Component {
     if (id === undefined) return []
     const description = this.registry.get(id)?.description
     if (description === undefined || description === '') return []
-    return [color.textMuted(description)]
+    return [color.textMuted(stripControlChars(description))]
   }
 
   /** The scrollable body + the line index the cursor sits on. */
@@ -356,7 +356,7 @@ export class FooterConfiguratorPanel implements Component {
         const ref = this.refAt(state.rowIndex, state.cursor)
         const def = ref === undefined ? undefined : this.registry.get(ref.id)
         const formats = def?.formats ?? []
-        const names = formats.map(format => this.humanizeFormat(format))
+        const names = formats.map(format => this.humanizeFormat(stripControlChars(format)))
         const nameWidth = Math.max(...names.map(name => name.length), 1)
         const lines = formats.map((format, index) => {
           const active = index === state.pickerIndex
@@ -415,7 +415,7 @@ export class FooterConfiguratorPanel implements Component {
           // (the parser rejects them in layouts, but a registry id from an
           // extension source is never trusted — an ESC/OSC id must not
           // reach the panel).
-          const label = def === undefined ? stripControlChars(id) : def.label
+          const label = def === undefined ? stripControlChars(id) : stripControlChars(def.label)
           return `${marker} ${active ? color.textStrong(label) : color.text(label)}`
         })
         return { lines, cursor: Math.min(state.pickerIndex, matches.length - 1) }
@@ -437,12 +437,15 @@ export class FooterConfiguratorPanel implements Component {
     return renderSpans([{ text: label, tone }])
   }
 
-  /** The item's current format, humanized ('bar' → 'Bar'). */
+  /** The item's current format, humanized ('bar' → 'Bar'). A format id
+   * is DISPLAY text too (the parser accepts unknown format strings, an
+   * extension declares its own) — control characters are stripped at the
+   * display boundary. */
   private formatDisplay(ref: FooterItemRef | undefined): string {
     if (ref === undefined) return ''
     const def = this.registry.get(ref.id)
     if (def === undefined) return ''
-    return this.humanizeFormat(ref.format ?? def.defaultFormat)
+    return this.humanizeFormat(stripControlChars(ref.format ?? def.defaultFormat))
   }
 
   private humanizeFormat(format: string): string {
@@ -486,10 +489,16 @@ export class FooterConfiguratorPanel implements Component {
   }
 
   /** Apply the ref decoration the composer applies: prefix + tone
-   * override + suffix. */
+   * override + suffix. Both wraps are DISPLAY text: they are stripped of
+   * terminal control characters (the parser rejects them in persisted
+   * layouts, but the model accepts any FooterLayoutV1 — the panel is the
+   * last display boundary, so a hand-built ref can never paint an
+   * ESC/OSC sequence into the preview). */
   private decorate(ref: FooterItemRef, spans: readonly { text: string; tone?: FooterTone }[]): string {
     const override = ref.tone === undefined || ref.tone === 'auto' ? undefined : ref.tone
-    return `${ref.prefix ?? ''}${renderSpans(spans, override)}${ref.suffix ?? ''}`
+    const prefix = ref.prefix === undefined ? '' : stripControlChars(ref.prefix)
+    const suffix = ref.suffix === undefined ? '' : stripControlChars(ref.suffix)
+    return `${prefix}${renderSpans(spans, override)}${suffix}`
   }
 
   /** The ref at a row + flat position (undefined when absent). */
@@ -503,10 +512,13 @@ export class FooterConfiguratorPanel implements Component {
 
   /** The display label of a ref: the definition's label, or the SANITIZED
    * raw id for an unknown id (an unloaded plugin — control characters
-   * must never reach the panel). */
+   * must never reach the panel). The definition label is display text
+   * from an external source too (a plugin contribution): stripped at the
+   * boundary as well. */
   private refLabel(ref: FooterItemRef): string {
     const def = this.registry.get(ref.id)
-    return def === undefined ? stripControlChars(ref.id) : def.label
+    if (def === undefined) return stripControlChars(ref.id)
+    return stripControlChars(def.label)
   }
 
   private itemLabel(rowIndex: number, flat: number): string {
