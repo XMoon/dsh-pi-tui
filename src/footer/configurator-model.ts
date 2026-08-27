@@ -195,8 +195,9 @@ export function flatLengthOf(row: FooterRowLayout): number {
 
 /** One item-editor menu entry (Style appears only for items with more
  * than one finite format — a single format has nothing to pick). Custom Text
- * definitions expose their definition-owned text/tone/name/delete controls in
- * addition to the shared ref Advanced editor. */
+ * definitions expose their definition-owned text/default-tone controls and
+ * name/delete actions alongside the shared placement-tone and Advanced
+ * controls. */
 export type ItemMenuEntry =
   | { readonly kind: 'style' }
   | { readonly kind: 'tone' }
@@ -214,9 +215,8 @@ export function itemMenuFor(formats: readonly string[] | undefined, custom = fal
   if (custom) {
     entries.push({ kind: 'custom-text' })
     entries.push({ kind: 'custom-tone' })
-  } else {
-    entries.push({ kind: 'tone' })
   }
+  entries.push({ kind: 'tone' })
   entries.push({ kind: 'advanced' })
   if (custom) {
     entries.push({ kind: 'custom-name' })
@@ -704,7 +704,7 @@ export class FooterConfiguratorModel {
             : 'Name must be visible, at most 64 characters, and contain no colon.'
           return
         }
-        if (this.customItems.has(id)) {
+        if (this.customItems.has(id) || this.registry.ids().includes(id)) {
           this.customError = `A footer item named "${name}" already exists.`
           return
         }
@@ -1065,6 +1065,11 @@ export class FooterConfiguratorModel {
    * no dangling old `user:*` id remains. */
   private commitCustomName(): void {
     const oldId = this.editedRefId()
+    const nextId = customItemId(this.editBuffer)
+    if (nextId !== undefined && nextId !== oldId && this.registry.ids().includes(nextId)) {
+      this.customError = `A footer item named "${customItemName(nextId)}" already exists.`
+      return
+    }
     const result = this.customItems.rename(oldId, this.editBuffer)
     if (result.newId === undefined) {
       this.customError = result.error ?? 'Name is invalid.'

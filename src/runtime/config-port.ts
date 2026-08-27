@@ -27,7 +27,7 @@
 
 import type { AuthorizationTarget } from '../authorization.ts'
 import type { FooterCommandConfig } from '../footer/command-runner.ts'
-import type { FooterCustomItemSettings } from '../footer/custom-items.ts'
+import type { FooterCustomItemSettings, FooterCustomItemsParseResult } from '../footer/custom-items.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
  * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/focusMode).
@@ -49,9 +49,11 @@ export interface TuiSettingsDoc {
   footer: string
   footerFallbackMode?: string
   footerLayout?: unknown
-  /** PR C: user-owned custom definitions. The layout stores only their
-   * canonical `user:*` ids; this field carries the independent definition
-   * collection across a whole-document get/replace cycle. */
+  /** PR C: untrusted whole-document pass-through for custom definitions. The
+   * USER-owned semantic read is `ConfigPort.footerCustomItems`; consumers
+   * must not treat this merged/resolved value as an authority because a
+   * project layer may contribute it. It remains here so get/replace cycles
+   * preserve the stored field verbatim. */
   footerCustomItems?: FooterCustomItemSettings[]
   /** The M5 command status surface's TRUSTED configuration (the user-layer
    * `footerCommand` value, validated by footer/command-trust). Part of the
@@ -117,6 +119,13 @@ export interface FooterCommandTrust {
   /** The trusted command config (the user layer's footerCommand, bounds
    * validated), undefined when untrusted/absent. */
   readonly command: FooterCommandConfig | undefined
+}
+
+/** The USER-layer Custom Text definition read (PR C). The adapter reads the
+ * settings descriptor's user section and returns a detached, fail-soft parse
+ * result; merged/project settings never reach this surface. */
+export interface FooterCustomItemsConfig {
+  get(): FooterCustomItemsParseResult
 }
 
 /** The TUI settings document surface as the commands surface names it
@@ -319,6 +328,8 @@ export interface ConfigPort {
   readonly tuiSettings: TuiSettingsConfig | undefined
   /** The M5 footer-command trust read (USER-layer only). */
   readonly footerCommandTrust: FooterCommandTrust
+  /** The PR C Custom Text definitions (USER-layer only). */
+  readonly footerCustomItems: FooterCustomItemsConfig
   /** Provider profiles (the add-provider wizard + /login section reads). */
   readonly providers: ProviderProfileConfig
   /** Credentials (API keys + stored records). */

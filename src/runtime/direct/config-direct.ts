@@ -38,6 +38,7 @@ import {
 import { cancellationError } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { resolveTrustedFooterCommand, resolveUserLayerFooterMode } from '../../footer/command-trust.ts'
+import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../footer/custom-items.ts'
 import type {
   AuthorizationConfig,
   AuthorizationFlowEvent,
@@ -46,6 +47,7 @@ import type {
   CredentialConfig,
   CredentialProviderOption,
   FooterCommandTrust,
+  FooterCustomItemsConfig,
   PermissionConfig,
   PresetDefaultConfig,
   ProviderProfileConfig,
@@ -94,6 +96,7 @@ export interface AgentPresetsServiceLike {
 export class DirectConfigPort implements ConfigPort {
   readonly tuiSettings: TuiSettingsConfig | undefined
   readonly footerCommandTrust: FooterCommandTrust
+  readonly footerCustomItems: FooterCustomItemsConfig
   readonly providers: ProviderProfileConfig
   readonly credentials: CredentialConfig
   readonly authorization: AuthorizationConfig
@@ -107,6 +110,7 @@ export class DirectConfigPort implements ConfigPort {
   ) {
     this.tuiSettings = tuiSettings
     this.footerCommandTrust = new DirectFooterCommandTrust(ctx)
+    this.footerCustomItems = new DirectFooterCustomItems(ctx)
     this.providers = new DirectProviderProfileConfig(ctx)
     this.credentials = new DirectCredentialConfig(ctx)
     this.authorization = new DirectAuthorizationConfig(ctx)
@@ -161,6 +165,30 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
     // macrotask so a settings change is picked up.
     queueMicrotask(() => { this.descriptorCache = null })
     return found
+  }
+}
+
+/** The Direct PR C Custom Text read: only the settings descriptor's USER
+ * section is authoritative. The merged document remains a pass-through for
+ * persistence, but project-layer values can never create a user definition.
+ * A malformed descriptor/collection degrades to an empty fail-soft result. */
+class DirectFooterCustomItems implements FooterCustomItemsConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  get(): FooterCustomItemsParseResult {
+    try {
+      const settings = this.ctx.get('settings') as { describe?(): readonly SettingsDescriptorLike[] | undefined } | undefined
+      const descriptor = settings?.describe?.()?.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
+      const user = descriptor?.user
+      if (typeof user !== 'object' || user === null) return { items: [], invalidCount: 0 }
+      return parseFooterCustomItems((user as Record<string, unknown>).footerCustomItems)
+    } catch {
+      return { items: [], invalidCount: 1 }
+    }
   }
 }
 

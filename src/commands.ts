@@ -36,7 +36,7 @@ import type { KeybindingEditorModel } from './keybinding-ui/model.ts'
 import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { FooterComposer } from './footer/composer.ts'
-import { FooterCustomItemCatalog, parseFooterCustomItems } from './footer/custom-items.ts'
+import { FooterCustomItemCatalog, parseFooterCustomItems, type FooterCustomItemSettings } from './footer/custom-items.ts'
 import { FooterItemRegistry } from './footer/item-registry.ts'
 import { FooterConfiguratorModel } from './footer/configurator-model.ts'
 import type { TuiApp } from './tui-app.ts'
@@ -70,7 +70,7 @@ import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
 import type { Catalog } from './runtime/catalog-port.ts'
-import type { ConfigPort, CredentialProviderOption } from './runtime/config-port.ts'
+import type { ConfigPort, CredentialProviderOption, TuiSettingsDoc } from './runtime/config-port.ts'
 import type { HostFilePort } from './runtime/host-file-port.ts'
 import {
   credentialOptionsFor,
@@ -265,10 +265,15 @@ export interface TuiCommandRunner {
     create(options: CreateSessionRequest): Promise<SessionHandle>
     resume(options: ResumeSessionRequest): Promise<SessionHandle>
   }
-  /** M2/PR C: apply the persisted footer mode, layout and user definitions to
-   * the app (shared by /settings, /reload and startup; fail-soft on invalid
-   * configs). */
-  applyFooterSettings(doc: { footer: string; footerLayout?: unknown; footerCustomItems?: unknown } | undefined): void
+  /** M2/PR C: apply the persisted footer mode and layout to the app (shared
+   * by /settings, /reload and startup; fail-soft on invalid configs). The
+   * optional definitions are a validated /footer-save result, not the merged
+   * settings value; ordinary calls resolve definitions from the USER layer
+   * through the config port. */
+  applyFooterSettings(
+    doc: { footer: string; footerLayout?: unknown; footerCustomItems?: unknown } | undefined,
+    savedCustomItems?: readonly FooterCustomItemSettings[],
+  ): void
   /** The session READ port (migration M1.3): /sessions, /resume, /search,
    * the title batches, the context measurement and the export read go
    * through the port, never ctx directly. */
@@ -933,6 +938,15 @@ export interface InitialCommandCatalog {
   readonly skills?: HumanSkillCatalog
 }
 
+/** Keep USER-owned Custom Text definitions out of whole-document writes that
+ * start from a merged settings document. A project layer may contribute the
+ * pass-through `footerCustomItems` field, but it must never be copied into
+ * USER settings merely because an unrelated setting changed. */
+function withUserFooterCustomItems(doc: TuiSettingsDoc, config: ConfigPort): TuiSettingsDoc {
+  const { items } = config.footerCustomItems.get()
+  return { ...doc, footerCustomItems: items.map(item => ({ ...item })) }
+}
+
 /**
  * Register the TUI-owned slash commands on the commands service. The
  * completion list is refreshed after every registration so TUI-owned
@@ -1500,7 +1514,7 @@ export function registerTuiCommands(
                   // value IS the source-qualified identity.
                   detach('settings theme write', () => serializeTuiSettingsMutation(
                     settings,
-                    () => settings.replace({ ...settings.get(), theme: qualified }),
+                    () => settings.replace(withUserFooterCustomItems({ ...settings.get(), theme: qualified }, runner.config)),
                   ), { notify: true })
                 }
                 lastThemeChoice = qualified
@@ -1665,7 +1679,7 @@ export function registerTuiCommands(
               if (settings !== undefined) {
                 detach('settings busy enter write', () => serializeTuiSettingsMutation(
                    settings,
-                   () => settings.replace({ ...settings.get(), busyEnter: value }),
+                   () => settings.replace(withUserFooterCustomItems({ ...settings.get(), busyEnter: value }, runner.config)),
                  ), { notify: true })
               }
             }
@@ -1681,7 +1695,7 @@ export function registerTuiCommands(
               if (settings !== undefined) {
                 detach('settings icon style write', () => serializeTuiSettingsMutation(
                    settings,
-                   () => settings.replace({ ...settings.get(), iconStyle: value }),
+                   () => settings.replace(withUserFooterCustomItems({ ...settings.get(), iconStyle: value }, runner.config)),
                  ), { notify: true })
               }
             }
@@ -1691,7 +1705,7 @@ export function registerTuiCommands(
               if (settings !== undefined) {
                 detach('settings local shell sandbox write', () => serializeTuiSettingsMutation(
                    settings,
-                   () => settings.replace({ ...settings.get(), localShellSandbox: value }),
+                   () => settings.replace(withUserFooterCustomItems({ ...settings.get(), localShellSandbox: value }, runner.config)),
                  ), { notify: true })
               }
             }
@@ -1704,7 +1718,7 @@ export function registerTuiCommands(
               if (settings !== undefined) {
                 detach('settings home end keys write', () => serializeTuiSettingsMutation(
                    settings,
-                   () => settings.replace({ ...settings.get(), homeEndKeys: value }),
+                   () => settings.replace(withUserFooterCustomItems({ ...settings.get(), homeEndKeys: value }, runner.config)),
                  ), { notify: true })
               }
             }
@@ -1807,12 +1821,12 @@ export function registerTuiCommands(
                 footerCustomItems: savedCustomItems,
               }))
               app.setFooterCustomItems(savedCustomItems)
-              runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems })
+              runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems }, savedCustomItems)
               app.notify('footer layout saved', 'info')
             }, { notify: true })
           } else {
             app.setFooterCustomItems(savedCustomItems)
-            runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems })
+            runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems }, savedCustomItems)
             app.notify('footer layout saved', 'info')
           }
         },
@@ -3349,7 +3363,7 @@ export function registerTuiCommands(
         // it reports an error and the running keymap stays untouched.
         return serializeTuiSettingsMutation(settings, async (): Promise<CommandResult> => {
           try {
-            const doc = { ...settings.get() } as Record<string, unknown>
+            const doc = { ...withUserFooterCustomItems(settings.get(), runner.config) } as Record<string, unknown>
             delete doc.keybindings
             // Await the persistence write: the command result reflects the
             // ACTUAL outcome (a failed write must not report success — review

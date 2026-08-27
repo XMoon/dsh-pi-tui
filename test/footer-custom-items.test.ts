@@ -12,7 +12,7 @@ import { FooterComposer } from '../src/footer/composer.ts'
 import { FooterCustomItemCatalog, parseFooterCustomItem, parseFooterCustomItems } from '../src/footer/custom-items.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { FooterItemRegistry } from '../src/footer/item-registry.ts'
-import { FooterConfiguratorModel } from '../src/footer/configurator-model.ts'
+import { FooterConfiguratorModel, itemMenuFor } from '../src/footer/configurator-model.ts'
 import type { FooterItemDefinition } from '../src/footer/types.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -177,6 +177,43 @@ test('the Add picker searches custom definitions and creates multiple items auto
   assert.equal(m.customItemSettings().length, 4)
 })
 
+test('custom item editing separates default and placement tone entries', () => {
+  assert.deepEqual(itemMenuFor(['plain'], true).map(entry => entry.kind), [
+    'custom-text', 'custom-tone', 'tone', 'advanced', 'custom-name', 'custom-delete',
+  ])
+})
+
+test('custom names cannot collide with an extension-owned user namespace id', () => {
+  const catalog = new FooterCustomItemCatalog([VALID_ENVIRONMENT])
+  const registry = new FooterItemRegistry()
+  registry.setExternalSource({
+    ids: () => ['user:occupied'],
+    definition: id => id === 'user:occupied' ? {
+      id,
+      label: 'Occupied',
+      description: 'Extension item.',
+      defaultZone: 'left',
+      defaultImportance: 50,
+      formats: ['plain'],
+      defaultFormat: 'plain',
+      render: () => ({ spans: [{ text: 'EXT' }] }),
+    } : undefined,
+  })
+  const m = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'user:environment' }], right: [] }],
+  }, registry, catalog)
+  m.activate() // row
+  m.activate() // item
+  for (let i = 0; i < 4; i += 1) m.moveDown() // Rename definition
+  m.activate()
+  for (let i = 0; i < 'environment'.length; i += 1) m.backspace()
+  m.text('occupied')
+  m.activate()
+  assert.match(m.state().customError, /already exists/)
+  assert.ok(m.customItem('user:environment') !== undefined)
+})
+
 test('custom Text supports text/tone editing, rename, and referenced delete cleanup', () => {
   const catalog = new FooterCustomItemCatalog([VALID_ENVIRONMENT])
   const registry = new FooterItemRegistry()
@@ -194,11 +231,25 @@ test('custom Text supports text/tone editing, rename, and referenced delete clea
   m.activate()
   assert.equal(m.customItem('user:environment')?.text, 'STAGE')
 
-  // Tone: choose Primary in the definition picker.
+  // Default tone: choose Primary in the definition picker.
   m.moveDown()
   m.activate()
   for (let i = 0; i < 5; i += 1) m.moveUp()
   m.activate()
+  assert.equal(m.customItem('user:environment')?.tone, 'primary')
+
+  // Placement tone is a separate FooterItemRef override. It wins over the
+  // definition tone until the placement is explicitly returned to Auto.
+  m.moveDown()
+  m.activate()
+  for (let i = 0; i < 7; i += 1) m.moveDown()
+  m.activate()
+  assert.equal(m.state().layout.rows[0]!.left[0]!.tone, 'error')
+  assert.equal(m.customItem('user:environment')?.tone, 'primary')
+  m.activate()
+  for (let i = 0; i < 7; i += 1) m.moveUp()
+  m.activate()
+  assert.equal(m.state().layout.rows[0]!.left[0]!.tone, undefined)
   assert.equal(m.customItem('user:environment')?.tone, 'primary')
 
   // Rename: all references receive the new canonical id.
@@ -245,7 +296,9 @@ test('Custom Text creation is visible in the real configurator UI and saves both
   vt.sendInput('a') // add picker
   vt.sendInput('no-match') // make the create action the only option
   await vt.waitForRender()
-  assert.ok(vt.getViewport().join('\n').includes('+ Create Custom Text'))
+  const addView = vt.getViewport().join('\n')
+  assert.ok(addView.includes('+ Create Custom Text'))
+  assert.ok(addView.includes('Create a user-defined static footer item.'), `create action must describe itself:\n${addView}`)
   vt.sendInput('\r') // create name
   vt.sendInput('Environment')
   vt.sendInput('\r') // create text
@@ -258,6 +311,8 @@ test('Custom Text creation is visible in the real configurator UI and saves both
   await vt.waitForRender()
   const itemView = vt.getViewport().join('\n')
   assert.ok(itemView.includes('Text'), `custom item editor must expose Text:\n${itemView}`)
+  assert.ok(itemView.includes('Default tone'), `custom item editor must expose definition tone:\n${itemView}`)
+  assert.ok(itemView.includes('Tone'), `custom item editor must expose placement tone:\n${itemView}`)
   assert.ok(itemView.includes('Rename definition'), `custom item editor must expose rename:\n${itemView}`)
   assert.ok(itemView.includes('Delete definition'), `custom item editor must expose delete:\n${itemView}`)
   vt.sendInput('\x1b') // item -> row
