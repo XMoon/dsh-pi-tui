@@ -357,15 +357,20 @@ test('review finding (round 5): fd matches case-insensitively (aligned with the 
   const root = outsideCwdFixture().workspace
   writeFileSync(join(root, 'Foo.txt'), 'x')
   writeFileSync(join(root, 'foo.txt'), 'x')
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
-  // The fd-backed path (this machine has fdfind) must find BOTH — the
-  // shared ranking is case-insensitive and fd's smart-case default (case-
-  // SENSITIVE for an uppercase query) would miss foo.txt.
+  // REAL fd-backed path: the default DirectHostFilePort probes PATH (fd
+  // then fdfind — this machine has /usr/bin/fdfind), so the -i flag is
+  // what produces both matches. A fallback-only null would pass even
+  // without -i.
+  const port = new DirectHostFilePort(() => undefined)
+  assert.notEqual(port.fdPathAvailableForTest(), null, 'the test must run through a real fd/fdfind')
+  const provider = new MentionProvider([], root, port)
+  // fd's smart-case default (case-SENSITIVE for an uppercase query) would
+  // return only @Foo.txt; the -i flag returns both.
   const upper = await provider.getSuggestions(['@FOO'], 0, 4, { signal: abort })
   assert.ok(upper !== null, `@FOO must suggest:\n${JSON.stringify(upper)}`)
   assert.ok(
     upper.items.some(item => item.value === '@Foo.txt') && upper.items.some(item => item.value === '@foo.txt'),
-    `both case forms must match:\n${JSON.stringify(upper.items)}`,
+    `both case forms must match (real fd -i):\n${JSON.stringify(upper.items)}`,
   )
 })
 
@@ -468,6 +473,36 @@ test('review finding 2: a stale accept never applies after an unrelated edit', a
   // The editor state changed on an unrelated part: `see` → `look`.
   const applied = provider.applyCompletion(['look @local'], 0, 12, { value: '@local.txt', label: 'local.txt' }, '@local')
   assert.deepEqual(applied.lines, ['look @local'], 'an unrelated edit must also fence the accept')
+})
+
+test('review finding (round 6): a scope switch mid-flight fences the old session accept', async () => {
+  const rootA = outsideCwdFixture().workspace
+  const rootB = outsideCwdFixture().workspace
+  writeFileSync(join(rootA, 'session-a.txt'), 'x')
+  writeFileSync(join(rootB, 'session-b.txt'), 'x')
+  let scope: { kind: 'workspace'; cwd: string } = { kind: 'workspace', cwd: rootA }
+  const provider = new MentionProvider(
+    [],
+    rootA,
+    new DirectHostFilePort(() => undefined, null),
+    undefined,
+    () => scope,
+  )
+  const bound = await provider.getSuggestions(['@session-a'], 0, 11, { signal: abort })
+  assert.ok(bound !== null && bound.items.length > 0, 'session A must produce candidates')
+  // The session/workspace switches while the draft is UNCHANGED: the old
+  // snapshot's scope no longer matches, so accepting the OLD dropdown item
+  // must leave the draft untouched (never insert a Host candidate from the
+  // previous session under the new one).
+  scope = { kind: 'workspace', cwd: rootB }
+  const applied = provider.applyCompletion(
+    ['@session-a'],
+    0,
+    11,
+    { value: '@session-a.txt', label: 'session-a.txt' },
+    '@session-a',
+  )
+  assert.deepEqual(applied.lines, ['@session-a'], 'a scope switch must fence the stale accept')
 })
 
 test('review finding 2: a Windows-dialect directory keeps the backslash separator', () => {

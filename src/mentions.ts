@@ -249,13 +249,16 @@ export class MentionProvider implements AutocompleteProvider {
   /** The `/image` discovery source: Client-local (never HostFilePort). */
   private readonly localSource: LocalFileSource
   /** The REQUEST SNAPSHOT (plan §9.2): the exact document lines + cursor
-   * + mode of the most recent getSuggestions call that produced a
+   * + mode + SCOPE of the most recent getSuggestions call that produced a
    * suggestion list. applyCompletion accepts ONLY when the current
-   * document + cursor still match this snapshot — a stale dropdown (from
-   * an older request) can never modify a later edit of ANY part of the
-   * document (the prefix-only fence misses edits elsewhere on the line,
-   * e.g. `hello @foo` → `world @foo`). */
-  private requestSnapshot: { lines: readonly string[]; cursorLine: number; cursorCol: number; mode: EditorInputMode } | null = null
+   * document + cursor + scope still match this snapshot — a stale dropdown
+   * (from an older request, or from a request resolved under a since-
+   * switched session/workspace scope) can never modify the current draft
+   * (the prefix-only fence misses edits elsewhere on the line — `hello
+   * @foo` → `world @foo` — and the full-snapshot check here also misses a
+   * scope switch with an unchanged draft: an old session's Host candidate
+   * must never be accepted under a new session). */
+  private requestSnapshot: { lines: readonly string[]; cursorLine: number; cursorCol: number; mode: EditorInputMode; scope: MentionScope } | null = null
   /** The monotonically increasing request generation (plan §9.2 latest-
    * only): minted at REQUEST START (getSuggestions entry). A result —
    * host OR extension — captures its snapshot ONLY IF its minted
@@ -330,7 +333,11 @@ export class MentionProvider implements AutocompleteProvider {
     // Mint THIS request's generation: the snapshot capture below only
     // binds when this call is still the latest (a late result from an
     // older request — a provider or the extension chain ignoring
-    // AbortSignal — must never overwrite a newer request's snapshot).
+    // AbortSignal — must never overwrite a newer request's snapshot). A
+    // caller CANNOT pre-mint here; the DELEGATED wrap (tui-app) mints its
+    // own generation at entry and reads it back after this call — its
+    // extension answer binds to the delegated request even if newer host
+    // requests start mid-flight.
     const generation = ++this.requestGeneration
     // 1. The SHELL-BRIDGE grammar first (a `!` line's first word is a
     // command name; a path position falls through). The bridge never
@@ -497,6 +504,7 @@ export class MentionProvider implements AutocompleteProvider {
       cursorLine,
       cursorCol,
       mode: this.inputModeSource(),
+      scope: this.scopeOf(),
     }
     return result
   }
@@ -519,22 +527,56 @@ export class MentionProvider implements AutocompleteProvider {
     return this.withRequestSnapshot(generation, lines, cursorLine, cursorCol, result)
   }
 
-  /** The generation the host's getSuggestions call minted (the delegated
-   * wrap reads it right after the host settles, so the extension's answer
-   * binds to THIS request — even if a newer one started mid-await). */
+  /** The base provider's suggestion entry for the DELEGATED wrap: the
+   * wrap mints the generation at entry and passes it here, so THIS host
+   * call binds its snapshot to the SAME generation the extension's answer
+   * will use — a newer request that starts during the extension await
+   * bumps the counter past it, and the late extension answer is dropped. */
+  async getSuggestionsForGeneration(
+    generation: number,
+    lines: string[],
+    cursorLine: number,
+    cursorCol: number,
+    options: { signal: AbortSignal; force?: boolean },
+  ): Promise<AutocompleteSuggestions | null> {
+    const captured = await this.getSuggestions(lines, cursorLine, cursorCol, options)
+    // The host call minted generation+1 internally; the delegated call's
+    // generation is the one that must own the ext snapshot. Re-bind the
+    // host result to the delegated generation (a null host result clears
+    // the snapshot — the ext will bind after).
+    this.requestGeneration = generation
+    return this.withRequestSnapshot(generation, lines, cursorLine, cursorCol, captured)
+  }
+
+  /** PUBLIC test/app seam (plan §9.2): THE DELEGATING provider mints its
+   * OWN generation synchronously at request ENTRY (before calling the
+   * host), and the host's getSuggestionsForGeneration REUSES it: the
+   * extension's answer — which settles later — binds to THIS request,
+   * never to a newer one that started while the extension was in flight. */
+  mintRequestGeneration(): number {
+    return ++this.requestGeneration
+  }
+
+  /** The generation the host's getSuggestions call minted. The delegated
+   * wrap must read it SYNCHRONOUSLY right after the host settles (before
+   * any await): the global counter advances on every new request, so an
+   * async read could return a NEWER request's generation and let a late
+   * extension result bind to the wrong request. */
   captureRequestGeneration(): number {
     return this.requestGeneration
   }
 
   /** Whether the editor state still EXACTLY matches the request that
-   * produced the current dropdown (line array, cursor, and input mode —
-   * a mode switch swaps the completion grammar, so a dropdown built for
-   * the old mode must never apply). */
+   * produced the current dropdown (line array, cursor, input mode, AND
+   * the completion scope — a mode switch swaps the completion grammar,
+   * and a session/workspace switch changes which Host filesystem answers,
+   * so a dropdown built for one scope must never apply under another). */
   private requestMatchesSnapshot(lines: readonly string[], cursorLine: number, cursorCol: number): boolean {
     const snapshot = this.requestSnapshot
     if (snapshot === null) return false
     if (snapshot.cursorLine !== cursorLine || snapshot.cursorCol !== cursorCol) return false
     if (snapshot.mode !== this.inputModeSource()) return false
+    if (!sameMentionScope(snapshot.scope, this.scopeOf())) return false
     if (snapshot.lines.length !== lines.length) return false
     for (let index = 0; index < snapshot.lines.length; index += 1) {
       if (snapshot.lines[index] !== lines[index]) return false

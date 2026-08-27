@@ -9289,13 +9289,14 @@ export class TuiApp {
     const getMode = (): EditorInputMode => this.editor.getInputMode()
     const delegated: import('@xmoon76/pi-tui').AutocompleteProvider = {
       async getSuggestions(lines, cursorLine, cursorCol, options) {
-        const host = await base.getSuggestions(lines, cursorLine, cursorCol, options)
+        // THIS delegated request's generation: minted synchronously at
+        // entry and passed to the host entry (getSuggestionsForGeneration),
+        // so both the host result AND the extension's answer bind to THIS
+        // request — never to a newer one that started while the extension
+        // was in flight.
+        const requestGeneration = base.mintRequestGeneration()
+        const host = await base.getSuggestionsForGeneration(requestGeneration, lines, cursorLine, cursorCol, options)
         if (host !== null) return host
-        // The generation of THIS host request (minted by the host call
-        // above): the extension's answer binds to it — a newer request
-        // that started while the extension was in flight must not be
-        // overwritten by its late result.
-        const requestGeneration = base.captureRequestGeneration()
         // Preserve the shell-mode natural-trigger suppression: a leading
         // `/` on ANY line of a shell-mode document is a PATH, and the
         // host provider deliberately stays quiet until Tab — the plugin
