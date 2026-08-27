@@ -118,6 +118,7 @@ import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.t
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile, loadHistoryRecords, recallHistoryForSession } from './history.ts'
+import { terminalTitleOf } from './terminal-title.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from './history-persist.ts'
 import { FileHistorySearchSource } from './history-search.ts'
 import { safeErrorMessage } from './error-boundary.ts'
@@ -891,12 +892,6 @@ function gitBranch(cwd: string): string {
     }
   }
   return ''
-}
-
-/** Short cwd for the footer: last two path segments. */
-function shortCwd(cwd: string): string {
-  const parts = cwd.split('/').filter(Boolean)
-  return parts.slice(-2).join('/') || cwd
 }
 
 /** Shell commands the approval dialog flags as dangerous (kimi-inspired). */
@@ -2311,6 +2306,22 @@ export function apply(ctx: Context, config: Config): void {
      * (the process cwd) stays for launch-relative concerns (/export paths).
      */
     const sessionCwd = (): string => liveAgent?.session.header.cwd ?? cwd
+    /**
+     * Derive + write the terminal window title from the CURRENT surface
+     * identity (the title policy in terminal-title.ts): session
+     * presentation title first, the session (or launch) short cwd as the
+     * fallback — never the full session UUID / model / preset. Called at
+     * every identity change: fresh startup, session create/resume/switch,
+     * and session/title events (the session title event lands in the
+     * header through setSessionTitle; the OSC title follows).
+     */
+    const refreshTerminalTitle = (): void => {
+      const title = terminalTitleOf({
+        sessionTitle: app.getSessionTitle(),
+        cwd: sessionCwd(),
+      })
+      setTerminalTitle(title)
+    }
     /**
      * Every cwd this process has EVER known (launch cwd + every live
      * session's header cwd, accumulated across creates/resumes/swaps).
@@ -4372,6 +4383,11 @@ export function apply(ctx: Context, config: Config): void {
           if (ref !== undefined) extensionService?._clearRegistryError(ref)
         } catch {}
       },
+      // The session presentation title changed (advanced ui.host.setTitle,
+      // session/title events — the app fires it for EVERY setSessionTitle):
+      // the terminal window title policy follows, so a rename/regenerate
+      // refreshes the OSC title immediately.
+      onTitleChanged: () => refreshTerminalTitle(),
       // Phase 4: the advanced host-state setTheme for a NON-built-in name
       // (a registered plugin theme). The runner resolves the palette
       // through the theme registry; unknown names are a no-op; a throwing
@@ -5315,6 +5331,8 @@ export function apply(ctx: Context, config: Config): void {
     lastHistoryContent = bootHistoryEntries.at(-1)
     // File order is oldest-first; TuiApp's recall API takes newest-first.
     app.resetInputHistory([...bootHistoryEntries].reverse())
+    // Fresh/deferred startup title: no session yet — cwd identity only.
+    refreshTerminalTitle()
 
     // The TUI-owned slash commands are registered by registerCommands()
     // inside initLiveSession, exactly once after the first session exists.
@@ -5613,7 +5631,7 @@ export function apply(ctx: Context, config: Config): void {
       // so the session-filtered projection is reversed at the seed.
       const sessionRecall = recallHistoryForSession(historyRecords, agent.session.id)
       app.resetInputHistory([...sessionRecall].reverse())
-      setTerminalTitle(`dsh-pi-tui · ${shortCwd(sessionCwd())} · ${agent.session.id}`)
+      refreshTerminalTitle()
       updateWelcomeCard()
       registerCommands({ snapshot: initialSnapshot, skills: initialSkills })
     }
@@ -6103,7 +6121,7 @@ export function apply(ctx: Context, config: Config): void {
     } else {
       app.setWelcomeIdle(true)
       refreshStatus()
-      setTerminalTitle(`dsh-pi-tui · ${shortCwd(sessionCwd())}`)
+      refreshTerminalTitle()
     }
     // Command registration is sessionless: it must run on BOTH startup
     // surfaces (resume path registers inside initLiveSession; the deferred
