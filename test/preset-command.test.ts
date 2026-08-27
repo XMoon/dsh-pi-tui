@@ -16,6 +16,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
+import { KeybindingEditorController } from '../src/keybinding-ui/controller.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../src/skill-catalog-refresh.ts'
 import { SESSIONLESS_COMMANDS } from '../src/index.ts'
@@ -682,6 +683,123 @@ test('/keybindings reload re-reads the settings document LAZILY (the explicit re
   t.app.stop()
 })
 
+test('/keybindings reload queues behind an editor write and applies the latest document', async () => {
+  let settingsDoc: TuiSettingsLike['get'] extends () => infer T ? T : never = {
+    theme: 'auto',
+    footer: 'full',
+    fullscreen: 'off',
+    busyEnter: 'queue',
+    localShellSandbox: 'bypass',
+    homeEndKeys: 'viewport',
+    focusMode: 'off',
+    iconStyle: 'emoji',
+    keybindings: { 'app.input.steer': 'ctrl+x' },
+  }
+  let writes = 0
+  let firstWriteStarted!: () => void
+  const firstStarted = new Promise<void>(resolve => { firstWriteStarted = resolve })
+  let releaseFirst!: () => void
+  const release = new Promise<void>(resolve => { releaseFirst = resolve })
+  const tuiSettings: TuiSettingsLike = {
+    get: () => settingsDoc,
+    replace: async next => {
+      writes += 1
+      if (writes === 1) {
+        firstWriteStarted()
+        await release
+      }
+      settingsDoc = next
+    },
+  }
+  const t = setup({ tuiSettings })
+  const manager = t.app.keybindingsManager()
+  manager.setUserConfiguration(parseUserKeybindings(settingsDoc.keybindings))
+  const controller = new KeybindingEditorController({ settings: tuiSettings, manager })
+  try {
+    const editorWrite = controller.mutate({
+      kind: 'add',
+      action: 'app.todo.toggle',
+      binding: { kind: 'direct', key: 'ctrl+y' },
+    })
+    await firstStarted
+    let reloadSettled = false
+    const reload = t.runCommand('keybindings', 'reload').then(result => {
+      reloadSettled = true
+      return result
+    })
+    await Promise.resolve()
+    assert.equal(reloadSettled, false, 'reload must wait for the in-flight whole-document write')
+    releaseFirst()
+    const [editorResult, reloadResult] = await Promise.all([editorWrite, reload])
+    assert.equal(editorResult.kind, 'applied')
+    assert.equal((reloadResult as { kind: string }).kind, 'success')
+    assert.equal(writes, 1)
+    assert.deepEqual(settingsDoc.keybindings, {
+      'app.input.steer': 'ctrl+x',
+      'app.todo.toggle': 'ctrl+y',
+    })
+    assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+y'])
+  } finally {
+    releaseFirst()
+    t.app.stop()
+    manager.dispose()
+  }
+})
+
+test('/keybindings reset queues behind an editor write and keeps the final reset authoritative', async () => {
+  let settingsDoc: TuiSettingsLike['get'] extends () => infer T ? T : never = {
+    theme: 'auto',
+    footer: 'full',
+    fullscreen: 'off',
+    busyEnter: 'queue',
+    localShellSandbox: 'bypass',
+    homeEndKeys: 'viewport',
+    focusMode: 'off',
+    iconStyle: 'emoji',
+    keybindings: undefined,
+  }
+  let writes = 0
+  let firstWriteStarted!: () => void
+  const firstStarted = new Promise<void>(resolve => { firstWriteStarted = resolve })
+  let releaseFirst!: () => void
+  const release = new Promise<void>(resolve => { releaseFirst = resolve })
+  const tuiSettings: TuiSettingsLike = {
+    get: () => settingsDoc,
+    replace: async next => {
+      writes += 1
+      if (writes === 1) {
+        firstWriteStarted()
+        await release
+      }
+      settingsDoc = next
+    },
+  }
+  const t = setup({ tuiSettings })
+  const manager = t.app.keybindingsManager()
+  manager.setUserConfiguration(parseUserKeybindings(settingsDoc.keybindings))
+  const controller = new KeybindingEditorController({ settings: tuiSettings, manager })
+  try {
+    const editorWrite = controller.mutate({
+      kind: 'add',
+      action: 'app.todo.toggle',
+      binding: { kind: 'direct', key: 'ctrl+y' },
+    })
+    await firstStarted
+    const reset = t.runCommand('keybindings', 'reset')
+    releaseFirst()
+    const [editorResult, resetResult] = await Promise.all([editorWrite, reset])
+    assert.equal(editorResult.kind, 'applied')
+    assert.equal((resetResult as { kind: string }).kind, 'success')
+    assert.equal('keybindings' in settingsDoc, false)
+    assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+t'])
+    assert.equal(writes, 2)
+  } finally {
+    releaseFirst()
+    t.app.stop()
+    manager.dispose()
+  }
+})
+
 test('/keybindings reset awaits the settings write, applies the cleared config, and reports its real outcome', async () => {
   // Review finding: the reset must not report success before the async
   // persistence write resolves — a failed write is an error result.
@@ -747,6 +865,26 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
   assert.ok((readFailed as { text: string }).text.includes('failed'), `error text missing: ${JSON.stringify(readFailed)}`)
   assert.equal(readsFailing, 1, 'the initial read must be attempted once')
   assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+x'], 'a failed reset must keep the running keymap')
+  t.app.stop()
+})
+
+test('/settings keeps the keyboard-shortcuts fallback when the settings read throws', async () => {
+  let reads = 0
+  const tuiSettings: TuiSettingsLike = {
+    get: () => {
+      reads += 1
+      throw new Error('settings read exploded')
+    },
+    replace: async () => {},
+  }
+  const t = setup({ tuiSettings })
+  const result = await t.runCommand('settings')
+  assert.equal((result as { kind: string }).kind, 'success')
+  t.vt.sendInput('keyboard')
+  const view = await t.view()
+  assert.match(view, /Keyboard shortcuts/)
+  assert.match(view, /Unavailable/)
+  assert.equal(reads, 1, 'the settings command should make one guarded initial read')
   t.app.stop()
 })
 

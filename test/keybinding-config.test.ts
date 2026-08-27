@@ -56,6 +56,17 @@ test('unknown action → diagnostic + ignore', () => {
   assert.ok(parsed.diagnostics[0]!.includes('unknown action'))
 })
 
+test('prototype property names are unknown actions, never inherited definitions', () => {
+  const raw = Object.create(null) as Record<string, unknown>
+  raw['toString'] = 'ctrl+x'
+  raw['constructor'] = 'ctrl+y'
+  raw['__proto__'] = 'ctrl+z'
+  const parsed = parseUserKeybindings(raw)
+  assert.deepEqual(parsed.bindings, {})
+  assert.equal(parsed.diagnostics.length, 3)
+  assert.ok(parsed.diagnostics.every(message => message.includes('unknown action')))
+})
+
 test('invalid key → diagnostic + ignore', () => {
   const parsed = parseUserKeybindings({ 'app.input.steer': 'ctrl+zzz' })
   assert.deepEqual(parsed.bindings, {})

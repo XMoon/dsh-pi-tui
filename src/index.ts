@@ -151,6 +151,7 @@ import { DirectSessionLifecycle } from './runtime/direct/session-lifecycle-direc
 import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
 import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from './runtime/direct/config-direct.ts'
+import { serializeTuiSettingsMutation } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
 import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
 import { directAgentOf, ownerHandleOf, type CreateSessionRequest, type ResumeSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
@@ -4421,7 +4422,10 @@ export function apply(ctx: Context, config: Config): void {
       onFullscreenChange: (fullscreen) => {
         const settings = tuiSettings
         if (settings !== undefined) {
-          runDetached('settings fullscreen write', () => settings.replace({ ...settings.get(), fullscreen: fullscreen ? 'on' : 'off' }), {
+          runDetached('settings fullscreen write', () => serializeTuiSettingsMutation(
+             settings,
+             () => settings.replace({ ...settings.get(), fullscreen: fullscreen ? 'on' : 'off' }),
+           ), {
             diag,
             notify: (message) => app.notify(message, 'error'),
             recoverable: () => true,
@@ -5272,9 +5276,11 @@ export function apply(ctx: Context, config: Config): void {
           // them), so the resolved doc still carries `history`: delete it
           // explicitly, or the replace would write it right back.
           runDetached('settings history cleanup', () => {
-            const doc = { ...tuiSettings.get() } as Record<string, unknown>
-            delete doc.history
-            tuiSettings.replace(doc)
+            return serializeTuiSettingsMutation(tuiSettings, () => {
+              const doc = { ...tuiSettings.get() } as Record<string, unknown>
+              delete doc.history
+              return tuiSettings.replace(doc)
+            })
           }, {
             diag,
             notify: (message) => app.notify(message, 'error'),
@@ -5780,7 +5786,10 @@ export function apply(ctx: Context, config: Config): void {
       refreshStatus()
       const settings = tuiSettings
       if (settings !== undefined) {
-        runDetached('settings focus write', () => settings.replace({ ...settings.get(), focusMode: enabled ? 'on' : 'off' }) as Promise<unknown>, {
+        runDetached('settings focus write', () => serializeTuiSettingsMutation(
+           settings,
+           () => settings.replace({ ...settings.get(), focusMode: enabled ? 'on' : 'off' }),
+         ), {
           diag,
           notify: (message) => app.notify(`focus mode persistence failed: ${message}`, 'error'),
           recoverable: () => true,

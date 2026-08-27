@@ -45,6 +45,13 @@ const TASKS_OPEN_AFFORDANCE: CompositionRule = {
     && context.editorPromptMode && context.tasksActive,
 }
 
+export interface HostKeybindingPreflight {
+  /** The candidate's effective host projection, including conflicts. */
+  readonly snapshot: KeymapSnapshot
+  /** Diagnostics emitted while compiling the candidate. */
+  readonly diagnostics: readonly string[]
+}
+
 export interface HostKeybindingManagerOptions {
   /** Called after every rebuild (the app repaints hints/footer). */
   readonly onInvalidate?: () => void
@@ -295,6 +302,31 @@ export class HostKeybindingManager {
     this.leaderConfig = config.leader
     this.leaderBindings = config.leaderBindings
     this.rebuild()
+  }
+
+  /**
+   * Compile a candidate without changing this manager. This is the
+   * side-effect-free preflight used by the interactive editor: it carries
+   * over the live plugin rules and safe-mode policy, then disposes the
+   * temporary leader machine before returning.
+   */
+  preflight(config: {
+    readonly bindings: UserKeybindingsConfig
+    readonly leader: LeaderConfig | undefined
+    readonly leaderBindings: readonly LeaderBinding[]
+  }): HostKeybindingPreflight {
+    const preview = new HostKeybindingManager({ leaderTimeoutMs: this.leaderTimeoutMs })
+    try {
+      preview.setPluginRules(this.pluginRules)
+      preview.setSafeMode(this.safeMode)
+      preview.setUserConfiguration(config)
+      return {
+        snapshot: preview.snapshot(),
+        diagnostics: preview.diagnosticsList(),
+      }
+    } finally {
+      preview.dispose()
+    }
   }
 
   /** Safe mode (plan §17): ignore user overrides, keep builtin defaults.

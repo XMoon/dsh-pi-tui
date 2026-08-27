@@ -28,9 +28,11 @@ import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { iconStyleOf } from './icons.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
-import { APP_KEYBINDINGS } from './keybindings/definitions.ts'
-import { formatKeyId, formatLeaderSequence } from './keybindings/hints.ts'
+import { formatKeyId } from './keybindings/hints.ts'
 import type { AppKeybindingId } from './keybindings/types.ts'
+import { KeybindingEditorController } from './keybinding-ui/controller.ts'
+import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from './keybinding-ui/list.ts'
+import type { KeybindingEditorModel } from './keybinding-ui/model.ts'
 import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { FooterConfiguratorModel } from './footer/configurator-model.ts'
@@ -222,7 +224,7 @@ export function presetDisplayText(preset: {
  * an unknown-key pass-through in the config port's document schema — see
  * index.ts) ride along. */
 export type { TuiSettingsLike, TuiSettingsDoc } from './runtime/config-port.ts'
-import type { TuiSettingsLike } from './runtime/config-port.ts'
+import { serializeTuiSettingsMutation, type TuiSettingsDoc, type TuiSettingsLike } from './runtime/config-port.ts'
 
 
 /** The minimal commands-registry surface the TUI command surface needs
@@ -985,6 +987,49 @@ export function registerTuiCommands(
       recoverable: options.notify === true ? () => true : undefined,
     })
   }
+
+  /** Build the one editor used by /keybindings and the /settings submenu.
+   * The settings row is only a launcher; all reads/writes still go through
+   * the controller and the same panel state machine. */
+  const createKeybindingEditorPanel = (
+    onClose: () => void,
+    onModelChange: (model: KeybindingEditorModel) => void = () => {},
+  ): KeybindingEditorPanel | undefined => {
+    const settings = runner.tuiSettings
+    if (settings === undefined) return undefined
+    const controller = new KeybindingEditorController({
+      settings,
+      manager: app.keybindingsManager(),
+      onDiagnostic: diagnostic => runner.diag.debug('keybinding configuration', { error: diagnostic }),
+    })
+    let panel: KeybindingEditorPanel | undefined
+    try {
+      const model = controller.readModel()
+      let unregister = (): void => {}
+      panel = new KeybindingEditorPanel({
+        model,
+        onClose,
+        onModelChange,
+        onDispose: () => unregister(),
+        maxRows: () => app.keybindingEditorMaxRows(),
+        requestRender: () => app.requestRender(),
+        runMutation: (mutation, onResult, onError) => {
+          runOwned('keybinding editor mutation', () => controller.mutate(mutation), {
+            diag: runner.diag,
+            sessionId: () => runner.liveAgent?.session.id,
+            onResult,
+            onError,
+          })
+        },
+      })
+      unregister = app.trackKeybindingEditor(panel)
+      return panel
+    } catch (error) {
+      app.notify(`Could not open keyboard shortcuts: ${safeErrorMessage(error)}`, 'error')
+      return undefined
+    }
+  }
+
   /** Switch sessions with full rejection handling (the runner resolves an
    * error STRING for user-facing failures, but an unexpected rejection must
    * not become an unhandled rejection either). An owned workflow: the
@@ -1190,7 +1235,17 @@ export function registerTuiCommands(
     handler: () => {
       const liveAgent = runner.liveAgent
       const tuiSettings = runner.tuiSettings
-      const theme = tuiSettings?.get().theme ?? 'auto'
+      let settingsDoc: TuiSettingsDoc | undefined
+      if (tuiSettings !== undefined) {
+        try {
+          settingsDoc = tuiSettings.get()
+        } catch (error) {
+          // A present but temporarily unreadable settings service must degrade
+          // to the same unavailable keyboard-shortcuts fallback as absence.
+          runner.diag.warn('settings read failed', { error: safeErrorMessage(error) })
+        }
+      }
+      const theme = settingsDoc?.theme ?? 'auto'
       // The DISPLAYED current theme: the friendly name (the persisted
       // value may still be the legacy `custom:<name>` / bare-name form —
       // the display derives from it, the /settings handler reads and
@@ -1216,6 +1271,29 @@ export function registerTuiCommands(
       // Before the first session (deferred start) the session-scoped rows —
       // approval policy and the read-only session facts — do not exist yet;
       // everything process-wide stays available.
+      const keyboardShortcutsRow: SettingItem = {
+        id: 'keyboard-shortcuts',
+        label: 'Keyboard shortcuts',
+        description: 'Browse and customize action shortcuts, leader keys, and conflict-safe bindings',
+        currentValue: 'Unavailable',
+      }
+      if (runner.tuiSettings !== undefined && settingsDoc !== undefined) {
+        try {
+          const model = new KeybindingEditorController({
+            settings: runner.tuiSettings,
+            manager: app.keybindingsManager(),
+          }).readModel()
+          keyboardShortcutsRow.currentValue = model.summary
+        } catch {
+          keyboardShortcutsRow.currentValue = 'Unavailable'
+        }
+      }
+      keyboardShortcutsRow.submenu = (_currentValue, done) => createKeybindingEditorPanel(
+        done,
+        model => {
+          keyboardShortcutsRow.currentValue = model.summary
+        },
+      ) ?? new KeybindingEditorUnavailablePanel(done)
       app.openSettings(
         [
           ...liveAgent === undefined ? [] : [{
@@ -1266,7 +1344,7 @@ export function registerTuiCommands(
             description: 'Choose between emoji, compact symbols, or minimal structural markers',
             // The fallback applies HERE too: an invalid/missing persisted
             // value must never render as a row outside the values list.
-            currentValue: iconStyleOf(tuiSettings?.get().iconStyle),
+            currentValue: iconStyleOf(settingsDoc?.iconStyle),
             values: ['emoji', 'symbols', 'minimal'],
           },
           {
@@ -1294,14 +1372,14 @@ export function registerTuiCommands(
             id: 'busy-enter',
             label: 'Submit while busy',
             description: `Steer injects the draft into the running turn; ${keyHint('app.input.queue')} uses the other behavior`,
-            currentValue: tuiSettings?.get().busyEnter ?? 'queue',
+            currentValue: settingsDoc?.busyEnter ?? 'queue',
             values: ['queue', 'steer'],
           },
           {
             id: 'local-shell-sandbox',
             label: 'Local shell sandbox',
             description: '! / !! commands run outside the dsh sandbox (bypass, default) or under the sandbox policy',
-            currentValue: tuiSettings?.get().localShellSandbox ?? 'bypass',
+            currentValue: settingsDoc?.localShellSandbox ?? 'bypass',
             values: ['bypass', 'sandbox'],
           },
           {
@@ -1311,7 +1389,7 @@ export function registerTuiCommands(
             // The fallback applies HERE too: an invalid persisted value
             // must never render as a row outside the values list (round-1
             // finding).
-            currentValue: homeEndKeysModeOf(tuiSettings?.get().homeEndKeys),
+            currentValue: homeEndKeysModeOf(settingsDoc?.homeEndKeys),
             values: ['input', 'viewport'],
           },
           {
@@ -1360,6 +1438,7 @@ export function registerTuiCommands(
             description: color.textDim('The live session workspace (follows session switches)'),
             currentValue: color.textDim(runner.sessionCwd()),
           },
+          keyboardShortcutsRow,
           // ── M5: plugin-registered settings rows ───────────────────
           ...(runner.extensions?.settings.rows() ?? []).map(row => ({
             id: `ext-setting:${row.id}`,
@@ -1416,7 +1495,10 @@ export function registerTuiCommands(
                   // Spread the current doc: a replace is wholesale, so the
                   // other preference keys must ride along. The persisted
                   // value IS the source-qualified identity.
-                  detach('settings theme write', () => settings.replace({ ...settings.get(), theme: qualified }) as Promise<unknown>, { notify: true })
+                  detach('settings theme write', () => serializeTuiSettingsMutation(
+                    settings,
+                    () => settings.replace({ ...settings.get(), theme: qualified }),
+                  ), { notify: true })
                 }
                 lastThemeChoice = qualified
                 revert(themeDisplayNameOf(qualified, runner.extensions?.themes))
@@ -1540,25 +1622,30 @@ export function registerTuiCommands(
             if (value === 'default' || value === 'compact' || value === 'custom') {
               const settings = tuiSettings
               if (settings !== undefined) {
-                const doc = settings.get()
-                // Selecting custom with no (valid) layout initializes an
-                // editable copy of the default layout (plan §14.8).
-                const nextLayout = value === 'custom'
-                  ? !isFooterLayout(parseFooterLayout(doc.footerLayout))
-                    ? DEFAULT_FOOTER_LAYOUT
-                    : doc.footerLayout
-                  : doc.footerLayout
                 // footerFallbackMode records the LAST NATIVE mode (M5):
                 // `footer` is overwritten by 'command' when the command
                 // surface arms, so the command failure fallback must be
                 // able to recover THIS choice (a compact user's fallback
-                // survives a restart).
+                // survives a restart). Read and replace inside the shared
+                // transaction so a concurrent whole-document writer cannot
+                // be overwritten by this stale panel snapshot.
                 // PERSIST FIRST (the configurator's discipline): the app
                 // applies only from the successful write — a failed
                 // settings write must not leave the live layout ahead of
                 // the document (the next reload would silently revert).
                 detach('settings footer write', async () => {
-                  await settings.replace({ ...doc, footer: value, footerLayout: nextLayout, footerFallbackMode: value })
+                  const nextLayout = await serializeTuiSettingsMutation(settings, async () => {
+                    const doc = settings.get()
+                    // Selecting custom with no (valid) layout initializes an
+                    // editable copy of the default layout (plan §14.8).
+                    const layout = value === 'custom'
+                      ? !isFooterLayout(parseFooterLayout(doc.footerLayout))
+                        ? DEFAULT_FOOTER_LAYOUT
+                        : doc.footerLayout
+                      : doc.footerLayout
+                    await settings.replace({ ...doc, footer: value, footerLayout: layout, footerFallbackMode: value })
+                    return layout
+                  })
                   runner.applyFooterSettings({ footer: value, footerLayout: nextLayout })
                 }, { notify: true })
               } else {
@@ -1569,7 +1656,10 @@ export function registerTuiCommands(
             if (value === 'queue' || value === 'steer') {
               const settings = tuiSettings
               if (settings !== undefined) {
-                detach('settings busy enter write', () => settings.replace({ ...settings.get(), busyEnter: value }) as Promise<unknown>, { notify: true })
+                detach('settings busy enter write', () => serializeTuiSettingsMutation(
+                   settings,
+                   () => settings.replace({ ...settings.get(), busyEnter: value }),
+                 ), { notify: true })
               }
             }
           } else if (id === 'icon-style') {
@@ -1582,14 +1672,20 @@ export function registerTuiCommands(
               app.setIconStyle(value)
               const settings = tuiSettings
               if (settings !== undefined) {
-                detach('settings icon style write', () => settings.replace({ ...settings.get(), iconStyle: value }) as Promise<unknown>, { notify: true })
+                detach('settings icon style write', () => serializeTuiSettingsMutation(
+                   settings,
+                   () => settings.replace({ ...settings.get(), iconStyle: value }),
+                 ), { notify: true })
               }
             }
           } else if (id === 'local-shell-sandbox') {
             if (value === 'bypass' || value === 'sandbox') {
               const settings = tuiSettings
               if (settings !== undefined) {
-                detach('settings local shell sandbox write', () => settings.replace({ ...settings.get(), localShellSandbox: value }) as Promise<unknown>, { notify: true })
+                detach('settings local shell sandbox write', () => serializeTuiSettingsMutation(
+                   settings,
+                   () => settings.replace({ ...settings.get(), localShellSandbox: value }),
+                 ), { notify: true })
               }
             }
           } else if (id === 'home-end-keys') {
@@ -1599,7 +1695,10 @@ export function registerTuiCommands(
               applyHomeEndKeyMode(value)
               const settings = tuiSettings
               if (settings !== undefined) {
-                detach('settings home end keys write', () => settings.replace({ ...settings.get(), homeEndKeys: value }) as Promise<unknown>, { notify: true })
+                detach('settings home end keys write', () => serializeTuiSettingsMutation(
+                   settings,
+                   () => settings.replace({ ...settings.get(), homeEndKeys: value }),
+                 ), { notify: true })
               }
             }
           } else if (id === 'focus-mode') {
@@ -1681,7 +1780,12 @@ export function registerTuiCommands(
             // surface's restart fallback must resolve to THIS custom
             // layout, not the mode the user had before opening /footer.
             detach('footer configurator write', async () => {
-              await settings.replace({ ...settings.get(), footer: 'custom', footerFallbackMode: 'custom', footerLayout: parsed })
+              await serializeTuiSettingsMutation(settings, () => settings.replace({
+                ...settings.get(),
+                footer: 'custom',
+                footerFallbackMode: 'custom',
+                footerLayout: parsed,
+              }))
               runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed })
               app.notify('footer layout saved', 'info')
             }, { notify: true })
@@ -3154,13 +3258,12 @@ export function registerTuiCommands(
     },
   })
 
-  // M4: the keybinding diagnostics command (plan §19). The panel is
-  // read-only (no key recorder in the first version); reload re-reads the
-  // settings document, reset clears the user overrides THROUGH the
-  // settings service (never a direct settings.yaml write).
+  // M4: the keybinding command. Bare /keybindings opens the action-first
+  // Keyboard Shortcuts Editor; conflicts/reload/reset remain read-only or
+  // explicit diagnostics seams and persist only through the settings port.
   commands.register({
     name: 'keybindings',
-    description: 'Show effective keybindings (conflicts / reload / reset)',
+    description: 'Edit keyboard shortcuts (conflicts / reload / reset)',
     input: { hint: '[conflicts|reload|reset]' },
     handler: (invocation) => {
       const verb = invocation.rawInput.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
@@ -3201,18 +3304,20 @@ export function registerTuiCommands(
         // Neither class may throw out of the handler
         // (review round 28: reload is now the ONLY reload seam, so its
         // fail-soft contract must match the startup application).
-        try {
-          const parsed = parseUserKeybindings(settings.get().keybindings)
-          for (const message of parsed.diagnostics) runner.diag.warn('keybindings', { message })
-          keybindings.setUserConfiguration(parsed)
-        } catch (error: unknown) {
-          const message = safeErrorMessage(error)
-          runner.diag.warn('keybindings', { error: message, message: 'keybindings reload failed — the error may come from the post-rebuild UI invalidation, so the keymap may already be rebuilt' })
-          app.notify(`keybindings reload failed: ${message}`, 'error')
-          return { kind: 'error', text: `keybindings reload failed: ${message}` }
-        }
-        app.notify('Keybindings reloaded.', 'info')
-        return { kind: 'success', text: 'Keybindings reloaded.' }
+        return serializeTuiSettingsMutation(settings, (): CommandResult => {
+          try {
+            const parsed = parseUserKeybindings(settings.get().keybindings)
+            for (const message of parsed.diagnostics) runner.diag.warn('keybindings', { message })
+            keybindings.setUserConfiguration(parsed)
+          } catch (error: unknown) {
+            const message = safeErrorMessage(error)
+            runner.diag.warn('keybindings', { error: message, message: 'keybindings reload failed — the error may come from the post-rebuild UI invalidation, so the keymap may already be rebuilt' })
+            app.notify(`keybindings reload failed: ${message}`, 'error')
+            return { kind: 'error', text: `keybindings reload failed: ${message}` }
+          }
+          app.notify('Keybindings reloaded.', 'info')
+          return { kind: 'success', text: 'Keybindings reloaded.' }
+        })
       }
       if (verb === 'reset') {
         const settings = runner.tuiSettings
@@ -3220,7 +3325,7 @@ export function registerTuiCommands(
         // The whole reset is guarded — INCLUDING the initial read (review
         // round 30): a throwing first `get()` must not escape the handler;
         // it reports an error and the running keymap stays untouched.
-        return (async (): Promise<CommandResult> => {
+        return serializeTuiSettingsMutation(settings, async (): Promise<CommandResult> => {
           try {
             const doc = { ...settings.get() } as Record<string, unknown>
             delete doc.keybindings
@@ -3254,36 +3359,14 @@ export function registerTuiCommands(
             app.notify(`keybindings reset failed: ${message}`, 'error')
             return { kind: 'error', text: `keybindings reset failed: ${message}` }
           }
-        })()
-      }
-      // The full effective table, grouped by category (plan §19).
-      const snapshot = keybindings.snapshot()
-      const categories = new Map<string, SettingItem[]>()
-      for (const binding of snapshot.bindings) {
-        const definition = APP_KEYBINDINGS[binding.action as AppKeybindingId]
-        const category = definition?.category ?? 'Other'
-        const list = categories.get(category) ?? []
-        list.push({
-          id: `kb-${binding.action}`,
-          label: [ ...binding.keys.map(key => formatKeyId(key)), ...(binding.leaderKeys ?? []).map(key => formatLeaderSequence(key)) ].join(' / ') || '—',
-          description: `${binding.action} — ${definition?.description ?? ''} (${binding.scope}, ${binding.source})`,
-          currentValue: '',
         })
-        categories.set(category, list)
       }
-      const rows: SettingItem[] = []
-      for (const [category, list] of categories) {
-        rows.push({ id: `sep-${category}`, label: color.border(`── ${category} ──`), currentValue: '' })
-        rows.push(...list)
-      }
-      const diagnostics = keybindings.diagnosticsList()
-      if (diagnostics.length > 0) {
-        rows.push({ id: 'sep-diag', label: color.border('── diagnostics ──'), currentValue: '' })
-        for (const message of diagnostics) {
-          rows.push({ id: `diag-${rows.length}`, label: color.warning('⚠'), description: message, currentValue: '' })
-        }
-      }
-      app.openSettings(rows, () => {}, () => {})
+      // Bare /keybindings opens the action-first editor. The historical
+      // conflicts/reload/reset verbs above remain explicit diagnostics seams.
+      let closeEditor: () => void = () => {}
+      const panel = createKeybindingEditorPanel(() => closeEditor())
+      if (panel === undefined) return { kind: 'error', text: 'settings service unavailable' }
+      closeEditor = app.openKeybindingEditor(panel)
       return { kind: 'success' }
     },
   })
