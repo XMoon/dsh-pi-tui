@@ -7,8 +7,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
-import { renderSpans } from '../src/footer/composer.ts'
+import { FooterComposer, renderSpans } from '../src/footer/composer.ts'
+import { isFooterLayout, parseFooterLayout } from '../src/footer/layout.ts'
 import type { FooterItemRef } from '../src/footer/types.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
 
@@ -114,6 +116,20 @@ test('cwd shortens to the last two segments; empty → nothing', () => {
   assert.equal(render('cwd', emptyStatusSnapshot()), '')
 })
 
+test('cwd styles handle POSIX and Windows separators without losing roots', () => {
+  const windows = snapshotWith(snap => { snap.workspace.cwd = 'C:\\Users\\alice\\project' })
+  assert.equal(render('cwd', windows, { id: 'cwd', format: 'short' }), 'alice/project')
+  assert.equal(render('cwd', windows, { id: 'cwd', format: 'basename' }), 'project')
+  assert.equal(render('cwd', windows, { id: 'cwd', format: 'full' }), 'C:\\Users\\alice\\project')
+
+  const posixRoot = snapshotWith(snap => { snap.workspace.cwd = '/' })
+  assert.equal(render('cwd', posixRoot, { id: 'cwd', format: 'short' }), '/')
+  assert.equal(render('cwd', posixRoot, { id: 'cwd', format: 'basename' }), '/')
+  const windowsRoot = snapshotWith(snap => { snap.workspace.cwd = 'C:/' })
+  assert.equal(render('cwd', windowsRoot, { id: 'cwd', format: 'short' }), 'C:/')
+  assert.equal(render('cwd', windowsRoot, { id: 'cwd', format: 'basename' }), 'C:/')
+})
+
 test('git-branch renders the branch; empty → nothing', () => {
   const text = render('git-branch', snapshotWith(snap => { snap.workspace.branch = 'main' }))
   assert.equal(text, 'main')
@@ -169,6 +185,191 @@ test('ext:* bridges the extension footer text; empty → nothing', () => {
   assert.equal(withText === null ? '' : plain(renderSpans(withText.spans)), '[EXT]')
   assert.equal(render('ext:*', emptyStatusSnapshot()), '')
 })
+
+test('builtin styles render meaningful golden variants without changing defaults', () => {
+  const snap = snapshotWith(current => {
+    current.composition.agentPreset = { id: 'code', label: 'Code preset' }
+    current.composition.model = {
+      provider: 'deepseek',
+      id: 'flash',
+      displayName: 'flash',
+      reasoningEffort: 'high',
+    }
+    current.access.permissionPreset = { id: 'read-only', label: 'read-only', matched: true }
+    current.collaboration.plan = { effective: true }
+    current.workspace = { cwd: '/home/x/proj', branch: 'main' }
+    current.usage.context = { usedTokens: 25_000, windowTokens: 100_000, percent: 25 }
+    current.usage.tokens = { input: 1_200, output: 3_400, cacheRead: 2_000, cacheWrite: 100 }
+    current.usage.cacheHitPct = 91.9
+    current.usage.performance = { llmMs: 8_100, firstTokenMs: 2_000, tokensPerSec: 40 }
+    current.usage.turns = 3
+    current.usage.steps = 7
+    current.host.dshVersion = '1.2.3'
+  })
+
+  const cases: Array<{ id: string; formats: Array<[string, string]> }> = [
+    {
+      id: 'model',
+      formats: [
+        ['badge', '[deepseek/flash @high]'],
+        ['plain', 'deepseek/flash @high'],
+        ['compact', 'flash'],
+      ],
+    },
+    {
+      id: 'agent-preset',
+      formats: [['badge', '[Code preset]'], ['compact', '[CP]']],
+    },
+    {
+      id: 'permission-preset',
+      formats: [
+        ['badge', '[read-only]'],
+        ['plain', 'read-only'],
+        ['compact', 'ro'],
+      ],
+    },
+    {
+      id: 'plan-state',
+      formats: [['badge', '[plan]'], ['plain', 'plan']],
+    },
+    {
+      id: 'cwd',
+      formats: [['short', 'x/proj'], ['basename', 'proj'], ['full', '/home/x/proj']],
+    },
+    {
+      id: 'git-branch',
+      formats: [['plain', 'main'], ['label', 'branch: main']],
+    },
+    {
+      id: 'context',
+      formats: [
+        ['bar', '[███░░░░░░░░░] 25%'],
+        ['percent', 'ctx 25%'],
+        ['full', '25k/100k (25%)'],
+      ],
+    },
+    {
+      id: 'token-usage',
+      formats: [['io', '1200/3400'], ['total', '6.7k tokens'], ['compact', '6.7k']],
+    },
+    {
+      id: 'cache-hit',
+      formats: [['full', 'C 91.9%'], ['compact', '91.9%']],
+    },
+    {
+      id: 'performance',
+      formats: [['full', '8.1s 40 tok/s'], ['speed', '40 tok/s'], ['latency', '8.1s']],
+    },
+    {
+      id: 'turns-steps',
+      formats: [['both', 't3/s7'], ['turns', 't3'], ['steps', 's7']],
+    },
+    {
+      id: 'version',
+      formats: [['tui', 'v0.0.0'], ['dsh', 'dsh-1.2.3'], ['both', 'dsh-1.2.3/tui-0.0.0']],
+    },
+  ]
+
+  for (const { id, formats } of cases) {
+    const def = registry.get(id)!
+    assert.deepEqual(def.formats, formats.map(([format]) => format), `${id} format catalog`)
+    const outputs = formats.map(([format, expected]) => {
+      assert.equal(render(id, snap, { id, format }), expected, `${id}/${format}`)
+      return expected
+    })
+    assert.ok(new Set(outputs).size > 1, `${id} formats must not all render identically`)
+  }
+
+  // Keep the invariant registry-wide: a future multi-format builtin cannot
+  // silently escape the golden catalog above by being omitted from the list.
+  for (const id of registry.ids()) {
+    const def = registry.get(id)!
+    if (def.formats.length <= 1) continue
+    const rendered = def.formats.map(format => render(id, snap, { id, format }))
+    assert.ok(rendered.every(text => text !== ''), `${id} every declared format must render in the fixture`)
+    assert.ok(new Set(rendered).size > 1, `${id} formats must not all render identically`)
+  }
+
+  // A ref without an explicit format still selects each definition's old
+  // default formatter, so adding choices cannot alter the native layout.
+  assert.equal(render('model', snap), '[deepseek/flash @high]')
+  assert.equal(render('permission-preset', snap), '[read-only]')
+  assert.equal(render('plan-state', snap), '[plan]')
+  assert.equal(render('cwd', snap), 'x/proj')
+  assert.equal(render('git-branch', snap), 'main')
+  assert.equal(render('context', snap), '[███░░░░░░░░░] 25%')
+  assert.equal(render('token-usage', snap), '1200/3400')
+  assert.equal(render('cache-hit', snap), 'C 91.9%')
+  assert.equal(render('performance', snap), '8.1s 40 tok/s')
+  assert.equal(render('turns-steps', snap), 't3/s7')
+})
+
+test('new builtin styles fall back to the unchanged default formatter', () => {
+  const snap = snapshotWith(current => {
+    current.composition.agentPreset = { id: 'code', label: 'Code preset' }
+    current.composition.model = { provider: 'deepseek', id: 'flash', displayName: 'flash' }
+    current.access.permissionPreset = { id: 'read-only', label: 'read-only', matched: true }
+    current.collaboration.plan = { effective: true }
+    current.workspace = { cwd: '/home/x/proj', branch: 'main' }
+    current.usage.context = { usedTokens: 25_000, windowTokens: 100_000, percent: 25 }
+    current.usage.tokens = { input: 1_200, output: 3_400, cacheRead: 0, cacheWrite: 0 }
+    current.usage.cacheHitPct = 50
+    current.usage.performance = { llmMs: 8_100, firstTokenMs: 0, tokensPerSec: 40 }
+    current.host.dshVersion = '1.2.3'
+  })
+  assert.equal(render('agent-preset', snap, { id: 'agent-preset', format: 'unknown' }), '[Code preset]')
+  assert.equal(render('model', snap, { id: 'model', format: 'unknown' }), '[deepseek/flash]')
+  assert.equal(render('permission-preset', snap, { id: 'permission-preset', format: 'unknown' }), '[read-only]')
+  assert.equal(render('plan-state', snap, { id: 'plan-state', format: 'unknown' }), '[plan]')
+  assert.equal(render('cwd', snap, { id: 'cwd', format: 'unknown' }), 'x/proj')
+  assert.equal(render('git-branch', snap, { id: 'git-branch', format: 'unknown' }), 'main')
+  assert.equal(render('context', snap, { id: 'context', format: 'unknown' }), '[███░░░░░░░░░] 25%')
+  assert.equal(render('turns-steps', snap, { id: 'turns-steps', format: 'unknown' }), 't0/s0')
+  assert.equal(render('cache-hit', snap, { id: 'cache-hit', format: 'unknown' }), 'C 50.0%')
+  assert.equal(render('token-usage', snap, { id: 'token-usage', format: 'unknown' }), '1200/3400')
+  assert.equal(render('performance', snap, { id: 'performance', format: 'unknown' }), '8.1s 40 tok/s')
+  assert.equal(render('version', snap, { id: 'version', format: 'unknown' }), 'v0.0.0')
+  // `plain` (turns) and `compact` (performance) appeared in older custom
+  // documents even though they were never declared meaningful styles. They
+  // still degrade to the same effective legacy defaults instead of changing
+  // old layouts on load.
+  assert.equal(render('turns-steps', snap, { id: 'turns-steps', format: 'plain' }), 't0/s0')
+  assert.equal(render('performance', snap, { id: 'performance', format: 'compact' }), '8.1s 40 tok/s')
+})
+
+test('unknown persisted formats survive parsing and fail soft in the real composer', () => {
+  const snap = snapshotWith(current => {
+    current.usage.tokens = { input: 1_200, output: 3_400, cacheRead: 0, cacheWrite: 0 }
+    current.usage.cacheHitPct = 50
+    current.usage.performance = { llmMs: 8_100, firstTokenMs: 0, tokensPerSec: 40 }
+  })
+  const parsed = parseFooterLayout({
+    schemaVersion: 1,
+    rows: [{
+      left: [
+        { id: 'performance', format: 'future-performance' },
+        { id: 'cache-hit', format: 'future-cache' },
+        { id: 'token-usage', format: 'future-tokens' },
+      ],
+      right: [],
+    }],
+  })
+  assert.ok(isFooterLayout(parsed), 'unknown format strings must remain valid persisted layout data')
+  const output = new FooterComposer(registry).render({
+    snapshot: snap,
+    layout: parsed,
+    width: 40,
+    context: CONTEXT,
+  })
+  for (const row of output.split('\n')) {
+    assert.ok(visibleWidth(row) <= 40, `composer output overflows: ${JSON.stringify(row)}`)
+  }
+  const text = plain(output)
+  assert.ok(text.includes('8.1s 40 tok/s'), `performance must use its default: ${text}`)
+  assert.ok(text.includes('C 50.0%'), `cache hit must use its default: ${text}`)
+  assert.ok(text.includes('1200/3400'), `token usage must use its default: ${text}`)
+})
+
 test('the registry rejects duplicate ids and lists every id', () => {
   const def = registry.get('model')!
   const registry2 = createBuiltinFooterRegistry()

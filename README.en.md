@@ -219,7 +219,7 @@ footerLayout:
         - id: token-usage
           format: io
         - id: performance
-          format: compact
+          format: speed
         - id: version
           format: tui
       right:
@@ -228,6 +228,15 @@ footerLayout:
         text: " │ "
         tone: textDim
 ```
+
+Builtin format choices are finite and use the existing `format` field (no
+second style schema): Model `badge` / `plain` / `compact`; Permission preset
+`badge` / `plain` / `compact`; Plan state `badge` / `plain`; Working directory
+`short` / `basename` / `full`; Git branch `plain` / `label`; Context `bar` /
+`percent` / `full`; Token usage `io` / `total` / `compact`; Cache hit `full` /
+`compact`; Performance `full` / `speed` / `latency`; Turns/steps `both` /
+`turns` / `steps`; Version keeps `tui` / `dsh` / `both`. Omitting `format`
+continues to use each item's legacy default.
 
 Builtin item ids: `agent-preset`, `model`, `reasoning`,
 `permission-preset`, `sandbox-mode`, `approval-policy`, `plan-state`,

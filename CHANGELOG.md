@@ -33,6 +33,13 @@
   扩展条目能力、默认布局输出与无迁移契约均不变。Add 路径同时执行
   持久化解析的每行 32 条上限——满行时 picker 显示明确提示,拒绝第
   33 条而不是让之后的保存永远失败。
+- **内置 Footer 条目现在提供有意义的有限 Style。** 持久化仍只使用既有的
+  `format` 字段,常用条目新增了可区分的变体:Model 与 Permission preset
+  支持 badge/plain/compact,Working directory 支持 short/basename/full,
+  Context 支持 bar/percent/full,Token usage 支持 io/total/compact,
+  Performance 支持 full/speed/latency,Turns/steps 支持 both 或单独计数器。
+  Cache hit 的 compact 输出也不再与 full 相同;省略 format 时所有旧默认输出
+  保持不变。
 - **插件主题的选择身份改为 SOURCE-QUALIFIED(`plugin:<owner>/<id>`)。**
   之前插件主题与本地自定义主题文件共享同一个裸名字空间:`Foo.json` 与
   插件注册的 `name: "Foo"` 会在 picker 里出现两个完全相同的值,真正
