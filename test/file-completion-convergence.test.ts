@@ -327,6 +327,59 @@ test('review finding 1: a quoted /image argument completes inside the quotes', a
   assert.ok(spaced.items.some(item => item.value === '"my file.txt"'), `spaced quoted value missing:\n${JSON.stringify(spaced.items)}`)
 })
 
+test('review finding 3: an indented /image command still classifies its argument', async () => {
+  const { workspace } = outsideCwdFixture()
+  const root = workspace
+  writeFileSync(join(root, 'file-one.txt'), 'x')
+  const provider = new MentionProvider(
+    [{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }],
+    root,
+    new DirectHostFilePort(() => undefined, null),
+  )
+  const result = await provider.getSuggestions(['  /image file'], 0, 14, { signal: abort })
+  assert.ok(result !== null, `an indented /image must complete its argument:\n${JSON.stringify(result)}`)
+  assert.ok(result.items.some(item => item.value === 'file-one.txt'), `indented value missing:\n${JSON.stringify(result.items)}`)
+})
+
+test('review finding (verified): multi-space /image separator applies without duplication', async () => {
+  const { workspace } = outsideCwdFixture()
+  const root = workspace
+  writeFileSync(join(root, 'file-one.txt'), 'x')
+  const provider = new MentionProvider(
+    [{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }],
+    root,
+    new DirectHostFilePort(() => undefined, null),
+  )
+  // imageArgumentOf slices AFTER the first separator; completeImageArgument
+  // re-prefixes the value with the REMAINING separator whitespace. The
+  // fork's apply consumes the first separator in beforePrefix, so the
+  // total separator count is preserved — never duplicated.
+  const line = '/image    file'
+  const result = await provider.getSuggestions([line], 0, line.length, { signal: abort })
+  assert.ok(result !== null)
+  assert.equal(result.prefix, '   file', 'the classifier slice matches the fork slice (after the first space)')
+  const applied = provider.applyCompletion([line], 0, line.length, result.items[0]!, result.prefix)
+  assert.equal(applied.lines[0], '/image    file-one.txt', 'the separator count is preserved')
+})
+
+test('review finding: a CLOSED quoted /image token never completes further (no trailing-text deletion)', async () => {
+  const { workspace } = outsideCwdFixture()
+  const root = workspace
+  writeFileSync(join(root, 'my file.txt'), 'x')
+  const provider = new MentionProvider(
+    [{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }],
+    root,
+    new DirectHostFilePort(() => undefined, null),
+  )
+  // A closed quote with trailing text: completing would replace the whole
+  // argument range and DELETE the trailing text — stay quiet.
+  const closed = await provider.getSuggestions(['/image "my"foo'], 0, 15, { signal: abort })
+  assert.equal(closed, null, 'a closed quoted token with trailing text must stay quiet')
+  // A closed quote alone (no trailing text): also quiet — the token is done.
+  const bare = await provider.getSuggestions(['/image "my"'], 0, 11, { signal: abort })
+  assert.equal(bare, null, 'a closed quoted token must stay quiet')
+})
+
 test('review finding 2: a stale accept never applies after an unrelated edit', async () => {
   const root = outsideCwdFixture().workspace
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
