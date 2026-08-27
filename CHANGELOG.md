@@ -252,6 +252,26 @@
 
 ### 修复
 
+- **修复一处启动期 TDZ:footer command 生命周期槽声明过晚,启动回调读取
+  时抛 `ReferenceError`。** `startProcessTui` 捕获的 `onTerminalResize`
+  回调读取 `footerCommandRunner`,但该槽声明在约 940 行之后的 footer
+  settings 块里;首次 surface-geometry 同步就会触发该回调
+  (`lastCommandWidth` 初始为 0),而启动期间 keybinding rebuild 的
+  invalidate → requestRender 正可达此处——读取命中 temporal dead zone。
+  异常又恰好被 keybinding 启动应用的 fail-soft catch 吞掉,日志误报为
+  「keybindings startup apply failed — keeping the last-known-good
+  configuration」,尽管 rebuild 的顺序是 keymap 先行、invalidate 收尾,
+  新键表实际已经生效。修复:两个 footer 槽上移到与
+  `stopPluginKeybindingSync` / `catalogCoordinator` 相同的生命周期槽区
+  (同时位于 `cleanup()` 与 `startProcessTui` 之前);`cleanup()` 现在显式
+  释放 statusStore 订阅并 dispose runner(与 arm 路径对称,双保险幂等);
+  启动与 `/keybindings reload` 的诊断不再声称「保持 last-known-good」
+  ——post-rebuild 的 UI 失效异常下新键表已然生效。`test/rules.test.ts`
+  新增 startup-eager callback 审计:`startProcessTui` 参数中的启动期急切
+  回调(当前仅 `onTerminalResize`)与调用期即求值的属性值,只能引用在
+  调用之前声明的 runner 作用域绑定;输入期回调(onSubmit、onDequeue、
+  onClipboardPaste 等)对后声明绑定的惰性捕获仍属合法,不在审计范围。
+
 - **Linux Wayland/X11 下 Ctrl+V 图片粘贴恢复可用。** 剪贴板 runner 执行
   `wl-paste`/`xclip` 时未显式指定编码,二进制 stdout 被当作 UTF-8 解码,
   非法字节被替换——PNG magic 变成 `EF BF BD …`,图片解析器无法识别
