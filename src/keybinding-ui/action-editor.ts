@@ -54,6 +54,33 @@ function selectedLine(label: string, selected: boolean, width: number): string {
   return truncateToWidth(text, Math.max(1, width))
 }
 
+/** Keep the selected binding visible in a short terminal while retaining the
+ * detail footer. The first/last visible content lines double as scroll
+ * markers when they are not the selected line. */
+function actionViewport(
+  lines: readonly string[],
+  selectedLineIndex: number | undefined,
+  maxRows: number,
+): string[] {
+  const limit = Math.max(1, maxRows)
+  if (lines.length <= limit) return [...lines]
+  const footer = lines[lines.length - 1]!
+  if (limit === 1) return [footer]
+  const content = lines.slice(0, -1)
+  if (content.length === 0) return [footer]
+  const windowSize = Math.max(1, limit - 1)
+  const selected = selectedLineIndex === undefined
+    ? Math.min(content.length - 1, Math.floor(windowSize / 2))
+    : Math.min(content.length - 1, Math.max(0, selectedLineIndex))
+  const maxStart = Math.max(0, content.length - windowSize)
+  const start = Math.min(maxStart, Math.max(0, selected - Math.floor(windowSize / 2)))
+  const end = Math.min(content.length, start + windowSize)
+  const viewport = content.slice(start, end)
+  if (start > 0 && selected > start) viewport[0] = color.textDim(`↑ ${start} more lines`)
+  if (end < content.length && selected < end - 1) viewport[viewport.length - 1] = color.textDim(`↓ ${content.length - end} more lines`)
+  return [...viewport, footer]
+}
+
 export class ActionEditorPanel implements Component {
   private model: KeybindingEditorModel
   private row: KeybindingEditorRow
@@ -89,33 +116,49 @@ export class ActionEditorPanel implements Component {
       color.textStrong(`Keyboard shortcuts › ${this.row.label}`),
       '',
     ]
+    const selectableLineIndices: number[] = []
     lines.push(...wrapTextWithAnsi(this.row.description, safeWidth).map(line => color.text(line)))
     lines.push('')
     lines.push(color.textDim(`Action ID: ${this.row.id}`))
     lines.push(color.textDim(`Scope: ${this.row.scope} · Source: ${this.row.source}`))
     lines.push(color.textDim(`Status: ${statusLabel(this.row)}`))
+    if (this.row.safeMode) {
+      lines.push(color.warning('Safe mode is active. Custom shortcuts are ignored.'))
+      lines.push(color.textDim('Editing is disabled until safe mode is turned off.'))
+    }
     if (this.row.reserved) lines.push(color.warning('This action is reserved and has no runtime implementation.'))
     if (this.row.fixed) lines.push(color.textDim('This action is fixed by the application and cannot be edited.'))
     lines.push('')
 
     const configured = this.row.customized ? this.row.configured : []
+    const editable = this.row.customized ? this.row.configured : this.row.defaults
     lines.push(color.textStrong(this.row.customized ? 'Configured shortcuts' : 'Shortcuts'))
     if (this.row.customized && configured.length === 0) {
       lines.push(color.textDim(this.row.disabled ? '  Disabled' : '  Unbound'))
     }
-    if (!this.row.customized && this.row.defaults.length === 0) {
+    if (!this.row.customized && this.row.defaults.length === 0 && this.row.conditional.length === 0) {
       lines.push(color.textDim('  Unbound'))
     }
-    const canEdit = this.row.configurable && !this.row.reserved
+    const canEdit = this.row.configurable && !this.row.reserved && !this.row.safeMode
     if (canEdit) {
-      for (let index = 0; index < configured.length; index += 1) {
-        const binding = configured[index]!
-        const suffix = this.row.conflict ? color.warning(' !') : ''
-        lines.push(selectedLine(`${bindingLabel(binding)}${suffix}`, this.selectedIndex === index, safeWidth))
+      for (let index = 0; index < editable.length; index += 1) {
+        const binding = editable[index]!
+        const defaultSuffix = this.row.customized ? '' : ' (default)'
+        const conflictSuffix = this.row.conflict ? color.warning(' !') : ''
+        selectableLineIndices.push(lines.length)
+        lines.push(selectedLine(`${bindingLabel(binding)}${defaultSuffix}${conflictSuffix}`, this.selectedIndex === index, safeWidth))
       }
-      lines.push(selectedLine('+ Add shortcut', this.selectedIndex === configured.length, safeWidth))
+      selectableLineIndices.push(lines.length)
+      lines.push(selectedLine('+ Add shortcut', this.selectedIndex === editable.length, safeWidth))
     } else if (this.row.defaults.length > 0) {
       for (const binding of this.row.defaults) lines.push(`  ${bindingLabel(binding)}`)
+    }
+
+    if (this.row.conditional.length > 0) {
+      lines.push(color.textStrong('Conditional shortcuts'))
+      for (const binding of this.row.conditional) {
+        lines.push(color.textDim(`  ${bindingLabel(binding)} (${this.row.conditionalDescription ?? 'when its context is active'})`))
+      }
     }
 
     if (!this.row.customized && this.row.defaults.length > 0) {
@@ -130,10 +173,10 @@ export class ActionEditorPanel implements Component {
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, safeWidth)))
     if (this.pending) lines.push(color.accent('Saving…'))
     lines.push('')
-    lines.push(color.textDim(this.row.fixed
+    lines.push(color.textDim(this.row.fixed || this.row.reserved || this.row.safeMode
       ? 'Esc: back'
       : 'Enter: edit · a: add · Delete: remove · r: reset · d: disable · Esc: back'))
-    return lines.slice(0, Math.max(1, this.maxRows()))
+    return actionViewport(lines, selectableLineIndices[this.selectedIndex], this.maxRows())
   }
 
   invalidate(): void {
@@ -150,10 +193,21 @@ export class ActionEditorPanel implements Component {
   handleInput(data: string): void {
     if (this.disposed) return
     if (this.recorder !== undefined) {
-      this.recorder.handleInput(data)
+      if (this.row.safeMode) {
+        this.recorder.handleInput('\x1b')
+      } else {
+        this.recorder.handleInput(data)
+      }
       return
     }
     if (this.pending) {
+      if (matchesKey(data, 'escape')) {
+        this.dispose()
+        this.onBack()
+      }
+      return
+    }
+    if (this.row.safeMode) {
       if (matchesKey(data, 'escape')) {
         this.dispose()
         this.onBack()
@@ -171,7 +225,8 @@ export class ActionEditorPanel implements Component {
     }
     if (this.row.fixed || this.row.reserved) return
     const configured = this.row.customized ? this.row.configured : []
-    const total = configured.length + 1
+    const editable = this.row.customized ? this.row.configured : this.row.defaults
+    const total = editable.length + 1
     if (matchesKey(data, 'up')) {
       this.selectedIndex = (this.selectedIndex + total - 1) % total
       this.message = undefined
@@ -186,6 +241,7 @@ export class ActionEditorPanel implements Component {
     }
     if (commandKey(data, 'a')) {
       this.mode = 'choose-binding'
+      this.selectedIndex = 0
       this.message = undefined
       this.requestRender()
       return
@@ -199,18 +255,19 @@ export class ActionEditorPanel implements Component {
       return
     }
     if (matchesKey(data, 'delete') || matchesKey(data, 'backspace')) {
-      if (this.selectedIndex < configured.length) {
-        this.startMutation({ kind: 'remove', action: this.row.id, binding: configured[this.selectedIndex]! })
+      if (this.selectedIndex < editable.length) {
+        this.startMutation({ kind: 'remove', action: this.row.id, binding: editable[this.selectedIndex]! })
       }
       return
     }
     if (matchesKey(data, 'enter') || data === '\n' || data === '\r') {
-      if (this.selectedIndex >= configured.length) {
+      if (this.selectedIndex >= editable.length) {
         this.mode = 'choose-binding'
+        this.selectedIndex = 0
         this.message = undefined
         this.requestRender()
       } else {
-        this.startRecorder(configured[this.selectedIndex]!.kind, configured[this.selectedIndex])
+        this.startRecorder(editable[this.selectedIndex]!.kind, editable[this.selectedIndex])
       }
     }
   }
@@ -318,7 +375,8 @@ export class ActionEditorPanel implements Component {
     const next = result.model.rows.find(row => row.id === this.row.id)
     if (next !== undefined) this.row = next
     this.model = result.model
-    this.selectedIndex = Math.min(this.selectedIndex, (this.row.customized ? this.row.configured.length : 0))
+    const editableCount = this.row.customized ? this.row.configured.length : this.row.defaults.length
+    this.selectedIndex = Math.min(this.selectedIndex, editableCount)
     this.message = result.message
     this.onModelChange(result.model)
     this.requestRender()

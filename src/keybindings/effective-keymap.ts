@@ -556,6 +556,14 @@ export class EffectiveKeymap {
       rule.action === action && rule.owner === 'editor' && rule.source === 'user')
   }
 
+  /** The visible conditional/composition keys of one action. These are
+   * context-gated affordances rather than ordinary user-editable defaults. */
+  conditionalKeysFor(action: string): KeyId[] {
+    return [...new Set(this.visibleRules
+      .filter(rule => rule.action === action && rule.source === 'composition')
+      .map(rule => rule.key))]
+  }
+
   /** The primary (first) effective key of one action, or undefined. */
   primaryKeyFor(action: string): KeyId | undefined {
     const keys = this.keysFor(action)

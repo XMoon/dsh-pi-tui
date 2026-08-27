@@ -91,7 +91,7 @@ export class KeyRecorder implements Component {
         ? color.accent('Waiting for one key…')
         : color.error(this.error),
       '',
-      color.textDim('Esc: cancel'),
+      color.textDim(this.purpose === 'direct' ? 'Esc: cancel · e: use Escape' : 'Esc: cancel'),
     ]
     return lines.map(line => truncateToWidth(line, safeWidth))
   }
@@ -103,6 +103,18 @@ export class KeyRecorder implements Component {
     // Release/repeat reports are not a second binding. They are consumed by
     // the active editor overlay and must never reach the host editor.
     if (isKeyRelease(data) || isKeyRepeat(data)) return
+    // Raw Escape is the recorder's cancel gesture. Offer an explicit
+    // disambiguated command so a direct action can still express the legal
+    // unmodified Escape KeyId without making the cancel path unreachable.
+    if (this.purpose === 'direct' && data.length === 1 && data.toLowerCase() === 'e') {
+      try {
+        this.onCapture('escape')
+      } catch {
+        this.error = 'The shortcut could not be recorded. Try again.'
+        this.requestRender()
+      }
+      return
+    }
     if (matchesKey(data, 'escape')) {
       this.onCancel()
       return

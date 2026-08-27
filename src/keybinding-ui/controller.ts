@@ -114,6 +114,25 @@ function actionBindings(
   return [...editorBindingsFor(action, parsed)]
 }
 
+function defaultBindings(action: AppKeybindingId): KeybindingEditorBinding[] {
+  return APP_KEYBINDINGS[action]!.defaultKeys.map(key => ({ kind: 'direct' as const, key }))
+}
+
+/**
+ * The first edit of an untouched action starts from its editable effective
+ * defaults. Once the action has a user declaration, user bindings remain the
+ * complete source of truth because a declaration intentionally replaces the
+ * builtin set.
+ */
+function mutationBindings(
+  action: AppKeybindingId,
+  parsed: ParsedUserKeybindings,
+): KeybindingEditorBinding[] {
+  return hasOwn(parsed.bindings, action)
+    ? actionBindings(action, parsed)
+    : defaultBindings(action)
+}
+
 function sameBinding(left: KeybindingEditorBinding, right: KeybindingEditorBinding): boolean {
   return left.kind === right.kind && left.key === right.key
 }
@@ -188,17 +207,17 @@ function applyMutation(
 ): Record<string, unknown> | undefined {
   switch (mutation.kind) {
     case 'add': {
-      const bindings = actionBindings(mutation.action, current)
+      const bindings = mutationBindings(mutation.action, current)
       writeActionDeclarations(raw, mutation.action, [...bindings, mutation.binding])
       return raw
     }
     case 'replace': {
-      const bindings = actionBindings(mutation.action, current).filter(binding => !sameBinding(binding, mutation.previous))
+      const bindings = mutationBindings(mutation.action, current).filter(binding => !sameBinding(binding, mutation.previous))
       writeActionDeclarations(raw, mutation.action, [...bindings, mutation.binding])
       return raw
     }
     case 'remove': {
-      const bindings = actionBindings(mutation.action, current).filter(binding => !sameBinding(binding, mutation.binding))
+      const bindings = mutationBindings(mutation.action, current).filter(binding => !sameBinding(binding, mutation.binding))
       writeActionDeclarations(raw, mutation.action, bindings)
       return raw
     }
@@ -260,6 +279,9 @@ export class KeybindingEditorController {
     const settings = this.settings
     return serializeTuiSettingsMutation(settings, async () => {
       try {
+        if (this.manager.isSafeMode()) {
+          return { kind: 'rejected', message: 'Keyboard shortcuts cannot be edited while safe mode is active.' }
+        }
         const currentDoc = settings.get()
         const raw = cloneKeybindings(currentDoc.keybindings)
         const current = parseUserKeybindings(raw)

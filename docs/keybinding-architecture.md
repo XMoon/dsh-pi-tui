@@ -467,7 +467,14 @@ operation without a compare-and-swap token, all TUI settings writers use the
 shared transaction queue (including `/settings` and `/keybindings reset`), so
 editor controllers sharing a settings port serialize their `get` → candidate →
 `replace` transactions; late panel callbacks are generation-guarded and cannot
-repaint a disposed editor.
+repaint a disposed editor. Untouched builtin bindings are selectable in the
+Detail view: `Add shortcut` materializes the displayed defaults together with
+the new key, while replacing or removing one default preserves its siblings.
+Once an action has an explicit user declaration, the unified override contract
+still applies. Safe mode makes the entire editor read-only, and direct recording
+uses `e` as the explicit "use Escape" command because raw `Esc` remains cancel.
+Context-gated composition affordances are labeled separately from ordinary
+configured bindings (for example, `Down (conditional)` for the task browser).
 
 `/settings` contains one `Keyboard shortcuts` launcher whose submenu uses the
 same controller and editor component. The diagnostic verbs

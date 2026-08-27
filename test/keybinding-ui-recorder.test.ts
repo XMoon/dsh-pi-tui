@@ -34,6 +34,20 @@ test('recorder rejects dead, text-producing, and terminal-ambiguous keys', () =>
   assert.match(validateRecordedKey('escape', { purpose: 'leader-completion' }).message!, /cancel/i)
 })
 
+test('direct recorder can explicitly capture the legal Escape binding', () => {
+  let captured: string | undefined
+  const recorder = new KeyRecorder({
+    purpose: 'direct',
+    action: 'app.todo.toggle',
+    label: 'todo panel',
+    onCapture: key => { captured = key },
+    onCancel: noop,
+  })
+  assert.match(recorder.render(88).join('\n'), /e: use Escape/)
+  recorder.handleInput('e')
+  assert.equal(captured, 'escape')
+})
+
 test('Escape cancels recording and never captures a binding', () => {
   let captures = 0
   let cancels = 0

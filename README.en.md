@@ -345,7 +345,13 @@ dsh-pi-tui:
   toggle trigger (Ctrl+T stops); `['ctrl+z', '<leader>s']` keeps both
   USER triggers; `false` removes every trigger of the action.
 - `DSH_PI_TUI_SAFE_KEYBINDINGS=1` ignores all user overrides (builtin
-  defaults only).
+  defaults only). The whole `/keybindings` editor is read-only while safe mode
+  is active, so it cannot save a configuration that is only checked after safe
+  mode is disabled.
+- In the editor, untouched default bindings are selectable. `Add shortcut`
+  materializes every displayed default plus the new key; replacing or removing
+  one default preserves its siblings. Once an action has a user declaration,
+  that declaration still replaces the builtin set as described above.
 - `/help` remains the key-first, read-only help surface; `/keybindings` is the
   action-first, editable Keyboard Shortcuts Editor: it groups actions by
   category, searches action IDs/descriptions/current keys/default keys, and
@@ -354,7 +360,11 @@ dsh-pi-tui:
   and persistence controller as `/keybindings`.
 - The recorder reads a real terminal key, parses it with `parseKey`, and stores
   the canonical `KeyId`; known dead, typing-swallowing, terminal-ambiguous, and
-  conflicting shortcuts are rejected before saving.
+  conflicting shortcuts are rejected before saving. Raw `Esc` cancels recording;
+  press `e` in a direct recording to explicitly bind the legal Escape key.
+- Conditional affordances are labeled separately in the editor (for example,
+  `Down (conditional)` for the empty-editor task browser) instead of appearing
+  as ordinary configured shortcuts.
 - `/keybindings conflicts` lists conflicts (same key + overlapping scope + same
   priority — never silent last-write-wins); `/keybindings reload` re-reads the
   settings (fail-soft: a bad entry is diagnosed and skipped, a throwing read
