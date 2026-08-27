@@ -13,6 +13,7 @@ import test from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { FooterConfiguratorModel } from '../src/footer/configurator-model.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import type { StatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 function startApp(cols = 100, rows = 30): { vt: VirtualTerminal; app: TuiApp } {
@@ -407,6 +408,48 @@ test('a definition that ECHOES the ref format cannot paint control sequences (sp
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('\u001b'), `a format echoed into a span must be stripped:\n${view}`)
   assert.ok(view.includes('fmt=badge'), `the sanitized echo keeps its readable text:\n${view}`)
+  app.stop()
+})
+
+test('the whole-footer composer preview is sanitized too (SGR survives, OSC/CSI stripped)', async () => {
+  // The rows/row/add pages compose the preview through the REAL
+  // FooterComposer. A hand-built draft can carry prefix/suffix fields the
+  // persisted-layout parser would have rejected: the composed lines must
+  // pass the command mode's sanitize boundary — legitimate SGR styling
+  // survives, OSC/CSI/C0 never reaches the panel. The assertion inspects
+  // the PANEL RENDER output directly (not the terminal viewport).
+  const { FooterConfiguratorPanel } = await import('../src/footer/configurator.ts')
+  const { FooterComposer } = await import('../src/footer/composer.ts')
+  const { createBuiltinFooterRegistry } = await import('../src/footer/builtin-items.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
+  const model = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{
+      left: [{ id: 'model', prefix: '\u001b]52;c;bWFsaWNpb3Vz\u0007P', suffix: 'S\u001b[2J\u001b[?25h' }],
+      right: [],
+    }],
+  }, app.getFooterItemRegistry())
+  const panel = new FooterConfiguratorPanel({
+    model,
+    registry: app.getFooterItemRegistry(),
+    snapshot: () => (app as unknown as { statusStore: { snapshot(): StatusSnapshot } }).statusStore.snapshot(),
+    composer: new FooterComposer(createBuiltinFooterRegistry()),
+    taskBrowserAvailable: () => true,
+    extensionFooterText: () => '',
+    maxVisible: () => 100,
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  const rendered = panel.render(100).join('\n')
+  assert.ok(!rendered.includes('\u0007'), `a BEL must never reach the panel:\n${rendered}`)
+  assert.ok(!rendered.includes('\u001b]52'), `an OSC 52 clipboard write must never reach the panel:\n${rendered}`)
+  assert.ok(!rendered.includes('\u001b[2J'), `a CSI screen clear must never reach the panel:\n${rendered}`)
+  assert.ok(!rendered.includes('\u001b[?25h'), `a CSI cursor show must never reach the panel:\n${rendered}`)
+  assert.ok(rendered.includes('[deepseek/flash]'), `the item must still render (sanitized):\n${rendered}`)
   app.stop()
 })
 

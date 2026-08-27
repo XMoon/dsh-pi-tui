@@ -27,6 +27,7 @@ import { matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoo
 import { color } from '../theme.ts'
 import type { StatusSnapshot } from '../status/types.ts'
 import { FooterComposer, renderSpans } from './composer.ts'
+import { sanitizeCommandOutput } from './ansi-sanitize.ts'
 import {
   FOOTER_TONE_CHOICES,
   flatLengthOf,
@@ -259,7 +260,16 @@ export class FooterConfiguratorPanel implements Component {
       width,
       context: { taskBrowserAvailable: this.taskBrowserAvailable(), extensionFooterText: this.extensionFooterText() },
     })
-    const lines = preview.split('\n').filter((line, index, all) => !(line === '' && index === all.length - 1))
+    // The composed preview flows through the REAL composer (the contract:
+    // the preview must show exactly what the footer will show), but the
+    // draft may carry fields the persisted-layout parser would have
+    // rejected (a hand-built FooterLayoutV1) and definitions render their
+    // own span text — so the composed lines pass the SAME boundary the
+    // command mode applies to user-influenced footer text: SGR + OSC 8
+    // survive (the legitimate styling), every other ESC sequence and C0/
+    // C1 control is stripped.
+    const lines = preview.split('\n').map(line => sanitizeCommandOutput(line))
+      .filter((line, index, all) => !(line === '' && index === all.length - 1))
     return lines.length > 0 ? lines : [color.textMuted('(empty footer)')]
   }
 
