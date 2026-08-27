@@ -9317,13 +9317,19 @@ export class TuiApp {
         const wireLines = mode === 'prompt'
           ? lines
           : lines.map((line, index) => index === 0 ? prefix + line : line)
-        return extensionSuggest({
+        const result = await extensionSuggest({
           lines: wireLines,
           cursorLine,
           cursorCol: cursorCol + (mode === 'prompt' || cursorLine > 0 ? 0 : prefix.length),
           signal: options.signal,
           force: options.force,
         })
+        // The EXTENSION's suggestions bind the host's stale fence too:
+        // the base provider owns the apply-time document/cursor snapshot,
+        // and a list the extension produced must be computed against the
+        // SAME editor state (plan §9.2 — a stale ext accept must never
+        // modify a later edit either).
+        return base.captureRequestSnapshot(lines, cursorLine, cursorCol, result)
       },
       applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
         // A Stable plugin computes its prefix on the WIRE document it

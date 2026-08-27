@@ -321,6 +321,28 @@ test('review finding 1: a quoted /image argument completes inside the quotes', a
     result.items.some(item => item.value === '"my file.txt"'),
     `the quoted value must keep its quotes:\n${JSON.stringify(result.items)}`,
   )
+  // Round-2: spaces INSIDE the quotes are part of the token.
+  const spaced = await provider.getSuggestions(['/image "my f'], 0, 12, { signal: abort })
+  assert.ok(spaced !== null, `/image "my f must suggest:\n${JSON.stringify(spaced)}`)
+  assert.ok(spaced.items.some(item => item.value === '"my file.txt"'), `spaced quoted value missing:\n${JSON.stringify(spaced.items)}`)
+})
+
+test('review finding 2: a stale accept never applies after an unrelated edit', async () => {
+  const root = outsideCwdFixture().workspace
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  // The request produced a dropdown for `hello @foo` (snapshot captured);
+  // the user then edited the LINE START (`hello` → `world`) — the prefix
+  // @foo is intact but the document differs. The full-snapshot fence must
+  // reject the accept: the editor passes the CURRENT document to apply.
+  const request = await provider.getSuggestions(['hello @foo'], 0, 10, { signal: abort })
+  assert.equal(request, null, 'no @foo file exists in the fixture — the snapshot stays null for the empty result')
+  // Force a snapshot the way the editor does: a non-null result binds the
+  // state. Use an existing file so the suggestion list is non-null.
+  const bound = await provider.getSuggestions(['see @local'], 0, 11, { signal: abort })
+  assert.ok(bound !== null, 'the fixture file must produce a dropdown')
+  // The editor state changed on an unrelated part: `see` → `look`.
+  const applied = provider.applyCompletion(['look @local'], 0, 12, { value: '@local.txt', label: 'local.txt' }, '@local')
+  assert.deepEqual(applied.lines, ['look @local'], 'an unrelated edit must also fence the accept')
 })
 
 test('review finding 2: a Windows-dialect directory keeps the backslash separator', () => {
@@ -386,9 +408,15 @@ test('§24 C: hello ./src<Tab> opens no dropdown', async () => {
   vt.sendInput('hello ./src')
   await vt.waitForRender()
   vt.sendInput('\t')
-  await pollUntil(() => !isAutocompleteActive(app), 'hello ./src<Tab> must keep the dropdown closed')
-  await new Promise(resolve => setTimeout(resolve, 60))
-  assert.equal(isAutocompleteActive(app), false, 'hello ./src<Tab> must not open a dropdown')
+  // Poll the dropdown CLOSED state over the editor's whole debounce
+  // window (no fixed sleep): the state must stay closed the entire time —
+  // a late async request cannot slip a dropdown in unnoticed.
+  const deadline = Date.now() + 400
+  for (;;) {
+    assert.equal(isAutocompleteActive(app), false, 'hello ./src<Tab> must never open a dropdown')
+    if (Date.now() > deadline) break
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('wanted.ts'), `hello ./src<Tab> must not list files:\n${view}`)
   assert.equal(app.seatTextForTest(), 'hello ./src', 'the draft is untouched')
