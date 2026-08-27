@@ -24,6 +24,22 @@ import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-fi
 
 const abort = new AbortController().signal
 
+/** Poll until the predicate is true (asserts after a 3s deadline). */
+async function pollUntil(predicate: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 3000
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() > deadline) assert.fail(`${label}: condition never became true`)
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+/** The LIVE autocomplete state of the app's host editor (the seat's
+ * capability seam — the stable assertion, never a viewport needle). */
+function isAutocompleteActive(app: import('../src/tui-app.ts').TuiApp): boolean {
+  return (app.seatEditorForTest() as { isShowingAutocomplete?: () => boolean }).isShowingAutocomplete?.() === true
+}
+
 /** A root with workspace + sibling for outside-cwd probes. */
 function outsideCwdFixture(): { root: string; workspace: string; sibling: string } {
   const root = mkdtempSync(join(tmpdir(), 'dsh-conv-out-'))
@@ -76,7 +92,12 @@ test('P1.1 headless: foo<Tab> opens no dropdown (isShowingAutocomplete stays fal
   vt.sendInput('foo')
   await vt.waitForRender()
   vt.sendInput('\t')
-  await new Promise(resolve => setTimeout(resolve, 200))
+  // The STABLE assertion: the host editor's autocomplete state stays
+  // closed — never a viewport-needle-only check. Poll over the editor's
+  // debounce window so a late request cannot slip by unnoticed.
+  await pollUntil(() => !isAutocompleteActive(app), 'foo<Tab> must keep the dropdown closed')
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(isAutocompleteActive(app), false, `foo<Tab> must not open a dropdown`)
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('wanted.ts'), `foo<Tab> must not list files:\n${view}`)
   assert.equal(app.seatTextForTest(), 'foo', 'the draft is untouched')
@@ -285,6 +306,30 @@ test('the presentation layer quotes spaced values for /image and keeps @ quoting
   assert.equal(atQuoted.value, '@"my file.txt"')
 })
 
+test('review finding 1: a quoted /image argument completes inside the quotes', async () => {
+  const { workspace } = outsideCwdFixture()
+  const root = workspace
+  writeFileSync(join(root, 'my file.txt'), 'x')
+  const provider = new MentionProvider(
+    [{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }],
+    root,
+    new DirectHostFilePort(() => undefined, null),
+  )
+  const result = await provider.getSuggestions(['/image "my'], 0, 10, { signal: abort })
+  assert.ok(result !== null, `/image "my must suggest:\n${JSON.stringify(result)}`)
+  assert.ok(
+    result.items.some(item => item.value === '"my file.txt"'),
+    `the quoted value must keep its quotes:\n${JSON.stringify(result.items)}`,
+  )
+})
+
+test('review finding 2: a Windows-dialect directory keeps the backslash separator', () => {
+  const item = presentPathCandidate({ path: 'C:\\Users\\foo', kind: 'directory' }, { at: false, quoted: false, sep: '\\' })
+  assert.equal(item.value, 'C:\\Users\\foo\\', 'a Windows directory completes with \\ — never a mixed /')
+  const posix = presentPathCandidate({ path: 'src/foo', kind: 'directory' }, { at: false, quoted: false, sep: '/' })
+  assert.equal(posix.value, 'src/foo/')
+})
+
 test('extractAtPrefix keeps the CJK-glue rule and rejects emails', () => {
   assert.equal(extractAtPrefix('看看@foo'), '@foo')
   assert.equal(extractAtPrefix('a@b.c'), null)
@@ -304,18 +349,17 @@ test('a sessionless @dir/ lists children (direct children listing)', async () =>
 // ── §24 headless integration: TuiApp + TuiEditor + MentionProvider ─────────
 
 test('§24 A: @src → dropdown → Tab → @src/ → children dropdown', async () => {
-  const { startApp, startImageApp } = await import('./support/app-harness.ts')
+  const { startApp } = await import('./support/app-harness.ts')
   const root = largeWorkspaceFixture().root
   const { vt, app } = startApp(root)
   await vt.waitForRender()
   vt.sendInput('@src')
-  await new Promise(resolve => setTimeout(resolve, 120))
-  assert.ok(vt.getViewport().join('\n').includes('src/'), 'the src directory item must appear')
+  await pollUntil(() => vt.getViewport().join('\n').includes('src/'), 'the src directory item must appear')
+  assert.equal(isAutocompleteActive(app), true, '@src must open the dropdown')
   vt.sendInput('\t')
-  await new Promise(resolve => setTimeout(resolve, 120))
+  await pollUntil(() => app.seatTextForTest() === '@src/', 'Tab accepts the directory')
   assert.equal(app.seatTextForTest(), '@src/', 'Tab accepts the directory')
-  await new Promise(resolve => setTimeout(resolve, 120))
-  assert.ok(vt.getViewport().join('\n').includes('wanted.ts'), 'children must appear after accept')
+  await pollUntil(() => vt.getViewport().join('\n').includes('wanted.ts'), 'children must appear after accept')
   app.stop()
 })
 
@@ -325,13 +369,12 @@ test('§24 B: /image src → dropdown → Tab → /image src/ → children dropd
   const { vt, app } = startImageApp(root)
   await vt.waitForRender()
   vt.sendInput('/image src')
-  await new Promise(resolve => setTimeout(resolve, 120))
-  assert.ok(vt.getViewport().join('\n').includes('src/'), 'the src argument candidate must appear')
+  await pollUntil(() => vt.getViewport().join('\n').includes('src/'), 'the src argument candidate must appear')
+  assert.equal(isAutocompleteActive(app), true, '/image src must open the dropdown')
   vt.sendInput('\t')
-  await new Promise(resolve => setTimeout(resolve, 120))
+  await pollUntil(() => app.seatTextForTest() === '/image src/', 'Tab accepts the directory')
   assert.equal(app.seatTextForTest(), '/image src/', 'Tab accepts the directory')
-  await new Promise(resolve => setTimeout(resolve, 120))
-  assert.ok(vt.getViewport().join('\n').includes('wanted.ts'), 'children must appear after accept')
+  await pollUntil(() => vt.getViewport().join('\n').includes('wanted.ts'), 'children must appear after accept')
   app.stop()
 })
 
@@ -343,7 +386,9 @@ test('§24 C: hello ./src<Tab> opens no dropdown', async () => {
   vt.sendInput('hello ./src')
   await vt.waitForRender()
   vt.sendInput('\t')
-  await new Promise(resolve => setTimeout(resolve, 200))
+  await pollUntil(() => !isAutocompleteActive(app), 'hello ./src<Tab> must keep the dropdown closed')
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(isAutocompleteActive(app), false, 'hello ./src<Tab> must not open a dropdown')
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('wanted.ts'), `hello ./src<Tab> must not list files:\n${view}`)
   assert.equal(app.seatTextForTest(), 'hello ./src', 'the draft is untouched')
@@ -357,7 +402,6 @@ test('§24 E: sessionless @dir/ lists children through the app chain', async () 
   await vt.waitForRender()
   // No session was ever created: the workspace scope answers.
   vt.sendInput('@src/')
-  await new Promise(resolve => setTimeout(resolve, 120))
-  assert.ok(vt.getViewport().join('\n').includes('wanted.ts'), 'sessionless children must appear')
+  await pollUntil(() => vt.getViewport().join('\n').includes('wanted.ts'), 'sessionless children must appear')
   app.stop()
 })
