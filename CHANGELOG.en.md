@@ -319,6 +319,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Fixed a startup-time TDZ: the footer command lifecycle slots were
+  declared too late, so a startup callback read them and threw a
+  `ReferenceError`.** The `onTerminalResize` callback captured by
+  `startProcessTui` reads `footerCommandRunner`, but that slot was declared
+  ~940 lines later in the footer settings block; the FIRST surface-geometry
+  sync fires the callback (`lastCommandWidth` starts at 0), and during
+  startup a keybinding rebuild's invalidate → requestRender reaches exactly
+  that first sync — the read hit the temporal dead zone. The exception was
+  swallowed by the keybinding startup apply's fail-soft catch, so the log
+  misreported it as "keybindings startup apply failed — keeping the
+  last-known-good configuration", although the rebuild is ordered
+  keymap-first, invalidate-last and the new keymap was already effective.
+  Fix: the two footer slots move up next to the
+  `stopPluginKeybindingSync` / `catalogCoordinator` lifecycle slots (before
+  both `cleanup()` and `startProcessTui`); `cleanup()` now explicitly
+  releases the statusStore subscription and disposes the runner (symmetric
+  with the arm path, idempotent belt-and-braces); the startup and
+  `/keybindings reload` diagnostics no longer claim a last-known-good
+  rollback — a post-rebuild UI invalidation error leaves the NEW keymap
+  active. `test/rules.test.ts` gains a startup-eager callback audit:
+  startup-eager callbacks in the `startProcessTui` arguments (currently
+  only `onTerminalResize`) and eagerly-evaluated property values may only
+  reference runner-scope bindings declared BEFORE the call; lazy captures
+  of later-declared bindings by input-time callbacks (onSubmit, onDequeue,
+  onClipboardPaste, …) remain legal and outside the audit.
+
 - **Ctrl+V image paste works again on Linux Wayland/X11.** The clipboard
   runner executed `wl-paste`/`xclip` without an explicit encoding, so
   binary stdout was decoded as UTF-8 and invalid bytes were replaced —

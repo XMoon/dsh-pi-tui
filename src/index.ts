@@ -2624,6 +2624,18 @@ export function apply(ctx: Context, config: Config): void {
     // mid-startup HMR unload must never reference it while it is still in
     // the temporal dead zone; it is assigned during command registration.
     let catalogCoordinator: CatalogRefreshCoordinator | undefined
+    // M5: the footer command lifecycle slots. Hoisted here for TWO TDZ
+    // guards: cleanup releases them, and — unlike the two slots above —
+    // `onTerminalResize` (captured by startProcessTui below) READS
+    // footerCommandRunner during startup itself: the first surface-geometry
+    // sync fires it (lastCommandWidth starts at 0), and a keybinding
+    // rebuild's invalidate → requestRender is reachable before the footer
+    // settings block runs. Declaring at the footer block left the read in
+    // the temporal dead zone — a ReferenceError swallowed by the keybinding
+    // apply's fail-soft catch and misreported as a keybindings failure
+    // (guarded by the startup-eager-callback audit in test/rules.test.ts).
+    let footerCommandRunner: FooterCommandRunner | undefined
+    let footerCommandUnsubscribe: (() => void) | undefined
     // Idempotent teardown: abort lifecycle loads, stop the TUI, close diag.
     // Shared by /exit, the effect cleanup, and the startup-failure path.
     let cleanedUp = false
@@ -2647,6 +2659,16 @@ export function apply(ctx: Context, config: Config): void {
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.
       catalogCoordinator?.dispose()
+      // M5: release the footer command surface BEFORE the app dies — a
+      // late status-store notification must not refresh into a disposed
+      // surface. The lifecycle abort above already disposes an armed
+      // runner through its own abort listener; the explicit unsubscribe +
+      // dispose keeps the release symmetric with the arm path and also
+      // covers the teardown-before-arm window (both idempotent).
+      footerCommandUnsubscribe?.()
+      footerCommandUnsubscribe = undefined
+      footerCommandRunner?.dispose()
+      footerCommandRunner = undefined
       localShellController?.abort()
       for (const file of shellTempFiles) {
         try {
@@ -4680,15 +4702,20 @@ export function apply(ctx: Context, config: Config): void {
     }
     const applyUserKeybindings = (): void => {
       // Fail-soft reload (review finding): a transient settings read
-      // error must never abort the startup application or leave the
-      // keymap in a partial state — the previous (last-known-good)
-      // configuration stays active, and the failure is a diagnostic.
+      // error must never abort the startup application — the failure is
+      // a diagnostic. The catch is also the net for errors thrown AFTER
+      // the rebuild succeeded: HostKeybindingManager.rebuild() is ordered
+      // keymap-first, invalidate-last, so a throwing UI invalidation (a
+      // startup-eager callback — the footerCommandRunner TDZ was exactly
+      // this) leaves the NEW keymap active. The diagnostic must not claim
+      // a last-known-good rollback that did not happen; /keybindings
+      // reload re-applies from the document either way.
       try {
         const parsed = parseUserKeybindings(tuiSettings?.get().keybindings)
         for (const message of parsed.diagnostics) diag.warn('keybindings', { message })
         keybindings.setUserConfiguration(parsed)
       } catch (error: unknown) {
-        diag.warn('keybindings', { error: String(error), message: 'keybindings startup apply failed — keeping the last-known-good configuration' })
+        diag.warn('keybindings', { error: String(error), message: 'keybindings startup apply failed — the error may come from the post-rebuild UI invalidation, so the keymap may already be rebuilt; /keybindings reload re-applies it' })
       }
     }
     applyUserKeybindings()
@@ -5097,8 +5124,10 @@ export function apply(ctx: Context, config: Config): void {
     // M5: `command` arms the trusted command surface (the trust gate reads
     // the USER layer only — a project-supplied config is refused).
     let footerWarningShown = false
-    let footerCommandRunner: FooterCommandRunner | undefined
-    let footerCommandUnsubscribe: (() => void) | undefined
+    // footerCommandRunner / footerCommandUnsubscribe are hoisted ABOVE
+    // cleanup (TDZ guard — the startup-eager onTerminalResize callback
+    // reads the runner before this block can run); only the warning
+    // latch lives here.
     const disableFooterCommand = (): void => {
       footerCommandUnsubscribe?.()
       footerCommandUnsubscribe = undefined

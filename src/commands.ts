@@ -3191,10 +3191,14 @@ export function registerTuiCommands(
         // as a successful defaults read).
         if (settings === undefined) return { kind: 'error', text: 'settings service unavailable' }
         // Re-validate the settings document and rebuild the keymap
-        // (fail-soft: bad entries are diagnostics, never a crash). The
-        // settings read itself is guarded too — a transient `get()`
-        // failure must NOT throw out of the handler: the keymap keeps its
-        // last-known-good configuration and the command reports the error
+        // (fail-soft: bad entries are diagnostics, never a crash). Failures
+        // are two distinct classes: a READ/PARSE failure (settings.get() or
+        // parseUserKeybindings) leaves the previous keymap intact — the
+        // last-known-good configuration stays active — whereas a throw
+        // AFTER the rebuild (the post-rebuild UI invalidation — the
+        // rebuild is keymap-first, invalidate-last) leaves the NEW keymap
+        // active, so the diagnostic must not claim a rollback either.
+        // Neither class may throw out of the handler
         // (review round 28: reload is now the ONLY reload seam, so its
         // fail-soft contract must match the startup application).
         try {
@@ -3203,7 +3207,7 @@ export function registerTuiCommands(
           keybindings.setUserConfiguration(parsed)
         } catch (error: unknown) {
           const message = safeErrorMessage(error)
-          runner.diag.warn('keybindings', { error: message, message: 'keybindings reload failed — keeping the last-known-good configuration' })
+          runner.diag.warn('keybindings', { error: message, message: 'keybindings reload failed — the error may come from the post-rebuild UI invalidation, so the keymap may already be rebuilt' })
           app.notify(`keybindings reload failed: ${message}`, 'error')
           return { kind: 'error', text: `keybindings reload failed: ${message}` }
         }

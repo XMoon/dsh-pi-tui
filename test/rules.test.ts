@@ -376,3 +376,267 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
     'cleanup must only reference runner-scope bindings declared BEFORE it — a binding declared later is a TDZ ReferenceError when cleanup runs early (effect teardown / startup failure / exit)',
   )
 })
+
+test('startup-eager callbacks of startProcessTui never reference a later-declared binding (TDZ guard)', () => {
+  // Lifecycle regression (the footer-command startup ReferenceError):
+  // `onTerminalResize` is invoked SYNCHRONOUSLY from TuiApp's render path —
+  // the first syncSurfaceGeometry fires it (lastCommandWidth starts at 0),
+  // and a first render IS reachable during startup before the runner body
+  // finished (a keybinding rebuild's onInvalidate → requestRender lands
+  // there). A callback referencing a runner-scope binding declared AFTER
+  // the startProcessTui call then reads the temporal dead zone, and the
+  // surrounding fail-soft catch (the keybinding startup apply) misreported
+  // the ReferenceError as a keybinding configuration failure. Unlike the
+  // cleanup audit above, this class is keyed on an EXPLICIT eager set:
+  // input-time callbacks (onSubmit, onDequeue, pluginActionFor, …) and
+  // user-action callbacks (onClipboardPaste, onFullscreenChange)
+  // legitimately capture later-declared bindings (draftImages,
+  // openTasksBrowser, refreshQueue, …) — add a property here ONLY when
+  // TuiApp can fire it from its own startup-capable synchronous paths.
+  // Non-function property values are eagerly EVALUATED during the call
+  // itself, so they must never reference a later-declared binding either.
+  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
+  const sourceFile = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+
+  // The lifecycle root IIFE (same anchor as the cleanup audit above):
+  // the void expression whose arrow body declares `cleanup`. Only
+  // bindings in THAT scope are the runner-scope slots this audit speaks
+  // about.
+  const candidates: ts.ExpressionStatement[] = []
+  const findVoidStatements = (node: ts.Node): void => {
+    if (ts.isExpressionStatement(node) && ts.isVoidExpression(node.expression)) candidates.push(node)
+    ts.forEachChild(node, findVoidStatements)
+  }
+  findVoidStatements(sourceFile)
+  const arrowOf = (statement: ts.ExpressionStatement): ts.ArrowFunction | undefined => {
+    let found: ts.ArrowFunction | undefined
+    const walk = (node: ts.Node): void => {
+      if (found !== undefined) return
+      if (ts.isArrowFunction(node)) {
+        found = node
+        return
+      }
+      ts.forEachChild(node, walk)
+    }
+    walk(statement.expression)
+    return found
+  }
+  const hasCleanup = (block: ts.Block): boolean =>
+    block.statements.some(statement =>
+      ts.isVariableStatement(statement)
+      && statement.declarationList.declarations.some(declaration =>
+        ts.isIdentifier(declaration.name) && declaration.name.text === 'cleanup'))
+  const lifecycleRoot = candidates.find(statement => {
+    const arrow = arrowOf(statement)
+    return arrow !== undefined && ts.isBlock(arrow.body) && hasCleanup(arrow.body)
+  })
+  assert.ok(lifecycleRoot !== undefined, 'the startup lifecycle root IIFE (the void expression whose arrow declares cleanup) must exist')
+  const runnerBlock = arrowOf(lifecycleRoot)!.body as ts.Block
+
+  /** Collect every bound name of a binding pattern. */
+  const boundNames = (pattern: ts.BindingName, out: string[]): void => {
+    if (ts.isIdentifier(pattern)) {
+      out.push(pattern.text)
+      return
+    }
+    for (const element of pattern.elements) {
+      if (ts.isOmittedExpression(element)) continue
+      if (ts.isBindingElement(element)) boundNames(element.name, out)
+      else boundNames(element, out)
+    }
+  }
+  const runnerDecls = new Map<string, number>()
+  for (const statement of runnerBlock.statements) {
+    if (!ts.isVariableStatement(statement)) continue
+    const flags = statement.declarationList.flags
+    if (!(flags & (ts.NodeFlags.Let | ts.NodeFlags.Const))) continue
+    const names: string[] = []
+    for (const declaration of statement.declarationList.declarations) {
+      boundNames(declaration.name, names)
+    }
+    const line = sourceFile.getLineAndCharacterOfPosition(statement.getStart()).line + 1
+    for (const name of names) {
+      if (!runnerDecls.has(name)) runnerDecls.set(name, line)
+    }
+  }
+
+  // The single startProcessTui call inside the lifecycle root and its
+  // object-literal arguments (the options object). Scoped to the runner
+  // block: the audit speaks about RUNNER-scope bindings only.
+  let appCall: ts.CallExpression | undefined
+  const findCall = (node: ts.Node): void => {
+    if (appCall !== undefined) return
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'startProcessTui') {
+      appCall = node
+      return
+    }
+    ts.forEachChild(node, findCall)
+  }
+  findCall(runnerBlock)
+  assert.ok(appCall !== undefined, 'the startProcessTui call must exist in the runner scope')
+  const callLine = sourceFile.getLineAndCharacterOfPosition(appCall.getStart()).line + 1
+  const objectArgs = appCall.arguments.filter(argument => ts.isObjectLiteralExpression(argument))
+  assert.ok(objectArgs.length > 0, 'startProcessTui must receive its options as object-literal arguments')
+
+  /** Callbacks TuiApp can invoke SYNCHRONOUSLY from its own
+   * startup-capable paths: the requestRender → syncSurfaceGeometry chain
+   * fires onTerminalResize (the first geometry sync always does —
+   * lastCommandWidth starts at 0), and a first render is reachable during
+   * startup (keybinding rebuild invalidate). A new entry needs the same
+   * proof — never input-time or user-action-time callbacks. */
+  const STARTUP_EAGER = new Set(['onTerminalResize'])
+
+  const isFunctionValue = (node: ts.Expression): boolean =>
+    ts.isArrowFunction(node) || ts.isFunctionExpression(node)
+
+  /** Bare identifiers under root (property names, imports and the root's
+   * local declarations excluded). Scope-aware: a binding declared in a
+   * nested block shadows outer references to the same name only within
+   * that block (the previous flat `locals` set suppressed REAL outer
+   * references whenever any nested block declared the same name).
+   *
+   * eagerBody=true means the ROOT itself is evaluated during the startup
+   * window (an eager callback's body, a spread expression, a plain value),
+   * so the root's own body — when it is a function — is an eager read.
+   * NESTED function bodies are lazy capture scopes everywhere: a callback
+   * only runs later, EXCEPT an immediately-invoked function (`fn()` /
+   * `(fn)()`), whose body runs synchronously right here and is an eager
+   * read too. eagerBody=false (a lazily-evaluated plain value) makes every
+   * nested function lazy regardless. */
+  const collectRefs = (root: ts.Node, eagerBody: boolean): Set<string> => {
+    const refs = new Set<string>()
+    const scopeStack: Set<string>[] = [new Set()]
+    const currentScope = (): Set<string> => scopeStack[scopeStack.length - 1]!
+    const isIIFE = (fn: ts.Node): boolean => {
+      const parent = fn.parent
+      if (parent === undefined) return false
+      if (ts.isCallExpression(parent) && parent.expression === fn) return true
+      if (ts.isParenthesizedExpression(parent) && parent.parent !== undefined
+        && ts.isCallExpression(parent.parent) && parent.parent.expression === parent) return true
+      return false
+    }
+    const visit = (node: ts.Node): void => {
+      if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+        const names: string[] = []
+        boundNames(node.name, names)
+        for (const name of names) currentScope().add(name)
+      }
+      if (node !== root && ts.isFunctionLike(node) && (!eagerBody || !isIIFE(node))) return
+      // Enter a new scope for blocks and function-like nodes (their
+      // parameters and declarations shadow outer names inside).
+      const entersScope = !ts.isSourceFile(node) && (
+        ts.isBlock(node) || ts.isFunctionLike(node)
+      )
+      if (entersScope) scopeStack.push(new Set())
+      if (ts.isIdentifier(node)) {
+        const parent = node.parent
+        const isPropertyName = parent !== undefined && (
+          (ts.isPropertyAccessExpression(parent) && parent.name === node)
+          || (ts.isPropertyAssignment(parent) && parent.name === node)
+          || (ts.isShorthandPropertyAssignment(parent) && parent.name === node)
+          || (ts.isBindingElement(parent) && parent.name === node)
+          || (ts.isMethodDeclaration(parent) && parent.name === node)
+          || (ts.isParameter(parent) && parent.name === node)
+          || (ts.isImportClause(parent) || ts.isImportSpecifier(parent) || ts.isNamespaceImport(parent))
+        )
+        if (!isPropertyName && !scopeStack.some(scope => scope.has(node.text))) refs.add(node.text)
+      }
+      ts.forEachChild(node, visit)
+      if (entersScope) scopeStack.pop()
+    }
+    visit(root)
+    return refs
+  }
+
+  // Regression fixtures for the collectRefs semantics (review round 2):
+  // the eager/lazy boundary must not drift when the audit is touched.
+  const fixtureRefs = (fragment: string, eagerBody: boolean): Set<string> => {
+    const fixture = ts.createSourceFile('fixture.ts', fragment, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    return collectRefs((fixture.statements[0] as ts.ExpressionStatement).expression, eagerBody)
+  }
+  assert.deepEqual(
+    [...fixtureRefs('() => setTimeout(() => later(), 0)', true)],
+    ['setTimeout'],
+    'an eager body reports its own direct references but not a nested (non-IIFE) callback\'s — later must stay unreported',
+  )
+  assert.ok(
+    fixtureRefs('(() => later())()', true).has('later'),
+    'an immediately-invoked function inside an eager body runs synchronously — its references MUST be reported',
+  )
+  assert.ok(
+    fixtureRefs('makeOptions(later)', true).has('later'),
+    'a non-identifier spread expression is eagerly evaluated — its references MUST be reported',
+  )
+  assert.ok(
+    fixtureRefs('later.value', true).has('later'),
+    'a member-access spread expression is eagerly evaluated — its base reference MUST be reported',
+  )
+  assert.ok(
+    fixtureRefs('({ value: later })', true).has('later'),
+    'an object-literal spread expression is eagerly evaluated — its inner references MUST be reported',
+  )
+  assert.deepEqual(
+    [...fixtureRefs('makeOptions(() => later())', false)],
+    ['makeOptions'],
+    'a lazily-evaluated value reports its own references but not the nested function body\'s',
+  )
+
+  const violations: string[] = []
+  for (const objectArg of objectArgs) {
+    for (const property of objectArg.properties) {
+      // Shorthand `{ slot }` is an EAGER read of `slot` at object-creation
+      // time (it desugars to `slot: slot`) — audit it like a plain value.
+      if (ts.isShorthandPropertyAssignment(property)) {
+        const ref = property.name.text
+        const declLine = runnerDecls.get(ref)
+        if (declLine !== undefined && declLine > callLine) {
+          violations.push(
+            `${ref} → ${ref} (declared at line ${declLine}) captured by the startProcessTui arguments (call at line ${callLine})`
+              + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footerCommandRunner slots)',
+          )
+        }
+        continue
+      }
+      // A spread `{ ...expr }` eagerly evaluates `expr` at object-creation
+      // time. (No spread is currently present in the options object; the
+      // rule is defensive — a future spread of a later-declared slot must
+      // not silently slip past.) The whole expression is audited — a bare
+      // identifier, a call (`...makeOptions(later)`), a member access
+      // (`...later.value`) or an object literal (`...{ value: later }`)
+      // all read eagerly; nested lazy callbacks inside are still skipped.
+      if (ts.isSpreadAssignment(property)) {
+        for (const ref of collectRefs(property.expression, true)) {
+          const declLine = runnerDecls.get(ref)
+          if (declLine !== undefined && declLine > callLine) {
+            violations.push(
+              `…${ref} (declared at line ${declLine}) spread into the startProcessTui arguments (call at line ${callLine})`
+                + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footerCommandRunner slots)',
+            )
+          }
+        }
+        continue
+      }
+      if (!ts.isPropertyAssignment(property)) continue
+      const name = ts.isIdentifier(property.name) ? property.name.text : '?'
+      const eagerCallback = STARTUP_EAGER.has(name)
+      // A function-valued property OUTSIDE the eager set is a lazy
+      // capture scope (input/user-action time) — exempt. Everything else
+      // (eager-set callbacks, plain values, nested objects) runs during
+      // the startup window.
+      if (!eagerCallback && isFunctionValue(property.initializer)) continue
+      for (const ref of collectRefs(property.initializer, eagerCallback)) {
+        const declLine = runnerDecls.get(ref)
+        if (declLine === undefined || declLine <= callLine) continue
+        violations.push(
+          `${name} → ${ref} (declared at line ${declLine}) captured by the startProcessTui arguments (call at line ${callLine})`
+            + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footerCommandRunner slots)',
+        )
+      }
+    }
+  }
+  assert.deepEqual(
+    violations,
+    [],
+    'startup-eager callbacks and eagerly-evaluated values in the startProcessTui arguments must only reference runner-scope bindings declared BEFORE the call — a later declaration is a TDZ ReferenceError during startup',
+  )
+})
