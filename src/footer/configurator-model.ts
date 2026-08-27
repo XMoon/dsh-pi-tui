@@ -134,8 +134,11 @@ export interface FlatPosition {
 }
 
 /** Map a flat position (left refs, then right refs) onto one row's zones.
- * undefined past the row's item count. */
+ * undefined past the row's item count AND for negative positions (the
+ * exported helper's contract: any out-of-range flat is undefined, never a
+ * negative zone index). */
 export function flatPositionOf(flat: number, row: FooterRowLayout): FlatPosition | undefined {
+  if (flat < 0) return undefined
   if (flat < row.left.length) return { zone: 'left', index: flat }
   const rightIndex = flat - row.left.length
   if (rightIndex < row.right.length) return { zone: 'right', index: rightIndex }

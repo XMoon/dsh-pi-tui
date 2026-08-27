@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { FooterConfiguratorModel } from '../src/footer/configurator-model.ts'
+import { FooterConfiguratorModel, flatPositionOf } from '../src/footer/configurator-model.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 
@@ -365,6 +365,21 @@ test('a zero-row draft normalizes to one empty row (no crash on the first transi
   assert.equal(m.state().mode, 'add')
   m.activate()
   assert.ok(m.state().layout.rows[0]!.left.length === 1, 'the added item landed in the empty row')
+})
+
+test('flatPositionOf treats every out-of-range flat as undefined (negative included)', () => {
+  const row = { left: [{ id: 'a' }], right: [{ id: 'b' }] }
+  assert.deepEqual(flatPositionOf(0, row), { zone: 'left', index: 0 })
+  assert.deepEqual(flatPositionOf(1, row), { zone: 'right', index: 0 })
+  assert.equal(flatPositionOf(2, row), undefined)
+  // A negative flat must never alias the row's TAIL ({zone:'right',
+  // index:-1} — the exported helper's contract: out-of-range is
+  // undefined).
+  assert.equal(flatPositionOf(-1, row), undefined)
+  assert.equal(flatPositionOf(-99, row), undefined)
+  const emptyRow = { left: [], right: [] }
+  assert.equal(flatPositionOf(0, emptyRow), undefined)
+  assert.equal(flatPositionOf(-1, emptyRow), undefined)
 })
 
 test('the editable text is sanitized and bounded (the draft must re-parse)', () => {
