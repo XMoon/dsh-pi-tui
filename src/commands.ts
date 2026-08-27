@@ -1624,9 +1624,11 @@ export function registerTuiCommands(
 
   // `/footer` — the interactive footer configurator (plan M3): LOCAL +
   // SESSIONLESS (usable before any session exists — the preview shows
-  // placeholders/unavailable items and the config stays editable). Enter
-  // validates + persists + applies; Esc cancels without touching the
-  // active layout.
+  // placeholders/unavailable items and the config stays editable). The
+  // panel is a hierarchical editor; S on its Row Selector page validates
+  // + persists + applies, Enter is a navigation key, and Esc walks back
+  // page by page, closing on the selector without touching the active
+  // layout.
   //
   // `/statusline` is a deliberate alias (approved): other agents (and
   // users coming from tools that name this surface "statusline") reach

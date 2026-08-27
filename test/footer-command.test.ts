@@ -1,7 +1,8 @@
 /**
  * Headless tests for the /footer command (plan §15.2/§15.8): sessionless
- * (usable before any session), opens the configurator, Enter saves through
- * the runner's applyFooterSettings + the settings document, Esc cancels.
+ * (usable before any session), opens the configurator, S on the Row
+ * Selector saves through the runner's applyFooterSettings + the settings
+ * document, Esc cancels.
  * @module @xmoon76/dsh-pi-tui/footer-command.test
  */
 
