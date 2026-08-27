@@ -16,6 +16,8 @@ import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { readSurfaceCatalog, type SurfaceCatalogContext } from '../src/surface-catalog.ts'
 import { createDiag } from '../src/diag.ts'
 import { currentPalette, darkColors, lightColors } from '../src/theme.ts'
+import { ThemeRegistry } from '../src/theme-registry.ts'
+import { SettingsRegistry } from '../src/settings-registry.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
@@ -796,6 +798,137 @@ test('/title and /rename degrade when the sessionTitle service is absent', async
     assert.equal(result.kind, 'error')
     assert.equal(result.text, 'session title service unavailable')
   }
+  app.stop()
+})
+
+
+test('/settings theme pick persists the BUILTIN choice too (review P1: the transactional commit must keep the settings write)', async () => {
+  // Regression for the review's P1: the transactional restructure moved the
+  // settings.replace call into the file/plugin branch, so picking a BUILTIN
+  // (auto/dark/light) applied but never persisted — the next start restored
+  // the old theme. The commit() seam persists EVERY successful branch.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  const doc: Record<string, unknown> = { theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off' }
+  const persisted: string[] = []
+  Object.assign(runner, {
+    tuiSettings: {
+      get: () => doc as never,
+      replace: (next: Record<string, unknown>) => {
+        persisted.push(next.theme as string)
+        Object.assign(doc, next)
+        return next
+      },
+    },
+  })
+  registerTuiCommands(runner)
+  const settingsDef = services.defs.find(def => def.name === 'settings')
+  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
+  ;(settingsDef!.handler as () => unknown)()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // → Theme row (approval is first; the doc starts dark)
+  await vt.waitForRender()
+  vt.sendInput('\r') // open the Theme submenu
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // dark
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // light
+  await vt.waitForRender()
+  vt.sendInput('\r') // pick light
+  await vt.waitForRender()
+  assert.deepEqual(persisted, ['light'],
+    'a BUILTIN pick must persist through the same transactional commit as a plugin pick')
+  // The committed choice marks the light row on a re-open.
+  vt.sendInput('\r') // reopen the submenu
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  const lightMarked = view.split('\n').filter(line => line.includes('light') && line.includes('← current'))
+  assert.equal(lightMarked.length, 1, `the light row carries the marker after the pick:\n${view}`)
+  app.stop()
+})
+
+test('/settings theme STALE pick through the REAL handler rolls the row and the choice back (review P2: production-path failure)', async () => {
+  // The miniature in theme-picker.test.ts pins the fork contract; THIS test
+  // drives the REAL /settings handler (registerTuiCommands → app panel →
+  // ThemeSubmenu → the transactional commit/rollback in commands.ts): open
+  // the submenu while the plugin theme is live, unload it (the HMR window),
+  // confirm the STALE row → the handler must notify, roll the outer row
+  // back to the previous choice's display, and leave the committed choice
+  // untouched (a re-open marks `auto`, never the stale identity).
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  const doc: Record<string, unknown> = { theme: 'auto', iconStyle: 'emoji', footer: 'default', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off' }
+  const persisted: string[] = []
+  // A REAL registry with one plugin theme, plus an empty settings registry
+  // (the /settings panel reads extensions.settings.rows()).
+  const registry = new ThemeRegistry()
+  const handle = registry.register(
+    { id: 'solarized', name: 'Solarized', palette: { text: '#123456' } as never },
+    'owner-a-owner',
+    'owner-a',
+  )
+  Object.assign(runner, {
+    tuiSettings: {
+      get: () => doc as never,
+      replace: (next: Record<string, unknown>) => {
+        persisted.push(next.theme as string)
+        Object.assign(doc, next)
+        return next
+      },
+    },
+    extensions: { themes: registry, settings: new SettingsRegistry() },
+  })
+  registerTuiCommands(runner)
+  const settingsDef = services.defs.find(def => def.name === 'settings')
+  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
+  ;(settingsDef!.handler as () => unknown)()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // → Theme row (starts at auto)
+  await vt.waitForRender()
+  vt.sendInput('\r') // open the Theme submenu — rows FROZEN here
+  await vt.waitForRender()
+  // HMR: the contribution unloads while the submenu is open.
+  handle.dispose()
+  assert.equal(registry.paletteForSelectable('plugin:owner-a/solarized'), undefined,
+    'the source is gone at confirm time (the stale window)')
+  vt.sendInput('\x1b[B') // dark
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // light
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // Solarized (the frozen plugin row)
+  await vt.waitForRender()
+  vt.sendInput('\r') // confirm the STALE row
+  await vt.waitForRender()
+  // The REAL handler rejected the frozen identity and notified.
+  assert.ok(vt.getViewport().join('\n').includes('not found'),
+    'the stale pick must notify "theme not found"')
+  // Nothing was persisted, and the outer row rolled back to the previous
+  // choice's friendly display — never the stale raw identity.
+  assert.deepEqual(persisted, [], 'a failed pick must not persist')
+  // The outer theme ROW rolled back to the previous choice's friendly
+  // display (the notify banner still NAMES the stale value — that is the
+  // error message, not the row).
+  const themeRow = vt.getViewport().find(line => line.includes('Theme') && line.includes('auto') === false && line.includes('plugin:'))
+  assert.equal(themeRow, undefined, `the theme row must not show the stale identity: ${themeRow ?? ''}`)
+  const rollbackRow = vt.getViewport().find(line => line.includes('Theme'))
+  assert.ok(rollbackRow !== undefined && rollbackRow.includes('auto'),
+    `the theme row rolled back to the previous choice's label: ${rollbackRow ?? ''}`)
+  // The committed choice is UNCHANGED: a re-open marks `auto` `← current`.
+  vt.sendInput('\r') // reopen the submenu
+  await vt.waitForRender()
+  const reopened = vt.getViewport().join('\n')
+  const autoMarked = reopened.split('\n').filter(line => line.includes('auto') && line.includes('← current'))
+  assert.equal(autoMarked.length, 1, `the auto row carries the marker after the rollback:\n${reopened}`)
   app.stop()
 })
 

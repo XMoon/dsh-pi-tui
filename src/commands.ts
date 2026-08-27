@@ -1401,11 +1401,23 @@ export function registerTuiCommands(
             const qualified = value
             if (qualified !== undefined) {
               const previousChoice = lastThemeChoice
-              // SUCCESS only: commit the choice and rewrite the fork's raw
-              // write back to the FRIENDLY label (the openSettings
-              // updateValue seam — the row must never show a raw
-              // `plugin:owner/id`, and a re-open must mark the right row).
+              // SUCCESS only: persist the choice, commit it, and rewrite
+              // the fork's raw write back to the FRIENDLY label (the
+              // openSettings updateValue seam — the row must never show a
+              // raw `plugin:owner/id`, and a re-open must mark the right
+              // row). EVERY branch persists through here — builtins
+              // included (the review's P1: moving the write inside the
+              // file/plugin branch would silently stop persisting
+              // auto/dark/light and the next start would restore the old
+              // theme).
               const commit = (): void => {
+                const settings = tuiSettings
+                if (settings !== undefined) {
+                  // Spread the current doc: a replace is wholesale, so the
+                  // other preference keys must ride along. The persisted
+                  // value IS the source-qualified identity.
+                  detach('settings theme write', () => settings.replace({ ...settings.get(), theme: qualified }) as Promise<unknown>, { notify: true })
+                }
                 lastThemeChoice = qualified
                 revert(themeDisplayNameOf(qualified, runner.extensions?.themes))
               }
@@ -1478,13 +1490,6 @@ export function registerTuiCommands(
                   app.notify(`theme ${value} failed: ${safeErrorMessage(error)}`, 'error')
                   rollback()
                   return
-                }
-                // Spread the current doc: a replace is wholesale, so the
-                // other preference keys must ride along. The persisted value
-                // IS the source-qualified identity.
-                const settings = tuiSettings
-                if (settings !== undefined) {
-                  detach('settings theme write', () => settings.replace({ ...settings.get(), theme: qualified }) as Promise<unknown>, { notify: true })
                 }
                 commit()
               }
