@@ -162,12 +162,36 @@ export class RendererRegistry {
    * renders). A throwing renderer is isolated: its error is recorded via
    * onError and the chain continues (plan §18 — a renderer can never
    * stall the transcript).
+   *
+   * The PUBLIC contract (the Stable TuiRendererRegistryView ABI) is
+   * owner-LESS: a third-party caller's `(id, error)` callback must never
+   * receive the host's owner in the error slot (the review's P1 — the
+   * same class as the autocomplete ABI drift: TS parameter contravariance
+   * let a wider internal signature satisfy the narrower public one, so a
+   * v1 plugin's second callback parameter silently became the owner).
+   * The host's OWNER-scoped path is renderMessageOwned.
    * @param snapshot - the semantic message snapshot.
    * @param onError - records a renderer failure (health).
    */
   renderMessage(
     snapshot: MessagePresentationSnapshot,
-    onError: (id: string, owner: string, error: unknown) => void,
+    onError: (id: string, error: unknown) => void,
+    canUse?: (id: string, view: ExtensionView) => boolean,
+  ): { view: ExtensionView; rendererId: string } | undefined {
+    const rendered = this.renderMessageOwned(
+      snapshot,
+      onError === undefined ? undefined : (id, _owner, error) => onError(id, error),
+      canUse === undefined ? undefined : (id, _owner, view) => canUse(id, view),
+    )
+    return rendered === undefined ? undefined : { view: rendered.view, rendererId: rendered.rendererId }
+  }
+
+  /** HOST-ONLY variant: the callbacks and the result carry the SNAPSHOT
+   * owner (the health ledger keys renderer records by (slot, owner, id)).
+   * Not part of the public view. */
+  renderMessageOwned(
+    snapshot: MessagePresentationSnapshot,
+    onError?: (id: string, owner: string, error: unknown) => void,
     canUse?: (id: string, owner: string, view: ExtensionView) => boolean,
   ): { view: ExtensionView; rendererId: string; owner: string } | undefined {
     const records = [...this.messageRenderers.values()]
@@ -180,7 +204,7 @@ export class RendererRegistry {
           return { view, rendererId: record.id, owner: record.owner }
         }
       } catch (error) {
-        try { onError(record.id, record.owner, error) } catch {}
+        try { onError?.(record.id, record.owner, error) } catch {}
       }
     }
     return undefined
@@ -189,11 +213,27 @@ export class RendererRegistry {
   /**
    * Render one tool card through the tool-renderer chain (the winner for
    * the tool name first, then the remaining renderers as a fallback chain
-   * — plan §12: keyed + fallback chain).
+   * — plan §12: keyed + fallback chain). Owner-less public ABI — see
+   * renderMessage; the host path is renderToolOwned.
    */
   renderTool(
     snapshot: ToolPresentationSnapshot,
-    onError: (id: string, owner: string, error: unknown) => void,
+    onError: (id: string, error: unknown) => void,
+    canUse?: (id: string, view: ExtensionView) => boolean,
+  ): { view: ExtensionView; rendererId: string } | undefined {
+    const rendered = this.renderToolOwned(
+      snapshot,
+      onError === undefined ? undefined : (id, _owner, error) => onError(id, error),
+      canUse === undefined ? undefined : (id, _owner, view) => canUse(id, view),
+    )
+    return rendered === undefined ? undefined : { view: rendered.view, rendererId: rendered.rendererId }
+  }
+
+  /** HOST-ONLY variant: the callbacks and the result carry the SNAPSHOT
+   * owner. Not part of the public view. */
+  renderToolOwned(
+    snapshot: ToolPresentationSnapshot,
+    onError?: (id: string, owner: string, error: unknown) => void,
     canUse?: (id: string, owner: string, view: ExtensionView) => boolean,
   ): { view: ExtensionView; rendererId: string; owner: string } | undefined {
     const records = [...this.toolRenderers.values()]
@@ -206,7 +246,7 @@ export class RendererRegistry {
           return { view, rendererId: record.id, owner: record.owner }
         }
       } catch (error) {
-        try { onError(record.id, record.owner, error) } catch {}
+        try { onError?.(record.id, record.owner, error) } catch {}
       }
     }
     return undefined

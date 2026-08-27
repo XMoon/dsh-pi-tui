@@ -47,6 +47,14 @@ export interface TuiSettingsDoc {
   footer: string
   footerFallbackMode?: string
   footerLayout?: unknown
+  /** The M5 command status surface's TRUSTED configuration (the user-layer
+   * `footerCommand` value, validated by footer/command-trust). Part of the
+   * SEMANTIC document: a whole-document replace that drops it would wipe
+   * the trusted command config on the next get/replace cycle (the
+   * review's P2 — the same migration contract as the raw `keybindings`
+   * pass-through above; the value is re-validated by
+   * footer/command-trust on every read, so the field rides VERBATIM). */
+  footerCommand?: import('../footer/command-trust.ts').FooterCommandSettings
   fullscreen: string
   busyEnter: string
   localShellSandbox: string

@@ -337,7 +337,6 @@ test('a persisted `file:` value with traversal can never read outside the themes
   // names must resolve NOTHING (the deterministic missing-theme fallback),
   // never a file outside ~/.dsh-pi-tui/themes.
   const traversal = [
-    'file:../../etc/passwd',
     'file:..',
     'file:.',
     'file:../sibling.json',
@@ -350,6 +349,21 @@ test('a persisted `file:` value with traversal can never read outside the themes
   for (const value of traversal) {
     assert.equal(resolveThemeSelection(value, undefined), undefined,
       `a traversal/unsafe file value must not resolve: ${JSON.stringify(value)}`)
+  }
+  // The ORIGINAL traversal repro, made REAL: a valid theme JSON exists at
+  // the traversal TARGET (the themes directory's PARENT), so the pre-fix
+  // code would have RESOLVED it (join(themesDir, '../escape-probe.json')
+  // exists) — the fixed code must refuse. The value is the directory-local
+  // basename shape `escape-probe-<uuid>` reached through `..`.
+  const escapeTarget = join(dirname(customThemesDir()), `dsh-pi-tui-escape-probe-${randomUUID()}.json`)
+  writeFileSync(escapeTarget, JSON.stringify({ name: 'escape', colors: { primary: '#0a0b0c' } }))
+  try {
+    for (const name of [`../${escapeTarget.slice(dirname(customThemesDir()).length + 1, -'.json'.length)}`, `..\\${escapeTarget.slice(dirname(customThemesDir()).length + 1, -'.json'.length)}`]) {
+      assert.equal(resolveThemeSelection(`file:${name}`, undefined), undefined,
+        `a traversal value pointing at a REAL file must not resolve: ${JSON.stringify(name)}`)
+    }
+  } finally {
+    rmSync(escapeTarget, { force: true })
   }
   // loadCustomTheme itself refuses unsafe names at the fs seam (the
   // single shared loader).

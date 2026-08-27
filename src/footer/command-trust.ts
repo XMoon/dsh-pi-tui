@@ -39,6 +39,12 @@ export function parseFooterCommandConfig(input: unknown): FooterCommandConfig | 
   const raw = input as Record<string, unknown>
   if (raw.schemaVersion !== 1) return undefined
   if (typeof raw.command !== 'string' || raw.command.trim() === '') return undefined
+  // A NUL (or any C0 control except the tab the shell itself may carry)
+  // makes Node's spawn() throw SYNCHRONOUSLY (ERR_INVALID_ARG_VALUE) —
+  // the parse is the fail-soft boundary: a hand-edited/corrupted config
+  // degrades to the native fallback here, never breaks the startup/config
+  // apply chain (the review's P2).
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(raw.command)) return undefined
   const timeoutMs = raw.timeoutMs === undefined
     ? DEFAULT_COMMAND_TIMEOUT_MS
     : typeof raw.timeoutMs === 'number' && Number.isFinite(raw.timeoutMs)

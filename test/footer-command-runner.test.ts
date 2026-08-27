@@ -72,6 +72,65 @@ test('a timeout kills the child and falls back', async () => {
   assert.equal(rows, undefined)
 })
 
+test('the refresh interval RE-ARMS itself after a run settles (periodic trigger, not just a throttle)', async () => {
+  // The review's P2: before the fix, only explicit requestRefresh() calls
+  // started runs — an idle status line (no store change, no resize, no
+  // request) ran its command ONCE and froze forever. After the fix, a
+  // settled run re-arms the next interval run by itself: ONE request, then
+  // no further requests, must still spawn at least twice.
+  let spawns = 0
+  const rows = (script: string): Promise<string[] | undefined> => new Promise((resolve) => {
+    spawns += 1
+    resolve([])
+  })
+  void rows
+  const outputs: (string[] | undefined)[] = []
+  const runner = new FooterCommandRunner({
+    config: { ...CONFIG, command: 'node -e "process.stdout.write(\'tick\\n\')"', timeoutMs: 10000, refreshIntervalMs: 50 },
+    snapshot: () => emptyStatusSnapshot(),
+    width: () => 100,
+    height: () => 30,
+    onOutput: (r) => { outputs.push(r) },
+    signal: new AbortController().signal,
+  })
+  try {
+    runner.requestRefresh() // the ONLY explicit request
+    // Bounded spin (no fixed sleep): the event loop processes the child
+    // close + the interval timers while we spin on setImmediate.
+    for (let turn = 0; turn < 20000 && outputs.length < 2; turn += 1) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.ok(outputs.length >= 2,
+      `the interval must re-arm itself without further requests (got ${outputs.length} settled runs)`)
+  } finally {
+    runner.dispose()
+  }
+})
+
+test('a NUL byte in the command degrades to the fallback — requestRefresh never throws (review P2)', () => {
+  // spawn() throws SYNCHRONOUSLY on a NUL in the command (ERR_INVALID_ARG_VALUE):
+  // the runner must treat it as an ordinary command failure (fallback +
+  // one-shot notify), never break the startup/config apply chain.
+  let notified: string[] = []
+  let outputs: (string[] | undefined)[] = []
+  const runner = new FooterCommandRunner({
+    config: { ...CONFIG, command: 'echo hi\u0000oops' },
+    snapshot: () => emptyStatusSnapshot(),
+    width: () => 100,
+    height: () => 30,
+    onOutput: (r) => { outputs.push(r) },
+    onNotifyOnce: (message) => { notified.push(message) },
+    signal: new AbortController().signal,
+  })
+  try {
+    assert.doesNotThrow(() => runner.requestRefresh())
+    assert.deepEqual(outputs, [undefined], 'the failed run falls back (undefined rows)')
+    assert.equal(notified.length, 1, 'exactly one failure notification')
+  } finally {
+    runner.dispose()
+  }
+})
+
 test('a TERM-resistant child is HARD-killed after the grace period (no detached orphan)', async () => {
   // The child traps TERM and would run forever: a plain SIGTERM (the old
   // killChild) leaves it running as a detached orphan — the runner must
@@ -380,15 +439,15 @@ test('requests within the interval NEVER overlap a running child (coalescing gua
 })
 
 test('failure notifies once per error generation; recovery clears it', async () => {
+  // The PERIODIC re-arm (the review's P2) keeps a failing cadence running
+  // by itself, so the phases are OUTPUT-addressed: the first failure
+  // notifies, every repeat (whether re-armed or explicitly requested)
+  // stays silent, a recovery run clears the generation silently, and a
+  // NEW failure generation after recovery notifies once more.
   let notifyCount = 0
-  let fail = true
   const outputs: Array<string[] | undefined> = []
   const runner = new FooterCommandRunner({
-    config: {
-      ...CONFIG,
-      command: 'node -e "process.stdout.write(process.env.FAIL === \'1\' ? \'\' : \'ok\\n\'); process.exit(process.env.FAIL === \'1\' ? 1 : 0)"',
-      refreshIntervalMs: 50,
-    },
+    config: { ...CONFIG, refreshIntervalMs: 50, command: 'node -e "process.exit(1)"' },
     snapshot: () => emptyStatusSnapshot(),
     width: () => 100,
     height: () => 30,
@@ -396,34 +455,49 @@ test('failure notifies once per error generation; recovery clears it', async () 
     onNotifyOnce: () => { notifyCount += 1 },
     signal: new AbortController().signal,
   })
-  // Wait until N outputs have settled (never a fixed delay — the child
-  // spawn is async).
-  const waitFor = async (count: number): Promise<void> => {
+  const waitForCount = async (count: number): Promise<void> => {
     const deadline = Date.now() + 5000
     while (outputs.length < count && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 10))
+      await new Promise(resolve => setImmediate(resolve))
     }
     assert.ok(outputs.length >= count, `expected ${count} outputs, saw ${outputs.length}`)
   }
-  // First failure: notify once.
-  process.env.FAIL = '1'
-  runner.requestRefresh()
-  await waitFor(1)
-  assert.equal(notifyCount, 1, 'the first failure must notify once')
-  // Same failure: silent.
-  runner.requestRefresh()
-  await waitFor(2)
-  assert.equal(notifyCount, 1, 'a repeated failure must stay silent')
-  // Recovery clears the generation; the next failure notifies again.
-  process.env.FAIL = '0'
-  runner.requestRefresh()
-  await waitFor(3)
-  process.env.FAIL = '1'
-  runner.requestRefresh()
-  await waitFor(4)
-  assert.equal(notifyCount, 2, 'a new error generation must notify once')
-  delete process.env.FAIL
-  runner.dispose()
+  try {
+    // Failure #1: notify once.
+    runner.requestRefresh()
+    await waitForCount(1)
+    assert.equal(notifyCount, 1, 'the first failure must notify once')
+    // The re-arm keeps the failing cadence alive: repeats stay silent.
+    runner.requestRefresh()
+    await waitForCount(3)
+    assert.equal(notifyCount, 1, 'repeated failures must stay silent')
+    // RECOVERY: the succeeding command clears the error generation (the
+    // interval stays short — the periodic re-arm keeps committing, and the
+    // phases are output-addressed).
+    runner.setConfig({ ...CONFIG, refreshIntervalMs: 50, command: 'node -e "process.stdout.write(\'ok\\n\')"' })
+    const deadline = Date.now() + 5000
+    while (!outputs.some(rows => rows?.includes('ok')) && Date.now() < deadline) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.ok(outputs.some(rows => rows?.includes('ok')), 'the recovery run must commit')
+    assert.equal(notifyCount, 1, 'recovery is silent')
+    // A NEW failure generation after recovery notifies once (setConfig
+    // itself resets the generation — the fresh failure is the first of a
+    // new generation).
+    runner.setConfig({ ...CONFIG, refreshIntervalMs: 50, command: 'node -e "process.exit(1)"' })
+    // setConfig's own clearing write is not a run: the failed RUN's commit
+    // is the NEXT undefined after it.
+    const fallbacksBefore = outputs.filter(rows => rows === undefined).length
+    const deadline2 = Date.now() + 5000
+    while (outputs.filter(rows => rows === undefined).length <= fallbacksBefore && Date.now() < deadline2) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.ok(outputs.filter(rows => rows === undefined).length > fallbacksBefore,
+      'the new failing run settles (a fresh fallback)')
+    assert.equal(notifyCount, 2, 'a new error generation after recovery notifies once')
+  } finally {
+    runner.dispose()
+  }
 })
 
 test('the app renders the command surface; the Host instruction still merges on top', async () => {
@@ -617,10 +691,13 @@ test('a STALE child timeout never kills the CURRENT child (generation-scoped kil
 
 test('a config switch to a SHORTER interval never spawns from a stale coalesced timer', async () => {
   // The first refresh starts (lastStartAt set); the second coalesces
-  // onto the LONG interval's timer. setConfig switches to interval 0,
-  // whose requestRefresh takes the IMMEDIATE start branch — the stale
-  // long-interval timer must be cleared there, otherwise it fires later
-  // and spawns an EXTRA command.
+  // onto the LONG interval's timer. setConfig switches to a shorter
+  // interval: the switch clears the stale timer and starts the new
+  // command immediately. The stale timer would fire the OLD command 'a'
+  // — the new cadence can only ever commit 'b' rows, so a stale spawn is
+  // detectable by OUTPUT (the review's P2 periodic re-arm keeps the new
+  // cadence alive during the same window, which is why the assertion is
+  // output-addressed, not a count).
   const outputs: Array<string[] | undefined> = []
   const runner = new FooterCommandRunner({
     config: { ...CONFIG, refreshIntervalMs: 200, command: 'node -e "process.stdout.write(\'a\\n\')"' },
@@ -630,28 +707,31 @@ test('a config switch to a SHORTER interval never spawns from a stale coalesced 
     onOutput: (rows) => outputs.push(rows),
     signal: new AbortController().signal,
   })
-  // Two requests on the LONG interval: the first starts, the second
-  // coalesces onto a timer 100s away.
-  runner.requestRefresh()
-  runner.requestRefresh()
-  // Wait until the 200ms stale timer is ARMED (100ms in), then switch:
-  // the immediate-start branch must clear it, or it fires ~100ms later.
-  await new Promise(resolve => setTimeout(resolve, 100))
-  runner.setConfig({ ...CONFIG, refreshIntervalMs: 0, command: 'node -e "process.stdout.write(\'b\\n\')"' })
-  const deadline = Date.now() + 5000
-  while (!outputs.some(rows => rows?.includes('b')) && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 10))
+  try {
+    // Two requests on the LONG interval: the first starts, the second
+    // coalesces onto the interval timer.
+    runner.requestRefresh()
+    runner.requestRefresh()
+    // Wait until 100ms in (before the stale 200ms timer fires), then
+    // switch: the immediate-start branch must clear the stale timer.
+    await new Promise(resolve => setTimeout(resolve, 100))
+    runner.setConfig({ ...CONFIG, refreshIntervalMs: 100, command: 'node -e "process.stdout.write(\'b\\n\')"' })
+    const deadline = Date.now() + 5000
+    while (!outputs.some(rows => rows?.includes('b')) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(outputs.some(rows => rows?.includes('b')), 'the new config must commit')
+    const aRowsAtSwitch = outputs.filter(rows => rows?.[0] === 'a').length
+    // Cover the stale timer's firing point (~firstStart+200ms): a stale
+    // spawn would commit MORE 'a' rows. The new cadence (100ms) keeps
+    // committing 'b' rows — legal and expected.
+    await new Promise(resolve => setTimeout(resolve, 250))
+    assert.equal(outputs.filter(rows => rows?.[0] === 'a').length, aRowsAtSwitch,
+      `no spawn from a stale timer: ${JSON.stringify(outputs)}`)
+    assert.ok(outputs.some(rows => rows?.includes('b')), 'the new cadence keeps committing')
+  } finally {
+    runner.dispose()
   }
-  assert.ok(outputs.some(rows => rows?.includes('b')), 'the new config must commit')
-  const countAtCommit = outputs.length
-  // A stale 200ms timer would still be armed: if the immediate branch
-  // did not clear it, it fires ~100ms after the switch and spawns a
-  // THIRD command. The 120ms window here covers that firing point; a
-  // correct clear produces no change in the window (a negative
-  // assertion — "no event" cannot be event-driven).
-  await new Promise(resolve => setTimeout(resolve, 120))
-  assert.equal(outputs.length, countAtCommit, `no extra spawn from a stale timer: ${JSON.stringify(outputs)}`)
-  runner.dispose()
 })
 
 test('an already-aborted signal never spawns a child', async () => {

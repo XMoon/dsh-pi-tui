@@ -50,13 +50,61 @@ test('RendererRegistry: a throwing message renderer is isolated and the chain co
     id: 'worker',
     render: () => textView('worked'),
   }, 'b')
-  const result = registry.renderMessage({ kind: 'assistant', turn: 0, text: 'x' }, (id, _owner, error) => {
+  const result = registry.renderMessage({ kind: 'assistant', turn: 0, text: 'x' }, (id, error) => {
     errors.push(`${id}:${error instanceof Error ? error.message : String(error)}`)
   })
   assert.ok(result !== undefined)
   assert.equal(result.rendererId, 'worker')
   assert.equal(errors.length, 1)
   assert.match(errors[0] ?? '', /boom:renderer exploded/)
+})
+
+test('the PUBLIC render ABI is owner-LESS: a v1 (id, error) callback receives the REAL error, never the owner (review P1)', () => {
+  // The review's P1: the concrete render signature briefly carried the
+  // SNAPSHOT owner in the callbacks and the result — TS parameter
+  // contravariance let the wider internal signature satisfy the narrower
+  // public declaration, so an existing v1 plugin's second callback
+  // parameter silently became the owner STRING (the real error landed in
+  // the third slot and was dropped). The public renderMessage/renderTool
+  // keep the owner-less Stable v1 ABI; the owner-scoped path is the
+  // HOST-ONLY *Owned variants.
+  const registry = new RendererRegistry()
+  const seen: unknown[] = []
+  let canUseView: unknown
+  registry.registerMessageRenderer({
+    id: 'boom',
+    render: () => { throw new Error('the real error') },
+  }, 'plugin-owner-a')
+  registry.registerMessageRenderer({
+    id: 'worker',
+    render: () => textView('worked'),
+  }, 'other-owner')
+  const result = registry.renderMessage(
+    { kind: 'assistant', turn: 0, text: 'x' },
+    (id, error) => { seen.push(error) },
+    (id, view) => { canUseView = view; return true },
+  )
+  assert.ok(result !== undefined)
+  assert.equal(result.rendererId, 'worker')
+  // The v1 callback's second parameter is the REAL error object — never
+  // the owner string.
+  const boom = seen[0]
+  assert.ok(boom instanceof Error, `the error slot carries the real Error, got: ${String(boom)}`)
+  assert.match((boom as Error).message, /the real error/)
+  assert.equal(seen.length, 1)
+  // canUse's second parameter is the ExtensionView, never the owner.
+  assert.ok(typeof canUseView === 'object' && canUseView !== null,
+    'canUse receives the view, not the owner')
+  // The public result carries NO owner field.
+  assert.ok(!('owner' in result), 'the public result must not expose the owner')
+  // The HOST-ONLY Owned variants still carry the owner (the health ledger
+  // keys records by (slot, owner, id)).
+  const owned = registry.renderMessageOwned({ kind: 'assistant', turn: 0, text: 'x' }, () => {})
+  assert.ok(owned !== undefined && owned.owner === 'other-owner',
+    'the Owned variant exposes the snapshot owner to the host path')
+  const toolOwned = registry.renderToolOwned({ callId: 'c', toolName: 'bash', status: 'ok', expanded: false }, () => {})
+  assert.ok(toolOwned === undefined || typeof toolOwned.owner === 'string',
+    'renderToolOwned exposes the owner to the host path')
 })
 
 test('RendererRegistry: an onError throw does not stop the message chain', () => {

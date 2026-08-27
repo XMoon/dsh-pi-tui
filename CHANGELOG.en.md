@@ -148,8 +148,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any builtin item — the standard `replace()`/`invalidate()` pattern
   keeps it live. The item's config identity is `ext:<owner>/<id>`, stable
   across HMR; a layout referencing an unloaded plugin's item keeps the
-  reference and recovers when the plugin reloads. The legacy
-  `chrome.footer.status` slot is unchanged.
+  reference and recovers when the plugin reloads. The RUNTIME ownership
+  identity is separate from the config identity: the registration owner
+  carries the fiber uid (two anonymous sibling fibers are distinct owners
+  and never conflict), and only the persisted key uses the stable name; a
+  duplicate canonical key among live registrations is an explicit
+  registration error. The legacy `chrome.footer.status` slot is unchanged.
 - **A trusted command status line (Claude/Kimi style).** `footer:
   command` hands the status surface to a user-configured command: the
   current status snapshot (no secrets, no credentials, no prompts) is
@@ -159,9 +163,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wins, 16 KiB output cap, hard timeout with process-tree kill, stale
   results never commit), failures fall back to the native layout, and the
   Host's instruction surface (e.g. the Ctrl+C exit hint) always survives
-  on top. **Security:** the command is executed only when it lives in the
-  USER layer of your settings document — a repository/project-supplied
-  `footerCommand` is never executed.
+  on top. **Periodic refresh:** the configured refresh interval is a
+  PERIODIC trigger, not just a throttle — a settled run re-arms the next
+  interval run by itself, so an idle status line (clock, battery, external
+  git state) never freezes on its first output. A command containing a NUL
+  or other control characters is refused at parse time, and a synchronous
+  spawn failure takes the same fallback path — the startup/config-apply
+  chain can never be broken. The status snapshot the command reads on
+  stdin is transaction-consistent with viewer switches (the child cwd and
+  the main subject never appear in the same frame). `footerCommand` is a
+  formal field of the settings-document DTO: a future Remote adapter's
+  whole-document replace can never wipe it. **Security:** the command is
+  executed only when it lives in the USER layer of your settings document
+  — a repository/project-supplied `footerCommand` is never executed.
 
 ## [0.3.4] - 2026-08-25
 

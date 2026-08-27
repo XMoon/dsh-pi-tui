@@ -932,13 +932,13 @@ test('/settings theme STALE pick through the REAL handler rolls the row and the 
   app.stop()
 })
 
-/** Spin the event loop (no fixed sleep) until the CURRENT palette equals
- * `expected`, or fail with the last palette. The autodetect reply applies
- * through a detached task chain, so the assertion waits on the OBSERVABLE
- * outcome instead of a timing guess (AGENTS.md — never a fixed setTimeout). */
-async function waitForPalette(expected: unknown, timeoutMs = 1000): Promise<void> {
-  const start = Date.now()
-  while (currentPalette !== expected && Date.now() - start < timeoutMs) {
+/** Spin the event loop for a bounded number of TURNS (never a wall-clock
+ * timeout) until the CURRENT palette equals `expected`, then fail with the
+ * last palette. The autodetect reply applies through a detached task chain,
+ * so the assertion waits on the OBSERVABLE outcome via loop turns — no
+ * fixed sleep and no clock read (AGENTS.md — never a fixed setTimeout). */
+async function waitForPalette(expected: unknown, maxTurns = 1000): Promise<void> {
+  for (let turn = 0; turn < maxTurns && currentPalette !== expected; turn += 1) {
     await new Promise(resolve => setImmediate(resolve))
   }
   assert.equal(currentPalette, expected, 'the palette never reached the expected value')

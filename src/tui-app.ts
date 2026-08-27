@@ -2049,6 +2049,12 @@ export class TuiApp {
    * Viewer mode is host-owned chrome: extension footer segments (main-
    * session semantics) do not render while it is set. */
   private viewerFooter: SubagentViewerFooter | undefined
+  /** The parent's workspace section, captured when the subagent viewer
+   * opens and restored by the ATOMIC exit update in setViewerFooter
+   * (undefined): the exit commits view + workspace + usage together, so a
+   * synchronous store observer never reads `main` + the child's facts
+   * (the review's P2). */
+  private mainWorkspaceBeforeViewer: WorkspaceStatus | undefined
 
   constructor(terminal: Terminal, events: TuiAppEvents, options: TuiAppOptions = {}) {
     // The external-editor capability is a BOUND pair: the external-editor
@@ -5422,8 +5428,11 @@ export class TuiApp {
       this.renderHeader()
       this.requestRender()
       this.syncExtensionState()
-      // M0: the display subject returns to main when the viewer closes.
-      this.projectStatus({ view: resolveDisplaySubject(undefined) })
+      // M0: the display subject returns to main — through the ATOMIC
+      // setViewerFooter(undefined) update below (the runner pairs the two
+      // calls in the same synchronous tick), never as a standalone patch:
+      // a store observer (the footer command runner's refresh) must never
+      // observe `main` + the child's workspace/usage (the review's P2).
       return
     }
     if (this.viewerMode === undefined) {
@@ -5442,9 +5451,11 @@ export class TuiApp {
     }
     this.viewerMode = mode
     this.viewerGeneration += 1
-    // M0: the display subject follows the viewer (the layout never changes
-    // — only the data source does).
-    this.projectStatus({ view: resolveDisplaySubject(mode) })
+    // M0: the display subject follows the viewer — projected by the
+    // runner's setViewerFooter call together with the child's
+    // workspace/usage in ONE atomic store update (never a standalone view
+    // patch here: `subagent` + the parent's facts would be a mixed
+    // snapshot an observer can read — the review's P2).
     // M9: cover the CURRENT seat occupant (a plugin editor's component
     // receives the child draft / placeholder; the preserved drafts stay
     // in their own slots).
@@ -5489,21 +5500,33 @@ export class TuiApp {
    * paint — the very first frame after entering (or leaving) the viewer
    * must already show the new subject, never the old one. */
   setViewerFooter(footer: SubagentViewerFooter | undefined): void {
+    // Capture the parent's workspace BEFORE the assignment below flips the
+    // viewing state (the enter transition's exit-restoration capture).
+    if (footer !== undefined && this.viewerFooter === undefined) {
+      this.mainWorkspaceBeforeViewer = this.statusStore.snapshot().workspace
+    }
     this.viewerFooter = footer
     // M1: the display subject's facts follow the viewer (the layout never
-    // changes — only the data source). The child's structured usage rides
-    // the footer payload; turns/steps and the child workspace always
-    // project; the view section switches the subject.
+    // changes — only the data source). The transition is ATOMIC: view +
+    // workspace + usage are committed in ONE store update, because the
+    // store notifies its subscribers SYNCHRONOUSLY inside update() — the
+    // footer command runner's refresh (and every other observer) can read
+    // the snapshot the moment it is published, so a two-step transition
+    // would expose `main` + the child workspace (or `subagent` + the
+    // parent facts) as a REAL observation, not just a paint window (the
+    // review's P2).
     if (footer === undefined) {
-      // Usage and the display subject return to main here; the parent's
-      // WORKSPACE (cwd/project/branch) is restored by the runner's
-      // refreshStatus in the SAME synchronous tick after this call (the
-      // exit path never yields between them), so no intermediate frame
-      // with the child workspace ever paints.
+      // The exit commits the WHOLE return-to-main transition at once: the
+      // parent's workspace is the snapshot captured at enter (the runner's
+      // refreshStatus right after re-derives the same facts — same-value
+      // sections do not re-notify; a git-branch change DURING viewing is
+      // corrected by that same refresh in the same tick).
       this.projectStatus({
         usage: this.usageFromStatus(),
+        workspace: this.mainWorkspaceBeforeViewer,
         view: { subject: { kind: 'main' } },
       })
+      this.mainWorkspaceBeforeViewer = undefined
     } else {
       this.projectStatus({
         usage: {
@@ -7501,7 +7524,7 @@ export class TuiApp {
       // Thought when the host keeps it compact (review finding).
       const tool = { ...snapshot.tool, expanded }
       const compiled = new Map<string, Component>()
-      const rendered = registry.renderTool(tool, (id, owner, error) => this.rendererError?.({ id, error, slot: 'tool', owner }), (id, owner, view) => {
+      const rendered = registry.renderToolOwned(tool, (id, owner, error) => this.rendererError?.({ id, error, slot: 'tool', owner }), (id, owner, view) => {
         const component = this.compileExtensionViewIsolated(view, id, owner, 'tool')
         if (component === undefined) return false
         compiled.set(id, component)
@@ -7515,7 +7538,7 @@ export class TuiApp {
       return { component, rendererId: rendered.rendererId }
     }
     const compiled = new Map<string, Component>()
-    const rendered = registry.renderMessage(snapshot, (id, owner, error) => this.rendererError?.({ id, error, slot: 'message', owner }), (id, owner, view) => {
+    const rendered = registry.renderMessageOwned(snapshot, (id, owner, error) => this.rendererError?.({ id, error, slot: 'message', owner }), (id, owner, view) => {
       const component = this.compileExtensionViewIsolated(view, id, owner, 'message')
       if (component === undefined) return false
       compiled.set(id, component)

@@ -37,8 +37,17 @@ interface Registration<T> {
   readonly order: number
   readonly priority: number
   readonly description: string | undefined
-  /** The owning Cordis fiber name (diagnostics + owner-scoped disposal). */
+  /** The owning Cordis fiber identity, UID-QUALIFIED
+   * (`<uid>:<name>`): two anonymous sibling fibers are DISTINCT owners
+   * (the (slot, owner, id) uniqueness and owner-scoped disposal never
+   * conflate two live plugins). */
   readonly owner: string
+  /** The HMR-STABLE owner identity for slots whose canonical keys are
+   * PERSISTED across reloads (chrome.footer.item's `ext:<owner>/<id>`):
+   * a reloaded plugin gets a NEW uid but the SAME fiber name, so the
+   * persisted key must be derived from the name. Absent → the key
+   * falls back to `owner`. */
+  readonly stableOwner: string | undefined
   value: T
   /** Latched by dispose(); a disposed registration is inert. */
   disposed: boolean
@@ -140,6 +149,7 @@ export class ExtensionLedger {
     spec: RegistrationSpec,
     value: T,
     owner: string,
+    stableOwner?: string,
   ): RegistrationHandle<T> {
     if (!isSlotName(slot)) {
       throw new Error(`unknown extension slot "${slot}" (known: ${slotNames().join(', ')})`)
@@ -159,6 +169,7 @@ export class ExtensionLedger {
       priority: spec.priority ?? 0,
       description: spec.description,
       owner,
+      stableOwner,
       value,
       disposed: false,
     }
@@ -336,6 +347,7 @@ function contributionRecord<T>(registration: Registration<T>): ContributionRecor
     priority: registration.priority,
     description: registration.description,
     owner: registration.owner,
+    stableOwner: registration.stableOwner,
     value: registration.value,
   }
 }

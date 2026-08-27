@@ -12,6 +12,7 @@ import test from 'node:test'
 import { FooterComposer } from '../src/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { StatusStore } from '../src/status/store.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -136,6 +137,53 @@ test('the FIRST frame after entering the viewer already shows the child subject'
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
   assert.ok(after.includes('p/m'), `leaving the viewer must restore the parent footer immediately:\n${after}`)
+  app.stop()
+})
+
+test('the viewer transition is ATOMIC in the StatusStore: no observer ever reads a mixed snapshot (review P2)', () => {
+  // The store notifies its subscribers SYNCHRONOUSLY inside update(), so
+  // the footer command runner's refresh reads EVERY published snapshot.
+  // The old choreography published the view section alone (enter:
+  // `subagent` + the parent's facts; exit: `main` + the child's facts) —
+  // a mixed snapshot an observer could genuinely read (and act on: the
+  // command stdin captures the snapshot the moment the interval is due).
+  // The transition now commits view + workspace + usage in ONE update.
+  // The test records EVERY post-update snapshot through the production
+  // entry points (setViewerMode + setViewerFooter, exactly the runner's
+  // call pairs) and asserts none of them is mixed.
+  const snapshots: StatusSnapshot[] = []
+  const store = new StatusStore(emptyStatusSnapshot())
+  store.subscribe(() => { snapshots.push(store.snapshot()) })
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { statusStore: store })
+  app.start()
+  app.setStatus({ model: 'p/m', cwd: '/parent-ws', turns: 2, steps: 3 })
+  const parentCwd = '/parent-ws'
+  const childCwd = '/child-ws'
+  // ENTER (the runner's pair): setViewerMode then setViewerFooter.
+  app.setViewerMode({ parentSessionId: 'p', childSessionId: 'c1', label: 'research', mode: 'one-shot', activity: 'running' })
+  app.setViewerFooter({
+    label: 'research', childSessionId: 'c1', mode: 'one-shot', activity: 'running',
+    cwd: childCwd, turns: 5, steps: 9, usage: undefined, statsLine: '',
+  })
+  // EXIT (the runner's pair).
+  app.setViewerMode(undefined)
+  app.setViewerFooter(undefined)
+  // Every observed snapshot is self-consistent: the subject kind matches
+  // the workspace the SAME snapshot carries.
+  for (const snap of snapshots) {
+    if (snap.view.subject.kind === 'subagent') {
+      assert.equal(snap.workspace.cwd, childCwd,
+        `a subagent snapshot must carry the CHILD workspace, got ${snap.workspace.cwd}`)
+    } else {
+      assert.notEqual(snap.workspace.cwd, childCwd,
+        `a main snapshot must never carry the child workspace: ${JSON.stringify(snap.workspace)}`)
+    }
+  }
+  // The transition actually happened (the test is not vacuous).
+  assert.ok(snapshots.some(snap => snap.view.subject.kind === 'subagent'), 'the enter was observed')
+  assert.ok(snapshots.some(snap => snap.view.subject.kind === 'main' && snap.workspace.cwd === parentCwd),
+    'the exit restores main + the parent workspace in one snapshot')
   app.stop()
 })
 

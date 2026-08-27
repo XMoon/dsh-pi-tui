@@ -182,8 +182,14 @@ export interface ContributionRecord<T> {
   readonly order: number
   readonly priority: number
   readonly description: string | undefined
-  /** The Cordis fiber name that owns this registration (diagnostics). */
+  /** The Cordis fiber identity that owns this registration, UID-QUALIFIED
+   * (`<uid>:<name>`) — diagnostics, uniqueness and owner-scoped disposal
+   * never conflate two anonymous sibling fibers. */
   readonly owner: string
+  /** The HMR-STABLE owner identity for slots whose canonical keys are
+   * PERSISTED across reloads (chrome.footer.item). Absent → the key
+   * derives from `owner`. */
+  readonly stableOwner?: string
   /** The live contribution value. */
   readonly value: T
 }
@@ -562,6 +568,15 @@ export interface TuiCommandBridgeView {
 export interface TuiThemeRegistryView {
   /** The display names (diagnostics / /status counts only). */
   names(): string[]
+  /** DEPRECATED (still functional for the current API version — removal
+   * requires the next breaking API version): the palette behind a bare
+   * display NAME. The bare name is ambiguous now that plugin themes and
+   * custom files can share one (the source-qualified
+   * {@link paletteForSelectable} is the identity-addressed read). Kept as
+   * a source-compatibility shim: the concrete registry never dropped it,
+   * so removing it from this view would break existing Stable plugins'
+   * typecheck without a runtime need (the review's P1/P2). */
+  paletteFor(name: string): TuiColorPalette | undefined
   /** The source-qualified selectable values (the /settings picker's
    * plugin section; sorted). */
   selectableValues(): string[]
@@ -733,19 +748,21 @@ export interface TuiRendererHandle {
 
 /** The read-side of the renderer registry (M7): the host's message cache
  * asks it to present a message/tool through the plugin chain. The
- * concrete registry is host-internal. The OWNER rides the callbacks and
- * the result: the health ledger keys records by (slot, owner, id). */
+ * concrete registry is host-internal. The ABI is owner-LESS (the Stable
+ * v1 contract — an existing plugin's `(id, error)` callback must never
+ * receive the host's owner in the error slot); the host's OWNER-scoped
+ * health path uses the concrete registry's *Owned variants. */
 export interface TuiRendererRegistryView {
   renderMessage(
     snapshot: MessagePresentationSnapshot,
-    onError: (id: string, owner: string, error: unknown) => void,
-    canUse?: (id: string, owner: string, view: ExtensionView) => boolean,
-  ): { view: ExtensionView; rendererId: string; owner: string } | undefined
+    onError: (id: string, error: unknown) => void,
+    canUse?: (id: string, view: ExtensionView) => boolean,
+  ): { view: ExtensionView; rendererId: string } | undefined
   renderTool(
     snapshot: ToolPresentationSnapshot,
-    onError: (id: string, owner: string, error: unknown) => void,
-    canUse?: (id: string, owner: string, view: ExtensionView) => boolean,
-  ): { view: ExtensionView; rendererId: string; owner: string } | undefined
+    onError: (id: string, error: unknown) => void,
+    canUse?: (id: string, view: ExtensionView) => boolean,
+  ): { view: ExtensionView; rendererId: string } | undefined
   snapshot(): TuiRendererRegistrySnapshot
 }
 

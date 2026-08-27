@@ -775,24 +775,25 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // ledger is the service-lifetime registry and the SurfaceHost merely
     // consumes it (a dispose stops consuming, never removes).
     // `this.ctx` is the CALLER's context (Cordis Service tracing); its fiber
-    // owns this registration's lifetime. The OWNER is the fiber's stable
-    // plugin identity (the nearest named ancestor's display name — 'root'
-    // for anonymous plugins): the chrome.footer.item canonical config key
-    // `ext:<owner>/<id>` is PERSISTED in user layouts, so it must survive
-    // HMR — a reloaded plugin gets a NEW fiber (new uid) but the SAME name,
-    // and the layout reference recovers. Anonymous plugins share 'root';
-    // the ledger's (slot, owner, id) uniqueness rejects two live
-    // registrations of the same id under the SAME owner while DIFFERENT
-    // owners may register the same local id (their canonical keys stay
-    // distinct — the public contract: an id is unique per (slot, owner)),
-    // so the name-based owner never conflates LIVE records — it only
-    // makes the persisted key stable. The fiber-bound effect disposer
-    // performs the cleanup on unload. `this.ctx.fiber.effect()` throws
-    // INACTIVE_EFFECT when the caller fiber is already disposed — the
-    // registration must then be rolled back so the (slot, owner, id)
-    // triple is not blocked by a ghost.
+    // owns this registration's lifetime. The OWNER is UID-QUALIFIED
+    // (`<uid>:<name>`) like every other slot: two anonymous sibling fibers
+    // are DISTINCT owners (the (slot, owner, id) uniqueness never conflates
+    // two live plugins, and owner-scoped disposal stays exact). The
+    // fiber-bound effect disposer performs the cleanup on unload.
+    // `this.ctx.fiber.effect()` throws INACTIVE_EFFECT when the caller fiber
+    // is already disposed — the registration must then be rolled back so
+    // the (slot, owner, id) triple is not blocked by a ghost.
+    //
+    // chrome.footer.item additionally carries a SEPARATE HMR-STABLE owner
+    // (`stableOwner`, the nearest named ancestor's display name): its
+    // canonical config key `ext:<owner>/<id>` is PERSISTED in user layouts,
+    // so the key must survive a reload (a new uid, the SAME name). The
+    // lifecycle owner above keeps the uid; only the PERSISTED KEY uses the
+    // stable identity (the review's P1: a name-based OWNER for all slots
+    // would conflate two anonymous plugins into one owner).
     const caller = this.ctx
-    const owner = caller.fiber.name
+    const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    const stableOwner = slot === 'chrome.footer.item' ? caller.fiber.name : undefined
     // The chrome.footer.item canonical key is ext:<owner>/<id> — the
     // owner's `/` (an npm scoped plugin name) is percent-ENCODED in the
     // key (encodeURIComponent — injective, so a literal `~` owner can
@@ -808,7 +809,23 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       // id must never smuggle ESC/OSC/C0 into them (round-3 review).
       throw new Error(`chrome.footer.item registration id must not contain "/" or control characters (owner "${owner}", id "${stripControlChars(spec.id)}")`)
     }
-    const handle = this.ledger.register<T>(slot, spec, contribution, owner)
+    if (slot === 'chrome.footer.item') {
+      // The PERSISTED key namespace must stay injective among LIVE
+      // registrations (the same class as the theme registry's
+      // duplicate-name rejection): two plugins sharing a stable owner (two
+      // anonymous fibers both resolve to 'root') with the same id would
+      // produce the SAME canonical key — one user layout entry would drive
+      // both items. An id is unique per STABLE owner among live
+      // contributions; the same (stableOwner, id) is free again once the
+      // owner unloads (HMR reload = dispose-then-register, so a reload
+      // never hits this).
+      for (const record of this.ledger.snapshot<never>('chrome.footer.item').records) {
+        if (record.id !== spec.id) continue
+        if ((record.stableOwner ?? record.owner) !== caller.fiber.name) continue
+        throw new Error(`duplicate chrome.footer.item canonical key (stable owner "${caller.fiber.name}" already holds id "${spec.id}" among live contributions — ids are unique per stable owner; a reload must dispose the old registration first)`)
+      }
+    }
+    const handle = this.ledger.register<T>(slot, spec, contribution, owner, stableOwner)
     let dispose: () => void
     try {
       dispose = caller.fiber.effect(() => () => {
