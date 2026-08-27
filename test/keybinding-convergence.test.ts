@@ -1082,6 +1082,36 @@ test('6.6c leader-only submit: the unified model carries NO Enter (resolve/match
   assert.deepEqual(mixed.editorSubmitKeysFor(), ['ctrl+z'], 'the direct key survives; no Enter')
 })
 
+test('6.6d a leader-only declaration WITHOUT a leader key leaves the builtin intact', async () => {
+  // Review round 39: a missing leader makes the sequences inert
+  // (fail-soft) — the action must fall back to its builtin default. The
+  // parser must not leave the empty-array marker behind (it used to: the
+  // marker was written before the leader check, so a
+  // diagnosed-and-ignored config still suppressed the builtin).
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    bindings: { 'app.todo.toggle': '<leader>t' },
+  }))
+  assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+t'], 'the builtin Ctrl+T survives')
+  assert.deepEqual(manager.leaderKeysFor('app.todo.toggle'), [], 'no leader trigger without a leader key')
+  assert.equal(manager.keyHint('app.todo.toggle'), 'Ctrl+T')
+  // Runtime: Ctrl+T still toggles the todo panel.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+  })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    bindings: { 'app.todo.toggle': '<leader>t' },
+  }))
+  await vt.waitForRender()
+  vt.sendInput('\x14') // ctrl+t — the builtin
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelVisible(), true, 'Ctrl+T must still toggle the todo panel (the ignored config leaves the builtin)')
+  app.stop()
+})
+
 test('6.6 a conditional top rule does not permanently hide the fallback in the read model', () => {
   const manager = new HostKeybindingManager()
   manager.setUserConfiguration(parseUserKeybindings({ 'app.tasks.open': 'ctrl+s' }))

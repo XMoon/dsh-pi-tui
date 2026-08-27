@@ -118,10 +118,42 @@ test('leader key + leader sequences parse', () => {
 })
 
 test('leader sequences without a leader key are inert with a diagnostic', () => {
-  const parsed = parseUserKeybindings({ 'app.tasks.open': `${LEADER_PREFIX}t` })
+  // Review round 39: a missing leader makes the sequences inert
+  // (fail-soft) — the action must fall back to its builtin default. The
+  // empty-array marker must NOT be left behind: a diagnosed-and-ignored
+  // config must not suppress the builtin (app.todo.toggle's builtin
+  // Ctrl+T survives).
+  const parsed = parseUserKeybindings({ 'app.todo.toggle': `${LEADER_PREFIX}t` })
+  assert.deepEqual(parsed.bindings, {}, 'no empty-array marker — the builtin survives')
   assert.deepEqual(parsed.leaderBindings, [])
   assert.equal(parsed.diagnostics.length, 1)
   assert.ok(parsed.diagnostics[0]!.includes('no "leader" key'))
+})
+
+test('an invalid leader key leaves leader-only actions on their builtin defaults', () => {
+  // Review round 39: a leader that fails validation (text-producing,
+  // runtime-unbindable, terminal-ambiguous) is diagnosed and ignored —
+  // the same fail-soft contract as a missing leader: no empty-array
+  // marker, the builtin survives.
+  for (const badLeader of ['shift+a', 'shift+f5', 'ctrl+[']) {
+    const parsed = parseUserKeybindings({ leader: badLeader, 'app.todo.toggle': `${LEADER_PREFIX}t` })
+    assert.deepEqual(parsed.bindings, {}, `leader "${badLeader}" must not leave a marker`)
+    assert.deepEqual(parsed.leaderBindings, [])
+    assert.ok(parsed.diagnostics.some(message => message.includes('invalid leader key')),
+      `no leader diagnostic for "${badLeader}": ${parsed.diagnostics.join(' | ')}`)
+  }
+})
+
+test('a valid leader keeps the empty-array marker for leader-only actions', () => {
+  // Review round 39: only a VALID leader prefix earns the marker — the
+  // leader-only declaration then REPLACES the builtin (round 37 unified
+  // contract). A leader that is valid at parse time but dead at runtime
+  // (collision/ambiguity) keeps the marker and stays inert — no
+  // fabricated fallback (covered by the manager/integration tests).
+  const parsed = parseUserKeybindings({ leader: 'ctrl+x', 'app.todo.toggle': `${LEADER_PREFIX}t` })
+  assert.deepEqual(parsed.bindings, { 'app.todo.toggle': [] })
+  assert.equal(parsed.leader?.key, 'ctrl+x')
+  assert.deepEqual(parsed.leaderBindings, [{ action: 'app.todo.toggle', key: 't' }])
 })
 
 test('invalid leader sequence → diagnostic + ignore', () => {

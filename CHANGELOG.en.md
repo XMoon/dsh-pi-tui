@@ -33,7 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Any user declaration REPLACES the action's builtin default keys (a
   leader-only binding is the sole trigger rather than an addition to the
   builtin; a mixed direct + leader keeps both user triggers; `false`
-  removes every trigger). A plain printable key can never be bound to a
+  removes every trigger). A missing or invalid `leader` key makes the
+  `<leader>X` sequences inert (a warning) and the action falls back to
+  its builtin default keys — an ignored bad config never silently
+  removes the builtin. A plain printable key can never be bound to a
   Host action; a bad entry is a warning, never a startup failure
   (fail-soft); conflicts (same key + overlapping scope + same priority)
   are diagnosed and deactivated — never silent last-write-wins.
