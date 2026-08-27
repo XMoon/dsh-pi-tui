@@ -932,6 +932,18 @@ test('/settings theme STALE pick through the REAL handler rolls the row and the 
   app.stop()
 })
 
+/** Spin the event loop (no fixed sleep) until the CURRENT palette equals
+ * `expected`, or fail with the last palette. The autodetect reply applies
+ * through a detached task chain, so the assertion waits on the OBSERVABLE
+ * outcome instead of a timing guess (AGENTS.md — never a fixed setTimeout). */
+async function waitForPalette(expected: unknown, timeoutMs = 1000): Promise<void> {
+  const start = Date.now()
+  while (currentPalette !== expected && Date.now() - start < timeoutMs) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal(currentPalette, expected, 'the palette never reached the expected value')
+}
+
 test('/settings theme autodetect applies only while auto stays the latest choice', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
@@ -944,37 +956,44 @@ test('/settings theme autodetect applies only while auto stays the latest choice
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
   await vt.waitForRender()
-  vt.sendInput('\x1b[B') // → Theme 行（起点 auto）
+  vt.sendInput('\x1b[B') // → the Theme row (the panel opens at auto)
   await vt.waitForRender()
   // The theme row opens an in-place SUBMENU (the /model pattern — the row
   // displays the friendly name, the picker's rows carry the SOURCE-
   // QUALIFIED values; the first row is the current selection's row).
-  // 选 auto（第一项）：最后一次选择是 auto，落地应应用。
-  // 注入与当前调色板不同（上一个显式选择是 auto 之前的默认 dark）
-  // 的浅色应答：只有检测真正落地才能变 light——断言不能被显式选择的
-  // 副作用掩盖。
-  vt.sendInput('\r') // 打开 Theme 子菜单
+  // Pick `auto` (the first row): the LATEST choice is auto, so a landing
+  // detection must apply. Inject a LIGHT reply (the palette before the
+  // first explicit pick of this test is the default dark, so only a real
+  // detection landing can turn it light — the assertion is never masked by
+  // an explicit-pick side effect).
+  vt.sendInput('\r') // open the Theme submenu
   await vt.waitForRender()
-  vt.sendInput('\r') // 第一项 = auto（autodetect 发出）
+  vt.sendInput('\r') // the first row = auto (a detection query fires)
   await vt.waitForRender()
-  vt.sendInput('\x1b]11;#eeeeee\x07') // 浅色应答
-  await new Promise(resolve => setTimeout(resolve, 20))
-  assert.equal(currentPalette, lightColors,
-    'a detection landing while auto is the latest choice must apply')
-  // 再选 auto，然后在查询落地前切走：落地必须被拒绝。
-  vt.sendInput('\r') // 打开 Theme 子菜单
+  vt.sendInput('\x1b]11;#eeeeee\x07') // light-background reply
+  await waitForPalette(lightColors)
+  // Pick auto again, then walk away while the query is in flight: the late
+  // landing must be REFUSED (the guard reads the latest choice).
+  vt.sendInput('\r') // open the Theme submenu
   await vt.waitForRender()
-  vt.sendInput('\r') // 第一项 = auto（新查询）
+  vt.sendInput('\r') // the first row = auto (a NEW query fires)
   await vt.waitForRender()
-  vt.sendInput('\r') // 打开子菜单，切到 dark（查询仍在途）
+  vt.sendInput('\r') // reopen the submenu and switch to dark (query in flight)
   await vt.waitForRender()
-  vt.sendInput('\x1b[B') // → dark（第二项）
+  vt.sendInput('\x1b[B') // → dark (the second row)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
-  vt.sendInput('\x1b]11;#000000\x07') // 深色应答：守卫应拒绝，保持 dark
-  await new Promise(resolve => setTimeout(resolve, 20))
+  // The in-flight query gets a LIGHT reply — a landing would turn the
+  // palette light, so the refusal is OBSERVABLE (a dark reply would be
+  // indistinguishable from the explicit dark pick). The palette spins the
+  // event loop a bounded number of turns (no wall-clock sleep) before the
+  // refusal assertion.
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  for (let spin = 0; spin < 50; spin += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
   assert.equal(currentPalette, darkColors,
-    'a detection landing after the user left auto must not apply')
+    'a detection landing after the user left auto must not apply (a light reply must be refused)')
   app.stop()
 })

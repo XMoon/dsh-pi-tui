@@ -24,7 +24,7 @@
  */
 
 import type { ColorPalette } from './theme.ts'
-import { loadCustomTheme, customThemeNames } from './theme.ts'
+import { loadCustomTheme, customThemeNames, isSafeCustomThemeName } from './theme.ts'
 import type { ThemeRegistry } from './theme-registry.ts'
 
 /** The source-qualified prefix for custom-theme files. */
@@ -87,8 +87,16 @@ export function resolveThemeSelection(
   themes: ThemeRegistry | undefined,
 ): ResolvedThemeSelection | undefined {
   if (isFileThemeValue(value)) {
-    const palette = loadCustomTheme(fileThemeNameOf(value))
-    return palette === undefined ? undefined : { kind: 'file', name: fileThemeNameOf(value), palette }
+    const name = fileThemeNameOf(value)
+    // UNTRUSTED INPUT (the review's P2): a `file:<name>` value survives in
+    // the persisted settings document, so the name is validated as a
+    // directory-local basename BEFORE any path is constructed — a
+    // `file:../../x` value resolves nothing (the deterministic missing
+    // theme fallback), never a file outside the themes directory.
+    // loadCustomTheme enforces the same guard at the fs seam.
+    if (!isSafeCustomThemeName(name)) return undefined
+    const palette = loadCustomTheme(name)
+    return palette === undefined ? undefined : { kind: 'file', name, palette }
   }
   if (isPluginThemeValue(value)) {
     const palette = themes?.paletteForSelectable(value)

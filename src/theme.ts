@@ -7,9 +7,9 @@
  */
 
 import { Chalk } from 'chalk'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type {
   EditorTheme,
   MarkdownTheme,
@@ -204,10 +204,41 @@ export function validateCustomTheme(value: unknown): CustomThemeFile | undefined
   }
 }
 
-/** Load and resolve one custom theme file, or undefined when missing/broken. */
+/** Whether one custom theme NAME is a safe directory-local basename. The
+ * name reaches `loadCustomTheme` from UNTRUSTED persisted input (a
+ * `file:<name>` settings value survives reloads), so a traversal value
+ * (`..`, a path separator) must never construct a path outside the themes
+ * directory. Also enforced by the resolved-path containment check below —
+ * this guard is the first line (a rejected name never touches the fs).
+ * @param name - the bare theme name (no `.json` suffix).
+ */
+export function isSafeCustomThemeName(name: string): boolean {
+  if (name === '' || name === '.' || name === '..') return false
+  if (name.includes('/') || name.includes('\\')) return false
+  // Control characters (including NUL) and DEL never appear in a legitimate
+  // file name and could smuggle separators on exotic filesystems.
+  for (const ch of name) {
+    const code = ch.codePointAt(0) ?? 0
+    if (code < 0x20 || code === 0x7f) return false
+  }
+  return true
+}
+
+/** Load and resolve one custom theme file, or undefined when
+ * missing/broken/UNSAFE (a name that is not a directory-local basename is
+ * rejected before any path is constructed — a corrupted or hand-edited
+ * persisted `file:../../x` value must not read outside the themes
+ * directory). */
 export function loadCustomTheme(name: string): ColorPalette | undefined {
+  if (!isSafeCustomThemeName(name)) return undefined
   try {
-    const raw = readFileSync(join(customThemesDir(), `${name}.json`), 'utf8')
+    const dir = customThemesDir()
+    const path = join(dir, `${name}.json`)
+    // Belt: a symlink inside the themes directory pointing OUTSIDE it is
+    // not honored (the themes directory is the trust boundary). A missing
+    // file (realpath ENOENT) keeps the ordinary undefined fallback.
+    if (realpathSync(dir) !== dirname(realpathSync(path))) return undefined
+    const raw = readFileSync(path, 'utf8')
     const file = validateCustomTheme(JSON.parse(raw))
     return file === undefined ? undefined : resolveCustomTheme(file)
   } catch {

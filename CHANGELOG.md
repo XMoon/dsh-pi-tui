@@ -32,6 +32,10 @@
   只有真正 apply 成功才更新"当前选择"并改写外层行;stale 选择(确认前
   贡献已卸载)或 apply 失败会把外层行与当前选择一并回滚到上一个选择,
   失败的选取既不会伪造当前态,也不会抢走进行中的 `auto` 终端检测。
+  自定义文件主题名校验为目录内 basename(拒绝 `..`、路径分隔符、控制
+  字符与空名),themes 目录内逃逸出目录的 symlink 也不会被加载——
+  手改/损坏的持久化 `file:../../x` 只会确定性地落入"主题缺失"回退,
+  绝不读取 themes 目录之外的文件。
 - **Theme-unload hook 增加 generation lease。** runner 的
   `setThemeUnloadedHook` 现在返回一个 disposer,且只有当前 generation
   的 disposer 能清除回调——旧 runner 的 HMR cleanup 永远不会清掉新

@@ -189,7 +189,11 @@ transactional: only a successful apply moves the current choice and the
 outer row; a stale selection (the contribution unloaded between open and
 confirm) or an apply failure rolls both back to the previous choice — a
 failed pick can never fake a current selection nor steal an in-flight
-`auto` terminal detection. The vendored SettingsList submenu contract
+`auto` terminal detection. A `file:<name>` value is untrusted persisted
+input: the name must be a directory-local basename (no `..`, no path
+separators, no control characters) and a symlink escaping the themes
+directory is not loaded — a traversal value degrades to the deterministic
+missing-theme fallback. The vendored SettingsList submenu contract
 writes the RAW selected value into the outer row's display; the host
 rewrites it back to the friendly label through the openSettings
 updateValue seam after a successful apply, so the panel never shows a raw

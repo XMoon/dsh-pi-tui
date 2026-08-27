@@ -40,7 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the outer row; a stale selection (the contribution unloaded between
   open and confirm) or an apply failure rolls both back to the previous
   choice — a failed pick can never fake a current selection nor steal an
-  in-flight `auto` terminal detection.
+  in-flight `auto` terminal detection. Custom file theme names are
+  validated as directory-local basenames (`..`, path separators, control
+  characters and empty names are rejected), and a symlink inside the
+  themes directory that escapes it is not loaded — a hand-edited or
+  corrupted persisted `file:../../x` value degrades to the deterministic
+  missing-theme fallback and never reads outside the themes directory.
 - **The theme-unload hook is now generation-leased.** The runner's
   `setThemeUnloadedHook` returns a disposer, and only the CURRENT
   generation's disposer clears the callback — an old runner's HMR cleanup
