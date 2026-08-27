@@ -9628,8 +9628,10 @@ export class TuiApp {
   /**
    * M3: open the interactive footer configurator overlay. The panel
    * renders the model's draft layout + a live preview composed by the REAL
-   * composer against the current snapshot; Enter saves through onSave, Esc
-   * cancels without touching the active layout. Returns a closer.
+   * composer against the current snapshot; S (on the Row Selector page)
+   * saves through onSave, Enter navigates, and Esc walks back page by
+   * page, closing on the selector without touching the active layout.
+   * Returns a closer.
    */
   openFooterConfigurator(options: {
     model: FooterConfiguratorModel
