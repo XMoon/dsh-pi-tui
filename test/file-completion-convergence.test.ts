@@ -545,6 +545,48 @@ test('review finding 2: a stale accept never applies after an unrelated edit', a
   assert.deepEqual(applied.lines, ['look @local'], 'an unrelated edit must also fence the accept')
 })
 
+test('review finding (round 8): a fallback scan is async and abort-responsive (never a sync block)', async () => {
+  const root = largeWorkspaceFixture().root
+  const controller = new AbortController()
+  const port = new DirectHostFilePort(() => undefined, null) // forced fallback
+  const provider = new MentionProvider([], root, port)
+  // Abort mid-request: the async scan stops promptly (the old sync scan
+  // could not be interrupted once it started).
+  const started = Date.now()
+  const pending = provider.getSuggestions(['@wanted'], 0, 7, { signal: controller.signal })
+  controller.abort()
+  const result = await pending
+  assert.equal(result, null, 'an aborted fallback scan must never commit a late result')
+  assert.ok(Date.now() - started < 1000, 'the scan must stop promptly on abort')
+})
+
+test('review finding (round 6/8): overlapping delegated requests keep their own snapshots', async () => {
+  const root = outsideCwdFixture().workspace
+  writeFileSync(join(root, 'item-a.txt'), 'x')
+  writeFileSync(join(root, 'item-b.txt'), 'x')
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  // Two requests mint distinct generations; the OLDER result is dropped by
+  // the generation check (it cannot bind a snapshot), so the NEWER
+  // request's snapshot stays the only one the apply fence honors.
+  const g1 = provider.mintRequestGeneration()
+  provider.mintRequestGeneration() // a NEWER request starts
+  const staleBind = provider.captureRequestSnapshot(
+    g1,
+    { kind: 'workspace', cwd: root },
+    ['@item-a'],
+    0,
+    7,
+    { items: [{ value: '@item-a.txt', label: 'item-a.txt' }], prefix: '@item-a' },
+  )
+  // The OLD result does not become the snapshot (the fresh request below
+  // still applies); captureRequestSnapshot returns its argument unchanged.
+  assert.ok(staleBind !== null, 'capture returns the result value unchanged')
+  const fresh = await provider.getSuggestions(['@item-b'], 0, 7, { signal: abort })
+  assert.ok(fresh !== null, 'the NEWER request still completes normally')
+  const applied = provider.applyCompletion(['@item-b'], 0, 7, { value: '@item-b.txt', label: 'item-b.txt' }, '@item-b')
+  assert.equal(applied.lines[0], '@item-b.txt ', 'the fresh request applies normally (the older bind did not fence it)')
+})
+
 test('review finding (round 6): a scope switch mid-flight fences the old session accept', async () => {
   const rootA = outsideCwdFixture().workspace
   const rootB = outsideCwdFixture().workspace
