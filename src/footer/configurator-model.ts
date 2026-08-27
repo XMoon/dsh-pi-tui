@@ -18,7 +18,7 @@
  */
 
 import type { FooterItemRegistry } from './item-registry.ts'
-import { stripControlChars } from './layout.ts'
+import { MAX_ITEMS_PER_ROW, stripControlChars } from './layout.ts'
 import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from './presets.ts'
 import type { FooterItemRef, FooterLayoutV1, FooterRowLayout, FooterSeparator, FooterTone } from './types.ts'
 
@@ -597,15 +597,19 @@ export class FooterConfiguratorModel {
   }
 
   /** Add one available item to a side of the edited row (appended at the
-   * end; the cursor lands on it). */
-  addAvailable(id: string, zone: 'left' | 'right'): void {
+   * end; the cursor lands on it). Returns false — with NO mutation —
+   * when the edited row is already at the parser's per-row item cap: a
+   * 33rd item would make every future save fail to parse. */
+  addAvailable(id: string, zone: 'left' | 'right'): boolean {
     const row = this.editedRow()
+    if (row.left.length + row.right.length >= MAX_ITEMS_PER_ROW) return false
     const ref: MutableRef = { id }
     if (zone === 'left') row.left = [...row.left, ref]
     else row.right = [...row.right, ref]
     this.cursor = zone === 'left'
       ? row.left.length - 1
       : row.left.length + row.right.length - 1
+    return true
   }
 
   /** The style picker's index of the item's current format (the picker
@@ -660,13 +664,15 @@ export class FooterConfiguratorModel {
     }
   }
 
-  /** The advanced field's current value (the inline editor's seed). */
+  /** The advanced field's current value (the inline editor's seed). The
+   * seed is STRIPPED: the buffer must never carry control characters
+   * from a hand-built ref's prefix/suffix. */
   private advancedFieldValue(): string {
     const ref = this.refAt(this.cursor)?.ref
     if (ref === undefined) return ''
     switch (this.advancedField) {
-      case 'prefix': return ref.prefix ?? ''
-      case 'suffix': return ref.suffix ?? ''
+      case 'prefix': return stripControlChars(ref.prefix ?? '')
+      case 'suffix': return stripControlChars(ref.suffix ?? '')
       case 'importance': return ref.importance === undefined ? '' : String(ref.importance)
       case 'reset': return ''
     }

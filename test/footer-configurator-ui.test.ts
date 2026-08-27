@@ -280,6 +280,71 @@ test('the Advanced editor edits prefix inline and shows the values', async () =>
   app.stop()
 })
 
+test('the Advanced page sanitizes hand-built prefix/suffix values too', async () => {
+  const { vt, app } = startApp()
+  // The Advanced page shows the ref's committed prefix/suffix (and seeds
+  // the inline editor from them): a hand-built ref's control characters
+  // must not paint through THIS page either, and a commit of the seeded
+  // buffer must persist the STRIPPED value (the draft stays parseable).
+  const model = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{
+      left: [{ id: 'model', prefix: '\u001b]52;c;bWFsaWNpb3Vz\u0007P', suffix: 'S\u001b[2J' }],
+      right: [],
+    }],
+  }, app.getFooterItemRegistry())
+  app.openFooterConfigurator({
+    model,
+    registry: app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1
+  await vt.waitForRender()
+  vt.sendInput('\r') // → item editor (single item; menu: Tone, Advanced)
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // → Advanced…
+  vt.sendInput('\r') // → the Advanced page
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\u001b') && !view.includes('\u0007'), `the advanced page must sanitize the values:\n${view}`)
+  assert.ok(view.includes('bWFsaWNpb3Vz'), `the readable residue stays visible:\n${view}`)
+  // The inline editor seeds from the stripped value: commit unchanged.
+  vt.sendInput('\r') // edit prefix
+  await vt.waitForRender()
+  vt.sendInput('\r') // commit the stripped seed
+  await vt.waitForRender()
+  const prefix = model.preview().rows[0]!.left[0]!.prefix!
+  assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(prefix), `the committed prefix must be control-char free:\n${JSON.stringify(prefix)}`)
+  app.stop()
+})
+
+test('the Add picker refuses a FULL row with an explicit hint (the parse cap)', async () => {
+  const { vt, app } = startApp()
+  // 32 items is the persisted-layout parser's per-row cap: the picker
+  // must say WHY Enter no longer adds, and the model must not mutate.
+  const row = Array.from({ length: 32 }, (_, index) => ({ id: `pad-${index}` }))
+  const model = new FooterConfiguratorModel({ schemaVersion: 1, rows: [{ left: row, right: [] }] }, app.getFooterItemRegistry())
+  app.openFooterConfigurator({
+    model,
+    registry: app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1
+  await vt.waitForRender()
+  vt.sendInput('a') // → Add picker
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('(row is full — remove an item first)'), `the full-row hint must show:\n${view}`)
+  vt.sendInput('\r') // Enter at the cap
+  await vt.waitForRender()
+  assert.equal(model.preview().rows[0]!.left.length, 32, `the cap refuses the 33rd item`)
+  app.stop()
+})
+
 test('the preview and the help NEVER scroll away (the fixed shell)', async () => {
   const { vt, app } = startApp(100, 24)
   const model = openDefault(app)

@@ -22,9 +22,11 @@ const TONES: ReadonlySet<string> = new Set([
   'border', 'success', 'warning', 'error', 'roleUser', 'shellMode',
 ])
 
-/** Hard bounds (plan §8/§14.3). */
+/** Hard bounds (plan §8/§14.3). MAX_ITEMS_PER_ROW is exported: the
+ * configurator's Add path enforces the SAME bound, so a draft the editor
+ * builds can always re-parse (a 33rd item would make every save fail). */
+export const MAX_ITEMS_PER_ROW = 32
 const MAX_ROWS = 2
-const MAX_ITEMS_PER_ROW = 32
 const MAX_SEPARATOR_LENGTH = 8
 const MAX_PREFIX_SUFFIX_LENGTH = 16
 const MAX_IMPORTANCE = 1000

@@ -35,6 +35,7 @@ import {
   itemMenuFor,
 } from './configurator-model.ts'
 import type { FooterConfiguratorModel } from './configurator-model.ts'
+import { MAX_ITEMS_PER_ROW } from './layout.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
 import { stripControlChars } from './layout.ts'
 import type { FooterItemRef, FooterLayoutV1, FooterTone } from './types.ts'
@@ -281,9 +282,14 @@ export class FooterConfiguratorPanel implements Component {
   }
 
   /** Pinned lines BELOW the scrollport (the add picker's description of
-   * the highlighted item). */
-  private tailLines(state: { mode: string; pickerIndex: number }): string[] {
+   * the highlighted item — or the full-row notice: the model refuses a
+   * 33rd item, and a silent no-op would look broken). */
+  private tailLines(state: ReturnType<FooterConfiguratorModel['state']>): string[] {
     if (state.mode !== 'add') return []
+    const row = state.layout.rows[Math.min(state.rowIndex, state.layout.rows.length - 1)]!
+    if (flatLengthOf(row) >= MAX_ITEMS_PER_ROW) {
+      return [color.textMuted('(row is full — remove an item first)')]
+    }
     const matches = this.model.addMatches()
     const id = matches[Math.min(state.pickerIndex, Math.max(0, matches.length - 1))]
     if (id === undefined) return []
@@ -397,8 +403,12 @@ export class FooterConfiguratorPanel implements Component {
       case 'advanced': {
         const ref = this.refAt(state.rowIndex, state.cursor)
         const fields: Array<{ field: 'prefix' | 'suffix' | 'importance' | 'reset'; label: string; value: string }> = [
-          { field: 'prefix', label: 'Prefix', value: ref?.prefix ?? '' },
-          { field: 'suffix', label: 'Suffix', value: ref?.suffix ?? '' },
+          // The committed values are display text from an arbitrary
+          // FooterLayoutV1 (the parser rejects control characters in
+          // prefix/suffix, but the model accepts any layout): stripped at
+          // this display boundary exactly like the item preview.
+          { field: 'prefix', label: 'Prefix', value: ref?.prefix === undefined ? '' : stripControlChars(ref.prefix) },
+          { field: 'suffix', label: 'Suffix', value: ref?.suffix === undefined ? '' : stripControlChars(ref.suffix) },
           { field: 'importance', label: 'Importance', value: ref?.importance === undefined ? '' : String(ref.importance) },
           { field: 'reset', label: 'Reset to default', value: '' },
         ]
@@ -409,7 +419,10 @@ export class FooterConfiguratorPanel implements Component {
             return `${marker} ${color.textMuted(entry.label)}`
           }
           const editing = active && state.editing
-          const raw = editing ? state.editBuffer : entry.value
+          // The inline buffer is control-char-free by construction (the
+          // model strips on input and seeds from the stripped value), but
+          // the display boundary strips again — never trust a buffer.
+          const raw = stripControlChars(editing ? state.editBuffer : entry.value)
           const display = raw === ''
             ? color.textMuted(entry.field === 'importance' ? '(default)' : '(empty)')
             : color.textStrong(editing ? `${raw}▏` : raw)
