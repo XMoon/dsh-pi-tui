@@ -184,11 +184,19 @@ is NOT in the panel — it can only be enabled through the USER-layer
 settings document (`footer: "command"` + `footerCommand`). The `/settings`
 Status line row offers exactly `default / compact / custom`.
 
-`/footer` is the interactive configurator: toggle items, move them
-between the left/right zones, reorder, switch rows, cycle formatters,
-and watch a live preview composed by the real footer engine. `Enter`
-saves (persisted), `Esc` cancels without touching the active layout.
-Usable before any session exists.
+`/footer` is a hierarchical interactive configurator: pick a row first
+(Row Selector), then edit that row's items — `↑/↓` walks every item of
+the row in order (Left/Right are visual grouping only), `←/→` moves an
+item across sides, `Space` removes it, `A` opens a searchable Add Picker
+(filtered by label / id / description, with the highlighted item's
+description below), `M` enters Move Mode to reorder, and `Enter` opens
+the Item Editor (Style candidates previewed with the item's real render;
+semantic tones; Advanced edits prefix / suffix / importance with a
+one-keystroke Reset). The preview is composed by the real footer engine
+and — with the contextual help — pinned to the top of the panel; it never
+scrolls away at any terminal size. `S` on the Row Selector saves
+(persisted); `Esc` walks back page by page and closes on the first page
+without touching the active layout. Usable before any session exists.
 
 `footerLayout` is a nested settings object (schemaVersion 1, 1–2 rows,
 left/right zones, a separator, finite formatters, semantic tones,

@@ -181,10 +181,16 @@ TUI 使用 DSH 提供的模型和设置服务。
 通过 USER 层设置文档(`footer: "command"` + `footerCommand`)启用,
 `/settings` 的 Status line 行只有 `default / compact / custom` 三个选项。
 
-`/footer` 是交互式配置器:开关条目、在左/右区域间移动、排序、
-切换行、循环 formatter,并实时预览由真实 Footer 引擎合成的效果。
-`Enter` 保存(持久化),`Esc` 取消且不影响当前生效布局。无会话时
-也可使用。
+`/footer` 是层级式交互配置器:先选行(Row Selector),再编辑该行的
+条目——`↑/↓` 在整行条目间顺序移动(Left/Right 只是视觉分组),
+`←/→` 左右换侧,`Space` 移除,`A` 打开可搜索的 Add Picker(按
+label / id / 描述过滤,选中项下方显示描述),`M` 进入 Move Mode
+排序,`Enter` 打开 Item Editor(Style 候选以条目的真实渲染作示例;
+Tone 语义色;Advanced 编辑 prefix / suffix / importance 并可一键
+Reset)。预览由真实 Footer 引擎合成,与 contextual help 一起固定在
+面板顶部,任何终端尺寸下都不会随列表滚动消失。Row Selector 页 `S`
+保存(持久化),`Esc` 逐页返回、在首页关闭且不影响当前生效布局。
+无会话时也可使用。
 
 `footerLayout` 是嵌套设置对象(schemaVersion 1,1–2 行,左/右区域,
 分隔符,有限 formatter,语义 tone,prefix/suffix,importance)。

@@ -226,26 +226,28 @@ test('the configurator lists extension items in the Available section and can ad
     await vt.waitForRender()
     let view = vt.getViewport().join('\n')
     assert.ok(view.includes('Configure Footer'), `the configurator must open:\n${view}`)
-    // Scroll to the BOTTOM of the Available section (the extension item is
-    // the last available id — the content windows around the cursor).
-    while (!model.state().cursorInAvailable) model.moveCursorDown()
-    for (let i = 0; i < 20; i += 1) model.moveCursorDown()
-    app.requestRender()
+    // Enter Row 1, then open the Add picker: Available is a picker-only
+    // pool now (the hierarchical editor's A action).
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    vt.sendInput('a')
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+    assert.ok(view.includes('Add Item → Row 1'), `the add picker must open:\n${view}`)
+    // Type to search: the extension item's label matches the query.
+    vt.sendInput('kube')
     await vt.waitForRender()
     view = vt.getViewport().join('\n')
     assert.ok(view.includes('Kubernetes context'), `the extension item must be listed:\n${view}`)
 
-    // Add the item (the model is the authority; the preview renders below
-    // the fold).
-    vt.sendInput(' ')
+    // Add the item (the model is the authority; the fixed preview renders
+    // above the fold).
+    vt.sendInput('\r')
     await vt.waitForRender()
     const layout = model.preview()
     const added = layout.rows.some(row => [...row.left, ...row.right].some(ref => ref.id.startsWith('ext:')))
     assert.ok(added, 'the extension item must be added to the draft')
-    // Scroll to the bottom: the preview shows the added item.
-    for (let i = 0; i < 12; i += 1) model.moveCursorDown()
-    app.requestRender()
-    await vt.waitForRender()
+    assert.ok(!model.addMatches().some(id => id.startsWith('ext:')), 'the added item leaves the pool')
     view = vt.getViewport().join('\n')
     assert.ok(view.includes('kube:prod'), `the added item must render in the preview:\n${view}`)
     app.stop()

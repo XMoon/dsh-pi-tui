@@ -9,6 +9,28 @@
 
 ### 新增
 
+- **`/footer` 配置器重构为层级式 status-line 编辑器。** 旧界面把所有
+  Row / Zone / Available / Preview / Help 摊在一屏,靠 `Tab` 切行、
+  `Shift+Tab` 切区域、`Shift+↑/↓` 排序;现在改为层级式编辑:
+  `/footer` 先进入 Row Selector(每行显示条目数),`Enter` 进入
+  Edit Row——Left/Right 只是视觉分组,`↑/↓` 在整行条目间顺序移动,
+  `←/→` 左右换侧(保持目标侧稳定顺序,光标跟随),`Space` 移除条目
+  (自动回到条目池),`F` 保留为直接循环 style 的快捷键,`M` 进入
+  Move Mode 在所属侧内排序(`Shift+↑/↓` 仍作为兼容快捷键,但帮助
+  文案不再宣传)。`Enter` 打开 Item Editor:Style(单格式条目自动
+  隐藏;picker 用条目自身对该格式的真实渲染作示例)、Tone(持久化
+  既有 semantic token,`auto` 即移除覆盖)、Advanced(Prefix /
+  Suffix / Importance 内联编辑,空值 = 定义默认,Importance 拒绝
+  越界值;另有一键 Reset to default)。`Available` 不再是常驻区域:
+  `A` 打开可搜索的 Add Picker(对 label / id / description 做大小写
+  不敏感子串过滤,选中项下方显示描述;有搜索词时第一次 `Esc` 先
+  清空搜索)。Preview 与 contextual help 成为固定 shell——每页一条
+  简短帮助行(不再压成一条超长提示),只有中间列表随光标滚动,
+  任何终端尺寸(40/80/120 列 × 10/24/40 行矩阵)下 Preview 与帮助
+  都不会滚走。行为变化:保存键从 `Enter` 改为 Row Selector 页的
+  `S`(`Enter` 现在是导航键);`Esc` 逐页返回,首页 `Esc` 关闭并
+  取消,仍不触碰当前生效布局。持久化 schema(`FooterLayoutV1`)、
+  扩展条目能力、默认布局输出与无迁移契约均不变。
 - **插件主题的选择身份改为 SOURCE-QUALIFIED(`plugin:<owner>/<id>`)。**
   之前插件主题与本地自定义主题文件共享同一个裸名字空间:`Foo.json` 与
   插件注册的 `name: "Foo"` 会在 picker 里出现两个完全相同的值,真正

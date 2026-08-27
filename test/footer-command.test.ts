@@ -64,7 +64,7 @@ function fakeSettings(initial: { footer: string; footerLayout?: unknown; footerF
   }
 }
 
-test('/footer is sessionless and opens the configurator; Enter saves and persists', async () => {
+test('/footer is sessionless and opens the configurator; S saves and persists', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -142,11 +142,17 @@ test('/footer is sessionless and opens the configurator; Enter saves and persist
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('Configure Footer'), `the configurator must open:\n${view}`)
-  // Toggle the first item out and save.
-  vt.sendInput(' ')
+  // Enter the row, toggle the first item out, walk back to the selector,
+  // and save (S — the Row Selector is the save point).
   vt.sendInput('\r')
   await vt.waitForRender()
-  assert.equal(applied.length, 1, 'Enter must apply the layout')
+  vt.sendInput(' ')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('s')
+  await vt.waitForRender()
+  assert.equal(applied.length, 1, 'S must apply the layout')
   assert.equal(applied[0]!.footer, 'custom')
   assert.equal(settings.doc.footer, 'custom', 'the settings document must persist')
   // Saving a custom layout IS a native-mode change: footerFallbackMode
@@ -227,6 +233,10 @@ test('/footer Esc cancels without writing', async () => {
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
+  // Enter the row and edit (the pool items must NOT appear on the row
+  // page — Available is picker-only now), then walk back and cancel.
+  vt.sendInput('\r')
+  await vt.waitForRender()
   vt.sendInput(' ')
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -291,11 +301,13 @@ test('/footer starts from the persisted custom layout when active', async () => 
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
+  // Enter the row: the configurator lists the persisted layout's single
+  // item (model) — the default layout's items are not present.
+  vt.sendInput('\r')
+  await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  // The configurator lists the persisted layout's single item (model) —
-  // the default layout's items are not present.
-  assert.ok(view.includes('[x] Model'), `the persisted item must be listed:\n${view}`)
-  assert.ok(!view.includes('[x] Permission preset'), `the default-only items must not be listed:\n${view}`)
+  assert.ok(view.includes('Model'), `the persisted item must be listed:\n${view}`)
+  assert.ok(!view.includes('Permission preset'), `the default-only items must not be listed:\n${view}`)
   app.stop()
 })
 
@@ -363,14 +375,15 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
-  // The compact layout is ONE row: the panel must not list a second row.
+  // The compact layout is ONE row: the selector must not list a second
+  // row.
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Row 1 · Left'), `the compact row must be listed:\n${view}`)
+  assert.ok(view.includes('Row 1'), `the compact row must be listed:\n${view}`)
   assert.ok(!view.includes('Row 2'), `the compact layout must not start from the two-row default:\n${view}`)
-  // Enter UNCHANGED: the saved custom layout must stay ONE row.
-  vt.sendInput('\r')
+  // Save UNCHANGED (S): the saved custom layout must stay ONE row.
+  vt.sendInput('s')
   await vt.waitForRender()
-  assert.equal(applied.length, 1, 'Enter must apply the layout')
+  assert.equal(applied.length, 1, 'S must apply the layout')
   const saved = applied[0]!.footerLayout as { rows: unknown[] }
   assert.equal(saved.rows.length, 1, `an unchanged compact save must stay one row:\n${JSON.stringify(saved)}`)
   app.stop()
@@ -433,8 +446,17 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
-  vt.sendInput(' ')
+  // Edit the draft, walk back to the selector, then save with S — the
+  // write fails: the memory commit must NOT happen (the old layout
+  // stays) — the apply is deferred until the write succeeds. Poll a
+  // bounded window for any (wrong) apply, then assert none happened.
   vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput(' ')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('s')
   // The write fails: the memory commit must NOT happen (the old layout
   // stays) — the apply is deferred until the write succeeds. Poll a
   // bounded window for any (wrong) apply, then assert none happened.
