@@ -9,15 +9,29 @@
 import { formatTokens } from '../token-usage.ts'
 import type { UsageStatus } from '../status/types.ts'
 
+/** Whether cwd uses Windows path syntax rather than a POSIX filename with
+ * a literal backslash. Drive paths and UNC paths are unambiguous; every other
+ * path keeps POSIX's slash-only separator semantics. */
+function isWindowsStyleCwd(cwd: string): boolean {
+  return /^[A-Za-z]:[\\/]/u.test(cwd) || /^\\\\/u.test(cwd)
+}
+
+/** Split cwd using only the separators valid for its detected path syntax. */
+function cwdParts(cwd: string): string[] {
+  const separator = isWindowsStyleCwd(cwd) ? /[\\/]+/u : '/'
+  return cwd.split(separator).filter(Boolean)
+}
+
 /** Whether a path is a filesystem root whose separator must be retained. */
 function isRootCwd(cwd: string): boolean {
-  return /^\/+$/u.test(cwd) || /^[A-Za-z]:[\\/]+$/u.test(cwd)
+  if (/^\/+$/u.test(cwd) || /^[A-Za-z]:[\\/]+$/u.test(cwd)) return true
+  return /^\\\\/u.test(cwd) && cwdParts(cwd).length === 2
 }
 
 /** Short cwd for the footer: last two path segments (idempotent). */
 export function shortCwd(cwd: string): string {
   if (isRootCwd(cwd)) return cwd
-  const parts = cwd.split(/[\\/]+/u).filter(Boolean)
+  const parts = cwdParts(cwd)
   return parts.slice(-2).join('/') || cwd
 }
 
@@ -87,8 +101,7 @@ export function formatWorkingDirectory(cwd: string, format: string): string {
   switch (format) {
     case 'basename': {
       if (isRootCwd(cwd)) return cwd
-      const parts = cwd.split(/[\\/]+/).filter(Boolean)
-      return parts.at(-1) ?? cwd
+      return cwdParts(cwd).at(-1) ?? cwd
     }
     case 'full':
       return cwd
@@ -148,9 +161,9 @@ export function formatPerformanceSpeed(tokensPerSec: number): string {
   return `${tokensPerSec} tok/s`
 }
 
-/** Performance, latency-only form: `2.0s`. */
-export function formatPerformanceLatency(llmMs: number): string {
-  return formatSeconds(llmMs)
+/** Performance, average time-to-first-token form: `2.0s`. */
+export function formatPerformanceLatency(firstTokenMs: number): string {
+  return formatSeconds(firstTokenMs)
 }
 
 /** Turn/step counters: `t3/s7`, `t3`, or `s7`. */

@@ -48,9 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   items gain useful variants: model and permission badges can be plain or
   compact, directories can be short/basename/full, context can be a bar,
   percent or full value, token usage can be input/output, total or compact,
-  performance can show full timing, speed or latency, and turn/step counters
-  can show both or either counter. Cache-hit compact output now differs from
-  full output, and omitted formats keep every legacy default unchanged.
+  performance can show full timing, speed or average time-to-first-token
+  latency, and turn/step counters can show both or either counter. Cache-hit
+  compact output now differs from full output, and omitted formats keep every
+  legacy default unchanged.
 - **Plugin theme selections are now SOURCE-QUALIFIED (`plugin:<owner>/<id>`).**
   Previously a plugin theme and a local custom theme file shared one bare
   name namespace: `Foo.json` and a plugin's `name: "Foo"` produced two

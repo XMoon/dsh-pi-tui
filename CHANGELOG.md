@@ -37,7 +37,7 @@
   `format` 字段,常用条目新增了可区分的变体:Model 与 Permission preset
   支持 badge/plain/compact,Working directory 支持 short/basename/full,
   Context 支持 bar/percent/full,Token usage 支持 io/total/compact,
-  Performance 支持 full/speed/latency,Turns/steps 支持 both 或单独计数器。
+  Performance 支持 full/speed/平均首 token latency,Turns/steps 支持 both 或单独计数器。
   Cache hit 的 compact 输出也不再与 full 相同;省略 format 时所有旧默认输出
   保持不变。
 - **插件主题的选择身份改为 SOURCE-QUALIFIED(`plugin:<owner>/<id>`)。**
