@@ -97,7 +97,7 @@ import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { parseFooterLayout, isFooterLayout, resolveCommandFooterFallback } from './footer/layout.ts'
-import { parseFooterCustomItems } from './footer/custom-items.ts'
+import type { FooterCustomItemSettings } from './footer/custom-items.ts'
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { color, type ColorPalette } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
@@ -4467,7 +4467,7 @@ export function apply(ctx: Context, config: Config): void {
         if (settings !== undefined) {
           runDetached('settings fullscreen write', () => serializeTuiSettingsMutation(
              settings,
-             () => settings.replace({ ...settings.get(), fullscreen: fullscreen ? 'on' : 'off' }),
+             () => settings.replace({ ...settings.get(), footerCustomItems: userFooterCustomItemsForSave(), fullscreen: fullscreen ? 'on' : 'off' }),
            ), {
             diag,
             notify: (message) => app.notify(message, 'error'),
@@ -5183,15 +5183,28 @@ export function apply(ctx: Context, config: Config): void {
       footerCommandRunner = undefined
       app.setFooterCommandRows(undefined)
     }
-    const applyFooterSettings = (doc: { footer: string; footerLayout?: unknown; footerCustomItems?: unknown } | undefined): void => {
+    // Whole-document settings writes must not copy a project-layer
+    // footerCustomItems value into the USER section. The config port is the
+    // only source allowed to supply definitions for a non-/footer write.
+    const userFooterCustomItemsForSave = (): FooterCustomItemSettings[] =>
+      backend.config.footerCustomItems.get().items.map(item => ({ ...item }))
+    const applyFooterSettings = (
+      doc: { footer: string; footerLayout?: unknown; footerCustomItems?: unknown } | undefined,
+      savedCustomItems?: readonly FooterCustomItemSettings[],
+    ): void => {
       if (doc === undefined) return
-      if ('footerCustomItems' in doc) {
-        const customResult = parseFooterCustomItems(doc.footerCustomItems)
-        app.setFooterCustomItems(customResult.items)
-        if (customResult.invalidCount > 0 && !customFooterWarningShown) {
-          customFooterWarningShown = true
-          app.notify(`${customResult.invalidCount} custom footer item${customResult.invalidCount === 1 ? '' : 's'} invalid — skipped`, 'error')
-        }
+      // The merged document's footerCustomItems field is pass-through storage
+      // only. Normal startup/reload/settings reads use the ConfigPort's
+      // USER-layer semantic resolver; the optional second argument is supplied
+      // only by the validated /footer save after its write succeeds, so the
+      // just-committed draft is applied without trusting merged project data.
+      const customResult = savedCustomItems === undefined
+        ? backend.config.footerCustomItems.get()
+        : { items: savedCustomItems, invalidCount: 0 }
+      app.setFooterCustomItems(customResult.items)
+      if (customResult.invalidCount > 0 && !customFooterWarningShown) {
+        customFooterWarningShown = true
+        app.notify(`${customResult.invalidCount} custom footer item${customResult.invalidCount === 1 ? '' : 's'} invalid — skipped`, 'error')
       }
       if (doc.footer === 'command') {
         // The native FALLBACK layout must be established from the
@@ -5847,7 +5860,7 @@ export function apply(ctx: Context, config: Config): void {
       if (settings !== undefined) {
         runDetached('settings focus write', () => serializeTuiSettingsMutation(
            settings,
-           () => settings.replace({ ...settings.get(), focusMode: enabled ? 'on' : 'off' }),
+           () => settings.replace({ ...settings.get(), footerCustomItems: userFooterCustomItemsForSave(), focusMode: enabled ? 'on' : 'off' }),
          ), {
           diag,
           notify: (message) => app.notify(`focus mode persistence failed: ${message}`, 'error'),

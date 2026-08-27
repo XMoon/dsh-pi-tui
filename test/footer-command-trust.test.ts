@@ -111,6 +111,26 @@ test('the Direct config-port trust read resolves the same USER-layer facts', asy
   assert.equal(empty.footerCommandTrust.command, undefined)
 })
 
+test('the Direct custom-item read accepts only the USER settings layer', async () => {
+  const userItems = [{ schemaVersion: 1 as const, id: 'user:user-owned', kind: 'text' as const, text: 'USER' }]
+  const projectItems = [{ schemaVersion: 1 as const, id: 'user:project-owned', kind: 'text' as const, text: 'PROJECT' }]
+  const port = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', value: { footerCustomItems: projectItems }, user: { footerCustomItems: userItems } }] }),
+  } as never, {
+    get: () => ({ footerCustomItems: projectItems }),
+    replace: () => {},
+  } as never, () => undefined)
+  assert.deepEqual(port.footerCustomItems.get().items, userItems)
+
+  const noUser = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', value: { footerCustomItems: projectItems } }] }),
+  } as never, {
+    get: () => ({ footerCustomItems: projectItems }),
+    replace: () => {},
+  } as never, () => undefined)
+  assert.deepEqual(noUser.footerCustomItems.get().items, [])
+})
+
 test('TuiSettingsDoc round-trip: a whole-document replace never wipes the trusted footerCommand (review P2 migration contract)', async () => {
   // The settings port is get/replace WHOLE-DOCUMENT: a future Remote
   // adapter serializes the DECLARED DTO, so every semantic field must be

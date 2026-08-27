@@ -10,7 +10,7 @@
  * Pages (the plan's hierarchy):
  *   rows  — Row Selector (↑↓ select, Enter edit, S save, Esc cancel)
  *   row   — Edit Row (Left/Right as VISUAL grouping; ←→ moves sides)
- *   item  — Item Editor (Style / Tone / Advanced…)
+ *   item  — Item Editor (Style / Text / Default tone / Tone / Advanced…)
  *   style — Style picker (live per-format examples)
  *   tone  — Tone picker (semantic tones)
  *   advanced — Prefix / Suffix / Importance inline editors + Reset
@@ -377,8 +377,9 @@ export class FooterConfiguratorPanel implements Component {
       case 'style':
         return `Style · ${this.itemLabel(state.rowIndex, state.cursor)}`
       case 'tone':
-      case 'custom-tone':
         return `Tone · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-tone':
+        return `Default tone · ${this.itemLabel(state.rowIndex, state.cursor)}`
       case 'advanced':
         return `Advanced · ${this.itemLabel(state.rowIndex, state.cursor)}`
       case 'custom-text':
@@ -491,6 +492,9 @@ export class FooterConfiguratorPanel implements Component {
     if (flatLengthOf(row) >= MAX_ITEMS_PER_ROW) {
       return [color.textMuted('(row is full — remove an item first)')]
     }
+    if (this.model.isCreateOption()) {
+      return [color.textMuted('Create a user-defined static footer item.')]
+    }
     const matches = this.model.addMatches()
     const id = matches[Math.min(state.pickerIndex, Math.max(0, matches.length - 1))]
     if (id === undefined) return []
@@ -566,7 +570,7 @@ export class FooterConfiguratorPanel implements Component {
             // A legal-but-unlisted persisted token must display as ITSELF
             // (Strong/Dim/…), never as the 'Auto' fallback.
             const label = toneChoicesFor(ref?.tone).find(choice => choice.value === tone)?.label ?? 'Auto'
-            return this.menuRow(marker, 'Tone', this.tonePaint(tone, label), active)
+            return this.menuRow(marker, toneMenuLabel(entry.kind), this.tonePaint(tone, label), active)
           }
           if (entry.kind === 'custom-text') {
             const value = this.model.customItem(ref?.id ?? '')?.text
@@ -575,7 +579,7 @@ export class FooterConfiguratorPanel implements Component {
           if (entry.kind === 'custom-tone') {
             const tone = this.model.customItem(ref?.id ?? '')?.tone ?? 'auto'
             const label = toneChoicesFor(tone).find(choice => choice.value === tone)?.label ?? 'Auto'
-            return this.menuRow(marker, 'Tone', this.tonePaint(tone, label), active)
+            return this.menuRow(marker, toneMenuLabel(entry.kind), this.tonePaint(tone, label), active)
           }
           if (entry.kind === 'custom-name') return this.menuRow(marker, 'Rename definition', undefined, active)
           if (entry.kind === 'custom-delete') return this.menuRow(marker, 'Delete definition', undefined, active)
@@ -884,6 +888,11 @@ function longestPasteStartSuffix(data: string): number {
     if (data.endsWith(BRACKETED_PASTE_START.slice(0, length))) return length
   }
   return 0
+}
+
+/** The item page keeps definition tone and placement tone visibly distinct. */
+function toneMenuLabel(kind: string): string {
+  return kind === 'custom-tone' ? 'Default tone' : 'Tone'
 }
 
 /** Clip a title-part label (titles truncate ANSI-safely anyway). */

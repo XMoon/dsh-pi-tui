@@ -88,7 +88,10 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
   extension service (Host-composed, Stable). User Custom Text definitions are
   compiled into the same local item contract, but their raw definition
   collection is Host-owned settings data and is persisted separately from the
-  client-local `FooterLayoutV1` placement references. A future Remote adapter
+  client-local `FooterLayoutV1` placement references. The Direct config port
+  resolves definitions from the settings descriptor's USER layer only;
+  merged/project values are pass-through storage and cannot create
+  `user:*` definitions. A future Remote adapter
   must carry both fields through one whole-document settings round-trip; it
   must not invent a callback or merge definitions into layout refs.
 - **The footer command status line (M5) is DIRECT-ONLY, client-local
