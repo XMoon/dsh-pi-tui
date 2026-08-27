@@ -248,6 +248,14 @@ export class MentionProvider implements AutocompleteProvider {
   private readonly inputModeSource: () => EditorInputMode
   /** The `/image` discovery source: Client-local (never HostFilePort). */
   private readonly localSource: LocalFileSource
+  /** The REQUEST SNAPSHOT (plan §9.2): the exact document lines + cursor
+   * + mode of the most recent getSuggestions call that produced a
+   * suggestion list. applyCompletion accepts ONLY when the current
+   * document + cursor still match this snapshot — a stale dropdown (from
+   * an older request) can never modify a later edit of ANY part of the
+   * document (the prefix-only fence misses edits elsewhere on the line,
+   * e.g. `hello @foo` → `world @foo`). */
+  private requestSnapshot: { lines: readonly string[]; cursorLine: number; cursorCol: number; mode: EditorInputMode } | null = null
 
   constructor(
     slashCommands: readonly SlashCommand[],
@@ -333,10 +341,10 @@ export class MentionProvider implements AutocompleteProvider {
       : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands)
 
     if (context.kind === 'mention') {
-      return this.completeMention(context.query, options.signal)
+      return this.withRequestSnapshot(lines, cursorLine, cursorCol, await this.completeMention(context.query, options.signal))
     }
     if (context.kind === 'image-argument') {
-      return this.completeImageArgument(context.query, options.signal)
+      return this.withRequestSnapshot(lines, cursorLine, cursorCol, await this.completeImageArgument(context.query, options.signal))
     }
 
     // 3. Shell-mode natural-trigger suppression (mirrors the pre-plan
@@ -355,7 +363,8 @@ export class MentionProvider implements AutocompleteProvider {
     const literalShellLine = textBeforeCursor.trimStart().startsWith('!')
     if (semantic !== null || literalShellLine) {
       try {
-        return await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
+        const result = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
+        return this.withRequestSnapshot(lines, cursorLine, cursorCol, result)
       } catch {
         return null
       }
@@ -420,25 +429,79 @@ export class MentionProvider implements AutocompleteProvider {
   /** Complete one `/image` argument through the shared engine + the
    * Client-local source (NEVER HostFilePort). An EMPTY argument lists the
    * cwd (Tab on `/image ` — the directory-listing semantics the engine
-   * owns). A QUOTED argument (`/image "my fi`) completes inside the
-   * quotes — the shared quoting contract (plan §2.2) — and the completed
-   * value keeps the closing quote. An unquoted argument with embedded
-   * spaces cannot complete (the fork's apply replaces the whole argument
-   * range, so a later word would clobber the earlier ones). */
+   * owns). A QUOTED argument (`/image "my f`) completes inside the quotes
+   * — the shared quoting contract (plan §2.2): spaces inside the quotes
+   * are PART OF THE TOKEN (the quote is the delimiter), so `my f` finds
+   * `my file.txt`; the completed value keeps the closing quote. An
+   * UNQUOTED argument with embedded spaces cannot complete (the fork's
+   * apply replaces the whole argument range, so a later word would clobber
+   * the earlier ones). */
   private async completeImageArgument(argument: string, signal: AbortSignal): Promise<AutocompleteSuggestions | null> {
     const leading = argument.match(/^[ \t]+/)?.[0] ?? ''
     let token = argument.slice(leading.length)
     let quoted = false
     if (token.startsWith('"')) {
       quoted = true
-      token = token.startsWith('"') ? token.slice(1) : token
+      token = token.slice(1)
       const close = token.indexOf('"')
       if (close !== -1) token = token.slice(0, close)
+    } else if (token.includes(' ') || token.includes('\t')) {
+      // Unquoted: a space is a word boundary — completing a later word
+      // would clobber the earlier ones (the fork's whole-range apply).
+      return null
     }
-    if (token.includes(' ') || token.includes('\t')) return null
     const items = await completePath(token, this.workDir, this.localSource, signal, { at: false, quoted })
     if (items === null) return null
     return { prefix: argument, items: items.map(item => ({ ...item, value: `${leading}${item.value}` })) }
+  }
+
+  /** Capture the request state right before a non-null suggestion result
+   * is returned: the apply fence later requires the EXACT same document +
+   * cursor + mode (plan §9.2 — the strong stale check). A null result
+   * clears the snapshot (nothing to accept). */
+  private withRequestSnapshot<T extends AutocompleteSuggestions | null>(
+    lines: readonly string[],
+    cursorLine: number,
+    cursorCol: number,
+    result: T,
+  ): T {
+    if (result === null) this.requestSnapshot = null
+    else this.requestSnapshot = {
+      lines: [...lines],
+      cursorLine,
+      cursorCol,
+      mode: this.inputModeSource(),
+    }
+    return result
+  }
+
+  /** PUBLIC test/app seam (plan §9.2): the DELEGATING provider (the app's
+   * M5 wrap) captures the host snapshot when the EXTENSION chain answers —
+   * the base provider still owns the stale fence, but a suggestion list it
+   * did not produce must bind the state it was computed against. */
+  captureRequestSnapshot(
+    lines: readonly string[],
+    cursorLine: number,
+    cursorCol: number,
+    result: AutocompleteSuggestions | null,
+  ): AutocompleteSuggestions | null {
+    return this.withRequestSnapshot(lines, cursorLine, cursorCol, result)
+  }
+
+  /** Whether the editor state still EXACTLY matches the request that
+   * produced the current dropdown (line array, cursor, and input mode —
+   * a mode switch swaps the completion grammar, so a dropdown built for
+   * the old mode must never apply). */
+  private requestMatchesSnapshot(lines: readonly string[], cursorLine: number, cursorCol: number): boolean {
+    const snapshot = this.requestSnapshot
+    if (snapshot === null) return false
+    if (snapshot.cursorLine !== cursorLine || snapshot.cursorCol !== cursorCol) return false
+    if (snapshot.mode !== this.inputModeSource()) return false
+    if (snapshot.lines.length !== lines.length) return false
+    for (let index = 0; index < snapshot.lines.length; index += 1) {
+      if (snapshot.lines[index] !== lines[index]) return false
+    }
+    return true
   }
 
   applyCompletion(
@@ -449,12 +512,29 @@ export class MentionProvider implements AutocompleteProvider {
     prefix: string,
   ): { lines: string[]; cursorLine: number; cursorCol: number } {
     const currentLine = lines[cursorLine] ?? ''
-    // THE STALE FENCE (plan §9.1): the request's prefix must still be the
-    // text immediately before the cursor. Any edit since the request —
-    // typing, Backspace, Delete, cursor move, paste, mode/session switch —
-    // makes the replacement WRONG (the old code cut `cursorCol - prefix.length`
-    // into the middle of the new draft, deleting `@`-preceding text). A
-    // stale accept returns the document UNCHANGED.
+    const textBeforeCursor = currentLine.slice(0, cursorCol)
+    // The FILE-completion context of this apply (the shell-bridge and the
+    // shell-semantic paths below do NOT carry the snapshot — a shell word
+    // replacement is a plain-word swap that never cuts into `@`-preceding
+    // text, and its tests drive apply directly without a request).
+    const applySemantic = this.virtualShellSemanticContext(currentLine, cursorCol)
+    const context = applySemantic !== null
+      ? classifyFileCompletionContext(applySemantic.line, this.pathArgumentCommands)
+      : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands)
+    const isFileContext = context.kind === 'mention' || context.kind === 'image-argument'
+    // THE STALE FENCE (plan §9.1 minimum + §9.2 full snapshot for FILE
+    // contexts): the EXACT document lines + cursor of the REQUEST that
+    // produced this dropdown must still match the editor's current state.
+    // Any edit since — typing, Backspace, Delete, cursor move, paste,
+    // mode/session switch, or an unrelated edit ELSEWHERE on the line
+    // (`hello @foo` → `world @foo`) — makes the replacement WRONG. A stale
+    // accept returns the document UNCHANGED. The snapshot is the strong
+    // check; the prefix check remains the fork-contract fallback for the
+    // non-snapshot paths (shell/extension — still cannot cut into the
+    // draft).
+    if (isFileContext && !this.requestMatchesSnapshot(lines, cursorLine, cursorCol)) {
+      return { lines, cursorLine, cursorCol }
+    }
     const start = cursorCol - prefix.length
     if (start < 0 || currentLine.slice(start, cursorCol) !== prefix) {
       return { lines, cursorLine, cursorCol }
