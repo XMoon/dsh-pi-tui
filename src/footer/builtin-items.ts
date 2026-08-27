@@ -302,17 +302,6 @@ export function registerBuiltinFooterItems(registry: FooterItemRegistry): void {
   registry.register(versionItem)
 }
 
-/** Derive a deterministic compact preset label when the host does not
- * provide one. The final first-character fallback also keeps compact output
- * distinct from the badge for one-word or one-character labels. */
-function compactPresetLabel(label: string): string {
-  const trimmed = label.trim()
-  const words = trimmed.split(/\s+/u).filter(Boolean)
-  const initials = words.map(word => [...word][0] ?? '').join('').toUpperCase()
-  if (initials !== '' && initials.length < trimmed.length) return initials
-  return [...trimmed][0] ?? ''
-}
-
 /** The agent-preset badge: `[CM]`-style from the composition preset
  * (shortLabel when provided — the state layer never hardcodes it). */
 const agentPresetItem: FooterItemDefinition = {
@@ -327,16 +316,10 @@ const agentPresetItem: FooterItemDefinition = {
     if (snapshot.view.subject.kind !== 'main') return null
     const preset = snapshot.composition.agentPreset
     if (preset === undefined) return null
-    if (ref.format !== 'compact') {
-      return { spans: [{ text: `[${preset.label}]`, tone: 'accent' }] }
-    }
-    const compact = preset.shortLabel ?? compactPresetLabel(preset.label)
-    const compactBadge = `[${compact}]`
-    // A host may explicitly set a shortLabel equal to the full label. Drop
-    // the badge chrome in that degenerate case so the declared styles still
-    // have different, useful output rather than silently duplicating badge.
-    const text = compactBadge === `[${preset.label}]` ? compact : compactBadge
-    return { spans: [{ text, tone: 'accent' }] }
+    const text = ref.format === 'compact' && preset.shortLabel !== undefined
+      ? preset.shortLabel
+      : preset.label
+    return { spans: [{ text: `[${text}]`, tone: 'accent' }] }
   },
 }
 
@@ -546,7 +529,7 @@ const tokenUsageItem: FooterItemDefinition = {
 }
 
 /** The performance styles: full `2.0s 40 tok/s`, speed-only, or
- * latency-only. */
+ * average time-to-first-token latency-only. */
 const performanceItem: FooterItemDefinition = {
   id: 'performance',
   label: 'Performance',
@@ -560,7 +543,7 @@ const performanceItem: FooterItemDefinition = {
     const text = ref.format === 'speed'
       ? formatPerformanceSpeed(performance.tokensPerSec)
       : ref.format === 'latency'
-        ? formatPerformanceLatency(performance.llmMs)
+        ? formatPerformanceLatency(performance.firstTokenMs)
         : formatPerformanceFull(performance.llmMs, performance.tokensPerSec)
     return { spans: [{ text, tone: 'textMuted' }] }
   },

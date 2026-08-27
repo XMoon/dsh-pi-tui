@@ -122,9 +122,16 @@ test('cwd styles handle POSIX and Windows separators without losing roots', () =
   assert.equal(render('cwd', windows, { id: 'cwd', format: 'basename' }), 'project')
   assert.equal(render('cwd', windows, { id: 'cwd', format: 'full' }), 'C:\\Users\\alice\\project')
 
+  const posixBackslash = snapshotWith(snap => { snap.workspace.cwd = '/home/foo\\bar/project' })
+  assert.equal(render('cwd', posixBackslash, { id: 'cwd', format: 'short' }), 'foo\\bar/project')
+  assert.equal(render('cwd', posixBackslash, { id: 'cwd', format: 'basename' }), 'project')
+
   const posixRoot = snapshotWith(snap => { snap.workspace.cwd = '/' })
   assert.equal(render('cwd', posixRoot, { id: 'cwd', format: 'short' }), '/')
   assert.equal(render('cwd', posixRoot, { id: 'cwd', format: 'basename' }), '/')
+  const unc = snapshotWith(snap => { snap.workspace.cwd = '\\\\server\\share\\project' })
+  assert.equal(render('cwd', unc, { id: 'cwd', format: 'short' }), 'share/project')
+  assert.equal(render('cwd', unc, { id: 'cwd', format: 'basename' }), 'project')
   const windowsRoot = snapshotWith(snap => { snap.workspace.cwd = 'C:/' })
   assert.equal(render('cwd', windowsRoot, { id: 'cwd', format: 'short' }), 'C:/')
   assert.equal(render('cwd', windowsRoot, { id: 'cwd', format: 'basename' }), 'C:/')
@@ -188,7 +195,7 @@ test('ext:* bridges the extension footer text; empty → nothing', () => {
 
 test('builtin styles render meaningful golden variants without changing defaults', () => {
   const snap = snapshotWith(current => {
-    current.composition.agentPreset = { id: 'code', label: 'Code preset' }
+    current.composition.agentPreset = { id: 'code', label: 'Code preset', shortLabel: 'CP' }
     current.composition.model = {
       provider: 'deepseek',
       id: 'flash',
@@ -201,7 +208,7 @@ test('builtin styles render meaningful golden variants without changing defaults
     current.usage.context = { usedTokens: 25_000, windowTokens: 100_000, percent: 25 }
     current.usage.tokens = { input: 1_200, output: 3_400, cacheRead: 2_000, cacheWrite: 100 }
     current.usage.cacheHitPct = 91.9
-    current.usage.performance = { llmMs: 8_100, firstTokenMs: 2_000, tokensPerSec: 40 }
+    current.usage.performance = { llmMs: 1_104_000, firstTokenMs: 1_800, tokensPerSec: 40 }
     current.usage.turns = 3
     current.usage.steps = 7
     current.host.dshVersion = '1.2.3'
@@ -258,7 +265,7 @@ test('builtin styles render meaningful golden variants without changing defaults
     },
     {
       id: 'performance',
-      formats: [['full', '8.1s 40 tok/s'], ['speed', '40 tok/s'], ['latency', '8.1s']],
+      formats: [['full', '1104s 40 tok/s'], ['speed', '40 tok/s'], ['latency', '1.8s']],
     },
     {
       id: 'turns-steps',
@@ -300,7 +307,7 @@ test('builtin styles render meaningful golden variants without changing defaults
   assert.equal(render('context', snap), '[███░░░░░░░░░] 25%')
   assert.equal(render('token-usage', snap), '1200/3400')
   assert.equal(render('cache-hit', snap), 'C 91.9%')
-  assert.equal(render('performance', snap), '8.1s 40 tok/s')
+  assert.equal(render('performance', snap), '1104s 40 tok/s')
   assert.equal(render('turns-steps', snap), 't3/s7')
 })
 
@@ -318,6 +325,7 @@ test('new builtin styles fall back to the unchanged default formatter', () => {
     current.host.dshVersion = '1.2.3'
   })
   assert.equal(render('agent-preset', snap, { id: 'agent-preset', format: 'unknown' }), '[Code preset]')
+  assert.equal(render('agent-preset', snap, { id: 'agent-preset', format: 'compact' }), '[Code preset]')
   assert.equal(render('model', snap, { id: 'model', format: 'unknown' }), '[deepseek/flash]')
   assert.equal(render('permission-preset', snap, { id: 'permission-preset', format: 'unknown' }), '[read-only]')
   assert.equal(render('plan-state', snap, { id: 'plan-state', format: 'unknown' }), '[plan]')

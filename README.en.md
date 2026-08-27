@@ -234,9 +234,9 @@ second style schema): Model `badge` / `plain` / `compact`; Permission preset
 `badge` / `plain` / `compact`; Plan state `badge` / `plain`; Working directory
 `short` / `basename` / `full`; Git branch `plain` / `label`; Context `bar` /
 `percent` / `full`; Token usage `io` / `total` / `compact`; Cache hit `full` /
-`compact`; Performance `full` / `speed` / `latency`; Turns/steps `both` /
-`turns` / `steps`; Version keeps `tui` / `dsh` / `both`. Omitting `format`
-continues to use each item's legacy default.
+`compact`; Performance `full` / `speed` / `latency` measures average time
+to first token; Turns/steps `both` / `turns` / `steps`; Version keeps `tui` / `dsh` /
+`both`. Omitting `format` continues to use each item's legacy default.
 
 Builtin item ids: `agent-preset`, `model`, `reasoning`,
 `permission-preset`, `sandbox-mode`, `approval-policy`, `plan-state`,

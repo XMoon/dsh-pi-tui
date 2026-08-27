@@ -228,8 +228,8 @@ style schema):Model 为 `badge` / `plain` / `compact`;Permission preset
 directory 为 `short` / `basename` / `full`;Git branch 为 `plain` / `label`;
 Context 为 `bar` / `percent` / `full`;Token usage 为 `io` / `total` /
 `compact`;Cache hit 为 `full` / `compact`;Performance 为 `full` / `speed` /
-`latency`;Turns/steps 为 `both` / `turns` / `steps`;Version 保留 `tui` /
-`dsh` / `both`。省略 `format` 时仍使用各条目的旧默认值。
+`latency`(平均首 token 时间);Turns/steps 为 `both` / `turns` / `steps`;
+Version 保留 `tui` / `dsh` / `both`。省略 `format` 时仍使用各条目的旧默认值。
 
 内置条目 id:`agent-preset`、`model`、`reasoning`、
 `permission-preset`、`sandbox-mode`、`approval-policy`、`plan-state`、
