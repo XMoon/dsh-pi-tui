@@ -1,27 +1,89 @@
 /**
- * The footer configurator MODEL (plan §15.4): a pure state machine over a
- * draft FooterLayoutV1 — toggle items, move between zones, reorder, switch
- * rows, cycle formats, set the separator, reset to the builtin presets.
- * The UI component only renders and forwards actions, so the whole model
- * is headless-testable.
+ * The footer configurator MODEL (the hierarchical editor): a pure state
+ * machine over a draft FooterLayoutV1 organized as PAGES —
+ *
+ *   rows (Row Selector) → row (Edit Row) → item (Item Editor)
+ *                                          ├─ style (Style picker)
+ *                                          ├─ tone  (Tone picker)
+ *                                          └─ advanced (Prefix/Suffix/
+ *                                                       Importance/Reset)
+ *   row → add (searchable Add picker)
+ *   row ⇄ row-move (Move Mode)
+ *
+ * The UI component only renders and forwards keys; the whole model is
+ * headless-testable. The persisted shape (FooterLayoutV1 / FooterItemRef)
+ * is untouched: `format` is the only style field, `tone` the only tone
+ * field, and unknown/throwing definitions degrade to inert rows.
  * @module @xmoon76/dsh-pi-tui/footer/configurator-model
  */
 
 import type { FooterItemRegistry } from './item-registry.ts'
+import { stripControlChars } from './layout.ts'
 import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from './presets.ts'
-import type { FooterItemRef, FooterLayoutV1, FooterRowLayout, FooterSeparator } from './types.ts'
+import type { FooterItemRef, FooterLayoutV1, FooterRowLayout, FooterSeparator, FooterTone } from './types.ts'
+
+/** The configurator's pages. */
+export type FooterConfiguratorMode =
+  | 'rows'
+  | 'row'
+  | 'row-move'
+  | 'item'
+  | 'style'
+  | 'tone'
+  | 'advanced'
+  | 'add'
+
+/** The advanced editor's fields (v1: the EXISTING ref fields only — no
+ * new schema). `reset` is the trailing "Reset to default" action row. */
+export type FooterAdvancedField = 'prefix' | 'suffix' | 'importance' | 'reset'
 
 /** The configurator's observable state. */
 export interface FooterConfiguratorState {
   readonly layout: FooterLayoutV1
-  readonly activeRow: number
-  readonly activeZone: 'left' | 'right'
-  readonly activeIndex: number
-  /** Whether the cursor is in the AVAILABLE section (items not in the
-   * layout — builtin and extension items alike). */
-  readonly cursorInAvailable: boolean
-  readonly availableIndex: number
+  readonly mode: FooterConfiguratorMode
+  /** The highlighted row (rows page) / the row being edited (every other
+   * page). */
+  readonly rowIndex: number
+  /** Flat cursor over the EDITED row's items: left refs first, then right
+   * refs — one linear list (the plan's "left/right is visual grouping,
+   * not two focus sections"). */
+  readonly cursor: number
+  /** The item editor's menu cursor (Style / Tone / Advanced…). */
+  readonly itemCursor: number
+  /** The picker cursor (style formats / tone choices / add matches). */
+  readonly pickerIndex: number
+  /** The add picker's search query (case-insensitive substring over
+   * label, id and description). */
+  readonly addQuery: string
+  /** The side new items are added to: the selection's side when the
+   * picker opened, Left for an empty row. */
+  readonly addSide: 'left' | 'right'
+  /** The advanced editor's selected field. */
+  readonly advancedField: FooterAdvancedField
+  /** Whether an advanced field's INLINE text editor is open. */
+  readonly editing: boolean
+  /** The inline editor's buffer (raw; committed on Enter). */
+  readonly editBuffer: string
 }
+
+/** The tone picker's choices: persisted values use the EXISTING semantic
+ * tokens (`auto` = the ref carries no tone override); the labels are the
+ * user-facing names. */
+export const FOOTER_TONE_CHOICES: ReadonlyArray<{ readonly value: FooterTone | 'auto'; readonly label: string }> = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'primary', label: 'Primary' },
+  { value: 'accent', label: 'Accent' },
+  { value: 'text', label: 'Text' },
+  { value: 'textMuted', label: 'Muted' },
+  { value: 'success', label: 'Success' },
+  { value: 'warning', label: 'Warning' },
+  { value: 'error', label: 'Error' },
+]
+
+/** Hard input caps — the persisted-layout parser's bounds (a draft the
+ * configurator builds must always re-parse). */
+export const MAX_PREFIX_SUFFIX_LENGTH = 16
+const MAX_IMPORTANCE = 1000
 
 /** The mutable draft shape (the persisted layout is deeply readonly). */
 interface MutableRef {
@@ -65,14 +127,53 @@ function cloneLayout(layout: FooterLayoutV1): MutableLayout {
   return { schemaVersion: 1, rows: layout.rows.map(cloneRow) }
 }
 
+/** A zone + index pair: where a flat position lives inside one row. */
+export interface FlatPosition {
+  readonly zone: 'left' | 'right'
+  readonly index: number
+}
+
+/** Map a flat position (left refs, then right refs) onto one row's zones.
+ * undefined past the row's item count. */
+export function flatPositionOf(flat: number, row: FooterRowLayout): FlatPosition | undefined {
+  if (flat < row.left.length) return { zone: 'left', index: flat }
+  const rightIndex = flat - row.left.length
+  if (rightIndex < row.right.length) return { zone: 'right', index: rightIndex }
+  return undefined
+}
+
+/** The flat item count of one row (left refs + right refs). */
+export function flatLengthOf(row: FooterRowLayout): number {
+  return row.left.length + row.right.length
+}
+
+/** One item-editor menu entry (Style appears only for items with more
+ * than one finite format — a single format has nothing to pick). */
+export type ItemMenuEntry = { readonly kind: 'style' } | { readonly kind: 'tone' } | { readonly kind: 'advanced' }
+
+/** The item editor's menu for one definition (undefined = an unknown id:
+ * its format set is unknowable, so Style is hidden). */
+export function itemMenuFor(formats: readonly string[] | undefined): ItemMenuEntry[] {
+  const entries: ItemMenuEntry[] = []
+  if (formats !== undefined && formats.length > 1) entries.push({ kind: 'style' })
+  entries.push({ kind: 'tone' })
+  entries.push({ kind: 'advanced' })
+  return entries
+}
+
 /** The footer configurator state machine. */
 export class FooterConfiguratorModel {
   private readonly draft: MutableLayout
-  private activeRow = 0
-  private activeZone: 'left' | 'right' = 'left'
-  private activeIndex = 0
-  private cursorInAvailable = false
-  private availableIndex = 0
+  private mode: FooterConfiguratorMode = 'rows'
+  private rowIndex = 0
+  private cursor = 0
+  private itemCursor = 0
+  private pickerIndex = 0
+  private addQuery = ''
+  private addSide: 'left' | 'right' = 'left'
+  private advancedField: FooterAdvancedField = 'prefix'
+  private editing = false
+  private editBuffer = ''
   private readonly registry: FooterItemRegistry
 
   constructor(initial: FooterLayoutV1, registry: FooterItemRegistry) {
@@ -84,11 +185,16 @@ export class FooterConfiguratorModel {
   state(): FooterConfiguratorState {
     return {
       layout: this.draft as unknown as FooterLayoutV1,
-      activeRow: this.activeRow,
-      activeZone: this.activeZone,
-      activeIndex: this.activeIndex,
-      cursorInAvailable: this.cursorInAvailable,
-      availableIndex: this.availableIndex,
+      mode: this.mode,
+      rowIndex: this.rowIndex,
+      cursor: this.cursor,
+      itemCursor: this.itemCursor,
+      pickerIndex: this.pickerIndex,
+      addQuery: this.addQuery,
+      addSide: this.addSide,
+      advancedField: this.advancedField,
+      editing: this.editing,
+      editBuffer: this.editBuffer,
     }
   }
 
@@ -103,155 +209,496 @@ export class FooterConfiguratorModel {
     return this.registry.ids().filter(id => !present.has(id))
   }
 
-  /** The active row's mutable record. */
-  private activeRowRecord(): MutableRow {
-    return this.draft.rows[Math.min(this.activeRow, this.draft.rows.length - 1)]!
+  /** The add picker's filtered matches: case-insensitive substring over
+   * the item's label, id and description (an unknown id matches on its
+   * raw id text). */
+  addMatches(): string[] {
+    const query = this.addQuery.trim().toLowerCase()
+    const all = this.availableIds()
+    if (query === '') return all
+    return all.filter(id => {
+      const def = this.registry.get(id)
+      const haystack = [
+        id,
+        def?.label ?? '',
+        def?.description ?? '',
+      ].join('\n').toLowerCase()
+      return haystack.includes(query)
+    })
   }
 
-  /** The active zone's refs (a copy). */
-  private activeRefs(): MutableRef[] {
-    const row = this.activeRowRecord()
-    return this.activeZone === 'left' ? [...row.left] : [...row.right]
+  /** The edited row's mutable record (clamped). */
+  private editedRow(): MutableRow {
+    return this.draft.rows[Math.min(this.rowIndex, this.draft.rows.length - 1)]!
   }
 
-  /** Replace the active zone's refs, clamping the cursor. */
-  private setActiveRefs(refs: MutableRef[]): void {
-    const row = this.activeRowRecord()
-    if (this.activeZone === 'left') row.left = refs
+  /** The ref at a flat position of the edited row. */
+  private refAt(flat: number): { ref: MutableRef; pos: FlatPosition } | undefined {
+    const row = this.editedRow()
+    const pos = flatPositionOf(flat, row as unknown as FooterRowLayout)
+    if (pos === undefined) return undefined
+    const ref = pos.zone === 'left' ? row.left[pos.index]! : row.right[pos.index]!
+    return { ref, pos }
+  }
+
+  /** Write a zone's refs back and clamp the flat cursor. */
+  private setZoneRefs(zone: 'left' | 'right', refs: MutableRef[]): void {
+    const row = this.editedRow()
+    if (zone === 'left') row.left = refs
     else row.right = refs
-    this.activeIndex = Math.min(this.activeIndex, Math.max(0, refs.length - 1))
+    this.clampCursor()
   }
 
-  /** The active item's ref, when the active zone is non-empty. */
-  private activeRef(): MutableRef | undefined {
-    return this.activeRefs()[this.activeIndex]
+  private clampCursor(): void {
+    const row = this.editedRow()
+    this.cursor = Math.max(0, Math.min(this.cursor, row.left.length + row.right.length - 1))
   }
 
-  /** Space: toggle the active item out of the layout, or (in the
-   * available section) add the available item to the active zone. */
-  toggleActive(): void {
-    if (this.cursorInAvailable) {
-      const id = this.availableIds()[this.availableIndex]
-      if (id === undefined) return
-      this.addAvailable(id)
-      return
+  /** ↑: selection up (reorder in Move Mode). */
+  moveUp(): void {
+    switch (this.mode) {
+      case 'rows':
+        this.rowIndex = Math.max(0, this.rowIndex - 1)
+        return
+      case 'row':
+        this.cursor = Math.max(0, this.cursor - 1)
+        return
+      case 'row-move':
+        this.reorderActive(-1)
+        return
+      case 'item':
+        this.itemCursor = Math.max(0, this.itemCursor - 1)
+        return
+      case 'style':
+        this.pickerIndex = Math.max(0, this.pickerIndex - 1)
+        return
+      case 'tone':
+        this.pickerIndex = Math.max(0, this.pickerIndex - 1)
+        return
+      case 'advanced':
+        if (!this.editing) this.advancedField = ADVANCED_FIELDS[Math.max(0, this.advancedFieldIndex() - 1)]!
+        return
+      case 'add':
+        this.pickerIndex = Math.max(0, this.pickerIndex - 1)
+        return
     }
-    const ref = this.activeRef()
-    if (ref === undefined) return
-    this.setActiveRefs(this.activeRefs().filter(candidate => candidate !== ref))
   }
 
-  /** Add one available item to the active zone (appended at the end). */
-  addAvailable(id: string): void {
-    const row = this.activeRowRecord()
-    const ref: MutableRef = { id }
-    if (this.activeZone === 'left') row.left = [...row.left, ref]
-    else row.right = [...row.right, ref]
-    this.activeIndex = (this.activeZone === 'left' ? row.left : row.right).length - 1
-  }
-
-  /** ←/→: move the active item to the other zone (appended at the end). */
-  moveToOtherZone(): void {
-    const ref = this.activeRef()
-    if (ref === undefined) return
-    this.setActiveRefs(this.activeRefs().filter(candidate => candidate !== ref))
-    const row = this.activeRowRecord()
-    if (this.activeZone === 'left') row.right = [...row.right, ref]
-    else row.left = [...row.left, ref]
-  }
-
-  /** ↑: move the cursor up (selection, no reorder). */
-  moveCursorUp(): void {
-    if (this.cursorInAvailable) {
-      if (this.availableIndex > 0) {
-        this.availableIndex -= 1
+  /** ↓: selection down (reorder in Move Mode). */
+  moveDown(): void {
+    switch (this.mode) {
+      case 'rows':
+        this.rowIndex = Math.min(this.draft.rows.length - 1, this.rowIndex + 1)
+        return
+      case 'row':
+        this.cursor = Math.min(Math.max(0, this.flatCount() - 1), this.cursor + 1)
+        return
+      case 'row-move':
+        this.reorderActive(1)
+        return
+      case 'item':
+        this.itemCursor = Math.min(itemMenuFor(this.itemFormats()).length - 1, this.itemCursor + 1)
+        return
+      case 'style': {
+        const formats = this.itemFormats()
+        this.pickerIndex = Math.min(Math.max(0, (formats?.length ?? 1) - 1), this.pickerIndex + 1)
         return
       }
-      this.cursorInAvailable = false
+      case 'tone':
+        this.pickerIndex = Math.min(FOOTER_TONE_CHOICES.length - 1, this.pickerIndex + 1)
+        return
+      case 'advanced':
+        if (!this.editing) {
+          this.advancedField = ADVANCED_FIELDS[Math.min(ADVANCED_FIELDS.length - 1, this.advancedFieldIndex() + 1)]!
+        }
+        return
+      case 'add':
+        this.pickerIndex = Math.min(Math.max(0, this.addMatches().length - 1), this.pickerIndex + 1)
+        return
+    }
+  }
+
+  /** The edited row's item count (row page bounds). */
+  private flatCount(): number {
+    const row = this.editedRow()
+    return row.left.length + row.right.length
+  }
+
+  /** The edited item's definition formats (undefined = unknown id). */
+  private itemFormats(): readonly string[] | undefined {
+    return this.registry.get(this.editedRefId())?.formats
+  }
+
+  /** The edited item's id (the flat cursor's ref; '' when the row is
+   * empty). */
+  private editedRefId(): string {
+    return this.refAt(this.cursor)?.ref.id ?? ''
+  }
+
+  /** The advanced editor's selected field index. */
+  private advancedFieldIndex(): number {
+    return ADVANCED_FIELDS.indexOf(this.advancedField)
+  }
+
+  /** ←/→: move the item to that side (row pages); cycle the highlighted
+   * setting inline (item page); no-op elsewhere. */
+  moveZone(direction: 'left' | 'right'): void {
+    if (this.mode === 'row' || this.mode === 'row-move') {
+      const at = this.refAt(this.cursor)
+      if (at === undefined || at.pos.zone === direction) return
+      const row = this.editedRow()
+      const from = at.pos.zone === 'left' ? [...row.left] : [...row.right]
+      from.splice(at.pos.index, 1)
+      const to = direction === 'left' ? [...row.left] : [...row.right]
+      to.push(at.ref)
+      if (at.pos.zone === 'left') {
+        row.left = from
+        row.right = to
+      } else {
+        row.right = from
+        row.left = to
+      }
+      // The cursor follows the item to its appended position.
+      this.cursor = direction === 'left'
+        ? row.left.length - 1
+        : row.left.length + row.right.length - 1
       return
     }
-    if (this.activeIndex > 0) this.activeIndex -= 1
-  }
-
-  /** ↓: move the cursor down (selection, no reorder); past the last zone
-   * item it enters the available section. */
-  moveCursorDown(): void {
-    if (this.cursorInAvailable) {
-      const available = this.availableIds()
-      if (this.availableIndex < available.length - 1) this.availableIndex += 1
-      return
-    }
-    const refs = this.activeRefs()
-    if (this.activeIndex < refs.length - 1) {
-      this.activeIndex += 1
-      return
-    }
-    if (this.availableIds().length > 0) {
-      this.cursorInAvailable = true
-      this.availableIndex = 0
+    if (this.mode === 'item') {
+      this.cycleItemSetting(direction === 'left' ? -1 : 1)
     }
   }
 
-  /** Shift+↑: move the active item one position up. */
-  moveUp(): void {
-    const refs = this.activeRefs()
-    if (this.activeIndex <= 0 || refs.length === 0) return
-    const ref = refs[this.activeIndex]!
-    refs.splice(this.activeIndex, 1)
-    refs.splice(this.activeIndex - 1, 0, ref)
-    this.activeIndex -= 1
-    this.setActiveRefs(refs)
-  }
-
-  /** Shift+↓: move the active item one position down. */
-  moveDown(): void {
-    const refs = this.activeRefs()
-    if (this.activeIndex >= refs.length - 1 || refs.length === 0) return
-    const ref = refs[this.activeIndex]!
-    refs.splice(this.activeIndex, 1)
-    refs.splice(this.activeIndex + 1, 0, ref)
-    this.activeIndex += 1
-    this.setActiveRefs(refs)
-  }
-
-  /** Tab: switch to the next row (wraps). */
-  switchRow(): void {
-    if (this.draft.rows.length < 2) return
-    this.activeRow = (this.activeRow + 1) % this.draft.rows.length
-    this.activeIndex = 0
-    this.cursorInAvailable = false
-    this.availableIndex = 0
-  }
-
-  /** Shift+Tab: switch the active zone. */
-  switchZone(): void {
-    this.activeZone = this.activeZone === 'left' ? 'right' : 'left'
-    this.activeIndex = 0
-    this.cursorInAvailable = false
-    this.availableIndex = 0
-  }
-
-  /** Cycle the active item's finite formatter. */
-  cycleFormat(): void {
-    const ref = this.activeRef()
+  /** ←/→ on the item editor: cycle the highlighted setting's value.
+   * Style cycles the finite formats; Tone cycles the tone choices;
+   * Advanced opens the editor (nothing to cycle inline). */
+  private cycleItemSetting(direction: -1 | 1): void {
+    const menu = itemMenuFor(this.itemFormats())
+    const entry = menu[Math.min(this.itemCursor, menu.length - 1)]
+    if (entry === undefined) return
+    const ref = this.refAt(this.cursor)?.ref
     if (ref === undefined) return
-    const def = this.registry.get(ref.id)
+    if (entry.kind === 'style') {
+      const def = this.registry.get(ref.id)!
+      const current = ref.format ?? def.defaultFormat
+      const index = def.formats.indexOf(current)
+      const next = (index + direction + def.formats.length) % def.formats.length
+      this.applyFormat(ref, def.formats[next]!, def)
+      return
+    }
+    if (entry.kind === 'tone') {
+      const current = ref.tone ?? 'auto'
+      const index = FOOTER_TONE_CHOICES.findIndex(choice => choice.value === current)
+      const next = (index + direction + FOOTER_TONE_CHOICES.length) % FOOTER_TONE_CHOICES.length
+      this.applyTone(ref, FOOTER_TONE_CHOICES[next]!.value)
+    }
+  }
+
+  /** Persist a format choice: the definition default removes the override
+   * (the canonical round-trip — an explicit default never persists). */
+  private applyFormat(ref: MutableRef, format: string, def: { readonly defaultFormat: string }): void {
+    if (format === def.defaultFormat) delete ref.format
+    else ref.format = format
+  }
+
+  /** Persist a tone choice: 'auto' removes the override. */
+  private applyTone(ref: MutableRef, tone: FooterTone | 'auto'): void {
+    if (tone === 'auto') delete ref.tone
+    else ref.tone = tone
+  }
+
+  /** Reorder the cursor's item one position within its zone (Move Mode's
+   * ↑↓, and the Edit Row page's legacy Shift+↑/↓ compat shortcut).
+   * Zone-bounded — crossing zones is the ←/→ move. */
+  reorderActive(direction: -1 | 1): void {
+    const at = this.refAt(this.cursor)
+    if (at === undefined) return
+    const row = this.editedRow()
+    const refs = at.pos.zone === 'left' ? [...row.left] : [...row.right]
+    const target = at.pos.index + direction
+    if (target < 0 || target >= refs.length) return
+    const [ref] = refs.splice(at.pos.index, 1)
+    refs.splice(target, 0, ref!)
+    this.setZoneRefs(at.pos.zone, refs)
+    this.cursor = at.pos.zone === 'left'
+      ? target
+      : row.left.length + target
+  }
+
+  /** Enter: the page's primary action. */
+  activate(): void {
+    switch (this.mode) {
+      case 'rows':
+        // Enter the highlighted row.
+        this.rowIndex = Math.min(this.rowIndex, this.draft.rows.length - 1)
+        this.mode = 'row'
+        this.cursor = 0
+        return
+      case 'row':
+        if (this.flatCount() > 0) {
+          this.mode = 'item'
+          this.itemCursor = 0
+          this.pickerIndex = 0
+        }
+        return
+      case 'row-move':
+        this.mode = 'row'
+        return
+      case 'item': {
+        const menu = itemMenuFor(this.itemFormats())
+        const entry = menu[Math.min(this.itemCursor, menu.length - 1)]
+        if (entry === undefined) return
+        if (entry.kind === 'style') {
+          this.mode = 'style'
+          this.pickerIndex = this.currentFormatIndex()
+        } else if (entry.kind === 'tone') {
+          this.mode = 'tone'
+          this.pickerIndex = this.currentToneIndex()
+        } else {
+          this.mode = 'advanced'
+          this.advancedField = 'prefix'
+          this.editing = false
+          this.editBuffer = ''
+        }
+        return
+      }
+      case 'style': {
+        const formats = this.itemFormats()
+        const format = formats?.[Math.min(this.pickerIndex, formats.length - 1)]
+        const ref = this.refAt(this.cursor)?.ref
+        const def = ref === undefined ? undefined : this.registry.get(ref.id)
+        if (format !== undefined && ref !== undefined && def !== undefined) this.applyFormat(ref, format, def)
+        this.mode = 'item'
+        return
+      }
+      case 'tone': {
+        const choice = FOOTER_TONE_CHOICES[Math.min(this.pickerIndex, FOOTER_TONE_CHOICES.length - 1)]
+        const ref = this.refAt(this.cursor)?.ref
+        if (choice !== undefined && ref !== undefined) this.applyTone(ref, choice.value)
+        this.mode = 'item'
+        return
+      }
+      case 'advanced':
+        if (this.editing) {
+          this.commitEdit()
+          return
+        }
+        if (this.advancedField === 'reset') {
+          this.resetActiveRef()
+          return
+        }
+        this.editing = true
+        this.editBuffer = this.advancedFieldValue()
+        return
+      case 'add': {
+        const matches = this.addMatches()
+        const id = matches[Math.min(this.pickerIndex, matches.length - 1)]
+        if (id === undefined) return
+        this.addAvailable(id, this.addSide)
+        return
+      }
+    }
+  }
+
+  /** Esc: navigate back. Returns false exactly when the configurator
+   * should CLOSE (Esc on the Row Selector). */
+  cancel(): boolean {
+    if (this.mode === 'advanced' && this.editing) {
+      // First Esc inside an inline edit cancels the edit, not the page.
+      this.editing = false
+      this.editBuffer = ''
+      return true
+    }
+    switch (this.mode) {
+      case 'rows':
+        return false
+      case 'add':
+        if (this.addQuery !== '') {
+          // A search term swallows the first Esc: clear the search.
+          this.addQuery = ''
+          this.pickerIndex = 0
+          return true
+        }
+        this.mode = 'row'
+        return true
+      case 'row':
+      case 'row-move':
+        this.mode = 'rows'
+        return true
+      case 'item':
+      case 'style':
+      case 'tone':
+      case 'advanced':
+        this.mode = 'row'
+        return true
+    }
+  }
+
+  /** A (Edit Row page): open the Add picker. The add side follows the
+   * cursor's item zone (Left for an empty row — the C.5 default side
+   * rule, applied to every item kind). */
+  startAdd(): void {
+    if (this.mode !== 'row') return
+    const side = this.refAt(this.cursor)?.pos.zone ?? 'left'
+    this.mode = 'add'
+    this.addQuery = ''
+    this.addSide = side
+    this.pickerIndex = 0
+  }
+
+  /** M (Edit Row page): enter Move Mode. */
+  startMove(): void {
+    if (this.mode !== 'row' || this.flatCount() === 0) return
+    this.mode = 'row-move'
+  }
+
+  /** Space (Edit Row page): remove the cursor's item (it returns to the
+   * Add picker's pool — Available is derived, never stored). */
+  removeActive(): void {
+    if (this.mode !== 'row') return
+    const at = this.refAt(this.cursor)
+    if (at === undefined) return
+    const row = this.editedRow()
+    if (at.pos.zone === 'left') {
+      row.left = row.left.filter(candidate => candidate !== at.ref)
+    } else {
+      row.right = row.right.filter(candidate => candidate !== at.ref)
+    }
+    this.clampCursor()
+  }
+
+  /** F (Edit Row page): cycle the item's finite format (the power-user
+   * shortcut — the Style picker is the primary interaction). */
+  cycleFormat(): void {
+    if (this.mode !== 'row') return
+    const at = this.refAt(this.cursor)
+    if (at === undefined) return
+    const def = this.registry.get(at.ref.id)
     if (def === undefined || def.formats.length <= 1) return
-    const current = ref.format ?? def.defaultFormat
+    const current = at.ref.format ?? def.defaultFormat
     const index = def.formats.indexOf(current)
     const next = def.formats[(index + 1) % def.formats.length]!
-    if (next === def.defaultFormat) delete ref.format
-    else ref.format = next
+    this.applyFormat(at.ref, next, def)
   }
 
-  /** Set the active row's separator text ('' removes it). */
-  setSeparator(text: string): void {
-    const row = this.activeRowRecord()
-    if (text === '') {
-      delete row.separator
+  /** Add one available item to a side of the edited row (appended at the
+   * end; the cursor lands on it). */
+  addAvailable(id: string, zone: 'left' | 'right'): void {
+    const row = this.editedRow()
+    const ref: MutableRef = { id }
+    if (zone === 'left') row.left = [...row.left, ref]
+    else row.right = [...row.right, ref]
+    this.cursor = zone === 'left'
+      ? row.left.length - 1
+      : row.left.length + row.right.length - 1
+  }
+
+  /** The style picker's index of the item's current format (the picker
+   * opens on the current choice). */
+  private currentFormatIndex(): number {
+    const formats = this.itemFormats()
+    if (formats === undefined || formats.length === 0) return 0
+    const ref = this.refAt(this.cursor)?.ref
+    const current = ref === undefined ? undefined : ref.format ?? this.registry.get(ref.id)?.defaultFormat
+    const index = current === undefined ? -1 : formats.indexOf(current)
+    return index < 0 ? 0 : index
+  }
+
+  /** The tone picker's index of the item's current tone. */
+  private currentToneIndex(): number {
+    const ref = this.refAt(this.cursor)?.ref
+    const current = ref === undefined || ref.tone === undefined ? 'auto' : ref.tone
+    const index = FOOTER_TONE_CHOICES.findIndex(choice => choice.value === current)
+    return index < 0 ? 0 : index
+  }
+
+  /** Printable text: the add picker's query or the advanced inline
+   * editor's buffer. Everything else ignores it. */
+  text(data: string): void {
+    const clean = stripControlChars(data)
+    if (clean === '') return
+    if (this.mode === 'add') {
+      this.addQuery = (this.addQuery + clean).slice(0, 64)
+      this.pickerIndex = 0
       return
     }
-    row.separator = { text }
+    if (this.mode === 'advanced' && this.editing) {
+      if (this.advancedField === 'importance') {
+        // Importance is a non-negative integer (the parser's 0..1000
+        // bound): digits only.
+        this.editBuffer = (this.editBuffer + clean.replace(/[^0-9]/g, '')).slice(0, 4)
+        return
+      }
+      this.editBuffer = (this.editBuffer + clean).slice(0, MAX_PREFIX_SUFFIX_LENGTH)
+    }
+  }
+
+  /** Backspace: delete the last character of the active text input. */
+  backspace(): void {
+    if (this.mode === 'add') {
+      this.addQuery = this.addQuery.slice(0, -1)
+      this.pickerIndex = 0
+      return
+    }
+    if (this.mode === 'advanced' && this.editing) {
+      this.editBuffer = this.editBuffer.slice(0, -1)
+    }
+  }
+
+  /** The advanced field's current value (the inline editor's seed). */
+  private advancedFieldValue(): string {
+    const ref = this.refAt(this.cursor)?.ref
+    if (ref === undefined) return ''
+    switch (this.advancedField) {
+      case 'prefix': return ref.prefix ?? ''
+      case 'suffix': return ref.suffix ?? ''
+      case 'importance': return ref.importance === undefined ? '' : String(ref.importance)
+      case 'reset': return ''
+    }
+  }
+
+  /** Commit the advanced inline edit (Enter while editing). An empty
+   * buffer removes the override; an out-of-range importance cancels the
+   * edit without applying. */
+  private commitEdit(): void {
+    const at = this.refAt(this.cursor)
+    this.editing = false
+    if (at === undefined) {
+      this.editBuffer = ''
+      return
+    }
+    const ref = at.ref
+    if (this.advancedField === 'prefix') {
+      if (this.editBuffer === '') delete ref.prefix
+      else ref.prefix = this.editBuffer
+    } else if (this.advancedField === 'suffix') {
+      if (this.editBuffer === '') delete ref.suffix
+      else ref.suffix = this.editBuffer
+    } else if (this.advancedField === 'importance') {
+      if (this.editBuffer === '') {
+        delete ref.importance
+      } else {
+        const value = Number(this.editBuffer)
+        if (!Number.isFinite(value) || value < 0 || value > MAX_IMPORTANCE) {
+          this.editBuffer = ''
+          return
+        }
+        ref.importance = value
+      }
+    }
+    this.editBuffer = ''
+  }
+
+  /** Reset the edited ref to the definition defaults (the Advanced
+   * editor's "Reset to default"). */
+  resetActiveRef(): void {
+    const ref = this.refAt(this.cursor)?.ref
+    if (ref === undefined) return
+    delete ref.format
+    delete ref.tone
+    delete ref.prefix
+    delete ref.suffix
+    delete ref.importance
   }
 
   /** The draft layout (the live preview source). */
@@ -263,20 +710,16 @@ export class FooterConfiguratorModel {
   resetDefault(): void {
     const next = cloneLayout(DEFAULT_FOOTER_LAYOUT)
     this.draft.rows = next.rows
-    this.activeRow = 0
-    this.activeIndex = 0
-    this.cursorInAvailable = false
-    this.availableIndex = 0
+    this.rowIndex = 0
+    this.cursor = 0
   }
 
   /** Reset the draft to the builtin compact layout. */
   resetCompact(): void {
     const next = cloneLayout(COMPACT_FOOTER_LAYOUT)
     this.draft.rows = next.rows
-    this.activeRow = 0
-    this.activeIndex = 0
-    this.cursorInAvailable = false
-    this.availableIndex = 0
+    this.rowIndex = 0
+    this.cursor = 0
   }
 
   /** Add a second row (1..2 rows). */
@@ -289,7 +732,10 @@ export class FooterConfiguratorModel {
   removeRow(): void {
     if (this.draft.rows.length <= 1) return
     this.draft.rows = this.draft.rows.slice(0, -1)
-    this.activeRow = Math.min(this.activeRow, this.draft.rows.length - 1)
-    this.activeIndex = 0
+    this.rowIndex = Math.min(this.rowIndex, this.draft.rows.length - 1)
+    this.cursor = 0
   }
 }
+
+/** The advanced editor's field order (Reset last). */
+const ADVANCED_FIELDS: readonly FooterAdvancedField[] = ['prefix', 'suffix', 'importance', 'reset']

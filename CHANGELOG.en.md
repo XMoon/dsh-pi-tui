@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The `/footer` configurator is redesigned as a hierarchical
+  status-line editor.** The old surface spread every Row / Zone /
+  Available / Preview / Help section across one screen and leaned on
+  `Tab` (row), `Shift+Tab` (zone) and `Shift+↑/↓` (reorder). The editor
+  is now hierarchical: `/footer` opens the Row Selector (item counts per
+  row) and `Enter` enters Edit Row — Left/Right are visual grouping
+  only, `↑/↓` walks every item of the row in order, `←/→` moves an item
+  across sides (stable order on the target side, cursor follows),
+  `Space` removes it (it automatically returns to the item pool), `F`
+  stays as a direct style-cycle shortcut, and `M` enters Move Mode to
+  reorder within the item's side (`Shift+↑/↓` remain as compat
+  shortcuts, but the help no longer advertises them). `Enter` opens the
+  Item Editor: Style (hidden for single-format items; the picker shows
+  each candidate rendered by the item itself), Tone (persists the
+  existing semantic tokens, `auto` removes the override) and Advanced
+  (inline Prefix / Suffix / Importance editors — an empty value means
+  the definition default, out-of-range importance is refused — plus a
+  one-keystroke Reset to default). `Available` is no longer a standing
+  section: `A` opens a searchable Add Picker (case-insensitive
+  substring filter over label / id / description, the highlighted
+  item's description below; with a search term the first `Esc` clears
+  the search). The preview and the contextual help are now a FIXED
+  shell — one short help line per page (never one packed hint line) and
+  only the middle list scrolls with the cursor, so at any terminal size
+  (the 40/80/120 cols × 10/24/40 rows matrix) neither the preview nor
+  the help can scroll away. Behavior change: the save key moves from
+  `Enter` to `S` on the Row Selector (`Enter` is a navigation key now);
+  `Esc` walks back page by page, and the first page's `Esc` closes and
+  cancels without touching the active layout. The persisted schema
+  (`FooterLayoutV1`), the extension item capability, the default layout
+  output and the no-migration contract are unchanged.
 - **Plugin theme selections are now SOURCE-QUALIFIED (`plugin:<owner>/<id>`).**
   Previously a plugin theme and a local custom theme file shared one bare
   name namespace: `Foo.json` and a plugin's `name: "Foo"` produced two

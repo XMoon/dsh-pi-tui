@@ -1,7 +1,9 @@
 /**
- * Headless tests for the footer configurator MODEL (plan §15.4/§15.8):
- * toggle, reorder, zone moves, row switching, format cycling, separator,
- * resets, and the 1..2 row bound.
+ * Headless tests for the footer configurator MODEL (the hierarchical
+ * editor): page navigation (Row Selector → Edit Row → Item Editor →
+ * pickers), item operations (zone moves, remove, add, Move Mode, style
+ * cycle, tone, advanced round-trip, reset), and the Add picker's search
+ * (label/id/description, case-insensitive, Esc clears first).
  * @module @xmoon76/dsh-pi-tui/footer-configurator-model.test
  */
 
@@ -17,122 +19,365 @@ function model(): FooterConfiguratorModel {
   return new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, registry)
 }
 
-test('the model starts from the initial layout with the cursor at row 0 left', () => {
+/** The id at the edited row's flat cursor. */
+function idAtCursor(m: FooterConfiguratorModel): string | undefined {
+  const state = m.state()
+  const row = state.layout.rows[state.rowIndex]!
+  const flat = state.cursor
+  const ref = flat < row.left.length ? row.left[flat] : row.right[flat - row.left.length]
+  return ref?.id
+}
+
+/** Walk the flat cursor onto the named item of the edited row (wrapping
+ * at the row end). */
+function walkTo(m: FooterConfiguratorModel, id: string): void {
+  for (let i = 0; i < 128; i += 1) {
+    if (idAtCursor(m) === id) return
+    const row = m.state().layout.rows[m.state().rowIndex]!
+    if (m.state().cursor >= row.left.length + row.right.length - 1) {
+      while (m.state().cursor > 0) m.moveUp()
+      if (idAtCursor(m) === id) return
+    } else {
+      m.moveDown()
+    }
+  }
+  assert.fail(`cursor never reached "${id}"`)
+}
+
+test('the configurator opens on the Row Selector (row 0)', () => {
   const m = model()
   const state = m.state()
-  assert.equal(state.activeRow, 0)
-  assert.equal(state.activeZone, 'left')
-  assert.equal(state.activeIndex, 0)
+  assert.equal(state.mode, 'rows')
+  assert.equal(state.rowIndex, 0)
   assert.equal(state.layout.rows.length, 2)
   assert.equal(state.layout.rows[0]!.left[0]!.id, 'view-scope')
 })
 
-test('toggleActive removes the active item; the cursor clamps', () => {
+test('navigation: Enter a row, Esc back, Esc closes', () => {
   const m = model()
-  m.toggleActive() // view-scope out
-  const state = m.state()
-  assert.ok(!state.layout.rows[0]!.left.some(ref => ref.id === 'view-scope'))
-  assert.equal(state.activeIndex, 0)
-  // The next item is now active.
-  assert.equal(state.layout.rows[0]!.left[0]!.id, 'permission-preset')
+  m.activate()
+  assert.equal(m.state().mode, 'row')
+  assert.equal(m.state().rowIndex, 0)
+  assert.ok(m.cancel(), 'Esc from a row page is consumed')
+  assert.equal(m.state().mode, 'rows')
+  assert.equal(m.cancel(), false, 'Esc on the Row Selector closes the configurator')
 })
 
-test('moveToOtherZone moves the active item to the other zone', () => {
+test('the Row Selector moves between rows; Enter enters the highlighted row', () => {
   const m = model()
-  m.moveToOtherZone() // view-scope → right
-  const state = m.state()
-  assert.ok(!state.layout.rows[0]!.left.some(ref => ref.id === 'view-scope'))
-  assert.equal(state.layout.rows[0]!.right.at(-1)!.id, 'view-scope')
+  m.moveDown()
+  assert.equal(m.state().rowIndex, 1)
+  m.activate()
+  assert.equal(m.state().mode, 'row')
+  assert.equal(m.state().rowIndex, 1)
+  assert.equal(m.state().cursor, 0)
+  // The default layout's second row has one item (stats-line).
+  assert.equal(m.state().layout.rows[1]!.left[0]!.id, 'stats-line')
 })
 
-test('moveUp/moveDown reorder within the active zone', () => {
+test('Available is reachable ONLY through the Add picker (no cursor section)', () => {
   const m = model()
-  m.moveDown() // view-scope down one
+  m.activate()
+  // Walk down past every item: the cursor clamps inside the row's items —
+  // it never enters an "available" section.
+  for (let i = 0; i < 32; i += 1) m.moveDown()
+  assert.equal(m.state().mode, 'row')
+  assert.equal(m.state().cursor, 9, 'the cursor stays within the row items')
+  m.startAdd()
+  assert.equal(m.state().mode, 'add')
+  assert.ok(m.addMatches().includes('cache-hit'), 'the picker pools the non-layout items')
+})
+
+test('the flat cursor spans Left then Right; ←/→ move between zones', () => {
+  const m = model()
+  m.activate()
+  walkTo(m, 'ext:*') // the LAST left item (the right zone starts empty)
+  m.moveDown()
+  const leftCount = m.state().layout.rows[0]!.left.length
+  assert.equal(m.state().cursor, leftCount - 1, 'the cursor clamps at the row end — no available section')
+  m.moveZone('right')
   let state = m.state()
-  assert.equal(state.layout.rows[0]!.left[0]!.id, 'permission-preset')
-  assert.equal(state.layout.rows[0]!.left[1]!.id, 'view-scope')
-  assert.equal(state.activeIndex, 1)
-  m.moveUp()
-  state = m.state()
-  assert.equal(state.layout.rows[0]!.left[0]!.id, 'view-scope')
-  assert.equal(state.activeIndex, 0)
-  // Bounds: moving up at the top is a no-op.
-  m.moveUp()
-  assert.equal(m.state().activeIndex, 0)
+  assert.ok(!state.layout.rows[0]!.left.some(ref => ref.id === 'ext:*'))
+  assert.equal(state.layout.rows[0]!.right.at(-1)!.id, 'ext:*')
+  // The cursor followed the item into the right zone.
+  assert.equal(state.cursor, state.layout.rows[0]!.left.length + state.layout.rows[0]!.right.length - 1)
+  // ← moves it back to Left.
+  m.moveZone('left')
+  assert.ok(m.state().layout.rows[0]!.left.some(ref => ref.id === 'ext:*'))
+  // ← on an already-left item is a no-op.
+  const before = m.state().layout.rows[0]!.left.map(ref => ref.id)
+  m.moveZone('left')
+  assert.deepEqual(m.state().layout.rows[0]!.left.map(ref => ref.id), before)
 })
 
-test('switchRow cycles rows; switchZone flips the zone', () => {
+test('Space removes the active item; it returns to the Add pool', () => {
   const m = model()
-  m.switchRow()
-  assert.equal(m.state().activeRow, 1)
-  m.switchRow()
-  assert.equal(m.state().activeRow, 0)
-  m.switchZone()
-  assert.equal(m.state().activeZone, 'right')
-  m.switchZone()
-  assert.equal(m.state().activeZone, 'left')
-})
-
-test('cycleFormat cycles the active item\'s finite formatters', () => {
-  const m = model()
-  // Move the cursor onto the context item (formats: bar, full).
-  while (m.state().layout.rows[0]!.left[m.state().activeIndex]!.id !== 'context') m.moveCursorDown()
-  m.cycleFormat()
+  m.activate()
+  walkTo(m, 'context')
+  m.removeActive()
   const state = m.state()
-  const context = state.layout.rows[0]!.left[state.activeIndex]!
-  assert.equal(context.id, 'context')
-  assert.equal(context.format, 'full')
+  assert.ok(!state.layout.rows[0]!.left.some(ref => ref.id === 'context'))
+  assert.ok(m.availableIds().includes('context'), 'removed items return to Available')
+  // The cursor clamped onto the next item.
+  assert.equal(idAtCursor(m), 'turns-steps')
+})
+
+test('the Add picker: search, add, the item leaves the pool, Esc clears then back', () => {
+  const m = model()
+  m.activate()
+  m.startAdd()
+  assert.equal(m.state().addQuery, '')
+  assert.equal(m.state().addSide, 'left', 'an item-side cursor opens the picker on the left')
+  // Label hit, case-insensitive.
+  m.text('AGENT PRESET')
+  assert.deepEqual(m.addMatches(), ['agent-preset'])
+  // id hit.
+  for (let i = 0; i < 12; i += 1) m.backspace()
+  assert.equal(m.state().addQuery, '')
+  m.text('cache')
+  assert.deepEqual(m.addMatches(), ['cache-hit'])
+  m.activate()
+  // The item joined the layout (the picker's side) and left the pool; the
+  // picker stays open for multi-add.
+  assert.ok(m.state().layout.rows[0]!.left.some(ref => ref.id === 'cache-hit'))
+  assert.ok(!m.addMatches().includes('cache-hit'))
+  // Description hit ("wall time" matches the Performance description).
+  for (let i = 0; i < 5; i += 1) m.backspace()
+  m.text('wall time')
+  assert.deepEqual(m.addMatches(), ['performance'])
+  // Esc: clear the search first, then return to the row.
+  assert.ok(m.cancel())
+  assert.equal(m.state().addQuery, '')
+  assert.equal(m.state().mode, 'add')
+  m.cancel()
+  assert.equal(m.state().mode, 'row')
+})
+
+test('the add side follows the cursor item (right zone)', () => {
+  const m = model()
+  m.activate()
+  walkTo(m, 'ext:*')
+  m.moveZone('right')
+  m.startAdd()
+  assert.equal(m.state().addSide, 'right')
+  m.activate() // add the first match (agent-preset)
+  assert.ok(m.state().layout.rows[0]!.right.some(ref => ref.id === 'agent-preset'))
+  assert.ok(!m.state().layout.rows[0]!.left.some(ref => ref.id === 'agent-preset'))
+})
+
+test('Move Mode: M enters, ↑↓ reorder within the zone, Enter/Esc exits', () => {
+  const m = model()
+  m.activate()
+  walkTo(m, 'model')
+  m.startMove()
+  assert.equal(m.state().mode, 'row-move')
+  m.moveDown() // reorder: model swaps with tasks
+  const left = m.state().layout.rows[0]!.left
+  assert.equal(left[3]!.id, 'tasks')
+  assert.equal(left[4]!.id, 'model')
+  // Keep walking down: the item slides to the zone end, then stops.
+  for (let i = 0; i < 12; i += 1) m.moveDown()
+  const state = m.state()
+  assert.equal(state.layout.rows[0]!.left.at(-1)!.id, 'model', 'the item stops at the zone end')
+  assert.deepEqual(state.layout.rows[0]!.right.map(ref => ref.id), [], 'the right zone is untouched')
+  m.activate()
+  assert.equal(m.state().mode, 'row')
+  // Esc also exits Move Mode.
+  m.startMove()
+  m.cancel()
+  assert.equal(m.state().mode, 'rows', 'Esc from a row page returns to the Row Selector')
+})
+
+test('F cycles the finite format on the Edit Row page (default removes the override)', () => {
+  const m = model()
+  m.activate()
+  walkTo(m, 'context')
   m.cycleFormat()
-  // Wraps back to the default (the format field is removed).
-  assert.equal(m.state().layout.rows[0]!.left[m.state().activeIndex]!.format, undefined)
+  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
+  m.cycleFormat()
+  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, undefined)
 })
 
-test('moveCursorUp/Down select without reordering', () => {
+test('the Item Editor opens with Style hidden for single-format items', () => {
   const m = model()
-  m.moveCursorDown()
-  m.moveCursorDown()
-  assert.equal(m.state().activeIndex, 2)
-  assert.equal(m.state().layout.rows[0]!.left[0]!.id, 'view-scope', 'selection must not reorder')
-  m.moveCursorUp()
-  assert.equal(m.state().activeIndex, 1)
-  m.moveCursorUp()
-  m.moveCursorUp() // bound: no-op
-  assert.equal(m.state().activeIndex, 0)
+  m.activate()
+  walkTo(m, 'context') // formats: bar + full
+  m.activate()
+  assert.equal(m.state().mode, 'item')
+  // Style first for a multi-format item; ↓ reaches Tone.
+  m.moveDown()
+  m.activate()
+  assert.equal(m.state().mode, 'tone')
+  m.cancel()
+  assert.equal(m.state().mode, 'row')
+  // A single-format item (model: badge only) has no Style row: Enter on
+  // the FIRST menu row opens the Tone picker directly.
+  walkTo(m, 'model')
+  m.activate()
+  assert.equal(m.state().mode, 'item')
+  m.activate()
+  assert.equal(m.state().mode, 'tone')
 })
 
-test('setSeparator sets and clears the active row separator', () => {
+test('the Style picker applies a format; the inline ←→ change cycles too', () => {
   const m = model()
-  m.setSeparator(' │ ')
-  assert.equal(m.state().layout.rows[0]!.separator?.text, ' │ ')
-  m.setSeparator('')
-  assert.equal(m.state().layout.rows[0]!.separator, undefined)
+  m.activate()
+  walkTo(m, 'context')
+  m.activate() // item editor
+  m.activate() // Style picker (opens on the current format: bar)
+  assert.equal(m.state().mode, 'style')
+  m.moveDown()
+  m.activate()
+  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
+  assert.equal(m.state().mode, 'item')
+  // Inline ←→ cycles without opening the picker: ← wraps back to bar.
+  m.moveZone('left')
+  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, undefined)
+  // → cycles to full again.
+  m.moveZone('right')
+  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
 })
 
-test('resetDefault/resetCompact restore the builtin layouts', () => {
+test('the Tone picker persists the semantic token; Auto removes the override', () => {
   const m = model()
-  m.toggleActive()
-  m.resetCompact()
-  assert.equal(m.state().layout.rows.length, 1)
-  m.resetDefault()
-  assert.equal(m.state().layout.rows.length, 2)
-  assert.equal(m.state().layout.rows[0]!.left[0]!.id, 'view-scope')
+  m.activate()
+  walkTo(m, 'context')
+  m.activate()
+  m.moveDown() // Tone
+  m.activate()
+  assert.equal(m.state().mode, 'tone')
+  m.moveDown() // Primary
+  m.activate()
+  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.tone, 'primary')
+  // Reopen: the picker opens on the current tone; Auto (index 0) removes it.
+  m.activate() // tone picker again (menu cursor still on Tone)
+  m.moveUp()
+  m.moveUp()
+  m.activate()
+  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.tone, undefined)
+  assert.equal(m.state().mode, 'item')
 })
 
-test('addRow/removeRow keep 1..2 rows', () => {
+test('Advanced: prefix/suffix/importance round-trip; empty removes the override', () => {
   const m = model()
-  m.addRow()
-  assert.equal(m.state().layout.rows.length, 2)
-  m.removeRow()
-  assert.equal(m.state().layout.rows.length, 1)
-  m.removeRow() // bound: no-op
-  assert.equal(m.state().layout.rows.length, 1)
+  const ref = () => m.state().layout.rows[0]!.left.find(item => item.id === 'model')!
+  m.activate()
+  walkTo(m, 'model')
+  m.activate() // item editor
+  // Advanced is the LAST menu row (model has no Style entry).
+  m.moveDown()
+  m.activate()
+  assert.equal(m.state().mode, 'advanced')
+  assert.equal(m.state().advancedField, 'prefix')
+  // Prefix: type and commit.
+  m.activate() // open the inline editor
+  assert.equal(m.state().editing, true)
+  assert.equal(m.state().editBuffer, '')
+  m.text('a')
+  m.text('b')
+  assert.equal(m.state().editBuffer, 'ab')
+  m.activate() // commit
+  assert.equal(m.state().editing, false)
+  assert.equal(ref().prefix, 'ab')
+  // Esc inside the edit cancels the edit, not the page.
+  m.activate()
+  m.text('X')
+  assert.ok(m.cancel())
+  assert.equal(m.state().editing, false)
+  assert.equal(m.state().mode, 'advanced')
+  assert.equal(ref().prefix, 'ab')
+  m.cancel()
+  assert.equal(m.state().mode, 'row')
+  // Importance: digits only, bounds-checked.
+  m.activate() // → item editor (menu cursor resets to Tone)
+  m.moveDown() // → Advanced
+  m.activate() // → the advanced editor (field resets to prefix)
+  m.moveDown()
+  m.moveDown()
+  assert.equal(m.state().advancedField, 'importance')
+  m.activate()
+  m.text('12')
+  m.activate()
+  assert.equal(ref().importance, 12)
+  // An empty commit removes the override.
+  m.activate() // edit again (seeded with the current value)
+  m.backspace()
+  m.backspace()
+  m.activate()
+  assert.equal(ref().importance, undefined)
+  // Out-of-range importance is refused (the parse gate would reject it).
+  m.activate()
+  m.text('1001')
+  m.activate()
+  assert.equal(ref().importance, undefined)
+})
+
+test('Advanced: Reset to default clears every ref override', () => {
+  const m = model()
+  m.activate()
+  walkTo(m, 'context')
+  m.cycleFormat()
+  m.activate()
+  m.moveDown() // Tone
+  m.activate()
+  m.moveDown() // Primary
+  m.activate()
+  m.cancel() // → row
+  m.activate() // → item editor again
+  m.moveDown()
+  m.moveDown() // Advanced (menu: Style/Tone/Advanced for context)
+  m.activate()
+  m.moveDown()
+  m.moveDown()
+  m.moveDown()
+  assert.equal(m.state().advancedField, 'reset')
+  m.activate()
+  const ref = m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!
+  assert.equal(ref.format, undefined)
+  assert.equal(ref.tone, undefined)
+  assert.equal(ref.prefix, undefined)
+})
+
+test('the editable text is sanitized and bounded (the draft must re-parse)', () => {
+  const m = model()
+  const ref = () => m.state().layout.rows[0]!.left.find(item => item.id === 'model')!
+  m.activate()
+  walkTo(m, 'model')
+  m.activate()
+  m.moveDown()
+  m.activate() // Advanced
+  m.activate() // edit prefix
+  // Control characters never enter the buffer (the readable residue is
+  // legal prefix text — the same sanitize contract as the display side).
+  m.text('ok')
+  m.text('\u001b[2J\u0007')
+  assert.equal(m.state().editBuffer, 'ok[2J')
+  // The cap is the parser's 16-char bound.
+  for (let i = 0; i < 24; i += 1) m.text('z')
+  m.activate()
+  assert.ok((ref().prefix ?? '').length <= 16, 'prefix is capped at the parser bound')
 })
 
 test('the draft is a deep clone: mutations never touch the initial layout', () => {
   const initial = DEFAULT_FOOTER_LAYOUT
   const m = new FooterConfiguratorModel(initial, registry)
-  m.toggleActive()
-  m.setSeparator(' │ ')
+  m.activate()
+  m.removeActive()
   assert.ok(initial.rows[0]!.left.some(ref => ref.id === 'view-scope'), 'the initial layout must be untouched')
-  assert.equal(initial.rows[0]!.separator, undefined)
+})
+
+test('preset resets and the 1..2 row bound still work alongside the pages', () => {
+  const m = model()
+  m.addRow()
+  assert.equal(m.state().layout.rows.length, 2)
+  m.addRow()
+  assert.equal(m.state().layout.rows.length, 2)
+  m.removeRow()
+  assert.equal(m.state().layout.rows.length, 1)
+  m.removeRow()
+  assert.equal(m.state().layout.rows.length, 1)
+  m.resetDefault()
+  assert.equal(m.state().layout.rows.length, 2)
+  assert.equal(m.state().rowIndex, 0)
+  assert.equal(m.state().cursor, 0)
 })
