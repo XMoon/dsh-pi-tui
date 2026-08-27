@@ -64,6 +64,12 @@ export class DirectHostFilePort implements HostFilePort {
     return { fdPath: this.fdPath }
   }
 
+  /** TEST seam: the resolved fd/fdfind executable (null = fallback-only).
+   * Lets an fd-backed test assert it actually runs through a finder. */
+  fdPathAvailableForTest(): string | null {
+    return this.fdPath
+  }
+
   /** The scope's workspace cwd (undefined = the session is unresolvable —
    * a fail-closed empty discovery). A RESOLVED session without a header
    * cwd falls back to the process cwd — DIRECT-mode parity with the
