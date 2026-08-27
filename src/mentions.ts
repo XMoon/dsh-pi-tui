@@ -328,17 +328,28 @@ export class MentionProvider implements AutocompleteProvider {
     cursorCol: number,
     options: { signal: AbortSignal; force?: boolean },
   ): Promise<AutocompleteSuggestions | null> {
+    return this.getSuggestionsAtGeneration(++this.requestGeneration, lines, cursorLine, cursorCol, options)
+  }
+
+  /** The generation-threaded core: mint ONCE (either here for the direct
+   * path, or by the DELEGATED wrap at entry — getSuggestionsForGeneration)
+   * and never reset the global counter after an await. The snapshot
+   * capture binds only when the minted generation is still the latest, so
+   * a late result from an older request (a provider or the extension chain
+   * ignoring AbortSignal) can never overwrite a newer request's snapshot. */
+  private async getSuggestionsAtGeneration(
+    generation: number,
+    lines: string[],
+    cursorLine: number,
+    cursorCol: number,
+    options: { signal: AbortSignal; force?: boolean },
+  ): Promise<AutocompleteSuggestions | null> {
     const currentLine = lines[cursorLine] ?? ''
     const textBeforeCursor = currentLine.slice(0, cursorCol)
-    // Mint THIS request's generation: the snapshot capture below only
-    // binds when this call is still the latest (a late result from an
-    // older request — a provider or the extension chain ignoring
-    // AbortSignal — must never overwrite a newer request's snapshot). A
-    // caller CANNOT pre-mint here; the DELEGATED wrap (tui-app) mints its
-    // own generation at entry and reads it back after this call — its
-    // extension answer binds to the delegated request even if newer host
-    // requests start mid-flight.
-    const generation = ++this.requestGeneration
+    // The REQUEST scope, captured at entry (never re-read after an await:
+    // a session/workspace switch mid-request must not bake the NEW scope
+    // into this request's snapshot — the apply fence compares it).
+    const requestScope = this.scopeOf()
     // 1. The SHELL-BRIDGE grammar first (a `!` line's first word is a
     // command name; a path position falls through). The bridge never
     // competes with file completion.
@@ -363,10 +374,10 @@ export class MentionProvider implements AutocompleteProvider {
       : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands)
 
     if (context.kind === 'mention') {
-      return this.withRequestSnapshot(generation, lines, cursorLine, cursorCol, await this.completeMention(context.query, options.signal))
+      return this.withRequestSnapshot(generation, requestScope, lines, cursorLine, cursorCol, await this.completeMention(context.query, options.signal))
     }
     if (context.kind === 'image-argument') {
-      return this.withRequestSnapshot(generation, lines, cursorLine, cursorCol, await this.completeImageArgument(context.query, options.signal))
+      return this.withRequestSnapshot(generation, requestScope, lines, cursorLine, cursorCol, await this.completeImageArgument(context.query, options.signal))
     }
 
     // 3. Shell-mode natural-trigger suppression (mirrors the pre-plan
@@ -386,7 +397,7 @@ export class MentionProvider implements AutocompleteProvider {
     if (semantic !== null || literalShellLine) {
       try {
         const result = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
-        return this.withRequestSnapshot(generation, lines, cursorLine, cursorCol, result)
+        return this.withRequestSnapshot(generation, requestScope, lines, cursorLine, cursorCol, result)
       } catch {
         return null
       }
@@ -485,13 +496,17 @@ export class MentionProvider implements AutocompleteProvider {
 
   /** Capture the request state right before a non-null suggestion result
    * is returned: the apply fence later requires the EXACT same document +
-   * cursor + mode (plan §9.2 — the strong stale check). A null result
-   * clears the snapshot (nothing to accept). ONLY the LATEST request
-   * binds: a result minted for an OLDER generation (a late answer from a
-   * provider/extension that ignored AbortSignal) is dropped, so it cannot
-   * fence a newer request. */
+   * cursor + mode (+ the REQUEST scope) (plan §9.2 — the strong stale
+   * check). A null result clears the snapshot (nothing to accept). ONLY
+   * the LATEST request binds: a result minted for an OLDER generation (a
+   * late answer from a provider/extension that ignored AbortSignal) is
+   * dropped, so it cannot fence a newer request. The scope is the one
+   * captured at REQUEST ENTRY (passed in by the caller) — never read at
+   * capture time after an await (a session switch mid-request must not
+   * bake the NEW session into an OLD request's snapshot). */
   private withRequestSnapshot<T extends AutocompleteSuggestions | null>(
     generation: number,
+    scope: MentionScope,
     lines: readonly string[],
     cursorLine: number,
     cursorCol: number,
@@ -504,7 +519,7 @@ export class MentionProvider implements AutocompleteProvider {
       cursorLine,
       cursorCol,
       mode: this.inputModeSource(),
-      scope: this.scopeOf(),
+      scope,
     }
     return result
   }
@@ -513,25 +528,28 @@ export class MentionProvider implements AutocompleteProvider {
    * M5 wrap) captures the host snapshot when the EXTENSION chain answers —
    * the base provider still owns the stale fence, but a suggestion list it
    * did not produce must bind the state it was computed against. The
-   * DELEGATED call passes the generation minted by its own host
-   * getSuggestions (the `captureRequestGeneration` seam): a late
-   * extension answer from an OLDER request — a newer request already
-   * started — does not bind (exactly like a late host result). */
+   * DELEGATED call passes the generation minted at ITS entry AND the
+   * REQUEST scope captured at ITS entry (before the extension await): a
+   * late extension answer from an OLDER request — a newer request already
+   * started, or the scope switched mid-flight — does not bind. */
   captureRequestSnapshot(
     generation: number,
+    scope: MentionScope,
     lines: readonly string[],
     cursorLine: number,
     cursorCol: number,
     result: AutocompleteSuggestions | null,
   ): AutocompleteSuggestions | null {
-    return this.withRequestSnapshot(generation, lines, cursorLine, cursorCol, result)
+    return this.withRequestSnapshot(generation, scope, lines, cursorLine, cursorCol, result)
   }
 
   /** The base provider's suggestion entry for the DELEGATED wrap: the
-   * wrap mints the generation at entry and passes it here, so THIS host
+   * wrap mints the generation ONCE at entry and threads it HERE — the host
    * call binds its snapshot to the SAME generation the extension's answer
-   * will use — a newer request that starts during the extension await
-   * bumps the counter past it, and the late extension answer is dropped. */
+   * will use. A newer request that starts during the extension await bumps
+   * the counter past it, and the late extension answer is dropped by the
+   * generation check — NEVER reset the global counter after an await (that
+   * would clobber a newer request's minted generation). */
   async getSuggestionsForGeneration(
     generation: number,
     lines: string[],
@@ -539,13 +557,7 @@ export class MentionProvider implements AutocompleteProvider {
     cursorCol: number,
     options: { signal: AbortSignal; force?: boolean },
   ): Promise<AutocompleteSuggestions | null> {
-    const captured = await this.getSuggestions(lines, cursorLine, cursorCol, options)
-    // The host call minted generation+1 internally; the delegated call's
-    // generation is the one that must own the ext snapshot. Re-bind the
-    // host result to the delegated generation (a null host result clears
-    // the snapshot — the ext will bind after).
-    this.requestGeneration = generation
-    return this.withRequestSnapshot(generation, lines, cursorLine, cursorCol, captured)
+    return this.getSuggestionsAtGeneration(generation, lines, cursorLine, cursorCol, options)
   }
 
   /** PUBLIC test/app seam (plan §9.2): THE DELEGATING provider mints its
@@ -564,6 +576,14 @@ export class MentionProvider implements AutocompleteProvider {
    * extension result bind to the wrong request. */
   captureRequestGeneration(): number {
     return this.requestGeneration
+  }
+
+  /** The REQUEST scope, read synchronously by the DELEGATED wrap at entry:
+   * the extension's snapshot must carry the scope THIS request resolved
+   * under (a switch mid-request must fence the stale accept, not bake the
+   * new session into the old request's snapshot). */
+  scopeAtRequestTime(): MentionScope {
+    return this.scopeOf()
   }
 
   /** Whether the editor state still EXACTLY matches the request that

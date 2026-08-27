@@ -93,11 +93,15 @@ test('P1.1 headless: foo<Tab> opens no dropdown (isShowingAutocomplete stays fal
   await vt.waitForRender()
   vt.sendInput('\t')
   // The STABLE assertion: the host editor's autocomplete state stays
-  // closed — never a viewport-needle-only check. Poll over the editor's
-  // debounce window so a late request cannot slip by unnoticed.
-  await pollUntil(() => !isAutocompleteActive(app), 'foo<Tab> must keep the dropdown closed')
-  await new Promise(resolve => setTimeout(resolve, 60))
-  assert.equal(isAutocompleteActive(app), false, `foo<Tab> must not open a dropdown`)
+  // closed — never a viewport-needle-only check. Poll the closed state
+  // over the editor's whole debounce window (no fixed sleep): a late
+  // request cannot slip by unnoticed.
+  const deadline = Date.now() + 400
+  for (;;) {
+    assert.equal(isAutocompleteActive(app), false, 'foo<Tab> must never open a dropdown')
+    if (Date.now() > deadline) break
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('wanted.ts'), `foo<Tab> must not list files:\n${view}`)
   assert.equal(app.seatTextForTest(), 'foo', 'the draft is untouched')
@@ -117,14 +121,29 @@ test('P1.2: scoped @ paths search their OWN directory (outside the cwd)', async 
 })
 
 test('P1.2: @../../scope resolves outside the cwd by the typed amount', async () => {
-  const { root, workspace } = outsideCwdFixture()
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
-  const query = resolvePathQuery('workspace/loc', root)
-  assert.equal(query.searchBase, join(root, 'workspace'))
-  const result = await provider.getSuggestions(['@workspace/loc'], 0, 15, { signal: abort })
-  assert.ok(result !== null, `@workspace/loc must suggest:\n${JSON.stringify(result)}`)
-  assert.ok(result.items.some(item => item.value === '@workspace/local.txt'))
-  void workspace
+  // A REAL ../../ fixture: workspace = /root/alpha/beta/workspace; `../..`
+  // resolves to /root/alpha, so `../../alpha` targets /root/alpha/alpha.
+  // The file two levels up lives under alpha/alpha/deep.ts.
+  const root = mkdtempSync(join(tmpdir(), 'dsh-conv-upup-'))
+  const alpha = join(root, 'alpha')
+  const beta = join(alpha, 'beta')
+  const workspace = join(beta, 'workspace')
+  mkdirSync(workspace, { recursive: true })
+  mkdirSync(join(alpha, 'alpha'), { recursive: true })
+  writeFileSync(join(alpha, 'alpha', 'deep.ts'), 'x')
+  mkdirSync(join(alpha, 'alpha', 'deep'), { recursive: true })
+  writeFileSync(join(alpha, 'alpha', 'deep', 'nested.txt'), 'x')
+  const provider = new MentionProvider([], workspace, new DirectHostFilePort(() => undefined, null))
+  // /root/alpha/beta/workspace + ../../alpha = /root/alpha/alpha.
+  const result = await provider.getSuggestions(['@../../alpha/de'], 0, 16, { signal: abort })
+  assert.ok(result !== null, `@../../alpha/de must suggest:\n${JSON.stringify(result)}`)
+  assert.ok(
+    result.items.some(item => item.value === '@../../alpha/deep.ts'),
+    `../../ scope value missing:\n${JSON.stringify(result.items)}`,
+  )
+  const nested = await provider.getSuggestions(['@../../alpha/deep/nes'], 0, 22, { signal: abort })
+  assert.ok(nested !== null && nested.items.some(item => item.value === '@../../alpha/deep/nested.txt'),
+    `nested ../../ value missing:\n${JSON.stringify(nested)}`)
 })
 
 test('P1.2: @~/ resolves through the homedir', async () => {
@@ -152,6 +171,48 @@ test('P1.2 absolute: @/tmp/ searches the absolute scope', async () => {
   const result = await provider.getSuggestions([`@${target}/abs`], 0, `@${target}/abs`.length, { signal: abort })
   assert.ok(result !== null, `absolute must suggest:\n${JSON.stringify(result)}`)
   assert.ok(result.items.some(item => item.value.startsWith(`@${target}`)))
+})
+
+test('§23 matrix: /image shares the scoped forms (../, ~/, absolute, directory continuation)', async () => {
+  // ../../ fixture for /image: workspace = /root/alpha/beta/workspace;
+  // ../../alpha targets /root/alpha/alpha/pics.
+  const root = mkdtempSync(join(tmpdir(), 'dsh-conv-imgscope-'))
+  const alpha = join(root, 'alpha')
+  const beta = join(alpha, 'beta')
+  const workspace = join(beta, 'workspace')
+  mkdirSync(workspace, { recursive: true })
+  mkdirSync(join(alpha, 'alpha', 'pics'), { recursive: true })
+  writeFileSync(join(alpha, 'alpha', 'pics', 'a.png'), 'x')
+  writeFileSync(join(alpha, 'alpha', 'pics', 'note.txt'), 'x')
+  mkdirSync(join(workspace, 'subdir'))
+  writeFileSync(join(workspace, 'subdir', 'deep.png'), 'x')
+  const provider = new MentionProvider(
+    [{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }],
+    workspace,
+    new DirectHostFilePort(() => undefined, null),
+  )
+  // ../.. scope.
+  const up = await provider.getSuggestions(['/image ../../alpha/pics/a'], 0, 28, { signal: abort })
+  assert.ok(up !== null, `/image ../../ must suggest:\n${JSON.stringify(up)}`)
+  assert.ok(up.items.some(item => item.value === '../../alpha/pics/a.png'), `../../ image missing:\n${JSON.stringify(up.items)}`)
+  // Directory continuation.
+  const cont = await provider.getSuggestions(['/image subdir/'], 0, 14, { signal: abort })
+  assert.ok(cont !== null && cont.items.some(item => item.value === 'subdir/deep.png'),
+    `image dir continuation missing:\n${JSON.stringify(cont)}`)
+  // ~/ scope (homedir has a stable entry).
+  const saved = process.env.HOME
+  try {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-conv-imghome-'))
+    mkdirSync(join(home, 'pix'))
+    writeFileSync(join(home, 'pix', 'h.png'), 'x')
+    process.env.HOME = home
+    const tilde = await provider.getSuggestions(['/image ~/pix/h'], 0, 14, { signal: abort })
+    assert.ok(tilde !== null && tilde.items.some(item => item.value === '~/pix/h.png'),
+      `~/ image missing:\n${JSON.stringify(tilde)}`)
+  } finally {
+    if (saved === undefined) delete process.env.HOME
+    else process.env.HOME = saved
+  }
 })
 
 test('P1.3: a >2000-entry workspace keeps directory continuation working', async () => {
@@ -353,16 +414,25 @@ test('review finding (round 4): a regex-special filename still completes (fd lit
   assert.ok(plus !== null && plus.items.some(item => item.value.includes('a+b.ts')), `plus missing:\n${JSON.stringify(plus)}`)
 })
 
-test('review finding (round 5): fd matches case-insensitively (aligned with the ranking contract)', async () => {
+test('review finding (round 5): fd matches case-insensitively (aligned with the ranking contract)', async (t) => {
   const root = outsideCwdFixture().workspace
   writeFileSync(join(root, 'Foo.txt'), 'x')
   writeFileSync(join(root, 'foo.txt'), 'x')
+  // The ranking contract is case-INSENSITIVE (always runs, no fd needed):
+  // the engine lowercases the QUERY before scoring, so an uppercase query
+  // signs the lowercase basename as a prefix match (80).
+  assert.equal(scorePathCandidate({ path: 'foo.txt', kind: 'file' }, 'FOO'.toLowerCase()), 80,
+    'the shared ranking must be case-insensitive')
   // REAL fd-backed path: the default DirectHostFilePort probes PATH (fd
   // then fdfind — this machine has /usr/bin/fdfind), so the -i flag is
   // what produces both matches. A fallback-only null would pass even
-  // without -i.
+  // without -i. SKIP when no finder is installed (CI without fd/fdfind
+  // must not fail the suite — the fallback path is tested separately).
   const port = new DirectHostFilePort(() => undefined)
-  assert.notEqual(port.fdPathAvailableForTest(), null, 'the test must run through a real fd/fdfind')
+  if (port.fdPathAvailableForTest() === null) {
+    t.skip('no fd/fdfind on PATH: the real-fd case test cannot run')
+    return
+  }
   const provider = new MentionProvider([], root, port)
   // fd's smart-case default (case-SENSITIVE for an uppercase query) would
   // return only @Foo.txt; the -i flag returns both.
