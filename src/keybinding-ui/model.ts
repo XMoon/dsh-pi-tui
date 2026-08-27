@@ -43,6 +43,9 @@ export interface KeybindingEditorRow {
   readonly configured: readonly KeybindingEditorBinding[]
   readonly effective: readonly KeybindingEditorBinding[]
   readonly defaults: readonly KeybindingEditorBinding[]
+  /** Context-gated composition affordances, not ordinary direct defaults. */
+  readonly conditional: readonly KeybindingEditorBinding[]
+  readonly conditionalDescription: string | undefined
   readonly diagnostics: readonly string[]
   /** Search fields retain their semantic origin so tests and future UI can
    * explain why a row matched without re-parsing its display text. */
@@ -199,10 +202,11 @@ export function buildKeybindingEditorModel(
     const userValue = parsed.bindings[definition.id]
     const customized = owns(parsed.bindings, definition.id)
     const disabled = !safeMode && userValue === false
-    const direct = manager.keysFor(definition.id)
+    const directKeys = manager.keysFor(definition.id)
+    const conditionalKeys = manager.conditionalKeysFor(definition.id)
     const leader = manager.leaderKeysFor(definition.id)
     const effective: KeybindingEditorBinding[] = [
-      ...direct.map(key => ({ kind: 'direct' as const, key })),
+      ...directKeys.map(key => ({ kind: 'direct' as const, key })),
       ...leader.map(key => ({ kind: 'leader' as const, key })),
     ]
     const configured = directBindings(userValue).concat(
@@ -210,6 +214,12 @@ export function buildKeybindingEditorModel(
         .filter(binding => binding.action === definition.id)
         .map(binding => ({ kind: 'leader' as const, key: binding.key })),
     )
+    const configuredDirectKeys = new Set(
+      configured.filter(binding => binding.kind === 'direct').map(binding => binding.key),
+    )
+    const conditional = conditionalKeys
+      .filter(key => !configuredDirectKeys.has(key))
+      .map(key => ({ kind: 'direct' as const, key }))
     // Capturing-scope fixed actions are deliberately absent from the Host
     // keymap. Their defaults remain their effective fixed triggers.
     if (!disabled && !definition.configurable && effective.length === 0) {
@@ -254,6 +264,12 @@ export function buildKeybindingEditorModel(
       configured,
       effective,
       defaults,
+      conditional,
+      conditionalDescription: conditional.length === 0
+        ? undefined
+        : definition.id === 'app.tasks.open'
+          ? 'when the editor is empty and tasks are active'
+          : 'when its context is active',
       diagnostics,
       searchFields: {
         label: labelFor(definition),

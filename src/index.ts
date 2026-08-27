@@ -246,7 +246,7 @@ const LOCAL_SHELL_TAIL_FLUSH_MS = 200
  */
 export const SESSIONLESS_COMMANDS = new Set([
   'exit', 'focus', 'footer', 'settings', 'help', 'image', 'login', 'logout', 'model', 'reload',
-  'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset',
+  'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings',
   // `/statusline` is the approved alias of `/footer` (same configurator,
   // other-agent muscle memory) — it rides the same ownership sets, so it
   // executes locally, never steers, and works before any session exists.

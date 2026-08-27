@@ -50,16 +50,31 @@ function printableChunk(data: string): string | undefined {
 function statusMarkers(row: KeybindingEditorRow): string {
   const markers: string[] = []
   if (row.customized) markers.push('*')
+  if (row.status === 'safe-mode') markers.push('safe mode')
+  if (row.status === 'unbound') markers.push('unbound')
   if (row.conflict) markers.push('!')
   if (row.fixed) markers.push('fixed')
   if (row.reserved) markers.push('reserved')
   return markers.length === 0 ? '' : ` [${markers.join(', ')}]`
 }
 
+function rowBindingText(row: KeybindingEditorRow): string {
+  const ordinary = row.effective.filter(binding => !row.conditional.some(candidate =>
+    candidate.kind === binding.kind && candidate.key === binding.key))
+  const parts: string[] = []
+  if (ordinary.length > 0) parts.push(formatEditorBindings(ordinary))
+  if (row.conditional.length > 0) {
+    parts.push(row.conditional
+      .map(binding => `${formatKeyId(binding.key)} (conditional)`)
+      .join(' / '))
+  }
+  return parts.join(' / ') || 'Unbound'
+}
+
 function renderActionRow(row: KeybindingEditorRow, selected: boolean, width: number): string {
   const marker = selected ? color.primary('›') : ' '
   const labelText = `${row.label}${statusMarkers(row)}`
-  const valueText = row.disabled ? 'Disabled' : formatEditorBindings(row.effective)
+  const valueText = row.disabled ? 'Disabled' : rowBindingText(row)
   const available = Math.max(1, width - 2)
   const leftWidth = Math.min(available, Math.max(18, Math.floor(available * 0.57)))
   const left = truncateToWidth(labelText, leftWidth)
@@ -119,6 +134,12 @@ export class KeybindingEditorPanel implements Component {
 
     const lines: string[] = [
       color.textStrong('Keyboard shortcuts'),
+      ...(this.model.leader.safeMode
+        ? [
+          color.warning('Safe mode is active. Custom shortcuts are ignored.'),
+          color.textDim('Editing is disabled until safe mode is turned off.'),
+        ]
+        : []),
       color.textDim(`Search actions, descriptions, IDs, categories, or keys · ${this.model.summary}`),
       `${color.text('Search: ')}${this.query === '' ? color.textDim('type to filter') : color.text(this.query)}`,
       '',

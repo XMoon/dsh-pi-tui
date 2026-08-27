@@ -397,6 +397,12 @@ export class HostKeybindingManager {
     return this.keymap.keysFor(action)
   }
 
+  /** The visible context-gated composition keys of one action, kept
+   * separate by the editor from ordinary direct bindings. */
+  conditionalKeysFor(action: AppKeybindingId): KeyId[] {
+    return this.keymap.conditionalKeysFor(action)
+  }
+
   /** Whether one raw input resolves to a HOST-owned action (PLUGIN rules
    * excluded — a plugin binding is not a Host action and must reach the
    * plugin dispatch stage; PR review finding). */

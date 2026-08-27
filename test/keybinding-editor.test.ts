@@ -65,6 +65,76 @@ test('action details label an unbound configurable action distinctly', () => {
   }
 })
 
+test('untouched defaults are selectable and recorder replacement names the default', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  const mutations: Array<{ kind: string; previous?: { key: string } }> = []
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: mutation => { mutations.push(mutation as unknown as { kind: string; previous?: { key: string } }) },
+    onModelChange: () => {},
+    onBack: () => {},
+  })
+  try {
+    assert.match(plain(editor.render(88).join('\n')), /Ctrl\+T \(default\)/)
+    editor.handleInput('\r')
+    editor.handleInput('\x1b[121;5u')
+    assert.deepEqual(mutations, [{
+      kind: 'replace',
+      action: 'app.todo.toggle',
+      previous: { kind: 'direct', key: 'ctrl+t' },
+      binding: { kind: 'direct', key: 'ctrl+y' },
+    }])
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('short action details keep the selected binding in the viewport', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.transcript.search')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 8,
+  })
+  try {
+    const view = plain(editor.render(88).join('\n'))
+    assert.match(view, /› Ctrl\+F \(default\)/)
+    assert.match(view, /Esc: back/)
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('conditional task affordances are labeled separately from configured shortcuts', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.handleInput('tasks')
+    assert.match(plain(panel.render(88).join('\n')), /Down \(conditional\)/)
+    panel.handleInput('\r')
+    const detail = plain(panel.render(88).join('\n'))
+    assert.match(detail, /Conditional shortcuts/)
+    assert.match(detail, /Down \(when the editor is empty and tasks are active\)/)
+    assert.doesNotMatch(detail, /Shortcuts\n  Unbound/)
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
 test('editor search is cleared by the first Escape and closes on the second', () => {
   let closed = 0
   const { manager, panel } = makePanel(() => { closed += 1 })
@@ -88,6 +158,7 @@ test('binding choice arrows move in their named direction', () => {
   try {
     panel.handleInput('\x1b[B')
     panel.handleInput('\r')
+    panel.handleInput('\x1b[B')
     panel.handleInput('\r')
     let view = plain(panel.render(88).join('\n'))
     assert.match(view, /› Direct shortcut/)
@@ -161,6 +232,7 @@ test('a late action recorder cancel after disposal cannot repaint the panel', ()
     requestRender: () => { renders += 1 },
   })
   try {
+    editor.handleInput('\x1b[B')
     editor.handleInput('\r')
     editor.handleInput('\r')
     const recorder = (editor as unknown as {
@@ -254,6 +326,36 @@ test('safe mode presents an ignored leader and never starts its recorder', () =>
     assert.doesNotMatch(plain(panel.render(88).join('\n')), /record a new leader key/)
   } finally {
     panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('safe mode makes action details read-only', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+y' })
+  manager.setSafeMode(true)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  const mutations: string[] = []
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: mutation => { mutations.push(mutation.kind) },
+    onModelChange: () => {},
+    onBack: () => {},
+  })
+  try {
+    const view = plain(editor.render(88).join('\n'))
+    assert.match(view, /Editing is disabled until safe mode is turned off/)
+    assert.doesNotMatch(view, /Add shortcut/)
+    editor.handleInput('a')
+    editor.handleInput('r')
+    editor.handleInput('d')
+    editor.handleInput('\x1b[3~')
+    assert.deepEqual(mutations, [])
+  } finally {
+    editor.dispose()
     manager.dispose()
   }
 })

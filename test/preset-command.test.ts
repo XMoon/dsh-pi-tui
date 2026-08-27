@@ -290,6 +290,33 @@ test('/preset is in the sessionless dispatch gate', () => {
   assert.ok(SESSIONLESS_COMMANDS.has('preset'), 'SESSIONLESS_COMMANDS must keep /preset sessionless')
 })
 
+test('/keybindings opens sessionless without creating a session', async () => {
+  const tuiSettings: TuiSettingsLike = {
+    get: () => ({
+      theme: 'auto',
+      footer: 'full',
+      fullscreen: 'off',
+      busyEnter: 'queue',
+      localShellSandbox: 'bypass',
+      homeEndKeys: 'viewport',
+      focusMode: 'off',
+      iconStyle: 'emoji',
+      keybindings: undefined,
+    }),
+    replace: async () => {},
+  }
+  const t = setup({ tuiSettings })
+  try {
+    const result = await t.runCommand('keybindings')
+    assert.deepEqual(result, { kind: 'success' })
+    assert.deepEqual(t.ensureCalls, [], '/keybindings must not create a session')
+    const view = await t.view()
+    assert.match(view, /Keyboard shortcuts/)
+  } finally {
+    t.app.stop()
+  }
+})
+
 test('/preset with no session opens the English roster and creates nothing', async () => {
   const t = setup({})
   const result = await t.run('')
@@ -736,9 +763,9 @@ test('/keybindings reload queues behind an editor write and applies the latest d
     assert.equal(writes, 1)
     assert.deepEqual(settingsDoc.keybindings, {
       'app.input.steer': 'ctrl+x',
-      'app.todo.toggle': 'ctrl+y',
+      'app.todo.toggle': ['ctrl+t', 'ctrl+y'],
     })
-    assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+y'])
+    assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+t', 'ctrl+y'])
   } finally {
     releaseFirst()
     t.app.stop()

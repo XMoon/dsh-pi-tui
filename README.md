@@ -327,7 +327,12 @@ dsh-pi-tui:
   `app.todo.toggle: <leader>t` 让 Leader T 成为唯一切换触发(Ctrl+T
   失效);`['ctrl+z', '<leader>s']` 同时保留两个用户触发;`false`
   移除该 action 的全部触发。
-- `DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有用户覆盖(仅使用内置默认)。
+- `DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有用户覆盖(仅使用内置默认)。Safe mode
+  开启时整个 `/keybindings` 编辑器只读,避免保存只会在关闭 safe mode 后才发现的
+  冲突配置。
+- 编辑器中未自定义 action 的默认按键也可选择。`Add shortcut` 会把当前显示的
+  全部默认键与新键一起写入;替换或删除单个默认键会保留其余默认键。action 已有
+  用户声明后,仍按上文规则替换内置按键集合。
 - `/help` 仍是按键优先的只读帮助;`/keybindings` 是按 action 优先的
   可编辑 Keyboard Shortcuts Editor:按类别分组,搜索 action ID/描述/当前键和
   默认键,并标记 customized、conflict、Unbound、Disabled 和 fixed 状态。
@@ -335,7 +340,10 @@ dsh-pi-tui:
 - `/settings` 只有一个 `Keyboard shortcuts` 入口,打开与 `/keybindings` 相同的
   编辑器和持久化控制器。
 - 录制器读取真实终端按键,通过 `parseKey` 规范化为 `KeyId`;保存前会拒绝
-  无法匹配、吞输入、终端歧义或已知冲突的按键。
+  无法匹配、吞输入、终端歧义或已知冲突的按键。裸 `Esc` 会取消录制;
+  direct 录制时按 `e` 可显式绑定合法的 Escape 键。
+- 条件 affordance 会在编辑器中单独标注(例如空编辑器任务浏览器的
+  `Down (conditional)`),不会伪装成普通已配置快捷键。
 - `/keybindings conflicts` 列出冲突(同键 + 作用域重叠 + 同优先级——绝不
   静默 last-write-wins);`/keybindings reload` 重新读取设置(fail-soft:坏配置会
   被诊断并跳过,读取异常才会给出错误提示——都不会崩溃,keymap 保留

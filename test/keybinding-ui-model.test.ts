@@ -25,6 +25,8 @@ test('editor model preserves defaults and exposes real category sections', () =>
     const unbound = model.rows.find(row => row.id === 'app.tasks.open')!
     assert.deepEqual(unbound.defaults, [])
     assert.deepEqual(unbound.effective, [{ kind: 'direct', key: 'down' }])
+    assert.deepEqual(unbound.conditional, [{ kind: 'direct', key: 'down' }])
+    assert.equal(unbound.conditionalDescription, 'when the editor is empty and tasks are active')
     assert.equal(unbound.status, 'unbound')
     const trulyUnbound = model.rows.find(row => row.id === 'app.transcript.toggleFullscreen')!
     assert.deepEqual(trulyUnbound.effective, [])
@@ -34,6 +36,23 @@ test('editor model preserves defaults and exposes real category sections', () =>
     ])
     assert.ok(model.sections.every(section => section.rows.length > 0))
     assert.equal(model.leader.key, undefined)
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('safe mode marks persisted action overrides as ignored defaults', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+y' })
+  manager.setSafeMode(true)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  try {
+    const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+    assert.equal(row.safeMode, true)
+    assert.equal(row.status, 'safe-mode')
+    assert.equal(row.customized, true)
+    assert.deepEqual(row.effective, [{ kind: 'direct', key: 'ctrl+t' }])
   } finally {
     manager.dispose()
   }

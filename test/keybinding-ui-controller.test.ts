@@ -75,8 +75,88 @@ test('mutation performs one get, one replace, preserves unrelated fields, then p
     assert.equal((fixture.latest() as unknown as Record<string, unknown>).unrelated, 'preserved')
     assert.deepEqual((fixture.latest() as TuiSettingsDoc).footerCommand, { command: 'printf status', intervalMs: 1000 })
     assert.equal((fixture.latest() as TuiSettingsDoc).keybindings && typeof (fixture.latest() as TuiSettingsDoc).keybindings, 'object')
-    assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+y'])
-    assert.equal(result.kind === 'applied' ? result.model.rows.find(row => row.id === 'app.todo.toggle')!.effective[0]!.key : '', 'ctrl+y')
+    assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+t', 'ctrl+y'])
+    assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
+      'app.todo.toggle': ['ctrl+t', 'ctrl+y'],
+    })
+    assert.equal(result.kind === 'applied' ? result.model.rows.find(row => row.id === 'app.todo.toggle')!.effective[0]!.key : '', 'ctrl+t')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('adding to an untouched action retains every builtin shortcut', async () => {
+  const fixture = settingsFixture(undefined)
+  const { controller, manager } = controllerFor(fixture)
+  try {
+    const result = await controller.mutate({
+      kind: 'add',
+      action: 'app.transcript.search',
+      binding: { kind: 'direct', key: 'ctrl+y' },
+    })
+    assert.equal(result.kind, 'applied')
+    assert.deepEqual(manager.keysFor('app.transcript.search'), ['ctrl+f', 'ctrl+shift+f', 'ctrl+y'])
+    assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
+      'app.transcript.search': ['ctrl+f', 'ctrl+shift+f', 'ctrl+y'],
+    })
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('replacing one untouched builtin shortcut preserves its siblings', async () => {
+  const fixture = settingsFixture(undefined)
+  const { controller, manager } = controllerFor(fixture)
+  try {
+    const result = await controller.mutate({
+      kind: 'replace',
+      action: 'app.transcript.search',
+      previous: { kind: 'direct', key: 'ctrl+f' },
+      binding: { kind: 'direct', key: 'ctrl+y' },
+    })
+    assert.equal(result.kind, 'applied')
+    assert.deepEqual(manager.keysFor('app.transcript.search'), ['ctrl+shift+f', 'ctrl+y'])
+    assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
+      'app.transcript.search': ['ctrl+shift+f', 'ctrl+y'],
+    })
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('removing one untouched builtin shortcut preserves its siblings', async () => {
+  const fixture = settingsFixture(undefined)
+  const { controller, manager } = controllerFor(fixture)
+  try {
+    const result = await controller.mutate({
+      kind: 'remove',
+      action: 'app.transcript.search',
+      binding: { kind: 'direct', key: 'ctrl+f' },
+    })
+    assert.equal(result.kind, 'applied')
+    assert.deepEqual(manager.keysFor('app.transcript.search'), ['ctrl+shift+f'])
+    assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
+      'app.transcript.search': 'ctrl+shift+f',
+    })
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('safe mode rejects action mutations before they reach persistence', async () => {
+  const fixture = settingsFixture({ 'app.todo.toggle': 'ctrl+y' })
+  const { controller, manager } = controllerFor(fixture)
+  manager.setSafeMode(true)
+  try {
+    const result = await controller.mutate({
+      kind: 'add',
+      action: 'app.todo.toggle',
+      binding: { kind: 'direct', key: 'ctrl+z' },
+    })
+    assert.equal(result.kind, 'rejected')
+    assert.match(result.message, /safe mode/i)
+    assert.equal(fixture.replaceCount(), 0)
+    assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+t'])
   } finally {
     manager.dispose()
   }
@@ -170,8 +250,8 @@ test('shared settings mutations serialize and preserve both concurrent edits', a
     assert.equal(gets, 2)
     assert.equal(replaces, 2)
     assert.deepEqual(doc.keybindings, {
-      'app.todo.toggle': 'ctrl+y',
-      'app.input.steer': 'ctrl+z',
+      'app.todo.toggle': ['ctrl+t', 'ctrl+y'],
+      'app.input.steer': ['ctrl+s', 'ctrl+z'],
     })
   } finally {
     manager1.dispose()
@@ -224,7 +304,7 @@ test('the shared queue also preserves an unrelated whole-document settings write
     const [keybindingResult] = await Promise.all([keybindingWrite, unrelatedWrite])
     assert.equal(keybindingResult.kind, 'applied')
     assert.equal(doc.theme, 'dark')
-    assert.deepEqual(doc.keybindings, { 'app.todo.toggle': 'ctrl+y' })
+    assert.deepEqual(doc.keybindings, { 'app.todo.toggle': ['ctrl+t', 'ctrl+y'] })
     assert.equal(replaces, 2)
   } finally {
     manager.dispose()
@@ -246,7 +326,7 @@ test('leader setup and completion use the same persisted candidate', async () =>
     assert.deepEqual(manager.leaderKeysFor('app.todo.toggle'), ['t'])
     assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
       leader: 'ctrl+q',
-      'app.todo.toggle': '<leader>t',
+      'app.todo.toggle': ['ctrl+t', '<leader>t'],
     })
   } finally {
     manager.dispose()
