@@ -61,30 +61,27 @@ export function themeDisplayName(value: string | undefined, themes: ThemeRegistr
  * the outer onChange with the source-qualified VALUE. Esc calls `done()`
  * with no selection (the outer row is untouched).
  *
- * `currentValue` is the outer row's CURRENT display name AT OPEN TIME
- * (the fork passes the live item.currentValue — after a previous pick in
- * the same panel session it is the NEW selection, so `← current` follows
- * the latest choice, never the value captured when the panel opened — the
- * review's P3).
+ * `currentSelection` is the CURRENT SELECTION's SOURCE-QUALIFIED IDENTITY
+ * (the /settings handler's synchronous `lastThemeChoice` — normalized
+ * here). The `← current` marker compares ROW VALUES, never display
+ * labels: theme sources are dynamic, so a same-labeled row from a
+ * DIFFERENT source (a file `Solarized.json` created while a plugin theme
+ * `Solarized` is selected) must never steal the marker — the review's
+ * P3. The outer row's display string is presentational only and is never
+ * consulted for identity.
  */
 export class ThemeSubmenu {
   private readonly inner: SettingsList
 
   constructor(
-    currentDisplay: string,
+    currentSelection: string,
     themes: ThemeRegistry | undefined,
     done: (selectableValue?: string) => void,
   ) {
     const rows = themePickerRows(themes)
-    // The fork passes the outer row's LIVE `item.currentValue` — which,
-    // per the vendored SettingsList submenu contract, is the RAW
-    // SOURCE-QUALIFIED value of the last pick (`file:X`,
-    // `plugin:owner/id`) until the /settings handler rewrites it back to
-    // the friendly label. `themeDisplayName` resolves EITHER form to the
-    // row's friendly label, so `← current` matches the right row whether
-    // the outer row shows the friendly name (a fresh open) or the raw
-    // identity (mid-panel after a pick — the review's P2).
-    const currentLabel = themeDisplayName(currentDisplay, themes)
+    // The caller passes the selection's IDENTITY; normalize defensively
+    // (a legacy `custom:X` outer doc value still marks the `file:X` row).
+    const current = normalizePersistedTheme(currentSelection)
     const close = (selected?: string): void => {
       done(selected)
     }
@@ -98,7 +95,10 @@ export class ThemeSubmenu {
           : row.value.startsWith('file:')
             ? 'Custom theme file'
             : 'Built-in palette',
-        currentValue: row.displayName === currentLabel ? '← current' : '',
+        // The marker is a VALUE comparison against the live selection
+        // identity — never a display-label comparison (a same-labeled row
+        // from another source cannot steal it).
+        currentValue: row.value === current ? '← current' : '',
         values: ['✓'],
       })),
       Math.min(8, Math.max(3, rows.length)),

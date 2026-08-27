@@ -132,34 +132,62 @@ test('ThemeSubmenu row ids ARE the source-qualified values and labels are unique
   assert.equal(doneValue, 'unset', 'construction must not settle anything')
 })
 
-test('the submenu marks "← current" on the row matching the CURRENT display (the review\'s P3: a re-open after a pick follows the new selection)', () => {
+test('the submenu marks "← current" by the SELECTION IDENTITY, never a display label (the review\'s P3: a re-open after a pick follows the new selection)', () => {
   const registry = new ThemeRegistry()
   const rows = themePickerRows(registry)
-  // The fork's submenu contract: the outer row's LIVE currentValue (the
-  // NEW selection after a previous pick — the fork sets
-  // `item.currentValue = selectedValue` BEFORE the outer onChange) is
-  // passed as `currentDisplay` on every open. The submenu marks exactly
-  // the row whose LABEL equals it.
-  const rendered = (currentDisplay: string): string =>
-    new ThemeSubmenu(currentDisplay, registry, () => {}).render(80).join('\n')
+  // The /settings handler passes its synchronous `lastThemeChoice`
+  // IDENTITY (source-qualified) on every open; the marker compares ROW
+  // VALUES against it.
+  const rendered = (currentSelection: string): string =>
+    new ThemeSubmenu(currentSelection, registry, () => {}).render(80).join('\n')
   const openAtAuto = rendered('auto')
   assert.ok(openAtAuto.includes('auto') && openAtAuto.includes('← current'),
-    'opening with "auto" marks the auto row')
-  // After picking `file:…` the outer row shows the friendly label of the
-  // picked value — reopening with it marks THAT row (not the stale panel-
-  // open value).
-  const file = join(customThemesDir(), `${randomUUID()}.json`)
+    'opening with the auto identity marks the auto row')
+  // After picking `file:…` the committed identity is the source-qualified
+  // value — reopening with it marks THAT row (not the stale panel-open
+  // value).
   const name = `current-${randomUUID()}`
   const filePath = join(customThemesDir(), `${name}.json`)
   mkdirSync(customThemesDir(), { recursive: true })
   writeFileSync(filePath, JSON.stringify({ name, colors: { primary: '#aabbcc' } }))
   try {
-    const openAtFile = rendered(name)
-    // Exactly ONE row carries the marker, and it is the file row's label
-    // (the file label is unique here — no collision).
+    const openAtFile = rendered(`file:${name}`)
+    // Exactly ONE row carries the marker, and it is the file row.
     const marked = themePickerRows(registry).filter(row => openAtFile.includes(`${row.displayName}  ← current`) || openAtFile.split('\n').some(line => line.includes('← current') && line.includes(row.displayName)))
     assert.equal(marked.length, 1, `exactly one row must be marked: ${JSON.stringify(themePickerRows(registry))}`)
     assert.ok(marked[0]?.value === `file:${name}`, `the marked row is the picked file: ${marked[0]?.value}`)
+  } finally {
+    rmSync(filePath, { force: true })
+  }
+})
+
+test('a same-labeled file created AFTER a plugin selection can never steal the ← current marker (the review\'s P3 identity repro)', () => {
+  // The current selection is plugin:foo/solarized (display `Solarized`).
+  // While the settings panel is open, `Solarized.json` is created: the
+  // next picker run gives the FILE the bare `Solarized` label (files
+  // claim before plugins) and the plugin becomes `Solarized (plugin)`.
+  // The outer row still SHOWS `Solarized` — a display-label comparison
+  // would mark the FILE row; the identity comparison marks the PLUGIN row.
+  const registry = new ThemeRegistry()
+  registry.register({ id: 'solarized', name: 'Solarized', palette: { text: '#123456' } as never }, 'foo-owner', 'foo')
+  const current = 'plugin:foo/solarized'
+  const filePath = join(customThemesDir(), 'Solarized.json')
+  mkdirSync(customThemesDir(), { recursive: true })
+  writeFileSync(filePath, JSON.stringify({ name: 'Solarized', colors: { primary: '#010203' } }))
+  try {
+    const rendered = new ThemeSubmenu(current, registry, () => {}).render(80).join('\n')
+    const markedLines = rendered.split('\n').filter(line => line.includes('← current'))
+    assert.equal(markedLines.length, 1, `exactly one row must be marked:\n${rendered}`)
+    // The marked line is the PLUGIN row's tagged label (`Solarized
+    // (plugin)`), never the bare-label FILE row.
+    assert.ok(markedLines[0]?.includes('Solarized (plugin)'), `the PLUGIN row carries the marker (identity, not label):\n${rendered}`)
+    const fileLine = rendered.split('\n').find(line => line.includes('Solarized') && !line.includes('← current') && !line.includes('(plugin)'))
+    assert.ok(fileLine !== undefined && !fileLine.includes('← current'),
+      `the same-labeled file row is NOT marked:\n${fileLine ?? ''}`)
+    // The file row exists with the stolen bare label — and is NOT marked.
+    const fileRow = themePickerRows(registry).find(row => row.value === 'file:Solarized')
+    assert.ok(fileRow !== undefined && fileRow.displayName === 'Solarized',
+      'the file claimed the bare label (declaration order)')
   } finally {
     rmSync(filePath, { force: true })
   }
@@ -217,19 +245,22 @@ test('INTEGRATION: the vendored SettingsList submenu chain keeps the outer row F
   // 2. the /settings handler (commands.ts) applies the value AND calls
   //    revert(friendlyLabel) — the openSettings updateValue seam — so the
   //    outer row displays the friendly name, never `plugin:acme/solarized`.
-  // 3. reopening the submenu passes the LIVE outer currentValue (now the
-  //    friendly label) → the correct row carries `← current`.
+  // 3. reopening the submenu passes the handler's COMMITTED identity →
+  //    the correct row carries `← current`.
   const registry = new ThemeRegistry()
   pluginTheme(registry, 'solarized', 'Solarized')
   pluginTheme(registry, 'nord', 'Nord')
 
   // The outer row as the /settings handler builds it (commands.ts shape):
-  // currentValue holds the FRIENDLY label; submenu is the ThemeSubmenu.
+  // currentValue holds the FRIENDLY label; the submenu receives the
+  // handler's synchronous lastThemeChoice IDENTITY (never the fork's
+  // display string).
+  let lastThemeChoice = 'auto'
   const outerItems: SettingItem[] = [{
     id: 'theme',
     label: 'Theme',
     currentValue: 'auto',
-    submenu: (currentValue, done) => new ThemeSubmenu(currentValue, registry, (picked) => {
+    submenu: (_currentValue, done) => new ThemeSubmenu(lastThemeChoice, registry, (picked) => {
       if (picked !== undefined) done(picked)
       else done()
     }),
@@ -237,7 +268,8 @@ test('INTEGRATION: the vendored SettingsList submenu chain keeps the outer row F
 
   // A faithful miniature of TuiApp.openSettings: the fork ALREADY mutated
   // the row's currentValue to the raw selected value before onChange; the
-  // revert callback rewrites the DISPLAYED value (updateValue).
+  // handler applies the identity (persist), commits the choice, and
+  // rewrites the DISPLAYED value (updateValue).
   const applied: string[] = []
   let settledValue: string | undefined
   let list: SettingsList | undefined
@@ -249,10 +281,12 @@ test('INTEGRATION: the vendored SettingsList submenu chain keeps the outer row F
       // The fork has written the RAW identity into the row.
       assert.equal(outerItems[0]?.currentValue, value,
         'the fork contract: item.currentValue = raw selected value BEFORE onChange')
-      // The /settings handler's behavior: apply the identity (persist),
-      // then rewrite the display back to the friendly label.
+      // The /settings handler's transactional behavior: apply the identity,
+      // commit the choice (the submenu's next open reads it), rewrite the
+      // display back to the friendly label.
       applied.push(value)
       settledValue = value
+      lastThemeChoice = value
       const friendly = themeDisplayName(value, registry)
       list?.updateValue('theme', friendly)
     },
@@ -327,4 +361,94 @@ test('the claim algorithm disambiguates a GENERATED suffix against a same-source
   } finally {
     rmSync(filePath, { force: true })
   }
+})
+
+test('INTEGRATION: a STALE pick (the contribution unloads between open and confirm) rolls the outer row AND the choice back (the review\'s P2 failure path)', () => {
+  // Reviewer's HMR repro, driven through the REAL fork SettingsList:
+  // 1. current theme = `auto`; the Theme submenu opens while plugin A's
+  //    `Solarized` row is in the snapshot.
+  // 2. plugin A HMR-unloads; the user confirms the STALE row anyway → the
+  //    submenu returns the FROZEN value `plugin:owner-a/solarized`.
+  // 3. the fork has ALREADY written that raw value into the outer row
+  //    (its done contract) BEFORE the /settings handler runs.
+  // 4. the handler resolves nothing → notify + ROLLBACK: the outer row
+  //    goes back to the PREVIOUS choice's friendly display and
+  //    `lastThemeChoice` stays the previous choice — a failed pick can
+  //    never fake a current selection nor steal an in-flight `auto`
+  //    detection (the guard reads lastThemeChoice).
+  const registry = new ThemeRegistry()
+  const handleA = registry.register({
+    id: 'solarized',
+    name: 'Solarized',
+    palette: { text: '#123456' } as never,
+  }, 'owner-a-owner', 'owner-a')
+
+  let lastThemeChoice = 'auto'
+  const notified: string[] = []
+  const outerItems: SettingItem[] = [{
+    id: 'theme',
+    label: 'Theme',
+    currentValue: 'auto',
+    submenu: (_currentValue, done) => new ThemeSubmenu(lastThemeChoice, registry, (picked) => {
+      if (picked !== undefined) done(picked)
+      else done()
+    }),
+  }]
+  const applied: string[] = []
+  let list: SettingsList | undefined
+  list = new SettingsList(
+    outerItems,
+    6,
+    settingsListTheme(),
+    (_id, value) => {
+      applied.push(value)
+      // The /settings handler's transactional miniature: a stale value
+      // resolves NOTHING → notify + rollback (previousChoice display;
+      // lastThemeChoice untouched). No commit, no updateValue to the
+      // picked label.
+      const selection = registry.paletteForSelectable(value)
+      if (selection === undefined) {
+        notified.push(`theme ${value} not found`)
+        list?.updateValue('theme', themeDisplayName(lastThemeChoice, registry))
+        return
+      }
+      lastThemeChoice = value
+      list?.updateValue('theme', themeDisplayName(value, registry))
+    },
+    () => {},
+    { enableSearch: true },
+  )
+  const outer = (): string => list!.render(80).join('\n')
+
+  // Open the submenu while A is live; capture the row's frozen identity.
+  list!.handleInput('\r')
+  const rowsAtOpen = themePickerRows(registry)
+  const rowA = rowsAtOpen.find(row => row.value === 'plugin:owner-a/solarized')
+  assert.ok(rowA !== undefined)
+  // HMR unload AFTER the submenu snapshot: A is gone, but the submenu's
+  // frozen row id survives (rows were built at open time).
+  handleA.dispose()
+  assert.equal(registry.paletteForSelectable(rowA.value), undefined,
+    'the source is gone at confirm time (the stale window)')
+  // Confirm the stale row (auto, dark, light, then plugin rows sorted:
+  // Nord is not registered here — the only plugin row is Solarized).
+  list!.handleInput('\x1b[B')
+  list!.handleInput('\x1b[B')
+  list!.handleInput('\x1b[B')
+  list!.handleInput('\r')
+  // The handler received the FROZEN identity and rejected it.
+  assert.deepEqual(applied, ['plugin:owner-a/solarized'])
+  assert.deepEqual(notified, ['theme plugin:owner-a/solarized not found'])
+  // The outer row rolled back to the PREVIOUS choice's display — never
+  // the stale raw identity.
+  const afterRollback = outer()
+  assert.ok(afterRollback.includes('auto'), `the row shows the previous choice's label:\n${afterRollback}`)
+  assert.ok(!afterRollback.includes('plugin:owner-a/solarized'), `the row must not show the stale identity:\n${afterRollback}`)
+  // The committed choice is UNCHANGED: a re-open marks `auto` `← current`
+  // (and the in-flight auto detection's guard still reads `auto`).
+  assert.equal(lastThemeChoice, 'auto', 'a failed pick must not move the choice')
+  list!.handleInput('\r') // reopen the submenu
+  const reopened = list!.render(80).join('\n')
+  const autoMarked = reopened.split('\n').filter(line => line.includes('auto') && line.includes('← current'))
+  assert.equal(autoMarked.length, 1, `the auto row carries the marker after the rollback:\n${reopened}`)
 })
