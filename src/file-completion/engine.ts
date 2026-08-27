@@ -46,7 +46,7 @@ export function reattachDisplayBase(candidate: PathCandidate, query: PathComplet
 export function presentDiscovery(
   candidates: readonly PathCandidate[],
   term: string,
-  context: { at: boolean; quoted: boolean },
+  context: { at: boolean; quoted: boolean; sep?: string },
 ): AutocompleteItem[] {
   const lowerQuery = term.toLowerCase()
   return candidates
@@ -100,7 +100,7 @@ export async function completePath(
   const items = presentDiscovery(
     candidates.map(candidate => reattachDisplayBase(candidate, query)),
     query.searchTerm,
-    context,
+    { ...context, sep: query.winAbsolute ? '\\' : '/' },
   )
   return items.length === 0 ? null : items
 }

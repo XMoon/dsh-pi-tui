@@ -30,15 +30,18 @@ export function displayPathOf(candidate: PathCandidate, query: PathCompletionQue
 }
 
 /** Present one FINAL-display-path candidate as a completion item:
- * directories keep the trailing `/` (so accept continues), values with
- * spaces are quoted — with the `@"..."` form when the user typed a
- * quoted `@` prefix. PURE client policy. */
+ * directories keep the trailing separator OF THE USER'S OWN DIALECT (`/`
+ * on POSIX, `\` for a Windows-dialect token — so `C:\Users\foo\` stays
+ * dialect-consistent and the next Tab continues in the same dialect), so
+ * accept continues; values with spaces are quoted — with the `@"..."`
+ * form when the user typed a quoted `@` prefix. PURE client policy. */
 export function presentPathCandidate(
   candidate: PathCandidate,
-  context: { at: boolean; quoted: boolean },
+  context: { at: boolean; quoted: boolean; sep?: string },
 ): AutocompleteItem {
+  const sep = context.sep ?? '/'
   const displayPath = candidate.path
-  const pathValue = candidate.kind === 'directory' ? `${displayPath}/` : displayPath
+  const pathValue = candidate.kind === 'directory' ? `${displayPath}${sep}` : displayPath
   const needsQuotes = context.quoted || pathValue.includes(' ')
   const value = needsQuotes
     ? `${context.at ? '@"' : '"'}${pathValue}"`

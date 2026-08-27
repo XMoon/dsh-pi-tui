@@ -21,7 +21,6 @@
  * @module @xmoon76/dsh-pi-tui/mentions
  */
 
-import { readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import {
@@ -39,6 +38,7 @@ import {
   FILE_ARGUMENT_COMMANDS,
 } from './file-completion/context.ts'
 import { completePath, presentDiscovery, reattachDisplayBase, resolveQuery } from './file-completion/engine.ts'
+import { listDirectChildren } from './file-completion/discovery.ts'
 import { LocalFileSource } from './file-completion/local-file-source.ts'
 import { resolveFdPath } from './file-completion/discovery.ts'
 import type { PathCandidate } from './file-completion/types.ts'
@@ -398,7 +398,7 @@ export class MentionProvider implements AutocompleteProvider {
     const items = presentDiscovery(
       candidates.map(candidate => ({ path: candidate.path, kind: candidate.kind })),
       query.searchTerm,
-      { at: true, quoted },
+      { at: true, quoted, sep: query.winAbsolute ? '\\' : '/' },
     )
     if (items.length === 0) return null
     return { prefix: atPrefix, items }
@@ -420,14 +420,23 @@ export class MentionProvider implements AutocompleteProvider {
   /** Complete one `/image` argument through the shared engine + the
    * Client-local source (NEVER HostFilePort). An EMPTY argument lists the
    * cwd (Tab on `/image ` — the directory-listing semantics the engine
-   * owns); an argument with embedded spaces cannot complete (the fork's
-   * apply replaces the whole argument range, so a later word would clobber
-   * the earlier ones). */
+   * owns). A QUOTED argument (`/image "my fi`) completes inside the
+   * quotes — the shared quoting contract (plan §2.2) — and the completed
+   * value keeps the closing quote. An unquoted argument with embedded
+   * spaces cannot complete (the fork's apply replaces the whole argument
+   * range, so a later word would clobber the earlier ones). */
   private async completeImageArgument(argument: string, signal: AbortSignal): Promise<AutocompleteSuggestions | null> {
     const leading = argument.match(/^[ \t]+/)?.[0] ?? ''
-    const token = argument.slice(leading.length)
+    let token = argument.slice(leading.length)
+    let quoted = false
+    if (token.startsWith('"')) {
+      quoted = true
+      token = token.startsWith('"') ? token.slice(1) : token
+      const close = token.indexOf('"')
+      if (close !== -1) token = token.slice(0, close)
+    }
     if (token.includes(' ') || token.includes('\t')) return null
-    const items = await completePath(token, this.workDir, this.localSource, signal, { at: false, quoted: false })
+    const items = await completePath(token, this.workDir, this.localSource, signal, { at: false, quoted })
     if (items === null) return null
     return { prefix: argument, items: items.map(item => ({ ...item, value: `${leading}${item.value}` })) }
   }
@@ -540,19 +549,21 @@ function stripMentionToken(atPrefix: string): { raw: string; quoted: boolean } {
 }
 
 /**
- * Slash-command PATH-argument completion (`/image <path>`): the
- * COMPATIBILITY wrapper of the shared engine over the `/image` context —
- * query parsing, fuzzy ranking (basename substring), directory
- * continuation, quoting and the Windows `\` dialect are ONE implementation
- * with `@` (plan §6.3/§20), only the source differs (Client-local fs).
- *
- * PURE-SYNC shape: this function stays SYNCHRONOUS (the fork's
- * `getArgumentCompletions` contract is sync `AutocompleteItem[] | null`),
- * so it answers DIRECTORY-LOCAL discovery only — a scoped query lists
- * its directory, an unscoped query lists the cwd's direct children with
- * the SHARED ranking. The `fd` whole-tree fuzzy search (async) lives one
- * level up in {@link MentionProvider}; the tests exercise the async engine
- * directly too.
+ * Slash-command PATH-argument completion (`/image <path>`): the SYNC
+ * COMPATIBILITY wrapper over the shared engine's QUERY/RANKING/
+ * PRESENTATION (plan §20 — the same modules behind `@` and the async
+ * `/image` path). The discovery step here is DIRECTORY-LOCAL ONLY, and
+ * deliberately synchronous: the fork's `getArgumentCompletions` contract
+ * is sync `AutocompleteItem[] | null` (the fork calls it per keystroke
+ * and cannot await), and the engine's scoped-listing branch is itself a
+ * bounded `readdirSync` — so this wrapper shares the engine's query,
+ * ranking, quoting, separator dialect and display-base reattachment, and
+ * answers only what its sync shape allows. The fd/fdfind whole-tree fuzzy
+ * search (async, cancellable) is the provider-level `/image` path
+ * ({@link MentionProvider.completeImageArgument} → {@link completePath}),
+ * which the installed completion surface uses; this wrapper is the
+ * migration-era seam the existing tests pin, and it never runs an
+ * unbounded scan.
  *
  * @param argumentText - the text after the command name.
  * @param cwd - the session workspace (resolve relative forms against it).
@@ -568,31 +579,17 @@ export function suggestPathArgument(argumentText: string, cwd: string): Autocomp
   const items = presentDiscovery(
     entries.map(entry => reattachDisplayBase(entry, query)),
     query.searchTerm,
-    { at: false, quoted: false },
+    { at: false, quoted: false, sep: query.winAbsolute ? '\\' : '/' },
   )
   return items.length === 0 ? null : items.map(item => ({ ...item, value: `${leading}${item.value}` }))
 }
 
-/** The DIRECT children of one directory (the sync local source): paths
- * bare. A missing/unreadable directory yields [] (never a crash). */
+/** The DIRECT children of one directory through the engine's own listing
+ * (a scoped query's search base is its directory — the same bounded
+ * readdir the async engine uses; a missing/unreadable directory yields []
+ * (never a crash). Symlinks to directories complete with `/` (the engine's
+ * entryIsDirectory rule). */
 function localChildrenOf(query: import('./file-completion/types.ts').PathCompletionQuery): PathCandidate[] {
-  let entries
-  try {
-    entries = readdirSync(query.searchBase, { withFileTypes: true })
-  } catch {
-    return []
-  }
-  const out: PathCandidate[] = []
-  for (const entry of entries) {
-    let isDirectory = entry.isDirectory()
-    if (!isDirectory && entry.isSymbolicLink()) {
-      try {
-        isDirectory = statSync(join(query.searchBase, entry.name)).isDirectory()
-      } catch {
-        // Broken symlink or permission error — file candidate.
-      }
-    }
-    out.push({ path: entry.name, kind: isDirectory ? 'directory' : 'file' })
-  }
-  return out
+  return listDirectChildren(query.searchBase)
+    .map(entry => ({ path: entry.path, kind: entry.isDirectory ? 'directory' : 'file' }))
 }
