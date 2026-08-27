@@ -1783,6 +1783,9 @@ export class TuiApp {
    * The broker owns the modal-stacking + question-suspension rules; the
    * host keeps the physical screen mounts. */
   private readonly overlayBroker: OverlayBroker
+  /** Client-local editor panels need explicit disposal when the physical
+   * overlay stack is torn down for a screen swap or final surface dispose. */
+  private readonly keybindingEditorPanels = new Set<Component>()
   /** M8: still-owned plugin overlay leases (closed by the final dispose —
    * plan §13.3: leases are generation-scoped). */
   private readonly extensionOverlayLeases = new Set<import('./extension/public-types.ts').TuiOverlayHandle>()
@@ -2539,6 +2542,7 @@ export class TuiApp {
     for (const pending of [...this.approvalQueue]) this.settleApproval(pending, 'cancelled')
     this.approvalQueue.length = 0
     if (this.activeApproval !== undefined) this.settleApproval(this.activeApproval, 'cancelled')
+    this.disposeTrackedKeybindingEditors()
     this.stop()
     this.generation += 1
     this.clearNotify()
@@ -3789,6 +3793,7 @@ export class TuiApp {
     if (enabled === active) return
     const pending = this.activeApproval
     pending?.handle?.hide()
+    this.disposeTrackedKeybindingEditors()
     // overlayHandles holds RAW handles (showOverlayOnHost stores them before
     // wrapping), so this loop calls the pi-tui hide directly: it removes
     // every overlay from the OLD screen's stack. The tracking graph below
@@ -9660,6 +9665,48 @@ export class TuiApp {
     }, { enableSearch: true })
     handle = this.showOverlayOnHost(new Frame(settings, true), { width: 72, maxHeight: 28 })
     return () => handle?.hide()
+  }
+
+  /** Track an action-first editor even when it is nested inside the
+   * SettingsList submenu rather than mounted as a standalone overlay. The
+   * returned unregister callback is idempotent. */
+  trackKeybindingEditor(panel: Component): () => void {
+    this.keybindingEditorPanels.add(panel)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      this.keybindingEditorPanels.delete(panel)
+    }
+  }
+
+  private disposeTrackedKeybindingEditors(): void {
+    const panels = [...this.keybindingEditorPanels]
+    this.keybindingEditorPanels.clear()
+    for (const panel of panels) panel.dispose?.()
+  }
+
+  /** Open the action-first Keyboard Shortcuts Editor in the standard overlay
+   * lifecycle. The panel owns its Esc hierarchy; this method owns the Frame
+   * mount and the final disposal. */
+  openKeybindingEditor(panel: Component): () => void {
+    let handle: OverlayHandle | undefined
+    const unregister = this.trackKeybindingEditor(panel)
+    const close = (): void => {
+      panel.dispose?.()
+      unregister()
+      handle?.hide()
+    }
+    handle = this.showOverlayOnHost(new Frame(panel, true), {
+      width: 88,
+      maxHeight: '100%',
+    })
+    return close
+  }
+
+  /** Content-row budget used by client-local editor overlays. */
+  keybindingEditorMaxRows(): number {
+    return Math.max(1, this.terminal.rows - 4)
   }
 
   /**

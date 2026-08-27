@@ -73,6 +73,30 @@ export interface TuiSettingsDoc {
 export interface TuiSettingsConfig {
   get(): TuiSettingsDoc
   replace(doc: TuiSettingsDoc): unknown
+  /** Optional stable identity when several wrappers share one backend. */
+  readonly mutationQueueKey?: object
+}
+
+/**
+ * Serialize every whole-document TUI-settings transaction in this process.
+ * The port has no compare-and-swap token, so a queue keyed only by one wrapper
+ * object would still allow two adapters around the same backend to lose a
+ * get → modify → replace update. The shared fallback key closes that gap;
+ * future adapters may expose a stable object as `mutationQueueKey` when they
+ * need independent settings stores while preserving the same queue contract.
+ */
+const sharedTuiSettingsMutationKey = {}
+const tuiSettingsMutationQueues = new WeakMap<object, Promise<void>>()
+
+export function serializeTuiSettingsMutation<T>(
+  settings: TuiSettingsConfig,
+  task: () => T | PromiseLike<T>,
+): Promise<T> {
+  const key = settings.mutationQueueKey ?? sharedTuiSettingsMutationKey
+  const previous = tuiSettingsMutationQueues.get(key) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(task)
+  tuiSettingsMutationQueues.set(key, current.then(() => undefined, () => undefined))
+  return current
 }
 
 /** The USER-layer footer-command trust read (M5, plan §17.4): whether the
@@ -95,6 +119,8 @@ export interface FooterCommandTrust {
 export interface TuiSettingsLike {
   get(): TuiSettingsDoc
   replace(doc: TuiSettingsDoc): unknown
+  /** Optional stable identity for shared-backend wrappers. */
+  readonly mutationQueueKey?: object
 }
 
 /** One /login credential target as the CLIENT sees it — a detached DTO

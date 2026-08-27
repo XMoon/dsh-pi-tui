@@ -61,6 +61,12 @@ const EDITOR_PRE_SUBMIT_KEYS = new Set(
   [...EDITOR_OWNED_KEY_IDS].filter(key => !EDITOR_POST_SUBMIT_KEYS.has(key)),
 )
 
+/** Whether the fork editor consumes a key before the submit action can see
+ * it. The interactive editor shares this derived inventory with the parser. */
+export function isEditorSubmitPreSubmitKey(key: KeyId): boolean {
+  return EDITOR_PRE_SUBMIT_KEYS.has(canonicalizeKeyId(key))
+}
+
 /** Whether a key is a PLAIN (unmodified) printable — the strict subset of
  * {@link isTextProducingKeyId} with no modifier at all (plan §14). The
  * parser rejects the BROADER text-producing set (shift-only printables
@@ -222,7 +228,7 @@ export function parseUserKeybindings(
   }
 
   for (const [actionId, value] of entries) {
-    if (!(actionId in APP_KEYBINDINGS)) {
+    if (!Object.prototype.hasOwnProperty.call(APP_KEYBINDINGS, actionId)) {
       diagnostics.push(`keybindings: unknown action "${actionId}" — ignored`)
       continue
     }

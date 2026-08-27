@@ -445,3 +445,31 @@ Final gates: 2536 bundle tests, 985 fork tests, 11 docs tests,
 typecheck (fork + bundle), `check-host-keybindings` gate (all quote
 styles, either casing), `git diff --check` — all green. The latest
 external convergence review round was accepted with no findings.
+
+## Keyboard Shortcuts Editor
+
+`/help` remains the key-first, read-only help surface. `/keybindings` is the
+separate action-first editor: it groups definitions into non-selectable
+category sections, searches labels/descriptions/action IDs/categories/current
+keys/default keys, and marks `*` customized, `!` conflicts, `Unbound`,
+`Disabled`, fixed, and reserved actions. A standalone leader-key row also
+exposes the optional global leader key.
+
+The editor is client-local presentation and input handling. It reads and writes
+only through `TuiSettingsConfig.get()`/`replace()`, preserves the complete
+settings document, and projects the exact parsed candidate into
+`HostKeybindingManager` only after a successful write. A recorder accepts one
+raw terminal key, parses it with `parseKey`, canonicalizes it to `KeyId`, and
+reuses the shared runtime/text/terminal ambiguity policy. Interactive direct
+and leader mutations are preflighted against the live plugin rules and
+conflict diagnostics before persistence. Since `replace()` is a whole-document
+operation without a compare-and-swap token, all TUI settings writers use the
+shared transaction queue (including `/settings` and `/keybindings reset`), so
+editor controllers sharing a settings port serialize their `get` → candidate →
+`replace` transactions; late panel callbacks are generation-guarded and cannot
+repaint a disposed editor.
+
+`/settings` contains one `Keyboard shortcuts` launcher whose submenu uses the
+same controller and editor component. The diagnostic verbs
+`/keybindings conflicts`, `/keybindings reload`, and `/keybindings reset` stay
+available for inspection and recovery; no settings watch callback is used.

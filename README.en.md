@@ -346,11 +346,19 @@ dsh-pi-tui:
   USER triggers; `false` removes every trigger of the action.
 - `DSH_PI_TUI_SAFE_KEYBINDINGS=1` ignores all user overrides (builtin
   defaults only).
-- `/keybindings` shows the effective table; `/keybindings conflicts`
-  lists conflicts (same key + overlapping scope + same priority — never
-  silent last-write-wins); `/keybindings reload` re-reads the settings
-  (fail-soft: a bad entry is diagnosed and skipped, a throwing read is an
-  error notice — never a crash; the keymap keeps the last-known-good
+- `/help` remains the key-first, read-only help surface; `/keybindings` is the
+  action-first, editable Keyboard Shortcuts Editor: it groups actions by
+  category, searches action IDs/descriptions/current keys/default keys, and
+  marks customized, conflict, Unbound, Disabled, and fixed states. A standalone Leader key row also configures the global leader key.
+- `/settings` has one `Keyboard shortcuts` launcher that opens the same editor
+  and persistence controller as `/keybindings`.
+- The recorder reads a real terminal key, parses it with `parseKey`, and stores
+  the canonical `KeyId`; known dead, typing-swallowing, terminal-ambiguous, and
+  conflicting shortcuts are rejected before saving.
+- `/keybindings conflicts` lists conflicts (same key + overlapping scope + same
+  priority — never silent last-write-wins); `/keybindings reload` re-reads the
+  settings (fail-soft: a bad entry is diagnosed and skipped, a throwing read
+  is an error notice — never a crash; the keymap keeps the last-known-good
   configuration); `/keybindings reset` clears the overrides through the
   settings service and rebuilds the running keymap immediately.
 - The subagent viewer blocks PARENT actions by action id, so a remapped

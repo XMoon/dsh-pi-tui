@@ -328,12 +328,19 @@ dsh-pi-tui:
   失效);`['ctrl+z', '<leader>s']` 同时保留两个用户触发;`false`
   移除该 action 的全部触发。
 - `DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有用户覆盖(仅使用内置默认)。
-- `/keybindings` 显示生效表;`/keybindings conflicts` 列出冲突(同键 +
-  作用域重叠 + 同优先级——绝不静默 last-write-wins);`/keybindings
-  reload` 重新读取设置(fail-soft:坏配置会被诊断并跳过,读取异常才会
-  给出错误提示——都不会崩溃,keymap 保留 last-known-good 配置);
-  `/keybindings reset` 通过 settings 服务清除覆盖,并立即重建运行中的
-  keymap。
+- `/help` 仍是按键优先的只读帮助;`/keybindings` 是按 action 优先的
+  可编辑 Keyboard Shortcuts Editor:按类别分组,搜索 action ID/描述/当前键和
+  默认键,并标记 customized、conflict、Unbound、Disabled 和 fixed 状态。
+  独立的 Leader key 行还可设置全局 leader key。
+- `/settings` 只有一个 `Keyboard shortcuts` 入口,打开与 `/keybindings` 相同的
+  编辑器和持久化控制器。
+- 录制器读取真实终端按键,通过 `parseKey` 规范化为 `KeyId`;保存前会拒绝
+  无法匹配、吞输入、终端歧义或已知冲突的按键。
+- `/keybindings conflicts` 列出冲突(同键 + 作用域重叠 + 同优先级——绝不
+  静默 last-write-wins);`/keybindings reload` 重新读取设置(fail-soft:坏配置会
+  被诊断并跳过,读取异常才会给出错误提示——都不会崩溃,keymap 保留
+  last-known-good 配置);`/keybindings reset` 通过 settings 服务清除覆盖,并
+  立即重建运行中的 keymap。
 - 子代理查看器按 action id 阻止父级 action,因此改键后的父级快捷键
   在查看器内依然被阻止。
 - 条件 affordance 是**累加**的:绑定 `app.tasks.open: ctrl+x` 是**增加**
