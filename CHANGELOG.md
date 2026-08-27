@@ -9,6 +9,13 @@
 
 ### 新增
 
+- **新增 Pi/pi2dsh 兼容性双门禁。** `gate:pi-surface-compat` 在真实
+  `VirtualTerminal + TuiApp` 上验证 Pi component 的 render、resize、raw
+  input、focus、隐藏/显示与 dispose 生命周期;`smoke:pi2dsh` 则使用构建出的
+  精确 candidate tarball、发布版 `pi2dsh@0.20.0` 与隔离的真实 tmux TTY,
+  验证 custom component 的 render/input/resize/dispose 往返和 Host 恢复。
+  Unstable mount 在未指定宽度时跟随可用终端宽度,显式宽度仍保持固定;外部
+  smoke 不进入 `postpack`,但会阻断 CI 发布链。
 - **`/footer` 配置器重构为层级式 status-line 编辑器。** 旧界面把所有
   Row / Zone / Available / Preview / Help 摊在一屏,靠 `Tab` 切行、
   `Shift+Tab` 切区域、`Shift+↑/↓` 排序;现在改为层级式编辑:

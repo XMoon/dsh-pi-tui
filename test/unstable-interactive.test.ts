@@ -1,15 +1,15 @@
 /**
  * Phase 3 tests (plan §16): the UNSTABLE raw input stage inside the host's
- * input path (BEFORE protocol decoding), the emergency fail-safe
- * (triple-Esc, not rewritable by captures), and the low-level surface
- * seam (handle + mount lifecycle, fullscreen migration, surface dispose).
+ * input path (BEFORE protocol decoding) and the emergency fail-safe
+ * (triple-Esc, not rewritable by captures). The real low-level component
+ * contract lives in pi-component-compat.test.ts.
  * @module @xmoon76/dsh-pi-tui/unstable-interactive.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { UnstableInputRegistry } from '../src/extension/internal/unstable-input.ts'
-import type { UnstableMountedComponent, UnstableRawInputEvent } from '../src/extension/unstable-types.ts'
+import type { UnstableRawInputEvent } from '../src/extension/unstable-types.ts'
 
 /** A TuiApp with the unstable raw route wired to a fresh registry. */
 async function appWithUnstableRoute() {
@@ -197,114 +197,5 @@ test('emergency fail-safe: stale Esc presses from a released capture session nev
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(registry.hasAny(), false, 'three fresh Esc presses trigger the fail-safe')
-  app.stop()
-})
-
-test('low-level surface handle: geometry + requestRender + mount lifecycle', async () => {
-  const { VirtualTerminal } = await import('./virtual-terminal.ts')
-  const { TuiApp } = await import('../src/tui-app.ts')
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  await vt.waitForRender()
-  const handle = app.unstableSurfaceHandle()
-  assert.equal(handle.width, 80)
-  assert.equal(handle.height, 24)
-  assert.equal(handle.generation, 1)
-  // Mount a low-level component: RAW lines render, RAW input forwards.
-  const state = { disposed: false, inputs: [] as string[] }
-  const component: UnstableMountedComponent = {
-    render: (width) => [`raw mount w=${width}`],
-    handleInput: (raw) => { state.inputs.push(raw) },
-    dispose: () => { state.disposed = true },
-  }
-  const lease = handle.mountComponent(component)
-  await vt.waitForRender()
-  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
-  let view = vt.getViewport().map(strip).join('\n')
-  assert.ok(view.includes('raw mount'), `mount content missing:\n${view}`)
-  // RAW input reaches the component (the overlay owns the seat).
-  vt.sendInput('r')
-  await vt.waitForRender()
-  assert.deepEqual(state.inputs, ['r'], 'the raw chunk reached the component')
-  // close is idempotent and disposes the component.
-  lease.close()
-  lease.close()
-  assert.equal(state.disposed, true)
-  assert.equal(app.ownedUnstableMountLeasesForTest(), 0)
-  app.stop()
-})
-
-test('low-level surface handle: a throwing render/input is isolated; the host keeps working', async () => {
-  const { VirtualTerminal } = await import('./virtual-terminal.ts')
-  const { TuiApp } = await import('../src/tui-app.ts')
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  await vt.waitForRender()
-  const handle = app.unstableSurfaceHandle()
-  const lease = handle.mountComponent({
-    render: () => { throw new Error('render boom') },
-    handleInput: () => { throw new Error('input boom') },
-  })
-  await vt.waitForRender()
-  vt.sendInput('x')
-  await vt.waitForRender()
-  lease.close()
-  app.stop()
-})
-
-test('low-level surface handle: the surface dispose closes every still-owned mount (inert after)', async () => {
-  const { VirtualTerminal } = await import('./virtual-terminal.ts')
-  const { TuiApp } = await import('../src/tui-app.ts')
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  await vt.waitForRender()
-  const handle = app.unstableSurfaceHandle()
-  const state = { disposed: false }
-  const lease = handle.mountComponent({
-    render: () => ['x'],
-    dispose: () => { state.disposed = true },
-  })
-  await vt.waitForRender()
-  app.dispose()
-  lease.show()
-  lease.hide()
-  lease.focus()
-  lease.blur()
-  lease.invalidate()
-  lease.close() // must not throw
-  assert.equal(state.disposed, true, 'dispose disposes the plugin component')
-  assert.equal(app.ownedUnstableMountLeasesForTest(), 0)
-})
-
-test('low-level surface handle: a mount survives a fullscreen toggle (screen migration)', async () => {
-  const { VirtualTerminal } = await import('./virtual-terminal.ts')
-  const { TuiApp } = await import('../src/tui-app.ts')
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  await vt.waitForRender()
-  const handle = app.unstableSurfaceHandle()
-  const lease = handle.mountComponent({ render: () => ['fs raw mount'] })
-  await vt.waitForRender()
-  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
-  let view = vt.getViewport().map(strip).join('\n')
-  assert.ok(view.includes('fs raw mount'), `mount content missing:\n${view}`)
-  for (let toggle = 0; toggle < 3; toggle += 1) {
-    app.setFullscreen(true)
-    await vt.waitForRender()
-    view = vt.getViewport().map(strip).join('\n')
-    assert.ok(view.includes('fs raw mount'), `mount missing after fullscreen #${toggle}:\n${view}`)
-    assert.equal(app.unstableMountAdaptersForTest(), 1, `remount #${toggle} drops the old adapter (no set growth)`)
-    app.setFullscreen(false)
-    await vt.waitForRender()
-    view = vt.getViewport().map(strip).join('\n')
-    assert.ok(view.includes('fs raw mount'), `mount missing after fullscreen exit #${toggle}:\n${view}`)
-    assert.equal(app.unstableMountAdaptersForTest(), 1, `exit #${toggle} also keeps exactly one adapter`)
-  }
-  lease.close()
-  assert.equal(app.unstableMountAdaptersForTest(), 0, 'close drops the adapter')
   app.stop()
 })
