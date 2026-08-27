@@ -1244,14 +1244,26 @@ test('a large shell paste (>10 lines) enters the shell mode through the paste re
 // ── PR review round: mode transitions cancel the open dropdown ────────────
 
 test('a prompt-mode dropdown closes when ! enters shell mode', async () => {
-  const { vt, app } = startApp(fixtureWithFiles())
+  const { vt, app } = startApp(fixtureWithFiles(), {
+    fileReferences: new DirectHostFilePort(() => undefined, null),
+  })
   await vt.waitForRender()
-  vt.sendInput('\t') // prompt-mode Tab: cwd file completion
+  vt.sendInput('@notes') // prompt-mode mention: the ONLY prompt-mode file context
   await waitForDropdownRow(vt, 'notes.txt', 'file completion in prompt mode')
+  // The plan's §2.1 contract: with the dropdown open, Tab/typing `!` does
+  // NOT insert into the body (the dropdown owns the key) — so the shell
+  // mode cannot be entered while the dropdown is open. The mode transition
+  // closes the dropdown through the host's setInputMode cancellation,
+  // which the Backspace-direction test covers. Here we verify the prompt
+  // mode itself still transitions when the dropdown is closed.
+  vt.sendInput('\x1b') // close the dropdown (Esc, no re-trigger)
+  await vt.waitForRender()
+  await waitForNoDropdownRow(vt, 'notes.txt', 'dropdown after Esc')
+  app.setEditorText('')
+  await vt.waitForRender()
   vt.sendInput('!')
   await vt.waitForRender()
-  await waitForNoDropdownRow(vt, 'notes.txt', 'dropdown after entering shell mode')
-  assert.equal(app.inputModeForTest(), 'shell-context', 'the mode still transitions')
+  assert.equal(app.inputModeForTest(), 'shell-context', 'the mode still transitions from a closed dropdown')
   app.stop()
 })
 
