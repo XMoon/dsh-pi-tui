@@ -39,7 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Esc` walks back page by page, and the first page's `Esc` closes and
   cancels without touching the active layout. The persisted schema
   (`FooterLayoutV1`), the extension item capability, the default layout
-  output and the no-migration contract are unchanged.
+  output and the no-migration contract are unchanged. The Add path also
+  enforces the persisted-layout parser's 32-items-per-row cap — the
+  picker shows an explicit notice when the row is full instead of
+  letting a 33rd item make every future save fail to parse.
 - **Plugin theme selections are now SOURCE-QUALIFIED (`plugin:<owner>/<id>`).**
   Previously a plugin theme and a local custom theme file shared one bare
   name namespace: `Foo.json` and a plugin's `name: "Foo"` produced two
