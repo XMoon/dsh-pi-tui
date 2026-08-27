@@ -458,6 +458,79 @@ test('CSI-u encoded printables type into the Add search and the prefix', async (
   app.stop()
 })
 
+test('resizing the terminal LARGER after opening does not clip the configurator', async () => {
+  // The overlay's maxHeight used to be a NUMBER captured at open time:
+  // opening at 40x10 clamped it to 10 rows forever, so growing to 80x40
+  // let the panel re-budget itself (it thinks the active item is in its
+  // viewport) while the overlay hard-cut the output to 10 rows — slicing
+  // off the editable body, the preview tail and the bottom border.
+  // maxHeight is a live '100%' now.
+  const vt = new VirtualTerminal(40, 10)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
+  openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1
+  await vt.waitForRender()
+  for (let i = 0; i < 32; i += 1) vt.sendInput('\x1b[B') // → the last item
+  await vt.waitForRender()
+  vt.resize(80, 40)
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const text = view.join('\n')
+  const lastNonEmpty = [...view].reverse().find(line => line.trim() !== '')
+  assert.ok(lastNonEmpty !== undefined && lastNonEmpty.includes('╰'),
+    `the Frame bottom border must survive the resize:\n${text}`)
+  assert.ok(text.includes('Extension items'), `the active item must be visible after the resize:\n${text}`)
+  assert.ok(text.includes('Preview'), `the preview must stay visible after the resize:\n${text}`)
+  assert.ok(text.includes('A Add'), `the help must stay visible after the resize:\n${text}`)
+  app.stop()
+})
+
+test('a legal-but-unlisted persisted tone displays as ITSELF (never Auto)', async () => {
+  // The parser accepts all 12 semantic tones; the picker deliberately
+  // exposes 8. A hand-written `tone: textStrong` must not collapse into
+  // the 'Auto' display (the old fallback) — and applying the picker's
+  // own current row must not silently DELETE the persisted token.
+  const { vt, app } = startApp()
+  const model = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'model', tone: 'textStrong' }], right: [] }],
+  }, app.getFooterItemRegistry())
+  app.openFooterConfigurator({
+    model,
+    registry: app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1
+  await vt.waitForRender()
+  vt.sendInput('\r') // → item editor (model: Tone is the first menu row)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Strong'), `the persisted token must display as itself:\n${view}`)
+  assert.ok(!view.includes('Auto'), `the unlisted tone must not display as Auto:\n${view}`)
+  // Enter opens the tone picker ON the persisted token (marked current):
+  // applying its own row keeps the token.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Strong  (current)'), `the picker must list and mark the persisted token:\n${view}`)
+  vt.sendInput('\r') // apply the highlighted (persisted) choice
+  await vt.waitForRender()
+  assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'model')!.tone, 'textStrong',
+    'applying the persisted token\'s own row must keep the token')
+  // The inline ←→ cycle includes the unlisted token: ← from Strong wraps
+  // to the last LISTED tone (Error).
+  vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'model')!.tone, 'error',
+    'cycling ← from the unlisted token wraps to the last listed one')
+  app.stop()
+})
+
 test('the preview and the help NEVER scroll away (the fixed shell)', async () => {
   const { vt, app } = startApp(100, 24)
   const model = openDefault(app)

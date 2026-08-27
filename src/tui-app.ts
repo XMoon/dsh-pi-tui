@@ -9671,10 +9671,13 @@ export class TuiApp {
       // maxHeight must be at least the panel's full render + borders —
       // a fixed 30 would slice the bottom border on tall terminals (a
       // 40-row terminal renders 30 content rows + 2 borders = 32 > 30).
-      // Give the overlay the LIVE terminal height (the fork clamps to the
-      // available space anyway); the panel's own windowing keeps the
-      // content within rows-2.
-      maxHeight: this.terminal.rows,
+      // It must also track the LIVE height: a NUMBER is captured at open
+      // time and never changes — opening on a 10-row terminal and growing
+      // to 40 left the overlay clamped at 10, hard-cutting the editable
+      // body and the bottom border even though the panel had re-budgeted
+      // itself for the new size. '100%' is re-resolved against the
+      // CURRENT terminal height on every overlay frame.
+      maxHeight: '100%',
     })
     return () => handle?.hide()
   }
