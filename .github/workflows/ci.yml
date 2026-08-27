@@ -64,6 +64,12 @@ jobs:
       - name: Test documentation
         run: pnpm test:docs
 
+      - name: Build vendored pi-tui for compatibility contract
+        run: pnpm build:fork
+
+      - name: Pi component compatibility contract
+        run: pnpm gate:pi-surface-compat
+
       - name: Verify naming and packaging contracts
         run: node scripts/naming-gate.mjs
 
@@ -230,6 +236,76 @@ jobs:
           node scripts/tarball-smoke.mjs "${TARBALLS[0]}"
 
   # ---------------------------------------------------------------------------
+  # Test the EXACT packed artifact against the published pi2dsh bridge and a
+  # real Pi component in a real pseudo-terminal. This is intentionally outside
+  # postpack: local packing stays offline and non-interactive.
+  # ---------------------------------------------------------------------------
+  ecosystem-compat:
+    name: External compatibility / pi2dsh
+    needs:
+      - build-and-pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Install repository dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download release tarball
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-tarball
+          path: tarball
+
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+
+      - name: Run pi2dsh compatibility smoke
+        env:
+          PI2DSH_COMPAT_DEBUG_DIR: pi2dsh-compat-debug
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t TARBALLS < <(
+            find tarball -maxdepth 1 -type f \
+              -name 'xmoon76-dsh-pi-tui-*.tgz' \
+              -print \
+              | sort
+          )
+
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tarball, found ${#TARBALLS[@]}" >&2
+            printf '%s\n' "${TARBALLS[@]}" >&2
+            exit 1
+          fi
+
+          node scripts/pi2dsh-compat-smoke.mjs "${TARBALLS[0]}"
+
+      - name: Upload pi2dsh compatibility diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pi2dsh-compat-debug
+          path: pi2dsh-compat-debug
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
   # Production dependency security gate.
   #
   # Block releases for high/critical vulnerabilities.
@@ -334,6 +410,7 @@ jobs:
       - source-checks
       - build-and-pack
       - compat-smoke
+      - ecosystem-compat
       - security-audit
       - release-metadata
 
@@ -419,7 +496,8 @@ jobs:
   # Release always means the same version is already on npm.
   #
   # The assets are the SAME artifact chain as npm: the tarball produced by
-  # build-and-pack, smoke-tested by compat-smoke and published by publish —
+  # build-and-pack, smoke-tested by compat-smoke and ecosystem-compat, then
+  # published by publish —
   # never a rebuild. A SHA256 file rides along for download verification.
   #
   # The job is re-runnable: an existing release is edited in place and assets

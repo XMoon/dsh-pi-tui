@@ -6112,7 +6112,13 @@ export class TuiApp {
         show: () => {},
       }
     }
-    const mountOptions = this.overlayOptionsOf(options)
+    // A low-level Pi component is a surface, not a fixed-size dialog. Keep
+    // the default width responsive so a consumer such as pi2dsh receives a
+    // fresh render(width) after a terminal resize; explicit plugin sizing
+    // remains authoritative.
+    const mountOptions = this.overlayOptionsOf(
+      options.width === undefined ? { ...options, width: '100%' } : options,
+    )
     const id = `unstable-mount-${++this.unstableMountCounter}`
     let adapter: import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter | undefined
     let raw: OverlayHandle | undefined

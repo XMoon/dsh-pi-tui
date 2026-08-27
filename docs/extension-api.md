@@ -54,8 +54,9 @@ tiers have since grown:
 - **Unstable** (`UNSTABLE_API_LEVEL = 1`, Phase 3): raw input
   interception (observe/consume/rewrite, exclusive raw ownership), the
   Host emergency fail-safe (triple-Esc), and a selected low-level surface
-  seam — NO compatibility guarantee; a broken plugin can disrupt Host
-  behavior. See `docs/extension-unstable.md`.
+  seam. Its component mount defaults to the full responsive terminal width
+  unless the plugin supplies an explicit width — NO compatibility guarantee;
+  a broken plugin can disrupt Host behavior. See `docs/extension-unstable.md`.
 
 Such access is provided through the supported tier package entry
 (`./extensions/advanced` / `./extensions/unstable`), never through

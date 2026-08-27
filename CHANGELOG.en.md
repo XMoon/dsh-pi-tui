@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pi/pi2dsh compatibility is now guarded by two blocking gates.**
+  `gate:pi-surface-compat` verifies render, resize, raw input, focus,
+  hide/show and disposal lifecycle on a real `VirtualTerminal + TuiApp`;
+  `smoke:pi2dsh` uses the exact built candidate tarball, published
+  `pi2dsh@0.20.0` and an isolated real tmux TTY to verify custom-component
+  render/input/resize/dispose round-trips and Host recovery. An Unstable mount
+  follows the available terminal width when no width is supplied, while an
+  explicit width remains fixed. The external smoke stays out of `postpack` but
+  blocks the CI publication chain.
 - **The `/footer` configurator is redesigned as a hierarchical
   status-line editor.** The old surface spread every Row / Zone /
   Available / Preview / Help section across one screen and leaned on

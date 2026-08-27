@@ -130,7 +130,9 @@ lease.hide(); lease.show(); lease.close()
   genuinely needs.
 - The mount is a capturing overlay: the plugin renders RAW lines and
   receives RAW input; the Host owns the physical mount, focus, stacking,
-  fullscreen migration and teardown. The lease is caller-fiber-owned; a
+  fullscreen migration and teardown. With no `width` option, the mount follows
+  the full available terminal width so `render(width)` changes after resize;
+  an explicit width remains authoritative. The lease is caller-fiber-owned; a
   stale lease (surface disposed) is inert.
 - The handle follows the CURRENT surface attachment; without a live
   surface it is inert (safe no-ops).
