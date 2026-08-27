@@ -382,6 +382,19 @@ test('flatPositionOf treats every out-of-range flat as undefined (negative inclu
   assert.equal(flatPositionOf(-1, emptyRow), undefined)
 })
 
+test('the Add path refuses a 33rd item (the parser per-row cap)', () => {
+  const row = Array.from({ length: 32 }, (_, index) => ({ id: `pad-${index}` }))
+  const m = new FooterConfiguratorModel({ schemaVersion: 1, rows: [{ left: row, right: [] }] }, registry)
+  assert.equal(m.addAvailable('cache-hit', 'left'), false, 'the cap refuses the 33rd item')
+  assert.equal(m.preview().rows[0]!.left.length, 32, 'the layout is untouched at the cap')
+  // One below the cap it still adds, and the next one is refused.
+  const m2 = new FooterConfiguratorModel({ schemaVersion: 1, rows: [{ left: row.slice(0, 31), right: [] }] }, registry)
+  assert.equal(m2.addAvailable('cache-hit', 'left'), true)
+  assert.equal(m2.preview().rows[0]!.left.length, 32)
+  assert.equal(m2.addAvailable('cache-hit', 'left'), false)
+  assert.equal(m2.preview().rows[0]!.left.length, 32)
+})
+
 test('the editable text is sanitized and bounded (the draft must re-parse)', () => {
   const m = model()
   const ref = () => m.state().layout.rows[0]!.left.find(item => item.id === 'model')!
