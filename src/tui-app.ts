@@ -1050,6 +1050,14 @@ export interface TuiAppEventsBase {
    * Optional.
    */
   onAdvancedSetTheme?: (name: string) => void
+  /**
+   * The session PRESENTATION title changed (the header override via
+   * `ui.host.setTitle`, or the advanced setTitle service path) — the
+   * runner refreshes the terminal window title policy. Named separately
+   * from `onExtensionAction` because the advanced host-state facade is a
+   * direct service seam, not a semantic action. Optional.
+   */
+  onTitleChanged?: () => void
 }
 
 /**
@@ -4959,6 +4967,16 @@ export class TuiApp {
     this.sessionTitleText = title ?? ''
     this.renderHeader()
     this.extensionHost?.updateSession({ title: title ?? '' })
+    this.events.onTitleChanged?.()
+  }
+
+  /**
+   * The current session presentation title ('' when none) — the runner's
+   * terminal-title policy derives the OSC title from this, never directly
+   * from the session's internal id.
+   */
+  getSessionTitle(): string {
+    return this.sessionTitleText
   }
 
   /**

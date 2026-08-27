@@ -76,6 +76,24 @@ test('the auto session title shows in the header and clears', async () => {
 })
 
 
+test('setSessionTitle fires onTitleChanged (the terminal-title refresh trigger)', async () => {
+  const { vt, app } = startApp()
+  const changes: (string | undefined)[] = []
+  // TuiAppEvents is internal to the surface core; the runner wires
+  // onTitleChanged to refreshTerminalTitle — it must fire for EVERY
+  // presentation-title change (session create/resume, session/title
+  // events, the advanced ui.host.setTitle override).
+  const events = app as unknown as { events: { onTitleChanged?: () => void } }
+  events.events.onTitleChanged = () => changes.push(app.getSessionTitle())
+  app.setSessionTitle('first')
+  app.setSessionTitle(undefined)
+  app.setSessionTitle('second')
+  assert.deepEqual(changes, ['first', '', 'second'],
+    'every title change must notify (undefined clears to "")')
+  assert.equal(app.getSessionTitle(), 'second')
+  void vt
+})
+
 test('status merges partial updates', async () => {
   const { vt, app } = startApp()
   app.setStatus({ model: 'm', cwd: 'c' })
