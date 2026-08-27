@@ -423,6 +423,51 @@ test('the draft is a deep clone: mutations never touch the initial layout', () =
   assert.ok(initial.rows[0]!.left.some(ref => ref.id === 'view-scope'), 'the initial layout must be untouched')
 })
 
+test('preset resets re-anchor every page cursor (a stale buffer never survives)', () => {
+  const m = model()
+  m.activate() // row
+  walkTo(m, 'model')
+  m.activate() // item editor
+  m.moveDown() // Advanced (model menu: Tone, Advanced)
+  m.activate() // the advanced page
+  m.activate() // editing the prefix (buffer seeded)
+  m.text('STALE')
+  assert.equal(m.state().editing, true)
+  assert.equal(m.state().editBuffer, 'STALE')
+  // A reset mid-edit must clear EVERY page state, not just the layout.
+  m.resetDefault()
+  const state = m.state()
+  assert.equal(state.mode, 'rows')
+  assert.equal(state.editing, false)
+  assert.equal(state.editBuffer, '')
+  assert.equal(state.addQuery, '')
+  assert.equal(state.itemCursor, 0)
+  assert.equal(state.pickerIndex, 0)
+  assert.equal(state.advancedField, 'prefix')
+  assert.equal(state.cursor, 0)
+  // The post-reset flow starts from the selector: the stale buffer can
+  // never be committed into the new layout's items.
+  m.activate()
+  assert.equal(m.state().mode, 'row')
+  assert.equal(m.state().editBuffer, '')
+  m.activate()
+  m.activate()
+  assert.equal(m.state().mode, 'tone', 'the fresh item editor opens its first menu row — not a stale advanced page')
+})
+
+test('removeRow re-anchors onto the Row Selector too', () => {
+  const m = model()
+  m.activate() // row 0
+  m.addRow()
+  m.moveDown() // → row 1
+  m.activate() // editing row 2
+  m.removeRow()
+  const state = m.state()
+  assert.equal(state.mode, 'rows')
+  assert.equal(state.rowIndex, 0)
+  assert.equal(state.editBuffer, '')
+})
+
 test('preset resets and the 1..2 row bound still work alongside the pages', () => {
   const m = model()
   m.addRow()

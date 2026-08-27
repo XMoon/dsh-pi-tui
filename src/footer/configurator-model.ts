@@ -727,20 +727,36 @@ export class FooterConfiguratorModel {
     return this.draft as unknown as FooterLayoutV1
   }
 
+  /** Re-anchor the editor onto the Row Selector after a whole-layout
+   * replacement (preset reset, row removal): the draft's item identities
+   * changed, so EVERY page cursor, picker, query and inline-edit buffer
+   * is cleared — a stale advanced buffer must never be committed into an
+   * item of the new layout. */
+  private reanchor(): void {
+    this.mode = 'rows'
+    this.rowIndex = 0
+    this.cursor = 0
+    this.itemCursor = 0
+    this.pickerIndex = 0
+    this.addQuery = ''
+    this.addSide = 'left'
+    this.advancedField = 'prefix'
+    this.editing = false
+    this.editBuffer = ''
+  }
+
   /** Reset the draft to the builtin default layout. */
   resetDefault(): void {
     const next = cloneLayout(DEFAULT_FOOTER_LAYOUT)
     this.draft.rows = next.rows
-    this.rowIndex = 0
-    this.cursor = 0
+    this.reanchor()
   }
 
   /** Reset the draft to the builtin compact layout. */
   resetCompact(): void {
     const next = cloneLayout(COMPACT_FOOTER_LAYOUT)
     this.draft.rows = next.rows
-    this.rowIndex = 0
-    this.cursor = 0
+    this.reanchor()
   }
 
   /** Add a second row (1..2 rows). */
@@ -749,12 +765,12 @@ export class FooterConfiguratorModel {
     this.draft.rows = [...this.draft.rows, { left: [], right: [] }]
   }
 
-  /** Remove the last row (1..2 rows). */
+  /** Remove the last row (1..2 rows). The edited row's identity can
+   * vanish with it: re-anchor onto the Row Selector. */
   removeRow(): void {
     if (this.draft.rows.length <= 1) return
     this.draft.rows = this.draft.rows.slice(0, -1)
-    this.rowIndex = Math.min(this.rowIndex, this.draft.rows.length - 1)
-    this.cursor = 0
+    this.reanchor()
   }
 }
 
