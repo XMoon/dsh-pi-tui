@@ -522,8 +522,12 @@ export class FooterConfiguratorModel {
         this.mode = 'row'
         return true
       case 'row':
-      case 'row-move':
         this.mode = 'rows'
+        return true
+      case 'row-move':
+        // Move Mode's Esc exits the MODE back to the row editor (the
+        // plan's A.4: Enter/Esc are both "Done" — never a page skip).
+        this.mode = 'row'
         return true
       case 'item':
       case 'style':
