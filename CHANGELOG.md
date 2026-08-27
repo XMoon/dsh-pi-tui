@@ -168,6 +168,18 @@
   擦掉。**安全:** 只有当命令位于你的设置文档的 USER 层时才会被执行
   ——仓库/项目提供的 `footerCommand` 永远不会被执行。
 
+### 修复
+
+- **compaction/prune 后的幽灵 Tool Card 不再出现。** 长会话发生
+  工具结果剪枝(或 summary compaction 生成检查点)后,Harness 会追加
+  携带 `surfaceOp: { op: 'replace' }` 的模型专用副本事件;Human
+  Transcript 之前会把这些副本当成新消息渲染,导致 transcript 末尾
+  突然出现一批重复的“幽灵 Tool Card”,并把原始完整结果替换成剪枝
+  后的截断文本。现在 `TranscriptFolder` 在统一入口过滤所有明确的
+  surface replacement(user/message、assistant/message、tool/result
+  一视同仁)——append-origin 历史原样保留,未标记 surfaceOp 的旧
+  session 完全兼容,`/export md` 导出采用同一契约。
+
 ## [0.3.4] - 2026-08-25
 
 ### 新增

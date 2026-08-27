@@ -16,6 +16,7 @@
  * @module @xmoon76/dsh-pi-tui/transcript
  */
 
+import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader, JsonValue } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
@@ -910,6 +911,17 @@ export class TranscriptFolder {
   }
 
   private applyEvent(event: SessionEvent): void {
+    // The human transcript keeps append-origin history. Surface
+    // replacements are model-only rewrites (tool-result pruning,
+    // compaction summary checkpoints) and must never be replayed as new
+    // visible messages or mutate any projection (items, Focus activity,
+    // tool counts, grouping, usage). Replaced history may ALSO arrive as
+    // user/message or assistant/message, so this is a unified gate before
+    // the compaction lifecycle and the switch — not a per-case guard.
+    // Only an EXPLICIT replacement is filtered; unmarked legacy events
+    // keep their current behavior (no surfaceOp = not a surface event at
+    // all — the helper requires the event type AND the marker).
+    if (isReplacementSurfaceEvent(event)) return
     // Compaction lifecycle events are typed STRUCTURALLY: dsh-compaction
     // is not a peer dependency, so its session-event augmentation never
     // enters our type graph (the same pattern as the structural service
@@ -1483,6 +1495,12 @@ export function renderTranscriptMarkdown(session: {
     '',
   ]
   for (const event of session.events) {
+    // The same append-origin contract as the transcript fold: a surface
+    // replacement is a model-only rewrite (pruned tool result, compaction
+    // summary checkpoint) and must never be replayed in a human-facing
+    // export — the append-origin original is already rendered at its log
+    // position. Unmarked legacy events keep their current behavior.
+    if (isReplacementSurfaceEvent(event)) continue
     switch (event.type) {
       case 'user/message': {
         const text = markdownContent(event.data.content)

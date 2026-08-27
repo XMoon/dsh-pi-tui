@@ -26,6 +26,52 @@ function rawEvent(type: string, data: Record<string, unknown>, seq: number): Ses
   return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
 }
 
+/** Build a surface event carrying its surface metadata marker. */
+function surfaceEvent<K extends SessionEvent['type']>(
+  type: K,
+  data: SessionEvent<K>['data'],
+  seq: number,
+  surfaceOp: 'append' | { op: 'replace'; start: number; end: number },
+): SessionEvent {
+  return { type, seq, time: 1_700_000_000_000 + seq, data, surfaceOp } as SessionEvent
+}
+
+/** One append-origin tool result for `callId` (surfaceOp=append). */
+function toolResult(seq: number, callId: string, text: string, name = 'bash'): SessionEvent {
+  return surfaceEvent('tool/result', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId(`msg-${seq}`),
+      role: 'user',
+      content: [{
+        type: 'tool-result',
+        toolCallId: CallId(callId),
+        content: [{ type: 'text', text }],
+      }],
+      source: { kind: 'tool', callId: CallId(callId) },
+    },
+  }, seq, 'append')
+}
+
+/** One prune replacement of tool/result `callId` (surfaceOp=replace). */
+function pruneReplacement(seq: number, callId: string, text: string, originalSeq: number): SessionEvent {
+  return surfaceEvent('tool/result', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId(`msg-prune-${seq}`),
+      role: 'user',
+      content: [{
+        type: 'tool-result',
+        toolCallId: CallId(callId),
+        content: [{ type: 'text', text }],
+      }],
+      source: { kind: 'tool', callId: CallId(callId) },
+    },
+  }, seq, { op: 'replace', start: originalSeq, end: originalSeq })
+}
+
 /** The message list shape expected by assertions. */
 function kinds(messages: readonly TranscriptMessage[]): string[] {
   return messages.map(message => message.kind)
@@ -914,6 +960,284 @@ test('injected context rows carry a source-kind icon SEMANTIC (never a glyph)', 
     // The fold NEVER stores a concrete glyph.
     assert.equal('emoji' in (message as Record<string, unknown>), false, `folded system rows must not carry a glyph field:\n${JSON.stringify(message)}`)
   })
+})
+
+// ---------------------------------------------------------------------------
+// Human-transcript append-origin contract: model-only surface replacements
+// (tool-result pruning after compaction/prune, summary compaction
+// checkpoints) must never be replayed as new visible messages.
+// ---------------------------------------------------------------------------
+
+test('Test A: an append-origin tool call/result pair folds into one ok card', () => {
+  const messages = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('a1'), name: 'bash', arguments: '{"command":"echo"}' }, 1),
+    toolResult(2, 'a1', 'ORIGINAL FULL RESULT'),
+  ])
+  assert.deepEqual(kinds(messages), ['tool'])
+  const tool = messages[0]
+  assert.ok(tool !== undefined && tool.kind === 'tool')
+  assert.equal(tool.status, 'ok')
+  assert.equal(tool.result, 'ORIGINAL FULL RESULT')
+  // The running → ok pairing is unchanged (verified via the folder).
+  const folder = new TranscriptFolder()
+  folder.apply([event('turn/start', { turn: 0 }, 0), event('tool/call', { turn: 0, step: 0, callId: CallId('a1'), name: 'bash', arguments: '{}' }, 1)])
+  const running = folder.messages()[0]
+  assert.ok(running !== undefined && running.kind === 'tool')
+  assert.equal(running.status, 'running')
+  folder.apply([toolResult(2, 'a1', 'done')])
+  const settled = folder.messages()[0]
+  assert.ok(settled !== undefined && settled.kind === 'tool')
+  assert.equal(settled.status, 'ok')
+})
+
+test('Test B: a post-prune replacement tool/result must not add a ghost card', () => {
+  const messages = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('a1'), name: 'bash', arguments: '{}' }, 1),
+    toolResult(2, 'a1', 'ORIGINAL FULL RESULT'),
+    // compaction/prune then the replacement copy of the SAME call.
+    rawEvent('compaction/prune', {
+      shadowedRange: { start: 2, end: 2 },
+      shadowedSeqs: [2],
+      shadowedTokenCount: 4200,
+    }, 3),
+    pruneReplacement(4, 'a1', 'PRUNED RESULT', 2),
+  ])
+  assert.deepEqual(kinds(messages), ['tool'], 'exactly one tool card expected')
+  const tool = messages[0]
+  assert.ok(tool !== undefined && tool.kind === 'tool')
+  assert.equal(tool.result, 'ORIGINAL FULL RESULT', 'the append-origin result must survive pruned replacement')
+  assert.notEqual(tool.result, 'PRUNED RESULT')
+})
+
+test('Test C: many prune replacements never change the transcript tail', () => {
+  const events: SessionEvent[] = [event('turn/start', { turn: 0 }, 0)]
+  let seq = 1
+  const originalSeqs: number[] = []
+  for (let index = 0; index < 13; index += 1) {
+    const callId = `call-${index}`
+    events.push(event('tool/call', { turn: 0, step: 0, callId: CallId(callId), name: 'bash', arguments: `{"cmd":"${index}"}` }, seq++))
+    const originalSeq = seq
+    originalSeqs.push(originalSeq)
+    events.push(toolResult(seq++, callId, `ORIGINAL ${index}`))
+  }
+  const before = foldTranscript(events)
+  const beforeTools = before.filter(message => message.kind === 'tool')
+  assert.equal(beforeTools.length, 13)
+  // Every original gets a prune + replacement, at the tail of the log.
+  for (let index = 0; index < 13; index += 1) {
+    const callId = `call-${index}`
+    events.push(rawEvent('compaction/prune', {
+      shadowedRange: { start: originalSeqs[index]!, end: originalSeqs[index]! },
+      shadowedSeqs: [originalSeqs[index]!],
+      shadowedTokenCount: 100,
+    }, seq++))
+    events.push(pruneReplacement(seq++, callId, `PRUNED ${index}`, originalSeqs[index]!))
+  }
+  const after = foldTranscript(events)
+  assert.deepEqual(kinds(after), kinds(before), 'transcript kinds must be identical before/after pruning')
+  const afterTools = after.filter(message => message.kind === 'tool')
+  assert.equal(afterTools.length, 13, 'no ghost tool cards after 13 prunes')
+  afterTools.forEach((tool, index) => {
+    assert.ok(tool !== undefined && tool.kind === 'tool')
+    assert.equal(tool.result, `ORIGINAL ${index}`, `tool ${index} result must keep the append-origin text`)
+  })
+})
+
+test('Test D: a replacement user/message does not enter the transcript', () => {
+  const messages = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    surfaceEvent('user/message', {
+      id: MessageId('msg-orig'),
+      role: 'user',
+      content: [{ type: 'text', text: 'original' }],
+      source: { kind: 'user' },
+    }, 1, 'append'),
+    // The summary compaction checkpoint replaces the range with one node.
+    surfaceEvent('user/message', {
+      id: MessageId('msg-summary'),
+      role: 'user',
+      content: [{ type: 'text', text: 'summary of earlier turns' }],
+      source: { kind: 'user' },
+    }, 2, { op: 'replace', start: 0, end: 1 }),
+  ])
+  assert.deepEqual(kinds(messages), ['user'], 'no user or system card for the replacement')
+  const only = messages[0]
+  assert.ok(only !== undefined && only.kind === 'user')
+  assert.equal(only.text, 'original')
+})
+
+test('Test E: a replacement assistant/message does not enter the transcript', () => {
+  const messages = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    surfaceEvent('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('msg-ans'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'the original answer' }],
+        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+      },
+    }, 1, 'append'),
+    surfaceEvent('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('msg-ans2'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'rewritten answer' }],
+        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+      },
+    }, 2, { op: 'replace', start: 1, end: 1 }),
+  ])
+  assert.deepEqual(kinds(messages), ['assistant'], 'no assistant card for the replacement')
+  const only = messages[0]
+  assert.ok(only !== undefined && only.kind === 'assistant')
+  assert.equal(only.text, 'the original answer', 'the append-origin assistant history must not be overwritten')
+})
+
+test('Test F: legacy unmarked sessions keep their current behavior', () => {
+  // tool/call + tool/result WITHOUT surfaceOp (a legacy Harness log).
+  const messages = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('legacy-1'), name: 'bash', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('msg-legacy'),
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: CallId('legacy-1'),
+          content: [{ type: 'text', text: 'legacy result' }],
+        }],
+        source: { kind: 'tool', callId: CallId('legacy-1') },
+      },
+    }, 2),
+  ])
+  assert.deepEqual(kinds(messages), ['tool'])
+  const tool = messages[0]
+  assert.ok(tool !== undefined && tool.kind === 'tool')
+  assert.equal(tool.status, 'ok')
+  assert.equal(tool.result, 'legacy result')
+  // Legacy user/assistant messages without surfaceOp also survive.
+  const legacyUser = foldTranscript([
+    event('user/message', {
+      id: MessageId('msg-lu'), role: 'user',
+      content: [{ type: 'text', text: 'hello legacy' }],
+      source: { kind: 'user' },
+    }, 0),
+  ])
+  assert.deepEqual(kinds(legacyUser), ['user'])
+})
+
+test('Test G: cold replay and incremental replay agree on replacement logs', () => {
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('a1'), name: 'bash', arguments: '{}' }, 1),
+    toolResult(2, 'a1', 'ORIGINAL'),
+    rawEvent('compaction/prune', { shadowedRange: { start: 2, end: 2 }, shadowedSeqs: [2], shadowedTokenCount: 1 }, 3),
+    pruneReplacement(4, 'a1', 'PRUNED', 2),
+  ]
+  const cold = foldTranscript(events)
+  const folder = new TranscriptFolder()
+  for (const eventOne of events) folder.apply([eventOne])
+  const incremental = folder.messages()
+  assert.deepEqual(incremental, cold, 'incremental replay must match the one-shot cold fold')
+  // Windowing must agree too: a window containing the turn keeps one tool.
+  const coldWindowed = foldTranscript(events, { maxTurns: 5 })
+  const warmWindowed = folder.messages({ maxTurns: 5 })
+  assert.deepEqual(warmWindowed, coldWindowed, 'windowed projections must match')
+})
+
+test('a replacement does not disturb consecutive-read grouping or the window summary', () => {
+  const readResult = (seq: number, callId: string, text: string): SessionEvent => surfaceEvent('tool/result', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId(`msg-${seq}`),
+      role: 'user',
+      content: [{
+        type: 'tool-result',
+        toolCallId: CallId(callId),
+        content: [{ type: 'text', text }],
+      }],
+      source: { kind: 'tool', callId: CallId(callId) },
+    },
+  }, seq, 'append')
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    readResult(2, 'r1', 'aaa'),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
+    readResult(4, 'r2', 'bbb'),
+  ]
+  const before = foldTranscript(events)
+  const beforeTools = before.filter(message => message.kind === 'tool')
+  assert.equal(beforeTools.length, 1)
+  assert.equal(beforeTools[0]?.args, '2 files')
+  assert.ok((beforeTools[0]?.result ?? '').includes('aaa') && (beforeTools[0]?.result ?? '').includes('bbb'))
+  // A prune replacement of the FIRST read lands after the pair.
+  const after = foldTranscript([
+    ...events,
+    rawEvent('compaction/prune', { shadowedRange: { start: 2, end: 2 }, shadowedSeqs: [2], shadowedTokenCount: 1 }, 5),
+    pruneReplacement(6, 'r1', 'aaa-pruned', 2),
+  ])
+  const afterTools = after.filter(message => message.kind === 'tool')
+  assert.equal(afterTools.length, 1, 'the group must not gain a member')
+  assert.equal(afterTools[0]?.args, '2 files', 'the group card must keep "2 files"')
+  assert.ok((afterTools[0]?.result ?? '').includes('aaa') && (afterTools[0]?.result ?? '').includes('bbb'), 'the grouped result must keep both originals')
+  // The window summary counts grouped cards, and the replacement must not
+  // change the collapsed history's tool count.
+  const windowed = foldTranscript([...events, rawEvent('compaction/prune', { shadowedRange: { start: 2, end: 2 }, shadowedSeqs: [2], shadowedTokenCount: 1 }, 5), pruneReplacement(6, 'r1', 'aaa-pruned', 2)], { maxTurns: 5 })
+  assert.equal(windowed[0]?.kind, 'tool', 'one recent turn fits the window; no summary noise')
+  assert.equal(windowed.filter(message => message.kind === 'tool').length, 1, 'the windowed view keeps exactly the grouped read card')
+})
+
+test('a replacement assistant/message does not mutate Focus activity', () => {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    surfaceEvent('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('msg-1'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'first answer' }],
+        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+      },
+    }, 1, 'append'),
+  ]
+  folder.apply(events)
+  const before = folder.turnActivity(0)
+  assert.ok(before !== undefined)
+  const beforeMessages = before.assistantMessages
+  const beforeRevision = before.revision
+  // A replacement assistant/message for the same step lands.
+  folder.apply([surfaceEvent('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId('msg-2'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'rewritten' }],
+      source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+    },
+  }, 2, { op: 'replace', start: 1, end: 1 })])
+  const after = folder.turnActivity(0)
+  assert.ok(after !== undefined)
+  assert.equal(after.assistantMessages, beforeMessages, 'replacement must not bump assistantMessages')
+  assert.equal(after.revision, beforeRevision, 'replacement must not bump the Focus revision')
+  // And the transcript itself still holds the append-origin answer.
+  const messages = folder.messages()
+  assert.deepEqual(kinds(messages), ['assistant'])
+  const assistant = messages[0]
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, 'first answer', 'append-origin assistant text must survive')
 })
 
 
