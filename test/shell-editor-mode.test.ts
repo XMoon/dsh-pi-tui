@@ -318,6 +318,22 @@ test('submission serializes the mode back into the exact wire form', async () =>
   app.stop()
 })
 
+test('a BARE ! / !! (empty body) is a serialized PAYLOAD, never an empty guard victim (plan §7.6)', async () => {
+  const { vt, app, submitted } = startApp(fixtureWorkspace())
+  await vt.waitForRender()
+  // Shell-context with an empty body: the wire form is '!' — payload.
+  vt.sendInput('!')
+  vt.sendInput('\r')
+  assert.deepEqual(submitted, ['!'], 'a bare ! must submit (the runner no-ops the bare shell, but the app must fire)')
+  // Shell-local with an empty body: the wire form is '!!' — payload.
+  vt.sendInput('!')
+  vt.sendInput('!')
+  vt.sendInput('\r')
+  assert.deepEqual(submitted, ['!', '!!'], 'a bare !! must submit')
+  assert.equal(app.inputModeForTest(), 'prompt')
+  app.stop()
+})
+
 test('a rejected submission restores the serialized text AND the mode', async () => {
   const { vt, app, submitted } = startApp(fixtureWorkspace(), {
     onSubmit: (text) => {

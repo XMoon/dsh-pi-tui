@@ -34,6 +34,20 @@ export function serializeEditorInput(mode: EditorInputMode, text: string): strin
 }
 
 /**
+ * Whether a serialized wire form carries a REAL payload — the shared
+ * empty-input verdict (plan §5: Enter / Ctrl+Enter / Ctrl+S must never
+ * drift apart into three different empty checks). A bare `!` / `!!` shell
+ * prefix IS payload (the shell branch handles it); whitespace-only text is
+ * not. Image-bearing drafts are judged SEPARATELY by the runner
+ * (`draftHasImages` — the placeholder markers are part of the text, so an
+ * image-containing wire form is non-empty; the synthetic marker-less
+ * image-only case goes through `isImageDraft`).
+ */
+export function serializedDraftHasPayload(serialized: string): boolean {
+  return serialized.trim() !== ''
+}
+
+/**
  * Decode a serialized user input line (a history entry, a pasted shell
  * line, a restored submission) into mode + body. The `!!` check runs
  * before `!`; a bare `!` / `!!` decodes to the matching shell mode with an

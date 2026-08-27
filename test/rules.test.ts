@@ -640,3 +640,45 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
     'startup-eager callbacks and eagerly-evaluated values in the startProcessTui arguments must only reference runner-scope bindings declared BEFORE the call — a later declaration is a TDZ ReferenceError during startup',
   )
 })
+
+test('steerNow calls the empty-Ctrl+S gate BEFORE any runOwned/ensureSession work (deferred-start no-creation contract)', () => {
+  // The original bug (plan §6.2): a fresh start + empty Ctrl+S used to be
+  // able to create the session inside ensureSession() before the emptiness
+  // was noticed. The gate (steerHasPayload) must be evaluated — and return
+  // early — BEFORE runOwned('steer') and BEFORE ensureSession can run.
+  // This audit pins the ORDER: someone moving the gate below the owned
+  // workflow (or in front of the payload computation) breaks the deferred
+  // no-creation contract even if every behavior test still passes.
+  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
+  const sourceFile = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+
+  // Locate the steerNow arrow function BY DECLARATION NAME: the runner
+  // scope declares `const steerNow = (text, onlyDraft, persistHistory)
+  // => { ... }` — the only arrow named steerNow.
+  let steerNow: ts.ArrowFunction | undefined
+  const findSteerNow = (node: ts.Node): void => {
+    if (steerNow !== undefined) return
+    if (ts.isVariableDeclaration(node)
+      && node.name.getText(sourceFile) === 'steerNow'
+      && node.initializer !== undefined
+      && ts.isArrowFunction(node.initializer)) {
+      steerNow = node.initializer
+      return
+    }
+    ts.forEachChild(node, findSteerNow)
+  }
+  findSteerNow(sourceFile)
+  assert.ok(steerNow !== undefined, 'the steerNow arrow must exist in the runner')
+  const body = steerNow.body as ts.Block
+
+  const gateLine = body.statements.findIndex(statement => statement.getText(sourceFile).includes('steerHasPayload'))
+  const ownedLine = body.statements.findIndex(statement => statement.getText(sourceFile).includes("runOwned('steer'"))
+  const ensureLine = body.statements.findIndex(statement => statement.getText(sourceFile).includes('ensureSession'))
+  assert.ok(gateLine !== -1, 'the steerHasPayload gate must be a direct statement in steerNow')
+  // The gate must run before the owned workflow starts (a reorder that
+  // puts runOwned/ensureSession first would allow session creation).
+  assert.ok(gateLine !== -1 && (ownedLine === -1 || gateLine < ownedLine),
+    'the empty-Ctrl+S gate must run BEFORE runOwned(\'steer\') — a fresh empty Ctrl+S must never create the session')
+  assert.ok(gateLine !== -1 && (ensureLine === -1 || gateLine < ensureLine),
+    'the empty-Ctrl+S gate must run BEFORE ensureSession — the gate is the deferred-start no-creation contract')
+})

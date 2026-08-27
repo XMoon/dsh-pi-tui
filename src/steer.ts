@@ -179,6 +179,40 @@ export interface SteerAllOptions {
    * cannot be pulled back, so Enter must never sweep the queue along.
    */
   onlyDraft?: boolean
+  /**
+   * Whether the draft text carries a real payload (the serialized wire
+   * form — `!` / `!!` shell mode makes a bare prefix payload, an
+   * image-bearing draft is payload, whitespace-only is not). The RUNNER
+   * decides (it owns the shell-mode / image semantics); `steer.ts` never
+   * guesses. `undefined` keeps the historical behavior: any text is
+   * treated as payload (the runner's empty-payload gate covers it).
+   */
+  draftHasPayload?: boolean
+}
+
+/**
+ * The empty-Ctrl+S GATE (the runner's Gate A, kept here so it is
+ * headless-testable and so a reordering can never sneak `ensureSession`
+ * in front of it): whether there is ANYTHING to steer, judged on the
+ * draft-payload verdict plus the live queue.
+ *
+ * ```text
+ * onlyDraft            → the draft verdict alone decides (busy-Enter steer)
+ * liveAgent + queue    → queue non-empty OR draft payload
+ * no live agent        → draft payload alone (deferred start: an empty
+ *                        Ctrl+S must NOT create a session)
+ * ```
+ *
+ * `undefined` is a VERBATIM pass-through: the caller wants no filtering.
+ */
+export function steerHasPayload(
+  draftHasPayload: boolean | undefined,
+  options: { onlyDraft: boolean; queuedCount: number; liveAgent: boolean },
+): boolean {
+  if (draftHasPayload === undefined) return true
+  if (options.onlyDraft) return draftHasPayload
+  if (options.liveAgent) return options.queuedCount > 0 || draftHasPayload
+  return draftHasPayload
 }
 
 /**
@@ -247,6 +281,14 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   if (agent === undefined) return 'ok'
   const generation = deps.currentGeneration()
   const snapshot = onlyDraft ? [] : [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+  // Gate B (empty-payload no-op): when the caller told us the draft
+  // carries NO payload, nothing to send is a clean no-op — for BOTH the
+  // onlyDraft branch (busy-Enter steer of an empty draft) and the full
+  // Ctrl+S branch (empty draft + empty queue). The queue is checked
+  // BEFORE the guard so no session-identity work is ever wasted and no
+  // empty followup/steer can be produced. `draftHasPayload: undefined`
+  // keeps the historical semantics (the text is a payload).
+  if (options.draftHasPayload === false && snapshot.length === 0) return 'ok'
   const verdict = await deps.guard.run(savePayloadIdentity(snapshot, text))
   if (verdict.kind === 'blocked') {
     const verbatim = deps.restoreDraft(text)
@@ -306,14 +348,19 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
     else deliverFollowup(deps, message)
     return 'ok'
   }
-  const draft = text.trim()
+  // Whether the draft rides along: the caller's explicit payload verdict
+  // is AUTHORITATIVE (the runner — the only owner of shell/image
+  // semantics — computed it on the wire form before calling steerAll);
+  // `undefined` keeps the historical text-based behavior for callers
+  // that never adopted the new contract (e.g. extension callers).
+  const includeDraft = options.draftHasPayload ?? text.trim() !== ''
   const messages = [
     ...current,
     // The draft message is built from the ORIGINAL text (never the trim):
     // the runner prepares one message whose content must match the guarded
-    // payload identity exactly (round-4 finding 2). The trim only decides
-    // whether a whitespace-only draft rides along.
-    ...(draft === '' ? [] : [deps.createDraft(text)]),
+    // payload identity exactly (round-4 finding 2). The verdict only
+    // decides whether the draft rides along.
+    ...(includeDraft ? [deps.createDraft(text)] : []),
   ]
   // Remove ONLY the confirmed messages — never clear() — so anything
   // spliced in DURING the guard survives untouched.

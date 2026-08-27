@@ -144,7 +144,7 @@ import type { RendererRegistry } from './renderer-registry.ts'
 import { OverlayBroker } from './overlay-broker.ts'
 import { EditorSeatHolder } from './editor-seat-holder.ts'
 import { TuiEditor } from './tui-editor.ts'
-import { serializeEditorInput, shellPrefixForMode, type EditorInputMode } from './editor-input-mode.ts'
+import { serializeEditorInput, serializedDraftHasPayload, shellPrefixForMode, type EditorInputMode } from './editor-input-mode.ts'
 import type { EditorRegistry } from './editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
@@ -2229,6 +2229,19 @@ export class TuiApp {
       // the visible-seat semantics would collapse `!!pwd` into a plain
       // `pwd` and turn a local-only command into a normal prompt submit.
       const serialized = serializeEditorInput(this.editor.getInputMode(), text)
+      // P0 (empty-submission semantics): an EMPTY serialized wire form is
+      // a no-op — no history row, no session creation, no followup/steer,
+      // no queue mutation. Emptiness is judged on the WIRE form: a bare
+      // `!` / `!!` shell mode has an empty BODY but serializes to a
+      // non-empty prefix, so it passes exactly like the literal prefix
+      // did before the mode feature. An image-bearing draft is not empty
+      // either: the placeholder markers are editor text (so the wire form
+      // is non-empty whenever referenced images are staged), and the
+      // SYNTHETIC image-only case (isImageDraft — the runner's gate over
+      // app.getDraft()) must pass EXACTLY like submitDraft decides it:
+      // the two host-owned submit paths must never drift on what counts
+      // as a payload.
+      if (!serializedDraftHasPayload(serialized) && this.events.isImageDraft?.() !== true) return
       // DEFENSE IN DEPTH: the app-level guard consumes Enter while a
       // continuable viewer is up, so the host editor's own onSubmit never
       // fires there — but a replacement editor's submit routes through
@@ -2322,13 +2335,13 @@ export class TuiApp {
             // / `!!` shell mode has an empty BODY but a non-empty wire
             // form, and must reach the existing protocol like the literal
             // prefix did before the mode feature.
-            if (this.serializeSeatDraft(text).trim() === '') return false
+            if (!serializedDraftHasPayload(this.serializeSeatDraft(text))) return false
             this.submitDraft(false)
             return true
           }
           case 'queue-submit': {
             const text = this.seatEditor().getText()
-            if (this.serializeSeatDraft(text).trim() === '') return false
+            if (!serializedDraftHasPayload(this.serializeSeatDraft(text))) return false
             this.submitDraft(true)
             return true
           }
@@ -3256,7 +3269,7 @@ export class TuiApp {
           // `!` / `!!` shell mode has an empty BODY but a non-empty wire
           // form, and must reach the queue protocol like the literal
           // prefix did before the mode feature.
-          if (this.serializeSeatDraft(this.seatEditor().getText()).trim() === '') return true
+          if (!serializedDraftHasPayload(this.serializeSeatDraft(this.seatEditor().getText()))) return true
         }
         this.submitDraft(forceQueue)
         return true

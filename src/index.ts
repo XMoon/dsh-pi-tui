@@ -134,7 +134,7 @@ import { consumeDraftImages, draftHasImages, prepareUserMessage, pruneUnreferenc
 import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
-import { mergeDraft, refuseByTransitionFence, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
+import { mergeDraft, refuseByTransitionFence, steerAll, steerHasPayload, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import {
   resolveSubagentSettleTarget,
   viewerCanonicalizeScope,
@@ -3789,14 +3789,21 @@ export function apply(ctx: Context, config: Config): void {
       // created (deferred start). Every message goes through steer(): the
       // next step boundary claims all next-step input together, so the
       // batch arrives in one shot (an idle driver starts a turn with it).
-      if (onlyDraft) {
-        if (text.trim() === '' && !draftHasImages(text, draftImages)) return
-      } else if (liveAgent !== undefined) {
-        const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
-        if (queued.length === 0 && text.trim() === '' && !draftHasImages(text, draftImages)) return
-      } else if (text.trim() === '' && !draftHasImages(text, draftImages)) {
-        return
-      }
+      // The payload verdict is computed ONCE here on the SERIALIZED wire
+      // form and passed to steerAll (steer.ts never guesses shell/image
+      // semantics): `!` / `!!` shell modes make a bare prefix a payload,
+      // image placeholders make an empty-text draft a payload, whitespace
+      // alone is not.
+      const draftHasPayload = text.trim() !== '' || draftHasImages(text, draftImages)
+      // The empty-Ctrl+S gate: nothing to steer is a clean no-op BEFORE
+      // any runOwned / ensureSession work — the deferred-start contract
+      // (an empty Ctrl+S must never create the session). The decision is
+      // the steerHasPayload pure function (headless-pinned).
+      if (!steerHasPayload(draftHasPayload, {
+        onlyDraft,
+        queuedCount: liveAgent === undefined ? 0 : liveAgent.inbox.nextTurn.length + liveAgent.inbox.nextStep.length,
+        liveAgent: liveAgent !== undefined,
+      })) return
       // An owned workflow: the send's outcome drives the draft restore and
       // the notices — runOwned (AGENTS.md), never a bare void. Reserve the
       // referenced drafts SYNCHRONOUSLY (same call stack that left the
@@ -3870,7 +3877,10 @@ export function apply(ctx: Context, config: Config): void {
           // Direct guard/fence/barrier orchestration above stays in the
           // runner, the port only delivers (steer/followup/dequeue).
           writer: backend.sessionWriter,
-        }, text, onlyDraft ? { onlyDraft: true } : undefined)
+        },
+        text,
+        onlyDraft ? { onlyDraft: true, draftHasPayload } : { draftHasPayload },
+      )
         // Only a successful send consumes the drafts: on block/stale the
         // draft was restored and the images are still referenced — removing
         // would orphan the placeholders (§14). The consumption is
@@ -3941,6 +3951,17 @@ export function apply(ctx: Context, config: Config): void {
      * @param forceQueue - the chord: never steer, queue instead.
      */
     const dispatchUserInput = (text: string, forceQueue = false): void => {
+      // P0 (empty-submission semantics): an EMPTY serialized wire form is
+      // a silent no-op — no history write, no session creation, no
+      // followup/steer, no image admission, no queue mutation. Judged on
+      // the wire form ONCE here: the editor onSubmit path already
+      // swallowed `''`, but plugin-extension submissions (submitDraft via
+      // the semantic action) and any future caller must not bypass it.
+      // A bare `!` / `!!` shell mode serializes to a non-empty wire form
+      // (handle below at the shell branches), and an image-bearing draft
+      // is non-empty too (the placeholder markers are part of the text —
+      // draftHasImages).
+      if (text.trim() === '' && !draftHasImages(text, draftImages)) return
       // Plain `exit` quits (shell muscle memory): the exact trimmed word
       // intercepts BEFORE any session creation or submission, so typing
       // `exit` with a deferred start never births a session. `/exit` remains

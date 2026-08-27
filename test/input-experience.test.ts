@@ -161,6 +161,47 @@ test('ctrl+enter on an empty draft does not fire the chord (no session-creating 
   assert.deepEqual(queued, [], 'an empty chord must not submit an empty followup')
 })
 
+// ── P0: empty-submission semantics (plan §4.1 / §6.2) ────────────────────────────────────
+
+test('Enter on a truly empty editor is a silent NO-OP — no submit event at all', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\r') // Enter on the empty editor
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [], 'an empty Enter must never fire onSubmit')
+  // Whitespace-only is also empty (the wire form trims to nothing).
+  vt.sendInput('   ')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, [], 'a whitespace-only Enter must never fire onSubmit')
+  // The editor itself was cleared by the fork BEFORE onSubmit, so a no-op
+  // leaves the surface fresh for the next real input.
+  assert.equal(app.getDraft(), '', 'the draft stays empty after the no-op Enter')
+  app.stop()
+})
+
+test('Enter after a REAL prompt still submits (the empty gate never eats a non-empty wire form)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('hello')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['hello'], 'a non-empty Enter must submit exactly as before')
+  app.stop()
+})
+
 test('ctrl+g opens the external editor and restores its content', async () => {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
