@@ -33,11 +33,16 @@ import type {
 
 /** The conditional affordance rules (plan §5): the empty-editor ↓ task
  * browser. Kept as a composition rule so a user remap of app.tasks.open
- * replaces the ACTION, while the affordance itself stays conditional. */
+ * replaces the ACTION, while the affordance itself stays conditional.
+ * PROMPT-mode only: a shell-mode empty body is composing a command — ↓
+ * keeps its editing meaning there, never the browser (the shell-mode
+ * exclusion pre-keybindings main had on the raw ↓ routing; the footer's
+ * ↓ hint and the routing share this single gate). */
 const TASKS_OPEN_AFFORDANCE: CompositionRule = {
   action: 'app.tasks.open',
   key: 'down',
-  predicate: (context) => context.focusedSeat === 'editor' && context.editorEmpty && context.tasksActive,
+  predicate: (context) => context.focusedSeat === 'editor' && context.editorEmpty
+    && context.editorPromptMode && context.tasksActive,
 }
 
 export interface HostKeybindingManagerOptions {

@@ -182,6 +182,11 @@ export interface KeybindingContext {
   readonly agentRunning: boolean
   /** The focused editor's draft is empty. */
   readonly editorEmpty: boolean
+  /** The focused editor is in PROMPT mode (a shell-mode empty body is
+   * composing a command — the shell-mode exclusion keeps ↓ out of the
+   * task-browser affordance there; pre-keybindings main had the same
+   * gate on the raw ↓ routing). */
+  readonly editorPromptMode: boolean
   /** The editor's autocomplete dropdown is open. */
   readonly autocompleteActive: boolean
   /** Background tasks/subagents are active (the ↓ browser affordance). */
