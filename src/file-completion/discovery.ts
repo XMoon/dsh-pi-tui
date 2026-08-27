@@ -159,6 +159,13 @@ export function discoverWithFd(
   const args = [
     '--base-directory', baseDir,
     '--max-results', String(MAX_FD_RESULTS),
+    // fd's DEFAULT is smart-case (case-insensitive for a lowercase query,
+    // case-SENSITIVE when the query contains uppercase) — but the shared
+    // ranking contract is case-INSENSITIVE (scorePathCandidate lowercases
+    // both sides). Forced --ignore-case keeps the fd discovery semantics
+    // aligned with the ranking model: @FOO finds foo.txt, exactly like the
+    // bounded-scan fallback path.
+    '-i',
     '--type', 'f',
     '--type', 'd',
     '--follow',

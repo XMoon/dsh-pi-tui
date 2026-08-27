@@ -353,6 +353,22 @@ test('review finding (round 4): a regex-special filename still completes (fd lit
   assert.ok(plus !== null && plus.items.some(item => item.value.includes('a+b.ts')), `plus missing:\n${JSON.stringify(plus)}`)
 })
 
+test('review finding (round 5): fd matches case-insensitively (aligned with the ranking contract)', async () => {
+  const root = outsideCwdFixture().workspace
+  writeFileSync(join(root, 'Foo.txt'), 'x')
+  writeFileSync(join(root, 'foo.txt'), 'x')
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  // The fd-backed path (this machine has fdfind) must find BOTH — the
+  // shared ranking is case-insensitive and fd's smart-case default (case-
+  // SENSITIVE for an uppercase query) would miss foo.txt.
+  const upper = await provider.getSuggestions(['@FOO'], 0, 4, { signal: abort })
+  assert.ok(upper !== null, `@FOO must suggest:\n${JSON.stringify(upper)}`)
+  assert.ok(
+    upper.items.some(item => item.value === '@Foo.txt') && upper.items.some(item => item.value === '@foo.txt'),
+    `both case forms must match:\n${JSON.stringify(upper.items)}`,
+  )
+})
+
 test('review finding (round 4): failed fd falls back to the bounded scan', async () => {
   const { workspace, sibling } = outsideCwdFixture()
   const root = workspace
