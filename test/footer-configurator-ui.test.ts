@@ -428,6 +428,56 @@ test('bracketed paste split across terminal chunks buffers until the end marker'
   app.stop()
 })
 
+test('a bracketed-paste start marker split across chunks is recognized', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('a')
+  await vt.waitForRender()
+  // The start marker is split after ESC+[20; the first chunk must not leak
+  // into the search and the second chunk must complete the protocol.
+  vt.sendInput('\x1b[20')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, '')
+  vt.sendInput('0~cach\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, 'cach')
+  assert.ok(vt.getViewport().join('\n').includes('Cache hit'))
+  app.stop()
+})
+
+test('malformed paste prefixes preserve Escape, arrows, and following text', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('a')
+  await vt.waitForRender()
+  vt.sendInput('cache')
+  await vt.waitForRender()
+
+  // A prefix that never becomes 200~ must not consume a later Escape.
+  vt.sendInput('\x1b[20')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, '', 'Escape must still clear the pending search')
+
+  // The malformed prefix must not consume a complete arrow sequence either.
+  vt.sendInput('\x1b[20')
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(model.state().pickerIndex, 1, 'the arrow must still move the picker')
+
+  vt.sendInput('\x1b[20')
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, 'x', 'ordinary input after the prefix must survive')
+  app.stop()
+})
+
 test('CSI-u encoded printables type into the Add search and the prefix', async () => {
   const { vt, app } = startApp()
   const model = openDefault(app)

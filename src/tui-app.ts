@@ -76,6 +76,7 @@ import { resolveFooterInstruction } from './footer/instruction.ts'
 import { layoutForPreset } from './footer/presets.ts'
 import { FooterConfiguratorModel } from './footer/configurator-model.ts'
 import { FooterConfiguratorPanel } from './footer/configurator.ts'
+import { FooterCustomItemCatalog } from './footer/custom-items.ts'
 import type { FooterItemRegistry } from './footer/item-registry.ts'
 import type { FooterLayoutV1 } from './footer/types.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
@@ -1608,8 +1609,11 @@ export class TuiApp {
    * render path. Disposed with the surface so a long-lived EXTERNAL store
    * never retains a dead TuiApp's listener. */
   private statusStoreUnsubscribe: (() => void) | undefined
-  /** The builtin footer item registry (M1): the composer's catalog. */
+  /** The builtin/footer item registry (M1): the composer's catalog. */
   private readonly footerItemRegistry: FooterItemRegistry
+  /** User-owned custom definitions. The active composer reads this source;
+   * unsaved configurator drafts use a layered catalog instead. */
+  private readonly footerCustomItems: FooterCustomItemCatalog
   /** The footer composer (M1): renders the active layout against the
    * snapshot. */
   private readonly footerComposer: FooterComposer
@@ -2134,6 +2138,12 @@ export class TuiApp {
       ids: () => this.extensionHost!.footerItemIds(),
       definition: (id) => this.extensionHost!.footerItemDefinition(id),
     })
+    // PR C: user-owned definitions use the ordinary item registry and
+    // composer path. The source is replaced atomically by
+    // setFooterCustomItems(), so a malformed settings entry cannot reach the
+    // render callback.
+    this.footerCustomItems = new FooterCustomItemCatalog()
+    this.footerItemRegistry.setCustomSource(this.footerCustomItems)
     this.footerComposer = new FooterComposer(this.footerItemRegistry)
     // F-17: an invalidation batch re-bakes the outlets; the host then
     // re-merges its chrome rows so the new content reaches the screen.
@@ -9112,6 +9122,21 @@ export class TuiApp {
     return this.footerItemRegistry
   }
 
+  /** PR C: replace the user-owned custom definition catalog. Invalid or
+   * duplicate entries are skipped and the returned count lets the runner
+   * issue one fail-soft diagnostic without blocking startup. */
+  setFooterCustomItems(input: unknown): number {
+    const invalidCount = this.footerCustomItems.replace(input)
+    this.renderFooter()
+    return invalidCount
+  }
+
+  /** PR C: detached custom definitions for an unsaved configurator draft or
+   * a settings write. */
+  getFooterCustomItems(): import('./footer/custom-items.ts').FooterCustomItemSettings[] {
+    return this.footerCustomItems.snapshot()
+  }
+
   /** M5: set the command surface's sanitized rows (undefined restores the
    * native composer surface). The rows are already sanitized + capped by
    * the runner; the Host instruction still merges on top. */
@@ -9745,7 +9770,9 @@ export class TuiApp {
   openFooterConfigurator(options: {
     model: FooterConfiguratorModel
     registry: FooterItemRegistry
-    onSave: (layout: FooterLayoutV1) => void
+    /** A layered composer for an unsaved custom-definition draft. */
+    composer?: FooterComposer
+    onSave: (layout: FooterLayoutV1, customItems?: readonly import('./footer/custom-items.ts').FooterCustomItemSettings[]) => void
     onCancel: () => void
   }): () => void {
     let handle: OverlayHandle | undefined
@@ -9753,7 +9780,7 @@ export class TuiApp {
       model: options.model,
       registry: options.registry,
       snapshot: () => this.statusStore.snapshot(),
-      composer: this.footerComposer,
+      composer: options.composer ?? this.footerComposer,
       taskBrowserAvailable: () => this.taskBrowserAvailable(),
       extensionFooterText: () => this.extensionHost?.footerText() ?? '',
       maxVisible: () => {
@@ -9764,9 +9791,9 @@ export class TuiApp {
         const rows = Math.max(1, this.terminal.rows - 2)
         return Math.min(30, rows)
       },
-      onSave: (layout) => {
+      onSave: (layout, customItems) => {
         handle?.hide()
-        options.onSave(layout)
+        options.onSave(layout, customItems)
       },
       onCancel: () => {
         handle?.hide()

@@ -35,9 +35,9 @@ function fakeCommands(): { defs: Array<{ name: string; handler?: unknown }>; ser
 }
 
 /** A fake settings document. */
-function fakeSettings(initial: { footer: string; footerLayout?: unknown; footerFallbackMode?: string }): {
+function fakeSettings(initial: { footer: string; footerLayout?: unknown; footerFallbackMode?: string; footerCustomItems?: unknown }): {
   value: TuiSettingsLike
-  doc: { footer: string; footerLayout?: unknown; footerFallbackMode?: string }
+  doc: { footer: string; footerLayout?: unknown; footerFallbackMode?: string; footerCustomItems?: unknown }
 } {
   const doc = { ...initial }
   return {
@@ -49,16 +49,18 @@ function fakeSettings(initial: { footer: string; footerLayout?: unknown; footerF
         footer: doc.footer,
         footerLayout: doc.footerLayout,
         footerFallbackMode: doc.footerFallbackMode,
+        footerCustomItems: doc.footerCustomItems as never,
         fullscreen: 'on',
         busyEnter: 'queue',
         localShellSandbox: 'bypass',
         homeEndKeys: 'viewport',
         focusMode: 'off',
       }),
-      replace: (next: { footer: string; footerLayout?: unknown; footerFallbackMode?: string }) => {
+      replace: (next: { footer: string; footerLayout?: unknown; footerFallbackMode?: string; footerCustomItems?: unknown }) => {
         doc.footer = next.footer
         doc.footerLayout = next.footerLayout
         doc.footerFallbackMode = next.footerFallbackMode
+        doc.footerCustomItems = next.footerCustomItems
         return undefined
       },
     },
@@ -72,8 +74,10 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   app.start()
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
-  const settings = fakeSettings({ footer: 'default' })
-  const applied: Array<{ footer: string; footerLayout?: unknown }> = []
+  const customItems = [{ schemaVersion: 1 as const, id: 'user:environment', kind: 'text' as const, text: 'PROD', tone: 'warning' as const }]
+  app.setFooterCustomItems(customItems)
+  const settings = fakeSettings({ footer: 'default', footerCustomItems: customItems })
+  const applied: Array<{ footer: string; footerLayout?: unknown; footerCustomItems?: unknown }> = []
   const runner: TuiCommandRunner = {
     ctx,
     app,
@@ -162,6 +166,8 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   assert.equal(settings.doc.footerFallbackMode, 'custom', 'the fallback mode must persist as custom')
   const saved = settings.doc.footerLayout as { rows: Array<{ left: Array<{ id: string }> }> }
   assert.ok(!saved.rows[0]!.left.some(ref => ref.id === 'view-scope'), 'the persisted layout must reflect the toggle')
+  assert.deepEqual(settings.doc.footerCustomItems, customItems, 'saving the layout must preserve custom definitions')
+  assert.deepEqual(applied[0]!.footerCustomItems, customItems, 'apply must carry custom definitions alongside the layout')
   assert.equal(app.getFooterMode(), 'custom', 'the app must apply the custom layout')
 
   // The approved `/statusline` alias (other-agent muscle memory) registers

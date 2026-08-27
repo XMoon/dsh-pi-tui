@@ -97,6 +97,7 @@ import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { parseFooterLayout, isFooterLayout, resolveCommandFooterFallback } from './footer/layout.ts'
+import { parseFooterCustomItems } from './footer/custom-items.ts'
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { color, type ColorPalette } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
@@ -1485,6 +1486,11 @@ export function apply(ctx: Context, config: Config): void {
             }),
           })),
         }),
+        // PR C: retain the definition collection as raw data. The custom-item
+        // parser is the fail-soft authority, so malformed entries (or even a
+        // malformed collection) are skipped instead of making the whole TUI
+        // unavailable.
+        footerCustomItems: z.any(),
         // M5: the trusted command status-line config (the command is
         // executed ONLY when it lives in the USER layer — see
         // resolveTrustedFooterCommand).
@@ -1530,7 +1536,7 @@ export function apply(ctx: Context, config: Config): void {
       // The base layout is the builtin default; the schemastery output
       // type is fully-populated, so the cast bridges the sparse literal
       // (the runtime validation accepts missing optional fields).
-      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off' } },
+      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCustomItems: undefined as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off' } },
     )
     // The ONE authoritative Focus runtime state (plan §5): restored from
     // the persisted document BEFORE the first compose/resume below, mutated
@@ -5165,6 +5171,7 @@ export function apply(ctx: Context, config: Config): void {
     // M5: `command` arms the trusted command surface (the trust gate reads
     // the USER layer only — a project-supplied config is refused).
     let footerWarningShown = false
+    let customFooterWarningShown = false
     // footerCommandRunner / footerCommandUnsubscribe are hoisted ABOVE
     // cleanup (TDZ guard — the startup-eager onTerminalResize callback
     // reads the runner before this block can run); only the warning
@@ -5176,8 +5183,16 @@ export function apply(ctx: Context, config: Config): void {
       footerCommandRunner = undefined
       app.setFooterCommandRows(undefined)
     }
-    const applyFooterSettings = (doc: { footer: string; footerLayout?: unknown } | undefined): void => {
+    const applyFooterSettings = (doc: { footer: string; footerLayout?: unknown; footerCustomItems?: unknown } | undefined): void => {
       if (doc === undefined) return
+      if ('footerCustomItems' in doc) {
+        const customResult = parseFooterCustomItems(doc.footerCustomItems)
+        app.setFooterCustomItems(customResult.items)
+        if (customResult.invalidCount > 0 && !customFooterWarningShown) {
+          customFooterWarningShown = true
+          app.notify(`${customResult.invalidCount} custom footer item${customResult.invalidCount === 1 ? '' : 's'} invalid — skipped`, 'error')
+        }
+      }
       if (doc.footer === 'command') {
         // The native FALLBACK layout must be established from the
         // PERSISTED document, never from whatever the memory happens to

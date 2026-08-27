@@ -5,9 +5,11 @@
  *   rows (Row Selector) → row (Edit Row) → item (Item Editor)
  *                                          ├─ style (Style picker)
  *                                          ├─ tone  (Tone picker)
- *                                          └─ advanced (Prefix/Suffix/
- *                                                       Importance/Reset)
- *   row → add (searchable Add picker)
+ *                                          ├─ custom Text/Tone
+ *                                          ├─ Advanced (Prefix/Suffix/
+ *                                          │            Importance/Reset)
+ *                                          └─ Rename/Delete definition
+ *   row → add (searchable Add picker → Create Custom Text flow)
  *   row ⇄ row-move (Move Mode)
  *
  * The UI component only renders and forwards keys; the whole model is
@@ -17,6 +19,7 @@
  * @module @xmoon76/dsh-pi-tui/footer/configurator-model
  */
 
+import { FooterCustomItemCatalog, type FooterCustomItemSettings, customItemId, customItemName } from './custom-items.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
 import { MAX_ITEMS_PER_ROW, stripControlChars } from './layout.ts'
 import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from './presets.ts'
@@ -32,6 +35,13 @@ export type FooterConfiguratorMode =
   | 'tone'
   | 'advanced'
   | 'add'
+  | 'create-name'
+  | 'create-text'
+  | 'create-tone'
+  | 'custom-text'
+  | 'custom-tone'
+  | 'custom-name'
+  | 'custom-delete'
 
 /** The advanced editor's fields (v1: the EXISTING ref fields only — no
  * new schema). `reset` is the trailing "Reset to default" action row. */
@@ -64,6 +74,14 @@ export interface FooterConfiguratorState {
   readonly editing: boolean
   /** The inline editor's buffer (raw; committed on Enter). */
   readonly editBuffer: string
+  /** The name currently being created (without the persisted `user:` prefix). */
+  readonly customName: string
+  /** The text currently being created. */
+  readonly customText: string
+  /** The tone currently being created. */
+  readonly customTone: FooterTone | 'auto'
+  /** A fail-soft validation message for the current custom-item flow. */
+  readonly customError: string
 }
 
 /** The tone picker's choices: persisted values use the EXISTING semantic
@@ -176,16 +194,34 @@ export function flatLengthOf(row: FooterRowLayout): number {
 }
 
 /** One item-editor menu entry (Style appears only for items with more
- * than one finite format — a single format has nothing to pick). */
-export type ItemMenuEntry = { readonly kind: 'style' } | { readonly kind: 'tone' } | { readonly kind: 'advanced' }
+ * than one finite format — a single format has nothing to pick). Custom Text
+ * definitions expose their definition-owned text/tone/name/delete controls in
+ * addition to the shared ref Advanced editor. */
+export type ItemMenuEntry =
+  | { readonly kind: 'style' }
+  | { readonly kind: 'tone' }
+  | { readonly kind: 'advanced' }
+  | { readonly kind: 'custom-text' }
+  | { readonly kind: 'custom-tone' }
+  | { readonly kind: 'custom-name' }
+  | { readonly kind: 'custom-delete' }
 
 /** The item editor's menu for one definition (undefined = an unknown id:
  * its format set is unknowable, so Style is hidden). */
-export function itemMenuFor(formats: readonly string[] | undefined): ItemMenuEntry[] {
+export function itemMenuFor(formats: readonly string[] | undefined, custom = false): ItemMenuEntry[] {
   const entries: ItemMenuEntry[] = []
   if (formats !== undefined && formats.length > 1) entries.push({ kind: 'style' })
-  entries.push({ kind: 'tone' })
+  if (custom) {
+    entries.push({ kind: 'custom-text' })
+    entries.push({ kind: 'custom-tone' })
+  } else {
+    entries.push({ kind: 'tone' })
+  }
   entries.push({ kind: 'advanced' })
+  if (custom) {
+    entries.push({ kind: 'custom-name' })
+    entries.push({ kind: 'custom-delete' })
+  }
   return entries
 }
 
@@ -202,9 +238,14 @@ export class FooterConfiguratorModel {
   private advancedField: FooterAdvancedField = 'prefix'
   private editing = false
   private editBuffer = ''
+  private customName = ''
+  private customText = ''
+  private customTone: FooterTone | 'auto' = 'auto'
+  private customError = ''
   private readonly registry: FooterItemRegistry
+  private readonly customItems: FooterCustomItemCatalog
 
-  constructor(initial: FooterLayoutV1, registry: FooterItemRegistry) {
+  constructor(initial: FooterLayoutV1, registry: FooterItemRegistry, customItems?: FooterCustomItemCatalog) {
     // A parser-valid layout always has 1..2 rows, but the model accepts
     // any FooterLayoutV1 (hand-built test layouts, foreign callers): a
     // zero-row draft would make editedRow() return undefined and crash
@@ -215,6 +256,12 @@ export class FooterConfiguratorModel {
       ? { schemaVersion: 1, rows: [{ left: [], right: [] }] }
       : initial)
     this.registry = registry
+    this.customItems = customItems ?? new FooterCustomItemCatalog()
+    // A caller that supplies a draft catalog expects the editor's picker and
+    // preview to see it through the same registry. Do not replace an existing
+    // app source when no draft catalog was requested (legacy callers use the
+    // app registry directly).
+    if (customItems !== undefined) registry.setCustomSource(customItems)
   }
 
   /** The current state (the draft layout is the live preview source). */
@@ -231,6 +278,10 @@ export class FooterConfiguratorModel {
       advancedField: this.advancedField,
       editing: this.editing,
       editBuffer: this.editBuffer,
+      customName: this.customName,
+      customText: this.customText,
+      customTone: this.customTone,
+      customError: this.customError,
     }
   }
 
@@ -245,9 +296,24 @@ export class FooterConfiguratorModel {
     return this.registry.ids().filter(id => !present.has(id))
   }
 
+  /** Detached custom definitions in their persisted order. */
+  customItemSettings(): FooterCustomItemSettings[] {
+    return this.customItems.snapshot()
+  }
+
+  /** Whether an id is one of this editor's user-owned definitions. */
+  isCustomItem(id: string): boolean {
+    return this.customItems.has(id)
+  }
+
+  /** The current user-owned definition for an item ref. */
+  customItem(id: string): FooterCustomItemSettings | undefined {
+    return this.customItems.get(id)
+  }
+
   /** The add picker's filtered matches: case-insensitive substring over
-   * the item's label, id and description (an unknown id matches on its
-   * raw id text). */
+   * the item's label, id, description, and user-defined text (an unknown id
+   * matches on its raw id text). */
   addMatches(): string[] {
     const query = this.addQuery.trim().toLowerCase()
     const all = this.availableIds()
@@ -258,6 +324,7 @@ export class FooterConfiguratorModel {
         id,
         def?.label ?? '',
         def?.description ?? '',
+        this.customItems.get(id)?.text ?? '',
       ].join('\n').toLowerCase()
       return haystack.includes(query)
     })
@@ -306,10 +373,13 @@ export class FooterConfiguratorModel {
         this.itemCursor = Math.max(0, this.itemCursor - 1)
         return
       case 'style':
+      case 'tone':
+      case 'custom-tone':
         this.pickerIndex = Math.max(0, this.pickerIndex - 1)
         return
-      case 'tone':
+      case 'create-tone':
         this.pickerIndex = Math.max(0, this.pickerIndex - 1)
+        this.customTone = FOOTER_TONE_CHOICES[this.pickerIndex]?.value ?? 'auto'
         return
       case 'advanced':
         if (!this.editing) this.advancedField = ADVANCED_FIELDS[Math.max(0, this.advancedFieldIndex() - 1)]!
@@ -333,7 +403,7 @@ export class FooterConfiguratorModel {
         this.reorderActive(1)
         return
       case 'item':
-        this.itemCursor = Math.min(itemMenuFor(this.itemFormats()).length - 1, this.itemCursor + 1)
+        this.itemCursor = Math.min(this.itemMenu().length - 1, this.itemCursor + 1)
         return
       case 'style': {
         const formats = this.itemFormats()
@@ -343,13 +413,20 @@ export class FooterConfiguratorModel {
       case 'tone':
         this.pickerIndex = Math.min(this.toneChoices().length - 1, this.pickerIndex + 1)
         return
+      case 'custom-tone':
+        this.pickerIndex = Math.min(this.customToneChoices().length - 1, this.pickerIndex + 1)
+        return
+      case 'create-tone':
+        this.pickerIndex = Math.min(FOOTER_TONE_CHOICES.length - 1, this.pickerIndex + 1)
+        this.customTone = FOOTER_TONE_CHOICES[this.pickerIndex]?.value ?? 'auto'
+        return
       case 'advanced':
         if (!this.editing) {
           this.advancedField = ADVANCED_FIELDS[Math.min(ADVANCED_FIELDS.length - 1, this.advancedFieldIndex() + 1)]!
         }
         return
       case 'add':
-        this.pickerIndex = Math.min(Math.max(0, this.addMatches().length - 1), this.pickerIndex + 1)
+        this.pickerIndex = Math.min(this.addMatches().length, this.pickerIndex + 1)
         return
     }
   }
@@ -363,6 +440,28 @@ export class FooterConfiguratorModel {
   /** The edited item's definition formats (undefined = unknown id). */
   private itemFormats(): readonly string[] | undefined {
     return this.registry.get(this.editedRefId())?.formats
+  }
+
+  private editedCustomItem(): FooterCustomItemSettings | undefined {
+    return this.customItems.get(this.editedRefId())
+  }
+
+  private itemMenu(): ItemMenuEntry[] {
+    return itemMenuFor(this.itemFormats(), this.editedCustomItem() !== undefined)
+  }
+
+  private customToneChoices(): ReadonlyArray<{ readonly value: FooterTone | 'auto'; readonly label: string }> {
+    return toneChoicesFor(this.editedCustomItem()?.tone ?? 'auto')
+  }
+
+  /** The add picker has one non-item action after its filtered matches. */
+  addOptionCount(): number {
+    return this.addMatches().length + 1
+  }
+
+  /** True when the highlighted add option is the create action. */
+  isCreateOption(): boolean {
+    return this.mode === 'add' && this.pickerIndex >= this.addMatches().length
   }
 
   /** The edited item's id (the flat cursor's ref; '' when the row is
@@ -409,7 +508,7 @@ export class FooterConfiguratorModel {
    * Style cycles the finite formats; Tone cycles the tone choices;
    * Advanced opens the editor (nothing to cycle inline). */
   private cycleItemSetting(direction: -1 | 1): void {
-    const menu = itemMenuFor(this.itemFormats())
+    const menu = this.itemMenu()
     const entry = menu[Math.min(this.itemCursor, menu.length - 1)]
     if (entry === undefined) return
     const ref = this.refAt(this.cursor)?.ref
@@ -428,6 +527,14 @@ export class FooterConfiguratorModel {
       const index = choices.findIndex(choice => choice.value === current)
       const next = (index + direction + choices.length) % choices.length
       this.applyTone(ref, choices[next]!.value)
+      return
+    }
+    if (entry.kind === 'custom-tone') {
+      const current = this.editedCustomItem()?.tone ?? 'auto'
+      const choices = this.customToneChoices()
+      const index = choices.findIndex(choice => choice.value === current)
+      const next = (index + direction + choices.length) % choices.length
+      this.applyCustomTone(choices[next]!.value)
     }
   }
 
@@ -451,6 +558,14 @@ export class FooterConfiguratorModel {
   private applyTone(ref: MutableRef, tone: FooterTone | 'auto'): void {
     if (tone === 'auto') delete ref.tone
     else ref.tone = tone
+  }
+
+  /** Persist a custom definition's tone in the draft catalog. */
+  private applyCustomTone(tone: FooterTone | 'auto'): void {
+    const id = this.editedRefId()
+    const result = this.customItems.updateTone(id, tone)
+    if (!result.ok) this.customError = result.error ?? 'The selected tone is invalid.'
+    else this.customError = ''
   }
 
   /** Reorder the cursor's item one position within its zone (Move Mode's
@@ -491,7 +606,7 @@ export class FooterConfiguratorModel {
         this.mode = 'row'
         return
       case 'item': {
-        const menu = itemMenuFor(this.itemFormats())
+        const menu = this.itemMenu()
         const entry = menu[Math.min(this.itemCursor, menu.length - 1)]
         if (entry === undefined) return
         if (entry.kind === 'style') {
@@ -500,6 +615,27 @@ export class FooterConfiguratorModel {
         } else if (entry.kind === 'tone') {
           this.mode = 'tone'
           this.pickerIndex = this.currentToneIndex()
+        } else if (entry.kind === 'custom-text') {
+          const item = this.editedCustomItem()
+          if (item === undefined) return
+          this.mode = 'custom-text'
+          this.editing = true
+          this.editBuffer = item.text
+          this.customError = ''
+        } else if (entry.kind === 'custom-tone') {
+          this.mode = 'custom-tone'
+          this.pickerIndex = this.currentCustomToneIndex()
+          this.customError = ''
+        } else if (entry.kind === 'custom-name') {
+          const item = this.editedCustomItem()
+          if (item === undefined) return
+          this.mode = 'custom-name'
+          this.editing = true
+          this.editBuffer = customItemName(item.id)
+          this.customError = ''
+        } else if (entry.kind === 'custom-delete') {
+          this.mode = 'custom-delete'
+          this.customError = ''
         } else {
           this.mode = 'advanced'
           this.advancedField = 'prefix'
@@ -525,6 +661,87 @@ export class FooterConfiguratorModel {
         this.mode = 'item'
         return
       }
+      case 'custom-tone': {
+        const choices = this.customToneChoices()
+        const choice = choices[Math.min(this.pickerIndex, choices.length - 1)]
+        if (choice !== undefined) this.applyCustomTone(choice.value)
+        this.mode = 'item'
+        return
+      }
+      case 'custom-text':
+        if (this.editing) {
+          this.commitCustomText()
+          return
+        }
+        this.mode = 'item'
+        return
+      case 'custom-name':
+        if (this.editing) {
+          this.commitCustomName()
+          return
+        }
+        this.mode = 'item'
+        return
+      case 'custom-delete': {
+        const id = this.editedRefId()
+        if (!this.customItems.remove(id)) {
+          this.customError = 'Footer item no longer exists.'
+          this.mode = 'item'
+          return
+        }
+        this.removeReferences(id)
+        this.mode = 'row'
+        this.itemCursor = 0
+        this.clampCursor()
+        return
+      }
+      case 'create-name': {
+        const name = this.customName.trim()
+        const id = customItemId(name)
+        if (id === undefined) {
+          this.customError = name === ''
+            ? 'Name is required.'
+            : 'Name must be visible, at most 64 characters, and contain no colon.'
+          return
+        }
+        if (this.customItems.has(id)) {
+          this.customError = `A footer item named "${name}" already exists.`
+          return
+        }
+        this.customError = ''
+        this.mode = 'create-text'
+        return
+      }
+      case 'create-text':
+        if (this.customText.trim() === '') {
+          this.customError = 'Text is required.'
+          return
+        }
+        this.customError = ''
+        this.mode = 'create-tone'
+        this.pickerIndex = 0
+        return
+      case 'create-tone': {
+        const choices = FOOTER_TONE_CHOICES
+        const choice = choices[Math.min(this.pickerIndex, choices.length - 1)]
+        if (choice === undefined) return
+        const created = this.customItems.create(this.customName, this.customText, choice.value)
+        if (created.item === undefined) {
+          this.customError = created.error ?? 'Custom footer item could not be created.'
+          return
+        }
+        if (!this.addAvailable(created.item.id, this.addSide)) {
+          // The row cap can only change through this model, but keep the
+          // catalog transactional if a future caller changes it between the
+          // picker render and Enter.
+          this.customItems.remove(created.item.id)
+          this.customError = 'The row is full — remove an item first.'
+          return
+        }
+        this.mode = 'row'
+        this.resetCustomFlow()
+        return
+      }
       case 'advanced':
         if (this.editing) {
           this.commitEdit()
@@ -539,6 +756,16 @@ export class FooterConfiguratorModel {
         return
       case 'add': {
         const matches = this.addMatches()
+        if (this.pickerIndex >= matches.length) {
+          if (this.flatCount() >= MAX_ITEMS_PER_ROW) return
+          this.customName = ''
+          this.customText = ''
+          this.customTone = 'auto'
+          this.customError = ''
+          this.editBuffer = ''
+          this.mode = 'create-name'
+          return
+        }
         const id = matches[Math.min(this.pickerIndex, matches.length - 1)]
         if (id === undefined) return
         const added = this.addAvailable(id, this.addSide)
@@ -554,10 +781,12 @@ export class FooterConfiguratorModel {
   /** Esc: navigate back. Returns false exactly when the configurator
    * should CLOSE (Esc on the Row Selector). */
   cancel(): boolean {
-    if (this.mode === 'advanced' && this.editing) {
+    if ((this.mode === 'advanced' || this.mode === 'custom-text' || this.mode === 'custom-name') && this.editing) {
       // First Esc inside an inline edit cancels the edit, not the page.
       this.editing = false
       this.editBuffer = ''
+      this.customError = ''
+      if (this.mode === 'custom-text' || this.mode === 'custom-name') this.mode = 'item'
       return true
     }
     switch (this.mode) {
@@ -571,6 +800,27 @@ export class FooterConfiguratorModel {
           return true
         }
         this.mode = 'row'
+        return true
+      case 'create-name':
+      case 'create-text':
+      case 'create-tone':
+        // Creation is a child flow of the Add picker; cancellation never
+        // closes the whole configurator and never mutates the draft catalog.
+        this.mode = 'add'
+        this.customError = ''
+        this.editBuffer = ''
+        return true
+      case 'custom-delete':
+      case 'custom-tone':
+        this.mode = 'item'
+        this.customError = ''
+        return true
+      case 'custom-text':
+      case 'custom-name':
+        this.mode = 'item'
+        this.customError = ''
+        this.editing = false
+        this.editBuffer = ''
         return true
       case 'row':
         this.mode = 'rows'
@@ -678,14 +928,39 @@ export class FooterConfiguratorModel {
     return index < 0 ? 0 : index
   }
 
-  /** Printable text: the add picker's query or the advanced inline
-   * editor's buffer. Everything else ignores it. */
+  /** The custom definition tone picker opens on its current definition
+   * value, not on the layout ref's independent tone override. */
+  private currentCustomToneIndex(): number {
+    const current = this.editedCustomItem()?.tone ?? 'auto'
+    const choices = this.customToneChoices()
+    const index = choices.findIndex(choice => choice.value === current)
+    return index < 0 ? 0 : index
+  }
+
+  /** Printable text: the add picker, custom-definition fields, or the
+   * advanced inline editor's buffer. Everything else ignores it. */
   text(data: string): void {
     const clean = stripControlChars(data)
     if (clean === '') return
     if (this.mode === 'add') {
       this.addQuery = (this.addQuery + clean).slice(0, 64)
       this.pickerIndex = 0
+      return
+    }
+    if (this.mode === 'create-name') {
+      this.customName = [...this.customName + clean].slice(0, 64).join('')
+      this.customError = ''
+      return
+    }
+    if (this.mode === 'create-text') {
+      this.customText = [...this.customText + clean].slice(0, 256).join('')
+      this.customError = ''
+      return
+    }
+    if (this.mode === 'custom-text' || this.mode === 'custom-name') {
+      const limit = this.mode === 'custom-text' ? 256 : 64
+      this.editBuffer = [...this.editBuffer + clean].slice(0, limit).join('')
+      this.customError = ''
       return
     }
     if (this.mode === 'advanced' && this.editing) {
@@ -704,6 +979,21 @@ export class FooterConfiguratorModel {
     if (this.mode === 'add') {
       this.addQuery = this.addQuery.slice(0, -1)
       this.pickerIndex = 0
+      return
+    }
+    if (this.mode === 'create-name') {
+      this.customName = [...this.customName].slice(0, -1).join('')
+      this.customError = ''
+      return
+    }
+    if (this.mode === 'create-text') {
+      this.customText = [...this.customText].slice(0, -1).join('')
+      this.customError = ''
+      return
+    }
+    if ((this.mode === 'custom-text' || this.mode === 'custom-name') && this.editing) {
+      this.editBuffer = [...this.editBuffer].slice(0, -1).join('')
+      this.customError = ''
       return
     }
     if (this.mode === 'advanced' && this.editing) {
@@ -757,6 +1047,59 @@ export class FooterConfiguratorModel {
     this.editBuffer = ''
   }
 
+  /** Commit the custom definition's text without touching the layout ref. */
+  private commitCustomText(): void {
+    const id = this.editedRefId()
+    const result = this.customItems.updateText(id, this.editBuffer)
+    if (!result.ok) {
+      this.customError = result.error ?? 'Text is invalid.'
+      return
+    }
+    this.customError = ''
+    this.editing = false
+    this.editBuffer = ''
+    this.mode = 'item'
+  }
+
+  /** Commit a custom definition rename and update every layout reference so
+   * no dangling old `user:*` id remains. */
+  private commitCustomName(): void {
+    const oldId = this.editedRefId()
+    const result = this.customItems.rename(oldId, this.editBuffer)
+    if (result.newId === undefined) {
+      this.customError = result.error ?? 'Name is invalid.'
+      return
+    }
+    if (result.newId !== oldId) {
+      for (const row of this.draft.rows) {
+        row.left = row.left.map(ref => ref.id === oldId ? { ...ref, id: result.newId! } : ref)
+        row.right = row.right.map(ref => ref.id === oldId ? { ...ref, id: result.newId! } : ref)
+      }
+    }
+    this.customError = ''
+    this.editing = false
+    this.editBuffer = ''
+    this.mode = 'item'
+  }
+
+  /** Remove every reference to a definition from every row. */
+  private removeReferences(id: string): void {
+    for (const row of this.draft.rows) {
+      row.left = row.left.filter(ref => ref.id !== id)
+      row.right = row.right.filter(ref => ref.id !== id)
+    }
+  }
+
+  /** Clear the create flow's transient fields after a successful add. */
+  private resetCustomFlow(): void {
+    this.customName = ''
+    this.customText = ''
+    this.customTone = 'auto'
+    this.customError = ''
+    this.editing = false
+    this.editBuffer = ''
+  }
+
   /** Reset the edited ref to the definition defaults (the Advanced
    * editor's "Reset to default"). */
   resetActiveRef(): void {
@@ -790,6 +1133,10 @@ export class FooterConfiguratorModel {
     this.advancedField = 'prefix'
     this.editing = false
     this.editBuffer = ''
+    this.customName = ''
+    this.customText = ''
+    this.customTone = 'auto'
+    this.customError = ''
   }
 
   /** Reset the draft to the builtin default layout. */
