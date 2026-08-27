@@ -35,10 +35,10 @@ import type { StatusSnapshot } from '../status/types.ts'
 import { FooterComposer, renderSpans } from './composer.ts'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
 import {
-  FOOTER_TONE_CHOICES,
   flatLengthOf,
   flatPositionOf,
   itemMenuFor,
+  toneChoicesFor,
 } from './configurator-model.ts'
 import type { FooterConfiguratorModel } from './configurator-model.ts'
 import { MAX_ITEMS_PER_ROW } from './layout.ts'
@@ -445,7 +445,9 @@ export class FooterConfiguratorPanel implements Component {
           }
           if (entry.kind === 'tone') {
             const tone = ref?.tone ?? 'auto'
-            const label = FOOTER_TONE_CHOICES.find(choice => choice.value === tone)?.label ?? 'Auto'
+            // A legal-but-unlisted persisted token must display as ITSELF
+            // (Strong/Dim/…), never as the 'Auto' fallback.
+            const label = toneChoicesFor(ref?.tone).find(choice => choice.value === tone)?.label ?? 'Auto'
             return this.menuRow(marker, 'Tone', this.tonePaint(tone, label), active)
           }
           return this.menuRow(marker, 'Advanced…', undefined, active)
@@ -474,15 +476,15 @@ export class FooterConfiguratorPanel implements Component {
       }
       case 'tone': {
         const ref = this.refAt(state.rowIndex, state.cursor)
-        const current = ref?.tone ?? 'auto'
-        const lines = FOOTER_TONE_CHOICES.map((choice, index) => {
+        const choices = toneChoicesFor(ref?.tone)
+        const lines = choices.map((choice, index) => {
           const active = index === state.pickerIndex
           const marker = active ? color.primary('›') : ' '
           const painted = this.tonePaint(choice.value, choice.label)
           const suffix = (ref?.tone ?? 'auto') === choice.value ? color.textMuted('  (current)') : ''
           return `${marker} ${painted}${suffix}`
         })
-        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, FOOTER_TONE_CHOICES.length - 1)) }
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)) }
       }
       case 'advanced': {
         const ref = this.refAt(state.rowIndex, state.cursor)

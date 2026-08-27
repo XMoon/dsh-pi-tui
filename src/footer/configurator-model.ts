@@ -80,6 +80,31 @@ export const FOOTER_TONE_CHOICES: ReadonlyArray<{ readonly value: FooterTone | '
   { value: 'error', label: 'Error' },
 ]
 
+/** Friendly names for the legal-but-UNLISTED semantic tokens (the parser
+ * accepts all 12; the picker deliberately exposes the 8 user-facing
+ * ones). */
+const UNLISTED_TONE_LABELS: Partial<Record<FooterTone, string>> = {
+  textStrong: 'Strong',
+  textDim: 'Dim',
+  border: 'Border',
+  roleUser: 'Role user',
+  shellMode: 'Shell mode',
+}
+
+/** The tone choices for one item's CURRENT tone: the 8 user-facing tones,
+ * plus — when the ref carries a legal but UNLISTED persisted token — that
+ * exact value, so a legal persisted value is never DISPLAYED as 'Auto'
+ * and never silently deleted by a fake-'Auto' apply. */
+export function toneChoicesFor(current: FooterTone | 'auto' | undefined): ReadonlyArray<{
+  readonly value: FooterTone | 'auto'
+  readonly label: string
+}> {
+  if (current === undefined || current === 'auto' || FOOTER_TONE_CHOICES.some(choice => choice.value === current)) {
+    return FOOTER_TONE_CHOICES
+  }
+  return [...FOOTER_TONE_CHOICES, { value: current, label: UNLISTED_TONE_LABELS[current] ?? current }]
+}
+
 /** Hard input caps — the persisted-layout parser's bounds (a draft the
  * configurator builds must always re-parse). */
 export const MAX_PREFIX_SUFFIX_LENGTH = 16
@@ -316,7 +341,7 @@ export class FooterConfiguratorModel {
         return
       }
       case 'tone':
-        this.pickerIndex = Math.min(FOOTER_TONE_CHOICES.length - 1, this.pickerIndex + 1)
+        this.pickerIndex = Math.min(this.toneChoices().length - 1, this.pickerIndex + 1)
         return
       case 'advanced':
         if (!this.editing) {
@@ -399,10 +424,20 @@ export class FooterConfiguratorModel {
     }
     if (entry.kind === 'tone') {
       const current = ref.tone ?? 'auto'
-      const index = FOOTER_TONE_CHOICES.findIndex(choice => choice.value === current)
-      const next = (index + direction + FOOTER_TONE_CHOICES.length) % FOOTER_TONE_CHOICES.length
-      this.applyTone(ref, FOOTER_TONE_CHOICES[next]!.value)
+      const choices = this.toneChoices()
+      const index = choices.findIndex(choice => choice.value === current)
+      const next = (index + direction + choices.length) % choices.length
+      this.applyTone(ref, choices[next]!.value)
     }
+  }
+
+  /** The tone choices for the EDITED item's current tone (the 8
+   * user-facing tones plus a legal-but-unlisted persisted token). The
+   * draft's tone field is parser-validated in practice (the save gate
+   * rejects unknown tokens); the cast only bridges the mutable draft's
+   * string storage. */
+  private toneChoices(): ReadonlyArray<{ readonly value: FooterTone | 'auto'; readonly label: string }> {
+    return toneChoicesFor(this.refAt(this.cursor)?.ref?.tone as FooterTone | 'auto' | undefined)
   }
 
   /** Persist a format choice: the definition default removes the override
@@ -483,7 +518,8 @@ export class FooterConfiguratorModel {
         return
       }
       case 'tone': {
-        const choice = FOOTER_TONE_CHOICES[Math.min(this.pickerIndex, FOOTER_TONE_CHOICES.length - 1)]
+        const choices = this.toneChoices()
+        const choice = choices[Math.min(this.pickerIndex, choices.length - 1)]
         const ref = this.refAt(this.cursor)?.ref
         if (choice !== undefined && ref !== undefined) this.applyTone(ref, choice.value)
         this.mode = 'item'
@@ -632,11 +668,13 @@ export class FooterConfiguratorModel {
     return index < 0 ? 0 : index
   }
 
-  /** The tone picker's index of the item's current tone. */
+  /** The tone picker's index of the item's current tone (an unlisted
+   * persisted token resolves to its appended row — never fake-'Auto'). */
   private currentToneIndex(): number {
     const ref = this.refAt(this.cursor)?.ref
     const current = ref === undefined || ref.tone === undefined ? 'auto' : ref.tone
-    const index = FOOTER_TONE_CHOICES.findIndex(choice => choice.value === current)
+    const choices = this.toneChoices()
+    const index = choices.findIndex(choice => choice.value === current)
     return index < 0 ? 0 : index
   }
 
