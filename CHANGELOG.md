@@ -21,6 +21,12 @@
   一律使用带来源前缀的形式。Theme registry 的读取侧新增
   `selectableValues()` / `paletteForSelectable()` / `displayNameForSelectable()` /
   `hasSelectable()`;health 协议也改为按可取值寻址。
+  `/settings` 的 Theme picker 全程以 source-qualified value 作为行 id,
+  display label 只做展示、绝不回传成 identity(打开时冻结的取值在 HMR
+  重载后也不会被重定向到同名新贡献);label 在 builtin/file/plugin 三方
+  及人为带 `(file)`/`(plugin)` 后缀的文件名下都保证唯一。选中后外层
+  设置行通过 openSettings 的 updateValue seam 显示回友好名(绝不显示
+  裸 `plugin:` 串),再次打开 submenu 时 `← current` 正确跟随最新选择。
 - **Theme-unload hook 增加 generation lease。** runner 的
   `setThemeUnloadedHook` 现在返回一个 disposer,且只有当前 generation
   的 disposer 能清除回调——旧 runner 的 HMR cleanup 永远不会清掉新

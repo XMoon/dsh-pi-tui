@@ -8,11 +8,13 @@
  * — the exact string that gets applied and persisted. The display name is
  * ONLY a label (rendered text); nothing ever round-trips
  * `value → display → value`. The outer SettingsList row's `currentValue`
- * is the FRIENDLY display name (it is what the panel shows); the outer
- * onChange receives the source-qualified value directly from the submenu
- * row id, so no live-registry re-resolution happens at confirm time (an
- * HMR unload between open and confirm can never redirect the selection to
- * a same-named new contribution — the review's P2).
+ * is the FRIENDLY display name (what the panel shows — the /settings
+ * handler rewrites the fork's raw selected value back to the label via
+ * the updateValue seam after a pick); the outer onChange receives the
+ * source-qualified value directly from the submenu row id, so no
+ * live-registry re-resolution happens at confirm time (an HMR unload
+ * between open and confirm can never redirect the selection to a
+ * same-named new contribution — the review's P2).
  *
  * Why a submenu instead of `values` cycling: the cycling list matches
  * `currentValue` against the `values` array verbatim, so the row's value
@@ -74,6 +76,15 @@ export class ThemeSubmenu {
     done: (selectableValue?: string) => void,
   ) {
     const rows = themePickerRows(themes)
+    // The fork passes the outer row's LIVE `item.currentValue` — which,
+    // per the vendored SettingsList submenu contract, is the RAW
+    // SOURCE-QUALIFIED value of the last pick (`file:X`,
+    // `plugin:owner/id`) until the /settings handler rewrites it back to
+    // the friendly label. `themeDisplayName` resolves EITHER form to the
+    // row's friendly label, so `← current` matches the right row whether
+    // the outer row shows the friendly name (a fresh open) or the raw
+    // identity (mid-panel after a pick — the review's P2).
+    const currentLabel = themeDisplayName(currentDisplay, themes)
     const close = (selected?: string): void => {
       done(selected)
     }
@@ -87,7 +98,7 @@ export class ThemeSubmenu {
           : row.value.startsWith('file:')
             ? 'Custom theme file'
             : 'Built-in palette',
-        currentValue: row.displayName === currentDisplay ? '← current' : '',
+        currentValue: row.displayName === currentLabel ? '← current' : '',
         values: ['✓'],
       })),
       Math.min(8, Math.max(3, rows.length)),

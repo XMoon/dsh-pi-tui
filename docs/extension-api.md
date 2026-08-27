@@ -181,7 +181,11 @@ id IS the source-qualified value (display labels are unique per row —
 builtin/file/plugin collisions are source-tagged — but are presentational
 only and never round-tripped back to an identity at confirm time, so an
 HMR unload between open and confirm can never redirect a selection to a
-same-named new contribution).
+same-named new contribution). The vendored SettingsList submenu contract
+writes the RAW selected value into the outer row's display; the host
+rewrites it back to the friendly label through the openSettings
+updateValue seam after a successful apply, so the panel never shows a raw
+`plugin:` string and a re-open marks the right `← current`.
 
 ## Configurable footer items (M4)
 
