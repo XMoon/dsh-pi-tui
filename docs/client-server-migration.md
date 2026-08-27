@@ -85,7 +85,12 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
 - **The footer surface (composer/layout/items/configurator, `src/footer/`)
   is client-local presentation.** It consumes the snapshot; no Host
   service is read there. The extension footer items ride the public
-  extension service (Host-composed, Stable).
+  extension service (Host-composed, Stable). User Custom Text definitions are
+  compiled into the same local item contract, but their raw definition
+  collection is Host-owned settings data and is persisted separately from the
+  client-local `FooterLayoutV1` placement references. A future Remote adapter
+  must carry both fields through one whole-document settings round-trip; it
+  must not invent a callback or merge definitions into layout refs.
 - **The footer command status line (M5) is DIRECT-ONLY, client-local
   execution.** The trusted command runs on the Client machine's shell
   (like the local `!` shell) with a USER-layer-only trust gate. There is

@@ -35,6 +35,9 @@ import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from './keybi
 import type { KeybindingEditorModel } from './keybinding-ui/model.ts'
 import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
+import { FooterComposer } from './footer/composer.ts'
+import { FooterCustomItemCatalog, parseFooterCustomItems } from './footer/custom-items.ts'
+import { FooterItemRegistry } from './footer/item-registry.ts'
 import { FooterConfiguratorModel } from './footer/configurator-model.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
@@ -262,10 +265,10 @@ export interface TuiCommandRunner {
     create(options: CreateSessionRequest): Promise<SessionHandle>
     resume(options: ResumeSessionRequest): Promise<SessionHandle>
   }
-  /** M2: apply the persisted footer mode + layout to the app (shared by
-   * /settings, /reload and the startup path; fail-soft on invalid custom
+  /** M2/PR C: apply the persisted footer mode, layout and user definitions to
+   * the app (shared by /settings, /reload and startup; fail-soft on invalid
    * configs). */
-  applyFooterSettings(doc: { footer: string; footerLayout?: unknown } | undefined): void
+  applyFooterSettings(doc: { footer: string; footerLayout?: unknown; footerCustomItems?: unknown } | undefined): void
   /** The session READ port (migration M1.3): /sessions, /resume, /search,
    * the title batches, the context measurement and the export read go
    * through the port, never ctx directly. */
@@ -1634,7 +1637,7 @@ export function registerTuiCommands(
                 // settings write must not leave the live layout ahead of
                 // the document (the next reload would silently revert).
                 detach('settings footer write', async () => {
-                  const nextLayout = await serializeTuiSettingsMutation(settings, async () => {
+                  const next = await serializeTuiSettingsMutation(settings, async () => {
                     const doc = settings.get()
                     // Selecting custom with no (valid) layout initializes an
                     // editable copy of the default layout (plan §14.8).
@@ -1643,10 +1646,14 @@ export function registerTuiCommands(
                         ? DEFAULT_FOOTER_LAYOUT
                         : doc.footerLayout
                       : doc.footerLayout
-                    await settings.replace({ ...doc, footer: value, footerLayout: layout, footerFallbackMode: value })
-                    return layout
+                    // Preserve the detached USER value, not a merged/project
+                    // projection, while the whole-document write is queued.
+                    const raw = runner.config.footerCustomItems.rawForPersistence()
+                    if (raw.kind === 'unavailable') throw new Error('custom footer definitions unavailable; settings write aborted')
+                    await settings.replace({ ...doc, footer: value, footerLayout: layout, footerFallbackMode: value, footerCustomItems: raw.value })
+                    return { layout, customItems: raw.value }
                   })
-                  runner.applyFooterSettings({ footer: value, footerLayout: nextLayout })
+                  runner.applyFooterSettings({ footer: value, footerLayout: next.layout, footerCustomItems: next.customItems })
                 }, { notify: true })
               } else {
                 runner.applyFooterSettings({ footer: value })
@@ -1758,12 +1765,19 @@ export function registerTuiCommands(
       const initial = persisted !== undefined && isFooterLayout(persisted)
         ? persisted
         : app.getEffectiveFooterLayout()
-      const registry = app.getFooterItemRegistry()
-      const model = new FooterConfiguratorModel(initial, registry)
+      // Layer the draft catalog over the live app registry. Unsaved create /
+      // edit / rename / delete operations stay inside this catalog, so Esc
+      // cannot mutate the active footer or its persisted definitions.
+      const registry = new FooterItemRegistry(app.getFooterItemRegistry())
+      const customItems = new FooterCustomItemCatalog(app.getFooterCustomItems())
+      registry.setCustomSource(customItems)
+      const composer = new FooterComposer(registry)
+      const model = new FooterConfiguratorModel(initial, registry, customItems)
       app.openFooterConfigurator({
         model,
         registry,
-        onSave: (layout) => {
+        composer,
+        onSave: (layout, draftCustomItems) => {
           // Validate the draft (the model's operations keep it well-formed,
           // but the persisted value is never trusted).
           const parsed = parseFooterLayout(layout)
@@ -1771,26 +1785,34 @@ export function registerTuiCommands(
             app.notify(`footer layout invalid: ${parsed.message}`, 'error')
             return
           }
+          const customResult = parseFooterCustomItems(draftCustomItems ?? [])
+          if (customResult.invalidCount > 0 || customResult.items.length !== (draftCustomItems ?? []).length) {
+            app.notify('custom footer items invalid', 'error')
+            return
+          }
+          const savedCustomItems = customResult.items.map(item => ({ ...item }))
           if (settings !== undefined) {
             // Persist FIRST; the memory commit happens only after the
             // settings write succeeds (plan §15.7 — a failed write keeps
-            // the old layout and notifies). footerFallbackMode rides
-            // ALONG: the /settings path records the last native mode, and
-            // saving a custom layout IS a native-mode change — the command
-            // surface's restart fallback must resolve to THIS custom
-            // layout, not the mode the user had before opening /footer.
+            // the old layout and definitions and notifies). footerFallbackMode
+            // rides ALONG: the /settings path records the last native mode,
+            // and saving a custom layout IS a native-mode change — the command
+            // surface's restart fallback must resolve to THIS custom layout.
             detach('footer configurator write', async () => {
               await serializeTuiSettingsMutation(settings, () => settings.replace({
                 ...settings.get(),
                 footer: 'custom',
                 footerFallbackMode: 'custom',
                 footerLayout: parsed,
+                footerCustomItems: savedCustomItems,
               }))
-              runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed })
+              app.setFooterCustomItems(savedCustomItems)
+              runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems })
               app.notify('footer layout saved', 'info')
             }, { notify: true })
           } else {
-            runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed })
+            app.setFooterCustomItems(savedCustomItems)
+            runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems })
             app.notify('footer layout saved', 'info')
           }
         },

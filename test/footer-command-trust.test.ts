@@ -129,12 +129,20 @@ test('TuiSettingsDoc round-trip: a whole-document replace never wipes the truste
     refreshIntervalMs: 2000,
     maxRows: 2,
   }
+  const footerCustomItems = [{
+    schemaVersion: 1 as const,
+    id: 'user:environment',
+    kind: 'text' as const,
+    text: 'PROD',
+    tone: 'warning' as const,
+  }]
   let backing: Record<string, unknown> = {
     theme: 'dark',
     iconStyle: 'emoji',
     footer: 'command',
     footerFallbackMode: 'default',
     footerCommand,
+    footerCustomItems,
     fullscreen: 'off',
     busyEnter: 'queue',
     localShellSandbox: 'bypass',
@@ -155,4 +163,6 @@ test('TuiSettingsDoc round-trip: a whole-document replace never wipes the truste
   const reread = port.tuiSettings.get()
   assert.deepEqual(reread.footerCommand, footerCommand,
     'footerCommand must survive a whole-document replace')
+  assert.deepEqual(reread.footerCustomItems, footerCustomItems,
+    'footerCustomItems must survive a whole-document replace')
 })

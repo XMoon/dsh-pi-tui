@@ -29,6 +29,7 @@ import {
   truncateToWidth,
   visibleWidth,
   type Component,
+  type KeyId,
 } from '@xmoon76/pi-tui'
 import { color } from '../theme.ts'
 import type { StatusSnapshot } from '../status/types.ts'
@@ -37,6 +38,7 @@ import { sanitizeCommandOutput } from './ansi-sanitize.ts'
 import {
   flatLengthOf,
   flatPositionOf,
+  FOOTER_TONE_CHOICES,
   itemMenuFor,
   toneChoicesFor,
 } from './configurator-model.ts'
@@ -61,7 +63,7 @@ export interface FooterConfiguratorOptions {
   /** The overlay's row budget source: re-read at EVERY render so a
    * terminal resize never leaves the panel clipped or oversized. */
   readonly maxVisible: () => number
-  readonly onSave: (layout: FooterLayoutV1) => void
+  readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('./custom-items.ts').FooterCustomItemSettings[]) => void
   readonly onCancel: () => void
 }
 
@@ -74,7 +76,7 @@ export class FooterConfiguratorPanel implements Component {
   private readonly taskBrowserAvailable: () => boolean
   private readonly extensionFooterText: () => string
   private readonly maxVisible: () => number
-  private readonly onSave: (layout: FooterLayoutV1) => void
+  private readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('./custom-items.ts').FooterCustomItemSettings[]) => void
   private readonly onCancel: () => void
   /** The body scrollport's top offset (stable across renders — the cursor
    * scrolls the body minimally; the fixed shell never moves). */
@@ -82,9 +84,11 @@ export class FooterConfiguratorPanel implements Component {
   /** Bracketed-paste buffering (the fork's Input-component pattern):
    * `isInPaste` between the \x1b[200~/\x1b[201~ markers, `pasteBuffer`
    * accumulating the chunks — the markers (and the content) may split
-   * across terminal chunks. */
+   * across terminal chunks. `pasteStartPending` holds an incomplete start
+   * marker after its ESC+[ prefix without delaying a standalone Escape key. */
   private isInPaste = false
   private pasteBuffer = ''
+  private pasteStartPending = ''
   /** The fork dispatches input to the focused component's handleInput. */
   readonly handleInput: (data: string) => void
 
@@ -117,7 +121,11 @@ export class FooterConfiguratorPanel implements Component {
       // (start marker, content, end marker — all ESC-led) — so "contains
       // ESC" is NOT a printable test: decodePrintableKey + the paste
       // protocol decide, exactly like the fork's Input component.
-      const textMode = state.mode === 'add' || (state.mode === 'advanced' && state.editing)
+      const textMode = state.mode === 'add'
+        || state.mode === 'create-name'
+        || state.mode === 'create-text'
+        || (state.mode === 'advanced' && state.editing)
+        || ((state.mode === 'custom-text' || state.mode === 'custom-name') && state.editing)
       if (textMode) {
         if (matchesKey(data, 'backspace')) {
           this.model.backspace()
@@ -138,8 +146,9 @@ export class FooterConfiguratorPanel implements Component {
         // the navigation keys below (arrows move the add list).
       }
       if (state.mode === 'rows' && matchesKey(data, 's')) {
-        // The Row Selector is the save point: S persists the draft.
-        this.onSave(this.model.preview())
+        // The Row Selector is the save point: S persists the layout and the
+        // definition catalog as one draft snapshot.
+        this.onSave(this.model.preview(), this.model.customItemSettings())
         return
       }
       if (state.mode === 'row') {
@@ -263,23 +272,97 @@ export class FooterConfiguratorPanel implements Component {
    * content to the model as one text input (the model strips control
    * characters and enforces the parser's bounds). */
   private feedPaste(data: string): boolean {
-    if (data.includes('\x1b[200~')) {
-      this.isInPaste = true
-      this.pasteBuffer = ''
-      data = data.replace('\x1b[200~', '')
+    const pendingStart = this.pasteStartPending
+    if (pendingStart !== '') {
+      this.pasteStartPending = ''
+      const candidate = pendingStart + data
+      if (continuesPasteStart(candidate)) {
+        data = candidate
+      } else {
+        // The pending bytes were only a possible paste prefix. Do not replay
+        // them through feedPaste (that would buffer the same malformed prefix
+        // forever); replay the incoming chunk normally. A complete CSI key
+        // reconstructed by the split is still dispatched as one key.
+        if (isReplayableInput(candidate)) {
+          this.handleInput(candidate)
+        } else if (data !== '') {
+          this.handleInput(data)
+        }
+        return true
+      }
     }
-    if (!this.isInPaste) return false
-    this.pasteBuffer += data
-    const endIndex = this.pasteBuffer.indexOf('\x1b[201~')
-    if (endIndex === -1) return true
-    const content = this.pasteBuffer.substring(0, endIndex)
-    const remaining = this.pasteBuffer.substring(endIndex + '\x1b[201~'.length)
-    this.isInPaste = false
-    this.pasteBuffer = ''
-    this.model.text(content)
-    // A trailing chunk after the end marker is ordinary input again.
-    if (remaining !== '') this.handleInput(remaining)
-    return true
+
+    // Once a paste has started, every byte belongs to the paste until the
+    // end marker. The end marker is allowed to split because it stays in
+    // pasteBuffer between calls.
+    if (this.isInPaste) {
+      this.pasteBuffer += data
+      this.finishPastes()
+      return true
+    }
+
+    const startIndex = data.indexOf(BRACKETED_PASTE_START)
+    if (startIndex >= 0) {
+      // Preserve ordinary input that arrived before a complete marker, then
+      // consume the marker and continue scanning the same chunk. This path
+      // also handles a complete marker reconstructed from pasteStartPending.
+      const before = data.slice(0, startIndex)
+      if (before !== '') this.handleInput(before)
+      this.isInPaste = true
+      this.pasteBuffer = data.slice(startIndex + BRACKETED_PASTE_START.length)
+      this.finishPastes()
+      return true
+    }
+
+    // Keep only an incomplete ESC+[200~ suffix. A lone ESC remains ordinary
+    // input so the configurator's Escape navigation is never delayed; the
+    // terminal's usual split boundary (ESC+[20 / 0~) is buffered here.
+    const partialLength = longestPasteStartSuffix(data)
+    if (partialLength > 0) {
+      const ordinary = data.slice(0, -partialLength)
+      if (ordinary !== '') this.handleInput(ordinary)
+      this.pasteStartPending = data.slice(-partialLength)
+      return true
+    }
+
+    return false
+  }
+
+  /** Consume all complete paste end markers in the current buffer. */
+  private finishPastes(): void {
+    let remaining = ''
+    while (this.isInPaste) {
+      const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END)
+      if (endIndex < 0) return
+      const content = this.pasteBuffer.slice(0, endIndex)
+      remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length)
+      this.isInPaste = false
+      this.pasteBuffer = ''
+      this.model.text(content)
+      if (remaining === '') return
+
+      // A single terminal chunk can contain ordinary input or another paste
+      // after the end marker. Re-enter the scanner without sending the same
+      // bytes through the outer handleInput twice.
+      const startIndex = remaining.indexOf(BRACKETED_PASTE_START)
+      if (startIndex >= 0) {
+        const before = remaining.slice(0, startIndex)
+        if (before !== '') this.handleInput(before)
+        this.isInPaste = true
+        this.pasteBuffer = remaining.slice(startIndex + BRACKETED_PASTE_START.length)
+        remaining = ''
+        continue
+      }
+      const partialLength = longestPasteStartSuffix(remaining)
+      if (partialLength > 0) {
+        const ordinary = remaining.slice(0, -partialLength)
+        if (ordinary !== '') this.handleInput(ordinary)
+        this.pasteStartPending = remaining.slice(-partialLength)
+        return
+      }
+      this.handleInput(remaining)
+      return
+    }
   }
 
   /** The page title (the header). */
@@ -294,9 +377,20 @@ export class FooterConfiguratorPanel implements Component {
       case 'style':
         return `Style · ${this.itemLabel(state.rowIndex, state.cursor)}`
       case 'tone':
+      case 'custom-tone':
         return `Tone · ${this.itemLabel(state.rowIndex, state.cursor)}`
       case 'advanced':
         return `Advanced · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-text':
+        return `Text · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-name':
+        return `Rename · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-delete':
+        return `Delete · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'create-name':
+      case 'create-text':
+      case 'create-tone':
+        return 'Create Custom Text'
       case 'add':
         // The side is decided when the picker opens (the cursor item's
         // zone): showing it spares the user guessing where the item will
@@ -320,9 +414,20 @@ export class FooterConfiguratorPanel implements Component {
         return '↑↓ Select · Enter Open · ←→ Change · Esc Back'
       case 'style':
       case 'tone':
+      case 'custom-tone':
         return '↑↓ Select · Enter Apply · Esc Back'
       case 'advanced':
         return state.editing ? 'Type · Enter Confirm · Esc Cancel' : '↑↓ Select · Enter Edit · Esc Back'
+      case 'custom-text':
+      case 'custom-name':
+        return 'Type · Enter Confirm · Esc Cancel'
+      case 'custom-delete':
+        return 'Enter Confirm · Esc Cancel'
+      case 'create-name':
+      case 'create-text':
+        return 'Type · Enter Next · Esc Cancel'
+      case 'create-tone':
+        return '↑↓ Select · Enter Create · Esc Cancel'
       case 'add':
         return 'Type to search · ↑↓ Select · Enter Add · Esc Back'
       default:
@@ -335,9 +440,21 @@ export class FooterConfiguratorPanel implements Component {
    * pages. FIXED chrome — never scrolls with the body. */
   private previewLines(width: number): string[] {
     const state = this.model.state()
-    if (state.mode === 'item' || state.mode === 'style' || state.mode === 'tone' || state.mode === 'advanced') {
+    if (state.mode === 'item' || state.mode === 'style' || state.mode === 'tone'
+      || state.mode === 'advanced' || state.mode === 'custom-text' || state.mode === 'custom-tone'
+      || state.mode === 'custom-name' || state.mode === 'custom-delete') {
       const ref = this.refAt(state.rowIndex, state.cursor)
       return [ref === undefined ? color.textMuted('(no item)') : this.itemPreview(ref)]
+    }
+    if (state.mode === 'create-name' || state.mode === 'create-text' || state.mode === 'create-tone') {
+      const tone = state.mode === 'create-tone'
+        ? FOOTER_TONE_CHOICES[state.pickerIndex]?.value ?? state.customTone
+        : state.customTone
+      const text = state.customText === '' ? color.textMuted('(enter text)') : renderSpans([{
+        text: stripControlChars(state.customText),
+        ...(tone === 'auto' ? {} : { tone }),
+      }])
+      return [text]
     }
     const preview = this.composer.render({
       snapshot: this.snapshot(),
@@ -435,7 +552,8 @@ export class FooterConfiguratorPanel implements Component {
       }
       case 'item': {
         const ref = this.refAt(state.rowIndex, state.cursor)
-        const menu = itemMenuFor(ref === undefined ? undefined : this.registry.get(ref.id)?.formats)
+        const custom = ref !== undefined && this.model.isCustomItem(ref.id)
+        const menu = itemMenuFor(ref === undefined ? undefined : this.registry.get(ref.id)?.formats, custom)
         const lines = menu.map((entry, index) => {
           const active = index === state.itemCursor
           const marker = active ? color.primary('›') : ' '
@@ -450,6 +568,17 @@ export class FooterConfiguratorPanel implements Component {
             const label = toneChoicesFor(ref?.tone).find(choice => choice.value === tone)?.label ?? 'Auto'
             return this.menuRow(marker, 'Tone', this.tonePaint(tone, label), active)
           }
+          if (entry.kind === 'custom-text') {
+            const value = this.model.customItem(ref?.id ?? '')?.text
+            return this.menuRow(marker, 'Text', value === undefined ? undefined : color.text(value), active)
+          }
+          if (entry.kind === 'custom-tone') {
+            const tone = this.model.customItem(ref?.id ?? '')?.tone ?? 'auto'
+            const label = toneChoicesFor(tone).find(choice => choice.value === tone)?.label ?? 'Auto'
+            return this.menuRow(marker, 'Tone', this.tonePaint(tone, label), active)
+          }
+          if (entry.kind === 'custom-name') return this.menuRow(marker, 'Rename definition', undefined, active)
+          if (entry.kind === 'custom-delete') return this.menuRow(marker, 'Delete definition', undefined, active)
           return this.menuRow(marker, 'Advanced…', undefined, active)
         })
         return { lines, cursor: Math.min(state.itemCursor, Math.max(0, menu.length - 1)) }
@@ -486,6 +615,76 @@ export class FooterConfiguratorPanel implements Component {
         })
         return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)) }
       }
+      case 'custom-tone': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const current = this.model.customItem(ref?.id ?? '')?.tone ?? 'auto'
+        const choices = toneChoicesFor(current)
+        const lines = choices.map((choice, index) => {
+          const active = index === state.pickerIndex
+          const marker = active ? color.primary('›') : ' '
+          const painted = this.tonePaint(choice.value, choice.label)
+          const suffix = current === choice.value ? color.textMuted('  (current)') : ''
+          return `${marker} ${painted}${suffix}`
+        })
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)) }
+      }
+      case 'custom-text':
+      case 'custom-name': {
+        const label = state.mode === 'custom-text' ? 'Text' : 'Name'
+        const raw = stripControlChars(state.editBuffer)
+        const value = raw === '' ? color.textMuted('(empty)') : color.textStrong(`${raw}▏`)
+        const lines = [this.menuRow(color.primary('›'), label, value, true)]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: 0 }
+      }
+      case 'custom-delete': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const id = ref?.id ?? ''
+        const count = this.referenceCount(id)
+        const lines = [
+          color.error(`Delete ${this.itemLabel(state.rowIndex, state.cursor)}?`),
+          color.textMuted(count === 0
+            ? 'This definition is not currently placed in the layout.'
+            : `${count} layout reference${count === 1 ? '' : 's'} will be removed.`),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: 0 }
+      }
+      case 'create-name': {
+        const lines = [
+          this.menuRow(color.primary('›'), 'Name', state.customName === '' ? color.textMuted('(required)') : color.textStrong(`${stripControlChars(state.customName)}▏`), true),
+          color.textMuted('Use a stable name; it is stored as user:<name>.'),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: 0 }
+      }
+      case 'create-text': {
+        const name = state.customName === '' ? color.textMuted('(unnamed)') : color.text(state.customName)
+        const value = state.customText === '' ? color.textMuted('(required)') : color.textStrong(`${stripControlChars(state.customText)}▏`)
+        const lines = [
+          this.menuRow(' ', 'Name', name, false),
+          this.menuRow(color.primary('›'), 'Text', value, true),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: 1 }
+      }
+      case 'create-tone': {
+        const lines = [
+          this.menuRow(' ', 'Name', color.text(state.customName), false),
+          this.menuRow(' ', 'Text', color.text(state.customText), false),
+          color.textStrong('Tone'),
+          ...FOOTER_TONE_CHOICES.map((choice, index) => {
+            const active = index === state.pickerIndex
+            const marker = active ? color.primary('›') : ' '
+            const suffix = choice.value === (FOOTER_TONE_CHOICES[state.pickerIndex]?.value ?? 'auto')
+              ? color.textMuted('  (selected)')
+              : ''
+            return `${marker} ${this.tonePaint(choice.value, choice.label)}${suffix}`
+          }),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1) }
+      }
       case 'advanced': {
         const ref = this.refAt(state.rowIndex, state.cursor)
         const fields: Array<{ field: 'prefix' | 'suffix' | 'importance' | 'reset'; label: string; value: string }> = [
@@ -518,19 +717,21 @@ export class FooterConfiguratorPanel implements Component {
       }
       case 'add': {
         const matches = this.model.addMatches()
-        if (matches.length === 0) return { lines: [color.textMuted('(no matching items)')], cursor: 0 }
         const lines = matches.map((id, index) => {
-          const active = index === Math.min(state.pickerIndex, matches.length - 1)
+          const active = index === state.pickerIndex
           const marker = active ? color.primary('›') : ' '
           const def = this.registry.get(id)
           // An UNKNOWN id renders its raw text: strip control characters
-          // (the parser rejects them in layouts, but a registry id from an
-          // extension source is never trusted — an ESC/OSC id must not
-          // reach the panel).
+          // (the parser rejects them in layouts, but an extension source is
+          // never trusted — an ESC/OSC id must not reach the panel).
           const label = def === undefined ? stripControlChars(id) : stripControlChars(def.label)
           return `${marker} ${active ? color.textStrong(label) : color.text(label)}`
         })
-        return { lines, cursor: Math.min(state.pickerIndex, matches.length - 1) }
+        const createIndex = matches.length
+        if (matches.length === 0) lines.push(color.textMuted('(no matching items)'))
+        const createActive = state.pickerIndex === createIndex
+        lines.push(`${createActive ? color.primary('›') : ' '} ${createActive ? color.textStrong('+ Create Custom Text') : color.text('+ Create Custom Text')}`)
+        return { lines, cursor: Math.min(state.pickerIndex, createIndex) }
       }
     }
   }
@@ -641,11 +842,48 @@ export class FooterConfiguratorPanel implements Component {
     return clipText(this.refLabel(ref))
   }
 
+  /** Count all layout references to a definition before a delete. */
+  private referenceCount(id: string): number {
+    return this.model.preview().rows.reduce((count, row) => count
+      + row.left.filter(ref => ref.id === id).length
+      + row.right.filter(ref => ref.id === id).length, 0)
+  }
+
   /** The item's current style name for the Edit Row list (empty for an
    * unknown definition). */
   private styleText(ref: FooterItemRef): string {
     return this.formatDisplay(ref)
   }
+}
+
+const BRACKETED_PASTE_START = '\x1b[200~'
+const BRACKETED_PASTE_END = '\x1b[201~'
+const REPLAYABLE_ESC_KEYS: readonly KeyId[] = [
+  'tab', 'enter', 'backspace', 'delete', 'insert', 'home', 'end',
+  'pageUp', 'pageDown', 'up', 'down', 'left', 'right',
+  'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12',
+]
+
+/** Whether a pending-prefix candidate is a complete normal key sequence. */
+function isReplayableInput(data: string): boolean {
+  return decodePrintableKey(data) !== undefined
+    || REPLAYABLE_ESC_KEYS.some(key => matchesKey(data, key))
+}
+
+/** Whether the candidate still begins with a valid paste start marker. */
+function continuesPasteStart(data: string): boolean {
+  const length = Math.min(data.length, BRACKETED_PASTE_START.length)
+  return data.slice(0, length) === BRACKETED_PASTE_START.slice(0, length)
+}
+
+/** Return the longest proper start-marker prefix at the end of a chunk.
+ * A one-byte ESC is intentionally excluded: it is a standalone Escape key
+ * in normal terminal traffic and must not be held waiting for another chunk. */
+function longestPasteStartSuffix(data: string): number {
+  for (let length = Math.min(BRACKETED_PASTE_START.length - 1, data.length); length >= 2; length -= 1) {
+    if (data.endsWith(BRACKETED_PASTE_START.slice(0, length))) return length
+  }
+  return 0
 }
 
 /** Clip a title-part label (titles truncate ANSI-safely anyway). */

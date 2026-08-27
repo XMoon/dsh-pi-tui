@@ -27,9 +27,11 @@
 
 import type { AuthorizationTarget } from '../authorization.ts'
 import type { FooterCommandConfig } from '../footer/command-runner.ts'
+import type { FooterCustomItemSettings } from '../footer/custom-items.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
- * fullscreen/busyEnter/localShellSandbox/homeEndKeys/focusMode). The old
+ * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/focusMode).
+ * The old
  * `history` field moved to $DSH_HOME/user-history/*.jsonl and is
  * deliberately NOT part of the document anymore. `footerLayout` is the
  * M2 versioned custom layout (nested settings object), absent when not
@@ -47,6 +49,10 @@ export interface TuiSettingsDoc {
   footer: string
   footerFallbackMode?: string
   footerLayout?: unknown
+  /** PR C: user-owned custom definitions. The layout stores only their
+   * canonical `user:*` ids; this field carries the independent definition
+   * collection across a whole-document get/replace cycle. */
+  footerCustomItems?: FooterCustomItemSettings[]
   /** The M5 command status surface's TRUSTED configuration (the user-layer
    * `footerCommand` value, validated by footer/command-trust). Part of the
    * SEMANTIC document: a whole-document replace that drops it would wipe
