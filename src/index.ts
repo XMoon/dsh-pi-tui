@@ -1570,6 +1570,14 @@ export function apply(ctx: Context, config: Config): void {
       new DirectHostFilePort((sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
     )
 
+    // Whole-document settings writes must not copy a project-layer
+    // footerCustomItems value into the USER section. The config port is the
+    // only source allowed to supply definitions for a non-/footer write.
+    // Declare this before mounting the TUI: fullscreen initialization can
+    // synchronously invoke its persistence callback.
+    const userFooterCustomItemsForSave = (): FooterCustomItemSettings[] =>
+      backend.config.footerCustomItems.get().items.map(item => ({ ...item }))
+
     // Launch-time preset entry: `--preset` wins over $DSH_PI_TUI_PRESET, and
     // both fall back to the saved default (settings `agent-presets.default`,
     // then the roster config) when absent. A fresh session starts on it; a
@@ -5183,11 +5191,6 @@ export function apply(ctx: Context, config: Config): void {
       footerCommandRunner = undefined
       app.setFooterCommandRows(undefined)
     }
-    // Whole-document settings writes must not copy a project-layer
-    // footerCustomItems value into the USER section. The config port is the
-    // only source allowed to supply definitions for a non-/footer write.
-    const userFooterCustomItemsForSave = (): FooterCustomItemSettings[] =>
-      backend.config.footerCustomItems.get().items.map(item => ({ ...item }))
     const applyFooterSettings = (
       doc: { footer: string; footerLayout?: unknown; footerCustomItems?: unknown } | undefined,
       savedCustomItems?: readonly FooterCustomItemSettings[],

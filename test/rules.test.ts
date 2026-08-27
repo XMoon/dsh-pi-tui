@@ -377,6 +377,16 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
   )
 })
 
+test('the restored fullscreen startup path initializes custom-item persistence before its callback can run', () => {
+  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
+  const helper = source.indexOf('const userFooterCustomItemsForSave =')
+  const fullscreenBoot = source.indexOf("if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)")
+  assert.ok(helper >= 0, 'the custom-item save projection must exist')
+  assert.ok(fullscreenBoot >= 0, 'the restored fullscreen startup path must exist')
+  assert.ok(helper < fullscreenBoot,
+    'fullscreen startup can synchronously invoke its persistence callback; the custom-item save projection must be initialized first')
+})
+
 test('startup-eager callbacks of startProcessTui never reference a later-declared binding (TDZ guard)', () => {
   // Lifecycle regression (the footer-command startup ReferenceError):
   // `onTerminalResize` is invoked SYNCHRONOUSLY from TuiApp's render path —
