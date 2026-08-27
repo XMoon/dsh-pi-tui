@@ -341,6 +341,62 @@ test('review finding 3: an indented /image command still classifies its argument
   assert.ok(result.items.some(item => item.value === 'file-one.txt'), `indented value missing:\n${JSON.stringify(result.items)}`)
 })
 
+test('review finding (round 4): a regex-special filename still completes (fd literal match)', async () => {
+  const root = outsideCwdFixture().workspace
+  writeFileSync(join(root, 'file[1].ts'), 'x')
+  writeFileSync(join(root, 'a+b.ts'), 'x')
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const bracketed = await provider.getSuggestions(['@file[1'], 0, 7, { signal: abort })
+  assert.ok(bracketed !== null, `@file[1 must suggest:\n${JSON.stringify(bracketed)}`)
+  assert.ok(bracketed.items.some(item => item.value.includes('file[1].ts')), `bracketed missing:\n${JSON.stringify(bracketed.items)}`)
+  const plus = await provider.getSuggestions(['@a+b'], 0, 4, { signal: abort })
+  assert.ok(plus !== null && plus.items.some(item => item.value.includes('a+b.ts')), `plus missing:\n${JSON.stringify(plus)}`)
+})
+
+test('review finding (round 4): failed fd falls back to the bounded scan', async () => {
+  const { workspace, sibling } = outsideCwdFixture()
+  const root = workspace
+  writeFileSync(join(sibling, 'fallback-scan.ts'), 'x')
+  // A fake fd that always FAILS (non-zero exit): discovery must fall back
+  // to the bounded recursive scan, never report a false "no match".
+  const fakeFd = join(tmpdir(), 'dsh-conv-fdcrash')
+  writeFileSync(fakeFd, '#!/bin/sh\nexit 1\n')
+  chmodSync(fakeFd, 0o755)
+  const port = new DirectHostFilePort(() => undefined, fakeFd)
+  const provider = new MentionProvider([], root, port)
+  const result = await provider.getSuggestions(['@../sibling/fallback'], 0, 21, { signal: abort })
+  assert.ok(result !== null, `a failed fd must fall back:\n${JSON.stringify(result)}`)
+  assert.ok(result.items.some(item => item.value.includes('fallback-scan.ts')), `fallback missing:\n${JSON.stringify(result.items)}`)
+})
+
+test('review finding (round 4): scoped listings never present .git', async () => {
+  const root = outsideCwdFixture().workspace
+  mkdirSync(join(root, '.git'))
+  writeFileSync(join(root, '.git', 'config'), 'x')
+  writeFileSync(join(root, 'visible.txt'), 'x')
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const result = await provider.getSuggestions(['@'], 0, 1, { signal: abort })
+  assert.ok(result !== null)
+  assert.ok(!result.items.some(item => item.value.includes('.git')), `.git must not be listed:\n${JSON.stringify(result.items)}`)
+  assert.ok(result.items.some(item => item.value === '@visible.txt'))
+})
+
+test('review finding (round 4): null pins the fallback /image source; undefined probes PATH', async () => {
+  const root = outsideCwdFixture().workspace
+  writeFileSync(join(root, 'shot.png'), 'x')
+  // null → forced fallback (never fd), regardless of PATH.
+  const fallbackProvider = new MentionProvider(
+    [{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }],
+    root,
+    new DirectHostFilePort(() => undefined, null),
+    undefined,
+    { kind: 'workspace', cwd: root },
+    null,
+  )
+  const result = await fallbackProvider.getSuggestions(['/image shot'], 0, 11, { signal: abort })
+  assert.ok(result !== null && result.items.length > 0, `a null-pinned fallback must complete:\n${JSON.stringify(result)}`)
+})
+
 test('review finding (verified): multi-space /image separator applies without duplication', async () => {
   const { workspace } = outsideCwdFixture()
   const root = workspace

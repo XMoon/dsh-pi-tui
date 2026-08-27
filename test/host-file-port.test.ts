@@ -209,14 +209,16 @@ test('an abort mid-fd-query fails closed (the port re-checks AFTER the await)', 
   assert.deepEqual(await pending, [], 'a cancelled fd query must never serve a late result')
 })
 
-test('a failing fd yields NO candidates (fail closed, pre-migration parity)', async () => {
+test('a failing fd falls back to the bounded scan (plan §6.2 fd-first-fallback)', async () => {
   const root = fixtureWorkspace()
-  // Non-zero exit: real fd would have failed (e.g. a broken query); the
-  // adapter returns empty rather than partial or wrong data.
+  // Non-zero exit: fd failed (a broken invocation). The plan's §6.2
+  // contract is fd-FIRST, BOUNDED-FALLBACK — a failure is NOT a valid
+  // empty result, so the recursive scan answers.
   const port = new DirectHostFilePort(() => undefined, fakeFd('exit 3'))
-  assert.deepEqual(
-    await port.listReferences({ kind: 'workspace', cwd: root } as const, '@file'),
-    [],
-    'a failed fd spawn must not fabricate candidates',
+  const candidates = await port.listReferences({ kind: 'workspace', cwd: root } as const, '@file')
+  assert.ok(candidates.length > 0, 'a failed fd must fall back to the bounded scan')
+  assert.ok(
+    candidates.some(candidate => candidate.path.includes('file-one.txt')),
+    `the fallback must find the fixture file:\n${JSON.stringify(candidates)}`,
   )
 })
