@@ -177,7 +177,7 @@ test('M enters Move Mode; arrows reorder; Enter exits', async () => {
   app.stop()
 })
 
-test('A opens the Add picker; typing filters; Enter adds; Esc clears then back', async () => {
+test('A opens the Add picker; typing filters; Enter adds and closes', async () => {
   const { vt, app } = startApp()
   const model = openDefault(app)
   await vt.waitForRender()
@@ -186,7 +186,7 @@ test('A opens the Add picker; typing filters; Enter adds; Esc clears then back',
   vt.sendInput('a') // → Add picker
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Add Item → Row 1'), `picker title missing:\n${view}`)
+  assert.ok(view.includes('Add Item → Row 1 · Left'), `picker title missing (the add side is shown):\n${view}`)
   assert.ok(view.includes('Search:'), `search line missing:\n${view}`)
   // Type to filter (one chunk — the paste-burst path).
   vt.sendInput('cache')
@@ -194,10 +194,20 @@ test('A opens the Add picker; typing filters; Enter adds; Esc clears then back',
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('Cache hit'), `the search must filter to the match:\n${view}`)
   assert.ok(!view.includes('Sandbox mode'), `non-matches must be filtered out:\n${view}`)
-  // Enter adds; the item leaves the pool (the picker shows no more matches).
+  // Enter adds AND closes the picker (ccstatusline parity): the row
+  // editor shows the cursor on the added item.
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.ok(model.preview().rows[0]!.left.some(ref => ref.id === 'cache-hit'), 'the item joined the draft')
+  assert.equal(model.state().mode, 'row', 'a successful add closes the picker')
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Edit Row 1'), `the picker must close back into the row editor:\n${view}`)
+  // Reopen: the query is FRESH, and the added item has left the pool.
+  vt.sendInput('a')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, '')
+  vt.sendInput('cache')
+  await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('(no matching items)'), `the pool must drop the added item:\n${view}`)
   // Esc clears the search first, then returns to the row editor.
@@ -342,6 +352,109 @@ test('the Add picker refuses a FULL row with an explicit hint (the parse cap)', 
   vt.sendInput('\r') // Enter at the cap
   await vt.waitForRender()
   assert.equal(model.preview().rows[0]!.left.length, 32, `the cap refuses the 33rd item`)
+  app.stop()
+})
+
+test('bracketed paste feeds the Add search (single chunk, markers included)', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1
+  await vt.waitForRender()
+  vt.sendInput('a') // → Add picker
+  await vt.waitForRender()
+  // A terminal wraps a paste between the 200~/201~ markers — the WHOLE
+  // chunk is ESC-led, so the old "no ESC = printable" test dropped it.
+  vt.sendInput('\x1b[200~cache\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, 'cache', `the pasted query must land:\n${model.state().addQuery}`)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Cache hit'), `the pasted query must filter:\n${view}`)
+  app.stop()
+})
+
+test('bracketed paste feeds the Advanced prefix editor', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  while (idAt(model) !== 'model') vt.sendInput('\x1b[B')
+  vt.sendInput('\r') // → item editor
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // → Advanced…
+  vt.sendInput('\r') // → the Advanced page
+  await vt.waitForRender()
+  vt.sendInput('\r') // edit prefix
+  await vt.waitForRender()
+  vt.sendInput('\x1b[200~PROD\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(model.state().editBuffer, 'PROD', `the paste must land in the buffer`)
+  vt.sendInput('\r') // commit
+  await vt.waitForRender()
+  assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'model')!.prefix, 'PROD')
+  app.stop()
+})
+
+test('bracketed paste split across terminal chunks buffers until the end marker', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('a')
+  await vt.waitForRender()
+  // Start/content/end split across chunks (slow terminals deliver paste
+  // in pieces). 'cach' filters to Cache hit (context is already IN the
+  // default layout, so the pool wouldn't list it).
+  vt.sendInput('\x1b[200~c')
+  await vt.waitForRender()
+  vt.sendInput('ac')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, '', 'the buffered paste must not leak into the query mid-stream')
+  vt.sendInput('h\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, 'cach', `the split paste must assemble:\n${model.state().addQuery}`)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Cache hit'), `the assembled query must filter:\n${view}`)
+  app.stop()
+})
+
+test('CSI-u encoded printables type into the Add search and the prefix', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('a')
+  await vt.waitForRender()
+  // Kitty flag 1 sends CSI-u for ALL keys — including plain printables.
+  // '\x1b[97u' is 'a'; '\x1b[97:65;2u' is shift+a ('A' via the shifted
+  // keycode). Both contain ESC: the old contains-ESC check dropped them.
+  vt.sendInput('\x1b[97u')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[97:65;2u')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, 'aA', `the CSI-u printables must land:\n${JSON.stringify(model.state().addQuery)}`)
+  vt.sendInput('\x1b') // clear the query
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // back to the row
+  await vt.waitForRender()
+  // modifyOtherKeys shape in the prefix editor.
+  while (idAt(model) !== 'model') vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\r') // edit prefix
+  await vt.waitForRender()
+  vt.sendInput('\x1b[27;2;80~') // modifyOtherKeys shift+P → 'P'
+  await vt.waitForRender()
+  assert.equal(model.state().editBuffer, 'P', `the modifyOtherKeys printable must land`)
+  vt.sendInput('\r') // commit
+  await vt.waitForRender()
+  assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'model')!.prefix, 'P')
   app.stop()
 })
 
@@ -632,9 +745,36 @@ for (const cols of [40, 80, 120]) {
         `the Frame borders must be visible at ${cols}x${rows}:\n${text}`)
       assert.ok(text.includes('Preview'), `the preview must stay visible at ${cols}x${rows}:\n${text}`)
       assert.ok(text.includes('A Add'), `the contextual help must not scroll away at ${cols}x${rows}:\n${text}`)
+      // THE key guarantee: the EDITABLE body survives — the cursor's item
+      // (the last one: Extension items) must be on screen, never eaten by
+      // the fixed preview.
+      assert.ok(text.includes('Extension items'), `the active item must stay visible at ${cols}x${rows}:\n${text}`)
       // A long label must not break the layout (ANSI-safe truncation).
       assert.ok(!text.split('\n').some(line => line.length > cols + 20), `no line may overflow the frame at ${cols}x${rows}`)
       app.stop()
     })
   }
 }
+
+test('a 4-physical-row preview cannot eat the editable body (10-row terminal)', async () => {
+  // The footer composer legally wraps a status row into up to 4 physical
+  // rows: with the OLD shell-wins budget a 10-row terminal could spend
+  // its entire budget on title/help/preview and show ZERO editable rows.
+  // A very long model id forces the deterministic 4-row wrap.
+  const vt = new VirtualTerminal(40, 10)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setStatus({ model: `a-very-long-model-name/${'x'.repeat(120)}`, cwd: '/home/x/proj' })
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1
+  await vt.waitForRender()
+  for (let i = 0; i < 32; i += 1) vt.sendInput('\x1b[B') // → the last item
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const text = view.join('\n')
+  assert.ok(text.includes('A Add'), `the help must stay visible:\n${text}`)
+  assert.ok(text.includes('Preview'), `the preview must stay visible:\n${text}`)
+  assert.ok(text.includes('Extension items'), `the ACTIVE item must stay visible (the body must never be eaten):\n${text}`)
+  app.stop()
+})

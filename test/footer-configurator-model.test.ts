@@ -137,12 +137,17 @@ test('the Add picker: search, add, the item leaves the pool, Esc clears then bac
   m.text('cache')
   assert.deepEqual(m.addMatches(), ['cache-hit'])
   m.activate()
-  // The item joined the layout (the picker's side) and left the pool; the
-  // picker stays open for multi-add.
+  // The item joined the layout (the picker's side) and left the pool; a
+  // SUCCESSFUL add closes the picker (ccstatusline parity — the cursor
+  // lands on the added item).
   assert.ok(m.state().layout.rows[0]!.left.some(ref => ref.id === 'cache-hit'))
   assert.ok(!m.addMatches().includes('cache-hit'))
-  // Description hit ("wall time" matches the Performance description).
-  for (let i = 0; i < 5; i += 1) m.backspace()
+  assert.equal(m.state().mode, 'row')
+  assert.equal(idAtCursor(m), 'cache-hit', 'the cursor lands on the added item')
+  // Description hit ("wall time" matches the Performance description) —
+  // the picker reopens with a FRESH query.
+  m.startAdd()
+  assert.equal(m.state().addQuery, '')
   m.text('wall time')
   assert.deepEqual(m.addMatches(), ['performance'])
   // Esc: clear the search first, then return to the row.
@@ -211,6 +216,9 @@ test('the Item Editor opens with Style hidden for single-format items', () => {
   m.moveDown()
   m.activate()
   assert.equal(m.state().mode, 'tone')
+  // The pickers hang off the ITEM EDITOR: Esc returns one level up.
+  m.cancel()
+  assert.equal(m.state().mode, 'item')
   m.cancel()
   assert.equal(m.state().mode, 'row')
   // A single-format item (model: badge only) has no Style row: Enter on
@@ -220,6 +228,32 @@ test('the Item Editor opens with Style hidden for single-format items', () => {
   assert.equal(m.state().mode, 'item')
   m.activate()
   assert.equal(m.state().mode, 'tone')
+})
+
+test('Esc walks the hierarchy ONE level at a time (row → item → picker → item → row)', () => {
+  const m = model()
+  m.activate()
+  walkTo(m, 'context')
+  m.activate()
+  assert.equal(m.state().mode, 'item')
+  m.activate() // Style
+  assert.equal(m.state().mode, 'style')
+  m.cancel()
+  assert.equal(m.state().mode, 'item', 'Style Esc returns to the item editor')
+  m.moveDown() // Tone
+  m.activate()
+  assert.equal(m.state().mode, 'tone')
+  m.cancel()
+  assert.equal(m.state().mode, 'item', 'Tone Esc returns to the item editor')
+  m.moveDown() // Advanced…
+  m.activate()
+  assert.equal(m.state().mode, 'advanced')
+  m.cancel()
+  assert.equal(m.state().mode, 'item', 'Advanced Esc returns to the item editor')
+  m.cancel()
+  assert.equal(m.state().mode, 'row')
+  m.cancel()
+  assert.equal(m.state().mode, 'rows')
 })
 
 test('the Style picker applies a format; the inline ←→ change cycles too', () => {
@@ -289,11 +323,12 @@ test('Advanced: prefix/suffix/importance round-trip; empty removes the override'
   assert.equal(m.state().editing, false)
   assert.equal(m.state().mode, 'advanced')
   assert.equal(ref().prefix, 'ab')
+  // Esc on the (non-editing) Advanced page returns to the ITEM EDITOR —
+  // the pickers hang off the item editor (row → item → advanced).
   m.cancel()
-  assert.equal(m.state().mode, 'row')
+  assert.equal(m.state().mode, 'item')
+  assert.equal(m.state().itemCursor, 1, 'the menu cursor still sits on Advanced')
   // Importance: digits only, bounds-checked.
-  m.activate() // → item editor (menu cursor resets to Tone)
-  m.moveDown() // → Advanced
   m.activate() // → the advanced editor (field resets to prefix)
   m.moveDown()
   m.moveDown()
@@ -324,11 +359,8 @@ test('Advanced: Reset to default clears every ref override', () => {
   m.moveDown() // Tone
   m.activate()
   m.moveDown() // Primary
-  m.activate()
-  m.cancel() // → row
-  m.activate() // → item editor again
-  m.moveDown()
-  m.moveDown() // Advanced (menu: Style/Tone/Advanced for context)
+  m.activate() // applied → back to the item editor
+  m.moveDown() // Advanced (menu cursor rides from Tone to Advanced)
   m.activate()
   m.moveDown()
   m.moveDown()
