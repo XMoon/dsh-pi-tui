@@ -220,6 +220,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   executed only when it lives in the USER layer of your settings document
   — a repository/project-supplied `footerCommand` is never executed.
 
+### Fixed
+
+- **Ghost Tool Cards after `compaction/prune` are gone.** After
+  tool-result pruning (or a summary-compaction checkpoint) in a long
+  session, Harness appends model-only copy events carrying
+  `surfaceOp: { op: 'replace' }`; the Human Transcript used to render
+  those copies as new messages, so a batch of duplicate "ghost Tool
+  Cards" appeared at the transcript tail and the original full result
+  was replaced by the pruned truncated text. `TranscriptFolder` now
+  filters every explicit surface replacement at its unified entry point
+  (user/message, assistant/message and tool/result alike) — append-origin
+  history survives untouched, unmarked legacy sessions stay fully
+  compatible, and `/export md` follows the same contract.
+
 ## [0.3.4] - 2026-08-25
 
 ### Added

@@ -256,3 +256,55 @@ test('renderTranscriptMarkdown projects image blocks (review finding 4)', () => 
   assert.ok(md.includes('> 🖼️ image · 640×480 · attachment `att-10`'), 'image-only message renders')
   assert.ok(md.includes('分析这张图:'), 'text rides along')
 })
+
+test('renderTranscriptMarkdown never replays surface replacements', () => {
+  // A pruned tool result + a summary compaction checkpoint must stay out
+  // of the human-facing export: the append-origin originals already render
+  // at their log positions (same contract as the transcript fold).
+  const session = {
+    header: { id: 'session-2' as never, cwd: '/ws', version: 1, createdAt: 0 },
+    events: [
+      {
+        type: 'tool/call',
+        seq: 0,
+        time: 1,
+        data: { turn: 0, step: 0, callId: 'call-1' as never, name: 'bash', arguments: '{}' },
+      },
+      {
+        type: 'tool/result',
+        seq: 1,
+        time: 2,
+        data: {
+          turn: 0,
+          step: 0,
+          message: {
+            id: 'msg-1' as never,
+            role: 'user',
+            content: [{ type: 'tool-result', toolCallId: 'call-1' as never, content: [{ type: 'text', text: 'ORIGINAL RESULT' }] }],
+            source: { kind: 'tool', callId: 'call-1' as never },
+          },
+        },
+        surfaceOp: 'append',
+      },
+      {
+        type: 'tool/result',
+        seq: 2,
+        time: 3,
+        data: {
+          turn: 0,
+          step: 0,
+          message: {
+            id: 'msg-2' as never,
+            role: 'user',
+            content: [{ type: 'tool-result', toolCallId: 'call-1' as never, content: [{ type: 'text', text: 'PRUNED RESULT' }] }],
+            source: { kind: 'tool', callId: 'call-1' as never },
+          },
+        },
+        surfaceOp: { op: 'replace', start: 1, end: 1 },
+      },
+    ],
+  }
+  const md = renderTranscriptMarkdown(session as never)
+  assert.ok(md.includes('ORIGINAL RESULT'), 'the append-origin result renders')
+  assert.ok(!md.includes('PRUNED RESULT'), 'the pruned replacement must never render in the export')
+})
