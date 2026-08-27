@@ -448,8 +448,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   await vt.waitForRender()
   // Edit the draft, walk back to the selector, then save with S — the
   // write fails: the memory commit must NOT happen (the old layout
-  // stays) — the apply is deferred until the write succeeds. Poll a
-  // bounded window for any (wrong) apply, then assert none happened.
+  // stays) — the apply is deferred until the write succeeds.
   vt.sendInput('\r')
   await vt.waitForRender()
   vt.sendInput(' ')
@@ -458,12 +457,11 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   await vt.waitForRender()
   vt.sendInput('s')
   // The write fails: the memory commit must NOT happen (the old layout
-  // stays) — the apply is deferred until the write succeeds. Poll a
-  // bounded window for any (wrong) apply, then assert none happened.
-  const deadline = Date.now() + 300
-  while (applied.length === 0 && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 10))
-  }
+  // stays) — the apply is deferred until the write succeeds. Spin the
+  // event loop a BOUNDED number of turns (never a wall-clock sleep — the
+  // repo's headless-test discipline) so the rejected write and its catch
+  // chain settle, then assert no apply ever landed.
+  for (let spin = 0; spin < 50; spin += 1) await new Promise(resolve => setImmediate(resolve))
   assert.equal(applied.length, 0, 'a failed write must not apply the layout')
   assert.equal(app.getFooterMode(), 'default', 'the old layout must stay active')
   app.stop()

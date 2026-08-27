@@ -368,6 +368,48 @@ test('KNOWN-item ref fields are sanitized too (prefix/suffix/format display boun
   app.stop()
 })
 
+test('a definition that ECHOES the ref format cannot paint control sequences (span strip)', async () => {
+  const { vt, app } = startApp()
+  app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
+  // The parser ACCEPTS unknown format strings and a definition receives
+  // the ref verbatim: a hostile (or merely buggy) definition that echoes
+  // ref.format into its span text must not paint ESC/OSC into the item
+  // preview or the style examples — the display boundary strips every
+  // span's text.
+  const registry = app.getFooterItemRegistry()
+  registry.register({
+    id: 'echo',
+    label: 'Echo',
+    description: 'echoes the format into its span',
+    defaultZone: 'left',
+    defaultImportance: 50,
+    formats: ['plain', 'ba\u001bdge'],
+    defaultFormat: 'plain',
+    render(_snapshot, ref) {
+      return { spans: [{ text: `fmt=${ref.format ?? 'plain'}` }] }
+    },
+  })
+  const model = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'echo', format: 'ba\u001bdge' }], right: [] }],
+  }, registry)
+  app.openFooterConfigurator({
+    model,
+    registry,
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1 (single item)
+  await vt.waitForRender()
+  vt.sendInput('\r') // → the item editor (the preview renders the echo)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\u001b'), `a format echoed into a span must be stripped:\n${view}`)
+  assert.ok(view.includes('fmt=badge'), `the sanitized echo keeps its readable text:\n${view}`)
+  app.stop()
+})
+
 test('the preview context is LIVE: an extension segment update while open shows up', async () => {
   // The panel receives GETTERS for the task-browser gate and the
   // extension footer text: a change while the panel is open must be
