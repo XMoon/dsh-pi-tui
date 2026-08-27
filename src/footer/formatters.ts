@@ -9,9 +9,15 @@
 import { formatTokens } from '../token-usage.ts'
 import type { UsageStatus } from '../status/types.ts'
 
+/** Whether a path is a filesystem root whose separator must be retained. */
+function isRootCwd(cwd: string): boolean {
+  return /^\/+$/u.test(cwd) || /^[A-Za-z]:[\\/]+$/u.test(cwd)
+}
+
 /** Short cwd for the footer: last two path segments (idempotent). */
 export function shortCwd(cwd: string): string {
-  const parts = cwd.split('/').filter(Boolean)
+  if (isRootCwd(cwd)) return cwd
+  const parts = cwd.split(/[\\/]+/u).filter(Boolean)
   return parts.slice(-2).join('/') || cwd
 }
 
@@ -26,9 +32,85 @@ export function formatSeconds(ms: number): string {
   return `${trimDecimal(ms / 1000)}s`
 }
 
+/** Format a model according to the builtin style vocabulary. */
+export function formatModel(
+  provider: string | undefined,
+  id: string,
+  reasoningEffort: string | undefined,
+  format: string,
+): string {
+  const label = `${provider === undefined ? '' : `${provider}/`}${id}`
+    + (reasoningEffort === undefined ? '' : ` @${reasoningEffort}`)
+  switch (format) {
+    case 'plain':
+      return label
+    case 'compact':
+      return id
+    case 'badge':
+    default:
+      return `[${label}]`
+  }
+}
+
+const PERMISSION_LABELS: Readonly<Record<string, string>> = {
+  'danger-full-access': 'yolo',
+  'read-only': 'read-only',
+  'workspace-write': 'workspace-write',
+  custom: 'custom',
+}
+
+/** Format the known permission preset ids. Unknown ids are unavailable to
+ * the builtin item, preserving the legacy fail-soft behavior. */
+export function formatPermissionPreset(id: string, format: string): string | undefined {
+  const label = PERMISSION_LABELS[id]
+  if (label === undefined) return undefined
+  switch (format) {
+    case 'plain':
+      return label
+    case 'compact':
+      return id === 'read-only' ? 'ro' : id === 'workspace-write' ? 'ww' : label
+    case 'badge':
+    default:
+      return `[${label}]`
+  }
+}
+
+/** Format the plan state as a badge or a plain status label. */
+export function formatPlanState(effective: boolean, pending: boolean | undefined, format: string): string | undefined {
+  const state = pending !== undefined ? 'plan pending' : effective ? 'plan' : undefined
+  if (state === undefined) return undefined
+  return format === 'plain' ? state : `[${state}]`
+}
+
+/** Format a working directory using the finite builtin style vocabulary. */
+export function formatWorkingDirectory(cwd: string, format: string): string {
+  switch (format) {
+    case 'basename': {
+      if (isRootCwd(cwd)) return cwd
+      const parts = cwd.split(/[\\/]+/).filter(Boolean)
+      return parts.at(-1) ?? cwd
+    }
+    case 'full':
+      return cwd
+    case 'short':
+    default:
+      return shortCwd(cwd)
+  }
+}
+
+/** Format a branch name either plainly or with a visible label. */
+export function formatGitBranch(branch: string, format: string): string {
+  return format === 'label' ? `branch: ${branch}` : branch
+}
+
 /** Context pressure, full form: `160.0K/1.0M (16%)`. */
 export function formatContextFull(used: number, window: number, percent: number): string {
   return `${formatTokens(used)}/${formatTokens(window)} (${percent}%)`
+}
+
+/** Context pressure, percent form: `ctx 31%`. */
+export function formatContextPercent(percent: number): string {
+  return `ctx ${percent}%`
 }
 
 /** Cache-hit share: `C 91.9%`. */
@@ -36,9 +118,24 @@ export function formatCacheHit(pct: number): string {
   return `C ${pct.toFixed(1)}%`
 }
 
+/** Cache-hit share without the item marker: `91.9%`. */
+export function formatCacheHitCompact(pct: number): string {
+  return `${pct.toFixed(1)}%`
+}
+
 /** Token usage, io form: `2579/5507` (input/output). */
 export function formatTokenUsageIo(input: number, output: number): string {
   return `${input}/${output}`
+}
+
+/** Token usage, total form: `8.1k tokens` (all billed token classes). */
+export function formatTokenUsageTotal(input: number, output: number, cacheRead: number, cacheWrite: number): string {
+  return `${formatTokens(input + output + cacheRead + cacheWrite)} tokens`
+}
+
+/** Token usage, compact total form: `8.1k` (all billed token classes). */
+export function formatTokenUsageCompact(input: number, output: number, cacheRead: number, cacheWrite: number): string {
+  return formatTokens(input + output + cacheRead + cacheWrite)
 }
 
 /** Performance, full form: `2.0s 40 tok/s`. */
@@ -46,9 +143,27 @@ export function formatPerformanceFull(llmMs: number, tokensPerSec: number): stri
   return `${formatSeconds(llmMs)} ${tokensPerSec} tok/s`
 }
 
-/** Turn/step counters: `t3/s7`. */
-export function formatTurnsSteps(turns: number, steps: number): string {
-  return `t${turns}/s${steps}`
+/** Performance, speed-only form: `40 tok/s`. */
+export function formatPerformanceSpeed(tokensPerSec: number): string {
+  return `${tokensPerSec} tok/s`
+}
+
+/** Performance, latency-only form: `2.0s`. */
+export function formatPerformanceLatency(llmMs: number): string {
+  return formatSeconds(llmMs)
+}
+
+/** Turn/step counters: `t3/s7`, `t3`, or `s7`. */
+export function formatTurnsSteps(turns: number, steps: number, format = 'both'): string {
+  switch (format) {
+    case 'turns':
+      return `t${turns}`
+    case 'steps':
+      return `s${steps}`
+    case 'both':
+    default:
+      return `t${turns}/s${steps}`
+  }
 }
 
 /** The pi-vocabulary stats line (the legacy line-2 format), derived from

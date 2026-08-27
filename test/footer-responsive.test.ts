@@ -61,6 +61,25 @@ const RIGHT_ZONE_LAYOUT = {
   }],
 }
 
+const STYLE_LAYOUT = {
+  schemaVersion: 1 as const,
+  rows: [{
+    left: [
+      { id: 'permission-preset', format: 'compact' },
+      { id: 'plan-state', format: 'plain' },
+      { id: 'model', format: 'compact' },
+      { id: 'cwd', format: 'full' },
+      { id: 'git-branch', format: 'label' },
+      { id: 'context', format: 'percent' },
+      { id: 'cache-hit', format: 'compact' },
+      { id: 'token-usage', format: 'total' },
+      { id: 'performance', format: 'speed' },
+      { id: 'turns-steps', format: 'steps' },
+    ],
+    right: [],
+  }],
+}
+
 const WIDTHS = [200, 160, 120, 100, 80, 60, 40, 20]
 
 test('the default layout never overflows or breaks ANSI at any width', () => {
@@ -77,6 +96,18 @@ test('the default layout never overflows or breaks ANSI at any width', () => {
       // the outer dim after inner resets — the legacy structure).
       const truncated = row.match(/\x1b\[(?:[0-9;]*[^0-9;m]|[0-9;]*$)/)
       assert.equal(truncated, null, `truncated ANSI at ${width}: ${JSON.stringify(row)}`)
+    }
+  }
+})
+
+test('all builtin styles stay inside the composer width policy', () => {
+  const snap = busySnapshot()
+  for (const width of WIDTHS) {
+    const text = composer.render({ snapshot: snap, layout: STYLE_LAYOUT, width, context: CONTEXT })
+    for (const row of text.split('\n')) {
+      assert.ok(visibleWidth(row) <= width, `styled row overflows at ${width}: ${JSON.stringify(row)}`)
+      const truncated = row.match(/\x1b\[(?:[0-9;]*[^0-9;m]|[0-9;]*$)/)
+      assert.equal(truncated, null, `styled row has truncated ANSI at ${width}: ${JSON.stringify(row)}`)
     }
   }
 })

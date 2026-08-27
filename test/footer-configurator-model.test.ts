@@ -199,17 +199,19 @@ test('Move Mode: M enters, ↑↓ reorder within the zone, Enter/Esc exits', () 
 test('F cycles the finite format on the Edit Row page (default removes the override)', () => {
   const m = model()
   m.activate()
-  walkTo(m, 'context')
+  walkTo(m, 'context') // formats: bar + percent + full
+  m.cycleFormat()
+  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'percent')
   m.cycleFormat()
   assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
   m.cycleFormat()
   assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, undefined)
 })
 
-test('the Item Editor opens with Style hidden for single-format items', () => {
+test('the Item Editor shows Style for multi-format items and hides it for single-format items', () => {
   const m = model()
   m.activate()
-  walkTo(m, 'context') // formats: bar + full
+  walkTo(m, 'context') // formats: bar + percent + full
   m.activate()
   assert.equal(m.state().mode, 'item')
   // Style first for a multi-format item; ↓ reaches Tone.
@@ -221,13 +223,18 @@ test('the Item Editor opens with Style hidden for single-format items', () => {
   assert.equal(m.state().mode, 'item')
   m.cancel()
   assert.equal(m.state().mode, 'row')
-  // A single-format item (model: badge only) has no Style row: Enter on
-  // the FIRST menu row opens the Tone picker directly.
-  walkTo(m, 'model')
-  m.activate()
-  assert.equal(m.state().mode, 'item')
-  m.activate()
-  assert.equal(m.state().mode, 'tone')
+
+  // A single-format item (stats-line) has no Style row: Enter on the
+  // FIRST menu row opens the Tone picker directly.
+  const single = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'stats-line' }], right: [] }],
+  }, registry)
+  single.activate()
+  single.activate()
+  assert.equal(single.state().mode, 'item')
+  single.activate()
+  assert.equal(single.state().mode, 'tone')
 })
 
 test('Esc walks the hierarchy ONE level at a time (row → item → picker → item → row)', () => {
@@ -263,16 +270,49 @@ test('the Style picker applies a format; the inline ←→ change cycles too', (
   m.activate() // item editor
   m.activate() // Style picker (opens on the current format: bar)
   assert.equal(m.state().mode, 'style')
-  m.moveDown()
+  m.moveDown() // Percent
+  m.moveDown() // Full
   m.activate()
   assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
   assert.equal(m.state().mode, 'item')
-  // Inline ←→ cycles without opening the picker: ← wraps back to bar.
+  // Inline ←→ cycles without opening the picker: full → percent → bar.
+  m.moveZone('left')
+  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'percent')
   m.moveZone('left')
   assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, undefined)
-  // → cycles to full again.
+  // → cycles to percent, then full.
+  m.moveZone('right')
+  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'percent')
   m.moveZone('right')
   assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
+})
+
+test('format changes preserve item ids, zones, and order', () => {
+  const m = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{
+      left: [{ id: 'model' }, { id: 'context' }, { id: 'turns-steps' }],
+      right: [{ id: 'git-branch' }],
+    }],
+  }, registry)
+  m.activate()
+  walkTo(m, 'context')
+  const before = m.state().layout.rows[0]!
+  const beforeLeftIds = before.left.map(ref => ref.id)
+  const beforeRightIds = before.right.map(ref => ref.id)
+  const beforeModel = before.left[0]!
+  const beforeTurns = before.left[2]!
+  const beforeBranch = before.right[0]!
+
+  m.cycleFormat() // context: bar → percent
+
+  const after = m.state().layout.rows[0]!
+  assert.deepEqual(after.left.map(ref => ref.id), beforeLeftIds)
+  assert.deepEqual(after.right.map(ref => ref.id), beforeRightIds)
+  assert.deepEqual(after.left[0], beforeModel)
+  assert.deepEqual(after.left[2], beforeTurns)
+  assert.deepEqual(after.right[0], beforeBranch)
+  assert.equal(after.left[1]!.format, 'percent')
 })
 
 test('the Tone picker persists the semantic token; Auto removes the override', () => {
@@ -301,7 +341,8 @@ test('Advanced: prefix/suffix/importance round-trip; empty removes the override'
   m.activate()
   walkTo(m, 'model')
   m.activate() // item editor
-  // Advanced is the LAST menu row (model has no Style entry).
+  // Advanced is the LAST menu row (model now has Style, Tone, Advanced).
+  m.moveDown()
   m.moveDown()
   m.activate()
   assert.equal(m.state().mode, 'advanced')
@@ -327,7 +368,7 @@ test('Advanced: prefix/suffix/importance round-trip; empty removes the override'
   // the pickers hang off the item editor (row → item → advanced).
   m.cancel()
   assert.equal(m.state().mode, 'item')
-  assert.equal(m.state().itemCursor, 1, 'the menu cursor still sits on Advanced')
+  assert.equal(m.state().itemCursor, 2, 'the menu cursor still sits on Advanced')
   // Importance: digits only, bounds-checked.
   m.activate() // → the advanced editor (field resets to prefix)
   m.moveDown()
@@ -434,6 +475,7 @@ test('the editable text is sanitized and bounded (the draft must re-parse)', () 
   walkTo(m, 'model')
   m.activate()
   m.moveDown()
+  m.moveDown()
   m.activate() // Advanced
   m.activate() // edit prefix
   // Control characters never enter the buffer (the readable residue is
@@ -460,7 +502,8 @@ test('preset resets re-anchor every page cursor (a stale buffer never survives)'
   m.activate() // row
   walkTo(m, 'model')
   m.activate() // item editor
-  m.moveDown() // Advanced (model menu: Tone, Advanced)
+  m.moveDown() // Tone
+  m.moveDown() // Advanced (model menu: Style, Tone, Advanced)
   m.activate() // the advanced page
   m.activate() // editing the prefix (buffer seeded)
   m.text('STALE')

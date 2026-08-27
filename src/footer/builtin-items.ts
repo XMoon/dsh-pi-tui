@@ -16,13 +16,23 @@
 import type { StatusSnapshot } from '../status/types.ts'
 import {
   formatCacheHit,
+  formatCacheHitCompact,
   formatContextFull,
+  formatContextPercent,
+  formatGitBranch,
+  formatModel,
   formatPerformanceFull,
+  formatPerformanceLatency,
+  formatPerformanceSpeed,
+  formatPermissionPreset,
+  formatPlanState,
   formatStatsLine,
+  formatTokenUsageCompact,
   formatTokenUsageIo,
+  formatTokenUsageTotal,
   formatTurnsSteps,
   formatVersion,
-  shortCwd,
+  formatWorkingDirectory,
 } from './formatters.ts'
 import type { FooterItemDefinition } from './types.ts'
 import { FooterItemRegistry } from './item-registry.ts'
@@ -32,60 +42,59 @@ import { FooterItemRegistry } from './item-registry.ts'
 const permissionPresetItem: FooterItemDefinition = {
   id: 'permission-preset',
   label: 'Permission preset',
-  description: 'The effective permission preset badge ([yolo]/[read-only]/[workspace-write]/[custom]).',
+  description: 'The effective permission preset as a badge, plain label, or compact code.',
   defaultZone: 'left',
   defaultImportance: 110,
-  formats: ['badge'],
+  formats: ['badge', 'plain', 'compact'],
   defaultFormat: 'badge',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, ref) {
     if (snapshot.view.subject.kind !== 'main') return null
-    switch (snapshot.access.permissionPreset?.id) {
-      case 'danger-full-access': return { spans: [{ text: '[yolo]', tone: 'warning' }] }
-      case 'read-only': return { spans: [{ text: '[read-only]', tone: 'textMuted' }] }
-      case 'workspace-write': return { spans: [{ text: '[workspace-write]', tone: 'text' }] }
-      case 'custom': return { spans: [{ text: '[custom]', tone: 'warning' }] }
-      default: return null
-    }
+    const preset = snapshot.access.permissionPreset
+    if (preset === undefined) return null
+    const text = formatPermissionPreset(preset.id, ref.format ?? 'badge')
+    if (text === undefined) return null
+    const tone = preset.id === 'danger-full-access' || preset.id === 'custom'
+      ? 'warning'
+      : preset.id === 'read-only' ? 'textMuted' : 'text'
+    return { spans: [{ text, tone }] }
   },
 }
 
-/** The plan badge: `[plan]` while plan mode is effective, `[plan pending]`
- * while a plan-mode switch is pending (plan §4.3 — BOTH pending-enter and
- * pending-exit render the pending badge; the derive never guesses it). */
+/** The plan styles: a badge or a plain status label. Pending enter and
+ * pending exit both keep the pending state visible (plan §4.3). */
 const planStateItem: FooterItemDefinition = {
   id: 'plan-state',
   label: 'Plan state',
-  description: 'The plan-mode badge ([plan] while effective, [plan pending] while a switch is pending).',
+  description: 'The plan-mode badge or plain status label.',
   defaultZone: 'left',
   defaultImportance: 115,
-  formats: ['badge'],
+  formats: ['badge', 'plain'],
   defaultFormat: 'badge',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, ref) {
     if (snapshot.view.subject.kind !== 'main') return null
-    if (snapshot.collaboration.plan.pending !== undefined) {
-      return { spans: [{ text: '[plan pending]', tone: 'warning' }] }
-    }
-    if (!snapshot.collaboration.plan.effective) return null
-    return { spans: [{ text: '[plan]', tone: 'warning' }] }
+    const text = formatPlanState(
+      snapshot.collaboration.plan.effective,
+      snapshot.collaboration.plan.pending,
+      ref.format ?? 'badge',
+    )
+    return text === undefined ? null : { spans: [{ text, tone: 'warning' }] }
   },
 }
 
-/** The model badge: `[provider/model @effort]` (legacy label form). */
+/** The model styles: badge, provider/model plain text, or model id only. */
 const modelItem: FooterItemDefinition = {
   id: 'model',
   label: 'Model',
-  description: 'The provider/model badge with the reasoning effort.',
+  description: 'The provider/model identity as a badge, plain label, or model id.',
   defaultZone: 'left',
   defaultImportance: 100,
-  formats: ['badge'],
+  formats: ['badge', 'plain', 'compact'],
   defaultFormat: 'badge',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, ref) {
     if (snapshot.view.subject.kind !== 'main') return null
     const model = snapshot.composition.model
     if (model === undefined) return null
-    const label = `${model.provider === undefined ? '' : `${model.provider}/`}${model.id}`
-      + (model.reasoningEffort === undefined ? '' : ` @${model.reasoningEffort}`)
-    return { spans: [{ text: `[${label}]` }] }
+    return { spans: [{ text: formatModel(model.provider, model.id, model.reasoningEffort, ref.format ?? 'badge') }] }
   },
 }
 
@@ -118,48 +127,48 @@ const tasksItem: FooterItemDefinition = {
   },
 }
 
-/** The working directory (shortened for display). */
+/** The working directory (short, basename, or full path). */
 const cwdItem: FooterItemDefinition = {
   id: 'cwd',
   label: 'Working directory',
-  description: 'The display subject\'s workspace, shortened to the last two segments.',
+  description: 'The display subject\'s workspace in short, basename, or full form.',
   defaultZone: 'left',
   defaultImportance: 80,
-  formats: ['short'],
+  formats: ['short', 'basename', 'full'],
   defaultFormat: 'short',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, ref) {
     const cwd = snapshot.workspace.cwd
     if (cwd === '') return null
-    return { spans: [{ text: shortCwd(cwd) }] }
+    return { spans: [{ text: formatWorkingDirectory(cwd, ref.format ?? 'short') }] }
   },
 }
 
-/** The git branch. */
+/** The git branch, either plainly or with a visible label. */
 const gitBranchItem: FooterItemDefinition = {
   id: 'git-branch',
   label: 'Git branch',
-  description: 'The display subject\'s git branch.',
+  description: 'The display subject\'s git branch, plainly or with a label.',
   defaultZone: 'left',
   defaultImportance: 70,
-  formats: ['plain'],
+  formats: ['plain', 'label'],
   defaultFormat: 'plain',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, ref) {
     if (snapshot.view.subject.kind !== 'main') return null
     const branch = snapshot.workspace.branch
     if (branch === undefined || branch === '') return null
-    return { spans: [{ text: branch }] }
+    return { spans: [{ text: formatGitBranch(branch, ref.format ?? 'plain') }] }
   },
 }
 
-/** The context pressure bar (legacy form) or the full `used/window (pct)`
- * formatter. */
+/** The context pressure styles: legacy bar, percent, or full
+ * used/window output. */
 const contextItem: FooterItemDefinition = {
   id: 'context',
   label: 'Context',
-  description: 'Context pressure: the progress bar (bar) or used/window (full).',
+  description: 'Context pressure: a progress bar, percent, or used/window value.',
   defaultZone: 'left',
   defaultImportance: 100,
-  formats: ['bar', 'full'],
+  formats: ['bar', 'percent', 'full'],
   defaultFormat: 'bar',
   render(snapshot: StatusSnapshot, ref) {
     if (snapshot.view.subject.kind !== 'main') return null
@@ -168,37 +177,40 @@ const contextItem: FooterItemDefinition = {
     const used = context.usedTokens ?? 0
     const window = context.windowTokens
     const format = ref.format ?? 'bar'
+    const percent = context.percent ?? Math.min(100, Math.max(0, Math.ceil((used * 100) / window)))
     if (format === 'full') {
-      const percent = context.percent ?? Math.min(100, Math.max(0, Math.ceil((used * 100) / window)))
       return { spans: [{ text: formatContextFull(used, window, percent), tone: 'primary' }] }
+    }
+    if (format === 'percent') {
+      return { spans: [{ text: formatContextPercent(percent), tone: 'primary' }] }
     }
     // The legacy bar: 12 cells, rounded fill, ceiling percent. The bar is
     // primary; the percent rides OUTSIDE the color (the legacy string
     // concatenation — the outer dim pass colors it).
     const ratio = Math.min(1, Math.max(0, used / window))
     const filled = Math.round(ratio * CONTEXT_BAR_WIDTH)
-    const pct = Math.min(100, Math.max(0, Math.ceil(ratio * 100)))
+    const barPercent = Math.min(100, Math.max(0, Math.ceil(ratio * 100)))
     const bar = '█'.repeat(filled) + '░'.repeat(CONTEXT_BAR_WIDTH - filled)
-    return { spans: [{ text: `[${bar}]`, tone: 'primary' }, { text: ` ${pct}%` }] }
+    return { spans: [{ text: `[${bar}]`, tone: 'primary' }, { text: ` ${barPercent}%` }] }
   },
 }
 
 /** The legacy bar width (moved from tui-app.ts). */
 const CONTEXT_BAR_WIDTH = 12
 
-/** The turn/step counters: `t3/s7` (host-native since M1 — the first-party
- * builtin extension segment was removed; the host core state no longer
- * depends on plugin loading). */
+/** The turn/step counters: both counters, turns only, or steps only
+ * (host-native since M1 — the first-party builtin extension segment was
+ * removed; the host core state no longer depends on plugin loading). */
 const turnsStepsItem: FooterItemDefinition = {
   id: 'turns-steps',
   label: 'Turns/steps',
-  description: 'The completed turn/step counters.',
+  description: 'The completed turn/step counters, together or separately.',
   defaultZone: 'left',
   defaultImportance: 45,
-  formats: ['plain'],
-  defaultFormat: 'plain',
-  render(snapshot: StatusSnapshot) {
-    return { spans: [{ text: formatTurnsSteps(snapshot.usage.turns, snapshot.usage.steps) }] }
+  formats: ['both', 'turns', 'steps'],
+  defaultFormat: 'both',
+  render(snapshot: StatusSnapshot, ref) {
+    return { spans: [{ text: formatTurnsSteps(snapshot.usage.turns, snapshot.usage.steps, ref.format ?? 'both') }] }
   },
 }
 
@@ -290,12 +302,23 @@ export function registerBuiltinFooterItems(registry: FooterItemRegistry): void {
   registry.register(versionItem)
 }
 
+/** Derive a deterministic compact preset label when the host does not
+ * provide one. The final first-character fallback also keeps compact output
+ * distinct from the badge for one-word or one-character labels. */
+function compactPresetLabel(label: string): string {
+  const trimmed = label.trim()
+  const words = trimmed.split(/\s+/u).filter(Boolean)
+  const initials = words.map(word => [...word][0] ?? '').join('').toUpperCase()
+  if (initials !== '' && initials.length < trimmed.length) return initials
+  return [...trimmed][0] ?? ''
+}
+
 /** The agent-preset badge: `[CM]`-style from the composition preset
  * (shortLabel when provided — the state layer never hardcodes it). */
 const agentPresetItem: FooterItemDefinition = {
   id: 'agent-preset',
   label: 'Agent preset',
-  description: 'The agent composition preset badge.',
+  description: 'The agent composition preset badge or compact short label.',
   defaultZone: 'left',
   defaultImportance: 90,
   formats: ['badge', 'compact'],
@@ -304,10 +327,16 @@ const agentPresetItem: FooterItemDefinition = {
     if (snapshot.view.subject.kind !== 'main') return null
     const preset = snapshot.composition.agentPreset
     if (preset === undefined) return null
-    const text = ref.format === 'compact' && preset.shortLabel !== undefined
-      ? preset.shortLabel
-      : preset.label
-    return { spans: [{ text: `[${text}]`, tone: 'accent' }] }
+    if (ref.format !== 'compact') {
+      return { spans: [{ text: `[${preset.label}]`, tone: 'accent' }] }
+    }
+    const compact = preset.shortLabel ?? compactPresetLabel(preset.label)
+    const compactBadge = `[${compact}]`
+    // A host may explicitly set a shortLabel equal to the full label. Drop
+    // the badge chrome in that degenerate case so the declared styles still
+    // have different, useful output rather than silently duplicating badge.
+    const text = compactBadge === `[${preset.label}]` ? compact : compactBadge
+    return { spans: [{ text, tone: 'accent' }] }
   },
 }
 
@@ -478,49 +507,62 @@ const todoItem: FooterItemDefinition = {
   },
 }
 
-/** The cache-hit share: `C 91.9%`. */
+/** The cache-hit share: full `C 91.9%` or compact `91.9%`. */
 const cacheHitItem: FooterItemDefinition = {
   id: 'cache-hit',
   label: 'Cache hit',
-  description: 'The cache-hit share of billed input tokens.',
+  description: 'The cache-hit share of billed input tokens, full or compact.',
   defaultZone: 'left',
   defaultImportance: 55,
   formats: ['full', 'compact'],
   defaultFormat: 'full',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, ref) {
     const pct = snapshot.usage.cacheHitPct
     if (pct === undefined) return null
-    return { spans: [{ text: formatCacheHit(pct), tone: 'success' }] }
+    const text = ref.format === 'compact' ? formatCacheHitCompact(pct) : formatCacheHit(pct)
+    return { spans: [{ text, tone: 'success' }] }
   },
 }
 
-/** The token usage: `2579/5507` (io). */
+/** The token usage: input/output, all billed tokens, or compact total. */
 const tokenUsageItem: FooterItemDefinition = {
   id: 'token-usage',
   label: 'Token usage',
-  description: 'The input/output token totals.',
+  description: 'The input/output totals, billed total, or compact total.',
   defaultZone: 'left',
   defaultImportance: 50,
-  formats: ['io'],
+  formats: ['io', 'total', 'compact'],
   defaultFormat: 'io',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, ref) {
     const tokens = snapshot.usage.tokens
-    return { spans: [{ text: formatTokenUsageIo(tokens.input, tokens.output), tone: 'success' }] }
+    const format = ref.format ?? 'io'
+    const text = format === 'total'
+      ? formatTokenUsageTotal(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite)
+      : format === 'compact'
+        ? formatTokenUsageCompact(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite)
+        : formatTokenUsageIo(tokens.input, tokens.output)
+    return { spans: [{ text, tone: 'success' }] }
   },
 }
 
-/** The performance: `2.0s 40 tok/s` (full). */
+/** The performance styles: full `2.0s 40 tok/s`, speed-only, or
+ * latency-only. */
 const performanceItem: FooterItemDefinition = {
   id: 'performance',
   label: 'Performance',
-  description: 'LLM wall time and output throughput.',
+  description: 'LLM wall time and output throughput, full, speed, or latency.',
   defaultZone: 'left',
   defaultImportance: 40,
-  formats: ['full', 'compact'],
+  formats: ['full', 'speed', 'latency'],
   defaultFormat: 'full',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, ref) {
     const performance = snapshot.usage.performance
-    return { spans: [{ text: formatPerformanceFull(performance.llmMs, performance.tokensPerSec), tone: 'textMuted' }] }
+    const text = ref.format === 'speed'
+      ? formatPerformanceSpeed(performance.tokensPerSec)
+      : ref.format === 'latency'
+        ? formatPerformanceLatency(performance.llmMs)
+        : formatPerformanceFull(performance.llmMs, performance.tokensPerSec)
+    return { spans: [{ text, tone: 'textMuted' }] }
   },
 }
 

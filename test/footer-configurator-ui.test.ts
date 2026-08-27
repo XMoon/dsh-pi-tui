@@ -239,7 +239,10 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   assert.ok(view.includes('Tone'), `the tone row missing:\n${view}`)
   assert.ok(view.includes('Advanced…'), `the advanced row missing:\n${view}`)
   assert.ok(view.includes('↑↓ Select · Enter Open · ←→ Change · Esc Back'), `item help missing:\n${view}`)
-  // ←→ cycles the style inline.
+  // ←→ cycles the style inline: bar → percent → full.
+  vt.sendInput('\x1b[C')
+  await vt.waitForRender()
+  assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'context')!.format, 'percent')
   vt.sendInput('\x1b[C')
   await vt.waitForRender()
   assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
@@ -249,8 +252,10 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('Style · Context'), `style picker title missing:\n${view}`)
   assert.ok(view.includes('Bar'), `the bar example missing:\n${view}`)
+  assert.ok(view.includes('Percent'), `the percent example missing:\n${view}`)
   assert.ok(view.includes('Full'), `the full example missing:\n${view}`)
   // Walk to Full, apply.
+  vt.sendInput('\x1b[B')
   vt.sendInput('\x1b[B')
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -266,8 +271,9 @@ test('the Advanced editor edits prefix inline and shows the values', async () =>
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
   while (idAt(model) !== 'model') vt.sendInput('\x1b[B')
-  vt.sendInput('\r') // → item editor (model: Tone first — no Style row)
+  vt.sendInput('\r') // → item editor (model: Style, Tone, Advanced)
   await vt.waitForRender()
+  vt.sendInput('\x1b[B') // → Tone
   vt.sendInput('\x1b[B') // → Advanced…
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -312,8 +318,9 @@ test('the Advanced page sanitizes hand-built prefix/suffix values too', async ()
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
-  vt.sendInput('\r') // → item editor (single item; menu: Tone, Advanced)
+  vt.sendInput('\r') // → item editor (single item; menu: Style, Tone, Advanced)
   await vt.waitForRender()
+  vt.sendInput('\x1b[B') // → Tone
   vt.sendInput('\x1b[B') // → Advanced…
   vt.sendInput('\r') // → the Advanced page
   await vt.waitForRender()
@@ -382,6 +389,7 @@ test('bracketed paste feeds the Advanced prefix editor', async () => {
   while (idAt(model) !== 'model') vt.sendInput('\x1b[B')
   vt.sendInput('\r') // → item editor
   await vt.waitForRender()
+  vt.sendInput('\x1b[B') // → Tone
   vt.sendInput('\x1b[B') // → Advanced…
   vt.sendInput('\r') // → the Advanced page
   await vt.waitForRender()
@@ -444,7 +452,8 @@ test('CSI-u encoded printables type into the Add search and the prefix', async (
   while (idAt(model) !== 'model') vt.sendInput('\x1b[B')
   vt.sendInput('\r')
   await vt.waitForRender()
-  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B') // → Tone
+  vt.sendInput('\x1b[B') // → Advanced…
   vt.sendInput('\r')
   await vt.waitForRender()
   vt.sendInput('\r') // edit prefix
@@ -507,7 +516,9 @@ test('a legal-but-unlisted persisted tone displays as ITSELF (never Auto)', asyn
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
-  vt.sendInput('\r') // → item editor (model: Tone is the first menu row)
+  vt.sendInput('\r') // → item editor (model: Style, Tone, Advanced)
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // → Tone
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('Strong'), `the persisted token must display as itself:\n${view}`)
