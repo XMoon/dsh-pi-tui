@@ -137,6 +137,23 @@ export class FooterCommandRunner {
     }, this.options.config.refreshIntervalMs - elapsed)
   }
 
+  /** Re-arm the NEXT interval run after a command settles: the
+   * configured refresh interval is a PERIODIC trigger (plan M5 —
+   * "configured refresh interval reached"), not only a request throttle.
+   * Without the re-arm, an idle status line freezes after its first run:
+   * nothing else calls requestRefresh while the agent is idle, the
+   * terminal keeps its width and the store stays quiet. A coalesced
+   * request that armed a timer DURING the run already IS the next due
+   * boundary — never double-schedule. */
+  private scheduleNextRun(): void {
+    if (this.disposed || this.timer !== undefined) return
+    const elapsed = Date.now() - this.lastStartAt
+    this.timer = setTimeout(() => {
+      this.timer = undefined
+      this.start()
+    }, Math.max(0, this.options.config.refreshIntervalMs - elapsed))
+  }
+
   /** Replace the config (a settings change): the in-flight child is
    * invalidated and terminated immediately (its result must never commit
    * under the new config), the committed rows of the OLD configuration are
@@ -165,7 +182,34 @@ export class FooterCommandRunner {
     // wins; a stale child must never commit).
     this.killChild()
     const config = this.options.config
-    const child = spawn(config.command, { shell: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    let child: ChildProcess | undefined
+    let settled = false
+    const finish = (rows: string[] | undefined): void => {
+      if (settled || this.disposed || generation !== this.generation) return
+      settled = true
+      if (this.child === child) this.child = undefined
+      this.onResult(rows)
+      // The interval is a PERIODIC trigger, not just a throttle: after a
+      // run settles, the NEXT interval run re-arms itself, so an idle
+      // status line (no store change, no resize, no explicit request)
+      // still refreshes (a clock/battery/external-state script would
+      // otherwise freeze forever after its first run — the review's P2).
+      // A coalesced request that armed a timer DURING the run IS the next
+      // due boundary — never double-scheduled.
+      this.scheduleNextRun()
+    }
+    let childProc: ChildProcess
+    try {
+      childProc = spawn(config.command, { shell: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    } catch {
+      // A SYNCHRONOUS spawn failure (e.g. a NUL byte that slipped past the
+      // parser — ERR_INVALID_ARG_VALUE) is a COMMAND failure, never a
+      // runner crash: fall back exactly like a failed run (the plan's
+      // fail-soft contract), and keep the interval alive.
+      finish(undefined)
+      return
+    }
+    child = childProc
     this.child = child
     // The child's STDERR is never surfaced: DRAIN it (a user command that
     // writes enough stderr to fill the pipe buffer would BLOCK and get
@@ -176,13 +220,6 @@ export class FooterCommandRunner {
     // The decoder buffers a PARTIAL multibyte sequence across chunks, so a
     // byte-budget slice never emits U+FFFD replacement characters.
     const decoder = new StringDecoder('utf8')
-    let settled = false
-    const finish = (rows: string[] | undefined): void => {
-      if (settled || this.disposed || generation !== this.generation) return
-      settled = true
-      if (this.child === child) this.child = undefined
-      this.onResult(rows)
-    }
     const timeout = setTimeout(() => {
       // The timeout is generation- AND child-scoped: if a NEW child has
       // already replaced this one (a config change / refresh started

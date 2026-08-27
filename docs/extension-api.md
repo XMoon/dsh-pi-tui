@@ -175,7 +175,11 @@ plugin unloads (it resolves nothing — the built-in fallback, never
 silently the same-named file). The registry's read-side view exposes
 `selectableValues()` / `paletteForSelectable(value)` /
 `displayNameForSelectable(value)` / `hasSelectable(value)` for the
-picker; the bare `name` is a display label, never an identity. The
+picker; the bare `name` is a display label, never an identity. The legacy
+bare-name read `paletteFor(name)` remains on the view as a DEPRECATED
+source-compatibility shim (it stays functional for the current API
+version and is removed only in the next breaking API version) — new code
+addresses themes by selectable value. The
 `/settings` picker carries the identity end-to-end: every picker row's
 id IS the source-qualified value (display labels are unique per row —
 builtin/file/plugin collisions are source-tagged — but are presentational
@@ -253,8 +257,17 @@ skipped at render) and recovers automatically when the plugin reloads. The
 ledger's (slot, owner, id) uniqueness still rejects two LIVE registrations
 of the same id under the SAME owner — while DIFFERENT owners may
 simultaneously register the same local id (their canonical keys embed the
-owner, so the config identities stay distinct; the public contract: an id
-is unique per (slot, owner)). The legacy
+stable owner, so the config identities stay distinct; the public contract:
+an id is unique per (slot, owner)). The RUNTIME ownership identity is
+separate from the config identity: the ledger's owner is UID-qualified
+(`<uid>:<name>`), so two anonymous sibling fibers are DISTINCT owners (a
+second live plugin registering the same id never hits a duplicate-owner
+conflict, and owner-scoped disposal never conflates neighbors); only the
+PERSISTED canonical key uses the stable name (the review's P1 — a
+name-based runtime owner would conflate anonymous plugins into one). A
+duplicate canonical key (same stable owner AND id) among LIVE
+registrations is an explicit registration error — a reload disposes the
+old registration first, so HMR never hits it. The legacy
 `chrome.footer.status` slot is unchanged: its segments aggregate into the
 single `ext:*` item (show/hide as a whole, no per-segment ordering).
 

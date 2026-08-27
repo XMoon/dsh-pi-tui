@@ -47,13 +47,17 @@ interface PiTuiExtensionServiceLike {
   attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
 }
 
-/** The canonical config key for one ledger record: ext:<owner>/<id>. */
+/** The canonical config key for one ledger record: ext:<stableOwner>/<id>.
+ * The key derives from the record's HMR-STABLE owner (the fiber NAME — a
+ * reloaded plugin gets a new uid but the same name); the ledger's runtime
+ * `owner` stays uid-qualified for uniqueness/disposal. */
 function canonicalKey(service: PiTuiExtensionServiceLike, slot: string, id: string): string {
-  const record = service._ledger().snapshot(slot).records.find(entry => entry.id === id)
+  const record = service._ledger().snapshot(slot).records.find(entry => entry.id === id) as
+    { id: string; owner: string; stableOwner?: string } | undefined
   assert.ok(record !== undefined, `record ${id} missing`)
-  // Match the host's canonical key construction (the owner's `/` — an npm
-  // scoped plugin name — is ESCAPED to `~`).
-  return `ext:${encodeURIComponent(record.owner)}/${record.id}`
+  // Match the host's canonical key construction (the stable owner's `/` —
+  // an npm scoped plugin name — is percent-encoded, injectively).
+  return `ext:${encodeURIComponent(record.stableOwner ?? record.owner)}/${record.id}`
 }
 
 /** Attach a live TuiApp + SurfaceHost to the tree. */
@@ -292,10 +296,10 @@ test('named plugins keep distinct config keys; a same-plugin reload RECOVERS the
     } })
     await fiberB
     const records = service._ledger().snapshot('chrome.footer.item').records
-    const keyOf = (owner: string): string => {
-      const record = records.find(entry => entry.owner === owner)
-      assert.ok(record !== undefined, `record for owner ${owner} missing`)
-      return `ext:${encodeURIComponent(record.owner)}/${record.id}`
+    const keyOf = (stableOwner: string): string => {
+      const record = records.find(entry => (entry as { stableOwner?: string }).stableOwner === stableOwner)
+      assert.ok(record !== undefined, `record for stable owner ${stableOwner} missing`)
+      return `ext:${encodeURIComponent((record as { stableOwner?: string }).stableOwner ?? record.owner)}/${record.id}`
     }
     const keyA2 = keyOf('quota-a')
     const keyB = keyOf('quota-b')

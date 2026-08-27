@@ -110,3 +110,49 @@ test('the Direct config-port trust read resolves the same USER-layer facts', asy
   assert.equal(empty.footerCommandTrust.userFooterMode, undefined)
   assert.equal(empty.footerCommandTrust.command, undefined)
 })
+
+test('TuiSettingsDoc round-trip: a whole-document replace never wipes the trusted footerCommand (review P2 migration contract)', async () => {
+  // The settings port is get/replace WHOLE-DOCUMENT: a future Remote
+  // adapter serializes the DECLARED DTO, so every semantic field must be
+  // part of it. The old document type omitted footerCommand — a
+  // Remote-shaped get→change-theme→replace cycle would silently delete
+  // the trusted command config (the same migration contract the raw
+  // `keybindings` pass-through carries). The Direct adapter rides the
+  // real schemastery object through, so this test pins the DECLARED
+  // shape: the field is part of TuiSettingsDoc and a get/replace cycle
+  // preserves it.
+  const { DirectConfigPort } = await import('../src/runtime/direct/config-direct.ts')
+  const footerCommand = {
+    schemaVersion: 1 as const,
+    command: '~/.config/dsh/statusline.sh',
+    timeoutMs: 1000,
+    refreshIntervalMs: 2000,
+    maxRows: 2,
+  }
+  let backing: Record<string, unknown> = {
+    theme: 'dark',
+    iconStyle: 'emoji',
+    footer: 'command',
+    footerFallbackMode: 'default',
+    footerCommand,
+    fullscreen: 'off',
+    busyEnter: 'queue',
+    localShellSandbox: 'bypass',
+    homeEndKeys: 'input',
+    focusMode: 'off',
+    keybindings: { version: 1, bindings: {} },
+  }
+  const port = new DirectConfigPort({ get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', user: { footerCommand } }] }) } as never, {
+    get: () => backing as never,
+    replace: (next: unknown) => { backing = { ...(next as Record<string, unknown>) } },
+  }, () => undefined)
+  assert.ok(port.tuiSettings !== undefined, 'the surface is wired')
+  // The trust read resolves the SAME field the DTO round-trips.
+  assert.equal(port.footerCommandTrust.command?.command, footerCommand.command)
+  // Change an UNRELATED key and replace the whole document.
+  port.tuiSettings.replace({ ...port.tuiSettings.get(), theme: 'light' })
+  // The replace round-trips footerCommand verbatim.
+  const reread = port.tuiSettings.get()
+  assert.deepEqual(reread.footerCommand, footerCommand,
+    'footerCommand must survive a whole-document replace')
+})

@@ -247,6 +247,73 @@ test('the (slot, id) pair is free again after its owner fiber unloads', async ()
   }
 })
 
+test('two anonymous sibling fibers are DISTINCT owners: the same (slot, id) from both must not conflict (review P1)', async () => {
+  // Regression for the review's P1: the generic register() briefly used the
+  // BARE fiber name as the owner, so two anonymous sibling plugins both
+  // owned by 'root' — a second live plugin registering the same id in the
+  // same slot was (wrongly) rejected as a duplicate, and owner-scoped
+  // disposal/health conflated the two. The owner is UID-QUALIFIED; the
+  // HMR-stable identity lives in a SEPARATE stableOwner field (only the
+  // chrome.footer.item canonical key uses it).
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startup = await mount(ctx, startupPlugin)
+    const host = await mount(ctx, applyExtensionHost)
+
+    // Two ANONYMOUS plugin fibers (no name) registering the SAME id.
+    const pluginA = await mount(ctx, (c) => {
+      ;(c.get(PI_TUI_EXTENSIONS_SERVICE) as any).register('chrome.header.badge', { id: 'sibling' }, { text: 'A' })
+    })
+    const pluginB = await mount(ctx, (c) => {
+      ;(c.get(PI_TUI_EXTENSIONS_SERVICE) as any).register('chrome.header.badge', { id: 'sibling' }, { text: 'B' })
+    })
+    await settle()
+    const view = badges(ctx)
+    assert.ok(view !== null && view !== undefined && view['sibling'] !== undefined,
+      'both anonymous siblings must register the same id without a duplicate-owner conflict')
+    // Unload one: the OTHER sibling's registration survives (owner-scoped
+    // disposal is exact — 'root' can never sweep a live neighbor).
+    await pluginA()
+    await settle()
+    assert.ok(badges(ctx)?.['sibling'] !== undefined,
+      'unloading one anonymous sibling must not remove the other\u2019s registration')
+    await pluginB()
+
+    // The chrome.footer.item PERSISTED key (`ext:<stableOwner>/<id>`) must
+    // stay injective among LIVE registrations: two plugins sharing a stable
+    // owner (two anonymous fibers both resolve to 'root') with the same id
+    // would produce the SAME canonical key — the second registration is an
+    // explicit error (the theme registry's duplicate-name precedent), and
+    // the key is free again once the holder unloads (an HMR reload disposes
+    // first). The rejection is asserted at the top level (a register throw
+    // inside a plugin fiber is reported through the fiber's error channel).
+    const serviceOf = (c: Context) => c.get(PI_TUI_EXTENSIONS_SERVICE) as unknown as {
+      register(slot: string, spec: { id: string }, value: unknown): unknown
+    }
+    // C registers from its OWN fiber (the caller's context owns the
+    // registration — a mount that reads the service through the outer ctx
+    // would bind the effect to the root fiber and never unload).
+    const pluginC = await mount(ctx, (c) => {
+      serviceOf(c).register('chrome.footer.item', { id: 'foot' }, { label: 'C', segment: { spans: [{ text: 'C' }] } })
+    })
+    await settle()
+    assert.throws(
+      () => serviceOf(ctx).register('chrome.footer.item', { id: 'foot' }, { label: 'D', segment: { spans: [{ text: 'D' }] } }),
+      /duplicate chrome\.footer\.item canonical key/,
+      'the second same-key footer registration must be rejected while the holder is live',
+    )
+    // After the holder unloads, the (stable owner, id) key is free again.
+    await pluginC()
+    await settle()
+    serviceOf(ctx).register('chrome.footer.item', { id: 'foot' }, { label: 'E', segment: { spans: [{ text: 'E' }] } })
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
 test('a stale service detachSurface does not tear down a newer generation bridge (P1)', async () => {
   const ctx = new Context()
   try {

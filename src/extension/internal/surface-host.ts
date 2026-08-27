@@ -18,7 +18,7 @@
 
 import type { Text } from '@xmoon76/pi-tui'
 import { sanitizeSpanText } from './slot-outlet.ts'
-import type { FooterItemContribution, PiTuiCapability, SurfaceSnapshot, SurfaceStateValues } from '../public-types.ts'
+import type { ContributionRecord, FooterItemContribution, PiTuiCapability, SurfaceSnapshot, SurfaceStateValues } from '../public-types.ts'
 import type { ExtensionLedger } from './ledger.ts'
 import { InvalidateBatcher } from './batcher.ts'
 import { SurfaceStateStore } from './surface-state.ts'
@@ -292,19 +292,23 @@ export class SurfaceHost {
    * ledger's owner-scoped uniqueness made the collision reachable; the
    * review's P2). The id stays `/`-free (register() enforces that), so
    * the `owner/id` boundary is unambiguous. */
-  private static footerItemKey(owner: string, id: string): string {
-    if (id.includes('/')) {
+  private static footerItemKey(record: ContributionRecord<FooterItemContribution>): string {
+    if (record.id.includes('/')) {
       // Unreachable in practice: register() enforces the constraint; this
       // guards a future caller that bypasses it.
-      throw new Error(`chrome.footer.item id must not contain "/" (owner "${owner}", id "${id}")`)
+      throw new Error(`chrome.footer.item id must not contain "/" (owner "${record.owner}", id "${record.id}")`)
     }
-    return `ext:${encodeURIComponent(owner)}/${id}`
+    // The PERSISTED key derives from the HMR-STABLE owner (the fiber NAME —
+    // a reloaded plugin gets a new uid but the same name, so the user's
+    // layout reference recovers). The record's `owner` stays uid-qualified
+    // (uniqueness/disposal); the stable identity is a separate field.
+    return `ext:${encodeURIComponent(record.stableOwner ?? record.owner)}/${record.id}`
   }
 
   /** Every live chrome.footer.item contribution's canonical config id. */
   footerItemIds(): string[] {
     const snapshot = this.ledger.snapshot<FooterItemContribution>('chrome.footer.item')
-    return snapshot.records.map(record => SurfaceHost.footerItemKey(record.owner, record.id))
+    return snapshot.records.map(record => SurfaceHost.footerItemKey(record))
   }
 
   /** Build the footer item DEFINITION for one canonical id (the composer's
@@ -313,7 +317,7 @@ export class SurfaceHost {
   footerItemDefinition(id: string): FooterItemDefinition | undefined {
     const snapshot = this.ledger.snapshot<FooterItemContribution>('chrome.footer.item')
     for (const record of snapshot.records) {
-      if (SurfaceHost.footerItemKey(record.owner, record.id) !== id) continue
+      if (SurfaceHost.footerItemKey(record) !== id) continue
       const contribution = record.value
       // Malformed runtime data (a plugin replace() with a broken shape)
       // must DEGRADE, never throw: the composer isolates render throws,
