@@ -149,6 +149,13 @@ export function parseUserKeybindings(
   const diagnostics: string[] = []
   const bindings: UserKeybindingsConfig = {}
   const leaderBindings: LeaderBinding[] = []
+  // Actions whose ONLY declaration is a leader sequence (no direct keys).
+  // The empty-array marker is written ONLY after the leader prefix is
+  // confirmed valid (review round 39 finding): a missing/invalid leader
+  // makes the sequences inert (fail-soft) and the action must fall back
+  // to its builtin default — a marker left behind would suppress the
+  // builtin for a config that was diagnosed and ignored.
+  const leaderOnlyActions = new Set<AppKeybindingId>()
   let leader: LeaderConfig | undefined
 
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
@@ -336,14 +343,12 @@ export function parseUserKeybindings(
       bindings[action] = keys.length === 1 ? keys[0]! : keys
     } else if (leaderBindings.some(binding => binding.action === action)) {
       // A LEADER-ONLY declaration (no direct keys, only `<leader>X`
-      // sequences): record an EMPTY-ARRAY marker so the effective keymap
-      // sees a USER DECLARATION and REPLACES the builtin default for this
-      // action (review round 37 — the unified override contract: absent =
-      // builtin, direct = replace, leader-only = replace, direct+leader =
-      // both user triggers with the builtin removed, false = remove all).
-      // The empty array compiles no direct rules but suppresses the
-      // builtin; the leader sequences live in `leaderBindings`.
-      bindings[action] = []
+      // sequences): record the action — the empty-array marker is
+      // written AFTER the leader prefix is confirmed valid (review
+      // round 39 finding: the marker used to be written here, before
+      // the leader check, so a missing/invalid leader — diagnosed and
+      // ignored — still suppressed the builtin default).
+      leaderOnlyActions.add(action)
     }
   }
 
@@ -351,6 +356,18 @@ export function parseUserKeybindings(
   if (leaderBindings.length > 0 && leader === undefined) {
     diagnostics.push('keybindings: leader sequences configured but no "leader" key — the sequences are ignored')
     return { bindings, leader, leaderBindings: [], diagnostics }
+  }
+  // The leader prefix is confirmed valid: write the empty-array markers
+  // for the leader-only declarations (review round 37 — the unified
+  // override contract: absent = builtin, direct = replace, leader-only =
+  // replace, direct+leader = both user triggers with the builtin removed,
+  // false = remove all). The empty array compiles no direct rules but
+  // suppresses the builtin; the leader sequences live in `leaderBindings`.
+  // Written only NOW so a missing/invalid leader (fail-soft: the
+  // sequences are ignored) leaves the action on its builtin default
+  // (review round 39 finding).
+  for (const action of leaderOnlyActions) {
+    bindings[action] = []
   }
   return { bindings, leader, leaderBindings, diagnostics }
 }

@@ -226,12 +226,17 @@ parsed user bindings, so the effective keymap sees a real user
 declaration and suppresses the builtin (including the editor-owned
 builtin for submit — `resolve(Enter)` is undefined and
 `matches(Enter, submit)` is false for a leader-only submit; the unified
-model has ONE effective truth). The conflict fail-soft is the only
-exception: a DIRECT submit override that CONFLICTS away (all user rules
-deactivated) restores the builtin Enter — the documented convergence
-§4.5 rule, never a fabricated fallback for a working override. A dead
-leader (shadowed/ambiguous) leaves a leader-only action inert — the
-diagnostic explains why; no silent builtin restoration.
+model has ONE effective truth). The marker is written ONLY after the
+leader prefix is confirmed valid (review round 39): a missing or
+invalid leader (text-producing, runtime-unbindable, terminal-ambiguous)
+is diagnosed and ignored — fail-soft — and the action falls back to its
+builtin default; the marker must never outlive a leader that was
+rejected. The conflict fail-soft is the only exception: a DIRECT submit
+override that CONFLICTS away (all user rules deactivated) restores the
+builtin Enter — the documented convergence §4.5 rule, never a fabricated
+fallback for a working override. A dead leader (shadowed/ambiguous)
+leaves a leader-only action inert — the diagnostic explains why; no
+silent builtin restoration.
 
 **Conditional affordances are ADDITIVE, never replaced.** A composition
 rule (the empty-editor `↓` task-browser affordance → `app.tasks.open`)

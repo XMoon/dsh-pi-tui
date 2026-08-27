@@ -136,7 +136,9 @@ export interface AppKeybindingDefinition {
  * - an array: multiple keys (REPLACE the builtin defaults; a LEADER-ONLY
  *   declaration is an EMPTY array — the parser emits it for an action
  *   configured ONLY with `<leader>X` sequences, so the builtin default is
- *   replaced by the leader trigger);
+ *   replaced by the leader trigger; the marker is emitted ONLY when the
+ *   leader prefix is valid — a missing/invalid leader is fail-soft and
+ *   leaves the action on its builtin default, review round 39);
  * - `false`: DISABLE the action's effective keys entirely (no builtin, no
  *   user key, no leader sequence — every trigger is removed);
  * - a `<leader>X` string: a leader-sequence binding (M6).

@@ -28,7 +28,9 @@
   按键,`leader` 键加 `<leader>X` 序列支持多键绑定(M6)。任何用户声明
   都会**替换**该 action 的内置默认键(仅 leader 的绑定是唯一触发而
   非叠加在内置键之上;直接 + leader 混合保留两个用户触发;`false`
-  移除全部触发)。普通可打印键永远不能绑定到 Host action;坏配置只是
+  移除全部触发)。缺少或无效的 `leader` 键会让 `<leader>X` 序列失效
+  并警告,该 action 回落到内置默认键——被忽略的坏配置不会悄悄删掉
+  内置键。普通可打印键永远不能绑定到 Host action;坏配置只是
   警告,绝不会导致启动失败(fail-soft);冲突(同键 + 作用域重叠 +
   同优先级)会被诊断并停用——绝不静默 last-write-wins。
   `DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有用户覆盖。`/keybindings`
