@@ -177,7 +177,15 @@ export class FooterConfiguratorModel {
   private readonly registry: FooterItemRegistry
 
   constructor(initial: FooterLayoutV1, registry: FooterItemRegistry) {
-    this.draft = cloneLayout(initial)
+    // A parser-valid layout always has 1..2 rows, but the model accepts
+    // any FooterLayoutV1 (hand-built test layouts, foreign callers): a
+    // zero-row draft would make editedRow() return undefined and crash
+    // the first page transition. Normalize to ONE empty row — every
+    // subsequent invariant (editedRow, clamps, the row-page rendering)
+    // can then rely on rows.length >= 1.
+    this.draft = cloneLayout(initial.rows.length === 0
+      ? { schemaVersion: 1, rows: [{ left: [], right: [] }] }
+      : initial)
     this.registry = registry
   }
 

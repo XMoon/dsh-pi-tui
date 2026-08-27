@@ -341,6 +341,32 @@ test('Advanced: Reset to default clears every ref override', () => {
   assert.equal(ref.prefix, undefined)
 })
 
+test('a zero-row draft normalizes to one empty row (no crash on the first transition)', () => {
+  // The parser rejects zero-row layouts, but the model accepts any
+  // FooterLayoutV1: every page transition must survive one.
+  const m = new FooterConfiguratorModel({ schemaVersion: 1, rows: [] }, registry)
+  assert.equal(m.state().layout.rows.length, 1)
+  m.activate()
+  assert.equal(m.state().mode, 'row')
+  assert.equal(m.state().cursor, 0)
+  // Every item op on an empty row is a safe no-op.
+  m.moveDown()
+  m.moveUp()
+  m.removeActive()
+  m.moveZone('right')
+  m.reorderActive(1)
+  m.cycleFormat()
+  assert.equal(m.state().mode, 'row')
+  assert.equal(m.state().cursor, 0)
+  m.activate() // an empty row never opens an item editor
+  assert.equal(m.state().mode, 'row')
+  // The Add picker still works: the first pool item joins the empty row.
+  m.startAdd()
+  assert.equal(m.state().mode, 'add')
+  m.activate()
+  assert.ok(m.state().layout.rows[0]!.left.length === 1, 'the added item landed in the empty row')
+})
+
 test('the editable text is sanitized and bounded (the draft must re-parse)', () => {
   const m = model()
   const ref = () => m.state().layout.rows[0]!.left.find(item => item.id === 'model')!

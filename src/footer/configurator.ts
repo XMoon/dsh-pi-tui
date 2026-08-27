@@ -357,14 +357,17 @@ export class FooterConfiguratorPanel implements Component {
         const def = ref === undefined ? undefined : this.registry.get(ref.id)
         const formats = def?.formats ?? []
         const names = formats.map(format => this.humanizeFormat(stripControlChars(format)))
-        const nameWidth = Math.max(...names.map(name => name.length), 1)
+        // Alignment is computed on VISIBLE widths (a format name may
+        // contain wide characters — string.length would misalign every
+        // row after it).
+        const nameWidth = Math.max(...names.map(name => visibleWidth(name)), 1)
         const lines = formats.map((format, index) => {
           const active = index === state.pickerIndex
           const marker = active ? color.primary('›') : ' '
           const example = ref === undefined ? '' : this.formatExample(ref, format)
           // The plain name pads FIRST (alignment is computed on visible
           // text); the color wraps the padded label.
-          const padded = `${names[index]!.padEnd(nameWidth + 2)}`
+          const padded = `${names[index]!}${' '.repeat(Math.max(0, nameWidth + 2 - visibleWidth(names[index]!)))}`
           return `${marker} ${active ? color.textStrong(padded) : color.text(padded)}${example === '' ? '' : ` ${example}`}`
         })
         return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, formats.length - 1)) }
@@ -489,16 +492,18 @@ export class FooterConfiguratorPanel implements Component {
   }
 
   /** Apply the ref decoration the composer applies: prefix + tone
-   * override + suffix. Both wraps are DISPLAY text: they are stripped of
-   * terminal control characters (the parser rejects them in persisted
-   * layouts, but the model accepts any FooterLayoutV1 — the panel is the
-   * last display boundary, so a hand-built ref can never paint an
-   * ESC/OSC sequence into the preview). */
+   * override + suffix. Everything here is DISPLAY text — the parser
+   * rejects control characters in persisted prefix/suffix but ACCEPTS
+   * unknown format strings (and the model accepts any FooterLayoutV1), so
+   * a definition that echoes the ref's format into a span could paint an
+   * ESC/OSC sequence into the preview. Prefix, suffix AND every span's
+   * text are stripped at this last display boundary. */
   private decorate(ref: FooterItemRef, spans: readonly { text: string; tone?: FooterTone }[]): string {
     const override = ref.tone === undefined || ref.tone === 'auto' ? undefined : ref.tone
     const prefix = ref.prefix === undefined ? '' : stripControlChars(ref.prefix)
     const suffix = ref.suffix === undefined ? '' : stripControlChars(ref.suffix)
-    return `${prefix}${renderSpans(spans, override)}${suffix}`
+    const rendered = renderSpans(spans.map(span => ({ ...span, text: stripControlChars(span.text) })), override)
+    return `${prefix}${rendered}${suffix}`
   }
 
   /** The ref at a row + flat position (undefined when absent). */
