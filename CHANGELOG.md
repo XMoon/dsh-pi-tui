@@ -170,6 +170,28 @@
 
 ### 修复
 
+- **空输入不再制造消息或副作用。** 之前空编辑器直接按 Enter,或
+  Ctrl+S(空草稿 + 空队列)会把一条空 user message 送进会话(首次
+  Ctrl+S 还会先创建会话);现在真正空(序列化后无内容且未挂载图片)
+  的 Enter / Ctrl+Enter / Ctrl+S 一律静默 no-op——不创建会话、不写
+  history、不产生空消息、不动队列。队列非空时 Ctrl+S 仍然照旧把
+  整批队列 steer 进当前 turn(空草稿没问题),`!` / `!!` shell 前缀
+  仍是有效 payload(不被空判断误杀),图片草稿(含纯图片)照常提交。
+- **编辑器 ↑/↓ 历史现在按当前会话投影。** 同一目录下多个会话的历史
+  不再混在一起:存在 live session 时 ↑/↓ 只看当前 session 自己的行
+  (旧 v1 legacy 行不猜归属,仍可通过 Ctrl+R 的 Current directory /
+  All directories 搜到);尚未创建会话时保持当前的 cwd 级行为;到
+  头即停,不会悄悄回落到 cwd 历史(显式更大范围用 Ctrl+R)。存储
+  仍是 per-cwd JSONL,`lastHistoryContent` 去重锚点仍是该文件真正
+  的最后一行(按文件去重,绝不变成按会话去重)。
+- **终端窗口标题改为人类可读。** 之前标题是
+  `dsh-pi-tui · <短 cwd> · <完整 session UUID>`,现在优先显示会话的
+  presentation title(`dsh · <title>`,自动或 `/title` 改名都跟随),
+  没有标题则显示短 cwd,再否则是 `dsh`;完整 session id / model /
+  preset 从标题移除。标题按终端可见宽度截断(CJK/emoji/ZWJ 安全,
+  上限 40 cells),并在会话创建/恢复/切换、`/title` 改名与
+  session/title 事件、advanced `ui.host.setTitle` 时即时刷新;写入前
+  会清洗 ANSI/OSC/控制序列,恶意会话标题不能借标题注入终端控制。
 - **compaction/prune 后的幽灵 Tool Card 不再出现。** 长会话发生
   工具结果剪枝(或 summary compaction 生成检查点)后,Harness 会追加
   携带 `surfaceOp: { op: 'replace' }` 的模型专用副本事件;Human

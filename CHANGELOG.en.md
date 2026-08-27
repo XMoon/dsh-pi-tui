@@ -222,6 +222,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Empty input no longer manufactures a message or a side effect.**
+  Pressing Enter on an empty editor (or Ctrl+S with an empty draft AND an
+  empty queue) used to send an empty user message into the session — and
+  the first Ctrl+S could even create the session first. A truly empty
+  submission (nothing in the serialized wire form and no staged image) is
+  now a silent no-op for Enter / Ctrl+Enter / Ctrl+S: no session creation,
+  no history write, no empty message, no queue mutation. Ctrl+S with a
+  NON-empty queue still steers the whole batch exactly as before (the
+  empty draft is fine), bare `!` / `!!` shell prefixes remain valid
+  payloads (never killed by the empty guard), and image-bearing drafts
+  (including image-only) still submit.
+- **Editor ↑/↓ history is now projected onto the active session.** History
+  from several sessions sharing one directory no longer mixes: with a live
+  session, ↑/↓ recalls ONLY that session's own rows (v1 legacy rows are
+  never guessed into a session and stay reachable through Ctrl+R's
+  `Current directory` / `All directories` scopes); without a session
+  (fresh/deferred start) the current cwd-level behavior is preserved;
+  when the session's rows run out, ↑ stops instead of silently falling
+  back to cwd history (use Ctrl+R for the explicit broader scope).
+  Storage stays per-cwd JSONL and the `lastHistoryContent` dedupe anchor
+  remains the file's actual last row — dedupe stays per-file, never
+  per-session.
+- **Terminal window titles are human-readable now.** The title used to be
+  `dsh-pi-tui · <short cwd> · <full session UUID>`; it now prefers the
+  session's presentation title (`dsh · <title>`, following auto titles and
+  `/title` renames), falls back to the short cwd, then to a bare `dsh`.
+  The full session id / model / preset are gone from the title. Titles
+  are truncated by terminal visible width (CJK/emoji/ZWJ safe, 40-cell
+  cap), refresh immediately on session create/resume/switch, `/title`
+  renames and session/title events, and advanced `ui.host.setTitle`; they
+  are sanitized against ANSI/OSC/control sequences before the OSC write,
+  so a malicious session title cannot inject terminal control.
 - **Ghost Tool Cards after `compaction/prune` are gone.** After
   tool-result pruning (or a summary-compaction checkpoint) in a long
   session, Harness appends model-only copy events carrying
