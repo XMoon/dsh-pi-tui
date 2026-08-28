@@ -247,6 +247,7 @@ export class KeybindingEditorPanel implements Component {
     this.mutationGeneration += 1
     this.actionEditor?.dispose?.()
     this.actionEditor = undefined
+    this.leaderRecorder?.dispose()
     this.leaderRecorder = undefined
     this.onDispose()
   }

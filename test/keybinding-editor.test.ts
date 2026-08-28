@@ -95,6 +95,68 @@ test('untouched defaults are selectable and recorder replacement names the defau
   }
 })
 
+test('shadowed defaults are reference-only and Add does not select them', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ 'app.history.search': 'ctrl+t' })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  const mutations: Array<{ kind: string; binding?: { key: string } }> = []
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: mutation => { mutations.push(mutation as unknown as { kind: string; binding?: { key: string } }) },
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    const view = plain(editor.render(88).join('\n'))
+    assert.match(view, /Default: Ctrl\+T/)
+    assert.match(view, /Effective now: Unbound/)
+    assert.doesNotMatch(view, /› Ctrl\+T \(default\)/)
+    assert.match(view, /› \+ Add shortcut/)
+    editor.handleInput('\r')
+    editor.handleInput('\r')
+    editor.handleInput('\x1b[121;5u')
+    assert.deepEqual(mutations, [{ kind: 'add', action: 'app.todo.toggle', binding: { kind: 'direct', key: 'ctrl+y' } }])
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('interrupt action detail assigns Escape with double-Esc', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.agent.interrupt')!
+  const mutations: Array<{ kind: string; previous?: { key: string }; binding?: { key: string } }> = []
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: mutation => { mutations.push(mutation as unknown as { kind: string; previous?: { key: string }; binding?: { key: string } }) },
+    onModelChange: () => {},
+    onBack: () => {},
+  })
+  try {
+    editor.handleInput('\r')
+    assert.match(plain(editor.render(88).join('\n')), /double-Esc: assign Escape/)
+    editor.handleInput('\x1b')
+    editor.handleInput('\x1b')
+    assert.deepEqual(mutations, [{
+      kind: 'replace',
+      action: 'app.agent.interrupt',
+      previous: { kind: 'direct', key: 'ctrl+x' },
+      binding: { kind: 'direct', key: 'escape' },
+    }])
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
 test('short action details keep the selected binding in the viewport', () => {
   const manager = new HostKeybindingManager()
   const parsed = parseUserKeybindings(undefined)

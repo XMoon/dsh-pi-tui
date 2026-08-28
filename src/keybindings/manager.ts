@@ -121,10 +121,13 @@ export class HostKeybindingManager {
     this.onEditorSubmitSync(this.editorSubmitKeysFor())
   }
 
-  private buildKeymap(): EffectiveKeymap {
+  private buildKeymap(
+    userBindings: UserKeybindingsConfig = this.userBindings,
+    onDiagnostic: (message: string) => void = message => this.diagnostics.push(message),
+  ): EffectiveKeymap {
     return new EffectiveKeymap({
       definitions: APP_KEYBINDINGS,
-      userBindings: this.safeMode ? {} : this.userBindings,
+      userBindings: this.safeMode ? {} : userBindings,
       pluginRules: this.pluginRules,
       compositionRules: [TASKS_OPEN_AFFORDANCE],
       safeMode: this.safeMode,
@@ -133,7 +136,7 @@ export class HostKeybindingManager {
       // overlay keys live in their own contexts (plan §3.3) and must never
       // resolve in the host ladder.
       includeScopes: new Set(['global', 'editor', 'agent-running']),
-      onDiagnostic: (message) => this.diagnostics.push(message),
+      onDiagnostic,
     })
   }
 
@@ -145,9 +148,61 @@ export class HostKeybindingManager {
     // including the leader key and its sequences (a leader sequence is a
     // user override; safe mode must restore the builtin surface).
     const effectiveLeaderConfig = this.safeMode ? undefined : this.leaderConfig
-    const effectiveLeaderBindings = this.safeMode
+    const configuredLeaderBindings = this.safeMode
       ? []
       : this.leaderBindings.filter(binding => this.userBindings[binding.action] !== false)
+
+    // Build a provisional map before creating the leader machine. The editor
+    // submit seam is an EFFECTIVE projection: it already accounts for user
+    // rules that are live, conflicted, shadowed, or absent. Do not infer this
+    // from the raw submit declaration (a conflicted remap can fall back to
+    // builtin Enter, while a shadowed builtin can disappear).
+    const provisionalDiagnostics: string[] = []
+    const provisionalKeymap = this.buildKeymap(
+      this.userBindings,
+      message => provisionalDiagnostics.push(message),
+    )
+    const provisionalSubmitKeys = new Set(provisionalKeymap.editorKeysFor('app.input.submit'))
+    const deadLeaderOnlyActions = new Set<AppKeybindingId>()
+    const deadLeaderPairs = new Set<string>()
+    const filteredLeaderBindings = configuredLeaderBindings.filter(binding => {
+      if (!provisionalSubmitKeys.has(binding.key)) return true
+      const pair = `${binding.action}\u0000${binding.key}`
+      if (!deadLeaderPairs.has(pair)) {
+        deadLeaderPairs.add(pair)
+        this.diagnostics.push(
+          `keybinding: <leader>${formatKeyId(binding.key)} for ${binding.action} is unavailable because ${formatKeyId(binding.key)} is an effective editor submit key — ignored`,
+        )
+      }
+      return false
+    })
+    for (const action of new Set(configuredLeaderBindings.map(binding => binding.action))) {
+      const configured = this.userBindings[action]
+      if (Array.isArray(configured) && configured.length === 0
+        && configuredLeaderBindings.some(binding => binding.action === action)
+        && !filteredLeaderBindings.some(binding => binding.action === action)) {
+        // A leader-only marker is a full replacement declaration. If every
+        // completion is dead because the effective submit seam consumes it,
+        // remove the marker for the final map so the builtin survives.
+        deadLeaderOnlyActions.add(action)
+      }
+    }
+
+    let finalKeymap = provisionalKeymap
+    let finalDiagnostics = provisionalDiagnostics
+    if (deadLeaderOnlyActions.size > 0) {
+      const restoredUserBindings = { ...this.userBindings }
+      for (const action of deadLeaderOnlyActions) delete restoredUserBindings[action]
+      const rebuiltDiagnostics: string[] = []
+      finalKeymap = this.buildKeymap(
+        restoredUserBindings,
+        message => rebuiltDiagnostics.push(message),
+      )
+      finalDiagnostics = rebuiltDiagnostics
+    }
+    this.keymap = finalKeymap
+    this.diagnostics.push(...finalDiagnostics)
+
     // Leader bindings: a duplicate completing key across DIFFERENT
     // actions is ambiguous — neither fires (plan §6 M6: ambiguous prefix
     // is a diagnostic). Identical (action, key) pairs are DEDUPED first
@@ -156,7 +211,7 @@ export class HostKeybindingManager {
     // never fires either.
     const seenPairs = new Set<string>()
     const byKey = new Map<KeyId, LeaderBinding[]>()
-    for (const binding of effectiveLeaderBindings) {
+    for (const binding of filteredLeaderBindings) {
       const pair = `${binding.action}\u0000${binding.key}`
       if (seenPairs.has(pair)) continue
       seenPairs.add(pair)
@@ -174,7 +229,6 @@ export class HostKeybindingManager {
       }
       leaderBindings.push(list[0]!)
     }
-    this.keymap = this.buildKeymap()
     this.effectiveLeaderBindings = leaderBindings
     // Leader PREFIX collision (PR review finding + round-12 finding): the
     // leader key is fed BEFORE the host ladder AND before the plugin

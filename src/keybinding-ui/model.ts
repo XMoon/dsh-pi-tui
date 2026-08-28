@@ -42,7 +42,11 @@ export interface KeybindingEditorRow {
    * editor never treats an untouched builtin as a removable override. */
   readonly configured: readonly KeybindingEditorBinding[]
   readonly effective: readonly KeybindingEditorBinding[]
+  /** All definition defaults, retained for reset/reference/search display. */
   readonly defaults: readonly KeybindingEditorBinding[]
+  /** Definition defaults that are still effective direct runtime keys and can
+   * be materialized safely by the first edit of an untouched action. */
+  readonly editableDefaults: readonly KeybindingEditorBinding[]
   /** Context-gated composition affordances, not ordinary direct defaults. */
   readonly conditional: readonly KeybindingEditorBinding[]
   readonly conditionalDescription: string | undefined
@@ -216,6 +220,8 @@ export function buildKeybindingEditorModel(
     )
     const conditional = conditionalKeys
       .map(key => ({ kind: 'direct' as const, key }))
+    const ordinaryEffective = effective.filter(binding => !conditional.some(candidate =>
+      candidate.kind === binding.kind && candidate.key === binding.key))
     // Capturing-scope fixed actions are deliberately absent from the Host
     // keymap. Their defaults remain their effective fixed triggers.
     if (!disabled && !definition.configurable && effective.length === 0) {
@@ -225,6 +231,11 @@ export function buildKeybindingEditorModel(
     const diagnostics = manager.diagnosticsList().filter(message => message.includes(definition.id))
     const conflict = conflictFor(definition.id, snapshot, diagnostics)
     const reserved = definition.availability === 'reserved'
+    const editableDefaults = !customized && definition.configurable
+      ? definition.defaultKeys
+        .filter(key => directKeys.includes(key))
+        .map(key => ({ kind: 'direct' as const, key }))
+      : []
     const status: KeybindingEditorRowStatus = safeMode && customized
       ? 'safe-mode'
       : disabled
@@ -235,7 +246,7 @@ export function buildKeybindingEditorModel(
             ? 'reserved'
             : !definition.configurable
               ? 'fixed'
-              : configured.length === 0 && definition.defaultKeys.length === 0
+              : !customized && ordinaryEffective.length === 0
                 ? 'unbound'
                 : customized
                   ? 'customized'
@@ -260,6 +271,7 @@ export function buildKeybindingEditorModel(
       configured,
       effective,
       defaults,
+      editableDefaults,
       conditional,
       conditionalDescription: conditional.length === 0
         ? undefined

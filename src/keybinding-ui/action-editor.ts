@@ -139,12 +139,12 @@ export class ActionEditorPanel implements Component {
     lines.push('')
 
     const configured = this.row.customized ? this.row.configured : []
-    const editable = this.row.customized ? this.row.configured : this.row.defaults
+    const editable = this.row.customized ? this.row.configured : this.row.editableDefaults
     lines.push(color.textStrong(this.row.customized ? 'Configured shortcuts' : 'Shortcuts'))
     if (this.row.customized && configured.length === 0) {
       lines.push(color.textDim(this.row.disabled ? '  Disabled' : '  Unbound'))
     }
-    if (!this.row.customized && this.row.defaults.length === 0 && this.row.conditional.length === 0) {
+    if (!this.row.customized && editable.length === 0 && this.row.conditional.length === 0) {
       lines.push(color.textDim('  Unbound'))
     }
     const canEdit = this.row.configurable && !this.row.reserved && !this.row.safeMode
@@ -180,7 +180,8 @@ export class ActionEditorPanel implements Component {
     }
     const effectiveOrdinary = ordinaryBindings(this.row, this.row.effective)
     const configuredOrdinary = ordinaryBindings(this.row, configured)
-    if (this.row.customized && effectiveOrdinary.length > 0 && !sameBindingList(effectiveOrdinary, configuredOrdinary)) {
+    const baselineOrdinary = this.row.customized ? configuredOrdinary : this.row.defaults
+    if (this.row.configurable && !sameBindingList(effectiveOrdinary, baselineOrdinary)) {
       lines.push(color.textDim(`Effective now: ${formatEditorBindings(effectiveOrdinary)}`))
     }
     if (this.row.diagnostics.length > 0) {
@@ -203,6 +204,7 @@ export class ActionEditorPanel implements Component {
     if (this.disposed) return
     this.disposed = true
     this.mutationGeneration += 1
+    this.recorder?.dispose()
     this.recorder = undefined
   }
 
@@ -241,7 +243,7 @@ export class ActionEditorPanel implements Component {
     }
     if (this.row.fixed || this.row.reserved) return
     const configured = this.row.customized ? this.row.configured : []
-    const editable = this.row.customized ? this.row.configured : this.row.defaults
+    const editable = this.row.customized ? this.row.configured : this.row.editableDefaults
     const total = editable.length + 1
     if (matchesKey(data, 'up')) {
       this.selectedIndex = (this.selectedIndex + total - 1) % total
@@ -391,7 +393,7 @@ export class ActionEditorPanel implements Component {
     const next = result.model.rows.find(row => row.id === this.row.id)
     if (next !== undefined) this.row = next
     this.model = result.model
-    const editableCount = this.row.customized ? this.row.configured.length : this.row.defaults.length
+    const editableCount = this.row.customized ? this.row.configured.length : this.row.editableDefaults.length
     this.selectedIndex = Math.min(this.selectedIndex, editableCount)
     this.message = result.message
     this.onModelChange(result.model)

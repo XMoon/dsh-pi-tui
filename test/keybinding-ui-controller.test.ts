@@ -85,6 +85,66 @@ test('mutation performs one get, one replace, preserves unrelated fields, then p
   }
 })
 
+test('adding to an untouched action does not resurrect a shadowed builtin shortcut', async () => {
+  const fixture = settingsFixture({ 'app.history.search': 'ctrl+t' })
+  const { controller, manager } = controllerFor(fixture)
+  try {
+    assert.deepEqual(manager.keysFor('app.todo.toggle'), [], 'the todo builtin is shadowed before editing')
+    const result = await controller.mutate({
+      kind: 'add',
+      action: 'app.todo.toggle',
+      binding: { kind: 'direct', key: 'ctrl+y' },
+    })
+    assert.equal(result.kind, 'applied')
+    assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+y'])
+    assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
+      'app.history.search': 'ctrl+t',
+      'app.todo.toggle': 'ctrl+y',
+    })
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('adding to a partially shadowed multi-default keeps only surviving defaults', async () => {
+  const fixture = settingsFixture({ 'app.todo.toggle': 'ctrl+f' })
+  const { controller, manager } = controllerFor(fixture)
+  try {
+    assert.deepEqual(manager.keysFor('app.transcript.search'), ['ctrl+shift+f'])
+    const result = await controller.mutate({
+      kind: 'add',
+      action: 'app.transcript.search',
+      binding: { kind: 'direct', key: 'ctrl+y' },
+    })
+    assert.equal(result.kind, 'applied')
+    assert.deepEqual(manager.keysFor('app.transcript.search'), ['ctrl+shift+f', 'ctrl+y'])
+    assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
+      'app.todo.toggle': 'ctrl+f',
+      'app.transcript.search': ['ctrl+shift+f', 'ctrl+y'],
+    })
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('adding to the conditional task affordance never materializes Down', async () => {
+  const fixture = settingsFixture(undefined)
+  const { controller, manager } = controllerFor(fixture)
+  try {
+    const result = await controller.mutate({
+      kind: 'add',
+      action: 'app.tasks.open',
+      binding: { kind: 'direct', key: 'ctrl+y' },
+    })
+    assert.equal(result.kind, 'applied')
+    assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
+      'app.tasks.open': 'ctrl+y',
+    })
+  } finally {
+    manager.dispose()
+  }
+})
+
 test('adding to an untouched action retains every builtin shortcut', async () => {
   const fixture = settingsFixture(undefined)
   const { controller, manager } = controllerFor(fixture)
@@ -191,6 +251,24 @@ test('a direct binding cannot newly shadow an already configured leader prefix',
     })
     assert.equal(result.kind, 'rejected')
     assert.match(result.message, /leader key/i)
+    assert.equal(fixture.replaceCount(), 0)
+    assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+t'])
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('interactive preflight rejects a leader completion consumed by effective submit', async () => {
+  const fixture = settingsFixture({ leader: 'ctrl+x' })
+  const { controller, manager } = controllerFor(fixture)
+  try {
+    const result = await controller.mutate({
+      kind: 'add',
+      action: 'app.todo.toggle',
+      binding: { kind: 'leader', key: 'enter' },
+    })
+    assert.equal(result.kind, 'rejected')
+    assert.match(result.message, /effective editor submit key/i)
     assert.equal(fixture.replaceCount(), 0)
     assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+t'])
   } finally {

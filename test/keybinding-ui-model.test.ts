@@ -41,6 +41,34 @@ test('editor model preserves defaults and exposes real category sections', () =>
   }
 })
 
+test('untouched rows expose only surviving effective defaults for editing', () => {
+  const { manager, model } = modelFor({ 'app.history.search': 'ctrl+t' })
+  try {
+    const todo = model.rows.find(row => row.id === 'app.todo.toggle')!
+    assert.deepEqual(todo.defaults, [{ kind: 'direct', key: 'ctrl+t' }])
+    assert.deepEqual(todo.editableDefaults, [])
+    assert.deepEqual(todo.effective, [])
+    assert.equal(todo.status, 'unbound')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('partial default shadowing leaves only the surviving default editable', () => {
+  const { manager, model } = modelFor({ 'app.todo.toggle': 'ctrl+f' })
+  try {
+    const search = model.rows.find(row => row.id === 'app.transcript.search')!
+    assert.deepEqual(search.defaults, [
+      { kind: 'direct', key: 'ctrl+f' },
+      { kind: 'direct', key: 'ctrl+shift+f' },
+    ])
+    assert.deepEqual(search.editableDefaults, [{ kind: 'direct', key: 'ctrl+shift+f' }])
+    assert.deepEqual(search.effective, [{ kind: 'direct', key: 'ctrl+shift+f' }])
+  } finally {
+    manager.dispose()
+  }
+})
+
 test('a Down remap of the task browser keeps its conditional metadata', () => {
   const { manager, model } = modelFor({ 'app.tasks.open': 'down' })
   try {

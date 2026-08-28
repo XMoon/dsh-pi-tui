@@ -332,9 +332,10 @@ dsh-pi-tui:
 - `DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有用户覆盖(仅使用内置默认)。Safe mode
   开启时整个 `/keybindings` 编辑器只读,避免保存只会在关闭 safe mode 后才发现的
   冲突配置。
-- 编辑器中未自定义 action 的默认按键也可选择。`Add shortcut` 会把当前显示的
-  全部默认键与新键一起写入;替换或删除单个默认键会保留其余默认键。action 已有
-  用户声明后,仍按上文规则替换内置按键集合。
+- 编辑器中未自定义 action 且仍然 effective 的默认按键可选择。`Add shortcut` 会把
+  这些仍生效的默认键与新键一起写入;已被 shadow 的 definition default 仅作参考,替换
+  或删除一个仍生效的默认键会保留其余 sibling。action 已有用户声明后,仍按上文规则
+  替换内置按键集合。
 - `/help` 仍是按键优先的只读帮助;`/keybindings` 是按 action 优先的
   可编辑 Keyboard Shortcuts Editor:按类别分组,搜索 action ID/描述/当前键和
   默认键,并标记 customized、conflict、Unbound、Disabled 和 fixed 状态。
@@ -342,9 +343,10 @@ dsh-pi-tui:
 - `/settings` 只有一个 `Keyboard shortcuts` 入口,打开与 `/keybindings` 相同的
   编辑器和持久化控制器。
 - 录制器读取真实终端按键,通过 `parseKey` 规范化为 `KeyId`;保存前会拒绝
-  无法匹配、吞输入、终端歧义或已知冲突的按键。裸 `Esc` 会取消录制;
-  录制 Host interrupt action 时按 `e` 可显式保留合法的 Escape 绑定;
-  物理 Escape 保留给 Host 生命周期路径。
+  无法匹配、吞输入、终端歧义或已知冲突的按键。普通录制器按 `Esc` 立即取消;
+  Host interrupt action 的 direct recorder 使用短暂双击窗口:一次 `Esc` 取消,
+  两次 `Esc` press event 才录入物理 Escape。repeat/release 不算第二次,不再有单字母
+  快捷方式;物理 Escape 保留给 Host 生命周期路径。
 - 条件 affordance 会在编辑器中单独标注(例如空编辑器任务浏览器的
   `Down (conditional)`),不会伪装成普通已配置快捷键。
 - `/keybindings conflicts` 列出冲突(同键 + 作用域重叠 + 同优先级——绝不
