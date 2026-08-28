@@ -111,24 +111,30 @@ test('the Direct config-port trust read resolves the same USER-layer facts', asy
   assert.equal(empty.footerCommandTrust.command, undefined)
 })
 
-test('the Direct custom-item read accepts only the USER settings layer', async () => {
-  const userItems = [{ schemaVersion: 1 as const, id: 'user:user-owned', kind: 'text' as const, text: 'USER' }]
-  const projectItems = [{ schemaVersion: 1 as const, id: 'user:project-owned', kind: 'text' as const, text: 'PROJECT' }]
+test('the Direct custom-item read separates USER raw storage from the safe runtime projection', async () => {
+  const userRaw: unknown[] = [
+    { schemaVersion: 1, id: 'user:user-owned', kind: 'text', text: 'USER' },
+    { schemaVersion: 1, id: 'user:future-command', kind: 'command', command: 'date' },
+  ]
+  const projectRaw: unknown[] = [{ schemaVersion: 1, id: 'user:project-owned', kind: 'text', text: 'PROJECT' }]
   const port = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
-    get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', value: { footerCustomItems: projectItems }, user: { footerCustomItems: userItems } }] }),
+    get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', value: { footerCustomItems: projectRaw }, user: { footerCustomItems: userRaw } }] }),
   } as never, {
-    get: () => ({ footerCustomItems: projectItems }),
+    get: () => ({ footerCustomItems: projectRaw }),
     replace: () => {},
   } as never, () => undefined)
-  assert.deepEqual(port.footerCustomItems.get().items, userItems)
+  assert.deepEqual(port.footerCustomItems.get().items, [userRaw[0]])
+  assert.equal(port.footerCustomItems.get().invalidCount, 1)
+  assert.deepEqual(port.footerCustomItems.rawForPersistence(), userRaw)
 
   const noUser = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
-    get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', value: { footerCustomItems: projectItems } }] }),
+    get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', value: { footerCustomItems: projectRaw } }] }),
   } as never, {
-    get: () => ({ footerCustomItems: projectItems }),
+    get: () => ({ footerCustomItems: projectRaw }),
     replace: () => {},
   } as never, () => undefined)
   assert.deepEqual(noUser.footerCustomItems.get().items, [])
+  assert.equal(noUser.footerCustomItems.rawForPersistence(), undefined)
 })
 
 test('TuiSettingsDoc round-trip: a whole-document replace never wipes the trusted footerCommand (review P2 migration contract)', async () => {

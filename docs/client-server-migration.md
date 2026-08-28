@@ -91,8 +91,10 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
   client-local `FooterLayoutV1` placement references. The Direct config port
   resolves definitions from the settings descriptor's USER layer only;
   merged/project values are pass-through storage and cannot create
-  `user:*` definitions. A future Remote adapter
-  must carry both fields through one whole-document settings round-trip; it
+  `user:*` definitions. It exposes a parsed runtime projection plus an
+  exact raw USER storage projection, so unrelated writes preserve
+  unknown/future definition kinds. A future Remote adapter must carry both
+  fields through one whole-document settings round-trip; it
   must not invent a callback or merge definitions into layout refs.
 - **The footer command status line (M5) is DIRECT-ONLY, client-local
   execution.** The trusted command runs on the Client machine's shell

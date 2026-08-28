@@ -813,14 +813,30 @@ test('/settings theme pick persists the BUILTIN choice too (review P1: the trans
   app.start()
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
+  const userFooterCustomItems: unknown[] = [
+    { schemaVersion: 1, id: 'user:prod', kind: 'text', text: 'PROD' },
+    { schemaVersion: 1, id: 'user:clock', kind: 'command', command: 'date' },
+  ]
+  const projectFooterCustomItems: unknown[] = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
+  ctx.provide('settings', {
+    describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footerCustomItems: projectFooterCustomItems },
+      user: { footerCustomItems: userFooterCustomItems },
+    }],
+  } as never)
   const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
-  const doc: Record<string, unknown> = { theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off' }
-  const persisted: string[] = []
+  const doc: Record<string, unknown> = {
+    theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
+    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off',
+    footerCustomItems: projectFooterCustomItems,
+  }
+  const persisted: Array<{ theme: unknown; footerCustomItems: unknown }> = []
   Object.assign(runner, {
     tuiSettings: {
       get: () => doc as never,
       replace: (next: Record<string, unknown>) => {
-        persisted.push(next.theme as string)
+        persisted.push({ theme: next.theme, footerCustomItems: next.footerCustomItems })
         Object.assign(doc, next)
         return next
       },
@@ -841,8 +857,15 @@ test('/settings theme pick persists the BUILTIN choice too (review P1: the trans
   await vt.waitForRender()
   vt.sendInput('\r') // pick light
   await vt.waitForRender()
-  assert.deepEqual(persisted, ['light'],
+  assert.equal(persisted.length, 1)
+  assert.equal(persisted[0]?.theme, 'light',
     'a BUILTIN pick must persist through the same transactional commit as a plugin pick')
+  assert.deepEqual(persisted[0]?.footerCustomItems, userFooterCustomItems,
+    'an unrelated theme change must preserve the exact USER custom-item storage value')
+  assert.deepEqual(doc.footerCustomItems, userFooterCustomItems,
+    'a project-layer custom-item value must never be promoted by the theme write')
+  assert.deepEqual(runner.config.footerCustomItems.get().items, [userFooterCustomItems[0]],
+    'runtime resolution must still expose only the supported USER definition')
   // The committed choice marks the light row on a re-open.
   vt.sendInput('\r') // reopen the submenu
   await vt.waitForRender()
