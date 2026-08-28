@@ -14,6 +14,7 @@ import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 import type { FooterLayoutV1 } from '../src/footer/types.ts'
 import type { FooterCustomItemSettings } from '../src/footer/custom-items.ts'
+import { serializeTuiSettingsMutation } from '../src/runtime/config-port.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
@@ -68,6 +69,87 @@ function fakeSettings(initial: { footer: string; footerLayout?: unknown; footerF
     },
   }
 }
+
+test('footer, focus, and fullscreen writes share one FIFO at the live commit point', async () => {
+  let doc: ReturnType<TuiSettingsLike['get']> = {
+    theme: 'auto',
+    iconStyle: 'emoji',
+    footer: 'custom',
+    footerLayout: { source: 'old' },
+    footerCustomItems: [],
+    fullscreen: 'on',
+    busyEnter: 'queue',
+    localShellSandbox: 'bypass',
+    homeEndKeys: 'viewport',
+    focusMode: 'off',
+  }
+  const pending: Array<{ next: ReturnType<TuiSettingsLike['get']>; resolve: () => void }> = []
+  const settings: TuiSettingsLike = {
+    get: () => ({ ...doc }),
+    replace: (next) => new Promise<void>(resolve => pending.push({ next, resolve })),
+  }
+  const footerWrite = serializeTuiSettingsMutation(settings, () => settings.replace({ ...settings.get(), footerLayout: { source: 'footer' } }))
+  const focusWrite = serializeTuiSettingsMutation(settings, () => settings.replace({ ...settings.get(), focusMode: 'on' }))
+  const fullscreenWrite = serializeTuiSettingsMutation(settings, () => settings.replace({ ...settings.get(), fullscreen: 'off' }))
+  const flush = async (): Promise<void> => {
+    for (let index = 0; index < 8; index += 1) await Promise.resolve()
+  }
+
+  await flush()
+  assert.equal(pending.length, 1, 'the focus and fullscreen writes must wait behind footer')
+  assert.deepEqual(pending[0]!.next.footerLayout, { source: 'footer' })
+  doc = { ...pending[0]!.next }
+  pending[0]!.resolve()
+  await flush()
+  assert.equal(pending.length, 2, 'focus must start only after footer settles')
+  assert.deepEqual(pending[1]!.next.footerLayout, { source: 'footer' })
+  assert.equal(pending[1]!.next.focusMode, 'on')
+  doc = { ...pending[1]!.next }
+  pending[1]!.resolve()
+  await flush()
+  assert.equal(pending.length, 3, 'fullscreen must start only after focus settles')
+  assert.deepEqual(pending[2]!.next.footerLayout, { source: 'footer' })
+  assert.equal(pending[2]!.next.focusMode, 'on')
+  assert.equal(pending[2]!.next.fullscreen, 'off')
+  doc = { ...pending[2]!.next }
+  pending[2]!.resolve()
+  await Promise.all([footerWrite, focusWrite, fullscreenWrite])
+})
+
+test('a failed whole-document settings write does not block later queued writes', async () => {
+  const doc: ReturnType<TuiSettingsLike['get']> = {
+    theme: 'auto',
+    iconStyle: 'emoji',
+    footer: 'default',
+    fullscreen: 'on',
+    busyEnter: 'queue',
+    localShellSandbox: 'bypass',
+    homeEndKeys: 'viewport',
+    focusMode: 'off',
+  }
+  let calls = 0
+  let rejectFirst: (error: Error) => void = () => {}
+  let resolveSecond: () => void = () => {}
+  const settings: TuiSettingsLike = {
+    get: () => ({ ...doc }),
+    replace: () => {
+      calls += 1
+      if (calls === 1) return new Promise<void>((_resolve, reject) => { rejectFirst = reject })
+      return new Promise<void>(resolve => { resolveSecond = resolve })
+    },
+  }
+  const first = serializeTuiSettingsMutation(settings, () => settings.replace({ ...settings.get(), footer: 'custom' }))
+  const second = serializeTuiSettingsMutation(settings, () => settings.replace({ ...settings.get(), focusMode: 'on' }))
+  for (let index = 0; index < 8; index += 1) await Promise.resolve()
+  assert.equal(calls, 1)
+  const firstOutcome = assert.rejects(first, /settings failure/)
+  rejectFirst(new Error('settings failure'))
+  await firstOutcome
+  for (let index = 0; index < 8; index += 1) await Promise.resolve()
+  assert.equal(calls, 2, 'the queue must advance after a rejection')
+  resolveSecond()
+  await second
+})
 
 test('/footer is sessionless and opens the configurator; S saves and persists', async () => {
   const ctx = new Context()
