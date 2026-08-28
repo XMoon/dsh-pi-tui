@@ -132,6 +132,51 @@ test('physical Escape reaches a replacement editor before user action resolution
   app.stop()
 })
 
+test('a declined replacement Escape is consumed once after the interrupt is remapped', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  let pluginEscapes = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+  }, { editorRegistry: registry })
+  app.start()
+  const handle = registry.register({
+    id: 'declining-escape-plugin',
+    priority: 0,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: '' }] },
+      getText: () => '',
+      setText: () => {},
+      getCursor: () => 0,
+      setCursor: () => {},
+      focused: false,
+      borderColor: (text: string) => text,
+      handleInput: () => {
+        pluginEscapes += 1
+        return false
+      },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  // Bypass the parser to exercise the runtime guard against the old bad
+  // shadowing state, while remapping the real interrupt away from Escape.
+  app.keybindingsManager().setUserConfiguration({
+    bindings: { 'app.todo.toggle': 'escape', 'app.agent.interrupt': 'ctrl+x' },
+    leader: undefined,
+    leaderBindings: [],
+  })
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(pluginEscapes, 1, 'a declining replacement must receive Escape exactly once')
+  assert.equal(app.isTodoPanelVisible(), false, 'a declining replacement must not expose the shadowing action')
+  handle.dispose()
+  app.reconcileEditorNow()
+  app.stop()
+})
+
 test('the viewer guard follows the remap: ctrl+x is blocked inside the continuable viewer', async () => {
   // The plan's key test: the user remaps app.input.steer to ctrl+x; the
   // viewer receives ctrl+x — the PARENT must still NOT be steered (the

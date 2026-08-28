@@ -556,21 +556,21 @@ export class EffectiveKeymap {
       rule.action === action && rule.owner === 'editor' && rule.source === 'user')
   }
 
-  /** The visible conditional/composition keys of one action. These are
-   * context-gated affordances rather than ordinary user-editable defaults.
-   * A user rule inherits its action's composition predicate, and may dedupe
-   * the synthesized composition rule when it uses the same key, so source
-   * alone cannot identify every conditional trigger. */
+  /** The conditional/composition keys of one action. These are context-gated
+   * affordance metadata rather than ordinary user-editable defaults. Keep the
+   * projection independent of active rules: a conflicting user rule can
+   * deactivate both the user and synthesized composition rules, but the UI
+   * still needs to explain that the declared Down trigger is conditional.
+   * Explicit `false` remains the sole way to remove the affordance. */
   conditionalKeysFor(action: string): KeyId[] {
-    const compositionKeys = new Set(this.compositionRules
+    const definition = this.definitions[action]
+    if (definition === undefined) return []
+    if (this.includeScopes !== undefined && !this.includeScopes.has(definition.scope)) return []
+    const userValue = this.safeMode ? undefined : this.userBindings[action as AppKeybindingId]
+    if (userValue === false) return []
+    return [...new Set(this.compositionRules
       .filter(composition => composition.action === action)
-      .map(composition => canonicalizeKeyId(composition.key)))
-    if (compositionKeys.size === 0) return []
-    return [...new Set(this.visibleRules
-      .filter(rule => rule.action === action
-        && compositionKeys.has(rule.key)
-        && (rule.source === 'composition' || rule.predicate !== undefined))
-      .map(rule => rule.key))]
+      .map(composition => canonicalizeKeyId(composition.key)))]
   }
 
   /** The primary (first) effective key of one action, or undefined. */

@@ -3191,9 +3191,11 @@ export class TuiApp {
         this.lastEscapeAt = undefined
         return routed
       }
-      // The plugin DECLINED Esc: continue through the host Esc fallback
-      // (shell-mode exit, double-Esc cancel) instead of dropping the
-      // key — a dropped Esc would never arm the cancel.
+      // The plugin DECLINED Esc. With an effective interrupt, continue
+      // through the Host fallback below; with a remapped interrupt, the
+      // replacement already received the event and it must not be delivered
+      // a second time by TuiBase's focused-component dispatch.
+      if (!includeInterrupt) return { consume: true }
     }
     // Shell-mode exit: the host editor in a shell mode with an EMPTY
     // body owns Esc — it cancels the shell mode (the double-Esc cancel
