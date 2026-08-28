@@ -397,16 +397,13 @@ export class HostKeybindingManager {
     return this.safeMode
   }
 
-  /** Whether physical Escape should run the Host lifecycle seam. A malformed
-   * lower-priority/ordinary action must not shadow the builtin lifecycle key;
-   * only an explicit interrupt remap or disable changes this decision. */
+  /** Whether physical Escape should run the Host lifecycle seam. Derive this
+   * from the final effective map so fail-soft builtin restoration (including a
+   * dead leader-only interrupt declaration) cannot leave runtime and hints at
+   * odds. The active projection deliberately retains a reserved lifecycle
+   * builtin when malformed injected ordinary state shadows it. */
   physicalEscapeEnabled(): boolean {
-    if (this.safeMode) return true
-    const configured = this.userBindings['app.agent.interrupt']
-    if (configured === false) return false
-    if (configured === undefined) return true
-    const keys = Array.isArray(configured) ? configured : [configured]
-    return keys.includes('escape')
+    return this.keymap.activeKeysFor('app.agent.interrupt').includes('escape')
   }
 
   /** Replace the plugin contributions (the runner wires the keybinding
