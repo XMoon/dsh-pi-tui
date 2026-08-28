@@ -121,6 +121,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
   app.start()
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
   const settings = fakeTuiSettings(options.busyEnter ?? 'queue', options.localShellSandbox ?? 'bypass')
   const runner: TuiCommandRunner = {
     ctx,

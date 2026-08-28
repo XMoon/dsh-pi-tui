@@ -228,6 +228,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     find: () => undefined,
     execute: async () => undefined,
   } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
   const settings = fakeTuiSettings(options.homeEndKeys ?? 'input')
   const runner: TuiCommandRunner = {
     ctx,
