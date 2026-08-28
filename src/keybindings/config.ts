@@ -381,7 +381,9 @@ export function parseUserKeybindings(
   const submitKeys = submitValue === false
     ? new Set<KeyId>()
     : submitValue === undefined
-      ? new Set(APP_KEYBINDINGS['app.input.submit'].defaultKeys)
+      ? leaderOnlyActions.has('app.input.submit')
+        ? new Set<KeyId>()
+        : new Set(APP_KEYBINDINGS['app.input.submit'].defaultKeys)
       : new Set(Array.isArray(submitValue) ? submitValue : [submitValue])
   const usableLeaderBindings = leaderBindings.filter(binding => {
     if (!submitKeys.has(binding.key)) return true

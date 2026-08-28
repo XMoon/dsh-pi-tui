@@ -326,7 +326,9 @@ dsh-pi-tui:
   ctrl+x` 让 Ctrl+X steer、Ctrl+S 不再 steer;仅 leader 的
   `app.todo.toggle: <leader>t` 让 Leader T 成为唯一切换触发(Ctrl+T
   失效);`['ctrl+z', '<leader>s']` 同时保留两个用户触发;`false`
-  移除该 action 的全部触发。
+  移除该 action 的全部触发。若 effective editor-owned submit key 会在
+  leader machine 之前消费某个 completion(例如 `<leader>enter`),该死序列会被
+  拒绝而不会被展示。
 - `DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有用户覆盖(仅使用内置默认)。Safe mode
   开启时整个 `/keybindings` 编辑器只读,避免保存只会在关闭 safe mode 后才发现的
   冲突配置。

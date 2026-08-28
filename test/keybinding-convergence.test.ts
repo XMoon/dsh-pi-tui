@@ -1074,6 +1074,19 @@ test('6.6c leader-only submit: the unified model carries NO Enter (resolve/match
   const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.input.submit')
   assert.ok(binding !== undefined)
   assert.deepEqual(binding!.keys, [], 'the snapshot carries no Enter')
+  // Enter remains a valid leader completion when the submit action itself is
+  // leader-only: the editor submit seam is empty, so this is not a dead key.
+  const enterLeader = new HostKeybindingManager()
+  const enterParsed = parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.input.submit': '<leader>enter' },
+  })
+  enterLeader.setUserConfiguration(enterParsed)
+  assert.deepEqual(enterParsed.bindings, { 'app.input.submit': [] })
+  assert.deepEqual(enterParsed.leaderBindings, [{ action: 'app.input.submit', key: 'enter' }])
+  assert.equal(enterLeader.leaderMachine()?.leaderBindings[0]?.key, 'enter')
+  assert.deepEqual(enterLeader.editorSubmitKeysFor(), [])
+  enterLeader.dispose()
   // A direct+leader mix keeps the direct key AND the leader (both user
   // triggers; the builtin is removed).
   const mixed = new HostKeybindingManager()
