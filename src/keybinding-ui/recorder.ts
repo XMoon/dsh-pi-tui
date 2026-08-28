@@ -2,7 +2,7 @@
 
 import { isKeyRelease, isKeyRepeat, matchesKey, parseKey, truncateToWidth, type Component } from '@xmoon76/pi-tui'
 import { canonicalizeKeyId, isRuntimeBindableKeyId, isTextProducingKeyId, isValidKeyId } from '../keybindings/key-identity.ts'
-import { isEditorSubmitPreSubmitKey, isTerminalAmbiguousKeyId } from '../keybindings/config.ts'
+import { isEditorSubmitPreSubmitKey, isPhysicalEscapeAction, isTerminalAmbiguousKeyId } from '../keybindings/config.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
 import type { AppKeybindingId } from '../keybindings/types.ts'
 import { color } from '../theme.ts'
@@ -45,6 +45,9 @@ export function validateRecordedKey(
   }
   if (options.purpose === 'leader-completion' && key === 'escape') {
     return { key: undefined, message: 'Escape cancels a leader sequence and cannot be a completion.' }
+  }
+  if (key === 'escape' && (options.action === undefined || !isPhysicalEscapeAction(options.action))) {
+    return { key: undefined, message: 'Physical Escape is reserved for the Host lifecycle path.' }
   }
   if (options.action === 'app.input.submit' && options.purpose !== 'leader-completion') {
     if (key === 'shift+enter') {
@@ -91,7 +94,9 @@ export class KeyRecorder implements Component {
         ? color.accent('Waiting for one key…')
         : color.error(this.error),
       '',
-      color.textDim(this.purpose === 'direct' ? 'Esc: cancel · e: use Escape' : 'Esc: cancel'),
+      color.textDim(this.purpose === 'direct' && this.action === 'app.agent.interrupt'
+        ? 'Esc: cancel · e: use Escape'
+        : 'Esc: cancel'),
     ]
     return lines.map(line => truncateToWidth(line, safeWidth))
   }
@@ -104,11 +109,18 @@ export class KeyRecorder implements Component {
     // the active editor overlay and must never reach the host editor.
     if (isKeyRelease(data) || isKeyRepeat(data)) return
     // Raw Escape is the recorder's cancel gesture. Offer an explicit
-    // disambiguated command so a direct action can still express the legal
-    // unmodified Escape KeyId without making the cancel path unreachable.
-    if (this.purpose === 'direct' && data.length === 1 && data.toLowerCase() === 'e') {
+    // disambiguated command so the lifecycle interrupt action can retain its
+    // legal unmodified Escape KeyId without making the cancel path unreachable.
+    if (this.purpose === 'direct' && this.action === 'app.agent.interrupt'
+      && data.length === 1 && data.toLowerCase() === 'e') {
+      const validation = validateRecordedKey('escape', { purpose: this.purpose, action: this.action })
+      if (validation.key === undefined) {
+        this.error = validation.message
+        this.requestRender()
+        return
+      }
       try {
-        this.onCapture('escape')
+        this.onCapture(validation.key)
       } catch {
         this.error = 'The shortcut could not be recorded. Try again.'
         this.requestRender()

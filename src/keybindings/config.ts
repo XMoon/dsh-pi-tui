@@ -44,6 +44,13 @@ export const LEADER_PREFIX = '<leader>'
  * for callers of the parser module). */
 export { isValidKeyId }
 
+/** Physical Escape is reserved for the Host lifecycle path (overlay close,
+ * shell exit, interrupt/double-cancel). Only the lifecycle action itself may
+ * declare it; every other action would otherwise steal that path. */
+export function isPhysicalEscapeAction(action: string): boolean {
+  return action === 'app.agent.interrupt'
+}
+
 /** The FORK EDITOR's UNCONDITIONAL PRE-SUBMIT keys — DERIVED from the
  * shared {@link EDITOR_OWNED_KEY_IDS} inventory minus the POST-SUBMIT
  * keys (packages/pi-tui components/editor.ts handleInput dispatch
@@ -185,6 +192,8 @@ export function parseUserKeybindings(
         diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — the runtime can never match this modifier combination (F-keys and Escape take no modifiers; Clear takes only Shift/Ctrl) — ignored`)
       } else if (isTextProducingKeyId(canonicalLeader)) {
         diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — a text-producing leader would swallow typing — ignored`)
+      } else if (canonicalLeader === 'escape') {
+        diagnostics.push(`keybindings: invalid leader key "${String(leaderValue)}" — physical Escape is reserved for the Host lifecycle path — ignored`)
       } else if (TERMINAL_AMBIGUOUS_KEY_IDS.has(canonicalLeader)) {
         // Legacy terminal collisions are REJECTED for the leader prefix too
         // (convergence finding): a leader on ctrl+[ / ctrl+j / ctrl+m would
@@ -293,6 +302,10 @@ export function parseUserKeybindings(
       // never bypass the printable guard or the collision sets — the raw
       // spelling is only used in the diagnostic text.
       const canonicalEntry = canonicalizeKeyId(entry as KeyId)
+      if (canonicalEntry === 'escape' && !isPhysicalEscapeAction(actionId)) {
+        diagnostics.push(`keybindings: "${actionId}" cannot bind "${entry}" — physical Escape is reserved for the Host lifecycle path — ignored`)
+        continue
+      }
       // RUNTIME-BINDABLE GATE (round-22/24 finding): the fork matcher
       // can never match certain modifier combinations (F-keys/Escape
       // take no modifiers — keys.ts `modifier !== 0` → false; Clear
@@ -340,7 +353,8 @@ export function parseUserKeybindings(
       // while that overlay is open (e.g. the search toggle remapped to
       // Enter collides with search.next). The binding still works
       // outside the overlay; warned, never silently dropped.
-      if (FIXED_OVERLAY_KEYS.has(canonicalEntry)) {
+      if (FIXED_OVERLAY_KEYS.has(canonicalEntry)
+        && !(canonicalEntry === 'escape' && isPhysicalEscapeAction(actionId))) {
         diagnostics.push(`keybindings: "${actionId}" binds "${entry}", which a non-configurable overlay owns while it is open — the overlay wins there`)
       }
       keys.push(canonicalEntry)

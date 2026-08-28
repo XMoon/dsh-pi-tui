@@ -191,7 +191,9 @@ dsh-pi-tui:
 
 Semantics: string = one key; array = several; `false` = disable the
 action's effective binding; absent = builtin default; `<leader>X` = a
-leader sequence (requires `leader`). The validation pipeline is
+leader sequence (requires `leader`). Physical `Escape` is reserved for the
+Host lifecycle path and is accepted only for `app.agent.interrupt`; the
+runtime routes it before ordinary user action resolution. The validation pipeline is
 **grammar → canonicalize → policy → store** (round-9 finding): every
 policy check (printable, lifecycle collisions, editor-owned constraints)
 runs on the CANONICAL key, so an uppercase spelling (`SPACE`, `ctrl+A`)
@@ -472,7 +474,8 @@ Detail view: `Add shortcut` materializes the displayed defaults together with
 the new key, while replacing or removing one default preserves its siblings.
 Once an action has an explicit user declaration, the unified override contract
 still applies. Safe mode makes the entire editor read-only, and direct recording
-uses `e` as the explicit "use Escape" command because raw `Esc` remains cancel.
+uses `e` as the explicit "use Escape" command for the Host interrupt because raw
+`Esc` remains cancel. Physical Escape is never available to ordinary actions.
 Context-gated composition affordances are labeled separately from ordinary
 configured bindings (for example, `Down (conditional)` for the task browser).
 

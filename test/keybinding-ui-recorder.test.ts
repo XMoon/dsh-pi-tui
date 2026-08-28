@@ -38,14 +38,15 @@ test('direct recorder can explicitly capture the legal Escape binding', () => {
   let captured: string | undefined
   const recorder = new KeyRecorder({
     purpose: 'direct',
-    action: 'app.todo.toggle',
-    label: 'todo panel',
+    action: 'app.agent.interrupt',
+    label: 'interrupt',
     onCapture: key => { captured = key },
     onCancel: noop,
   })
   assert.match(recorder.render(88).join('\n'), /e: use Escape/)
   recorder.handleInput('e')
   assert.equal(captured, 'escape')
+  assert.match(validateRecordedKey('escape', { purpose: 'direct', action: 'app.todo.toggle' }).message!, /reserved/i)
 })
 
 test('Escape cancels recording and never captures a binding', () => {

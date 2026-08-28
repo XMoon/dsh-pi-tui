@@ -203,6 +203,20 @@ test('the space key is printable: rejected as a leader and as a direct binding',
   assert.deepEqual(chord.bindings, { 'app.todo.toggle': 'ctrl+space' })
 })
 
+test('physical Escape stays reserved for the Host lifecycle action', () => {
+  const stolen = parseUserKeybindings({ 'app.todo.toggle': 'escape' })
+  assert.deepEqual(stolen.bindings, {})
+  assert.ok(stolen.diagnostics.some(message => message.includes('physical Escape')))
+
+  const lifecycle = parseUserKeybindings({ 'app.agent.interrupt': 'escape' })
+  assert.deepEqual(lifecycle.bindings, { 'app.agent.interrupt': 'escape' })
+  assert.deepEqual(lifecycle.diagnostics, [])
+
+  const leader = parseUserKeybindings({ leader: 'escape', 'app.todo.toggle': '<leader>t' })
+  assert.equal(leader.leader, undefined)
+  assert.ok(leader.diagnostics.some(message => message.includes('physical Escape')))
+})
+
 test('legacy terminal collisions are REJECTED bindings', () => {
   // Convergence §4.5: a key indistinguishable from a lifecycle key on
   // legacy terminals is unsupported — rejected with a diagnostic.

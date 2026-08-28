@@ -343,6 +343,18 @@ export class HostKeybindingManager {
     return this.safeMode
   }
 
+  /** Whether physical Escape should run the Host lifecycle seam. A malformed
+   * lower-priority/ordinary action must not shadow the builtin lifecycle key;
+   * only an explicit interrupt remap or disable changes this decision. */
+  physicalEscapeEnabled(): boolean {
+    if (this.safeMode) return true
+    const configured = this.userBindings['app.agent.interrupt']
+    if (configured === false) return false
+    if (configured === undefined) return true
+    const keys = Array.isArray(configured) ? configured : [configured]
+    return keys.includes('escape')
+  }
+
   /** Replace the plugin contributions (the runner wires the keybinding
    * registry's snapshot). A no-op when the rules are unchanged (the
    * runner may call this on every registry invalidation). */

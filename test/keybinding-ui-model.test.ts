@@ -41,6 +41,18 @@ test('editor model preserves defaults and exposes real category sections', () =>
   }
 })
 
+test('a Down remap of the task browser keeps its conditional metadata', () => {
+  const { manager, model } = modelFor({ 'app.tasks.open': 'down' })
+  try {
+    const row = model.rows.find(candidate => candidate.id === 'app.tasks.open')!
+    assert.deepEqual(row.effective, [{ kind: 'direct', key: 'down' }])
+    assert.deepEqual(row.conditional, [{ kind: 'direct', key: 'down' }])
+    assert.equal(row.conditionalDescription, 'when the editor is empty and tasks are active')
+  } finally {
+    manager.dispose()
+  }
+})
+
 test('safe mode marks persisted action overrides as ignored defaults', () => {
   const manager = new HostKeybindingManager()
   const parsed = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+y' })

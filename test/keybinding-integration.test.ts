@@ -8,6 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { EditorRegistry } from '../src/editor-registry.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { HostKeybindingManager } from '../src/keybindings/manager.ts'
@@ -35,6 +36,16 @@ function managerWith(config: Record<string, unknown>): (manager: HostKeybindingM
   }
 }
 
+/** Inject the formerly possible bad state to prove the runtime lifecycle
+ * guard independently of the parser's Escape reservation. */
+function injectEscapeSteal(manager: HostKeybindingManager): void {
+  manager.setUserConfiguration({
+    bindings: { 'app.todo.toggle': 'escape' },
+    leader: undefined,
+    leaderBindings: [],
+  })
+}
+
 test('user remap: ctrl+x steers, ctrl+s no longer does', async () => {
   const steered: string[] = []
   const { vt, app } = startApp({ onSteer: (text: string) => steered.push(text) }, managerWith({ 'app.input.steer': 'ctrl+x' }))
@@ -44,6 +55,80 @@ test('user remap: ctrl+x steers, ctrl+s no longer does', async () => {
   vt.sendInput('\x13') // ctrl+s
   await vt.waitForRender()
   assert.deepEqual(steered, [''], 'the old key must no longer steer')
+  app.stop()
+})
+
+test('physical idle Escape keeps the Host lifecycle path ahead of an action binding', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let singleEscapes = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSingleEscape: () => { singleEscapes += 1; return true },
+  })
+  app.start()
+  injectEscapeSteal(app.keybindingsManager())
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(singleEscapes, 1, 'physical idle Escape must reach the lifecycle handler')
+  assert.equal(app.isTodoPanelVisible(), false, 'an injected action binding must not steal Escape')
+  app.stop()
+})
+
+test('physical busy Escape cancels before an action binding can dispatch', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let cancels = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { cancels += 1 },
+  })
+  app.start()
+  injectEscapeSteal(app.keybindingsManager())
+  app.setBusy(true)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(cancels, 1, 'physical busy Escape must cancel the active work')
+  assert.equal(app.isTodoPanelVisible(), false, 'busy Escape must not dispatch the injected action')
+  app.stop()
+})
+
+test('physical Escape reaches a replacement editor before user action resolution', async () => {
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  let pluginEscapes = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+  }, { editorRegistry: registry })
+  app.start()
+  const handle = registry.register({
+    id: 'escape-guard-plugin',
+    priority: 0,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: '' }] },
+      getText: () => '',
+      setText: () => {},
+      getCursor: () => 0,
+      setCursor: () => {},
+      get focused() { return false },
+      borderColor: (text: string) => text,
+      handleInput: () => {
+        pluginEscapes += 1
+        return true
+      },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  injectEscapeSteal(app.keybindingsManager())
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(pluginEscapes, 1, 'the replacement editor must receive physical Escape')
+  assert.equal(app.isTodoPanelVisible(), false, 'the action binding must not steal replacement Escape')
+  handle.dispose()
+  app.reconcileEditorNow()
   app.stop()
 })
 
