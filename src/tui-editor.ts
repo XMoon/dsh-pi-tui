@@ -1,6 +1,6 @@
 /**
- * Host editor subclass: kimi CustomEditor parity for `@dir/` mention
- * completion (AGENTS.md decision 8 — consumer-side, the vendored fork
+ * Host editor subclass: kimi CustomEditor parity for `@dir/`/`@dir\\`
+ * mention completion (AGENTS.md decision 8 — consumer-side, the vendored fork
  * stays pristine). After every handled key, if the cursor sits on an
  * `@dir/` mention with the autocomplete closed, re-trigger completion so
  * Tab-accepting a directory immediately shows its children (kimi's
@@ -267,6 +267,33 @@ export class TuiEditor extends Editor {
       // shell-local + empty: `!` is an ordinary body character (no fourth
       // mode — intentional, guarded by a test).
     }
+    // Closed-dropdown Tab is explicit and context-gated. In prompt mode the
+    // host provider owns only `@` and declared path arguments; ordinary prose
+    // and ordinary paths must not fall through to the fork's broad file
+    // completion. A slash command name is the one non-file case delegated to
+    // the fork so command-name completion remains intact.
+    if (matchesKey(data, 'tab') && !this.isShowingAutocomplete() && this.inputMode === 'prompt') {
+      const { line, col } = this.getCursor()
+      const beforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
+      const context = classifyFileCompletionContext(beforeCursor, FILE_ARGUMENT_COMMANDS)
+      if (context.kind === 'mention' || context.kind === 'image-argument') {
+        ;(this as unknown as AutocompleteInternals)
+          .requestAutocomplete({ force: true, explicitTab: true })
+        return
+      }
+      const trimmed = beforeCursor.trimStart()
+      if (/^\/[^\s/]*$/.test(trimmed)) {
+        // Let the fork resolve slash-command names (`/he`, including an
+        // indented form after its provider-side normalization).
+      } else {
+        // Still run the provider request so the separate extension
+        // autocomplete chain can answer ordinary positions. MentionProvider's
+        // host file branch remains closed for this `none` context.
+        ;(this as unknown as AutocompleteInternals)
+          .requestAutocomplete({ force: true, explicitTab: true })
+        return
+      }
+    }
     // Tab on a leading `/` in a shell mode is a PATH, never a slash
     // command: the fork's handleTabCompletion routes a space-free
     // leading-`/` line to slash-command completion, which would list
@@ -302,7 +329,38 @@ export class TuiEditor extends Editor {
       return
     }
     if (data !== '') super.handleInput(data)
+    this.triggerNonstandardMentionCompletion(data)
     this.reopenAutocompleteAfterInput()
+  }
+
+  /** Trigger the provider for mention boundaries that the vendored editor's
+   * generic symbol gate does not know about (CJK glue and `=`/quote
+   * delimiters). Ordinary prose and path positions remain untouched; the
+   * shared classifier is the only file-context decision point. */
+  private triggerNonstandardMentionCompletion(data: string): void {
+    if (this.isShowingAutocomplete()) return
+    const printable = decodePrintableKey(data) ?? (data.length === 1 && data.charCodeAt(0) >= 32 ? data : undefined)
+    // Virtual terminals and paste-like test seams may deliver several plain
+    // characters in one input event. Escape sequences are navigation/control
+    // keys, not text, even though their bytes include printable characters.
+    if (printable === undefined && data.includes('\x1b')) return
+    if (printable === undefined && ![...data].some(character => character.charCodeAt(0) >= 32)) return
+    const { line, col } = this.getCursor()
+    const before = this.getLines()[line]?.slice(0, col) ?? ''
+    const context = classifyFileCompletionContext(before, FILE_ARGUMENT_COMMANDS)
+    if (context.kind !== 'mention') return
+    const beforeAt = before[context.range.start - 1]
+    // Start/space/tab are already handled by the fork for bare mentions. Its
+    // generic gate does not reliably recognize quoted forms (`@"...`),
+    // including when they begin after whitespace, so the classified quoted
+    // context is an explicit exception. Nonstandard boundaries (`=`, CJK,
+    // quote delimiters) are also owned by this consumer-side trigger and must
+    // work when a real terminal delivers one key per input event.
+    const quotedMention = context.query.startsWith('@"')
+    const nonstandardBoundary = beforeAt !== undefined && beforeAt !== ' ' && beforeAt !== '\t'
+    if (!quotedMention && !nonstandardBoundary) return
+    ;(this as unknown as AutocompleteInternals)
+      .requestAutocomplete({ force: false, explicitTab: false })
   }
 
   /** Stitch a buffered paste-marker prefix onto this chunk. */
@@ -427,7 +485,7 @@ export class TuiEditor extends Editor {
     // reopen through the same directory-shaped context gate — never a
     // per-command hardcode, and never a plain trailing `/` (a `see /tmp/`
     // position stays closed).
-    if (textBeforeCursor.endsWith('/') && isFileArgumentContext(textBeforeCursor)) {
+    if ((textBeforeCursor.endsWith('/') || textBeforeCursor.endsWith('\\')) && isFileArgumentContext(textBeforeCursor)) {
       ;(this as unknown as AutocompleteInternals)
         .requestAutocomplete({ force: false, explicitTab: false })
     }

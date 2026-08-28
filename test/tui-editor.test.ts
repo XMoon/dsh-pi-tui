@@ -34,6 +34,15 @@ function imageWorkspace(): string {
   return root
 }
 
+/** A quoted-path fixture: accepting the spaced directory must keep the quote
+ * open at the cursor so the shared directory-reopen path can continue. */
+function spacedImageWorkspace(): string {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-tui-editor-spaced-'))
+  mkdirSync(join(root, 'sub dir'))
+  writeFileSync(join(root, 'sub dir', 'deep.png'), 'x')
+  return root
+}
+
 function startApp(cwd: string): { vt: VirtualTerminal; app: TuiApp; cancels: number } {
   const vt = new VirtualTerminal(100, 24)
   let cancels = 0
@@ -63,6 +72,11 @@ function startImageApp(cwd: string): { vt: VirtualTerminal; app: TuiApp } {
   )
   app.start()
   return { vt, app }
+}
+
+/** Simulate a normal terminal's one-printable-key input events. */
+function sendKeyByKey(vt: VirtualTerminal, text: string): void {
+  for (const character of text) vt.sendInput(character)
 }
 
 /** Poll the viewport until the dropdown row appears (asserts on failure). */
@@ -125,6 +139,21 @@ test('Esc while the dropdown is open closes it WITHOUT re-triggering', async () 
   app.stop()
 })
 
+test('non-whitespace mention boundaries trigger natural completion', async () => {
+  const root = fixtureWorkspace()
+  const { vt, app } = startApp(root)
+  await vt.waitForRender()
+  sendKeyByKey(vt, '看看@src')
+  await waitForDropdownRow(vt, 'deep-nested.ts', 'CJK-glued mention completion')
+  app.stop()
+
+  const second = startApp(root)
+  await second.vt.waitForRender()
+  sendKeyByKey(second.vt, 'key=@src')
+  await waitForDropdownRow(second.vt, 'deep-nested.ts', 'equals-delimited mention completion')
+  second.app.stop()
+})
+
 test('a non-mention trailing slash does not reopen the dropdown', async () => {
   const root = fixtureWorkspace()
   const { vt, app } = startApp(root)
@@ -182,6 +211,47 @@ test('Tab-accepting a /image directory reopens the dropdown at its children', as
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), '/image subdir/', 'Tab must accept the directory argument')
   await waitForDropdownRow(vt, 'deep.png', 'children after Tab accept')
+  app.stop()
+})
+
+test('quoted @ directory acceptance keeps the quote open for child completion', async () => {
+  const root = spacedImageWorkspace()
+  const { vt, app } = startApp(root)
+  await vt.waitForRender()
+  sendKeyByKey(vt, '@"sub dir')
+  await waitForDropdownRow(vt, 'sub dir/', 'quoted mention directory')
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '@"sub dir/"', 'the accepted value keeps balanced quote text')
+  assert.equal(app.seatEditorForTest().getCursor(), '@"sub dir/'.length, 'the cursor remains inside the open quote')
+  await waitForDropdownRow(vt, 'deep.png', 'quoted mention children after Tab')
+  app.stop()
+})
+
+test('quoted /image directory acceptance keeps the quote open for child completion', async () => {
+  const root = spacedImageWorkspace()
+  const { vt, app } = startImageApp(root)
+  await vt.waitForRender()
+  sendKeyByKey(vt, '/image "sub dir')
+  await waitForDropdownRow(vt, 'sub dir/', 'quoted image directory')
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '/image "sub dir/"', 'the accepted value keeps balanced quote text')
+  assert.equal(app.seatEditorForTest().getCursor(), '/image "sub dir/'.length, 'the cursor remains inside the open quote')
+  await waitForDropdownRow(vt, 'deep.png', 'quoted image children after Tab')
+  app.stop()
+})
+
+test('a Windows-style backslash directory continuation reopens /image children', async () => {
+  const root = imageWorkspace()
+  const { vt, app } = startImageApp(root)
+  await vt.waitForRender()
+  app.setEditorText('/image subdir\\')
+  // A handled cursor key runs the same post-input reopen hook. The provider
+  // resolves the POSIX fixture path while preserving the typed backslash in
+  // the presentation dialect.
+  vt.sendInput('\x1b[C')
+  await waitForDropdownRow(vt, 'deep.png', 'backslash directory continuation')
   app.stop()
 })
 

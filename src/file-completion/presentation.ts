@@ -12,9 +12,8 @@
  * @module @xmoon76/dsh-pi-tui/file-completion/presentation
  */
 
-import { basename } from 'node:path'
 import type { AutocompleteItem } from '@xmoon76/pi-tui'
-import type { PathCandidate, PathCompletionQuery } from './types.ts'
+import { basenameOfPath, type PathCandidate, type PathCompletionQuery } from './types.ts'
 
 /** The joined display path for one candidate under a scoped query: the
  * display base (already in the user's own dialect, always ending with the
@@ -48,7 +47,10 @@ export function presentPathCandidate(
     : `${context.at ? '@' : ''}${pathValue}`
   return {
     value,
-    label: `${basename(candidate.path)}${candidate.kind === 'directory' ? '/' : ''}`,
+    // The vendored SelectList uses the slash marker to recognize a directory
+    // item during apply. The accepted VALUE carries the user's actual
+    // separator; keep this UI marker stable across path dialects.
+    label: `${basenameOfPath(candidate.path)}${candidate.kind === 'directory' ? '/' : ''}`,
     description: displayPath,
   }
 }

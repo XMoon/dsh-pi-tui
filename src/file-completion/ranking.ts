@@ -6,8 +6,7 @@
  * @module @xmoon76/dsh-pi-tui/file-completion/ranking
  */
 
-import { basename } from 'node:path'
-import type { PathCandidate } from './types.ts'
+import { basenameOfPath, type PathCandidate } from './types.ts'
 
 /** Score one candidate against the query term (lowercased). */
 export function scorePathCandidate(
@@ -20,7 +19,7 @@ export function scorePathCandidate(
     return (candidate.kind === 'directory' ? 120 : 100) - depthPenalty
   }
   const lowerPath = candidate.path.toLowerCase()
-  const lowerBase = basename(candidate.path).toLowerCase()
+  const lowerBase = basenameOfPath(candidate.path).toLowerCase()
   let score = 0
   if (lowerBase === lowerQuery) score = 100
   else if (lowerBase.startsWith(lowerQuery)) score = 80

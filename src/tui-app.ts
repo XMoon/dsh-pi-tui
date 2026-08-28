@@ -9252,6 +9252,9 @@ export class TuiApp {
    *   live SESSION when one exists, the workspace cwd otherwise). May be a
    *   live SOURCE resolved at suggestion time — the runner passes one so
    *   a session switch never needs a provider reinstall.
+   * @param localCwd - the Client-local base for `/image` completion. Keep it
+   *   separate from the Host session cwd; a remote attach may have different
+   *   local and Host filesystems. A function keeps the client base live.
    */
   setCommandCompletions(
     commands: readonly SlashCommand[],
@@ -9266,8 +9269,17 @@ export class TuiApp {
     }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
     scope: import('./runtime/host-file-port.ts').HostFileScope
       | (() => import('./runtime/host-file-port.ts').HostFileScope) = { kind: 'workspace', cwd },
+     localCwd: string | (() => string) = cwd,
   ): void {
-    const base = new MentionProvider([...commands], cwd, fileReferences, () => this.editor.getInputMode(), scope)
+    const base = new MentionProvider(
+      [...commands],
+      cwd,
+      fileReferences,
+      () => this.editor.getInputMode(),
+      scope,
+      undefined,
+      localCwd,
+    )
     if (extensionSuggest === undefined) {
       this.editor.setAutocompleteProvider(base)
       return
@@ -9296,7 +9308,9 @@ export class TuiApp {
         // never to a session/workspace that switched mid-request.
         const requestGeneration = base.mintRequestGeneration()
         const requestScope = base.scopeAtRequestTime()
-        const host = await base.getSuggestionsForGeneration(requestGeneration, lines, cursorLine, cursorCol, options)
+        const requestMode = getMode()
+        const requestLocalCwd = base.localCwdAtRequestTime()
+        const host = await base.getSuggestionsForGeneration(requestGeneration, lines, cursorLine, cursorCol, options, requestMode, requestLocalCwd)
         if (host !== null) return host
         // Preserve the shell-mode natural-trigger suppression: a leading
         // `/` on ANY line of a shell-mode document is a PATH, and the
@@ -9305,7 +9319,7 @@ export class TuiApp {
         // reopen the dropdown mid-typing and double-apply on the next
         // Tab). The wire query below still carries the prefix on line 0
         // only.
-        const mode = getMode()
+        const mode = requestMode
         if (mode !== 'prompt' && options.force !== true
           && (lines[cursorLine] ?? '').startsWith('/')) {
           return null
@@ -9337,7 +9351,7 @@ export class TuiApp {
         // SAME editor state + scope (plan §9.2 — a stale ext accept must
         // never modify a later edit, and an old session's candidate must
         // never be accepted under a switched session).
-        return base.captureRequestSnapshot(requestGeneration, requestScope, lines, cursorLine, cursorCol, result)
+        return base.captureRequestSnapshot(requestGeneration, requestScope, lines, cursorLine, cursorCol, result, requestMode, requestLocalCwd)
       },
       applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
         // A Stable plugin computes its prefix on the WIRE document it

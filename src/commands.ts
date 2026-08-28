@@ -56,6 +56,7 @@ import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './t
 import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from './theme-menu.ts'
 import { resolveThemeSelection, normalizePersistedTheme } from './theme-source.ts'
 import { suggestPathArgument } from './mentions.ts'
+import { FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { renderTranscriptMarkdown, textOf } from './transcript.ts'
@@ -1132,9 +1133,10 @@ export function registerTuiCommands(
   /** The advertised names of the currently installed completion list. */
   let claims = new Set<string>()
   /** Slash commands whose single argument is a path: the fork's
-   * `getArgumentCompletions` extension point completes it against the LIVE
-   * session cwd (natural typing shows candidates, Tab accepts them). */
-  const PATH_ARGUMENT_COMMANDS = new Set(['image'])
+   * `getArgumentCompletions` extension point completes it against the
+   * Client-local cwd (natural typing shows candidates, Tab accepts them).
+   * Host session cwd remains reserved for `@` via HostFilePort. */
+  const PATH_ARGUMENT_COMMANDS = FILE_ARGUMENT_COMMANDS
   /**
    * Install one completion list (sorted, claims refreshed). The single
    * synchronous seam every catalog commit funnels through.
@@ -1151,7 +1153,7 @@ export function registerTuiCommands(
         description: command.description,
         argumentHint: command.input?.hint,
         ...(PATH_ARGUMENT_COMMANDS.has(command.name)
-          ? { getArgumentCompletions: (argument: string) => suggestPathArgument(argument, runner.sessionCwd()) }
+          ? { getArgumentCompletions: (argument: string) => suggestPathArgument(argument, runner.cwd) }
           : {}),
       })),
       runner.sessionCwd(),
@@ -1179,6 +1181,9 @@ export function registerTuiCommands(
       () => runner.liveAgent === undefined
         ? { kind: 'workspace', cwd: runner.sessionCwd() }
         : { kind: 'session', sessionId: runner.liveAgent.session.id },
+      // `/image` is Client-local. Direct mode uses the process cwd; a remote
+      // adapter can keep this independent from the Host session scope.
+      () => runner.cwd,
     )
     claims = new Set(sorted.map(command => command.name))
   }

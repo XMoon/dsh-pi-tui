@@ -26,7 +26,7 @@ import type { FileCompletionContext } from './types.ts'
 export const FILE_ARGUMENT_COMMANDS: ReadonlySet<string> = new Set(['image'])
 
 /** Token separators: `@` must sit at the start of the current token. */
-const PATH_DELIMITERS = new Set([' ', '\t', '"', "'", '='])
+const PATH_DELIMITERS = new Set([' ', '\t', '\n', '\r', '"', "'", '='])
 
 /** Whether the char is CJK (ideographs, kana, hangul, CJK punctuation,
  * full-width forms): a mention may sit DIRECTLY against CJK text without
@@ -144,20 +144,22 @@ export function classifyFileCompletionContext(
   textBeforeCursor: string,
   pathArgumentCommands: ReadonlySet<string>,
 ): FileCompletionContext {
-  const atPrefix = extractAtPrefix(textBeforeCursor)
-  if (atPrefix !== null) {
-    return {
-      kind: 'mention',
-      query: atPrefix,
-      range: { start: textBeforeCursor.length - atPrefix.length, end: textBeforeCursor.length },
-    }
-  }
+  // A declared command argument owns the whole command line. In particular,
+  // `/image @foo` is still a Client-local image path, not a Host mention.
   const argument = imageArgumentOf(textBeforeCursor, pathArgumentCommands)
   if (argument !== undefined) {
     return {
       kind: 'image-argument',
       query: argument,
       range: { start: textBeforeCursor.length - argument.length, end: textBeforeCursor.length },
+    }
+  }
+  const atPrefix = extractAtPrefix(textBeforeCursor)
+  if (atPrefix !== null) {
+    return {
+      kind: 'mention',
+      query: atPrefix,
+      range: { start: textBeforeCursor.length - atPrefix.length, end: textBeforeCursor.length },
     }
   }
   return { kind: 'none' }

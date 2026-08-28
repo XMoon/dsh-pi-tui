@@ -10,7 +10,7 @@
  */
 
 import { accessSync, constants as fsConstants, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import type { PathCandidate, PathCompletionQuery } from './types.ts'
 
@@ -27,17 +27,23 @@ const MAX_FD_RESULTS = 100
 /** Locate an executable file-finder on PATH: `fd` preferred, `fdfind`
  * (Debian/Ubuntu's fd-find) second (plan §12 — kimi parity). Bare command
  * names resolve through PATH at spawn time; absolute/relative entries must
- * exist and be X_OK. POSIX PATH separators only (this deployment targets
- * POSIX hosts; a Windows Host would need a platform-aware probe, recorded
- * as a portability note, not a behavior change). */
+ * exist and be X_OK. The platform PATH delimiter is used so the same probe
+ * remains correct on Windows hosts too. */
 export function resolveFdPath(): string | null {
-  const pathEntries = process.env.PATH?.split(':').filter(entry => entry !== '') ?? []
+  const pathEntries = process.env.PATH?.split(delimiter) ?? []
   for (const name of ['fd', 'fdfind']) {
-    for (const dir of pathEntries) {
+    for (const entry of pathEntries) {
+      // An empty POSIX PATH component means the current directory. Keep it
+      // rather than silently changing the shell's lookup semantics.
+      const dir = entry === '' ? '.' : entry
       const candidate = join(dir, name)
       try {
-        accessSync(candidate, fsConstants.X_OK)
-        return candidate
+        // X_OK alone also succeeds for a directory on POSIX. Only return a
+        // regular file that is executable; a directory named `fd` must not
+        // poison discovery before the fallback gets a chance to run.
+        if (statSync(candidate).isFile() && accessSync(candidate, fsConstants.X_OK) === undefined) {
+          return candidate
+        }
       } catch {
         // Not here; keep scanning.
       }
@@ -81,7 +87,8 @@ function entryIsDirectory(
  * bare entry names. `.git` is skipped (consistent with fd and the
  * recursive scan — a `@` or `/image` listing never presents VCS
  * internals). A missing/unreadable directory yields [] (never a crash). */
-export function listDirectChildren(baseDir: string): RawDiscoveryEntry[] {
+export function listDirectChildren(baseDir: string, signal?: AbortSignal): RawDiscoveryEntry[] {
+  if (signal?.aborted ?? false) return []
   let entries
   try {
     entries = readdirSync(baseDir, { withFileTypes: true })
@@ -90,10 +97,11 @@ export function listDirectChildren(baseDir: string): RawDiscoveryEntry[] {
   }
   const out: RawDiscoveryEntry[] = []
   for (const entry of entries) {
+    if (signal?.aborted ?? false) return []
     if (entry.name === '.git') continue
     out.push({ path: entry.name, isDirectory: entryIsDirectory(baseDir, entry.name, entry) })
   }
-  return out
+  return (signal?.aborted ?? false) ? [] : out
 }
 
 /** The bounded recursive scan of one directory's SUBTREE: the root's
@@ -115,6 +123,7 @@ export async function scanSubtree(baseDir: string, signal?: AbortSignal): Promis
   } catch {
     return []
   }
+  if (signal?.aborted ?? false) return []
   // Depth 0: complete, uncapped.
   const stack: string[] = []
   for (const entry of firstEntries) {
@@ -176,19 +185,25 @@ export function discoverWithFd(
     // aligned with the ranking model: @FOO finds foo.txt, exactly like the
     // bounded-scan fallback path.
     '-i',
+    '--full-path',
+    '--print0',
     '--type', 'f',
     '--type', 'd',
-    '--follow',
+    // Include symlinks as candidates but do not follow them during descent;
+    // the bounded fallback exposes symlink entries and classifies a symlink
+    // to a directory as a directory without traversing it.
+    '--type', 'l',
     '--hidden',
     '--exclude', '.git',
     '--exclude', '.git/*',
     '--exclude', '.git/**',
   ]
-  // fd matches the query against the basename by default (substring,
-  // smart-case): for a basename term that is exactly the scoring model's
-  // input. A scoped query runs inside its own baseDir, so the term never
-  // contains a separator here — no --full-path needed. fd's default
-  // pattern is a REGEX — a user's literal term containing regex
+  // fd matches the query against the FULL relative path. This is important
+  // for parity with the fallback scorer: an unscoped `@src` must also see a
+  // candidate such as `src/readme`, not only an entry whose basename is
+  // `src`. A scoped query still runs inside its own baseDir, so the term is
+  // normally a basename substring. fd's pattern is a REGEX — a user's literal
+  // term containing regex
   // metacharacters (`foo[1].ts`, `a+b.ts`) would silently match nothing,
   // so the term is escaped to its literal form (the completion contract
   // is substring matching of the literal text, not regex). The filenames
@@ -199,10 +214,18 @@ export function discoverWithFd(
       resolve([])
       return
     }
-    const child = spawn(fdPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let child
+    try {
+      // stderr is intentionally ignored: discovery treats every non-zero exit
+      // as a fallback signal, and a pipe that is never drained can deadlock a
+      // noisy finder before it reaches its close event.
+      child = spawn(fdPath, args, { stdio: ['ignore', 'pipe', 'ignore'] })
+    } catch {
+      resolve(null)
+      return
+    }
     let stdout = ''
     let settled = false
-    let failed = false
     const settle = (results: RawDiscoveryEntry[] | null): void => {
       if (settled) return
       settled = true
@@ -211,6 +234,10 @@ export function discoverWithFd(
     }
     const onAbort = (): void => {
       if (child.exitCode === null) child.kill('SIGKILL')
+      // Do not wait for a misbehaving child to acknowledge SIGKILL before the
+      // editor request settles. The close handler is idempotent and will only
+      // discard the eventual process event.
+      settle([])
     }
     signal.addEventListener('abort', onAbort, { once: true })
     child.stdout.setEncoding('utf-8')
@@ -228,12 +255,26 @@ export function discoverWithFd(
         settle(null)
         return
       }
-      const lines = stdout.trim().split('\n').filter((line) => line !== '')
+      // Prefer NUL records (the real fd invocation uses --print0) so legal
+      // filenames containing newlines survive. Fake/older finders that ignore
+      // --print0 are accepted through the newline fallback; unlike trim(), it
+      // preserves meaningful leading/trailing spaces in a filename.
+      const records = stdout.includes('\0')
+        ? stdout.split('\0').filter((record) => record !== '')
+        : (() => {
+            const lines = stdout.split(/\r?\n/)
+            if (lines.at(-1) === '') lines.pop()
+            return lines.filter((line) => line !== '')
+          })()
       const results: RawDiscoveryEntry[] = []
-      for (const line of lines) {
-        if (line === '.git' || line.startsWith('.git/') || line.includes('/.git/')) continue
-        const normalized = line.endsWith('/') ? line.slice(0, -1) : line
-        let isDirectory = line.endsWith('/')
+      for (const line of records) {
+        // fd/fdfind commonly prefixes paths emitted with --base-directory by
+        // `./`; the discovery contract is relative paths without a leading
+        // current-directory component (the fallback has the same shape).
+        const relative = line.startsWith('./') ? line.slice(2) : line
+        if (relative === '.git' || relative.startsWith('.git/') || relative.includes('/.git/')) continue
+        const normalized = relative.endsWith('/') ? relative.slice(0, -1) : relative
+        let isDirectory = relative.endsWith('/')
         if (!isDirectory) {
           try {
             isDirectory = statSync(join(baseDir, normalized)).isDirectory()
@@ -266,16 +307,29 @@ export async function discoverForQuery(
     // A scoped listing: the target directory's OWN content — always the
     // direct children (never a whole-tree scan filtered by string, plan
     // §6.1; and never fd's subtree listing — "show src children" semantics).
-    return listDirectChildren(query.searchBase).map(toCandidate)
+    if (signal.aborted) return []
+    const direct = listDirectChildren(query.searchBase, signal)
+    return signal.aborted ? [] : direct.map(toCandidate)
   }
   // Fuzzy (scoped or whole-tree): fd first, bounded scan fallback. A
   // Windows-dialect token stays on the scan path (fd's POSIX matcher does
   // not speak `\`).
-  if (source.fdPath !== null && !query.winAbsolute) {
+  if (source.fdPath !== null && !query.winAbsolute && !query.raw.includes('\\')) {
     const entries = await discoverWithFd(source.fdPath, query.searchBase, query.searchTerm, signal)
     if (signal.aborted) return []
-    // fd FAILURE (not a valid empty result): fall back to the bounded scan.
-    if (entries !== null) return entries.map(toCandidate)
+    // fd can omit a filesystem mount-point entry even when it is a direct
+    // child of the search root (for example `/tmp` in containerized Linux).
+    // Merge matching direct children back in so fd and the fallback expose the
+    // same root-level candidates; de-duplicate by the relative path.
+    if (entries !== null) {
+      const seen = new Set(entries.map(entry => entry.path))
+      const lowerTerm = query.searchTerm.toLowerCase()
+      const direct = listDirectChildren(query.searchBase, signal)
+        .filter(entry => lowerTerm === '' || entry.path.toLowerCase().includes(lowerTerm))
+        .filter(entry => !seen.has(entry.path))
+      if (signal.aborted) return []
+      return [...entries, ...direct].map(toCandidate)
+    }
   }
   // The bounded fallback is ASYNC + abort-aware (plan §25): the scan
   // yields between directory levels and stops on abort, so a large-tree

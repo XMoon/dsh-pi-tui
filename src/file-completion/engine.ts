@@ -17,7 +17,7 @@
 
 import type { AutocompleteItem } from '@xmoon76/pi-tui'
 import { compareScoredPaths, scorePathCandidate } from './ranking.ts'
-import { resolvePathQuery, stripAtQuotes } from './query.ts'
+import { resolvePathQuery, separatorOfRaw, stripAtQuotes } from './query.ts'
 import { discoverForQuery, type DiscoverySource } from './discovery.ts'
 import { presentPathCandidate } from './presentation.ts'
 import type { PathCandidate, PathCompletionQuery } from './types.ts'
@@ -100,7 +100,7 @@ export async function completePath(
   const items = presentDiscovery(
     candidates.map(candidate => reattachDisplayBase(candidate, query)),
     query.searchTerm,
-    { ...context, sep: query.winAbsolute ? '\\' : '/' },
+    { ...context, sep: separatorOfRaw(raw, query.winAbsolute || raw.includes('\\')) },
   )
   return items.length === 0 ? null : items
 }
