@@ -5347,6 +5347,9 @@ export function apply(ctx: Context, config: Config): void {
           runDetached('settings history cleanup', () => {
             return serializeTuiSettingsMutation(tuiSettings, () => {
               const doc = { ...tuiSettings.get() } as Record<string, unknown>
+              // This is a whole-document write from the merged settings view;
+              // keep the raw USER custom definitions out of the project layer.
+              doc.footerCustomItems = userFooterCustomItemsForSave()
               delete doc.history
               return tuiSettings.replace(doc)
             })
