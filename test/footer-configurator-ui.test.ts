@@ -448,6 +448,40 @@ test('a bracketed-paste start marker split across chunks is recognized', async (
   app.stop()
 })
 
+test('a bracketed-paste start marker split exactly after ESC is recognized', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('a')
+  await vt.waitForRender()
+  // ESC is ambiguous until the next chunk: it must stay buffered long
+  // enough to join the remainder of the bracketed-paste marker.
+  vt.sendInput('\x1b')
+  vt.sendInput('[200~cach\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, 'cach')
+  assert.ok(vt.getViewport().join('\n').includes('Cache hit'))
+  app.stop()
+})
+
+test('a lone Escape is replayed as navigation after the paste-prefix timeout', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('a')
+  await vt.waitForRender()
+  vt.sendInput('cache')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, '', 'a standalone Escape must still clear the search')
+  app.stop()
+})
+
 test('malformed paste prefixes preserve Escape, arrows, and following text', async () => {
   const { vt, app } = startApp()
   const model = openDefault(app)

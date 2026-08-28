@@ -9791,6 +9791,7 @@ export class TuiApp {
         const rows = Math.max(1, this.terminal.rows - 2)
         return Math.min(30, rows)
       },
+      requestRender: () => this.requestRender(),
       onSave: (layout, customItems) => {
         handle?.hide()
         options.onSave(layout, customItems)
