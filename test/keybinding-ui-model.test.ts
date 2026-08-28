@@ -53,6 +53,21 @@ test('a Down remap of the task browser keeps its conditional metadata', () => {
   }
 })
 
+test('a conflicted Down task binding keeps its conditional metadata', () => {
+  const { manager, model } = modelFor({
+    'app.tasks.open': 'down',
+    'app.todo.toggle': 'down',
+  })
+  try {
+    const row = model.rows.find(candidate => candidate.id === 'app.tasks.open')!
+    assert.equal(row.conflict, true)
+    assert.deepEqual(row.effective, [])
+    assert.deepEqual(row.conditional, [{ kind: 'direct', key: 'down' }])
+  } finally {
+    manager.dispose()
+  }
+})
+
 test('safe mode marks persisted action overrides as ignored defaults', () => {
   const manager = new HostKeybindingManager()
   const parsed = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+y' })
