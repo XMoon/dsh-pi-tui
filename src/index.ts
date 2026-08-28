@@ -1505,9 +1505,9 @@ export function apply(ctx: Context, config: Config): void {
         // user's own), 'sandbox' routes them through the dsh shell
         // capability's policy for deployments that want it applied.
         localShellSandbox: z.string(),
-        // Home/End navigation behavior (issue #9): 'viewport' (default)
-        // keeps Home/End scrolling the fullscreen conversation; 'input'
-        // makes Home/End move within the input (Ctrl+Home/End scroll).
+        // Home/End navigation behavior (issue #9): 'input' (default)
+        // makes Home/End move within the input (Ctrl+Home/End scroll);
+        // 'viewport' keeps Home/End scrolling the fullscreen conversation.
         homeEndKeys: z.string(),
         // Focus Mode: 'on' collapses turn-intermediate activity into a
         // live Thought block (default 'off' — Focus OFF == current UI).
@@ -1530,7 +1530,7 @@ export function apply(ctx: Context, config: Config): void {
       // The base layout is the builtin default; the schemastery output
       // type is fully-populated, so the cast bridges the sparse literal
       // (the runtime validation accepts missing optional fields).
-      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' } },
+      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off' } },
     )
     // The ONE authoritative Focus runtime state (plan §5): restored from
     // the persisted document BEFORE the first compose/resume below, mutated
