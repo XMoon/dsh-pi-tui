@@ -14,8 +14,11 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-direct
  */
 
+import { SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
 import { dshHome } from '../../diag.ts'
-import { loadSessionTitleBatch, type SessionPickerPersistence, type SessionQueryLike, type TitleDiagLike } from '../../sessions.ts'
+import { isUnsupportedSessionFormatError, loadSessionTitleBatch, type SessionEventSearchDocumentLike, type SessionPickerPersistence, type SessionQueryLike, type TitleDiagLike } from '../../sessions.ts'
+import { recordedSessionPreset, sessionPresetOf } from './session-preset-direct.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import type { ExportReadResult, SessionSearchHit, SessionReader, SessionSummary } from '../session-reader-port.ts'
 
@@ -40,7 +43,24 @@ export interface TokenMeterLike {
 
 /** A live agent as the reader resolves it (structural projection). */
 export interface LiveAgentLike {
-  readonly session: { readonly id: string }
+  readonly session: Session
+}
+
+/** Read a typed query-service error without depending on its package surface. */
+function errorCodeOf(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' ? code : undefined
+}
+
+/** Make one semantic event document suitable for the existing search port. */
+function semanticSnippet(document: SessionEventSearchDocumentLike, query: string): string {
+  const text = document.text.replace(/\s+/g, ' ').trim()
+  const needle = query.replace(/\s+/g, ' ').trim().toLowerCase()
+  const index = text.toLowerCase().indexOf(needle)
+  if (index < 0) return text.slice(0, 120)
+  const start = Math.max(0, index - 40)
+  return text.slice(start, index + needle.length + 40).trim()
 }
 
 /** The Direct backend's session reader: `ctx` services behind the semantic
@@ -64,41 +84,106 @@ export class DirectSessionReader implements SessionReader {
     return this.agentFor(sessionId) as LiveAgentLike | undefined
   }
 
+  /**
+   * Resolve the effective preset for a row through DSH's projection. A
+   * projectionless deployment cannot claim that creation metadata is the
+   * current composition, so it reports no effective preset instead.
+   */
+  private async presetFor(header: SessionHeader): Promise<string | undefined> {
+    const projections = this.ctx.get('sessionProjections')
+    if (projections === undefined) return undefined
+
+    const sessionId = String(header.id)
+    const live = this.liveAgent(sessionId)
+    if (live !== undefined) return sessionPresetOf(this.ctx, live.session)
+
+    if (this.ctx.get('sessionPersistence') !== undefined) {
+      return recordedSessionPreset(this.ctx, sessionId, header)
+    }
+    return undefined
+  }
+
   async list(currentSessionId: string | undefined): Promise<SessionSummary[] | undefined> {
     const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
-    if (persistence === undefined) return undefined
     const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
     let rows: SessionSummary[]
     if (query !== undefined) {
       // Live-preferred listing: the session-query engine marks sessions
-      // currently loaded in the store.
-      rows = (await query.listSessions()).map(record => ({
+      // currently loaded in the store. Resolve each row's effective preset
+      // separately because listSessions exposes the creation header, not the
+      // latest `agent-preset/selected` projection state.
+      rows = await Promise.all((await query.listSessions()).map(async record => ({
         id: record.header.id,
         createdAt: record.header.createdAt,
         cwd: record.header.cwd,
-        preset: record.header.agentPreset,
+        preset: await this.presetFor(record.header),
         parentSession: record.header.parentSession,
         origin: record.header.origin,
         live: record.live,
-      }))
+      })))
     } else {
+      if (persistence === undefined) return undefined
       // Persistence fallback: the plain list; the current session is the
-      // only live marker.
-      rows = (await persistence.list()).map(header => ({
+      // only live marker. The known header is passed into presetFor so the
+      // projection path does not repeat the list query.
+      rows = await Promise.all((await persistence.list()).map(async header => ({
         id: header.id,
         createdAt: header.createdAt,
         cwd: header.cwd,
-        preset: header.agentPreset,
+        preset: await this.presetFor(header as SessionHeader),
         parentSession: header.parentSession,
         origin: header.origin,
         live: header.id === currentSessionId,
-      }))
+      })))
     }
     rows.sort((a, b) => b.createdAt - a.createdAt)
     return rows
   }
 
   async search(query: string): Promise<SessionSearchHit[] | undefined> {
+    const searchText = query.trim()
+    if (searchText === '') return []
+
+    const sessionQuery = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
+    if (sessionQuery?.filterEvents !== undefined) {
+      // `searchSessions` is intentionally disabled by the shipped SQLite
+      // composition (`openAt: never`). `filterEvents` remains the public,
+      // backend-independent semantic text seam, so use it over the query
+      // engine's live-preferred corpus rather than scanning raw JSONL.
+      const records = [...await sessionQuery.listSessions()]
+        .sort((a, b) => b.header.createdAt - a.header.createdAt)
+        .slice(0, 100)
+      const hits: SessionSearchHit[] = []
+      for (const record of records) {
+        let documents: readonly SessionEventSearchDocumentLike[]
+        try {
+          documents = await sessionQuery.filterEvents(SessionId(record.header.id), [{ kind: 'text', text: searchText }])
+        } catch (error) {
+          // An explicitly disabled query capability is the one case where the
+          // old persistence path remains a deliberate deployment fallback.
+          // It is not a DSH runtime compatibility branch.
+          if (errorCodeOf(error) === 'SESSION_QUERY_SEARCH_DISABLED') return this.searchRaw(searchText)
+          throw error
+        }
+        const document = documents[0]
+        if (document === undefined) continue
+        hits.push({
+          id: String(record.header.id),
+          createdAt: record.header.createdAt,
+          snippet: semanticSnippet(document, searchText),
+        })
+        if (hits.length >= 20) break
+      }
+      return hits
+    }
+
+    // Test doubles and deployments without a query engine retain the old
+    // capability fallback. The supported DSH runtime itself mounts the query
+    // service; this branch is not API or runtime-version detection.
+    return this.searchRaw(searchText)
+  }
+
+  private async searchRaw(query: string): Promise<SessionSearchHit[] | undefined> {
     const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
     if (persistence === undefined) return undefined
     const needle = query.toLowerCase()
@@ -113,7 +198,8 @@ export class DirectSessionReader implements SessionReader {
       let raw: { content: string } | undefined
       try {
         raw = await persistence.readRaw(header.id)
-      } catch {
+      } catch (error) {
+        if (isUnsupportedSessionFormatError(error)) throw error
         continue
       }
       if (raw === undefined) continue

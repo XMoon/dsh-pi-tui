@@ -16,19 +16,13 @@
  */
 
 import type { ApprovalPolicy, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
-import type { UserQuestionProvider } from '@deepseek-ai/dsh-user-questions'
-import type { ApprovalRequestLike, ApprovalRequestListener, InteractionPort } from '../interaction-port.ts'
+import type { ApprovalRequestLike, ApprovalRequestListener, InteractionPort, UserQuestionProvider } from '../interaction-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
 export interface HostContextLike {
   get(name: string): unknown
   on(event: string, listener: unknown): unknown
-}
-
-/** The structural `userQuestions` service surface. */
-export interface UserQuestionsServiceLike {
-  registerProvider(provider: UserQuestionProvider): unknown
 }
 
 /** The structural `approval` service surface. */
@@ -49,9 +43,10 @@ export class DirectInteractionPort implements InteractionPort {
   }
 
   registerQuestionProvider(provider: UserQuestionProvider): boolean {
-    const userQuestions = this.ctx.get('userQuestions') as UserQuestionsServiceLike | undefined
-    if (userQuestions === undefined) return false
-    userQuestions.registerProvider(provider)
+    if (this.ctx.get('userQuestions') === undefined) return false
+    // DSH 0.1.2 exposes question answerers on the scoped waterfall; the old
+    // userQuestions.registerProvider API was removed with the 1.2 contract.
+    this.ctx.on('user-questions/request', provider)
     return true
   }
 

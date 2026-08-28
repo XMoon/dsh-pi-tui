@@ -22,6 +22,7 @@ knows where the rest lives.
 | `releasing.md` | ops | The version bump, bilingual changelog/README update, verification gates, local commit/tag, explicit push approval, and CI publication checklist |
 | `surface-catalog.md` | contributors | The surface catalog design: resume prefetch + standing-scope cold skills; why composition probes are REMOVED (host `session/created` observers write durable knob events) and the standing-key path that replaces them; the coordinator invariants that keep snapshots detached and first submissions correctly routed |
 | `client-server-migration.md` | contributors | The server/client migration source of truth: phase status (M0–M8), backend default, rollback state, hard invariants, known blockers, startup constraint |
+| `dsh-compatibility.md` | users/contributors | The DSH 0.3/0.4 runtime boundary, target version window, old-runtime recovery, and legacy session/preset data compatibility |
 | `client-server-coupling.md` | contributors | The migration coupling allowlist: the (file, pattern) baseline enforced by `scripts/client-boundary-gate.mjs`, the four categories (DIRECT_HOST_REQUIRED / MIGRATABLE / CLIENT_LOCAL / TEMPORARY_EXCEPTION), and the locality rules for new features |
 | `perf-baseline.md` | contributors | Measured rendering performance before/after the incremental read grouping + render-cache optimization, and how to re-run it |
 | `tmux-testing.md` | contributors | When to test in tmux instead of headless, the manual verification flows, and every trap hit while real-testing |

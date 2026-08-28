@@ -7,6 +7,34 @@
 
 ## [Unreleased]
 
+## [0.4.0-alpha.1] - 2026-08-28
+
+### 迁移说明
+
+- **0.4.0-alpha.1 切换到 DeepSeek Harness 0.1.2。** 运行时最低要求为
+  `>=0.1.2-alpha.1`，不再兼容 DSH 0.1.1；没有已确认 break 时不设置未来
+  版本上限。保留 DSH 0.1.1 的用户应固定安装 `@xmoon76/dsh-pi-tui@0.3`。
+- **Agent preset 更名为 canonical `ptc`。** 官方 `standard`/`ptc`/
+  `minimal`/`cordis` preset 直接来自 DSH shipped root，不再打包本地 copy
+  或 `code` alias；需要时旧 Session 的 `agentPreset=code` 在恢复边界归一化为
+  `ptc`。
+- **上游 alpha 注意事项。** DSH 0.1.2-alpha.1 的 subagent dispose
+  行为仍有上游 caveat；发布前请按目标 Harness 版本运行兼容性门禁。
+
+### 安装与版本对应
+
+当前预发布页面建议按以下顺序安装，先安装匹配的 DSH，再将 TUI bundle
+加入 profile：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+需要保留 DSH `0.1.1-rc.2` 的用户应改用 `@xmoon76/dsh-pi-tui@0.3`，不要
+把 `@next` 与旧运行时混用。完整版本矩阵和更新/卸载命令见 README 的「安装」。
+
 ## [0.3.5] - 2026-08-28
 
 ### 新增
@@ -1160,7 +1188,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...HEAD
+[0.4.0-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...next-v0.4.0-alpha.1
 [0.3.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...v0.3.3

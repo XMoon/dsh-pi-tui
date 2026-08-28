@@ -54,7 +54,7 @@ test('pi2dsh smoke pins the required published compatibility baseline', () => {
   const manifest = JSON.parse(readFileSync(join(process.cwd(), 'test', 'compat', 'pi2dsh.json'), 'utf8'))
   assert.doesNotThrow(() => validateManifest(manifest))
   assert.throws(() => validateManifest({ ...manifest, pi2dshVersion: '0.20.1' }), /must pin 0\.20\.0/u)
-  assert.throws(() => validateManifest({ ...manifest, dshVersion: '0.1.1-rc.3' }), /must pin 0\.1\.1-rc\.2/u)
+  assert.throws(() => validateManifest({ ...manifest, dshVersion: '0.1.1-rc.3' }), /must pin 0\.1\.2-alpha\.1/u)
 })
 
 test('pi2dsh smoke classifies resize failures as surface failures', () => {

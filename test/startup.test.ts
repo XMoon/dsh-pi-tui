@@ -1,11 +1,10 @@
 /**
  * Headless tests for the startup compatibility gate: on a DeepSeek Harness
- * older than the minimum (dsh-v0.1.1-rc.1) the TUI must fail with an
- * ACTIONABLE message — the loader cannot even resolve the authorization row
- * the profile mounts on such a harness, and a raw ERR_MODULE_NOT_FOUND
- * stack would tell the user nothing. The gate prints the friendly message
- * first, then fails the startup row with the same text as its cause.
- * `--help` stays available on any harness (the action never runs).
+ * older than the minimum (dsh-v0.1.2-alpha.1) the TUI must fail with an
+ * ACTIONABLE message. The 0.4 line has no 0.1.1 compatibility shim: an old
+ * runtime gets an upgrade command and a pin-to-0.3 rollback command. Future
+ * runtime lines are not rejected without evidence of a break. `--help` stays
+ * available on any harness (the action never runs).
  * @module @xmoon76/dsh-pi-tui/startup.test
  */
 
@@ -80,11 +79,12 @@ test('an older harness fails startup with the actionable message', () => {
     const ctx = new Context()
     ctx.provide('cmdlineArgs', { get: () => ['--session', 's1'] })
     ctx.provide('appExit', ((code: number) => { void code }) as never)
-    assert.throws(() => applyStartup(ctx), (error: Error) => error.message.includes('requires DeepSeek Harness 0.1.1-rc.1'))
+    assert.throws(() => applyStartup(ctx), (error: Error) => error.message.includes('requires DeepSeek Harness 0.1.2-alpha.1 or later'))
     assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined, 'the startup service must not be provided on an old harness')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes(`running dsh 0.1.0-rc.8`), `stderr must name the installed version:\n${joined}`)
-    assert.ok(joined.includes('Upgrade dsh first'), `stderr must give the upgrade path:\n${joined}`)
+    assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.1'), `stderr must give the upgrade path:\n${joined}`)
+    assert.ok(joined.includes('npm install -g @xmoon76/dsh-pi-tui@0.3'), `stderr must give the rollback path:\n${joined}`)
   } finally {
     stderr.restore()
     launcher.restore()
@@ -92,7 +92,7 @@ test('an older harness fails startup with the actionable message', () => {
 })
 
 test('the minimum harness version starts normally and provides the service', () => {
-  const launcher = fakeLauncher('0.1.1-rc.1')
+  const launcher = fakeLauncher('0.1.2-alpha.1')
   const stderr = captureStderr()
   try {
     const ctx = mountStartup(['--session', 's1'])
@@ -105,13 +105,15 @@ test('the minimum harness version starts normally and provides the service', () 
   }
 })
 
-test('a newer harness line also starts normally', () => {
-  const launcher = fakeLauncher('0.1.1-rc.2')
-  try {
-    const ctx = mountStartup([])
-    assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined)
-  } finally {
-    launcher.restore()
+test('the later alpha and 0.1.2 release line starts normally', () => {
+  for (const version of ['0.1.2-alpha.2', '0.1.2']) {
+    const launcher = fakeLauncher(version)
+    try {
+      const ctx = mountStartup([])
+      assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, `${version} should be supported`)
+    } finally {
+      launcher.restore()
+    }
   }
 })
 
@@ -136,23 +138,25 @@ test('incompatibleHarnessMessage is actionable and names both versions', () => {
   // hardcoded), so the assertion reads it the same way.
   const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
   assert.ok(message.includes(`dsh-pi-tui v${pkg.version}`), `must name the bundle version: ${message}`)
-  assert.ok(message.includes('DeepSeek Harness 0.1.1-rc.1 or later'), 'must name the requirement')
+  assert.ok(message.includes('DeepSeek Harness 0.1.2-alpha.1 or later'), 'must name the requirement')
   assert.ok(message.includes('0.1.0-rc.8'), 'must name the installed version')
-  assert.ok(message.includes('npm install -g @deepseek-ai/dsh@0.1.1-rc.1'), 'must give the upgrade command')
+  assert.ok(message.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.1'), 'must give the upgrade command')
+  assert.ok(message.includes('npm install -g @xmoon76/dsh-pi-tui@0.3'), 'must give the compatible TUI pin command')
 })
 
 test('bundleVersionLabel falls back to the release line that imposed the requirement', () => {
-  assert.ok(bundleVersionLabel('0.3.0').startsWith('v'), `read version label: ${bundleVersionLabel('0.3.0')}`)
+  assert.ok(bundleVersionLabel('0.4.0-alpha.1').startsWith('v'), `read version label: ${bundleVersionLabel('0.4.0-alpha.1')}`)
 })
 
-test('harnessCompatEntryFor covers the incompatible range and lets newer lines through', () => {
-  const entry = HARNESS_COMPAT.find(candidate => candidate.max === '0.1.1-rc.1')
-  assert.ok(entry !== undefined, 'the pre-rc.1 entry must exist')
-  assert.equal(entry?.since, '0.3.0')
-  assert.equal(harnessCompatEntryFor('0.1.0-rc.8'), entry, 'rc.8 is incompatible')
-  assert.equal(harnessCompatEntryFor('0.1.0-rc.1'), entry, 'rc.1 is incompatible')
-  assert.equal(harnessCompatEntryFor('0.1.1-rc.1'), undefined, 'the floor itself is supported')
-  assert.equal(harnessCompatEntryFor('0.1.1-rc.2'), undefined)
-  assert.equal(harnessCompatEntryFor('0.1.1'), undefined)
+test('harnessCompatEntryFor protects only the too-old runtime boundary', () => {
+  const old = HARNESS_COMPAT.find(candidate => candidate.max === '0.1.2-alpha.1')
+  assert.ok(old !== undefined, 'the pre-alpha.1 entry must exist')
+  assert.equal(old?.since, '0.4.0-alpha.1')
+  assert.equal(harnessCompatEntryFor('0.1.1-rc.2'), old, 'the old runtime is incompatible')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.0'), old, 'alpha.0 is below the floor')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.1'), undefined, 'the floor itself is supported')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.2'), undefined)
+  assert.equal(harnessCompatEntryFor('0.1.2'), undefined)
+  assert.equal(harnessCompatEntryFor('0.1.3'), undefined, 'future runtimes are not rejected without evidence')
   assert.equal(harnessCompatEntryFor('1.0.0'), undefined)
 })

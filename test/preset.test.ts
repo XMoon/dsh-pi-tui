@@ -11,8 +11,11 @@ import test from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { composeAgent, recordedPreset, recomposeBlank } from '../src/index.ts'
 import { presetDisplayText } from '../src/commands.ts'
+import { sessionPresetOf } from '../src/runtime/direct/session-preset-direct.ts'
+import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 
 /** Minimal roster double recording every mount. */
 function roster(overrides: {
@@ -42,6 +45,33 @@ function roster(overrides: {
 
 function ctxWith(get: (name: string) => unknown): Context {
   return { get } as unknown as Context
+}
+
+function sessionHeader(id: string, agentPreset?: string): SessionHeader {
+  return {
+    version: 0,
+    id: SessionId(id),
+    createdAt: 1,
+    cwd: '/tmp',
+    ...(agentPreset === undefined ? {} : { agentPreset }),
+  }
+}
+
+/** A small host double that delegates to the official projection definition. */
+const agentPresetProjection = {
+  stateOf(session: Session, _key: 'agentPreset'): string | null {
+    let value = agentPresetProjectionDefinition.init(session.header)
+    for (const event of session.events) value = agentPresetProjectionDefinition.apply(value, event)
+    return value
+  },
+}
+
+function projectedCtx(persistence?: unknown): Context {
+  return ctxWith(name => {
+    if (name === 'sessionProjections') return agentPresetProjection
+    if (name === 'sessionPersistence') return persistence
+    return undefined
+  })
 }
 
 /** A minimal unpublished-agent scope: model selection registers two listeners. */
@@ -78,6 +108,36 @@ test('composeAgent mounts the named preset, not the default', async () => {
   assert.deepEqual(fake.mounted, ['minimal'])
 })
 
+test('composeAgent rejects a newly requested code alias', async () => {
+  const fake = roster()
+  const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)
+  await assert.rejects(
+    composeAgent(ctx, selection(), 'code'),
+    /renamed to "ptc"/,
+  )
+  assert.deepEqual(fake.mounted, [])
+})
+
+test('composeAgent normalizes a persisted default code id before resolving the official roster', async () => {
+  const fake = roster()
+  const resolvedIds: Array<string | undefined> = []
+  const service = {
+    ...fake.service,
+    defaultId: 'code',
+    resolve: async (id?: string) => {
+      resolvedIds.push(id)
+      if (id === 'code') throw new Error('official roster no longer contains code')
+      return { id: id ?? 'standard' }
+    },
+  }
+  const ctx = ctxWith(name => name === 'agentPresets' ? service : undefined)
+  const composition = await composeAgent(ctx, selection())
+  assert.deepEqual(resolvedIds, ['ptc'])
+  assert.equal(composition.agentPreset, 'ptc')
+  await composition.setup(agentCtx())
+  assert.deepEqual(fake.mounted, ['ptc'])
+})
+
 test('composeAgent propagates an unknown-preset rejection', async () => {
   const fake = roster({ unknown: true })
   const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)
@@ -91,46 +151,77 @@ test('recordedPreset returns undefined without persistence', async () => {
 
 test('recordedPreset returns undefined for an unknown session', async () => {
   const persistence = {
-    list: async () => [{ id: 'other', createdAt: 1 }],
+    list: async () => [sessionHeader('other')],
     inspect: async () => { throw new Error('not found') },
   }
-  const ctx = ctxWith(name => name === 'sessionPersistence' ? persistence : undefined)
+  const ctx = projectedCtx(persistence)
   assert.equal(await recordedPreset(ctx, 's1'), undefined)
 })
 
-test('recordedPreset falls back to the header preset when the log is unreadable', async () => {
+test('recordedPreset preserves an unreadable session error instead of falling back to its header', async () => {
   const persistence = {
-    list: async () => [{ id: 's1', agentPreset: 'standard', createdAt: 1 }],
+    list: async () => [sessionHeader('s1', 'standard')],
     inspect: async () => { throw new Error('log unreadable') },
   }
-  const ctx = ctxWith(name => name === 'sessionPersistence' ? persistence : undefined)
-  assert.equal(await recordedPreset(ctx, 's1'), 'standard')
+  const ctx = projectedCtx(persistence)
+  await assert.rejects(recordedPreset(ctx, 's1'), /log unreadable/)
 })
 
-test('recordedPreset resolves from the log: the newest selection wins over the header', async () => {
+test('recordedPreset uses the projection: the newest selection wins over the header', async () => {
   const persistence = {
-    list: async () => [{ id: 's1', agentPreset: 'standard', createdAt: 1 }],
+    list: async () => [sessionHeader('s1', 'standard')],
     inspect: async () => ({
-      meta: { id: 's1', agentPreset: 'standard', createdAt: 1 },
+      meta: sessionHeader('s1', 'standard'),
       events: [
-        { type: 'agent-preset/selected', seq: 1, time: 2, data: { agentPreset: 'minimal' } },
+        { type: 'agent-preset/selected', seq: 0, time: 2, data: { agentPreset: 'minimal' } } as SessionEvent,
       ],
     }),
   }
-  const ctx = ctxWith(name => name === 'sessionPersistence' ? persistence : undefined)
+  const ctx = projectedCtx(persistence)
   assert.equal(await recordedPreset(ctx, 's1'), 'minimal')
+})
+
+test('recordedPreset normalizes a legacy code selection to canonical ptc', async () => {
+  const persistence = {
+    list: async () => [sessionHeader('s1', 'standard')],
+    inspect: async () => ({
+      meta: sessionHeader('s1', 'standard'),
+      events: [
+        { type: 'agent-preset/selected', seq: 0, time: 2, data: { agentPreset: 'code' } } as SessionEvent,
+      ],
+    }),
+  }
+  const ctx = projectedCtx(persistence)
+  assert.equal(await recordedPreset(ctx, 's1'), 'ptc')
+})
+
+test('recordedPreset normalizes a legacy code header to canonical ptc', async () => {
+  const persistence = {
+    list: async () => [sessionHeader('s1', 'code')],
+    inspect: async () => ({
+      meta: sessionHeader('s1', 'code'),
+      events: [],
+    }),
+  }
+  const ctx = projectedCtx(persistence)
+  assert.equal(await recordedPreset(ctx, 's1'), 'ptc')
 })
 
 test('recordedPreset returns undefined for a pre-roster session log', async () => {
   const persistence = {
-    list: async () => [{ id: 's1', createdAt: 1 }],
+    list: async () => [sessionHeader('s1')],
     inspect: async () => ({
-      meta: { id: 's1', createdAt: 1 },
-      events: [{ type: 'user/message', seq: 1, time: 2, data: { content: [], source: { kind: 'user' } } }],
+      meta: sessionHeader('s1'),
+      events: [],
     }),
   }
-  const ctx = ctxWith(name => name === 'sessionPersistence' ? persistence : undefined)
+  const ctx = projectedCtx(persistence)
   assert.equal(await recordedPreset(ctx, 's1'), undefined)
+})
+
+test('sessionPresetOf reads a header-only session through the projection seam', () => {
+  const session = Session.create(SessionId('s1'), [], sessionHeader('s1', 'standard'))
+  assert.equal(sessionPresetOf(projectedCtx(), session), 'standard')
 })
 
 /** A blank/started session double recording appended selections. */
@@ -195,13 +286,13 @@ test('recomposeBlank propagates an unknown-preset rejection', async () => {
 })
 
 test('presetDisplayText maps the four shipped presets to fixed English copy', () => {
-  // The effective roster root ships Chinese metadata (the dsh install's own
-  // config/agent-presets); the id mapping must win over the file language.
+  // The official shipped root may provide localized metadata; the canonical
+  // id mapping keeps the TUI's built-in picker copy stable.
   assert.deepEqual(presetDisplayText({ id: 'standard', trust: 'system', name: '标准模式', description: '中文描述' }), {
     name: 'Standard mode',
     description: 'Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.',
   })
-  assert.equal(presetDisplayText({ id: 'code', trust: 'system' }).name, 'PTC mode')
+  assert.equal(presetDisplayText({ id: 'ptc', trust: 'system' }).name, 'PTC mode')
   assert.equal(presetDisplayText({ id: 'minimal', trust: 'system' }).name, 'Minimal mode')
   assert.equal(presetDisplayText({ id: 'cordis', trust: 'system' }).name, 'Creator mode')
 })

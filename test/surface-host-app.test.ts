@@ -261,7 +261,7 @@ test('a Cordis plugin registering through the real service renders into the surf
     await ctx.plugin(Loader)
     // Mount a minimal tuiStartup provider + the extension host + a plugin.
     const startupFiber = ctx.plugin((c) => {
-      c.provide('tuiStartup', { shippedPresetRoot: '/ws' })
+      c.provide('tuiStartup', {})
     })
     await startupFiber
     const hostFiber = ctx.plugin(applyExtensionHost)
@@ -449,7 +449,7 @@ test('a Cordis plugin registering BEFORE attach renders once the surface attache
   try {
     await ctx.plugin(Loader)
     const startupFiber = ctx.plugin((c) => {
-      c.provide('tuiStartup', { shippedPresetRoot: '/ws' })
+      c.provide('tuiStartup', {})
     })
     await startupFiber
     const hostFiber = ctx.plugin(applyExtensionHost)

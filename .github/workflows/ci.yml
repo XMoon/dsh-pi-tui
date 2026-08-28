@@ -4,8 +4,10 @@ on:
   push:
     branches:
       - main
+      - next
     tags:
       - 'v*'
+      - 'next-v*'
   pull_request:
 
 # Default to the minimum permission required by normal CI jobs.
@@ -19,6 +21,49 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Parse and validate release metadata once. Branch pushes and pull requests
+  # skip this tag-only job; tag jobs consume the same outputs everywhere.
+  # ---------------------------------------------------------------------------
+  release-context:
+    name: Resolve release context
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      channel: ${{ steps.context.outputs.channel }}
+      version: ${{ steps.context.outputs.version }}
+      npm_tag: ${{ steps.context.outputs.npm_tag }}
+      is_prerelease: ${{ steps.context.outputs.is_prerelease }}
+      required_branch: ${{ steps.context.outputs.required_branch }}
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Parse release tag
+        id: context
+        run: node scripts/release-context.mjs "$GITHUB_REF_NAME"
+
+      - name: Verify tag branch ancestry
+        env:
+          REQUIRED_BRANCH: ${{ steps.context.outputs.required_branch }}
+        run: |
+          set -euo pipefail
+          git fetch origin main next --no-tags
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$REQUIRED_BRANCH"; then
+            echo "Tag $GITHUB_REF_NAME is not an ancestor of origin/$REQUIRED_BRANCH" >&2
+            exit 1
+          fi
+
   # ---------------------------------------------------------------------------
   # Source-level checks that are NOT already covered by package prepack.
   #
@@ -306,6 +351,54 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
+  # Verify the EXACT packed artifact rejects the old Harness with guidance.
+  # This is intentionally separate from Gate B: target DSH success and old DSH
+  # friendly rejection are opposite, independently blocking contracts.
+  # ---------------------------------------------------------------------------
+  runtime-boundary:
+    name: Runtime boundary / old DSH rejection
+    needs:
+      - build-and-pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Download release tarball
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-tarball
+          path: tarball
+
+      - name: Run expected-rejection smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(
+            find tarball -maxdepth 1 -type f \
+              -name 'xmoon76-dsh-pi-tui-*.tgz' \
+              -print \
+              | sort
+          )
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tarball, found ${#TARBALLS[@]}" >&2
+            printf '%s\n' "${TARBALLS[@]}" >&2
+            exit 1
+          fi
+          node scripts/dsh-runtime-boundary-smoke.mjs "${TARBALLS[0]}"
+
+  # ---------------------------------------------------------------------------
   # Production dependency security gate.
   #
   # Block releases for high/critical vulnerabilities.
@@ -339,7 +432,7 @@ jobs:
   # changelog problem fails BEFORE npm publish: the publish gate below depends
   # on it. The script verifies, in one pass:
   #
-  #   - tag == package.json version
+  #   - parsed tag version == package.json version
   #   - CHANGELOG.md has a ## [<version>] section
   #   - CHANGELOG.en.md has the same section
   #   - the two section headings (version + date) match exactly
@@ -350,7 +443,9 @@ jobs:
   release-metadata:
     name: Prepare release metadata
 
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - release-context
 
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -404,13 +499,15 @@ jobs:
   publish:
     name: Publish to npm
 
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
 
     needs:
+      - release-context
       - source-checks
       - build-and-pack
       - compat-smoke
       - ecosystem-compat
+      - runtime-boundary
       - security-audit
       - release-metadata
 
@@ -473,8 +570,10 @@ jobs:
 
           TAG="${GITHUB_REF_NAME}"
 
-          if [ "$TAG" != "v$VERSION" ]; then
-            echo "Release tag $TAG does not match artifact version v$VERSION" >&2
+          EXPECTED_VERSION="${{ needs.release-context.outputs.version }}"
+
+          if [ "$VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "Artifact version $VERSION does not match parsed release version $EXPECTED_VERSION" >&2
             exit 1
           fi
 
@@ -489,7 +588,7 @@ jobs:
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
       - name: Publish to npm
-        run: npm publish "./${{ steps.package.outputs.tarball }}" --access public
+        run: npm publish "./${{ steps.package.outputs.tarball }}" --access public --tag "${{ needs.release-context.outputs.npm_tag }}"
 
   # ---------------------------------------------------------------------------
   # Create the GitHub Release AFTER npm publish succeeded, so a visible
@@ -506,9 +605,10 @@ jobs:
   release:
     name: Create GitHub Release
 
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
 
     needs:
+      - release-context
       - publish
       - build-and-pack
       - release-metadata
@@ -571,19 +671,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.release-context.outputs.version }}
+          IS_PRERELEASE: ${{ needs.release-context.outputs.is_prerelease }}
           TARBALL: ${{ steps.assets.outputs.tarball }}
           CHECKSUM: ${{ steps.assets.outputs.checksum }}
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION="${TAG#v}"
+          VERSION="$RELEASE_VERSION"
 
-          CREATE_ARGS=()
+          RELEASE_STATE_ARGS=(--prerelease=false)
 
-          # SemVer prerelease, e.g. 0.4.0-rc.1
-          if [[ "$VERSION" == *-* ]]; then
-            CREATE_ARGS+=(--prerelease)
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            RELEASE_STATE_ARGS=(--prerelease)
           fi
 
           if gh release view "$TAG" \
@@ -593,7 +694,7 @@ jobs:
 
             gh release edit "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "dsh-pi-tui $TAG" \
+              --title "dsh-pi-tui $VERSION" "${RELEASE_STATE_ARGS[@]}" \
               --notes-file release-metadata/release-notes.md
           else
             echo "Creating release $TAG"
@@ -601,9 +702,8 @@ jobs:
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
-              --title "dsh-pi-tui $TAG" \
-              --notes-file release-metadata/release-notes.md \
-              "${CREATE_ARGS[@]}"
+              --title "dsh-pi-tui $VERSION" "${RELEASE_STATE_ARGS[@]}" \
+              --notes-file release-metadata/release-notes.md
           fi
 
           gh release upload "$TAG" \

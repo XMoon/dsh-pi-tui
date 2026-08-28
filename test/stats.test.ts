@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { MessageId, type CallId } from '@deepseek-ai/dsh-llm'
+import { MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { computeStats, formatStats, StatsFolder } from '../src/stats.ts'
 import { StepUsageAccumulator } from '../src/token-usage.ts'
@@ -86,13 +86,13 @@ test('first-token semantics match the Web isTokenDelta: reasoning deltas start t
     event('step/end', { turn: 0, step: 0 }, 4, t + 6_000),
     // Step 1: tool-call delta only, then usage — also a token delta start.
     event('step/start', { turn: 1, step: 0 }, 5, t + 7_000),
-    event('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'tool-call-delta', index: 0, id: 'tc-1' as CallId, name: 'bash', argumentsDelta: '{"command"' } }, 6, t + 7_100),
+    event('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'tool-call-delta', index: 0, id: 'tc-1' as ToolCallId, name: 'bash', argumentsDelta: '{"command"' } }, 6, t + 7_100),
     event('assistant/message', {
       turn: 1, step: 0,
       message: {
         id: MessageId('m-2'),
         role: 'assistant',
-        content: [{ type: 'tool-call', id: 'tc-1' as CallId, name: 'bash', arguments: '{"command":"ls"}' }],
+        content: [{ type: 'tool-call', id: 'tc-1' as ToolCallId, name: 'bash', arguments: '{"command":"ls"}' }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 10, outputTokens: 50, cacheReadTokens: 0 },

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Issue #26 Gate B: test the candidate dsh-pi-tui tarball as a real
- * pi2dsh@0.20.0 consumer.
+ * pi2dsh consumer against the target DSH version recorded in
+ * test/compat/pi2dsh.json.
  *
  * The gate installs the exact published DSH and pi2dsh versions into an
  * isolated temporary profile, adds an unmodified Pi-shaped fixture, and drives
@@ -39,8 +40,9 @@ import ts from 'typescript'
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
-const REQUIRED_PI2DSH_VERSION = '0.20.0'
-const REQUIRED_DSH_VERSION = '0.1.1-rc.2'
+const EXPECTED_PI2DSH_VERSION = '0.20.0'
+const EXPECTED_DSH_VERSION = '0.1.2-alpha.1'
+const OFFICIAL_PRESET_IDS = ['standard', 'ptc', 'minimal', 'cordis']
 const MANIFEST_PATH = join(PACKAGE_ROOT, 'test', 'compat', 'pi2dsh.json')
 const FIXTURE_ROOT = join(PACKAGE_ROOT, 'test', 'fixtures', 'pi2dsh-compat')
 const REQUIRED_CONTRACTS = [
@@ -202,6 +204,14 @@ function assertNoCompatibilityFailures(tuiLog, tmux) {
   }
 }
 
+function assertOfficialPresetMounted(presetId, tuiLog, tmux) {
+  const text = `${readText(tuiLog)}\n${tmux.capturePane()}`
+  const fallback = text.split(/\r?\n/u).find(line => /tui-runner:\s*launch preset unavailable/iu.test(line))
+  if (fallback !== undefined) {
+    fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} did not mount; TUI fell back to the default: ${fallback.trim()}`)
+  }
+}
+
 function candidateArgument(args) {
   return args[0] === '--' ? args[1] : args[0]
 }
@@ -262,11 +272,17 @@ function validateManifest(manifest) {
     fail('COMPAT_BOOT_FAILURE', 'test/compat/pi2dsh.json is not the Issue #26 pi2dsh manifest')
   }
   const exactVersion = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/u
-  if (manifest.pi2dshVersion !== REQUIRED_PI2DSH_VERSION || !exactVersion.test(manifest.pi2dshVersion)) {
-    fail('COMPAT_BOOT_FAILURE', `pi2dsh compatibility manifest must pin ${REQUIRED_PI2DSH_VERSION}`)
+  if (!exactVersion.test(manifest.pi2dshVersion ?? '')) {
+    fail('COMPAT_BOOT_FAILURE', 'pi2dsh compatibility manifest must pin an exact pi2dsh version')
   }
-  if (manifest.dshVersion !== REQUIRED_DSH_VERSION || !exactVersion.test(manifest.dshVersion)) {
-    fail('COMPAT_BOOT_FAILURE', `pi2dsh compatibility manifest must pin ${REQUIRED_DSH_VERSION}`)
+  if (manifest.pi2dshVersion !== EXPECTED_PI2DSH_VERSION) {
+    fail('COMPAT_BOOT_FAILURE', `pi2dsh compatibility manifest must pin ${EXPECTED_PI2DSH_VERSION}`)
+  }
+  if (!exactVersion.test(manifest.dshVersion ?? '')) {
+    fail('COMPAT_BOOT_FAILURE', 'pi2dsh compatibility manifest must pin an exact target DSH version')
+  }
+  if (manifest.dshVersion !== EXPECTED_DSH_VERSION) {
+    fail('COMPAT_BOOT_FAILURE', `pi2dsh compatibility manifest must pin ${EXPECTED_DSH_VERSION}`)
   }
   if (!Array.isArray(manifest.contracts) || REQUIRED_CONTRACTS.some(contract => !manifest.contracts.includes(contract))) {
     fail('COMPAT_BOOT_FAILURE', 'pi2dsh compatibility manifest is missing a required contract')
@@ -546,7 +562,8 @@ function requireExactVersion(label, actual, expected) {
   }
 }
 
-function writeLauncher(path, invocation, env) {
+function writeLauncher(path, invocation, env, presetId) {
+  const preset = presetId === undefined ? '' : ` --preset ${shellQuote(presetId)}`
   const lines = [
     '#!/bin/sh',
     'set -eu',
@@ -560,7 +577,7 @@ function writeLauncher(path, invocation, env) {
     `export npm_config_userconfig=${shellQuote(env.npm_config_userconfig)}`,
     `export NPM_CONFIG_USERCONFIG=${shellQuote(env.NPM_CONFIG_USERCONFIG)}`,
     'export TERM="${TERM:-xterm-256color}"',
-    `exec ${invocation.map(shellQuote).join(' ') } --profile pi-tui`,
+    `exec ${invocation.map(shellQuote).join(' ') } --profile pi-tui${preset}`,
     '',
   ]
   writeFileSync(path, lines.join('\n'), { encoding: 'utf8', mode: 0o700 })
@@ -598,6 +615,41 @@ function tmuxRunner(socket, session, env) {
     tmux(['kill-server'], { ignoreGateDeadline: true })
   }
   return { tmux, capturePane, hasSession, sendLiteral, sendKey, resize, stop }
+}
+
+/**
+ * Boot every DSH-shipped preset explicitly. The normal compatibility path boots
+ * the default (standard) preset, but a healthy roster also requires the other
+ * official rows to resolve and mount in the real target profile. Each launch
+ * starts sessionless, so `--preset` is applied to a fresh agent and no model
+ * request or durable session is needed.
+ */
+async function smokeOfficialPresetMounts(invocation, workDir, env) {
+  for (const presetId of OFFICIAL_PRESET_IDS) {
+    const socket = `dsh-preset-health-${process.pid}-${presetId}`
+    const session = `preset-health-${process.pid}-${presetId}`
+    const tmux = tmuxRunner(socket, session, env)
+    const launcher = join(workDir, `run-preset-${presetId}.sh`)
+    const tuiLog = join(workDir, `preset-${presetId}.tui.log`)
+    writeLauncher(launcher, invocation, env, presetId)
+    try {
+      const started = tmux.tmux([
+        'new-session', '-d', '-s', session, '-x', '80', '-y', '24',
+        `script -qefc ${shellQuote(launcher)} ${shellQuote(tuiLog)}`,
+      ])
+      if (started.status !== 0) {
+        fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} could not start:\n${resultText(started)}`)
+      }
+      await waitUntil(`official preset ${presetId} boot`, TIMEOUTS.boot, () => {
+        if (!tmux.hasSession()) return false
+        return tmux.capturePane().includes('❯')
+      }, 'COMPAT_BOOT_FAILURE')
+      assertNoCompatibilityFailures(tuiLog, tmux)
+      assertOfficialPresetMounted(presetId, tuiLog, tmux)
+    } finally {
+      tmux.stop()
+    }
+  }
 }
 
 async function waitUntil(label, timeoutMs, probe, phase) {
@@ -790,6 +842,11 @@ async function main() {
     installPlugin(dsh, `pi2dsh@${context.manifest.pi2dshVersion}`, harnessDir, env, true)
     requireExactVersion('pi2dsh', packageVersion(profileDir, 'pi2dsh'), context.manifest.pi2dshVersion)
     installPlugin(dsh, fixtureDir, harnessDir, env, false)
+
+    // Gate all official DSH preset mounts before exercising the Pi surface.
+    // This catches a missing Host service for minimal/ptc/cordis that the
+    // default standard boot alone would never observe.
+    await smokeOfficialPresetMounts(dsh, workDir, env)
 
     const socket = `dsh-pi2dsh-compat-${process.pid}`
     const session = `compat-${process.pid}`

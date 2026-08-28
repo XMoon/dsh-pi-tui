@@ -29,7 +29,7 @@ const settle = async (): Promise<void> => {
 async function mountTree(ctx: Context): Promise<{ service: PiTuiExtensionServiceLike }> {
   await ctx.plugin(Loader)
   const startupFiber = ctx.plugin((c) => {
-    c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+    c.provide(TUI_STARTUP_SERVICE, {})
   })
   await startupFiber
   const hostFiber = ctx.plugin(applyExtensionHost)

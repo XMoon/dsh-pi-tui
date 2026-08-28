@@ -604,9 +604,9 @@ test('presetDefault reads the settings doc with the roster default fallback and 
     agentPresets: { get defaultId() { return 'standard' } },
   }).presetDefault
   assert.equal(presetDefault.available(), true)
-  assert.equal(presetDefault.get(), 'code', 'the saved value wins')
-  await presetDefault.set('minimal')
-  assert.deepEqual(writes, [{ ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'minimal' }] }])
+  assert.equal(presetDefault.get(), 'ptc', 'the legacy saved value is normalized at the data boundary')
+  await presetDefault.set('code')
+  assert.deepEqual(writes, [{ ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'ptc' }] }])
 })
 
 test('presetDefault falls back to the roster default and degrades without settings', () => {

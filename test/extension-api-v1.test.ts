@@ -182,7 +182,7 @@ test('the runner health bridge is a CAPTURED REF: (slot, id) at invocation start
   try {
     await ctx.plugin(Loader)
     const startup = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startup
     await ctx.plugin(applyExtensionHost)
@@ -259,7 +259,7 @@ test('a captured health ref is a GENERATION FENCE: stale settlements never land 
   try {
     await ctx.plugin(Loader)
     const startup = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startup
     await ctx.plugin(applyExtensionHost)
@@ -344,7 +344,7 @@ test('the theme-unload hook fires with the SOURCE-QUALIFIED selectable value, an
   try {
     await ctx.plugin(Loader)
     const startup = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startup
     await ctx.plugin(applyExtensionHost)
@@ -415,7 +415,7 @@ test('the invocation-time command health capture resolves a command registered A
   try {
     await ctx.plugin(Loader)
     const startup = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startup
     await ctx.plugin(applyExtensionHost)

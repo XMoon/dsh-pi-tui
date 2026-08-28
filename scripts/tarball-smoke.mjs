@@ -4,8 +4,9 @@
  * `@xmoon76/dsh-pi-tui` tarball end to end, so a fresh checkout can never
  * publish a broken or leaky artifact:
  *
- *   1. structure — every `exports` file exists, config + cordis.patch.yml +
- *      repair scripts are included, nothing else leaks in (no test fixtures,
+ *   1. structure — every `exports` file exists, cordis.patch.yml + repair
+ *      scripts are included, no duplicated official preset root is shipped, and
+ *      nothing else leaks in (no test fixtures,
  *      no backups, no nested tarballs, no absolute paths);
  *   2. content — no workspace absolute paths anywhere, and the bundle does
  *      NOT import `@xmoon76/pi-tui` externally (it is bundled);
@@ -156,7 +157,7 @@ function main() {
     check('exports entry dist/builtins.mjs', has('dist/builtins.mjs'))
     check('types dist/builtins.d.mts', has('dist/builtins.d.mts'))
     check('cordis.patch.yml included', has('cordis.patch.yml'))
-    check('config/ included', files.some(name => name.startsWith('config/')))
+    check('no duplicated official preset root', !files.some(name => name.startsWith('config/agent-presets/')))
     check('repair-session.mjs included', has('scripts/repair-session.mjs'))
     check('repair-core.mjs included', has('scripts/repair-core.mjs'))
     check('README included', has('README.md'))

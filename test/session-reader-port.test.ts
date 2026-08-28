@@ -15,7 +15,7 @@ import { DirectSessionReader, type HostContextLike, type SessionPersistenceLike 
 import type { SessionQueryLike } from '../src/sessions.ts'
 
 function header(id: string, createdAt: number, extra: Partial<{ cwd: string; agentPreset: string; parentSession: string; origin: 'subagent' }> = {}) {
-  return { id, createdAt, version: 1, ...extra }
+  return { id, createdAt, version: 0, ...extra }
 }
 
 function persistence(headers: Array<{ id: string; createdAt: number; version: number; cwd?: string; agentPreset?: string; parentSession?: string; origin?: 'subagent' }>, contents: Record<string, string> = {}): SessionPersistenceLike {
@@ -26,11 +26,15 @@ function persistence(headers: Array<{ id: string; createdAt: number; version: nu
   }
 }
 
-function query(records: Array<{ header: ReturnType<typeof header>; live: boolean }>): SessionQueryLike {
+function query(
+  records: Array<{ header: ReturnType<typeof header>; live: boolean }>,
+  filterEvents?: NonNullable<SessionQueryLike['filterEvents']>,
+): SessionQueryLike {
   return {
     listSessions: async () => records as unknown as SessionQueryLike['listSessions'] extends Promise<infer T> ? T : never,
     readTitleSnapshots: async (ids) =>
       ids.map(id => ({ sessionId: String(id), status: 'fulfilled' as const, value: { title: { title: `title-of-${id}` } } })),
+    ...(filterEvents === undefined ? {} : { filterEvents }),
   }
 }
 
@@ -63,9 +67,126 @@ test('list falls back to persistence and marks the current session live', async 
   assert.equal(rows[1].live, false)
 })
 
+test('list uses the semantic query roster without requiring raw persistence', async () => {
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([
+      { header: header('session-a', 100), live: false },
+      { header: header('session-b', 200), live: true },
+    ]),
+  }))
+  const rows = await reader.list(undefined)
+  assert.ok(rows !== undefined)
+  assert.deepEqual(rows.map(row => row.id), ['session-b', 'session-a'])
+  assert.equal(rows[0].live, true)
+})
+
+test('list uses the projection for effective preset state instead of the creation header', async () => {
+  const persistedHeader = header('session-selected', 100, { agentPreset: 'standard' })
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: persistedHeader, live: false }]),
+    sessionProjections: { stateOf: () => 'ptc' },
+    sessionPersistence: {
+      list: async () => [persistedHeader],
+      readRaw: async () => undefined,
+      inspect: async () => ({ meta: persistedHeader as never, events: [] }),
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.ok(rows !== undefined)
+  assert.equal(rows[0]?.preset, 'ptc')
+})
+
+test('list does not treat a persisted header as effective preset without the projection service', async () => {
+  let inspected = 0
+  const persistedHeader = header('session-unprojected', 100, { agentPreset: 'standard' })
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: persistedHeader, live: false }]),
+    sessionPersistence: {
+      list: async () => [persistedHeader],
+      readRaw: async () => undefined,
+      inspect: async () => {
+        inspected += 1
+        throw new Error('projectionless listing must not inspect durable events')
+      },
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.ok(rows !== undefined)
+  assert.equal(rows[0]?.preset, undefined)
+  assert.equal(inspected, 0)
+})
+
 test('list returns undefined when persistence is unavailable', async () => {
   const reader = new DirectSessionReader(host({}))
   assert.equal(await reader.list(undefined), undefined)
+})
+
+test('search uses semantic sessionQuery filtering without requiring persistence', async () => {
+  let listedFromPersistence = 0
+  let readRaw = 0
+  const records = [
+    { header: header('session-live', 300), live: true },
+    { header: header('session-hit', 200), live: false },
+    { header: header('session-miss', 100), live: false },
+  ]
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query(records, async (id, filters) => {
+      assert.deepEqual(filters, [{ kind: 'text', text: 'needle' }])
+      if (String(id) !== 'session-hit') return []
+      return [{
+        sessionId: id,
+        seq: 4,
+        type: 'message/user',
+        time: 200,
+        surface: 'current',
+        text: 'prefix Needle suffix',
+      }]
+    }),
+    sessionPersistence: {
+      list: async () => {
+        listedFromPersistence += 1
+        throw new Error('semantic search must not list persistence')
+      },
+      readRaw: async () => {
+        readRaw += 1
+        throw new Error('semantic search must not read raw artifacts')
+      },
+      inspect: async () => ({ events: [] }),
+    },
+  }))
+  const hits = await reader.search('needle')
+  assert.deepEqual(hits, [{ id: 'session-hit', createdAt: 200, snippet: 'prefix Needle suffix' }])
+  assert.equal(listedFromPersistence, 0)
+  assert.equal(readRaw, 0)
+})
+
+test('search keeps the raw traversal only as an explicit no-query capability fallback', async () => {
+  const reader = new DirectSessionReader(host({
+    sessionPersistence: persistence(
+      [header('session-hit', 200), header('session-miss', 100)],
+      { 'session-hit': 'prefix needle suffix' },
+    ),
+  }))
+  const hits = await reader.search('needle')
+  assert.ok(hits !== undefined)
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].id, 'session-hit')
+  assert.ok(hits[0].snippet.includes('needle'))
+})
+
+test('search falls back to raw artifacts only when semantic search is explicitly disabled', async () => {
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: header('session-hit', 200), live: false }], async () => {
+      throw Object.assign(new Error('search disabled'), { code: 'SESSION_QUERY_SEARCH_DISABLED' })
+    }),
+    sessionPersistence: persistence(
+      [header('session-hit', 200)],
+      { 'session-hit': 'prefix needle suffix' },
+    ),
+  }))
+  const hits = await reader.search('needle')
+  assert.ok(hits !== undefined)
+  assert.equal(hits[0].id, 'session-hit')
 })
 
 test('search scans the newest 100 sessions and returns bounded snippets', async () => {
@@ -96,6 +217,17 @@ test('search skips unreadable sessions and caps at 20 hits', async () => {
   assert.ok(hits !== undefined)
   assert.equal(hits.length, 20, 'capped at 20')
   assert.ok(!hits.some(h => h.id === 'session-0'), 'unreadable session skipped')
+})
+
+test('search preserves an unsupported session-format refusal', async () => {
+  const refusal = Object.assign(new Error('unknown durable event'), { name: 'SessionFormatUnsupportedError' })
+  const reader = new DirectSessionReader(host({
+    sessionPersistence: {
+      list: async () => [header('session-unknown', 100)],
+      readRaw: async () => { throw refusal },
+    },
+  }))
+  await assert.rejects(reader.search('needle'), error => error === refusal)
 })
 
 test('search never sorts the persistence list in place (the shared array stays untouched)', async () => {
@@ -178,6 +310,28 @@ test('titles reports rejected engine reads at INFO with the engine code and reas
   assert.equal(diagnostics[0]!.message, 'session title unavailable')
   assert.equal(diagnostics[0]!.fields?.code, 'SESSION_QUERY_CORRUPT_SESSION', 'the engine code must be exposed')
   assert.match(String(diagnostics[0]!.fields?.reason), /corrupt log/, 'the engine reason must be preserved')
+})
+
+test('titles preserves an unsupported engine format refusal after diagnosing it', async () => {
+  const refusal = Object.assign(new Error('unknown durable event'), { name: 'SessionFormatUnsupportedError' })
+  const diagnostics: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  const reader = new DirectSessionReader(host({
+    sessionQuery: {
+      listSessions: async () => [],
+      readTitleSnapshots: async () => [{
+        sessionId: 'session-unknown',
+        status: 'rejected' as const,
+        reason: refusal,
+      }],
+    },
+  }), undefined, {
+    info: (message: string, fields?: Record<string, unknown>) => diagnostics.push({ message, fields }),
+  })
+  await assert.rejects(
+    reader.titles([{ id: 'session-unknown', createdAt: 90, live: false }]),
+    error => error === refusal,
+  )
+  assert.equal(diagnostics[0]?.message, 'session title unavailable')
 })
 
 test('readExportData preserves a REJECTED log read as an error with the diagnostic', async () => {

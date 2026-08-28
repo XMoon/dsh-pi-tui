@@ -30,9 +30,6 @@
  "present.ts": [
   "import:dsh-session"
  ],
- "preset-events.ts": [
-  "import:dsh-session"
- ],
  "rewind.ts": [
   "import:dsh-session"
  ],
@@ -57,9 +54,15 @@
   "userQuestions"
  ],
  "runtime/direct/session-direct.ts": [
+  "import:dsh-session",
   "sessionPersistence",
   "sessionQuery",
   "tokenMeter"
+ ],
+ "runtime/direct/session-preset-direct.ts": [
+  "import:dsh-agent",
+  "import:dsh-session",
+  "sessionPersistence"
  ],
  "runtime/direct/session-lifecycle-direct.ts": [
   "agents",

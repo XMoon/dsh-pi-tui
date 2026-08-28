@@ -12,6 +12,7 @@ import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, normalize } from 'node:path'
 import { safeErrorMessage } from './error-boundary.ts'
+import { normalizeSessionPresetId } from './runtime/session-preset.ts'
 
 /**
  * Legacy exported window size: how many most-recent sessions the picker's
@@ -43,6 +44,31 @@ export interface SessionQueryLike {
     ids: readonly SessionId[],
     signal?: AbortSignal,
   ): Promise<Array<SessionTitleObservationResultLike>>
+  /**
+   * Provider-independent semantic text filtering. The method is optional so
+   * older test doubles and intentionally rosterless deployments can still use
+   * the persistence capability fallback; it is not a DSH runtime fallback.
+   */
+  filterEvents?: (
+    sessionId: SessionId,
+    filters: readonly SessionEventResultFilterLike[],
+  ) => Promise<readonly SessionEventSearchDocumentLike[]>
+}
+
+/** The public session-query text filter used by the Direct adapter. */
+export interface SessionEventResultFilterLike {
+  readonly kind: 'text'
+  readonly text: string
+}
+
+/** The semantic event document returned by `sessionQuery.filterEvents`. */
+export interface SessionEventSearchDocumentLike {
+  readonly sessionId: SessionId
+  readonly seq: number
+  readonly type: string
+  readonly time: number
+  readonly surface: 'current' | 'shadowed' | 'log-only'
+  readonly text: string
 }
 
 /** One per-session result of a batch title observation (discriminated on
@@ -71,6 +97,19 @@ function errorCodeOf(reason: unknown): string {
     if (typeof code === 'string' && code !== '') return code
   }
   return 'UNKNOWN'
+}
+
+/**
+ * Session persistence refuses logs containing a format/event vocabulary this
+ * runtime cannot faithfully interpret. Keep that refusal visible at every UI
+ * read boundary; turning it into an untitled or missing search row would make
+ * durable data loss look like an ordinary absent value.
+ */
+export function isUnsupportedSessionFormatError(reason: unknown): boolean {
+  if (typeof reason !== 'object' || reason === null) return false
+  const value = reason as { name?: unknown; code?: unknown }
+  return value.name === 'SessionFormatUnsupportedError'
+    || value.code === 'SESSION_FORMAT_UNSUPPORTED'
 }
 
 /** Strip the `session-` prefix and keep the first 8 characters, like the
@@ -244,7 +283,7 @@ export function headerToPickerRow(header: SessionHeader, live: boolean): Session
     id: header.id,
     createdAt: header.createdAt,
     cwd: header.cwd,
-    preset: header.agentPreset,
+    preset: normalizeSessionPresetId(header.agentPreset),
     parentSession: header.parentSession,
     origin: header.origin,
     live,
@@ -254,12 +293,13 @@ export function headerToPickerRow(header: SessionHeader, live: boolean): Session
 /**
  * Load the latest titles for a batch of sessions, newest-first order
  * preserved. Prefers the session-query engine's batch observation (one
- * cancellable corpus read, failures isolated per session — a rejected
- * session's id lands an info diagnostic with the engine's code and
- * reason, never a silent drop and never a behind-the-engine retry);
- * falls back to bounded sequential persistence inspections folded with
- * `foldSessionTitle` when the engine is absent. Never throws for
- * per-session failures.
+ * cancellable corpus read, ordinary failures isolated per session — a rejected
+ * session's id lands an info diagnostic with the engine's code and reason,
+ * never a silent drop and never a behind-the-engine retry); falls back to
+ * bounded sequential persistence inspections folded with `foldSessionTitle`
+ * when the engine is absent. Unsupported durable formats are rethrown so the
+ * caller can show the compatibility failure; ordinary per-session failures do
+ * not abort the batch.
  * @param query - the mounted session-query engine, when present.
  * @param persistence - the persistence backend for the fallback path.
  * @param ids - session ids to title, in display order.
@@ -350,12 +390,14 @@ export async function loadSessionTitleBatch(
         }
         // A rejected engine read is a real per-session failure: expose the
         // engine's code + reason at INFO level (visible in the default
-        // diagnostics log file). Never a fallback — see the doc comment.
+        // diagnostics log file). An unsupported durable format is stronger
+        // than an absent title, so preserve the engine's fail-closed error.
         diag?.info('session title unavailable', {
           session: result.sessionId,
           code: errorCodeOf(result.reason),
           reason: safeErrorMessage(result.reason),
         })
+        if (isUnsupportedSessionFormatError(result.reason)) throw result.reason
       }
     } else if (persistence !== undefined) {
       await inspectTitlesFromPersistence(persistence, toRead, found, signal)
@@ -380,12 +422,13 @@ export async function loadSessionTitleBatch(
 
 /**
  * Bounded fallback title reads for deployments WITHOUT a session-query
- * engine: sequential 4-worker inspections; one failing session must not
- * starve the rest, so every worker catches per-session failures.
+ * engine: sequential 4-worker inspections; ordinary per-session I/O failures
+ * must not starve the rest, so each worker isolates those failures. An
+ * unsupported durable format is rethrown as a compatibility refusal.
  * Cancellation propagates — the workers re-check the signal before every
  * inspection, and each inspection receives it. (Engine-present batches
- * NEVER reach this path: the engine already performs these same
- * inspections behind its consistency guards.)
+ * NEVER reach this path: the engine already performs these same inspections
+ * behind its consistency guards.)
  * @param persistence - the persistence backend to inspect.
  * @param rows - the sessions to inspect (the whole batch, no engine).
  * @param found - the shared title map, filled in place.
@@ -408,8 +451,12 @@ async function inspectTitlesFromPersistence(
         const inspection = await persistence.inspect(SessionId(row.id), signal)
         const title = foldSessionTitle(inspection.events)
         if (title !== undefined) found.set(row.id, title.title)
-      } catch {
-        // Isolated failure: the row stays untitled.
+      } catch (error) {
+        // Ordinary per-session I/O failures are isolated so one vanished
+        // artifact does not starve the rest of the picker. Unsupported log
+        // formats are not ordinary misses: preserve the refusal so the caller
+        // can diagnose the durable compatibility boundary.
+        if (isUnsupportedSessionFormatError(error)) throw error
       }
     }
   })

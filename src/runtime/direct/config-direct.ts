@@ -39,6 +39,7 @@ import { cancellationError } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { resolveTrustedFooterCommand, resolveUserLayerFooterMode } from '../../footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../footer/custom-items.ts'
+import { normalizeSessionPresetId } from '../session-preset.ts'
 import type {
   AuthorizationConfig,
   AuthorizationFlowEvent,
@@ -849,19 +850,19 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
       const doc = settings.get(settingsNamespace('agent-presets')) as { default?: string } | undefined
       // `??` semantics: an empty saved value is displayed as-is, only an
       // ABSENT value falls back to the roster default (old behavior).
-      if (doc?.default !== undefined) return doc.default
+      if (doc?.default !== undefined) return normalizeSessionPresetId(doc.default)
     } catch {
       // An unreadable namespace falls back to the roster default.
     }
     const presets = this.ctx.get('agentPresets') as AgentPresetsServiceLike | undefined
-    return presets?.defaultId
+    return normalizeSessionPresetId(presets?.defaultId)
   }
 
   async set(id: string): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
     await settings.mutate(settingsNamespace('agent-presets'), [
-      { op: 'set', path: ['default'], value: id },
+      { op: 'set', path: ['default'], value: normalizeSessionPresetId(id) ?? id },
     ])
   }
 }

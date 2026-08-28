@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 import {
@@ -64,7 +64,7 @@ function completedTurn(turn: number, baseSeq: number, startTime: number): Sessio
     eventAt('tool/call', {
       turn,
       step: 0,
-      callId: CallId(`call-${turn}-1`),
+      callId: ToolCallId(`call-${turn}-1`),
       name: 'read',
       arguments: JSON.stringify({ path: 'src/transcript.ts' }),
     }, startTime + 3, baseSeq + 3),
@@ -76,10 +76,10 @@ function completedTurn(turn: number, baseSeq: number, startTime: number): Sessio
         role: 'user',
         content: [{
           type: 'tool-result',
-          toolCallId: CallId(`call-${turn}-1`),
+          toolCallId: ToolCallId(`call-${turn}-1`),
           content: [{ type: 'text', text: 'ok' }],
         }],
-        source: { kind: 'tool', callId: CallId(`call-${turn}-1`) },
+        source: { kind: 'tool', callId: ToolCallId(`call-${turn}-1`) },
       },
     }, startTime + 4, baseSeq + 4),
     eventAt('assistant/message', {
@@ -102,13 +102,13 @@ function intermediateTurn(turn: number, baseSeq: number, startTime: number): Ses
   return [
     eventAt('turn/start', { turn }, startTime, baseSeq),
     eventAt('assistant/chunk', { turn, step: 0, chunk: { type: 'text-delta', index: 0, text: '我先检查文件' } }, startTime + 1, baseSeq + 1),
-    eventAt('tool/call', { turn, step: 0, callId: CallId('c-i1'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, startTime + 2, baseSeq + 2),
+    eventAt('tool/call', { turn, step: 0, callId: ToolCallId('c-i1'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, startTime + 2, baseSeq + 2),
     eventAt('tool/result', {
       turn, step: 0,
       message: {
         id: MessageId('r-i1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c-i1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c-i1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c-i1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c-i1') },
       },
     }, startTime + 3, baseSeq + 3),
     eventAt('assistant/chunk', { turn, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终答案是…' } }, startTime + 4, baseSeq + 4),
@@ -168,25 +168,25 @@ test('tool/result never double-counts a call; same-name calls accumulate', () =>
   const folder = new TranscriptFolder()
   const events: SessionEvent[] = [
     eventAt('turn/start', { turn: 3 }, 1000, 0),
-    eventAt('tool/call', { turn: 3, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
+    eventAt('tool/call', { turn: 3, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
     eventAt('tool/result', {
       turn: 3, step: 0,
       message: {
         id: MessageId('m1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, 1002, 2),
-    eventAt('tool/call', { turn: 3, step: 0, callId: CallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm typecheck' }) }, 1003, 3),
+    eventAt('tool/call', { turn: 3, step: 0, callId: ToolCallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm typecheck' }) }, 1003, 3),
     eventAt('tool/result', {
       turn: 3, step: 0,
       message: {
         id: MessageId('m2'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c2') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c2') },
       },
     }, 1004, 4),
-    eventAt('tool/call', { turn: 3, step: 0, callId: CallId('c3'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm lint' }) }, 1005, 5),
+    eventAt('tool/call', { turn: 3, step: 0, callId: ToolCallId('c3'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm lint' }) }, 1005, 5),
   ]
   folder.apply(events)
   const activity = folder.turnActivity(3)!
@@ -275,7 +275,7 @@ test('assistant/message settles the candidate text authoritatively (plan §5.4)'
       turn: 0, step: 0,
       message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'authoritative text' }], source: { kind: 'model', provider: 'p', model: 'm' } },
     }, 1002, 2),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1003, 3),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1003, 3),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
   ])
   const activity = folder.turnActivity(0)!
@@ -288,7 +288,7 @@ test('ANY tool/call is a Tool — skill included (event-first classification)', 
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'skill', arguments: JSON.stringify({ name: 'session-review' }) }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'skill', arguments: JSON.stringify({ name: 'session-review' }) }, 1001, 1),
   ])
   const activity = folder.turnActivity(0)!
   assert.equal(activity.toolCalls, 1)
@@ -304,7 +304,7 @@ test('an unknown custom tool is still a Tool (never a Message/System/nothing)', 
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'vendor_probe', arguments: JSON.stringify({ host: 'cache-01' }) }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'vendor_probe', arguments: JSON.stringify({ host: 'cache-01' }) }, 1001, 1),
   ])
   const activity = folder.turnActivity(0)!
   assert.equal(activity.toolCalls, 1)
@@ -341,14 +341,14 @@ test('parallel tool results never yank the Tool slot back to an older call (plan
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('A'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, 1001, 1),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('B'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('A'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('B'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1002, 2),
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
         id: MessageId('rA'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('A'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('A') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('A'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('A') },
       },
     }, 1003, 3),
   ])
@@ -360,8 +360,8 @@ test('parallel tool results never yank the Tool slot back to an older call (plan
     turn: 0, step: 0,
     message: {
       id: MessageId('rB'), role: 'user',
-      content: [{ type: 'tool-result', toolCallId: CallId('B'), content: [{ type: 'text', text: 'ok' }] }],
-      source: { kind: 'tool', callId: CallId('B') },
+      content: [{ type: 'tool-result', toolCallId: ToolCallId('B'), content: [{ type: 'text', text: 'ok' }] }],
+      source: { kind: 'tool', callId: ToolCallId('B') },
     },
   }, 1004, 4)])
   assert.equal(activity.tool?.status, 'ok')
@@ -405,14 +405,14 @@ test('an orphan tool/result never settles a running card of ANOTHER turn', () =>
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, 1000, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1001, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1001, 1),
     // An orphan result (unknown callId) for turn 2 with the same name.
     eventAt('tool/result', {
       turn: 2, step: 0,
       message: {
         id: MessageId('r'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('unknown'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('unknown') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('unknown'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('unknown') },
       },
     }, 1002, 2),
   ])
@@ -426,15 +426,15 @@ test('an orphan tool/result attributes to its OWN turn, never the stale current 
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, 1000, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1001, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1001, 1),
     // A result for an UNKNOWN call, from turn 2 (replay fragment): the
     // orphan card must carry turn 2, and turn 1's slot must stay running.
     eventAt('tool/result', {
       turn: 2, step: 0,
       message: {
         id: MessageId('r'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('unknown'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('unknown') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('unknown'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('unknown') },
       },
     }, 1002, 2),
   ])
@@ -539,7 +539,7 @@ test('a late authoritative message after step/end replaces the committed provisi
 test('a turn-start-less tool/call attributes to its OWN turn (replay fragment)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
-    eventAt('tool/call', { turn: 7, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1000, 0),
+    eventAt('tool/call', { turn: 7, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1000, 0),
   ])
   const activity = folder.turnActivity(7)!
   assert.equal(activity.toolCalls, 1)
@@ -552,7 +552,7 @@ test('an empty authoritative message for the latest confirmed step clears the co
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'partial' } }, 1001, 1),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
     // The authoritative message is EMPTY (image-only step, replay).
     eventAt('assistant/message', {
       turn: 0, step: 0,
@@ -574,7 +574,7 @@ test('a late text-delta for an already-confirmed step never resurrects a candida
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
     // A late delta for the confirmed step (replay).
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '更多' } }, 1003, 3),
     eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终' } }, 1004, 4),
@@ -593,14 +593,14 @@ test('an empty candidate confirmed after a prior intermediate clears the slot', 
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1002, 2),
     eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '第二步' } }, 1003, 3),
     // The step-1 authoritative text is EMPTY: the candidate tail clears.
     eventAt('assistant/message', {
       turn: 0, step: 1,
       message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: '' }], source: { kind: 'model', provider: 'p', model: 'm' } },
     }, 1004, 4),
-    eventAt('tool/call', { turn: 0, step: 1, callId: CallId('c2'), name: 'bash', arguments: '{}' }, 1005, 5),
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('c2'), name: 'bash', arguments: '{}' }, 1005, 5),
     eventAt('assistant/chunk', { turn: 0, step: 2, chunk: { type: 'text-delta', index: 0, text: '最终' } }, 1006, 6),
     eventAt('assistant/message', {
       turn: 0, step: 2,
@@ -617,7 +617,7 @@ test('a late message for an older step never regresses the final-answer dedup', 
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1002, 2),
     eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1003, 3),
     eventAt('assistant/message', {
       turn: 0, step: 1,
@@ -697,7 +697,7 @@ test('a text-delta after the step\'s authoritative message is ignored', () => {
     }, 1002, 2),
     // A late delta for the settled step (replay artifact).
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '迟到的内容' } }, 1003, 3),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1004, 4),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1004, 4),
     eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终' } }, 1005, 5),
     eventAt('assistant/message', {
       turn: 0, step: 1,
@@ -786,7 +786,7 @@ test('a late assistant/message after turn/end never mutates the settled Thought 
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
     eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终' } }, 1003, 3),
     eventAt('assistant/message', {
       turn: 0, step: 1,
@@ -809,13 +809,13 @@ test('late reasoning and tool events after turn/end never mutate the Focus state
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: '思考' } }, 1001, 1),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'read', arguments: '{}' }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1002, 2),
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
         id: MessageId('r'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, 1003, 3),
     eventAt('assistant/message', {
@@ -825,13 +825,13 @@ test('late reasoning and tool events after turn/end never mutate the Focus state
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
     // Late replay artifacts after finalization.
     eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: '迟到的思考' } }, 1006, 6),
-    eventAt('tool/call', { turn: 0, step: 1, callId: CallId('c2'), name: 'bash', arguments: '{}' }, 1007, 7),
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('c2'), name: 'bash', arguments: '{}' }, 1007, 7),
     eventAt('tool/result', {
       turn: 0, step: 1,
       message: {
         id: MessageId('r2'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c2') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c2') },
       },
     }, 1008, 8),
   ])
@@ -901,7 +901,7 @@ test('a late authoritative message for an already-confirmed candidate updates th
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'partial stream' } }, 1001, 1),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
     // The authoritative message arrives AFTER the confirmation (replay).
     eventAt('assistant/message', {
       turn: 0, step: 0,
@@ -924,9 +924,9 @@ test('a late message for an OLDER confirmed step never regresses the slot', () =
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'bash', arguments: '{}' }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1002, 2),
     eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '第二步' } }, 1003, 3),
-    eventAt('tool/call', { turn: 0, step: 1, callId: CallId('c2'), name: 'bash', arguments: '{}' }, 1004, 4),
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('c2'), name: 'bash', arguments: '{}' }, 1004, 4),
     // Step 0's authoritative message arrives late (after step 1 confirmed).
     eventAt('assistant/message', {
       turn: 0, step: 0,
@@ -977,7 +977,7 @@ test('a long confirmed intermediate message previews its TAIL, never the stale h
       turn: 0, step: 0,
       message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: long }], source: { kind: 'model', provider: 'p', model: 'm' } },
     }, 1002, 2),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1003, 3),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1003, 3),
     eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1004, 4),
     eventAt('assistant/message', {
       turn: 0, step: 1,
@@ -1321,7 +1321,7 @@ test('the collapsed body renders the three slots in fixed order, one line each (
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: '这应该是 presenter fallback。' } }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '我已经找到 skill 的特殊处理。' } }, 1002, 2),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/present.ts' }) }, 1003, 3),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/present.ts' }) }, 1003, 3),
   ])
   const activity = folder.turnActivity(0)!
   const body = focusCollapsedBody(activity, 60, focusToolDisplay(activity.tool!, {}))
@@ -1344,20 +1344,20 @@ test('the collapsed body renders the three slots in fixed order, one line each (
 test('the Tool slot line carries the status prefix: none running, ✓ ok, ✗ error (plan §10)', () => {
   const running = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
   ])!
   const body = focusCollapsedBody(running, 60, focusToolDisplay(running.tool!, {}))
   assert.ok(body.some(line => line.includes('Tool:    Bash pnpm test')), body.join('|'))
   // Settled ok.
   const ok = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
         id: MessageId('r'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c') },
       },
     }, 1002, 2),
   ])!
@@ -1366,13 +1366,13 @@ test('the Tool slot line carries the status prefix: none running, ✓ ok, ✗ er
   // Settled error.
   const err = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
         id: MessageId('r'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c'), content: [{ type: 'text', text: 'boom' }] }],
-        source: { kind: 'tool', callId: CallId('c') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c'), content: [{ type: 'text', text: 'boom' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c') },
       },
       error: { code: 'E', message: 'boom' },
     }, 1002, 2),
@@ -1483,7 +1483,7 @@ test('focusToolDisplay keeps a multiline terminal title to ONE line (ghost-row f
 test('focusCollapsedBody keeps a multiline Tool slot on ONE physical row (ghost-row fix)', () => {
   const activity = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1001, 1),
   ])!
   const rows = focusCollapsedBody(activity, 100, MULTILINE_BASH_COMMAND)
   const toolRow = rows.find(row => row.startsWith('Tool:'))
@@ -1502,7 +1502,7 @@ test('every compact slot is ONE physical row even with multiline input (ghost-ro
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first think line\nsecond think line' } }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'first message line\r\nsecond message line' } }, 1002, 2),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1003, 3),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1003, 3),
     eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'E', message: 'first error line\nsecond error line' } } }, 2000, 4),
   ])!
   const rows = focusCollapsedBody(activity, 80, MULTILINE_BASH_COMMAND)
@@ -1520,7 +1520,7 @@ test('every compact slot is ONE physical row even with multiline input (ghost-ro
 test('FocusActivityComponent.render returns only physical rows for a multiline Tool display (plan §6.4)', () => {
   const activity = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('tool/call', { turn: 0, step: 0, callId: CallId('c'), name: 'bash', arguments: '{}' }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1001, 1),
   ])!
   const component = new FocusActivityComponent({
     activity,
@@ -1776,7 +1776,7 @@ test('a tool-call-only exact last assistant is NOT renderable — no final', () 
       turn: 0, step: 2,
       message: {
         id: 'tc', role: 'assistant',
-        content: [{ type: 'tool-call', id: CallId('late-call'), name: 'bash', arguments: '{}' }],
+        content: [{ type: 'tool-call', id: ToolCallId('late-call'), name: 'bash', arguments: '{}' }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
     }, 1000 + 11, 21),

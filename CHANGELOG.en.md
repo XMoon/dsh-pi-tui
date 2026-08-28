@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-alpha.1] - 2026-08-28
+
+### Migration notes
+
+- **0.4.0-alpha.1 moves to DeepSeek Harness 0.1.2.** The minimum runtime
+  requirement is `>=0.1.2-alpha.1`; DSH 0.1.1 is no longer supported, and no
+  future-version ceiling is invented without a confirmed break. Users keeping
+  DSH 0.1.1 should pin `@xmoon76/dsh-pi-tui@0.3`.
+- **The Agent preset is now canonical `ptc`.** The official
+  `standard`/`ptc`/`minimal`/`cordis` presets come directly from DSH's shipped
+  root; no local copy or `code` alias is packaged. When required, a persisted
+  `agentPreset=code` is normalized to `ptc` at the restore boundary.
+- **Upstream alpha caveat.** DSH 0.1.2-alpha.1 still has an upstream
+  subagent-dispose caveat; run the target-Harness compatibility gates before
+  publishing.
+
+### Installation and version pairing
+
+For this prerelease, install the matching DSH first and then add the TUI bundle
+into a profile:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`
+instead of `@next`. Do not mix the prerelease TUI with the legacy runtime;
+the complete matrix and update/remove commands are in the README's
+Installation section.
+
 ## [0.3.5] - 2026-08-28
 
 ### Added
@@ -1464,7 +1496,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...HEAD
+[0.4.0-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...next-v0.4.0-alpha.1
 [0.3.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...v0.3.3

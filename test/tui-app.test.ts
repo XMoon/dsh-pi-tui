@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
-import { CallId, MessageId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, MessageId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -216,7 +216,7 @@ test('tool cards present through the real registry: read shows the relativized p
       },
     }))
     try {
-      const callId = CallId('call-1')
+      const callId = ToolCallId('call-1')
       // The mock stream: a tool/call event, then the real loop executes the
       // registered tool for real, then its outcome lands as tool/result.
       const callEvent: SessionEvent = {
@@ -951,7 +951,7 @@ function diffCallEvent(seq: number, callId: string): SessionEvent {
     type: 'tool/call',
     seq,
     time: 1_700_000_000_000 + seq,
-    data: { turn: 0, step: 0, callId: CallId(callId), name: 'edit', arguments: diffCallArgs() },
+    data: { turn: 0, step: 0, callId: ToolCallId(callId), name: 'edit', arguments: diffCallArgs() },
   }
 }
 
@@ -963,7 +963,7 @@ function diffResultEvent(seq: number, callId: string, text: string): SessionEven
     data: {
       turn: 0,
       step: 0,
-      message: createToolResultMessage({ callId: CallId(callId), content: [{ type: 'text', text }], isError: false }),
+      message: createToolResultMessage({ callId: ToolCallId(callId), content: [{ type: 'text', text }], isError: false }),
     },
   }
 }
@@ -973,7 +973,7 @@ function subagentRouteCallEvent(seq: number, callId: string, args: string): Sess
     type: 'tool/call',
     seq,
     time: 1_700_000_000_000 + seq,
-    data: { turn: 0, step: 0, callId: CallId(callId), name: 'subagent_route', arguments: args },
+    data: { turn: 0, step: 0, callId: ToolCallId(callId), name: 'subagent_route', arguments: args },
   }
 }
 
@@ -986,7 +986,7 @@ function subagentRouteResultEvent(seq: number, callId: string): SessionEvent {
       turn: 0,
       step: 0,
       message: createToolResultMessage({
-        callId: CallId(callId),
+        callId: ToolCallId(callId),
         content: [{ type: 'text', text: 'started background subagent job job-1' }],
         isError: false,
       }),
@@ -1542,7 +1542,7 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
     { type: 'assistant/chunk', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', text: 'think one\nthink two\n' } } } as SessionEvent,
     { type: 'assistant/message', seq: 2, time: 1_700_000_000_002, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'reasoning', text: 'think one\nthink two' }] } } } as SessionEvent,
     { type: 'tool/call', seq: 3, time: 1_700_000_000_003, data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } } as SessionEvent,
-    { type: 'tool/result', seq: 4, time: 1_700_000_000_004, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: CallId('c1'), content: [{ type: 'text', text: 'file.txt' }], isError: false }) } } as SessionEvent,
+    { type: 'tool/result', seq: 4, time: 1_700_000_000_004, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: ToolCallId('c1'), content: [{ type: 'text', text: 'file.txt' }], isError: false }) } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   await vt.waitForRender()

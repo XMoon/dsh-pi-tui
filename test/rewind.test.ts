@@ -310,6 +310,7 @@ function makeRig(options: {
   const state = { sessionId: 'session-source', generation: 1 }
   const host: RewindCommitHost = {
     sessionCwd: () => options.sessionCwd ?? '/live-ws',
+    sessionPreset: (session) => session.header.agentPreset,
     compose: async (presetId?: string) => {
       resolved.push(presetId ?? '(default)')
       return options.composePreset === undefined
@@ -899,13 +900,7 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
   const runner: TuiCommandRunner = {
     ...base,
     liveAgent: sourceAgent('session-source', turn(0, 1, 'A')),
-    catalog: {
-      ...base.catalog!,
-      presets: {
-        ...base.catalog!.presets,
-        resolve: async () => { resolves += 1; return { id: 'minimal' } },
-      },
-    },
+    currentPreset: () => { resolves += 1; return 'minimal' },
     agents: {
       create: async (opts: { agentPreset?: string }) => {
         createPreset = opts.agentPreset

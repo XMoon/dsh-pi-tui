@@ -23,13 +23,14 @@ import { contextIconSemantic, contextProvenance, contextSummary } from './contex
 import type { IconSemantic } from './icons.ts'
 import { firstLine, latestLine } from './present.ts'
 import { StepUsageAccumulator, totalTokens, type TokenUsageTotals } from './token-usage.ts'
-// The command/run + command/done event merge (SessionEventMap extension).
+import { normalizeSessionPresetId } from './runtime/session-preset.ts'
+// Load the official command event declarations.
 import type {} from '@deepseek-ai/dsh-commands'
-// The subagent/descriptor event merge (SessionEventMap extension).
+// Load the official subagent event declarations.
 import type {} from '@deepseek-ai/dsh-subagent'
-// The workflow run/member event merges (SessionEventMap extension).
+// Load the official workflow event declarations.
 import type {} from '@deepseek-ai/dsh-tool-workflow/types'
-// The llm/retry + llm/retry-started event merges (SessionEventMap extension).
+// Load the official retry event declarations.
 import type {} from '@deepseek-ai/dsh-llm-retry'
 
 /** One renderable message in the TUI transcript. */
@@ -1491,7 +1492,9 @@ export function renderTranscriptMarkdown(session: {
   const lines: string[] = [
     `# Session ${session.header.id}`,
     `- cwd: ${session.header.cwd ?? 'unknown'}`,
-    ...session.header.agentPreset === undefined ? [] : [`- agent preset: ${session.header.agentPreset}`],
+    ...normalizeSessionPresetId(session.header.agentPreset) === undefined
+      ? []
+      : [`- agent preset: ${normalizeSessionPresetId(session.header.agentPreset)}`],
     '',
   ]
   for (const event of session.events) {

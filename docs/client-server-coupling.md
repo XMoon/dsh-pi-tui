@@ -71,7 +71,8 @@
 | `src/skill-catalog-refresh.ts` | `import:dsh-agent` | Coordinator; agent-scoped refresh. |
 | `src/subagent-viewer-submit.ts` | (structural `ctx.subagents` followup surface, injected) | The pure follow-up delivery core; consumed by the `SubagentPort` (M1.2). |
 | `src/runtime/direct/subagent-direct.ts` | `subagents` | The Direct `SubagentPort` adapter (M1.2) — the ONLY module in the follow-up path that touches `ctx`; the runner depends on the port. Baseline entry added by the M1.2 relocation. |
-| `src/runtime/direct/session-direct.ts` | `sessionPersistence`, `sessionQuery`, `tokenMeter` | The Direct `SessionReader` adapter (M1.3, extended M1.11) — owns the live-preferred listing, the bounded content search, the cached title batches, the best-effort context measurement (`measureContext`, the /status row) and the export read (`readExportData`); the consumer (commands.ts) depends on the port. Baseline entries added by the M1.3/M1.11 relocations. |
+| `src/runtime/direct/session-direct.ts` | `import:dsh-session`, `sessionPersistence`, `sessionQuery`, `tokenMeter` | The Direct `SessionReader` adapter (M1.3, extended M1.11) — owns the live-preferred listing, the bounded content search, the cached title batches, the best-effort context measurement (`measureContext`, the /status row) and the export read (`readExportData`); the consumer (commands.ts) depends on the port. The runtime `SessionId` import was added for the DSH 0.1.2 semantic query boundary. Baseline entries added by the M1.3/M1.11 relocations. |
+| `src/runtime/direct/session-preset-direct.ts` | `import:dsh-agent`, `import:dsh-session`, `sessionPersistence` | The Direct session-preset adapter — materializes cold sessions through DSH's official `agentPreset` projection before resume; the pure legacy `code` → `ptc` normalization stays in `src/runtime/session-preset.ts`. |
 | `src/runtime/direct/session-writer-direct.ts` | `sessionTitle` | The Direct `SessionWriter` adapter (M1.4, contract round 2) — identity-based (sessionId) operations over the live agents (runner-injected resolver) and the `ctx.sessionTitle` service; steer ORCHESTRATION stays in the runner (steerAll), the FINAL steer delivery goes through this port. Baseline entry added by the M1.4 relocation. |
 | `src/runtime/host-file-port.ts` | (none) | The Host-file port interface (M1.10, contract review) — path-only candidates (`{path, kind}`, the official `FileReferenceCandidate` shape); the TUI's ranking/quoting/`@`-insertion value/label/description/directory-continuation are CLIENT policy in mentions.ts, never Host data. Zero Host coupling. |
 | `src/runtime/direct/host-file-direct.ts` | (fs only; no ctx services) | The Direct `HostFilePort` adapter (M1.10) — the ONLY module in the `@`-file path that touches the filesystem: fd discovery (fork delegation) or the bounded recursive fallback scan, stat existence probes, `~` expansion. Returns path-only DTOs; discovery bounds only, no presentation. No ctx-service coupling (baseline-free). |
@@ -85,7 +86,6 @@
 | `src/model-menu.ts` | `import:dsh-agent` | Type-only model selection types. |
 | `src/sessions.ts` | `import:dsh-session` | Type-only session types. |
 | `src/present.ts` | `import:dsh-session` | Type-only session event types in presentation. |
-| `src/preset-events.ts` | `import:dsh-session` | Type-only. |
 | `src/stats.ts` | `import:dsh-session` | Type-only. |
 | `src/transcript.ts` | `import:dsh-session` | Type-only; transcript folding must consume the client session event/window, not transport (plan §20). |
 

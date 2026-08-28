@@ -27,7 +27,7 @@ import { apply as applyExtensionHost } from '../src/extensions.ts'
 
 /** A minimal provider fiber that provides tuiStartup (the host's gate). */
 function startupPlugin(ctx: Context): void {
-  ctx.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+  ctx.provide(TUI_STARTUP_SERVICE, {})
 }
 
 /** One registered contribution (typed per slot contract shape). */
@@ -973,7 +973,7 @@ test('P1-4: a plugin overlay closes automatically when the owner fiber unloads (
   try {
     await ctx.plugin(Loader)
     const startupFiber = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startupFiber
     const hostFiber = ctx.plugin(applyExtensionHost)
@@ -1023,7 +1023,7 @@ test('P1-4: explicit close then fiber unload is idempotent — no double close, 
   try {
     await ctx.plugin(Loader)
     const startupFiber = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startupFiber
     const hostFiber = ctx.plugin(applyExtensionHost)
@@ -1068,7 +1068,7 @@ test('P1-4: an old overlay lease is INERT after its surface disposes; it never m
   try {
     await ctx.plugin(Loader)
     const startupFiber = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startupFiber
     const hostFiber = ctx.plugin(applyExtensionHost)

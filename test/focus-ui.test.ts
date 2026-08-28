@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TranscriptFolder, windowMessages } from '../src/transcript.ts'
@@ -47,7 +47,7 @@ function runningTurn(seqBase: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'locating the transcript path…' } }, T0 + 2, seqBase + 2),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/transcript.ts' }) }, T0 + 3, seqBase + 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/transcript.ts' }) }, T0 + 3, seqBase + 3),
   ]
 }
 
@@ -58,8 +58,8 @@ function settleEvents(seqBase: number): SessionEvent[] {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 5000, seqBase + 4),
     eventAt('assistant/message', {
@@ -80,7 +80,7 @@ function miniTurn(turn: number, baseSeq: number): SessionEvent[] {
   return [
     eventAt('turn/start', { turn }, T0 + baseSeq, baseSeq),
     eventAt('user/message', { id: MessageId(`u${turn}`), role: 'user', content: [{ type: 'text', text: `prompt ${turn}` }], source: { kind: 'user' } }, T0 + baseSeq + 1, baseSeq + 1),
-    eventAt('tool/call', { turn, step: 0, callId: CallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + baseSeq + 2, baseSeq + 2),
+    eventAt('tool/call', { turn, step: 0, callId: ToolCallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + baseSeq + 2, baseSeq + 2),
     eventAt('assistant/message', { turn, step: 1, message: { id: MessageId(`a${turn}`), role: 'assistant', content: [{ type: 'text', text: `done ${turn}` }], source: { kind: 'model', provider: 'p', model: 'm' } } }, T0 + baseSeq + 3, baseSeq + 3),
     eventAt('turn/end', { turn, reason: { kind: 'completed' } }, T0 + baseSeq + 4, baseSeq + 4),
   ]
@@ -177,7 +177,7 @@ test('new events stream into the RUNNING expansion', async () => {
   // The turn keeps running: a second tool call + reasoning land live.
   folder.apply([
     eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'checking turn boundaries…' } }, T0 + 4000, 10),
-    eventAt('tool/call', { turn: 1, step: 1, callId: CallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 4100, 11),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 4100, 11),
   ])
   show(app, folder)
   await vt.waitForRender()
@@ -397,7 +397,7 @@ test('a session switch with the SAME turn number and revision renders the NEW ac
   const folderA = new TranscriptFolder()
   folderA.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('ca'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('ca'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, T0 + 1, 1),
   ])
   app.setFocusMode(true)
   show(app, folderA)
@@ -410,7 +410,7 @@ test('a session switch with the SAME turn number and revision renders the NEW ac
   const folderB = new TranscriptFolder()
   folderB.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('cb'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cb'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 1, 1),
   ])
   app.clearSessionOverrides() // the runner's session-switch cleanup
   show(app, folderB)
@@ -958,7 +958,7 @@ test('regular Focus expanded roots render large diffs in FULL (no mouse, no cap)
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('tool/call', {
-      turn: 1, step: 0, callId: CallId('cdiff'),
+      turn: 1, step: 0, callId: ToolCallId('cdiff'),
       name: 'edit',
       arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }),
     }, T0 + 1, 1),
@@ -999,7 +999,7 @@ test('cache identity: Ctrl+O ON caps a large diff, then /focus on FULL-REVEALS t
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
     eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
   ])
   // Focus OFF + Ctrl+O ON: the ordinary fold expands the card, the diff CAPS.
@@ -1037,7 +1037,7 @@ test('cache identity: /focus off restores the ordinary CAPPED diff presentation 
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
     eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
   ])
   // Focus ON + Ctrl+O ON: the derived root full-reveals the diff.
@@ -1112,7 +1112,7 @@ function multilineBashTurn(seqBase: number): SessionEvent[] {
       content: [{ type: 'text', text: 'run the patch' }],
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: MULTILINE_BASH_COMMAND }) }, T0 + 2, seqBase + 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: MULTILINE_BASH_COMMAND }) }, T0 + 2, seqBase + 2),
   ]
 }
 
@@ -1129,8 +1129,8 @@ function settleMultilineBashTurn(seqBase: number): SessionEvent[] {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 5000, seqBase + 3),
     eventAt('assistant/message', {
@@ -1263,13 +1263,13 @@ function settledThoughtTurn(turn: number, baseSeq: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + baseSeq + 1, baseSeq + 1),
     eventAt('assistant/chunk', { turn, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: `reasoning ${turn} line A\nreasoning ${turn} line B` } }, T0 + baseSeq + 2, baseSeq + 2),
-    eventAt('tool/call', { turn, step: 0, callId: CallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + baseSeq + 3, baseSeq + 3),
+    eventAt('tool/call', { turn, step: 0, callId: ToolCallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + baseSeq + 3, baseSeq + 3),
     eventAt('tool/result', {
       turn, step: 0,
       message: {
         id: MessageId(`r${turn}`), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId(`c${turn}`), content: [{ type: 'text', text: lines }] }],
-        source: { kind: 'tool', callId: CallId(`c${turn}`) },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId(`c${turn}`), content: [{ type: 'text', text: lines }] }],
+        source: { kind: 'tool', callId: ToolCallId(`c${turn}`) },
       },
     }, T0 + baseSeq + 4, baseSeq + 4),
     eventAt('assistant/message', {
@@ -1302,17 +1302,17 @@ function offscreenThoughtTurn(seqBase: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the projection…' } }, T0 + 2, seqBase + 2),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'seq 1 120' }) }, T0 + 3, seqBase + 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'seq 1 120' }) }, T0 + 3, seqBase + 3),
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: lines }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: lines }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, seqBase + 4),
     eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'cross-checking the tail…' } }, T0 + 5, seqBase + 5),
-    eventAt('tool/call', { turn: 1, step: 2, callId: CallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'echo done' }) }, T0 + 6, seqBase + 6),
+    eventAt('tool/call', { turn: 1, step: 2, callId: ToolCallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'echo done' }) }, T0 + 6, seqBase + 6),
     eventAt('assistant/message', {
       turn: 1, step: 3,
       message: {
@@ -1957,13 +1957,13 @@ function reasoningTailTurn(seqBase: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, T0 + 2, seqBase + 2),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'x' }) }, T0 + 3, seqBase + 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'x' }) }, T0 + 3, seqBase + 3),
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, seqBase + 4),
     // The reasoning-only assistant message: zero rendered rows.
@@ -2186,13 +2186,13 @@ test('gutter blocker: the fullscreen Focus hit-map stays aligned across the disc
       source: { kind: 'user' },
     }, T0 + 1, 1),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'alpha reasoning\nalpha latest' } }, T0 + 2, 2),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 3, 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 3, 3),
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, 4),
     eventAt('assistant/message', {
@@ -2294,13 +2294,13 @@ test('the truncated marker stays ONE row inside the gutter: a click below it sti
       content: [{ type: 'text', text: 'second run' }],
       source: { kind: 'user' },
     }, T0 + 5, 5),
-    eventAt('tool/call', { turn: 2, step: 0, callId: CallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 2, step: 0, callId: ToolCallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 6, 6),
     eventAt('tool/result', {
       turn: 2, step: 0,
       message: {
         id: MessageId('r2'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c2') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c2') },
       },
     }, T0 + 7, 7),
     eventAt('assistant/message', {

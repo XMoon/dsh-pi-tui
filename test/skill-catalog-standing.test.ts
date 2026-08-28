@@ -27,7 +27,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentRegistry, { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -69,6 +69,7 @@ function fixtureProvider(): SkillProvider {
 async function mountRuntime(): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(Loader)
+  ctx.baseUrl = pathToFileURL(`${process.cwd()}/`).href
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, {})
@@ -80,6 +81,7 @@ async function mountRuntime(): Promise<Context> {
   await ctx.plugin(AgentPresets, {
     default: 'fixture',
     roots: [{ path: FIXTURE_ROOT, trust: 'system' }],
+    includeShippedRoot: false,
     includeUserRoot: false,
   })
   return ctx

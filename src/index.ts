@@ -30,16 +30,17 @@ import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { CallId, ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ToolCallId, ContentBlock } from '@deepseek-ai/dsh-llm'
 // P7d: the subagent registry merge for ctx.subagents (listChildren/interrupt).
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-// P6: the agent-preset roster — ctx.agentPresets, the session preset
-// resolver, and the `agent-preset/selected` session event map.
+import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
+// P6: the agent-preset roster — ctx.agentPresets and the
+// `agent-preset/selected` session projection owned by DSH.
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
-import type {} from './preset-events.ts'
+import type {} from '@deepseek-ai/dsh-tool-todo'
+import { normalizeSessionPresetId } from './runtime/session-preset.ts'
+import { recordedSessionPreset, sessionPresetOf } from './runtime/direct/session-preset-direct.ts'
 // Empty type imports carry the loader Context merge for the settlement await
 // and the cmdline Context merge for the appExit host value.
 import type {} from '@deepseek-ai/cordis-plugin-loader'
@@ -1257,14 +1258,28 @@ export async function composeAgent(
       },
     }
   }
-  const resolvedId = (await presets.resolve(presetId)).id
+  if (presetId === 'code') {
+    throw new Error('preset "code" was renamed to "ptc"; use the canonical ptc preset')
+  }
+  // DSH resolves an omitted id from its persisted default before returning a
+  // preset. Normalize that data first, otherwise a legacy default of `code`
+  // is rejected by the official roster before we can map it to `ptc`.
+  const requestedPresetId = presetId === undefined
+    ? normalizeSessionPresetId(presets.defaultId) ?? presets.defaultId
+    : presetId
+  const resolved = await presets.resolve(requestedPresetId)
+  // Normalize once more at the session-composition identity boundary so the
+  // official `ptc` mount is used and the newly created header records only
+  // `ptc`. An explicit new `--preset code` remains invalid rather than
+  // becoming a new alias.
+  const resolvedId = normalizeSessionPresetId(resolved.id) ?? resolved.id
   return {
     agentPreset: resolvedId,
     setup: async (agentCtx: Context): Promise<void> => {
       installModelSelection(agentCtx, selected)
       await presets.mount(agentCtx, resolvedId)
       // Focus is a TUI surface policy, installed AFTER the preset mount so
-      // it exists consistently across every preset (standard/code/minimal/
+      // it exists consistently across every preset (standard/ptc/minimal/
       // cordis) without depending on what the preset itself installs
       // (plan §9.1). A preset recompose that only swaps preset-owned rows
       // keeps this outer scoped section; a full agent rebuild re-runs this
@@ -1276,31 +1291,14 @@ export async function composeAgent(
 }
 
 /**
- * The preset a persisted session actually runs, from its log (newest
- * selection winning), or undefined when persistence is absent, the session is
- * unknown, or its log predates the roster.
+ * The preset a persisted session actually runs, resolved by the DSH 0.1.2+
+ * session projection (header initialization plus the latest selection event).
  * @param ctx - the runner context.
  * @param sessionId - the persisted session id.
  * @returns the recorded preset id, or undefined to compose the default.
  */
 export async function recordedPreset(ctx: Context, sessionId: string): Promise<string | undefined> {
-  const persistence = ctx.get('sessionPersistence')
-  if (persistence === undefined) return undefined
-  let header: SessionHeader | undefined
-  try {
-    header = (await persistence.list()).find(candidate => candidate.id === sessionId)
-  } catch {
-    return undefined
-  }
-  if (header === undefined) return undefined
-  let events: readonly SessionEvent[] = []
-  try {
-    events = (await persistence.inspect(SessionId(sessionId))).events
-  } catch {
-    // Header-only fallback: an unreadable log still resumes under the
-    // creation-time preset rather than the deployment default.
-  }
-  return resolveSessionPreset({ header, events })
+  return recordedSessionPreset(ctx, sessionId)
 }
 
 /** The session surface {@link recomposeBlank} needs: its log and the append seam. */
@@ -1333,6 +1331,7 @@ export async function recomposeBlank(
 ): Promise<RecomposeOutcome> {
   const presets = ctx.get('agentPresets')
   if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
+  if (id === 'code') throw new Error('preset "code" was renamed to "ptc"; use the canonical ptc preset')
   if (agent.session.events.some(event => event.type === 'turn/start')) return { kind: 'locked' }
   const preset = await presets.recompose(agent.ctx, id)
   agent.session.append('agent-preset/selected', { agentPreset: preset.id })
@@ -1988,10 +1987,10 @@ export function apply(ctx: Context, config: Config): void {
           return { kind: 'unavailable' }
       }
     }
-    /** The preset the live agent runs on, when the deployment composes one. */
+    /** The preset the live agent runs on, read from the DSH session projection. */
     const currentPreset = (): string | undefined => {
       if (liveAgent === undefined) return undefined
-      return ctx.get('agentPresets')?.composedPreset(liveAgent.ctx) ?? resolveSessionPreset(liveAgent.session)
+      return sessionPresetOf(ctx, liveAgent.session)
     }
     // Incremental fold state for the live session's log; reset on switch. The
     // folder/stats/goal stay empty until a session exists (deferred start).
@@ -3084,7 +3083,7 @@ export function apply(ctx: Context, config: Config): void {
       }, REPAINT_FLUSH_MS)
     }
     // Tool-call arguments by callId, for the approval-preview dialog.
-    const callArgs = new Map<CallId, string>()
+    const callArgs = new Map<ToolCallId, string>()
     // The in-flight compaction's id (paired start/end in the firehose): a
     // stale end must never clear a NEWER compaction's footer/busy state.
     let compactingId: string | undefined
@@ -5916,6 +5915,7 @@ export function apply(ctx: Context, config: Config): void {
       const sourceGeneration = sessionGeneration
       const commitHost: RewindCommitHost = {
         sessionCwd: () => sessionCwd(),
+        sessionPreset: (session) => sessionPresetOf(ctx, session),
         compose,
         agents: backend.sessionLifecycle,
         liveIdentity: () => ({ sessionId: liveAgent?.session.id, generation: sessionGeneration }),
@@ -6242,7 +6242,7 @@ export function apply(ctx: Context, config: Config): void {
         }
       } else if (event.type === 'tool/result') {
         const callId = event.data.message.content[0]?.toolCallId
-        callArgs.delete(callId ?? ('' as CallId))
+        callArgs.delete(callId ?? ('' as ToolCallId))
         // The delegation settled: drop it from the pending list and remember
         // whether the user is viewing the child this call spawned, so after
         // the event lands in the main folder we can pop back to the main
@@ -6392,9 +6392,9 @@ export function apply(ctx: Context, config: Config): void {
     // selection. All three events are capability-optional: an absent llm /
     // settings / credentials service never mounts them, and a throwing
     // listener is contained by the event bus (the refresh is best-effort).
-    // dsh 0.1.1-rc.1 split the credential update event into the reference
-    // half and the durable-record half; both change the same surface, so
-    // they share one refresh callback.
+    // The credential update surface has reference and durable-record events;
+    // both change the same footer/welcome state, so they share one refresh
+    // callback.
     ctx.on('llm/adapters-updated', () => { refreshStatus(); updateWelcomeCard() })
     ctx.on('settings/document-updated', (ns) => {
       if (ns === settingsNamespace('llm-pi-ai') || ns === settingsNamespace('llm-deepseek')) {
@@ -6459,26 +6459,24 @@ export function apply(ctx: Context, config: Config): void {
     })
     // The interactive question answerer: ask_user_question tool calls become
     // dialog flows; the tool receives the structured answers.
-    backend.interaction.registerQuestionProvider({
-        ask: async (request) => {
-          const answers = await app.askQuestions(request.questions.map(question => ({
-            id: question.id,
-            question: question.question,
-            ...question.header !== undefined ? { header: question.header } : {},
-            ...question.detail !== undefined ? { detail: question.detail } : {},
-            ...question.options !== undefined ? { options: question.options } : {},
-            ...question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {},
-            ...question.intent !== undefined ? { intent: question.intent } : {},
-          })), request.signal)
-          return {
-            answers: answers.map(answer => ({
-              id: answer.id,
-              selected: answer.selected,
-              ...answer.custom !== undefined ? { custom: answer.custom } : {},
-            })),
-          }
-        },
-      })
+    backend.interaction.registerQuestionProvider(async (request) => {
+      const answers = await app.askQuestions(request.questions.map(question => ({
+        id: question.id,
+        question: question.question,
+        ...question.header !== undefined ? { header: question.header } : {},
+        ...question.detail !== undefined ? { detail: question.detail } : {},
+        ...question.options !== undefined ? { options: question.options } : {},
+        ...question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {},
+        ...question.intent !== undefined ? { intent: question.intent } : {},
+      })), request.signal)
+      return {
+        answers: answers.map(answer => ({
+          id: answer.id,
+          selected: answer.selected,
+          ...answer.custom !== undefined ? { custom: answer.custom } : {},
+        })),
+      }
+    })
   })().catch((error: unknown) => {
     // Terminal-total final catch of the startup lifecycle root: error
     // observation, logging, abort, dispose and exit are each individually

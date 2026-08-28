@@ -137,6 +137,16 @@ test('headerToPickerRow maps a header onto the row shape', () => {
   assert.equal(row.live, true)
 })
 
+test('headerToPickerRow normalizes the legacy persisted code id', () => {
+  const row = headerToPickerRow({
+    version: 0,
+    id: SessionId('session-legacy'),
+    createdAt: 42,
+    agentPreset: 'code',
+  }, false)
+  assert.equal(row.preset, 'ptc')
+})
+
 test('loadSessionTitles uses the sessionQuery batch when mounted', async () => {
   const fakeQuery = {
     readTitleSnapshots: async (ids: readonly string[]) =>
@@ -169,6 +179,17 @@ test('loadSessionTitles falls back to persistence inspections', async () => {
   assert.equal(titles.get('session-a'), 'alpha title')
   assert.equal(titles.has('session-b'), false, 'untitled session must be absent')
   assert.equal(titles.has('session-c'), false, 'missing session must be absent, not throw')
+})
+
+test('loadSessionTitles preserves an unsupported session-format refusal', async () => {
+  const refusal = Object.assign(new Error('unknown durable event'), { name: 'SessionFormatUnsupportedError' })
+  const fakePersistence = {
+    inspect: async () => { throw refusal },
+  }
+  await assert.rejects(
+    loadSessionTitles(undefined, fakePersistence as never, ['session-unknown']),
+    error => error === refusal,
+  )
 })
 
 test('loadSessionTitles honors an aborted signal', async () => {

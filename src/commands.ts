@@ -19,9 +19,9 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
-import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import { createForkedAgent } from './session-fork.ts'
+import { normalizeSessionPresetId } from './runtime/session-preset.ts'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { mergeDraft } from './steer.ts'
@@ -180,23 +180,19 @@ export function sessionPickerCategories(
 /**
  * Display copy for the four shipped agent presets, fixed in English — the
  * web surface's `BUILT_IN_PRESET_KEYS` mapping (`dsh-client-ui-agent-preset`),
- * TUI-side. The EFFECTIVE roster root is the dsh install's own
- * `config/agent-presets`: the dsh CLI's profile composition replaces this
- * bundle's shipped root with that one at boot (the `composeProfile`
- * agent-presets overlay), and its preset.yml language is not ours to
- * control. Mapping the known ids keeps the picker English regardless of
+ * TUI-side. The effective roster root is the DSH agent-presets package's
+ * official shipped root; its preset metadata language is not ours to control. Mapping the known ids keeps the picker English regardless of
  * what the files say; everything else renders file metadata. Names follow
- * the upstream English locale (`presetCodeName` is 'PTC mode' since dsh
- * 0.1.0-rc.7, renamed from 'Code mode').
+ * the upstream English locale (`presetCodeName` is 'PTC mode').
  */
 const BUILT_IN_PRESET_COPY: Readonly<Record<string, { name: string; description: string }>> = {
   standard: {
     name: 'Standard mode',
     description: 'Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.',
   },
-  code: {
+  ptc: {
     name: 'PTC mode',
-    description: 'All Standard mode capabilities, with tools exposed through the Code Mode SDK so the model can combine multi-step operations in one TypeScript program.',
+    description: 'All Standard mode capabilities, with tools exposed through the PTC mode SDK so the model can combine multi-step operations in one TypeScript program.',
   },
   minimal: {
     name: 'Minimal mode',
@@ -2696,19 +2692,25 @@ export function registerTuiCommands(
         // override (run-local pending or launch-time --preset) masks the
         // new default — the masked case must not re-read a preset the next
         // session will not compose on.
+        const canonical = normalizeSessionPresetId(rest) ?? rest
         try {
-          await runner.config.presetDefault.set(rest)
+          // Validate before writing settings. `code` is accepted only as a
+          // legacy persisted identity and is rewritten to the official `ptc`
+          // id; it is never a selectable roster entry.
+          await presets.resolve(canonical)
+          await runner.config.presetDefault.set(canonical)
         } catch (error) {
           return { kind: 'error', text: safeErrorMessage(error) }
         }
         if (runner.effectivePresetId === undefined) {
           const outcome = await runner.refreshCatalog({
             source: 'preset',
-            target: { kind: 'preset', presetId: rest },
+            target: { kind: 'preset', presetId: canonical },
           })
           if (outcome.kind === 'applied' && outcome.notice !== undefined) app.notify(outcome.notice, 'error')
         }
-        return { kind: 'success', text: `default preset set: ${rest}` }
+        const rename = canonical !== rest ? ` (renamed from ${rest})` : ''
+        return { kind: 'success', text: `default preset set: ${canonical}${rename}` }
       }
       // Selecting swaps the composition; only a blank session (no turn
       // has run yet) may do so — a started conversation's history was
@@ -2718,6 +2720,9 @@ export function registerTuiCommands(
       // preset the next session composes on (nothing is created here).
       const applyPresetSelection = async (id: string):
         Promise<{ kind: 'pending'; preset: string } | { kind: 'switched'; preset: string } | { kind: 'locked'; sessionId: string }> => {
+        if (id === 'code') {
+          throw new Error('preset "code" was renamed to "ptc"; use /preset ptc')
+        }
         if (liveAgent === undefined) {
           const resolved = await presets.resolve(id)
           // A roster that vanished between the availability check and the
@@ -3066,17 +3071,16 @@ export function registerTuiCommands(
       // no rollback attempt).
       const sessionId = SessionId(`session-${randomUUID()}`)
       const childCwd = source.session.header.cwd || runner.sessionCwd()
-      // The concrete preset id is resolved ONCE and rides the create (a
-      // rejected create is NEVER retried — the first DSH call may have left
-      // a hidden lifecycle, so the target is PINNED immediately). The
-      // composition setup stays inside the Direct session lifecycle —
-      // the command surface only ever sees the identity (migration M1.11).
-      const resolved = await runner.catalog.presets.resolve(resolveSessionPreset(source.session))
-      const forkOptions = { provider: source.options.provider, model: source.options.model }
+      // The current preset is read once from the DSH projection and rides the
+      // create (a rejected create is NEVER retried — the first DSH call may
+      // have left a hidden lifecycle, so the target is PINNED immediately).
+      // The composition setup stays inside the Direct session lifecycle — the
+      // command surface only ever sees the identity (migration M1.11).
+      const sourcePreset = runner.currentPreset()
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd: childCwd } },
         fresh: true,
-        create: () => createForkedAgent(runner, source, seed, sessionId, resolved.id),
+        create: () => createForkedAgent(runner, source, seed, sessionId, sourcePreset),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
@@ -3144,9 +3148,9 @@ export function registerTuiCommands(
     handler: async (invocation) => {
       const credentials = runner.config.credentials
       if (!credentials.available()) return { kind: 'error', text: 'credentials service unavailable' }
-      // The two credential planes (dsh 0.1.1-rc.1): reference targets from
-      // the provider catalog, authorization flows from the seam. An absent
-      // authorization service degrades to the reference-only surface.
+      // The two credential planes: reference targets from the provider
+      // catalog, authorization flows from the seam. An absent authorization
+      // service degrades to the reference-only surface.
       const targets = runner.config.authorization.listTargets()
       const options = runner.config.providers.listCredentialOptions()
       const merged = mergeLoginTargets(options, targets)

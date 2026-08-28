@@ -45,11 +45,10 @@ function fakeAgent(sessionId: string, events: readonly { type: string }[] = []):
 }
 
 /** The four shipped rows WITH Chinese metadata, exactly as the dsh install's
- * own `config/agent-presets` ships them (the CLI's composeProfile overlay
- * makes that root the effective roster). */
+ * agent-presets package ships them in its official shipped root. */
 const SHIPPED_ROWS = [
   { id: 'standard', name: '标准模式', description: '功能完整的编码 Agent。', trust: 'system' },
-  { id: 'code', name: 'PTC 模式', description: 'Code Mode SDK。', trust: 'system' },
+  { id: 'ptc', name: 'PTC 模式', description: 'Code Mode SDK。', trust: 'system' },
   { id: 'minimal', name: '极简模式', description: '双工具编码 Agent。', trust: 'system' },
   { id: 'cordis', name: '创造模式', description: '自定义 Agent preset。', trust: 'system' },
 ]
@@ -325,7 +324,7 @@ test('/preset with no session opens the English roster and creates nothing', asy
   assert.deepEqual(t.ensureCalls, [], '/preset must not create a session')
   const view = await t.view()
   assert.ok(view.includes('Standard mode (standard)'), `roster row missing:\n${view}`)
-  assert.ok(view.includes('PTC mode (code)'), `roster row missing:\n${view}`)
+  assert.ok(view.includes('PTC mode (ptc)'), `roster row missing:\n${view}`)
   assert.ok(view.includes('Minimal mode (minimal)'), `roster row missing:\n${view}`)
   assert.ok(view.includes('Creator mode (cordis)'), `roster row missing:\n${view}`)
   assert.ok(!view.includes('标准模式'), `Chinese preset name leaked:\n${view}`)
@@ -354,6 +353,15 @@ test('/preset <id> with no session rejects an unknown id', async () => {
   assert.match(result.text, /not found/)
   assert.equal(t.pending.value, undefined)
   assert.deepEqual(t.ensureCalls, [])
+  t.app.stop()
+})
+
+test('/preset code is not a selectable alias for the official ptc preset', async () => {
+  const t = setup({})
+  const result = await t.run('code') as { kind: string; text: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /renamed to "ptc"/)
+  assert.equal(t.pending.value, undefined)
   t.app.stop()
 })
 
@@ -446,23 +454,23 @@ function standingOutcome(skills: string[], notice?: string): CatalogRefreshOutco
 
 test('/preset <id> with no session requests a STANDING refresh of the new preset, creating nothing', async () => {
   const t = setup({ refreshCatalog: async () => standingOutcome(['glab']) })
-  const result = await t.run('code')
-  assert.equal(t.pending.value, 'code')
+  const result = await t.run('ptc')
+  assert.equal(t.pending.value, 'ptc')
   assert.equal(t.refreshes.length, 1, 'the preset choice must request one standing refresh')
   assert.equal(t.refreshes[0]?.source, 'preset')
-  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'ptc' })
   assert.deepEqual(t.ensureCalls, [], '/preset must not create a session')
   t.app.stop()
 })
 
 test('/preset <id> with no session surfaces the standing degradation notice', async () => {
   const t = setup({
-    refreshCatalog: async () => standingOutcome(['global-skill'], 'skill catalog unavailable for preset "code": preset exploded'),
+    refreshCatalog: async () => standingOutcome(['global-skill'], 'skill catalog unavailable for preset "ptc": preset exploded'),
   })
-  const result = await t.run('code') as { kind: string; text: string }
+  const result = await t.run('ptc') as { kind: string; text: string }
   assert.equal(result.kind, 'success')
-  assert.equal(result.text, 'new sessions will start on preset code')
-  assert.equal(t.pending.value, 'code')
+  assert.equal(result.text, 'new sessions will start on preset ptc')
+  assert.equal(t.pending.value, 'ptc')
   await t.view()
   const view = t.vt.getViewport().join('\n')
   assert.ok(view.includes('preset exploded'), `degradation notice missing:\n${view}`)
@@ -478,12 +486,29 @@ test('/preset default <id> with no override requests a standing refresh of the n
       mutate: async (ns, patch) => { mutated.push({ ns, patch }); return undefined },
     },
   })
-  const result = await t.run('default code') as { kind: string; text: string }
+  const result = await t.run('default ptc') as { kind: string; text: string }
   assert.equal(result.kind, 'success')
-  assert.equal(result.text, 'default preset set: code')
+  assert.equal(result.text, 'default preset set: ptc')
   assert.equal(mutated.length, 1)
   assert.equal(t.refreshes.length, 1, 'an unmasked default change must refresh the standing catalog')
-  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'ptc' })
+  t.app.stop()
+})
+
+test('/preset default code rewrites the legacy input to canonical ptc', async () => {
+  const writes: unknown[] = []
+  const t = setup({
+    refreshCatalog: async () => standingOutcome(['glab']),
+    settings: {
+      get: () => undefined,
+      mutate: async (_ns, patch) => { writes.push(patch); return undefined },
+    },
+  })
+  const result = await t.run('default code') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.equal(result.text, 'default preset set: ptc (renamed from code)')
+  assert.deepEqual(writes, [[{ op: 'set', path: ['default'], value: 'ptc' }]])
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'ptc' })
   t.app.stop()
 })
 
@@ -496,7 +521,7 @@ test('/preset default <id> masked by a pending preset does NOT refresh', async (
     },
   })
   t.pending.value = 'minimal'
-  const result = await t.run('default code') as { kind: string; text: string }
+  const result = await t.run('default ptc') as { kind: string; text: string }
   assert.equal(result.kind, 'success')
   assert.equal(t.refreshes.length, 0, 'the pending override masks the new default — no refresh')
   t.app.stop()
@@ -640,15 +665,15 @@ test('/reload unknown theme does not create plugin health', async () => {
 
 test('/reload with a pending preset reports the standing degradation notice', async () => {
   const t = setup({
-    refreshCatalog: async () => standingOutcome([], 'skill catalog unavailable for preset "code": preset exploded'),
+    refreshCatalog: async () => standingOutcome([], 'skill catalog unavailable for preset "ptc": preset exploded'),
   })
-  t.pending.value = 'code'
+  t.pending.value = 'ptc'
   await t.runCommand('reload')
   await t.view()
   const view = t.vt.getViewport().join('\n')
   assert.ok(view.includes('0 human skills'), `skill count missing:\n${view}`)
   assert.ok(view.includes('preset exploded'), `degradation notice missing:\n${view}`)
-  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'ptc' })
   t.app.stop()
 })
 

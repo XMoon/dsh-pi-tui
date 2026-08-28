@@ -25,7 +25,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** A minimal provider fiber that provides tuiStartup (the host's gate). */
 function startupPlugin(ctx: Context): void {
-  ctx.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+  ctx.provide(TUI_STARTUP_SERVICE, {})
 }
 
 async function settle(): Promise<void> {

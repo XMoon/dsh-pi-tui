@@ -18,7 +18,7 @@ import { UNSTABLE_API_LEVEL } from '../src/extension/unstable.ts'
 
 /** A minimal provider fiber that provides tuiStartup (the host's gate). */
 function startupPlugin(ctx: Context): void {
-  ctx.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+  ctx.provide(TUI_STARTUP_SERVICE, {})
 }
 
 /** Mount one plugin fiber (awaited to ACTIVE) and return its disposer. */

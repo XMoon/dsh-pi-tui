@@ -64,8 +64,10 @@ export interface SessionReader {
    * query engine when available, the persistence fallback otherwise).
    * `undefined` = the persistence service is unavailable. */
   list(currentSessionId: string | undefined): Promise<SessionSummary[] | undefined>
-  /** Search persisted session content for a query (bounded: newest 100
-   * sessions, first 20 hits). `undefined` = persistence unavailable. */
+  /** Search semantic session content for a query (bounded: newest 100
+   * sessions, first 20 hits). The Direct adapter uses SessionQuery when its
+   * semantic filter capability is available and only falls back to raw
+   * persistence when that capability is absent/explicitly disabled. */
   search(query: string): Promise<SessionSearchHit[] | undefined>
   /** Load the latest titles for a batch of sessions, newest-first order
    * preserved (bounded, cached under the TUI home). */

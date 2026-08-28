@@ -42,24 +42,17 @@
     - id: authorization
       name: '@deepseek-ai/dsh-authorization'
 
-    # The agent-preset roster. The SHIPPED root is an assembly fact of this
-    # bundle: the four presets (standard/code/minimal/cordis) travel with the
-    # package under config/agent-presets and carry `system` trust. The
-    # expression reads the root from the startup service, so it resolves only
-    # after `tuiStartup` exists — the web bundle's `webserver` row pattern
-    # (no `!!js` at boot time, no HMR race). The writable root is
-    # `dsh-agent-presets`' own default (`includeUserRoot`):
-    # `$DSH_HOME/.agent-presets`, where a person authors their own presets.
+    # Consume DSH 0.1.2's official shipped presets directly. The upstream
+    # service defaults includeShippedRoot/includeUserRoot to true, so this
+    # bundle deliberately owns no duplicate standard/ptc/minimal/cordis root.
+    # The legacy persisted id `code` is normalized at the data boundary to
+    # `ptc`; it is not another preset row.
     - id: agent-presets
       name: '@deepseek-ai/dsh-agent-presets'
-      inject: [tuiStartup]
       config:
         default: standard
-        roots:
-          - path: !!js ctx.tuiStartup.shippedPresetRoot
-            trust: system
 
-    # Host-plane TypeScript runtime: the `code` preset's `tool-presentation`
+    # Host-plane TypeScript runtime: the `ptc` preset's `tool-presentation`
     # row waits for `codeRuntime` and fails the preset at mount without it
     # (same host row the web bundle inserts).
     - id: code-runtime

@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectInteractionPort, type HostContextLike } from '../src/runtime/direct/interaction-direct.ts'
-import type { UserQuestionProvider } from '@deepseek-ai/dsh-user-questions'
+import type { UserQuestionProvider } from '../src/runtime/interaction-port.ts'
 
 function host(services: Record<string, unknown>, events: Array<string | ((req: unknown, next: unknown) => unknown)> = []): HostContextLike {
   return {
@@ -30,15 +30,14 @@ function port(services: Record<string, unknown>, agentFor?: (sessionId: string) 
   return new DirectInteractionPort(host(services, events), agentFor ?? (() => undefined))
 }
 
-const provider: UserQuestionProvider = {
-  ask: async () => ({ answers: [] }),
-}
+const provider: UserQuestionProvider = async () => ({ answers: [] })
 
-test('registerQuestionProvider registers through the userQuestions service', () => {
-  const registered: unknown[] = []
-  const p = port({ userQuestions: { registerProvider: (p: unknown) => { registered.push(p) } } })
+test('registerQuestionProvider registers on the DSH user-question waterfall', () => {
+  const events: Array<string | ((req: unknown, next: unknown) => unknown)> = []
+  const p = port({ userQuestions: {} }, undefined, events)
   assert.equal(p.registerQuestionProvider(provider), true)
-  assert.deepEqual(registered, [provider])
+  assert.equal(events[0], 'user-questions/request')
+  assert.equal(events[1], provider)
 })
 
 test('registerQuestionProvider reports absent service', () => {

@@ -38,7 +38,7 @@ const settle = async (): Promise<void> => {
 async function mountTree(ctx: Context): Promise<{ builtinsFiber: unknown }> {
   await ctx.plugin(Loader)
   const startupFiber = ctx.plugin((c) => {
-    c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+    c.provide(TUI_STARTUP_SERVICE, {})
   })
   await startupFiber
   const hostFiber = ctx.plugin(applyExtensionHost)
@@ -108,7 +108,7 @@ test('the builtins render into a live TuiApp and the turn/step counter tracks st
     // Version badge: the installed dsh version first, then the bundle
     // version prefixed `tui-` (`[dsh-… · tui-vX.Y.Z]`); without a dsh
     // launcher (as in tests) it degrades to `[tui-vX.Y.Z]`.
-    assert.ok(/\[tui-v\d+\.\d+\.\d+\]/.test(view), `version badge missing:\n${view}`)
+    assert.ok(/\[tui-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\]/.test(view), `version badge missing:\n${view}`)
     assert.ok(view.includes('t0/s0'), `initial turn/step counter missing:\n${view}`)
 
     // State change: the host-native item re-composes from the projected
@@ -186,7 +186,7 @@ test('P0-1: a plugin following the README example registers BEFORE any surface e
   try {
     await ctx.plugin(Loader)
     const startupFiber = ctx.plugin((c) => {
-      c.provide('tuiStartup', { shippedPresetRoot: '/ws' })
+      c.provide('tuiStartup', {})
     })
     await startupFiber
     const hostFiber = ctx.plugin(applyExtensionHost)
@@ -241,7 +241,7 @@ test('the version badge shows the dsh version first, then the tui- bundle versio
   const root = mkdtempSync(join(tmpdir(), 'dsh-version-badge-'))
   const dshDir = join(root, 'node_modules', '@deepseek-ai', 'dsh')
   mkdirSync(join(dshDir, 'bin'), { recursive: true })
-  writeFileSync(join(dshDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.1-rc.1' }))
+  writeFileSync(join(dshDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.2-alpha.1' }))
   const bin = join(dshDir, 'bin', 'dsh')
   writeFileSync(bin, '')
   const previousArgv = process.argv[1]
@@ -267,7 +267,7 @@ test('the version badge shows the dsh version first, then the tui- bundle versio
       await vt.waitForRender()
       const view = vt.getViewport().join('\n')
       assert.ok(
-        /\[dsh-0\.1\.1-rc\.1 · tui-v\d+\.\d+\.\d+\]/.test(view),
+        /\[dsh-0\.1\.2-alpha\.1 · tui-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\]/.test(view),
         `dsh-first badge missing:\n${view}`,
       )
       app.stop()

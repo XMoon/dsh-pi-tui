@@ -107,26 +107,29 @@ export interface HarnessCompatEntry {
   max?: string
   /** The bundle release line that first required this constraint. */
   since: string
-  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.1-rc.1 or later`. */
+  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.2-alpha.1 or later`. */
   requires: string
-  /** What the user must do; placeholders are NOT needed — the message
-   *  builder fills in the requirement and the installed version. */
-  guidance: string
+  /** The target DSH version to install when the current runtime is too old. */
+  upgradeDsh?: string
+  /** The compatible TUI line to install when keeping an old DSH runtime. */
+  fallbackTui?: string
+  /** Special guidance for a range that is not covered by the normal recovery
+   * commands, such as an unvalidated future DSH line. */
+  guidance?: string
 }
 
 /** The compatibility table. */
 export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
-  // Every release before dsh-v0.1.1-rc.1 lacks the split credential events
-  // and the authorization seam; the profile cannot even resolve the
-  // authorization row there. First imposed by bundle 0.3.0.
+  // 0.4 is a new runtime line. Do not retain the historical 0.3 floor here:
+  // the first matching entry is the user-facing source of truth for this
+  // artifact, and older guidance would recommend an unusable 0.1.1 runtime.
   {
-    max: '0.1.1-rc.1',
-    since: '0.3.0',
-    requires: 'DeepSeek Harness 0.1.1-rc.1 or later',
-    guidance: 'Upgrade dsh first, e.g.: npm install -g @deepseek-ai/dsh@0.1.1-rc.1',
+    max: '0.1.2-alpha.1',
+    since: '0.4.0-alpha.1',
+    requires: 'DeepSeek Harness 0.1.2-alpha.1 or later',
+    upgradeDsh: '0.1.2-alpha.1',
+    fallbackTui: '0.3',
   },
-  // Future entries (illustration):
-  //   { max: '0.2.0', since: '0.4.0', requires: '...', guidance: '...' },
 ]
 
 /** The compat entry covering the installed dsh version, or undefined when
@@ -153,11 +156,25 @@ export function bundleVersionLabel(since: string): string {
  * installed harness falls in an incompatible range. `entry` MUST be the
  * entry {@link harnessCompatEntryFor} matched for `installed`. */
 export function incompatibleHarnessMessage(installed: string, entry: HarnessCompatEntry): string {
+  const recovery: string[] = []
+  if (entry.upgradeDsh !== undefined) {
+    recovery.push(
+      'Upgrade DeepSeek Harness:',
+      `  npm install -g @deepseek-ai/dsh@${entry.upgradeDsh}`,
+    )
+  }
+  if (entry.fallbackTui !== undefined) {
+    recovery.push(
+      'Or keep your current Harness and use the compatible TUI line:',
+      `  npm install -g @xmoon76/dsh-pi-tui@${entry.fallbackTui}`,
+    )
+  }
+  if (entry.guidance !== undefined) recovery.push(entry.guidance)
   return [
     `dsh-pi-tui ${bundleVersionLabel(entry.since)} requires ${entry.requires},`,
     `but this installation is running dsh ${installed}.`,
     '',
-    `${entry.guidance}`,
+    ...(recovery.length === 0 ? [] : ['Choose one:', '', ...recovery]),
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
 }
@@ -171,13 +188,6 @@ export interface TuiStartupValues {
   sessionId?: string
   /** `--preset`, the agent preset a fresh session starts on. */
   presetId?: string
-  /**
-   * The shipped agent-preset root bundled with this package. Absolute path of
-   * `config/agent-presets/` beside the built `lib/`; rows configured from the
-   * service (the `agent-presets` roster row) resolve it only after this
-   * service exists, mirroring the web bundle's `webStartup` pattern.
-   */
-  shippedPresetRoot: string
 }
 
 /** This app's command: its flags, its description, and its help text. */
@@ -206,9 +216,9 @@ export function apply(ctx: Context): void {
   const program = tuiCommand()
   program.action(() => {
     // Startup compatibility gate: an incompatible harness (see
-    // HARNESS_COMPAT) cannot even resolve the `@deepseek-ai/dsh-authorization`
-    // row this profile mounts (the package does not exist before 0.1.1-rc.1),
-    // so the loader WILL fail — but the user deserves to see WHY, not a raw
+    // HARNESS_COMPAT) cannot reliably resolve the `@deepseek-ai/dsh-authorization`
+    // row this profile mounts, so the loader WILL fail — but the user deserves
+    // to see WHY, not a raw
     // ERR_MODULE_NOT_FOUND stack. This action runs synchronously while the
     // loader creates the rows, so the actionable message lands on stderr
     // before the loader's own failure report, and this row then fails with
@@ -228,9 +238,6 @@ export function apply(ctx: Context): void {
     ctx.provide(TUI_STARTUP_SERVICE, {
       ...(options.session !== undefined ? { sessionId: options.session } : {}),
       ...(options.preset !== undefined ? { presetId: options.preset } : {}),
-      // `lib/startup.js` → `../config/agent-presets`; the `config` directory
-      // ships with the package (package.json `files`).
-      shippedPresetRoot: join(import.meta.dirname, '..', 'config', 'agent-presets'),
     } satisfies TuiStartupValues)
   })
   parseCmdline(ctx, program)
