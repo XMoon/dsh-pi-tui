@@ -81,6 +81,11 @@ export type KeybindingMutationRunner = (
 export interface KeybindingEditorControllerOptions {
   readonly settings: TuiSettingsConfig | undefined
   readonly manager: HostKeybindingManager
+  /** Project foreign/raw settings fields before a whole-document replace.
+   * The editor owns only `keybindings`; callers may preserve fields whose
+   * authority belongs to another domain without coupling this controller to
+   * that domain. Runs inside the settings mutation transaction. */
+  readonly projectSettingsForWrite?: (doc: TuiSettingsDoc) => TuiSettingsDoc
   readonly onDiagnostic?: (message: string) => void
 }
 
@@ -268,11 +273,13 @@ function applyMutation(
 export class KeybindingEditorController {
   private readonly settings: TuiSettingsConfig | undefined
   private readonly manager: HostKeybindingManager
+  private readonly projectSettingsForWrite: (doc: TuiSettingsDoc) => TuiSettingsDoc
   private readonly onDiagnostic: (message: string) => void
 
   constructor(options: KeybindingEditorControllerOptions) {
     this.settings = options.settings
     this.manager = options.manager
+    this.projectSettingsForWrite = options.projectSettingsForWrite ?? (doc => doc)
     this.onDiagnostic = options.onDiagnostic ?? (() => {})
   }
 
@@ -333,9 +340,14 @@ export class KeybindingEditorController {
         )
         if (newConflict !== undefined) return { kind: 'rejected', message: describeConflict(newConflict) }
 
-        const nextDoc = { ...currentDoc } as TuiSettingsDoc
+        let nextDoc = { ...currentDoc } as TuiSettingsDoc
         if (nextRaw === undefined) delete nextDoc.keybindings
         else nextDoc.keybindings = nextRaw
+        // The controller owns only keybindings. The optional projector keeps
+        // foreign/raw fields on their authoritative layer before the single
+        // whole-document replace; it runs while this queue transaction is
+        // held, so its reads observe the same commit point.
+        nextDoc = this.projectSettingsForWrite(nextDoc)
         // The transaction intentionally has one replace and only projects the
         // same parsed candidate after persistence succeeds.
         await Promise.resolve(settings.replace(nextDoc))
