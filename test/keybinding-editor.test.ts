@@ -135,6 +135,31 @@ test('conditional task affordances are labeled separately from configured shortc
   }
 })
 
+test('a configured Down task shortcut is still rendered as conditional', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ 'app.tasks.open': 'down' })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.tasks.open')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    const view = plain(editor.render(88).join('\n'))
+    assert.match(view, /Configured shortcuts/)
+    assert.match(view, /Down \(conditional\)/)
+    assert.match(view, /when the editor is empty and tasks are active/)
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
 test('editor search is cleared by the first Escape and closes on the second', () => {
   let closed = 0
   const { manager, panel } = makePanel(() => { closed += 1 })

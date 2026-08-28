@@ -34,21 +34,20 @@ const editorContext = deriveKeybindingContext({ focusedSeat: 'editor' })
 
 // ── 4.1 canonical identity ────────────────────────────────────────────────
 
-test('4.1a esc and escape are the SAME physical key (conflict)', () => {
+test('4.1a physical Escape aliases are reserved for the lifecycle path', () => {
   const manager = new HostKeybindingManager()
-  manager.setUserConfiguration(parseUserKeybindings({
+  const parsed = parseUserKeybindings({
     'app.history.search': 'escape',
     'app.todo.toggle': 'esc',
-  }))
-  // The two USER rules collide on the canonical escape key and are
-  // deactivated — neither action may fire on Esc. (The BUILTIN
-  // app.agent.interrupt on escape legitimately survives.)
+  })
+  manager.setUserConfiguration(parsed)
+  // User actions cannot take over the physical Escape lifecycle path; both
+  // aliases are rejected before they can enter the effective keymap.
   assert.equal(manager.resolve('\x1b', editorContext)?.action, 'app.agent.interrupt',
-    'the conflicting aliases must not fire — only the surviving builtin interrupt may')
-  assert.deepEqual(manager.keysFor('app.history.search'), [], 'the conflicted history must not keep escape')
-  assert.deepEqual(manager.keysFor('app.todo.toggle'), [], 'the conflicted todo must not keep esc')
-  assert.ok(manager.diagnosticsList().some(message => message.includes('conflict')),
-    `no conflict diagnostic for aliases: ${manager.diagnosticsList().join(' | ')}`)
+    'only the lifecycle interrupt may resolve physical Escape')
+  assert.deepEqual(manager.keysFor('app.history.search'), ['ctrl+r'], 'history must retain its builtin after rejection')
+  assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+t'], 'todo must retain its builtin after rejection')
+  assert.equal(parsed.diagnostics.filter(message => message.includes('physical Escape')).length, 2)
 })
 
 test('4.1b enter and return are the SAME physical key (conflict)', () => {
@@ -80,16 +79,17 @@ test('4.1c modifier order is canonicalized (ctrl+shift+p == shift+ctrl+p)', () =
   assert.ok(manager.diagnosticsList().some(message => message.includes('conflict')))
 })
 
-test('4.1d leader prefix alias (leader: esc) collides with the escape interrupt', () => {
+test('4.1d leader prefix alias (leader: esc) is lifecycle-reserved', () => {
   const manager = new HostKeybindingManager()
-  manager.setUserConfiguration(parseUserKeybindings({
+  const parsed = parseUserKeybindings({
     leader: 'esc',
     bindings: { 'app.tasks.open': '<leader>t' },
-  }))
+  })
+  manager.setUserConfiguration(parsed)
   assert.equal(manager.leaderMachine(), undefined,
-    'leader: esc must collide with the default escape interrupt and be disabled')
-  assert.ok(manager.diagnosticsList().some(message => message.includes('active host key')),
-    `no leader collision diagnostic: ${manager.diagnosticsList().join(' | ')}`)
+    'leader: esc must be rejected before it can take over physical Escape')
+  assert.ok(parsed.diagnostics.some(message => message.includes('physical Escape')),
+    `no Escape reservation diagnostic: ${parsed.diagnostics.join(' | ')}`)
 })
 
 test('4.1e leader completion aliases are ambiguous (enter vs return)', () => {
@@ -744,11 +744,13 @@ test('5.13 uppercase aliases canonicalize to the same key (ESC/escape, RETURN/en
   assert.equal(canonicalizeKeyId('RETURN' as never), 'enter')
   assert.equal(canonicalizeKeyId('CTRL+RETURN' as never), 'ctrl+enter')
   assert.equal(canonicalizeKeyId('Shift+Ctrl+ESC' as never), 'ctrl+shift+escape')
-  // An uppercase-alias config conflicts with the canonical spelling.
+  // Uppercase aliases still canonicalize before the lifecycle reservation.
   const manager = new HostKeybindingManager()
-  manager.setUserConfiguration(parseUserKeybindings({ 'app.history.search': 'ESC', 'app.todo.toggle': 'escape' }))
-  assert.deepEqual(manager.keysFor('app.history.search'), [], 'ESC and escape must conflict as one key')
-  assert.ok(manager.diagnosticsList().some(message => message.includes('conflict')))
+  const parsed = parseUserKeybindings({ 'app.history.search': 'ESC', 'app.todo.toggle': 'escape' })
+  manager.setUserConfiguration(parsed)
+  assert.deepEqual(manager.keysFor('app.history.search'), ['ctrl+r'], 'rejected ESC must leave the builtin intact')
+  assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+t'], 'rejected escape must leave the builtin intact')
+  assert.equal(parsed.diagnostics.filter(message => message.includes('physical Escape')).length, 2)
 })
 
 test('5.14 the leader prefix and completions reject legacy lifecycle collisions', () => {

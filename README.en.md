@@ -361,7 +361,8 @@ dsh-pi-tui:
 - The recorder reads a real terminal key, parses it with `parseKey`, and stores
   the canonical `KeyId`; known dead, typing-swallowing, terminal-ambiguous, and
   conflicting shortcuts are rejected before saving. Raw `Esc` cancels recording;
-  press `e` in a direct recording to explicitly bind the legal Escape key.
+  press `e` while recording the Host interrupt action to explicitly retain its
+  legal Escape binding; physical Escape is reserved for Host lifecycle paths.
 - Conditional affordances are labeled separately in the editor (for example,
   `Down (conditional)` for the empty-editor task browser) instead of appearing
   as ordinary configured shortcuts.

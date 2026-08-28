@@ -35,6 +35,21 @@ function bindingLabel(binding: KeybindingEditorBinding): string {
   return binding.kind === 'leader' ? formatLeaderSequence(binding.key) : formatKeyId(binding.key)
 }
 
+function isConditionalBinding(row: KeybindingEditorRow, binding: KeybindingEditorBinding): boolean {
+  return row.conditional.some(candidate => candidate.kind === binding.kind && candidate.key === binding.key)
+}
+
+function formatVisibleBindings(row: KeybindingEditorRow, bindings: readonly KeybindingEditorBinding[]): string {
+  const ordinary = bindings.filter(binding => !isConditionalBinding(row, binding))
+  const conditional = bindings
+    .filter(binding => isConditionalBinding(row, binding))
+    .map(binding => `${bindingLabel(binding)} (conditional)`)
+  return [
+    ordinary.length > 0 ? formatEditorBindings(ordinary) : '',
+    conditional.join(' / '),
+  ].filter(part => part !== '').join(' / ') || 'Unbound'
+}
+
 function statusLabel(row: KeybindingEditorRow): string {
   switch (row.status) {
     case 'customized': return 'Customized'
@@ -144,9 +159,13 @@ export class ActionEditorPanel implements Component {
       for (let index = 0; index < editable.length; index += 1) {
         const binding = editable[index]!
         const defaultSuffix = this.row.customized ? '' : ' (default)'
+        const conditionalSuffix = isConditionalBinding(this.row, binding) ? ' (conditional)' : ''
         const conflictSuffix = this.row.conflict ? color.warning(' !') : ''
         selectableLineIndices.push(lines.length)
-        lines.push(selectedLine(`${bindingLabel(binding)}${defaultSuffix}${conflictSuffix}`, this.selectedIndex === index, safeWidth))
+        lines.push(selectedLine(`${bindingLabel(binding)}${defaultSuffix}${conditionalSuffix}${conflictSuffix}`, this.selectedIndex === index, safeWidth))
+      }
+      if (editable.some(binding => isConditionalBinding(this.row, binding))) {
+        lines.push(color.textDim(`  Conditional: ${this.row.conditionalDescription ?? 'when its context is active'}`))
       }
       selectableLineIndices.push(lines.length)
       lines.push(selectedLine('+ Add shortcut', this.selectedIndex === editable.length, safeWidth))
@@ -154,9 +173,11 @@ export class ActionEditorPanel implements Component {
       for (const binding of this.row.defaults) lines.push(`  ${bindingLabel(binding)}`)
     }
 
-    if (this.row.conditional.length > 0) {
+    const conditionalOnly = this.row.conditional.filter(binding => !editable.some(candidate =>
+      candidate.kind === binding.kind && candidate.key === binding.key))
+    if (conditionalOnly.length > 0) {
       lines.push(color.textStrong('Conditional shortcuts'))
-      for (const binding of this.row.conditional) {
+      for (const binding of conditionalOnly) {
         lines.push(color.textDim(`  ${bindingLabel(binding)} (${this.row.conditionalDescription ?? 'when its context is active'})`))
       }
     }
@@ -165,7 +186,7 @@ export class ActionEditorPanel implements Component {
       lines.push(color.textDim(`Default: ${formatEditorBindings(this.row.defaults)}`))
     }
     if (this.row.customized && this.row.effective.length > 0 && !sameBindingList(this.row.effective, configured)) {
-      lines.push(color.textDim(`Effective now: ${formatEditorBindings(this.row.effective)}`))
+      lines.push(color.textDim(`Effective now: ${formatVisibleBindings(this.row, this.row.effective)}`))
     }
     if (this.row.diagnostics.length > 0) {
       for (const diagnostic of this.row.diagnostics.slice(0, 2)) lines.push(color.warning(truncateToWidth(diagnostic, safeWidth)))

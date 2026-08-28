@@ -2788,15 +2788,20 @@ export class TuiApp {
     // of Esc would trip the double-Esc cancel. The framework already filters
     // releases for the focused component; listeners are on their own.
     if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
+    const physicalEscape = matchesKey(data, 'escape')
     // The double-action window is a CONSECUTIVE-press chord of the
     // EFFECTIVE interrupt trigger: any OTHER key between the two presses
-    // disarms it (review E12 — `Esc → Left → Esc` must not rewind;
-    // convergence §4 finding — after a remap, the physical Esc is just
-    // another key, so `Ctrl+X → Esc → Ctrl+X` must NOT fire the double
-    // action; the default Escape matches app.agent.interrupt naturally).
+    // disarms it (review E12 — `Esc → Left → Esc` must not rewind). Physical
+    // Escape is a lifecycle seam only while it remains effective for
+    // app.agent.interrupt; after a remap it is an intervening key and must
+    // disarm the remapped interrupt's double-action window.
     // Releases/repeats already returned above, so only genuine presses
     // reach this line.
-    if (!this.keybindings.matches(data, 'app.agent.interrupt')) this.lastEscapeAt = undefined
+    if (physicalEscape
+      ? !this.keybindings.physicalEscapeEnabled()
+      : !this.keybindings.matches(data, 'app.agent.interrupt')) {
+      this.lastEscapeAt = undefined
+    }
     if (this.activeQuestions !== undefined) {
       return this.handleQuestionKey(data)
     }
@@ -2911,6 +2916,7 @@ export class TuiApp {
     // owns it — so this seam stays physical: it is the focused-editor
     // contract, not a host shortcut.)
     if (this.seatEditor().handleInput !== undefined
+      && !matchesKey(data, 'escape')
       && this.isSubmitKey(data)) {
       this.editorSeatHolder.handleHostFallbackInput(data)
       return { consume: true }
@@ -2923,7 +2929,10 @@ export class TuiApp {
     // callback ALREADY dispatched the action (the manager wires it to
     // dispatchResolvedAction) — this branch only consumes the key.
     const leader = this.keybindings.leaderMachine()
-    if (leader !== undefined) {
+    // Physical Escape is reserved even against a malformed/injected leader
+    // configuration: an idle leader must not arm on Escape. A pending leader
+    // still receives Escape so its documented cancel-consume behavior wins.
+    if (leader !== undefined && !(physicalEscape && !leader.pending)) {
       const outcome = leader.feed(data)
       if (outcome.kind === 'consumed' || outcome.kind === 'cancelled-consume') {
         return { consume: true }
@@ -2936,6 +2945,17 @@ export class TuiApp {
       }
       // cancelled-pass: the pending state was cancelled; the key is
       // processed normally below.
+    }
+
+    // Physical Escape is a reserved lifecycle path, not a normal user action:
+    // route it after leader cancellation but before user keymap resolution.
+    // This keeps idle/busy/replacement-editor Escape behavior intact even if
+    // malformed or future state injects an ordinary action at the same key.
+    // If an editor seam declines it, returning undefined deliberately hands
+    // Escape to the focused component; it must never fall through to a user
+    // action that could steal lifecycle handling.
+    if (physicalEscape) {
+      return this.handleEscapeKey(data, this.keybindings.physicalEscapeEnabled())
     }
 
     // M1/M2: the host semantic action ladder. The keymap resolves the raw
@@ -3055,8 +3075,10 @@ export class TuiApp {
 
   /** Dispatch one resolved semantic action (plan §9). The Esc and exit
    * paths are the two context-heavy host paths and stay host methods,
-   * keyed by the ACTION — a user remap of app.agent.interrupt moves the
-   * whole Esc path to the new key. Returns whether the key was consumed. */
+   * keyed by the ACTION. Physical Escape always takes its lifecycle path;
+   * a user remap of app.agent.interrupt adds a semantic interrupt trigger
+   * whose remapped key bypasses physical-editor Escape seams. Returns whether
+   * the key was consumed. */
   private dispatchResolvedAction(action: AppKeybindingId, data: string, key?: KeyId): boolean {
     if (action === 'app.agent.interrupt') {
       // Convergence §5: the PHYSICAL Escape key runs the full
@@ -3150,20 +3172,19 @@ export class TuiApp {
     return { consume: true }
   }
 
-  /** The PHYSICAL Escape path (app.agent.interrupt on the escape key):
+  /** The PHYSICAL Escape path (when Escape is the effective interrupt key):
    * the editor-owned Escape seams (overlay pass-through, autocomplete
    * pass-through, replacement-editor Esc, shell-mode exit) run FIRST,
-   * then the semantic interrupt core. A REMAPPED interrupt key bypasses
-   * this and goes straight to {@link handleInterruptAction} (convergence
-   * §5 — only physical Escape owns the Escape-specific editor behavior).
-   * Returns undefined when the key must fall through. */
-  private handleEscapeKey(data: string): TuiInputListenerResult | undefined {
-    // The BUSY cancel keeps its Host-owned priority over EVERY physical
-    // Escape seam (shell-mode exit, replacement-editor Esc): a busy Esc
-    // must stop the agent, never vanish into a shell-mode exit or a
-    // plugin's modal handling (convergence §5 — the priority order is
-    // preserved from the pre-split ladder).
-    if (this.busy) {
+   * then the semantic interrupt core. When app.agent.interrupt is remapped,
+   * the same seams still get first refusal but the semantic core is skipped,
+   * preserving the remapped trigger's consecutive-press contract. Returns
+   * undefined when the key must fall through. */
+  private handleEscapeKey(data: string, includeInterrupt = true): TuiInputListenerResult | undefined {
+    // While Escape is the effective interrupt trigger, BUSY cancel keeps its
+    // Host-owned priority over EVERY physical Escape seam (shell-mode exit,
+    // replacement-editor Esc). A remapped interrupt intentionally bypasses
+    // this semantic core, just like its other physical-key distinctions.
+    if (includeInterrupt && this.busy) {
       this.lastEscapeAt = undefined
       this.events.onCancel?.()
       return { consume: true }
@@ -3204,7 +3225,9 @@ export class TuiApp {
     if (this.seatEditor().id === 'host' && this.editor.getInputMode() !== 'prompt' && this.seatEditor().getText() === '') {
       return undefined
     }
-    // After the physical-Escape editor seams, the semantic core runs.
+    // After the physical-Escape editor seams, the semantic core runs only
+    // while Escape is the effective interrupt trigger.
+    if (!includeInterrupt) return undefined
     return this.handleInterruptAction(data)
   }
 

@@ -557,10 +557,19 @@ export class EffectiveKeymap {
   }
 
   /** The visible conditional/composition keys of one action. These are
-   * context-gated affordances rather than ordinary user-editable defaults. */
+   * context-gated affordances rather than ordinary user-editable defaults.
+   * A user rule inherits its action's composition predicate, and may dedupe
+   * the synthesized composition rule when it uses the same key, so source
+   * alone cannot identify every conditional trigger. */
   conditionalKeysFor(action: string): KeyId[] {
+    const compositionKeys = new Set(this.compositionRules
+      .filter(composition => composition.action === action)
+      .map(composition => canonicalizeKeyId(composition.key)))
+    if (compositionKeys.size === 0) return []
     return [...new Set(this.visibleRules
-      .filter(rule => rule.action === action && rule.source === 'composition')
+      .filter(rule => rule.action === action
+        && compositionKeys.has(rule.key)
+        && (rule.source === 'composition' || rule.predicate !== undefined))
       .map(rule => rule.key))]
   }
 

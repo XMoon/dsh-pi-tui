@@ -214,11 +214,7 @@ export function buildKeybindingEditorModel(
         .filter(binding => binding.action === definition.id)
         .map(binding => ({ kind: 'leader' as const, key: binding.key })),
     )
-    const configuredDirectKeys = new Set(
-      configured.filter(binding => binding.kind === 'direct').map(binding => binding.key),
-    )
     const conditional = conditionalKeys
-      .filter(key => !configuredDirectKeys.has(key))
       .map(key => ({ kind: 'direct' as const, key }))
     // Capturing-scope fixed actions are deliberately absent from the Host
     // keymap. Their defaults remain their effective fixed triggers.
