@@ -301,15 +301,11 @@ export class FooterConfiguratorPanel implements Component {
         // key, otherwise the incoming chunk is rescanned for fresh paste
         // markers before ordinary input dispatch.
         if (pendingStart === '\x1b') {
-          // If the continuation contains a fresh complete marker, keep the
-          // scanner in the text flow: replaying the old ESC first could move
-          // out of the picker before the valid marker is seen.
-          if (data.includes(BRACKETED_PASTE_START)) {
-            this.rescanPasteInput(data)
-          } else {
-            this.replayWithoutPaste(pendingStart)
-            this.rescanPasteInput(data)
-          }
+          // This is a rejected standalone ESC, not the marker's first byte;
+          // preserve its normal navigation semantics before rescanning the
+          // new chunk for a fresh marker.
+          this.replayWithoutPaste(pendingStart)
+          this.rescanPasteInput(data)
         } else if (isReplayableInput(candidate)) {
           this.replayWithoutPaste(candidate)
         } else {
@@ -335,9 +331,10 @@ export class FooterConfiguratorPanel implements Component {
       // also handles a complete marker reconstructed from pasteStartPending.
       const before = data.slice(0, startIndex)
       if (before !== '') this.handleInput(before)
-      // Dispatching `before` may have buffered a malformed prefix of its own;
-      // that prefix is not part of the now-complete paste start marker.
-      this.clearPasteStartPending()
+      // Dispatching `before` may have buffered a prefix of its own. Preserve
+      // a genuine lone Escape, but discard longer malformed bytes before the
+      // now-complete paste start marker.
+      this.replayPendingEscapeBeforePaste()
       this.isInPaste = true
       this.pasteBuffer = data.slice(startIndex + BRACKETED_PASTE_START.length)
       this.finishPastes()
@@ -404,6 +401,12 @@ export class FooterConfiguratorPanel implements Component {
     }, delay)
   }
 
+  private replayPendingEscapeBeforePaste(): void {
+    const pending = this.pasteStartPending
+    this.clearPasteStartPending()
+    if (pending === '\x1b') this.replayWithoutPaste(pending)
+  }
+
   private clearPasteStartPending(): void {
     this.pasteStartPending = ''
     this.clearPasteStartTimer()
@@ -435,9 +438,10 @@ export class FooterConfiguratorPanel implements Component {
       if (startIndex >= 0) {
         const before = remaining.slice(0, startIndex)
         if (before !== '') this.handleInput(before)
-        // The ordinary bytes before the next marker may have left a stale
-        // malformed-prefix candidate; it must not leak into this paste.
-        this.clearPasteStartPending()
+        // The ordinary bytes before the next marker may have left a prefix
+        // candidate; preserve a lone Escape, but do not leak a longer
+        // malformed prefix into this paste.
+        this.replayPendingEscapeBeforePaste()
         this.isInPaste = true
         this.pasteBuffer = remaining.slice(startIndex + BRACKETED_PASTE_START.length)
         remaining = ''

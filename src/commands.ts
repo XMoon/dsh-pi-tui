@@ -36,7 +36,12 @@ import type { KeybindingEditorModel } from './keybinding-ui/model.ts'
 import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { FooterComposer } from './footer/composer.ts'
-import { FooterCustomItemCatalog, parseFooterCustomItems, type FooterCustomItemSettings } from './footer/custom-items.ts'
+import {
+  FooterCustomItemCatalog,
+  parseFooterCustomItem,
+  parseFooterCustomItems,
+  type FooterCustomItemSettings,
+} from './footer/custom-items.ts'
 import { FooterItemRegistry } from './footer/item-registry.ts'
 import { FooterConfiguratorModel } from './footer/configurator-model.ts'
 import type { TuiApp } from './tui-app.ts'
@@ -951,6 +956,43 @@ function withUserFooterCustomItems(doc: TuiSettingsDoc, config: ConfigPort): Tui
 }
 
 /**
+ * Merge an intentional `/footer` save into the detached USER raw collection.
+ * The editor owns every recognized v1 text definition: an existing known id
+ * is replaced by its validated draft, and a missing known id is a deliberate
+ * delete. Entries this client cannot parse (future kinds or future fields)
+ * remain unchanged in their original slots so opening and saving the
+ * current UI does not destroy definitions owned by a newer client.
+ */
+function mergeFooterCustomItemsForSave(raw: unknown, saved: readonly FooterCustomItemSettings[]): readonly unknown[] {
+  if (!Array.isArray(raw)) return saved.map(item => ({ ...item }))
+  const savedById = new Map(saved.map(item => [item.id, item] as const))
+  const emittedKnown = new Set<string>()
+  const result: unknown[] = []
+  for (const candidate of raw) {
+    const known = parseFooterCustomItem(candidate)
+    if (known !== undefined) {
+      const replacement = savedById.get(known.id)
+      if (replacement !== undefined && !emittedKnown.has(known.id)) {
+        result.push({ ...replacement })
+        emittedKnown.add(known.id)
+      }
+      continue
+    }
+    // An explicitly-created v1 item wins an id collision with a future
+    // definition; otherwise preserving both would make the raw collection
+    // ambiguous to the newer owner.
+    const candidateId = typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
+      ? (candidate as { id?: unknown }).id
+      : undefined
+    if (typeof candidateId !== 'string' || !savedById.has(candidateId)) result.push(candidate)
+  }
+  for (const item of saved) {
+    if (!emittedKnown.has(item.id)) result.push({ ...item })
+  }
+  return result
+}
+
+/**
  * Register the TUI-owned slash commands on the commands service. The
  * completion list is refreshed after every registration so TUI-owned
  * commands appear in the editor's tab list. Registration is sessionless:
@@ -1808,7 +1850,24 @@ export function registerTuiCommands(
             return
           }
           const savedCustomItems = customResult.items.map(item => ({ ...item }))
+          let persistedCustomItems: readonly unknown[] = savedCustomItems
           if (settings !== undefined) {
+            // `/footer` intentionally edits the custom-definition collection,
+            // but it only owns the v1 text entries this client understands.
+            // Keep detached USER entries for future kinds alongside the
+            // validated draft so an older client stays downgrade-safe.
+            let raw: ReturnType<ConfigPort['footerCustomItems']['rawForPersistence']>
+            try {
+              raw = runner.config.footerCustomItems.rawForPersistence()
+            } catch {
+              app.notify('custom footer definitions unavailable; settings write aborted', 'error')
+              return
+            }
+            if (raw.kind === 'unavailable') {
+              app.notify('custom footer definitions unavailable; settings write aborted', 'error')
+              return
+            }
+            persistedCustomItems = mergeFooterCustomItemsForSave(raw.value, savedCustomItems)
             // Persist FIRST; the memory commit happens only after the
             // settings write succeeds (plan §15.7 — a failed write keeps
             // the old layout and definitions and notifies). footerFallbackMode
@@ -1821,7 +1880,7 @@ export function registerTuiCommands(
                 footer: 'custom',
                 footerFallbackMode: 'custom',
                 footerLayout: parsed,
-                footerCustomItems: savedCustomItems,
+                footerCustomItems: persistedCustomItems,
               }))
               app.setFooterCustomItems(savedCustomItems)
               runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems }, savedCustomItems)

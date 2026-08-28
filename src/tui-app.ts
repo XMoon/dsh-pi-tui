@@ -1768,6 +1768,9 @@ export class TuiApp {
   private historyPanel: HistoryPanel | undefined
   /** The overlay handle of the history panel (hide() closes it). */
   private historyOverlay: OverlayHandle | undefined
+  /** Footer configurators own paste timers outside the generic overlay
+   * disposal path; final surface disposal closes every still-open one. */
+  private readonly footerConfiguratorClosers = new Set<() => void>()
   /** The injected Ctrl+R search source (the runner wires the file-backed
    * implementation; the host never touches the filesystem). */
   private readonly historySearchSource: HistorySearchSource | undefined
@@ -2581,6 +2584,11 @@ export class TuiApp {
     // must not hang.
     for (const settle of [...this.pendingBrokerSettles]) settle()
     this.pendingBrokerSettles.clear()
+    // Footer configurators are wrapped in a generic Frame, whose removal
+    // does not forward Component.dispose(); close their owned timers before
+    // the broker drops the physical overlay handles.
+    for (const close of [...this.footerConfiguratorClosers]) close()
+    this.footerConfiguratorClosers.clear()
     this.overlayBroker.clear()
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
@@ -9783,6 +9791,7 @@ export class TuiApp {
     const close = (): void => {
       if (closed) return
       closed = true
+      this.footerConfiguratorClosers.delete(close)
       panel?.dispose()
       handle?.hide()
     }
@@ -9826,6 +9835,7 @@ export class TuiApp {
       // CURRENT terminal height on every overlay frame.
       maxHeight: '100%',
     })
+    this.footerConfiguratorClosers.add(close)
     return close
   }
 
