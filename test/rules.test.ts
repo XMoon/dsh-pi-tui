@@ -387,6 +387,35 @@ test('the restored fullscreen startup path initializes custom-item persistence b
     'fullscreen startup can synchronously invoke its persistence callback; the custom-item save projection must be initialized first')
 })
 
+test('legacy history cleanup preserves the raw USER custom-item field', () => {
+  // The migration cleanup is another whole-document replace. Keep this
+  // source-level guard beside the startup-order guard: omitting the raw USER
+  // projection here would promote a merged/project footerCustomItems value or
+  // erase unknown/future definitions while deleting legacy history.
+  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
+  const start = source.indexOf("runDetached('settings history cleanup'")
+  const end = source.indexOf("          }, {", start)
+  assert.ok(start >= 0, 'the legacy history cleanup write must exist')
+  assert.ok(end > start, 'the legacy history cleanup write must have options')
+  const cleanup = source.slice(start, end)
+  assert.match(cleanup, /doc\.footerCustomItems\s*=\s*userFooterCustomItemsForSave\(\)/,
+    'history cleanup must project the exact raw USER custom definitions before replace')
+  assert.match(cleanup, /delete doc\.history/, 'history cleanup must still remove the legacy field')
+
+  // Pin the ownership outcome represented by the production projection above:
+  // a merged project value is replaced by the raw USER value, including an
+  // entry this version intentionally cannot parse.
+  const userRaw = [
+    { schemaVersion: 1, id: 'user:known', kind: 'text', text: 'USER' },
+    { schemaVersion: 1, id: 'user:future', kind: 'command', command: 'date' },
+  ]
+  const merged = { footerCustomItems: [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }], history: { '/ws': ['old'] } }
+  const projected: { footerCustomItems: unknown; history?: unknown } = { ...merged, footerCustomItems: userRaw }
+  delete projected.history
+  assert.deepEqual(projected.footerCustomItems, userRaw,
+    'the cleanup projection must retain raw USER data rather than merged project data')
+})
+
 test('startup-eager callbacks of startProcessTui never reference a later-declared binding (TDZ guard)', () => {
   // Lifecycle regression (the footer-command startup ReferenceError):
   // `onTerminalResize` is invoked SYNCHRONOUSLY from TuiApp's render path —
