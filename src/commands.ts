@@ -1049,7 +1049,6 @@ export function registerTuiCommands(
       recoverable: options.notify === true ? () => true : undefined,
     })
   }
-
   /** Build the one editor used by /keybindings and the /settings submenu.
    * The settings row is only a launcher; all reads/writes still go through
    * the controller and the same panel state machine. */
@@ -1850,24 +1849,7 @@ export function registerTuiCommands(
             return
           }
           const savedCustomItems = customResult.items.map(item => ({ ...item }))
-          let persistedCustomItems: readonly unknown[] = savedCustomItems
           if (settings !== undefined) {
-            // `/footer` intentionally edits the custom-definition collection,
-            // but it only owns the v1 text entries this client understands.
-            // Keep detached USER entries for future kinds alongside the
-            // validated draft so an older client stays downgrade-safe.
-            let raw: ReturnType<ConfigPort['footerCustomItems']['rawForPersistence']>
-            try {
-              raw = runner.config.footerCustomItems.rawForPersistence()
-            } catch {
-              app.notify('custom footer definitions unavailable; settings write aborted', 'error')
-              return
-            }
-            if (raw.kind === 'unavailable') {
-              app.notify('custom footer definitions unavailable; settings write aborted', 'error')
-              return
-            }
-            persistedCustomItems = mergeFooterCustomItemsForSave(raw.value, savedCustomItems)
             // Persist FIRST; the memory commit happens only after the
             // settings write succeeds (plan §15.7 — a failed write keeps
             // the old layout and definitions and notifies). footerFallbackMode
@@ -1875,13 +1857,25 @@ export function registerTuiCommands(
             // and saving a custom layout IS a native-mode change — the command
             // surface's restart fallback must resolve to THIS custom layout.
             detach('footer configurator write', async () => {
-              await serializeTuiSettingsMutation(settings, () => settings.replace({
-                ...settings.get(),
-                footer: 'custom',
-                footerFallbackMode: 'custom',
-                footerLayout: parsed,
-                footerCustomItems: persistedCustomItems,
-              }))
+              if (app.isDisposed()) return
+              await serializeTuiSettingsMutation(settings, async () => {
+                if (app.isDisposed()) return
+                // `/footer` intentionally edits the custom-definition
+                // collection, but it only owns the v1 text entries this client
+                // understands. Re-read the detached USER value at the commit
+                // point so queued saves do not erase intervening future data.
+                const raw = runner.config.footerCustomItems.rawForPersistence()
+                if (raw.kind === 'unavailable') throw new Error('custom footer definitions unavailable; settings write aborted')
+                const persistedCustomItems = mergeFooterCustomItemsForSave(raw.value, savedCustomItems)
+                await settings.replace({
+                  ...settings.get(),
+                  footer: 'custom',
+                  footerFallbackMode: 'custom',
+                  footerLayout: parsed,
+                  footerCustomItems: persistedCustomItems,
+                })
+              })
+              if (app.isDisposed()) return
               app.setFooterCustomItems(savedCustomItems)
               runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems }, savedCustomItems)
               app.notify('footer layout saved', 'info')
