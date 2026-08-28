@@ -39,15 +39,8 @@ function isConditionalBinding(row: KeybindingEditorRow, binding: KeybindingEdito
   return row.conditional.some(candidate => candidate.kind === binding.kind && candidate.key === binding.key)
 }
 
-function formatVisibleBindings(row: KeybindingEditorRow, bindings: readonly KeybindingEditorBinding[]): string {
-  const ordinary = bindings.filter(binding => !isConditionalBinding(row, binding))
-  const conditional = bindings
-    .filter(binding => isConditionalBinding(row, binding))
-    .map(binding => `${bindingLabel(binding)} (conditional)`)
-  return [
-    ordinary.length > 0 ? formatEditorBindings(ordinary) : '',
-    conditional.join(' / '),
-  ].filter(part => part !== '').join(' / ') || 'Unbound'
+function ordinaryBindings(row: KeybindingEditorRow, bindings: readonly KeybindingEditorBinding[]): KeybindingEditorBinding[] {
+  return bindings.filter(binding => !isConditionalBinding(row, binding))
 }
 
 function statusLabel(row: KeybindingEditorRow): string {
@@ -185,8 +178,10 @@ export class ActionEditorPanel implements Component {
     if (!this.row.customized && this.row.defaults.length > 0) {
       lines.push(color.textDim(`Default: ${formatEditorBindings(this.row.defaults)}`))
     }
-    if (this.row.customized && this.row.effective.length > 0 && !sameBindingList(this.row.effective, configured)) {
-      lines.push(color.textDim(`Effective now: ${formatVisibleBindings(this.row, this.row.effective)}`))
+    const effectiveOrdinary = ordinaryBindings(this.row, this.row.effective)
+    const configuredOrdinary = ordinaryBindings(this.row, configured)
+    if (this.row.customized && effectiveOrdinary.length > 0 && !sameBindingList(effectiveOrdinary, configuredOrdinary)) {
+      lines.push(color.textDim(`Effective now: ${formatEditorBindings(effectiveOrdinary)}`))
     }
     if (this.row.diagnostics.length > 0) {
       for (const diagnostic of this.row.diagnostics.slice(0, 2)) lines.push(color.warning(truncateToWidth(diagnostic, safeWidth)))

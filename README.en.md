@@ -343,7 +343,10 @@ dsh-pi-tui:
   `app.input.steer: ctrl+x` makes Ctrl+X steer and Ctrl+S stop steering;
   a leader-only `app.todo.toggle: <leader>t` makes Leader T the only
   toggle trigger (Ctrl+T stops); `['ctrl+z', '<leader>s']` keeps both
-  USER triggers; `false` removes every trigger of the action.
+  USER triggers; `false` removes every trigger of the action. Leader
+  completions that the effective editor-owned submit key would consume (for
+  example, `<leader>enter`) are rejected instead of being advertised as dead
+  sequences.
 - `DSH_PI_TUI_SAFE_KEYBINDINGS=1` ignores all user overrides (builtin
   defaults only). The whole `/keybindings` editor is read-only while safe mode
   is active, so it cannot save a configuration that is only checked after safe

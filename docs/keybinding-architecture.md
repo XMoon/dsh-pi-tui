@@ -192,8 +192,11 @@ dsh-pi-tui:
 Semantics: string = one key; array = several; `false` = disable the
 action's effective binding; absent = builtin default; `<leader>X` = a
 leader sequence (requires `leader`). Physical `Escape` is reserved for the
-Host lifecycle path and is accepted only for `app.agent.interrupt`; the
-runtime routes it before ordinary user action resolution. The validation pipeline is
+Host lifecycle path and is accepted only for `app.agent.interrupt`; the runtime
+routes it before ordinary user action resolution. A leader completion that the
+current editor-owned submit key would consume (for example,
+`<leader>enter`) is rejected rather than advertised as a dead sequence. The
+validation pipeline is
 **grammar → canonicalize → policy → store** (round-9 finding): every
 policy check (printable, lifecycle collisions, editor-owned constraints)
 runs on the CANONICAL key, so an uppercase spelling (`SPACE`, `ctrl+A`)
