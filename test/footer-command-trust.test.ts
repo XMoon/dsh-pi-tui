@@ -114,7 +114,7 @@ test('the Direct config-port trust read resolves the same USER-layer facts', asy
 test('the Direct custom-item read separates USER raw storage from the safe runtime projection', async () => {
   const userRaw: unknown[] = [
     { schemaVersion: 1, id: 'user:user-owned', kind: 'text', text: 'USER' },
-    { schemaVersion: 1, id: 'user:future-command', kind: 'command', command: 'date' },
+    { schemaVersion: 1, id: 'user:future-command', kind: 'command', command: 'date', payload: { nested: ['preserve'] } },
   ]
   const projectRaw: unknown[] = [{ schemaVersion: 1, id: 'user:project-owned', kind: 'text', text: 'PROJECT' }]
   const port = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
@@ -125,7 +125,24 @@ test('the Direct custom-item read separates USER raw storage from the safe runti
   } as never, () => undefined)
   assert.deepEqual(port.footerCustomItems.get().items, [userRaw[0]])
   assert.equal(port.footerCustomItems.get().invalidCount, 1)
-  assert.deepEqual(port.footerCustomItems.rawForPersistence(), userRaw)
+  const raw = port.footerCustomItems.rawForPersistence()
+  assert.equal(raw.kind, 'available')
+  if (raw.kind === 'available') {
+    assert.deepEqual(raw.value, userRaw)
+    assert.notEqual(raw.value, userRaw, 'raw persistence must not expose descriptor-owned references')
+    assert.notEqual(
+      (raw.value as Array<Record<string, unknown>>)[1]?.payload,
+      (userRaw[1] as Record<string, unknown>).payload,
+      'raw persistence must deep-clone unknown/future fields too',
+    )
+  }
+
+  const revoked = Proxy.revocable([], {})
+  revoked.revoke()
+  const unsafe = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: revoked.proxy } }] }),
+  } as never, undefined, () => undefined)
+  assert.deepEqual(unsafe.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
 
   const noUser = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
     get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', value: { footerCustomItems: projectRaw } }] }),
@@ -134,7 +151,13 @@ test('the Direct custom-item read separates USER raw storage from the safe runti
     replace: () => {},
   } as never, () => undefined)
   assert.deepEqual(noUser.footerCustomItems.get().items, [])
-  assert.equal(noUser.footerCustomItems.rawForPersistence(), undefined)
+  assert.deepEqual(noUser.footerCustomItems.rawForPersistence(), { kind: 'available', value: undefined })
+
+  const unavailable = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => { throw new Error('settings read failed') } }),
+  } as never, undefined, () => undefined)
+  assert.deepEqual(unavailable.footerCustomItems.get(), { items: [], invalidCount: 1 })
+  assert.deepEqual(unavailable.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
 })
 
 test('TuiSettingsDoc round-trip: a whole-document replace never wipes the trusted footerCommand (review P2 migration contract)', async () => {

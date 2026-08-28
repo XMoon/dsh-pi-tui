@@ -48,6 +48,7 @@ import type {
   CredentialProviderOption,
   FooterCommandTrust,
   FooterCustomItemsConfig,
+  FooterCustomItemsRaw,
   PermissionConfig,
   PresetDefaultConfig,
   ProviderProfileConfig,
@@ -171,9 +172,10 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
 /** The Direct PR C Custom Text read: only the settings descriptor's USER
  * section is authoritative. The merged document remains a pass-through for
  * persistence, but project-layer values can never create a user definition.
- * `get()` parses a safe runtime projection; `rawForPersistence()` returns the
- * exact USER-layer value so unknown/future definitions survive unrelated writes.
- * A malformed descriptor/collection degrades to an empty fail-soft result. */
+ * `get()` parses a safe runtime projection; `rawForPersistence()` returns a
+ * detached exact USER-layer value so unknown/future definitions survive
+ * unrelated writes. A malformed descriptor/collection degrades to an empty
+ * fail-soft result, while an unsafe raw clone refuses the write. */
 class DirectFooterCustomItems implements FooterCustomItemsConfig {
   private readonly ctx: HostContextLike
 
@@ -187,16 +189,26 @@ class DirectFooterCustomItems implements FooterCustomItemsConfig {
     return parseFooterCustomItems(raw.value)
   }
 
-  rawForPersistence(): unknown {
-    return this.readRaw().value
+  rawForPersistence(): FooterCustomItemsRaw {
+    const raw = this.readRaw()
+    if (raw.failed) return { kind: 'unavailable' }
+    try {
+      return { kind: 'available', value: structuredClone(raw.value) }
+    } catch {
+      return { kind: 'unavailable' }
+    }
   }
 
   private readRaw(): { value: unknown; failed: boolean } {
     try {
       const settings = this.ctx.get('settings') as { describe?(): readonly SettingsDescriptorLike[] | undefined } | undefined
-      const descriptor = settings?.describe?.()?.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
+      if (settings !== undefined && typeof settings.describe !== 'function') return { value: undefined, failed: true }
+      const descriptors = settings?.describe?.()
+      if (settings !== undefined && descriptors === undefined) return { value: undefined, failed: true }
+      const descriptor = descriptors?.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
       const user = descriptor?.user
-      if (typeof user !== 'object' || user === null) return { value: undefined, failed: false }
+      if (user === undefined) return { value: undefined, failed: false }
+      if (typeof user !== 'object' || user === null || Array.isArray(user)) return { value: undefined, failed: true }
       return { value: (user as Record<string, unknown>).footerCustomItems, failed: false }
     } catch {
       return { value: undefined, failed: true }

@@ -945,7 +945,9 @@ export interface InitialCommandCatalog {
  * value is intentional here: parsed runtime items would erase unknown/future
  * definitions during a downgrade or a fail-soft read. */
 function withUserFooterCustomItems(doc: TuiSettingsDoc, config: ConfigPort): TuiSettingsDoc {
-  return { ...doc, footerCustomItems: config.footerCustomItems.rawForPersistence() }
+  const raw = config.footerCustomItems.rawForPersistence()
+  if (raw.kind === 'unavailable') throw new Error('custom footer definitions unavailable; settings write aborted')
+  return { ...doc, footerCustomItems: raw.value }
 }
 
 /**

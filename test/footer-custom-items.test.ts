@@ -74,6 +74,18 @@ test('invalid and duplicate custom definitions fail soft while valid definitions
   assert.equal(parseFooterCustomItems(undefined).invalidCount, 0)
 })
 
+test('hostile custom-item collections fail soft without escaping startup', () => {
+  const revoked = Proxy.revocable([], {})
+  revoked.revoke()
+  assert.deepEqual(parseFooterCustomItems(revoked.proxy), { items: [], invalidCount: 1 })
+
+  const throwingIterator: unknown[] = [VALID_ENVIRONMENT]
+  Object.defineProperty(throwingIterator, Symbol.iterator, {
+    get: () => { throw new Error('hostile iterator getter') },
+  })
+  assert.deepEqual(parseFooterCustomItems(throwingIterator), { items: [], invalidCount: 1 })
+})
+
 test('the reserved user namespace cannot be shadowed by builtin or extension items', () => {
   const definition: FooterItemDefinition = {
     id: 'user:extension',
