@@ -78,12 +78,6 @@ test('the refresh interval RE-ARMS itself after a run settles (periodic trigger,
   // request) ran its command ONCE and froze forever. After the fix, a
   // settled run re-arms the next interval run by itself: ONE request, then
   // no further requests, must still spawn at least twice.
-  let spawns = 0
-  const rows = (script: string): Promise<string[] | undefined> => new Promise((resolve) => {
-    spawns += 1
-    resolve([])
-  })
-  void rows
   const outputs: (string[] | undefined)[] = []
   const runner = new FooterCommandRunner({
     config: { ...CONFIG, command: 'node -e "process.stdout.write(\'tick\\n\')"', timeoutMs: 10000, refreshIntervalMs: 50 },
@@ -95,9 +89,11 @@ test('the refresh interval RE-ARMS itself after a run settles (periodic trigger,
   })
   try {
     runner.requestRefresh() // the ONLY explicit request
-    // Bounded spin (no fixed sleep): the event loop processes the child
-    // close + the interval timers while we spin on setImmediate.
-    for (let turn = 0; turn < 20000 && outputs.length < 2; turn += 1) {
+    // Bounded spin (no fixed sleep): wait on the observable output, with a
+    // wall-clock deadline long enough for a second child to spawn under the
+    // packed suite's process and CPU load.
+    const deadline = Date.now() + 5000
+    while (outputs.length < 2 && Date.now() < deadline) {
       await new Promise(resolve => setImmediate(resolve))
     }
     assert.ok(outputs.length >= 2,
