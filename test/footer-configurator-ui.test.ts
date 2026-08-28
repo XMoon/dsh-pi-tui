@@ -466,6 +466,35 @@ test('a bracketed-paste start marker split exactly after ESC is recognized', asy
   app.stop()
 })
 
+test('recovery rescans a valid paste marker after rejected prefixes', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('a')
+  await vt.waitForRender()
+
+  // A longer rejected prefix must not swallow a complete marker in the next
+  // chunk.
+  vt.sendInput('\x1b[20')
+  vt.sendInput('\x1b[200~cach\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, 'cach')
+
+  // Repeat from an empty picker: the stale lone ESC cannot move out of the
+  // page before the fresh marker is rescanned.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, '')
+  vt.sendInput('\x1b')
+  vt.sendInput('\x1b[200~hit\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'add')
+  assert.equal(model.state().addQuery, 'hit')
+  app.stop()
+})
+
 test('a lone Escape is replayed as navigation after the paste-prefix timeout', async () => {
   const { vt, app } = startApp()
   const model = openDefault(app)
@@ -482,7 +511,7 @@ test('a lone Escape is replayed as navigation after the paste-prefix timeout', a
   app.stop()
 })
 
-test('programmatic configurator close disposes a pending paste-prefix timer', async () => {
+test('programmatic configurator close disposes a pending paste-prefix timer', async (t) => {
   const { vt, app } = startApp()
   const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
   const close = app.openFooterConfigurator({
@@ -498,9 +527,11 @@ test('programmatic configurator close disposes a pending paste-prefix timer', as
   await vt.waitForRender()
   vt.sendInput('cache')
   await vt.waitForRender()
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.after(() => t.mock.timers.reset())
   vt.sendInput('\x1b') // arm the ambiguous paste-prefix timer
   close()
-  await new Promise<void>(resolve => setTimeout(resolve, 30))
+  t.mock.timers.tick(30)
   assert.equal(model.state().addQuery, 'cache', 'closing must prevent stale Escape replay')
   app.stop()
 })
