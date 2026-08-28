@@ -6,7 +6,7 @@ or any pi2dsh private module.
 
 The fixture uses only the Pi extension ABI supplied to its factory:
 
-- `registerCommand()` registers `/xmoon-pi-compat`.
+- `registerCommand()` deliberately registers the native `/help` name; pi2dsh must expose it as `/pi-help` so the host-owned `/help` remains reachable.
 - `ctx.ui.setStatus()` exercises the status bridge.
 - `ctx.ui.custom()` opens a component with `render(width)`, `handleInput(data)`,
   and `dispose()`.

@@ -234,6 +234,16 @@ test('Pi component contract: final surface disposal makes old handles inert', as
     assert.equal(state.disposeCount, 1, 'surface disposal must dispose the component')
     assert.equal(app.ownedUnstableMountLeasesForTest(), 0, 'surface disposal must clear the host lease set')
 
+    lease.focus()
+    lease.blur()
+    lease.hide()
+    lease.show()
+    lease.invalidate()
+    lease.close()
+    assert.equal(lease.active, false, 'a lease issued before surface disposal must remain inert afterwards')
+    assert.equal(state.disposeCount, 1, 'stale lease operations must not dispose the component again')
+    assert.equal(state.renderWidths.length, rendersBeforeDispose, 'stale lease operations must not render after final disposal')
+
     handle.requestRender()
     const staleLease = handle.mountComponent(recordingComponent(state, ['PI_COMPONENT_MUST_NOT_MOUNT']))
     staleLease.focus()
