@@ -27,25 +27,33 @@ const MAX_FD_RESULTS = 100
 /** Locate an executable file-finder on PATH: `fd` preferred, `fdfind`
  * (Debian/Ubuntu's fd-find) second (plan §12 — kimi parity). Bare command
  * names resolve through PATH at spawn time; absolute/relative entries must
- * exist and be X_OK. The platform PATH delimiter is used so the same probe
- * remains correct on Windows hosts too. */
+ * exist and be X_OK. The platform PATH delimiter and PATHEXT suffixes keep
+ * the same probe correct on Windows hosts too. */
 export function resolveFdPath(): string | null {
   const pathEntries = process.env.PATH?.split(delimiter) ?? []
+  const pathExt = process.env.PATHEXT || (process.platform === 'win32' ? '.COM;.EXE;.BAT;.CMD' : '')
+  const suffixes = pathExt
+    .split(';')
+    .map(suffix => suffix.trim())
+    .filter(suffix => suffix !== '')
+    .flatMap(suffix => suffix.toLowerCase() === suffix ? [suffix] : [suffix, suffix.toLowerCase()])
   for (const name of ['fd', 'fdfind']) {
     for (const entry of pathEntries) {
       // An empty POSIX PATH component means the current directory. Keep it
       // rather than silently changing the shell's lookup semantics.
       const dir = entry === '' ? '.' : entry
-      const candidate = join(dir, name)
-      try {
-        // X_OK alone also succeeds for a directory on POSIX. Only return a
-        // regular file that is executable; a directory named `fd` must not
-        // poison discovery before the fallback gets a chance to run.
-        if (statSync(candidate).isFile() && accessSync(candidate, fsConstants.X_OK) === undefined) {
-          return candidate
+      for (const suffix of ['', ...suffixes]) {
+        const candidate = join(dir, `${name}${suffix}`)
+        try {
+          // X_OK alone also succeeds for a directory on POSIX. Only return a
+          // regular file that is executable; a directory named `fd` must not
+          // poison discovery before the fallback gets a chance to run.
+          if (statSync(candidate).isFile() && accessSync(candidate, fsConstants.X_OK) === undefined) {
+            return candidate
+          }
+        } catch {
+          // Not here; keep scanning.
         }
-      } catch {
-        // Not here; keep scanning.
       }
     }
   }

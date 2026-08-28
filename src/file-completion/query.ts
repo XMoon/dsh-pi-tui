@@ -5,7 +5,7 @@
  * is the adapter's job, resolved here already for the search base.
  *
  * A scoped token (`src/fo`, `../foo`, `../../foo`, `~/foo`, `/tmp/foo`,
- * `C:\Users\sh`, `\\server\share\fo`) searches ONLY its resolved
+ * a drive-qualified path, or an UNC path) searches ONLY its resolved
  * directory — never a whole-tree scan filtered by string (plan §6.1). An
  * unscoped token (`foo`, `nested`, `config`) is a whole-tree fuzzy query
  * (plan §6.2) with an EMPTY display base.
@@ -68,9 +68,9 @@ export function stripAtQuotes(atPrefix: string): { raw: string; quoted: boolean 
 
 /**
  * Choose the separator immediately before the basename. This preserves a
- * mixed Windows token's actual dialect (`C:/Users/sh` stays `C:/Users/`,
- * while `C:\\Users\\sh` stays `C:\\Users\\`) instead of normalizing it to
- * the host platform's preferred separator.
+ * mixed Windows token's actual dialect (forward-slash drive paths stay
+ * forward-slashed, while backslash drive paths stay backslashed) instead of
+ * normalizing it to the host platform's preferred separator.
  */
 export function separatorOfRaw(raw: string, windowsDialect: boolean): '/' | '\\' {
   const slash = raw.lastIndexOf('/')
@@ -131,7 +131,7 @@ function isBareScopeForm(raw: string): boolean {
 export function resolvePathQuery(raw: string, cwd: string): PathCompletionQuery {
   const expanded = expandHomeToken(raw)
   // Detect the dialect from the RAW token, not from `path.isAbsolute` on the
-  // expanded token. On Windows, node:path.isAbsolute('C:\\x') is true but
+  // expanded token. On Windows, node:path.isAbsolute(drivePath) is true but
   // that must not erase the Windows dialect; on POSIX, `~\\x` expands to a
   // POSIX absolute filesystem path while remaining a Windows-looking token.
   const posixAbsolute = raw.startsWith('/')
@@ -170,7 +170,7 @@ export function resolvePathQuery(raw: string, cwd: string): PathCompletionQuery 
   }
 
   // Keep the DISPLAY base as a literal prefix of what the user typed. The
-  // path module may normalize `C:/Users` to `C:\\Users`; using the raw slice
+  // path module may normalize mixed drive separators; using the raw slice
   // preserves mixed separators and lets the completion value stay dialect
   // consistent with the input.
   const lastSlash = Math.max(raw.lastIndexOf('/'), raw.lastIndexOf('\\'))
