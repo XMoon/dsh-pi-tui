@@ -1574,9 +1574,10 @@ export function apply(ctx: Context, config: Config): void {
     // footerCustomItems value into the USER section. The config port is the
     // only source allowed to supply definitions for a non-/footer write.
     // Declare this before mounting the TUI: fullscreen initialization can
-    // synchronously invoke its persistence callback.
-    const userFooterCustomItemsForSave = (): FooterCustomItemSettings[] =>
-      backend.config.footerCustomItems.get().items.map(item => ({ ...item }))
+    // synchronously invoke its persistence callback. Use the raw USER value so
+    // unknown/future definitions survive unrelated writes unchanged.
+    const userFooterCustomItemsForSave = (): unknown =>
+      backend.config.footerCustomItems.rawForPersistence()
 
     // Launch-time preset entry: `--preset` wins over $DSH_PI_TUI_PRESET, and
     // both fall back to the saved default (settings `agent-presets.default`,

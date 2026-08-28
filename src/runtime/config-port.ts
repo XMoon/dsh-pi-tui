@@ -27,7 +27,7 @@
 
 import type { AuthorizationTarget } from '../authorization.ts'
 import type { FooterCommandConfig } from '../footer/command-runner.ts'
-import type { FooterCustomItemSettings, FooterCustomItemsParseResult } from '../footer/custom-items.ts'
+import type { FooterCustomItemsParseResult } from '../footer/custom-items.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
  * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/focusMode).
@@ -54,7 +54,7 @@ export interface TuiSettingsDoc {
    * must not treat this merged/resolved value as an authority because a
    * project layer may contribute it. It remains here so get/replace cycles
    * preserve the stored field verbatim. */
-  footerCustomItems?: FooterCustomItemSettings[]
+  footerCustomItems?: unknown
   /** The M5 command status surface's TRUSTED configuration (the user-layer
    * `footerCommand` value, validated by footer/command-trust). Part of the
    * SEMANTIC document: a whole-document replace that drops it would wipe
@@ -122,10 +122,15 @@ export interface FooterCommandTrust {
 }
 
 /** The USER-layer Custom Text definition read (PR C). The adapter reads the
- * settings descriptor's user section and returns a detached, fail-soft parse
- * result; merged/project settings never reach this surface. */
+ * settings descriptor's user section. `get()` is the safe runtime projection;
+ * `rawForPersistence()` is the exact USER-layer storage value and exists only
+ * for whole-document round-trips. Merged/project settings never reach either
+ * surface. */
 export interface FooterCustomItemsConfig {
+  /** Valid Custom Text definitions plus a fail-soft invalid-entry count. */
   get(): FooterCustomItemsParseResult
+  /** The exact raw USER-layer footerCustomItems value, or undefined if absent. */
+  rawForPersistence(): unknown
 }
 
 /** The TUI settings document surface as the commands surface names it

@@ -87,6 +87,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     },
     footerCustomItems: {
       get: () => ({ items: [], invalidCount: 0 }),
+      rawForPersistence: () => undefined,
     },
     providers: {
       available: () => true,

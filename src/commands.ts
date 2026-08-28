@@ -941,10 +941,11 @@ export interface InitialCommandCatalog {
 /** Keep USER-owned Custom Text definitions out of whole-document writes that
  * start from a merged settings document. A project layer may contribute the
  * pass-through `footerCustomItems` field, but it must never be copied into
- * USER settings merely because an unrelated setting changed. */
+ * USER settings merely because an unrelated setting changed. The raw USER
+ * value is intentional here: parsed runtime items would erase unknown/future
+ * definitions during a downgrade or a fail-soft read. */
 function withUserFooterCustomItems(doc: TuiSettingsDoc, config: ConfigPort): TuiSettingsDoc {
-  const { items } = config.footerCustomItems.get()
-  return { ...doc, footerCustomItems: items.map(item => ({ ...item })) }
+  return { ...doc, footerCustomItems: config.footerCustomItems.rawForPersistence() }
 }
 
 /**
