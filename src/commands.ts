@@ -1061,6 +1061,7 @@ export function registerTuiCommands(
     const controller = new KeybindingEditorController({
       settings,
       manager: app.keybindingsManager(),
+      projectSettingsForWrite: doc => withUserFooterCustomItems(doc, runner.config),
       onDiagnostic: diagnostic => runner.diag.debug('keybinding configuration', { error: diagnostic }),
     })
     let panel: KeybindingEditorPanel | undefined

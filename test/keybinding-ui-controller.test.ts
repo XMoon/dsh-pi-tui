@@ -8,7 +8,7 @@ import {
 } from '../src/keybinding-ui/controller.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../src/runtime/config-port.ts'
 
-function settingsFixture(initialKeybindings: unknown): {
+function settingsFixture(initialKeybindings: unknown, footerCustomItems?: unknown): {
   settings: { get(): TuiSettingsDoc; replace(doc: TuiSettingsDoc): unknown }
   getCount: () => number
   replaceCount: () => number
@@ -24,6 +24,7 @@ function settingsFixture(initialKeybindings: unknown): {
     homeEndKeys: 'off',
     focusMode: 'off',
     footerCommand: { command: 'printf status', intervalMs: 1000 },
+    ...footerCustomItems === undefined ? {} : { footerCustomItems },
     unrelated: 'preserved',
     keybindings: initialKeybindings,
   } as unknown as TuiSettingsDoc
@@ -80,6 +81,44 @@ test('mutation performs one get, one replace, preserves unrelated fields, then p
       'app.todo.toggle': ['ctrl+t', 'ctrl+y'],
     })
     assert.equal(result.kind === 'applied' ? result.model.rows.find(row => row.id === 'app.todo.toggle')!.effective[0]!.key : '', 'ctrl+t')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('keybinding writes project merged footer items back from the USER raw projection', async () => {
+  const userRaw = [
+    { schemaVersion: 1, id: 'user:mine', kind: 'text', text: 'USER', tone: 'default' },
+    { schemaVersion: 1, id: 'user:future', kind: 'command', command: 'future command', futureField: { version: 2 } },
+  ]
+  const projectRaw = [
+    { schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT', tone: 'warning' },
+  ]
+  const fixture = settingsFixture(undefined, projectRaw)
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings(fixture.settings.get().keybindings))
+  const controller = new KeybindingEditorController({
+    settings: fixture.settings,
+    manager,
+    // This is the commands-side USER authority projector. The controller
+    // must call it after copying the merged document and before replace.
+    projectSettingsForWrite: doc => ({ ...doc, footerCustomItems: userRaw }),
+  })
+  try {
+    const result = await controller.mutate({
+      kind: 'add',
+      action: 'app.todo.toggle',
+      binding: { kind: 'direct', key: 'ctrl+y' },
+    })
+    assert.equal(result.kind, 'applied')
+    const persisted = fixture.latest()!
+    assert.deepEqual(persisted.footerCustomItems, userRaw, 'a keybinding write must persist the exact USER raw collection')
+    assert.equal(
+      (persisted.footerCustomItems as Array<{ id: string }>).some(item => item.id === 'user:project'),
+      false,
+      'a project definition must never be promoted into USER settings',
+    )
+    assert.deepEqual(persisted.keybindings, { 'app.todo.toggle': ['ctrl+t', 'ctrl+y'] })
   } finally {
     manager.dispose()
   }

@@ -310,7 +310,9 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     return () => {}
   }) as TuiApp['openFooterConfigurator']
   let settingsChange: Parameters<TuiApp['openSettings']>[1] | undefined
+  let settingsItems: Parameters<TuiApp['openSettings']>[0] | undefined
   app.openSettings = ((...args: Parameters<TuiApp['openSettings']>) => {
+    settingsItems = args[0]
     settingsChange = args[1]
     return () => {}
   }) as TuiApp['openSettings']
@@ -416,6 +418,36 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   assert.deepEqual(applied[1]!.footerLayout, layoutOne)
   assert.equal((applied[2]!.footerLayout as FooterLayoutV1).rows[0]!.left[0]!.id, 'view-scope')
   assert.deepEqual(app.getFooterCustomItems(), [{ ...known, text: 'TWO' }])
+
+  // The keybinding editor is another whole-document writer introduced by
+  // main. Its merged settings read must not promote a project definition into
+  // USER when the user changes only a shortcut. The real command wiring uses
+  // DirectConfigPort.rawForPersistence() through the projector hook.
+  const projectOnly = { schemaVersion: 1, id: 'user:project-only', kind: 'text', text: 'PROJECT', tone: 'warning' }
+  currentDoc = { ...currentDoc, footerCustomItems: [projectOnly] }
+  const keyboardRow = settingsItems?.find(item => item.id === 'keyboard-shortcuts')
+  const keyboardSubmenu = keyboardRow?.submenu
+  assert.ok(keyboardRow !== undefined && keyboardSubmenu !== undefined, 'settings must expose the keyboard shortcuts submenu')
+  const panel = keyboardSubmenu(keyboardRow.currentValue, () => {})
+  const handleInput = panel.handleInput?.bind(panel)
+  assert.ok(handleInput !== undefined, 'the keyboard shortcuts submenu must accept input')
+  handleInput('app.todo.toggle')
+  handleInput('\r')
+  handleInput('r')
+  for (let index = 0; index < 10; index += 1) await Promise.resolve()
+  assert.equal(pendingWrites.length, 4, `the keybinding mutation must reach the settings writer\n${panel.render(100).join('\n')}`)
+  const keybindingWrite = pendingWrites[3]!
+  assert.deepEqual(keybindingWrite.next.footerCustomItems, userRaw, 'keybinding writes must use exact USER raw footer definitions')
+  assert.equal(
+    (keybindingWrite.next.footerCustomItems as Array<{ id: string }>).some(item => item.id === projectOnly.id),
+    false,
+    'the merged project definition must not be written to USER settings',
+  )
+  assert.deepEqual(keybindingWrite.next.keybindings, {}, 'the keybinding editor must still persist its own mutation')
+  currentDoc = { ...keybindingWrite.next, footerCustomItems: userRaw }
+  keybindingWrite.resolve()
+  for (let index = 0; index < 10; index += 1) await Promise.resolve()
+  panel.dispose?.()
   app.stop()
 })
 
