@@ -162,6 +162,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   await vt.waitForRender()
   vt.sendInput('s')
   await vt.waitForRender()
+  for (let index = 0; index < 20; index += 1) await Promise.resolve()
   assert.equal(applied.length, 1, 'S must apply the layout')
   assert.equal(applied[0]!.footer, 'custom')
   assert.equal(settings.doc.footer, 'custom', 'the settings document must persist')
@@ -226,6 +227,11 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     saveCallbacks.push(options.onSave)
     return () => {}
   }) as TuiApp['openFooterConfigurator']
+  let settingsChange: Parameters<TuiApp['openSettings']>[1] | undefined
+  app.openSettings = ((...args: Parameters<TuiApp['openSettings']>) => {
+    settingsChange = args[1]
+    return () => {}
+  }) as TuiApp['openSettings']
   const applied: Array<{ footerLayout?: unknown; footerCustomItems?: unknown }> = []
   const runner: TuiCommandRunner = {
     ctx,
@@ -283,17 +289,22 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   }
   registerTuiCommands(runner)
   const footer = commands.defs.find(entry => entry.name === 'footer')
+  const settingsCommand = commands.defs.find(entry => entry.name === 'settings')
   assert.ok(footer?.handler !== undefined)
+  assert.ok(settingsCommand?.handler !== undefined)
   await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await (settingsCommand.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   assert.equal(saveCallbacks.length, 2)
+  assert.ok(settingsChange !== undefined)
 
   const layoutOne: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'model' }], right: [] }] }
   const layoutTwo: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'view-scope' }], right: [] }] }
   saveCallbacks[0]!(layoutOne, [{ ...known, text: 'ONE' }])
+  settingsChange!('footer', 'compact', () => {})
   saveCallbacks[1]!(layoutTwo, [{ ...known, text: 'TWO' }])
   for (let index = 0; index < 5; index += 1) await Promise.resolve()
-  assert.equal(pendingWrites.length, 1, 'the second save must wait for the first write')
+  assert.equal(pendingWrites.length, 1, 'the settings and second footer saves must wait for the first write')
   assert.deepEqual(pendingWrites[0]!.next.footerCustomItems, [{ ...known, text: 'ONE' }, futureOne])
 
   const first = pendingWrites[0]!
@@ -302,16 +313,26 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   currentDoc = { ...currentDoc, footerCustomItems: userRaw }
   first.resolve()
   for (let index = 0; index < 5; index += 1) await Promise.resolve()
-  assert.equal(pendingWrites.length, 2, 'the queued second save must start after the first settles')
-  assert.deepEqual(pendingWrites[1]!.next.footerCustomItems, [{ ...known, text: 'TWO' }, futureOne, futureTwo])
+  assert.equal(pendingWrites.length, 2, 'the queued settings footer save must start after the first settles')
+  assert.equal(pendingWrites[1]!.next.footer, 'compact')
+  assert.deepEqual(pendingWrites[1]!.next.footerCustomItems, [{ ...known, text: 'ONE' }, futureOne, futureTwo])
 
-  const second = pendingWrites[1]!
+  const modeWrite = pendingWrites[1]!
+  currentDoc = { ...modeWrite.next, footerCustomItems: modeWrite.next.footerCustomItems }
+  userRaw = [...(modeWrite.next.footerCustomItems as unknown[])]
+  modeWrite.resolve()
+  for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  assert.equal(pendingWrites.length, 3, 'the second configurator save must wait for the settings footer write')
+  assert.deepEqual(pendingWrites[2]!.next.footerCustomItems, [{ ...known, text: 'TWO' }, futureOne, futureTwo])
+
+  const second = pendingWrites[2]!
   currentDoc = { ...second.next, footerCustomItems: second.next.footerCustomItems }
   userRaw = [...(second.next.footerCustomItems as unknown[])]
   second.resolve()
   for (let index = 0; index < 5; index += 1) await Promise.resolve()
-  assert.equal(applied.length, 2)
-  assert.deepEqual((applied[1]!.footerLayout as FooterLayoutV1).rows[0]!.left[0]!.id, 'view-scope')
+  assert.equal(applied.length, 3)
+  assert.deepEqual(applied[1]!.footerLayout, layoutOne)
+  assert.equal((applied[2]!.footerLayout as FooterLayoutV1).rows[0]!.left[0]!.id, 'view-scope')
   assert.deepEqual(app.getFooterCustomItems(), [{ ...known, text: 'TWO' }])
   app.stop()
 })
@@ -519,6 +540,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   // Save UNCHANGED (S): the saved custom layout must stay ONE row.
   vt.sendInput('s')
   await vt.waitForRender()
+  for (let index = 0; index < 20; index += 1) await Promise.resolve()
   assert.equal(applied.length, 1, 'S must apply the layout')
   const saved = applied[0]!.footerLayout as { rows: unknown[] }
   assert.equal(saved.rows.length, 1, `an unchanged compact save must stay one row:\n${JSON.stringify(saved)}`)
@@ -593,6 +615,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   vt.sendInput('\x1b')
   await vt.waitForRender()
   vt.sendInput('s')
+  for (let index = 0; index < 5; index += 1) await Promise.resolve()
   // The write fails: the memory commit must NOT happen (the old layout
   // stays) — the apply is deferred until the write succeeds. Spin the
   // event loop a BOUNDED number of turns (never a wall-clock sleep — the

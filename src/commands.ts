@@ -1695,7 +1695,9 @@ export function registerTuiCommands(
                 // settings write must not leave the live layout ahead of
                 // the document (the next reload would silently revert).
                 detach('settings footer write', async () => {
+                  if (app.isDisposed()) return
                   const next = await serializeTuiSettingsMutation(settings, async () => {
+                    if (app.isDisposed()) return undefined
                     const doc = settings.get()
                     // Selecting custom with no (valid) layout initializes an
                     // editable copy of the default layout (plan §14.8).
@@ -1711,6 +1713,7 @@ export function registerTuiCommands(
                     await settings.replace({ ...doc, footer: value, footerLayout: layout, footerFallbackMode: value, footerCustomItems: raw.value })
                     return { layout, customItems: raw.value }
                   })
+                  if (app.isDisposed() || next === undefined) return
                   runner.applyFooterSettings({ footer: value, footerLayout: next.layout, footerCustomItems: next.customItems })
                 }, { notify: true })
               } else {

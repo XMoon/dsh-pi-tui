@@ -3843,7 +3843,10 @@ export class TuiApp {
     // (overlayHandles, overlayDependents, the active question's suspension)
     // is then cleared wholesale — every one of those handles is dead, and
     // the pending-approval rebuild re-suspends a fresh handle on the new
-    // screen.
+    // screen. Footer configurators have a timer-bearing panel behind their
+    // generic Frame, so close those explicitly before dropping the graph.
+    for (const close of [...this.footerConfiguratorClosers]) close()
+    this.footerConfiguratorClosers.clear()
     for (const handle of this.overlayBroker.handles()) handle.hide()
     this.overlayBroker.clear()
     if (this.activeQuestions !== undefined) this.activeQuestions.suspendedOverlays.clear()
