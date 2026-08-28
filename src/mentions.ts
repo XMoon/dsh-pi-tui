@@ -22,7 +22,7 @@
  */
 
 import { homedir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, win32 } from 'node:path'
 import {
   CombinedAutocompleteProvider,
   type AutocompleteItem,
@@ -37,11 +37,10 @@ import {
   extractAtPrefix,
   FILE_ARGUMENT_COMMANDS,
 } from './file-completion/context.ts'
-import { completePath, presentDiscovery, reattachDisplayBase, resolveQuery } from './file-completion/engine.ts'
-import { listDirectChildren } from './file-completion/discovery.ts'
+import { completePath, presentDiscovery, resolveQuery } from './file-completion/engine.ts'
+import { separatorOfRaw, stripAtQuotes } from './file-completion/query.ts'
 import { LocalFileSource } from './file-completion/local-file-source.ts'
 import { resolveFdPath } from './file-completion/discovery.ts'
-import type { PathCandidate } from './file-completion/types.ts'
 
 // The migration-era surface re-exported for test pins (`mentions.test.ts`
 // imports `resolvePathSearch` and `extractAtPrefix` from this module).
@@ -49,7 +48,7 @@ export { extractAtPrefix } from './file-completion/context.ts'
 export { resolvePathSearch } from './file-completion/query.ts'
 
 /** Token separators: `@` must sit at the start of the current token. */
-const PATH_DELIMITERS = new Set([' ', '\t', '"', "'", '='])
+const PATH_DELIMITERS = new Set([' ', '\t', '\n', '\r', '"', "'", '='])
 /** Trailing punctuation allowed AFTER an unquoted mention token: stripped
  * for the existence probe but KEPT in the rewritten text, so a sentence
  * like "see @src/foo.ts, then…" still canonicalizes. */
@@ -147,9 +146,20 @@ function isCjkChar(char: string): boolean {
  * path resolves against the session workspace. PURE.
  */
 export function resolveMentionCandidate(raw: string, sessionCwd: string): string {
-  if (raw.startsWith('~/')) return join(homedir(), raw.slice(2))
-  if (isAbsolute(raw)) return raw
-  return join(sessionCwd, raw)
+  if (raw === '~' || raw.startsWith('~/') || raw.startsWith('~\\')) {
+    return raw === '~'
+      ? homedir()
+      : join(homedir(), raw.slice(2).replace(/\\/g, '/'))
+  }
+  // `path.isAbsolute` follows the host OS. The mention grammar must also
+  // preserve Windows drive/UNC references when a client process is POSIX
+  // (and must not mistake a POSIX `/tmp` path for a Windows path on Windows).
+  if (isAbsolute(raw) || (!raw.startsWith('/') && win32.isAbsolute(raw))) return raw
+  // A relative Windows-looking token is still relative to the session scope;
+  // normalize its separators only when the scope itself is POSIX.
+  return raw.includes('\\') && process.platform !== 'win32'
+    ? join(sessionCwd, raw.replace(/\\/g, '/'))
+    : join(sessionCwd, raw)
 }
 
 /** The injected existence probe (Host-owned). */
@@ -228,6 +238,38 @@ function sameMentionScope(left: MentionScope, right: MentionScope): boolean {
     : left.cwd === (right as { cwd: string }).cwd
 }
 
+/** Complete the argument text shared by the provider-level `/image`
+ * path and the awaitable command compatibility hook. The caller chooses the
+ * filesystem source and cwd; no HostFilePort is involved. */
+async function completeImageArgumentText(
+  argument: string,
+  cwd: string,
+  source: LocalFileSource,
+  signal: AbortSignal,
+  allowEmpty: boolean,
+): Promise<AutocompleteItem[] | null> {
+  const leading = argument.match(/^[ \t]+/)?.[0] ?? ''
+  let token = argument.slice(leading.length)
+  if (token === '' && !allowEmpty) return null
+  let quoted = false
+  if (token.startsWith('"')) {
+    quoted = true
+    token = token.slice(1)
+    const close = token.indexOf('"')
+    if (close !== -1) {
+      // A closed quote is already a complete token. Replacing the whole
+      // command argument would otherwise delete text after that quote.
+      return null
+    }
+  } else if (token.includes(' ') || token.includes('\t')) {
+    // The fork's argument apply replaces one contiguous argument range, so an
+    // unquoted later word must not cause the earlier word to be clobbered.
+    return null
+  }
+  const items = await completePath(token, cwd, source, signal, { at: false, quoted })
+  return items === null ? null : items.map(item => ({ ...item, value: `${leading}${item.value}` }))
+}
+
 /**
  * The editor's autocomplete provider: `@` mentions through the Host-file
  * port (the Direct adapter answers scoped discovery + fd/fdfind via the
@@ -248,17 +290,30 @@ export class MentionProvider implements AutocompleteProvider {
   private readonly inputModeSource: () => EditorInputMode
   /** The `/image` discovery source: Client-local (never HostFilePort). */
   private readonly localSource: LocalFileSource
+  /** Client-local cwd for `/image`; intentionally separate from the Host
+   * session scope so a future remote attach cannot make image completion read
+   * the Host workspace. */
+  private readonly localCwdOf: () => string
   /** The REQUEST SNAPSHOT (plan §9.2): the exact document lines + cursor
    * + mode + SCOPE of the most recent getSuggestions call that produced a
-   * suggestion list. applyCompletion accepts ONLY when the current
-   * document + cursor + scope still match this snapshot — a stale dropdown
-   * (from an older request, or from a request resolved under a since-
-   * switched session/workspace scope) can never modify the current draft
-   * (the prefix-only fence misses edits elsewhere on the line — `hello
-   * @foo` → `world @foo` — and the full-snapshot check here also misses a
-   * scope switch with an unchanged draft: an old session's Host candidate
-   * must never be accepted under a new session). */
-  private requestSnapshot: { lines: readonly string[]; cursorLine: number; cursorCol: number; mode: EditorInputMode; scope: MentionScope } | null = null
+   * suggestion list. Strict file/extension results may apply ONLY when the
+   * current document + cursor + scope still match this snapshot — a stale
+   * dropdown (from an older request, or from a request resolved under a
+   * switched session/workspace scope) can never modify the current draft.
+   * Legacy shell-word results keep the fork's prefix-only adapter behavior;
+   * direct calls without a captured request retain that same fallback. */
+  private requestSnapshot: {
+    lines: readonly string[]
+    cursorLine: number
+    cursorCol: number
+    mode: EditorInputMode
+    scope: MentionScope
+    localCwd: string
+    /** File and extension results require a full snapshot fence. The fork's
+     * legacy shell-word adapter keeps its prefix-only behavior for direct
+     * shell apply callers. */
+    strict: boolean
+  } | null = null
   /** The monotonically increasing request generation (plan §9.2 latest-
    * only): minted at REQUEST START (getSuggestions entry). A result —
    * host OR extension — captures its snapshot ONLY IF its minted
@@ -275,11 +330,13 @@ export class MentionProvider implements AutocompleteProvider {
     inputModeSource: () => EditorInputMode = () => 'prompt',
     scope: MentionScope | (() => MentionScope) = { kind: 'workspace', cwd: workDir },
     localFdPath: string | null | undefined = undefined,
+    localCwd: string | (() => string) = workDir,
   ) {
     this.workDir = workDir
     this.fileReferences = fileReferences ?? NO_HOST_REFERENCES
     this.inputModeSource = inputModeSource
     this.scopeOf = typeof scope === 'function' ? scope : () => scope
+    this.localCwdOf = typeof localCwd === 'function' ? localCwd : () => localCwd
     this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, null)
     this.pathArgumentCommands = FILE_ARGUMENT_COMMANDS
     // `/image`'s discovery source: the CLIENT's own filesystem.
@@ -328,7 +385,10 @@ export class MentionProvider implements AutocompleteProvider {
     cursorCol: number,
     options: { signal: AbortSignal; force?: boolean },
   ): Promise<AutocompleteSuggestions | null> {
-    return this.getSuggestionsAtGeneration(++this.requestGeneration, lines, cursorLine, cursorCol, options)
+    const generation = ++this.requestGeneration
+    const requestMode = this.inputModeSource()
+    const requestLocalCwd = this.localCwdOf()
+    return this.getSuggestionsAtGeneration(generation, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, options)
   }
 
   /** The generation-threaded core: mint ONCE (either here for the direct
@@ -339,6 +399,8 @@ export class MentionProvider implements AutocompleteProvider {
    * ignoring AbortSignal) can never overwrite a newer request's snapshot. */
   private async getSuggestionsAtGeneration(
     generation: number,
+    requestMode: EditorInputMode,
+    requestLocalCwd: string,
     lines: string[],
     cursorLine: number,
     cursorCol: number,
@@ -358,7 +420,9 @@ export class MentionProvider implements AutocompleteProvider {
     const shellContext = shellCompletionContext(shellLine.line, shellLine.cursorCol)
     if (shellContext !== undefined) {
       const suggestions = await suggestShellCompletion(shellContext, this.workDir, options)
-      if (suggestions !== null) return suggestions
+      if (suggestions !== null) {
+        return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, suggestions, false)
+      }
     }
 
     // 2. THE FILE-COMPLETION CONTEXT CLASSIFIER (plan §4): the ONLY places
@@ -374,10 +438,28 @@ export class MentionProvider implements AutocompleteProvider {
       : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands)
 
     if (context.kind === 'mention') {
-      return this.withRequestSnapshot(generation, requestScope, lines, cursorLine, cursorCol, await this.completeMention(context.query, options.signal))
+      return this.withRequestSnapshot(
+        generation,
+        requestScope,
+        requestMode,
+        requestLocalCwd,
+        lines,
+        cursorLine,
+        cursorCol,
+        await this.completeMention(requestScope, context.query, options.signal),
+      )
     }
     if (context.kind === 'image-argument') {
-      return this.withRequestSnapshot(generation, requestScope, lines, cursorLine, cursorCol, await this.completeImageArgument(context.query, options.signal))
+      return this.withRequestSnapshot(
+        generation,
+        requestScope,
+        requestMode,
+        requestLocalCwd,
+        lines,
+        cursorLine,
+        cursorCol,
+        await this.completeImageArgument(context.query, requestLocalCwd, options.signal),
+      )
     }
 
     // 3. Shell-mode natural-trigger suppression (mirrors the pre-plan
@@ -397,7 +479,7 @@ export class MentionProvider implements AutocompleteProvider {
     if (semantic !== null || literalShellLine) {
       try {
         const result = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
-        return this.withRequestSnapshot(generation, requestScope, lines, cursorLine, cursorCol, result)
+        return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, result, false)
       } catch {
         return null
       }
@@ -412,7 +494,8 @@ export class MentionProvider implements AutocompleteProvider {
     if (options.force === true) return null
     if (textBeforeCursor.trimStart().startsWith('/') && !textBeforeCursor.trimStart().includes(' ')) {
       try {
-        return await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
+        const result = await this.getSlashCommandSuggestions(lines, cursorLine, cursorCol, options)
+        return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, result, false)
       } catch {
         return null
       }
@@ -420,13 +503,35 @@ export class MentionProvider implements AutocompleteProvider {
     return null
   }
 
+  /** The vendored slash-command provider currently expects `/name` at
+   * column zero even though the editor's slash-command context accepts
+   * indentation. Normalize only for the inner query; keep its returned
+   * `/name` prefix so the normal apply adapter preserves the original
+   * indentation. File contexts never reach this helper. */
+  private getSlashCommandSuggestions(
+    lines: string[],
+    cursorLine: number,
+    cursorCol: number,
+    options: { signal: AbortSignal; force?: boolean },
+  ): Promise<AutocompleteSuggestions | null> {
+    const line = lines[cursorLine] ?? ''
+    const before = line.slice(0, cursorCol)
+    const trimmed = before.trimStart()
+    const leading = before.length - trimmed.length
+    if (leading === 0) return this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
+    const normalizedLines = lines.map((value, index) => index === cursorLine ? value.slice(leading) : value)
+    return this.inner.getSuggestions(normalizedLines, cursorLine, cursorCol - leading, options)
+  }
+
   /** Complete one `@` mention through the shared engine + HostFilePort:
    * the raw token is resolved against the SESSION scope, the port answers
    * Host discovery facts, and presentation (ranking/quoting/@-shape) is
    * the shared layer. Stale results are dropped twice: the port's own
    * abort check and the scope re-verification after the await. */
-  private async completeMention(atPrefix: string, signal: AbortSignal): Promise<AutocompleteSuggestions | null> {
-    const scope = this.scopeOf()
+  private async completeMention(scope: MentionScope, atPrefix: string, signal: AbortSignal): Promise<AutocompleteSuggestions | null> {
+    // `scope` is captured at request entry and deliberately threaded through
+    // the await. A session switch while the Host request is in flight must
+    // fence the old request instead of resolving it against the new session.
     // The editor's at-prefix INCLUDES the `@` (and an unclosed `"` for the
     // quoted form): the port's contract keeps the whole prefix (its Direct
     // adapter strips and resolves the scope). The engine's raw token for
@@ -440,7 +545,7 @@ export class MentionProvider implements AutocompleteProvider {
     const items = presentDiscovery(
       candidates.map(candidate => ({ path: candidate.path, kind: candidate.kind })),
       query.searchTerm,
-      { at: true, quoted, sep: query.winAbsolute ? '\\' : '/' },
+      { at: true, quoted, sep: separatorOfRaw(raw, query.winAbsolute || raw.includes('\\')) },
     )
     if (items.length === 0) return null
     return { prefix: atPrefix, items }
@@ -469,29 +574,13 @@ export class MentionProvider implements AutocompleteProvider {
    * UNQUOTED argument with embedded spaces cannot complete (the fork's
    * apply replaces the whole argument range, so a later word would clobber
    * the earlier ones). */
-  private async completeImageArgument(argument: string, signal: AbortSignal): Promise<AutocompleteSuggestions | null> {
-    const leading = argument.match(/^[ \t]+/)?.[0] ?? ''
-    let token = argument.slice(leading.length)
-    let quoted = false
-    if (token.startsWith('"')) {
-      quoted = true
-      token = token.slice(1)
-      const close = token.indexOf('"')
-      if (close !== -1) {
-        // A CLOSED quote: the token is complete — completing further is
-        // wrong, and if ANYTHING follows the closing quote (`/image "my"foo`)
-        // the fork's whole-argument-range apply would delete that text.
-        // Stay quiet (the dropdown is closed in this state anyway).
-        return null
-      }
-    } else if (token.includes(' ') || token.includes('\t')) {
-      // Unquoted: a space is a word boundary — completing a later word
-      // would clobber the earlier ones (the fork's whole-range apply).
-      return null
-    }
-    const items = await completePath(token, this.workDir, this.localSource, signal, { at: false, quoted })
-    if (items === null) return null
-    return { prefix: argument, items: items.map(item => ({ ...item, value: `${leading}${item.value}` })) }
+  private async completeImageArgument(
+    argument: string,
+    localCwd: string,
+    signal: AbortSignal,
+  ): Promise<AutocompleteSuggestions | null> {
+    const items = await completeImageArgumentText(argument, localCwd, this.localSource, signal, true)
+    return items === null ? null : { prefix: argument, items }
   }
 
   /** Capture the request state right before a non-null suggestion result
@@ -507,10 +596,13 @@ export class MentionProvider implements AutocompleteProvider {
   private withRequestSnapshot<T extends AutocompleteSuggestions | null>(
     generation: number,
     scope: MentionScope,
+    mode: EditorInputMode,
+    localCwd: string,
     lines: readonly string[],
     cursorLine: number,
     cursorCol: number,
     result: T,
+    strict = true,
   ): T {
     if (generation !== this.requestGeneration) return result
     if (result === null) this.requestSnapshot = null
@@ -518,8 +610,10 @@ export class MentionProvider implements AutocompleteProvider {
       lines: [...lines],
       cursorLine,
       cursorCol,
-      mode: this.inputModeSource(),
+      mode,
       scope,
+      localCwd,
+       strict,
     }
     return result
   }
@@ -539,8 +633,10 @@ export class MentionProvider implements AutocompleteProvider {
     cursorLine: number,
     cursorCol: number,
     result: AutocompleteSuggestions | null,
+    mode: EditorInputMode = this.inputModeSource(),
+    localCwd: string = this.localCwdOf(),
   ): AutocompleteSuggestions | null {
-    return this.withRequestSnapshot(generation, scope, lines, cursorLine, cursorCol, result)
+    return this.withRequestSnapshot(generation, scope, mode, localCwd, lines, cursorLine, cursorCol, result)
   }
 
   /** The base provider's suggestion entry for the DELEGATED wrap: the
@@ -556,8 +652,10 @@ export class MentionProvider implements AutocompleteProvider {
     cursorLine: number,
     cursorCol: number,
     options: { signal: AbortSignal; force?: boolean },
+    requestMode: EditorInputMode = this.inputModeSource(),
+    requestLocalCwd: string = this.localCwdOf(),
   ): Promise<AutocompleteSuggestions | null> {
-    return this.getSuggestionsAtGeneration(generation, lines, cursorLine, cursorCol, options)
+    return this.getSuggestionsAtGeneration(generation, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, options)
   }
 
   /** PUBLIC test/app seam (plan §9.2): THE DELEGATING provider mints its
@@ -586,6 +684,13 @@ export class MentionProvider implements AutocompleteProvider {
     return this.scopeOf()
   }
 
+  /** The Client-local cwd captured alongside the Host scope for a delegated
+   * request. `/image` must reject an answer if its local base changes while
+   * the async discovery is in flight. */
+  localCwdAtRequestTime(): string {
+    return this.localCwdOf()
+  }
+
   /** Whether the editor state still EXACTLY matches the request that
    * produced the current dropdown (line array, cursor, input mode, AND
    * the completion scope — a mode switch swaps the completion grammar,
@@ -597,6 +702,7 @@ export class MentionProvider implements AutocompleteProvider {
     if (snapshot.cursorLine !== cursorLine || snapshot.cursorCol !== cursorCol) return false
     if (snapshot.mode !== this.inputModeSource()) return false
     if (!sameMentionScope(snapshot.scope, this.scopeOf())) return false
+    if (snapshot.localCwd !== this.localCwdOf()) return false
     if (snapshot.lines.length !== lines.length) return false
     for (let index = 0; index < snapshot.lines.length; index += 1) {
       if (snapshot.lines[index] !== lines[index]) return false
@@ -612,27 +718,14 @@ export class MentionProvider implements AutocompleteProvider {
     prefix: string,
   ): { lines: string[]; cursorLine: number; cursorCol: number } {
     const currentLine = lines[cursorLine] ?? ''
-    const textBeforeCursor = currentLine.slice(0, cursorCol)
-    // The FILE-completion context of this apply (the shell-bridge and the
-    // shell-semantic paths below do NOT carry the snapshot — a shell word
-    // replacement is a plain-word swap that never cuts into `@`-preceding
-    // text, and its tests drive apply directly without a request).
-    const applySemantic = this.virtualShellSemanticContext(currentLine, cursorCol)
-    const context = applySemantic !== null
-      ? classifyFileCompletionContext(applySemantic.line, this.pathArgumentCommands)
-      : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands)
-    const isFileContext = context.kind === 'mention' || context.kind === 'image-argument'
-    // THE STALE FENCE (plan §9.1 minimum + §9.2 full snapshot for FILE
-    // contexts): the EXACT document lines + cursor of the REQUEST that
-    // produced this dropdown must still match the editor's current state.
-    // Any edit since — typing, Backspace, Delete, cursor move, paste,
-    // mode/session switch, or an unrelated edit ELSEWHERE on the line
-    // (`hello @foo` → `world @foo`) — makes the replacement WRONG. A stale
-    // accept returns the document UNCHANGED. The snapshot is the strong
-    // check; the prefix check remains the fork-contract fallback for the
-    // non-snapshot paths (shell/extension — still cannot cut into the
-    // draft).
-    if (isFileContext && !this.requestMatchesSnapshot(lines, cursorLine, cursorCol)) {
+    // THE STALE FENCE (plan §9.1 minimum + §9.2 full snapshot): file and
+    // extension results carry the EXACT document lines + cursor + mode + scope
+    // of the request that produced them. An extension result at an ordinary
+    // prompt position can otherwise keep the same prefix while an unrelated
+    // edit changes the rest of the line. Legacy shell-word results retain the
+    // fork's prefix-only adapter semantics because they are not file ranges.
+    if (this.requestSnapshot?.strict === true
+      && !this.requestMatchesSnapshot(lines, cursorLine, cursorCol)) {
       return { lines, cursorLine, cursorCol }
     }
     const start = cursorCol - prefix.length
@@ -720,56 +813,26 @@ export class MentionProvider implements AutocompleteProvider {
  * `src/fo`; `@"my file` → `my file`; the unclosed quote stays unclosed —
  * the ranking term is the text inside the quotes). */
 function stripMentionToken(atPrefix: string): { raw: string; quoted: boolean } {
-  if (atPrefix.startsWith('@"')) {
-    const inner = atPrefix.slice(2)
-    return { raw: inner.endsWith('"') ? inner.slice(0, -1) : inner, quoted: true }
-  }
-  const inner = atPrefix.slice(1)
-  return { raw: inner.endsWith('"') ? inner.slice(0, -1) : inner, quoted: false }
+  return stripAtQuotes(atPrefix)
 }
 
 /**
- * Slash-command PATH-argument completion (`/image <path>`): the SYNC
- * COMPATIBILITY wrapper over the shared engine's QUERY/RANKING/
- * PRESENTATION (plan §20 — the same modules behind `@` and the async
- * `/image` path). The discovery step here is DIRECTORY-LOCAL ONLY, and
- * deliberately synchronous: the fork's `getArgumentCompletions` contract
- * is sync `AutocompleteItem[] | null` (the fork calls it per keystroke
- * and cannot await), and the engine's scoped-listing branch is itself a
- * bounded `readdirSync` — so this wrapper shares the engine's query,
- * ranking, quoting, separator dialect and display-base reattachment, and
- * answers only what its sync shape allows. The fd/fdfind whole-tree fuzzy
- * search (async, cancellable) is the provider-level `/image` path
- * ({@link MentionProvider.completeImageArgument} → {@link completePath}),
- * which the installed completion surface uses; this wrapper is the
- * migration-era seam the existing tests pin, and it never runs an
- * unbounded scan.
+ * Slash-command PATH-argument compatibility completion (`/image <path>`).
+ * It is awaitable because the shared engine's fuzzy fallback is asynchronous
+ * and cancellable; the production editor normally reaches the provider-level
+ * `/image` branch, but the command descriptor can use this same source when
+ * the vendored provider calls its argument hook directly.
  *
- * @param argumentText - the text after the command name.
- * @param cwd - the session workspace (resolve relative forms against it).
+ * The empty argument remains quiet in this legacy helper. The editor-level
+ * `/image ` context owns the explicit cwd listing, while preserving the old
+ * command-hook contract for callers that used an empty argument as "no
+ * completion".
  */
-export function suggestPathArgument(argumentText: string, cwd: string): AutocompleteItem[] | null {
-  const token = argumentText
-  const leading = token.match(/^[ \t]+/)?.[0] ?? ''
-  const parsed = token.slice(leading.length)
-  if (parsed === '' || parsed.includes(' ') || parsed.includes('\t')) return null
-  const query = resolveQuery(parsed, cwd)
-  const entries = localChildrenOf(query)
-  if (entries.length === 0) return null
-  const items = presentDiscovery(
-    entries.map(entry => reattachDisplayBase(entry, query)),
-    query.searchTerm,
-    { at: false, quoted: false, sep: query.winAbsolute ? '\\' : '/' },
-  )
-  return items.length === 0 ? null : items.map(item => ({ ...item, value: `${leading}${item.value}` }))
-}
-
-/** The DIRECT children of one directory through the engine's own listing
- * (a scoped query's search base is its directory — the same bounded
- * readdir the async engine uses; a missing/unreadable directory yields []
- * (never a crash). Symlinks to directories complete with `/` (the engine's
- * entryIsDirectory rule). */
-function localChildrenOf(query: import('./file-completion/types.ts').PathCompletionQuery): PathCandidate[] {
-  return listDirectChildren(query.searchBase)
-    .map(entry => ({ path: entry.path, kind: entry.isDirectory ? 'directory' : 'file' }))
+export async function suggestPathArgument(
+  argumentText: string,
+  cwd: string,
+  localFdPath: string | null | undefined = undefined,
+): Promise<AutocompleteItem[] | null> {
+  const source = new LocalFileSource(localFdPath)
+  return completeImageArgumentText(argumentText, cwd, source, new AbortController().signal, false)
 }

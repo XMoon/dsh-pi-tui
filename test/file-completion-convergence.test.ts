@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join, win32, sep } from 'node:path'
 import { classifyFileCompletionContext, extractAtPrefix } from '../src/file-completion/context.ts'
@@ -215,6 +215,27 @@ test('§23 matrix: /image shares the scoped forms (../, ~/, absolute, directory 
   }
 })
 
+test('Host @ and Client /image completion keep separate cwd ownership', async () => {
+  const hostRoot = mkdtempSync(join(tmpdir(), 'dsh-conv-host-cwd-'))
+  const localRoot = mkdtempSync(join(tmpdir(), 'dsh-conv-local-cwd-'))
+  writeFileSync(join(hostRoot, 'host-only.txt'), 'x')
+  writeFileSync(join(localRoot, 'local-only.png'), 'x')
+  const provider = new MentionProvider(
+    [],
+    hostRoot,
+    new DirectHostFilePort(() => undefined, null),
+    undefined,
+    { kind: 'workspace', cwd: hostRoot },
+    null,
+    localRoot,
+  )
+  const mention = await provider.getSuggestions(['@host-only'], 0, 10, { signal: abort })
+  assert.ok(mention !== null && mention.items.some(item => item.value === '@host-only.txt'))
+  const image = await provider.getSuggestions(['/image local-only'], 0, '/image local-only'.length, { signal: abort })
+  assert.ok(image !== null && image.items.some(item => item.value === 'local-only.png'))
+  assert.ok(!image.items.some(item => item.value.includes('host-only')), 'image completion must not read Host cwd')
+})
+
 test('P1.3: a >2000-entry workspace keeps directory continuation working', async () => {
   const { root } = largeWorkspaceFixture()
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
@@ -240,6 +261,17 @@ test('P1.4: substring ranking is shared between @ and /image', async () => {
   // The engine is shared: verify the same ranking in the pure layer.
   const scored = scorePathCandidate({ path: 'src/deep-nested.ts', kind: 'file' }, 'nested')
   assert.equal(scored, 50, 'a basename substring scores 50')
+  const imageProvider = new MentionProvider(
+    [],
+    root,
+    new DirectHostFilePort(() => undefined, null),
+    undefined,
+    undefined,
+    null,
+  )
+  const image = await imageProvider.getSuggestions(['/image nested'], 0, 13, { signal: abort })
+  assert.ok(image !== null && image.items.some(item => item.value === 'src/deep-nested.ts'),
+    `/image nested must share subtree fuzzy discovery:\n${JSON.stringify(image)}`)
 })
 
 test('P1.5: a stale prefix accept never deletes @-preceding text', () => {
@@ -347,6 +379,45 @@ test('§22: fd/fdfind detection prefers fd then fdfind', () => {
   }
 })
 
+test('fd discovery uses full-path matching, NUL records and preserves filename whitespace', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-conv-fd-output-'))
+  mkdirSync(join(root, 'src'))
+  writeFileSync(join(root, 'src', 'deep-nested.png'), 'x')
+  writeFileSync(join(root, ' leading file.txt'), 'x')
+  const argsFile = join(root, 'fd-args.txt')
+  const fakeFd = join(root, 'fd')
+  writeFileSync(fakeFd, `#!/bin/sh
+printf '%s\\n' "$@" > ${JSON.stringify(argsFile)}
+printf '%s\\0' './src/deep-nested.png' './ leading file.txt'
+`)
+  chmodSync(fakeFd, 0o755)
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, fakeFd))
+  const nested = await provider.getSuggestions(['@nested'], 0, 7, { signal: abort })
+  assert.ok(nested !== null, `full-path fd matching must find nested files:\n${JSON.stringify(nested)}`)
+  assert.ok(nested.items.some(item => item.value === '@src/deep-nested.png'))
+  const spaced = await provider.getSuggestions(['@leading'], 0, 8, { signal: abort })
+  assert.ok(spaced !== null, `NUL output with spaces must survive:\n${JSON.stringify(spaced)}`)
+  assert.ok(spaced.items.some(item => item.value === '@" leading file.txt"'))
+  const args = readFileSync(argsFile, 'utf8').split(/\r?\n/)
+  assert.ok(args.includes('--full-path'), 'fd must match the full relative path')
+  assert.ok(args.includes('--print0'), 'fd must emit NUL-delimited records')
+})
+
+test('fd discovery ignores noisy stderr and settles without a pipe deadlock', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-conv-fd-stderr-'))
+  writeFileSync(join(root, 'visible.txt'), 'x')
+  const fakeFd = join(root, 'fd')
+  writeFileSync(fakeFd, `#!/bin/sh
+dd if=/dev/zero bs=1024 count=128 >&2 2>/dev/null
+printf '%s\\0' './visible.txt'
+`)
+  chmodSync(fakeFd, 0o755)
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, fakeFd))
+  const result = await provider.getSuggestions(['@visible'], 0, 8, { signal: abort })
+  assert.ok(result !== null, `noisy fd stderr must not block completion:\n${JSON.stringify(result)}`)
+  assert.ok(result.items.some(item => item.value === '@visible.txt'))
+})
+
 test('§23 matrix: Windows drive and UNC tokens keep their dialect (pure)', () => {
   const query = resolvePathQuery('C:\\Users\\sh', '/ws')
   assert.equal(query.searchBase, win32.dirname('C:\\Users\\sh'))
@@ -356,6 +427,24 @@ test('§23 matrix: Windows drive and UNC tokens keep their dialect (pure)', () =
   assert.equal(unc.searchBase, '\\\\server\\share\\')
   assert.equal(unc.displayBase, '\\\\server\\share\\')
   assert.equal(unc.winAbsolute, true)
+})
+
+test('Windows candidates rank and present basename labels independently of host path dialect', () => {
+  assert.equal(scorePathCandidate({ path: 'C:\\Users\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
+  assert.equal(scorePathCandidate({ path: 'C:\\Users\\deep\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
+  const directory = presentPathCandidate(
+    { path: 'C:\\Users\\Pictures', kind: 'directory' },
+    { at: false, quoted: false, sep: '\\' },
+  )
+  assert.equal(directory.value, 'C:\\Users\\Pictures\\')
+  assert.equal(directory.label, 'Pictures/')
+  assert.equal(directory.description, 'C:\\Users\\Pictures')
+  const mixed = presentPathCandidate(
+    { path: 'C:/Users\\Pictures', kind: 'directory' },
+    { at: true, quoted: false, sep: '\\' },
+  )
+  assert.equal(mixed.value, '@C:/Users\\Pictures\\')
+  assert.equal(mixed.label, 'Pictures/')
 })
 
 test('the presentation layer quotes spaced values for /image and keeps @ quoting', () => {
@@ -543,6 +632,22 @@ test('review finding 2: a stale accept never applies after an unrelated edit', a
   // The editor state changed on an unrelated part: `see` → `look`.
   const applied = provider.applyCompletion(['look @local'], 0, 12, { value: '@local.txt', label: 'local.txt' }, '@local')
   assert.deepEqual(applied.lines, ['look @local'], 'an unrelated edit must also fence the accept')
+})
+
+test('extension suggestion snapshots fence unrelated edits even with the same prefix', () => {
+  const root = outsideCwdFixture().workspace
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const generation = provider.mintRequestGeneration()
+  const suggestion = { items: [{ value: 'world', label: 'world' }], prefix: 'world' }
+  provider.captureRequestSnapshot(generation, { kind: 'workspace', cwd: root }, ['hello world'], 0, 11, suggestion)
+  const applied = provider.applyCompletion(
+    ['changed world'],
+    0,
+    13,
+    suggestion.items[0]!,
+    suggestion.prefix,
+  )
+  assert.deepEqual(applied.lines, ['changed world'], 'an extension result must not apply after an unrelated edit')
 })
 
 test('review finding (round 8): a fallback scan is async and abort-responsive (never a sync block)', async () => {

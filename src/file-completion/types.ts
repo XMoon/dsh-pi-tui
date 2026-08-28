@@ -17,6 +17,16 @@ export interface PathCandidate {
   readonly kind: 'file' | 'directory'
 }
 
+/**
+ * Return the final path component without depending on the host OS dialect.
+ * Completion can present a Windows path while the client process is running
+ * on POSIX (and vice versa), so `node:path.basename` is not sufficient here.
+ */
+export function basenameOfPath(path: string): string {
+  const separator = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return path.slice(separator + 1)
+}
+
 /** A half-open text range in the current line. */
 export interface TextRange {
   readonly start: number

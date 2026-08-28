@@ -9,7 +9,7 @@ import test from 'node:test'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join, win32 } from 'node:path'
-import { expandFileMentionsForSubmit, extractAtPrefix, findFileMentions, MentionProvider, resolvePathSearch, suggestPathArgument } from '../src/mentions.ts'
+import { expandFileMentionsForSubmit, extractAtPrefix, findFileMentions, MentionProvider, resolveMentionCandidate, resolvePathSearch, suggestPathArgument } from '../src/mentions.ts'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
 
 /** A throwaway workspace with known files. */
@@ -130,6 +130,20 @@ test('the fallback quotes mention values that contain spaces', async () => {
   assert.ok(result.items.some(item => item.value === '@"my file.txt"'), `spaced value must be quoted:\n${JSON.stringify(result.items)}`)
 })
 
+test('the provider delegates indented slash-command completion without losing indentation', async () => {
+  const root = fixtureWorkspace()
+  const provider = new MentionProvider(
+    [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
+    root,
+    fallbackSeam(),
+  )
+  const result = await provider.getSuggestions(['  /ex'], 0, 5, { signal: abort })
+  assert.ok(result !== null, `indented /ex must suggest:\n${JSON.stringify(result)}`)
+  assert.ok(result.items.some(item => item.value === 'exit'), `the exit command missing:\n${JSON.stringify(result.items)}`)
+  const applied = provider.applyCompletion(['  /ex'], 0, 5, result.items[0]!, result.prefix)
+  assert.equal(applied.lines[0], '  /exit ', 'the command apply must preserve indentation')
+})
+
 test('the provider delegates slash-command completion to the inner provider', async () => {
   const root = fixtureWorkspace()
   const provider = new MentionProvider(
@@ -176,33 +190,33 @@ test('a late port result is dropped when the request was aborted; a port rejecti
   )
 })
 
-test('suggestPathArgument completes a bare prefix in the cwd', () => {
+test('suggestPathArgument completes a bare prefix in the cwd', async () => {
   const root = fixtureWorkspace()
-  const items = suggestPathArgument('fi', root)
+  const items = await suggestPathArgument('fi', root)
   assert.ok(items !== null, `'fi' must suggest:\n${JSON.stringify(items)}`)
   assert.ok(items.some(item => item.value === 'file-one.txt'), `file-one missing:\n${JSON.stringify(items)}`)
   assert.ok(items.some(item => item.value === 'file-two.ts'), `file-two missing:\n${JSON.stringify(items)}`)
   // Directories sort FIRST and keep the trailing slash so Tab continues.
-  const dirs = suggestPathArgument('s', root)
+  const dirs = await suggestPathArgument('s', root)
   assert.ok(dirs !== null, `'s' must suggest:\n${JSON.stringify(dirs)}`)
   assert.equal(dirs[0]!.value, 'src/', 'directories lead the list')
   assert.equal(dirs[0]!.label, 'src/')
 })
 
-test('suggestPathArgument completes directory continuations', () => {
+test('suggestPathArgument completes directory continuations', async () => {
   const root = fixtureWorkspace()
-  const contents = suggestPathArgument('src/', root)
+  const contents = await suggestPathArgument('src/', root)
   assert.ok(contents !== null, `'src/' must suggest:\n${JSON.stringify(contents)}`)
   assert.ok(contents.some(item => item.value === 'src/deep-nested.ts'), `nested file missing:\n${JSON.stringify(contents)}`)
   // A partial basename inside a directory keeps the directory prefix.
-  const partial = suggestPathArgument('src/deep', root)
+  const partial = await suggestPathArgument('src/deep', root)
   assert.ok(partial !== null, `'src/deep' must suggest:\n${JSON.stringify(partial)}`)
   assert.ok(partial.some(item => item.value === 'src/deep-nested.ts'), `prefixed value missing:\n${JSON.stringify(partial)}`)
 })
 
-test('suggestPathArgument handles absolute and ~ forms', () => {
+test('suggestPathArgument handles absolute and ~ forms', async () => {
   const root = fixtureWorkspace()
-  const absolute = suggestPathArgument(`${root}/file`, root)
+  const absolute = await suggestPathArgument(`${root}/file`, root)
   assert.ok(absolute !== null, `absolute must suggest:\n${JSON.stringify(absolute)}`)
   assert.ok(absolute.some(item => item.value === `${root}/file-one.txt`), `absolute value missing:\n${JSON.stringify(absolute)}`)
   const home = mkdtempSync(join(tmpdir(), 'dsh-mentions-home-'))
@@ -211,7 +225,7 @@ test('suggestPathArgument handles absolute and ~ forms', () => {
     process.env.HOME = home
     mkdirSync(join(home, 'pics'))
     writeFileSync(join(home, 'pics', 'a.png'), 'x')
-    const tilde = suggestPathArgument('~/p', root)
+    const tilde = await suggestPathArgument('~/p', root)
     assert.ok(tilde !== null, `'~/p' must suggest:\n${JSON.stringify(tilde)}`)
     assert.ok(tilde.some(item => item.value === '~/pics/'), `tilde value missing:\n${JSON.stringify(tilde)}`)
   } finally {
@@ -220,21 +234,21 @@ test('suggestPathArgument handles absolute and ~ forms', () => {
   }
 })
 
-test('suggestPathArgument tolerates leading separator whitespace (multi-space / tab-expanded)', () => {
+test('suggestPathArgument tolerates leading separator whitespace (multi-space / tab-expanded)', async () => {
   const root = fixtureWorkspace()
   // The fork's argument branch passes everything after the FIRST space, so
   // a multi-space separator yields leading whitespace in the argument; the
   // completed VALUE keeps it so the fork's apply never glues the path to
   // the command.
-  const multi = suggestPathArgument('  fi', root)
+  const multi = await suggestPathArgument('  fi', root)
   assert.ok(multi !== null, `'  fi' must suggest:\n${JSON.stringify(multi)}`)
   assert.ok(multi.some(item => item.value === '  file-one.txt'), `leading whitespace must survive in the value:\n${JSON.stringify(multi)}`)
   // A tab-expanded directory continuation (tabs normalize to four spaces).
-  const dir = suggestPathArgument('    src/', root)
+  const dir = await suggestPathArgument('    src/', root)
   assert.ok(dir !== null, `'    src/' must suggest:\n${JSON.stringify(dir)}`)
   assert.ok(dir.some(item => item.value === '    src/deep-nested.ts'), `padded continuation missing:\n${JSON.stringify(dir)}`)
   // Pure separator (no token) stays quiet.
-  assert.equal(suggestPathArgument('   ', root), null, 'separator-only arguments complete nothing')
+  assert.equal(await suggestPathArgument('   ', root), null, 'separator-only arguments complete nothing')
 })
 
 test('POSIX and Windows ROOT partials keep their separator as the search dir', () => {
@@ -255,15 +269,15 @@ test('POSIX and Windows ROOT partials keep their separator as the search dir', (
   assert.deepEqual(resolvePathSearch('sub/fi', '/ws', 'sub/fi'), { searchDir: join('/ws', 'sub'), searchPrefix: 'fi', winAbsolute: false })
 })
 
-test('a POSIX root partial completes from `/` (fs level, when /tmp exists)', () => {
+test('a POSIX root partial completes from `/` (fs level, when /tmp exists)', async () => {
   if (!existsSync('/tmp')) return // the machine has no /tmp to complete
   const root = fixtureWorkspace()
-  const items = suggestPathArgument('/tm', root)
+  const items = await suggestPathArgument('/tm', root)
   assert.ok(items !== null && items.length > 0, `'/tm' must list root entries:\n${JSON.stringify(items)}`)
   assert.ok(items.some(item => item.value.startsWith('/tmp')), `the root completion stays absolute:\n${JSON.stringify(items)}`)
 })
 
-test('suggestPathArgument treats Windows drive and UNC tokens as absolute', () => {
+test('suggestPathArgument treats Windows drive and UNC tokens as absolute', async () => {
   const root = fixtureWorkspace()
   const savedCwd = process.cwd()
   try {
@@ -280,10 +294,10 @@ test('suggestPathArgument treats Windows drive and UNC tokens as absolute', () =
     // must not be stripped into a different path.
     mkdirSync(join(root, '\\\\server\\share\\'))
     writeFileSync(join(root, '\\\\server\\share\\', 'foo.png'), 'x')
-    const drive = suggestPathArgument('C:\\Users\\sh', root)
+    const drive = await suggestPathArgument('C:\\Users\\sh', root)
     assert.ok(drive !== null, `a drive token must complete:\\n${JSON.stringify(drive)}`)
     assert.ok(drive.some(item => item.value === 'C:\\Users\\shot.png'), `drive value keeps the backslash dialect:\\n${JSON.stringify(drive)}`)
-    const unc = suggestPathArgument('\\\\server\\share\\fo', root)
+    const unc = await suggestPathArgument('\\\\server\\share\\fo', root)
     assert.ok(unc !== null, `a UNC token must complete:\\n${JSON.stringify(unc)}`)
     assert.ok(unc.some(item => item.value === '\\\\server\\share\\foo.png'), `UNC value keeps the share form:\\n${JSON.stringify(unc)}`)
   } finally {
@@ -291,7 +305,7 @@ test('suggestPathArgument treats Windows drive and UNC tokens as absolute', () =
   }
 })
 
-test('a drive ROOT keeps `C:\\` — never degrades to the drive-relative `C:`', () => {
+test('a drive ROOT keeps `C:\\` — never degrades to the drive-relative `C:`', async () => {
   // `C:\` is the drive root; `C:` is the drive-relative current directory
   // — different directories on Windows. win32.dirname('C:\\Wi') returns
   // `C:\\`, and the search target must stay `C:\\` (the earlier
@@ -304,7 +318,7 @@ test('a drive ROOT keeps `C:\\` — never degrades to the drive-relative `C:`', 
     // A POSIX dir literally named `C:\` stands in for the drive root.
     mkdirSync(join(root, 'C:\\'))
     writeFileSync(join(root, 'C:\\', 'Win.exe'), 'x')
-    const items = suggestPathArgument('C:\\Wi', root)
+    const items = await suggestPathArgument('C:\\Wi', root)
     assert.ok(items !== null, `the drive root must complete:\\n${JSON.stringify(items)}`)
     assert.ok(items.some(item => item.value === 'C:\\Win.exe'), `drive-root value stays rooted:\\n${JSON.stringify(items)}`)
   } finally {
@@ -312,14 +326,14 @@ test('a drive ROOT keeps `C:\\` — never degrades to the drive-relative `C:`', 
   }
 })
 
-test('suggestPathArgument quotes values with spaces and stays quiet otherwise', () => {
+test('suggestPathArgument quotes values with spaces and stays quiet otherwise', async () => {
   const root = fixtureWorkspace()
-  const spaced = suggestPathArgument('my', root)
+  const spaced = await suggestPathArgument('my', root)
   assert.ok(spaced !== null, `'my' must suggest:\n${JSON.stringify(spaced)}`)
   assert.ok(spaced.some(item => item.value === '"my file.txt"'), `spaced value must be quoted:\n${JSON.stringify(spaced)}`)
-  assert.equal(suggestPathArgument('', root), null, 'an empty argument completes nothing')
-  assert.equal(suggestPathArgument('a b', root), null, 'embedded spaces cannot complete (single-token only)')
-  assert.equal(suggestPathArgument('no/such/dir', root), null, 'an unreadable directory stays quiet')
+  assert.equal(await suggestPathArgument('', root), null, 'an empty argument completes nothing')
+  assert.equal(await suggestPathArgument('a b', root), null, 'embedded spaces cannot complete (single-token only)')
+  assert.equal(await suggestPathArgument('no/such/dir', root), null, 'an unreadable directory stays quiet')
 })
 
 test('the provider completes /image arguments through the fork command branch', async () => {
@@ -474,6 +488,12 @@ test('expandFileMentionsForSubmit keeps absolute forms and expands ~ to the home
       'a real home-relative mention must expand through the homedir',
     )
   }
+})
+
+test('bare ~ mention canonicalization targets HOME rather than cwd/~', () => {
+  const root = fixtureWorkspace()
+  assert.equal(resolveMentionCandidate('~', root), homedir())
+  assert.equal(resolveMentionCandidate('~\\pics', root), join(homedir(), 'pics'))
 })
 
 test('expandFileMentionsForSubmit leaves nonexistent paths verbatim', async () => {
