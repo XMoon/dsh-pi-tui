@@ -826,12 +826,16 @@ async function main() {
       if (!tmux.hasSession()) return false
       return !tmux.capturePane().includes('Type to search')
     }, 'COMPAT_BOOT_FAILURE')
+    const nativeHelpEvidence = readEvidence(evidencePath)
+    if (nativeHelpEvidence.commandInvoked !== false) {
+      fail('COMPAT_BOOT_FAILURE', 'native /help unexpectedly invoked the Pi collision fixture')
+    }
     assertNoCompatibilityFailures(tuiLog, tmux)
 
-    tmux.sendLiteral('/xmoon-pi-compat')
+    tmux.sendLiteral('/pi-help')
     await delay(350)
     tmux.sendKey('Enter')
-    await waitUntil('Pi custom component marker', TIMEOUTS.command, () => {
+    await waitUntil('Pi /pi-help custom component marker', TIMEOUTS.command, () => {
       if (!tmux.hasSession()) return false
       return tmux.capturePane().includes('PI2DSH_COMPAT_READY')
     }, 'COMPAT_SURFACE_FAILURE')

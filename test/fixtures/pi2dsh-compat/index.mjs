@@ -51,7 +51,7 @@ class Pi2dshCompatComponent {
 }
 
 export default function pi2dshCompatFixture(pi) {
-  pi.registerCommand('xmoon-pi-compat', {
+  pi.registerCommand('help', {
     description: 'Open the Pi to pi2dsh component compatibility probe',
     async handler(_args, ctx) {
       state.commandInvoked = true
