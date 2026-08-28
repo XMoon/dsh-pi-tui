@@ -80,6 +80,27 @@ test('resolveFdPath finds an executable fd on PATH and returns null otherwise', 
   }
 })
 
+test('resolveFdPath honors PATHEXT-style executable suffixes', () => {
+  const savedPath = process.env.PATH
+  const savedPathExt = process.env.PATHEXT
+  try {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-fd-ext-'))
+    const fd = join(dir, 'fd.exe')
+    writeFileSync(fd, '#!/bin/sh\nexit 0\n')
+    chmodSync(fd, 0o755)
+    process.env.PATH = dir
+    process.env.PATHEXT = '.EXE'
+    const resolved = resolveFdPath()
+    assert.ok(resolved !== null, 'the suffixed fd binary must resolve')
+    assert.equal(resolved?.toLowerCase(), fd.toLowerCase())
+  } finally {
+    if (savedPath === undefined) delete process.env.PATH
+    else process.env.PATH = savedPath
+    if (savedPathExt === undefined) delete process.env.PATHEXT
+    else process.env.PATHEXT = savedPathExt
+  }
+})
+
 test('the fallback completes @ mentions from anywhere in the tree', async () => {
   const root = fixtureWorkspace()
   const provider = new MentionProvider([], root, fallbackSeam())

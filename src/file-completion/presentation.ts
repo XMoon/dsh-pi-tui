@@ -19,7 +19,8 @@ import { basenameOfPath, type PathCandidate, type PathCompletionQuery } from './
  * display base (already in the user's own dialect, always ending with the
  * user's separator) + the candidate path. `../` + `sibling-file.ts` →
  * `../sibling-file.ts`; `~/pics/` + `a.png` → `~/pics/a.png`;
- * `/tmp/` + `x` → `/tmp/x`; `C:\Users\` + `shot.png` → `C:\Users\shot.png`.
+ * `/tmp/` + `x` → `/tmp/x`; a Windows drive base + `shot.png` keeps its
+ * backslash dialect.
  * An unscoped query ('' display base) returns the path unchanged. PURE —
  * called by the SOURCE after discovery, before the candidate crosses to
  * the presentation/ranking layer. */
@@ -30,7 +31,7 @@ export function displayPathOf(candidate: PathCandidate, query: PathCompletionQue
 
 /** Present one FINAL-display-path candidate as a completion item:
  * directories keep the trailing separator OF THE USER'S OWN DIALECT (`/`
- * on POSIX, `\` for a Windows-dialect token — so `C:\Users\foo\` stays
+ * on POSIX, `\` for a Windows-dialect token — so the accepted value stays
  * dialect-consistent and the next Tab continues in the same dialect), so
  * accept continues; values with spaces are quoted — with the `@"..."`
  * form when the user typed a quoted `@` prefix. PURE client policy. */
