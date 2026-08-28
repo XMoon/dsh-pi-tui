@@ -300,18 +300,22 @@ export class FooterConfiguratorPanel implements Component {
         // scanner, then feed the new chunk normally so a fresh marker suffix
         // cannot be lost. Longer malformed prefixes retain their old
         // fail-soft behavior: a reconstructed normal key is replayed as one
-        // key, otherwise only the incoming chunk is dispatched.
+        // key, otherwise the incoming chunk is rescanned for fresh paste
+        // markers before ordinary input dispatch.
         if (pendingStart === '\x1b') {
-          this.replayWithoutPaste(pendingStart)
-          if (data !== '') {
-            if (isReplayableInput(data)) this.replayWithoutPaste(data)
-            else this.handleInput(data)
+          // If the continuation contains a fresh complete marker, keep the
+          // scanner in the text flow: replaying the old ESC first could move
+          // out of the picker before the valid marker is seen.
+          if (data.includes(BRACKETED_PASTE_START)) {
+            this.rescanPasteInput(data)
+          } else {
+            this.replayWithoutPaste(pendingStart)
+            this.rescanPasteInput(data)
           }
         } else if (isReplayableInput(candidate)) {
           this.replayWithoutPaste(candidate)
-        } else if (data !== '') {
-          if (isReplayableInput(data)) this.replayWithoutPaste(data)
-          else this.handleInput(data)
+        } else {
+          this.rescanPasteInput(data)
         }
         return true
       }
@@ -375,6 +379,13 @@ export class FooterConfiguratorPanel implements Component {
     } finally {
       this.skipPasteOnce = previous
     }
+  }
+
+  /** Re-enter the scanner for bytes arriving after a rejected prefix. */
+  private rescanPasteInput(data: string): void {
+    if (data === '') return
+    if (this.feedPaste(data)) return
+    this.replayWithoutPaste(data)
   }
 
   private holdPasteStart(prefix: string): void {
