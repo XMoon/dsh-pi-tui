@@ -210,6 +210,14 @@ export class FooterConfiguratorPanel implements Component {
     // mutation from outside (reset helpers) calls this.
   }
 
+  dispose(): void {
+    this.clearPasteStartTimer()
+    this.pasteStartPending = ''
+    this.pasteBuffer = ''
+    this.isInPaste = false
+    this.skipPasteOnce = false
+  }
+
   render(width: number): string[] {
     const state = this.model.state()
     // The budget is re-read EVERY render (resize-safe); the caller's

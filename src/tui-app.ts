@@ -9776,7 +9776,17 @@ export class TuiApp {
     onCancel: () => void
   }): () => void {
     let handle: OverlayHandle | undefined
-    const panel = new FooterConfiguratorPanel({
+    let panel: FooterConfiguratorPanel | undefined
+    let closed = false
+    // The generic Frame/overlay stack does not own or forward the panel's
+    // optional Component.dispose(), so every close path owns this cleanup.
+    const close = (): void => {
+      if (closed) return
+      closed = true
+      panel?.dispose()
+      handle?.hide()
+    }
+    panel = new FooterConfiguratorPanel({
       model: options.model,
       registry: options.registry,
       snapshot: () => this.statusStore.snapshot(),
@@ -9793,11 +9803,11 @@ export class TuiApp {
       },
       requestRender: () => this.requestRender(),
       onSave: (layout, customItems) => {
-        handle?.hide()
+        close()
         options.onSave(layout, customItems)
       },
       onCancel: () => {
-        handle?.hide()
+        close()
         options.onCancel()
       },
     })
@@ -9816,7 +9826,7 @@ export class TuiApp {
       // CURRENT terminal height on every overlay frame.
       maxHeight: '100%',
     })
-    return () => handle?.hide()
+    return close
   }
 
   /**

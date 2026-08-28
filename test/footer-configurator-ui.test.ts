@@ -482,6 +482,29 @@ test('a lone Escape is replayed as navigation after the paste-prefix timeout', a
   app.stop()
 })
 
+test('programmatic configurator close disposes a pending paste-prefix timer', async () => {
+  const { vt, app } = startApp()
+  const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
+  const close = app.openFooterConfigurator({
+    model,
+    registry: app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('a')
+  await vt.waitForRender()
+  vt.sendInput('cache')
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // arm the ambiguous paste-prefix timer
+  close()
+  await new Promise<void>(resolve => setTimeout(resolve, 30))
+  assert.equal(model.state().addQuery, 'cache', 'closing must prevent stale Escape replay')
+  app.stop()
+})
+
 test('malformed paste prefixes preserve Escape, arrows, and following text', async () => {
   const { vt, app } = startApp()
   const model = openDefault(app)
