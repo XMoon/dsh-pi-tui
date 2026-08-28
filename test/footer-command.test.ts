@@ -481,6 +481,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   app.start()
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
     get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
@@ -554,6 +555,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   app.start()
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
   const settings = fakeSettings({ footer: 'default' })
   const applied: Array<{ footer: string }> = []
   const runner: TuiCommandRunner = {
