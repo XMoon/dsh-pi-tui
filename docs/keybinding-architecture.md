@@ -115,8 +115,8 @@ configurable action first (plan §3.3).
    host-reserved, so the key reaches the fork editor. User remaps/`false`
    sync into the fork editor's binding, conflict and shadow apply,
    fail-soft (a CONFLICTED direct submit override restores the builtin
-   Enter — convergence §4.5; a DEAD leader-only override stays inert,
-   never a fabricated restore; explicit `false` removes everything)
+   Enter — convergence §4.5; a DEAD leader-only completion is ignored and restores the action's builtin default,
+   explicit `false` removes everything)
    is evaluated on the EFFECTIVE rules — never the raw config, and a
    leader sequence NEVER clears the direct keys (`submit:
    ['ctrl+z', '<leader>s']` keeps BOTH triggers; only a truly leader-only
@@ -472,13 +472,16 @@ operation without a compare-and-swap token, all TUI settings writers use the
 shared transaction queue (including `/settings` and `/keybindings reset`), so
 editor controllers sharing a settings port serialize their `get` → candidate →
 `replace` transactions; late panel callbacks are generation-guarded and cannot
-repaint a disposed editor. Untouched builtin bindings are selectable in the
-Detail view: `Add shortcut` materializes the displayed defaults together with
-the new key, while replacing or removing one default preserves its siblings.
+repaint a disposed editor. Untouched builtin bindings that are still effective
+are selectable in the Detail view: `Add shortcut` materializes surviving defaults together with
+the new key; shadowed defaults remain reference-only, while replacing or
+removing one surviving default preserves its siblings.
 Once an action has an explicit user declaration, the unified override contract
-still applies. Safe mode makes the entire editor read-only, and direct recording
-uses `e` as the explicit "use Escape" command for the Host interrupt because raw
-`Esc` remains cancel. Physical Escape is never available to ordinary actions.
+still applies. Safe mode makes the entire editor read-only. Ordinary recording cancels on
+`Esc`; the direct Host interrupt recorder uses a short double-press window
+where one `Esc` cancels and two Escape press events assign physical Escape.
+Repeats and releases do not count, and there is no single-letter Escape
+shortcut. Physical Escape is never available to ordinary actions.
 Context-gated composition affordances are labeled separately from ordinary
 configured bindings (for example, `Down (conditional)` for the task browser).
 

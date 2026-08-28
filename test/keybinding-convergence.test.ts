@@ -92,20 +92,90 @@ test('4.1d leader prefix alias (leader: esc) is lifecycle-reserved', () => {
     `no Escape reservation diagnostic: ${parsed.diagnostics.join(' | ')}`)
 })
 
-test('4.1e leader completion aliases on Enter are rejected by the editor submit seam', () => {
+test('4.1e default effective submit blocks ordinary leader Enter completions', () => {
   const manager = new HostKeybindingManager()
   const parsed = parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: {
-      'app.history.search': '<leader>enter',
-      'app.todo.toggle': '<leader>return',
+      'app.todo.toggle': ['<leader>enter', '<leader>return'],
+    },
+  })
+  // Parsing is static: both alias spellings survive canonical parsing.
+  assert.deepEqual(parsed.leaderBindings, [
+    { action: 'app.todo.toggle', key: 'enter' },
+    { action: 'app.todo.toggle', key: 'enter' },
+  ])
+  manager.setUserConfiguration(parsed)
+  // The provisional EffectiveKeymap sees builtin Enter as the effective
+  // editor submit key, so the manager drops both dead completions and
+  // restores the leader-only action's builtin default.
+  assert.equal(manager.leaderMachine(), undefined,
+    'Enter/Return completions must not arm a dead leader machine')
+  assert.deepEqual(manager.leaderKeysFor('app.todo.toggle'), [])
+  assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+t'])
+  assert.equal(manager.diagnosticsList().filter(message => message.includes('effective editor submit key')).length, 1,
+    'duplicate aliases should produce one dead-key diagnostic')
+})
+
+test('4.1f a working submit remap permits and runs leader Enter', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const parsed = parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.input.submit': 'ctrl+z',
+      'app.todo.toggle': '<leader>enter',
+    },
+  })
+  app.keybindingsManager().setUserConfiguration(parsed)
+  assert.deepEqual(app.keybindingsManager().editorSubmitKeysFor(), ['ctrl+z'])
+  assert.deepEqual(app.keybindingsManager().leaderKeysFor('app.todo.toggle'), ['enter'])
+  assert.deepEqual(app.keybindingsManager().keysFor('app.todo.toggle'), [])
+  assert.equal(app.keybindingsManager().diagnosticsList().some(message => message.includes('effective editor submit key')), false)
+  await vt.waitForRender()
+  vt.sendInput('\x18') // leader
+  await vt.waitForRender()
+  vt.sendInput('\r') // leader completion; Enter is not submit after the remap
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelVisible(), true, 'Leader Enter must activate todo after submit moves to Ctrl+Z')
+  app.stop()
+})
+
+test('4.1g a conflicted submit remap falls back to Enter and blocks leader Enter', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.input.submit': 'ctrl+z',
+      'app.history.search': 'ctrl+z',
+      'app.todo.toggle': '<leader>enter',
     },
   })
   manager.setUserConfiguration(parsed)
-  assert.equal(manager.leaderMachine(), undefined,
-    'Enter/Return completions must not arm a dead leader machine')
-  assert.equal(parsed.leaderBindings.length, 0)
-  assert.equal(parsed.diagnostics.filter(message => message.includes('editor-owned submit')).length, 2)
+  assert.deepEqual(manager.editorSubmitKeysFor(), ['enter'])
+  assert.deepEqual(manager.leaderKeysFor('app.todo.toggle'), [])
+  assert.deepEqual(manager.keysFor('app.todo.toggle'), ['ctrl+t'],
+    'a dead leader-only declaration must not suppress the builtin')
+  assert.ok(manager.diagnosticsList().some(message => message.includes('effective editor submit key')))
+  assert.ok(manager.diagnosticsList().some(message => message.includes('conflict')))
+})
+
+test('4.1h a shadowed builtin submit permits leader Enter', () => {
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.history.search': 'enter',
+      'app.todo.toggle': '<leader>enter',
+    },
+  }))
+  // The user history rule shadows the builtin editor-owned Enter, so Enter
+  // is no longer an effective submit key and the leader completion remains
+  // live rather than being rejected from the raw default assumption.
+  assert.deepEqual(manager.editorSubmitKeysFor(), [])
+  assert.deepEqual(manager.keysFor('app.history.search'), ['enter'])
+  assert.deepEqual(manager.leaderKeysFor('app.todo.toggle'), ['enter'])
 })
 
 // ── 4.2 duplicate direct key ──────────────────────────────────────────────

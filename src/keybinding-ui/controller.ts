@@ -114,23 +114,34 @@ function actionBindings(
   return [...editorBindingsFor(action, parsed)]
 }
 
-function defaultBindings(action: AppKeybindingId): KeybindingEditorBinding[] {
-  return APP_KEYBINDINGS[action]!.defaultKeys.map(key => ({ kind: 'direct' as const, key }))
+/** Builtin defaults that are still visible in the manager's effective
+ * direct projection. Composition/conditional affordances are intentionally
+ * absent because they are not definition defaults and must never be
+ * materialized as ordinary user declarations. */
+function editableEffectiveDefaults(
+  action: AppKeybindingId,
+  manager: HostKeybindingManager,
+): KeybindingEditorBinding[] {
+  const effective = new Set(manager.keysFor(action))
+  return APP_KEYBINDINGS[action]!.defaultKeys
+    .filter(key => effective.has(key))
+    .map(key => ({ kind: 'direct' as const, key }))
 }
 
 /**
- * The first edit of an untouched action starts from its editable effective
- * defaults. Once the action has a user declaration, user bindings remain the
- * complete source of truth because a declaration intentionally replaces the
- * builtin set.
+ * The first edit of an untouched action starts from its surviving effective
+ * builtin defaults. Once the action has a user declaration, user bindings
+ * remain the complete source of truth because a declaration intentionally
+ * replaces the builtin set.
  */
 function mutationBindings(
   action: AppKeybindingId,
   parsed: ParsedUserKeybindings,
+  manager: HostKeybindingManager,
 ): KeybindingEditorBinding[] {
   return hasOwn(parsed.bindings, action)
     ? actionBindings(action, parsed)
-    : defaultBindings(action)
+    : editableEffectiveDefaults(action, manager)
 }
 
 function sameBinding(left: KeybindingEditorBinding, right: KeybindingEditorBinding): boolean {
@@ -204,20 +215,21 @@ function applyMutation(
   raw: Record<string, unknown>,
   current: ParsedUserKeybindings,
   mutation: KeybindingMutation,
+  manager: HostKeybindingManager,
 ): Record<string, unknown> | undefined {
   switch (mutation.kind) {
     case 'add': {
-      const bindings = mutationBindings(mutation.action, current)
+      const bindings = mutationBindings(mutation.action, current, manager)
       writeActionDeclarations(raw, mutation.action, [...bindings, mutation.binding])
       return raw
     }
     case 'replace': {
-      const bindings = mutationBindings(mutation.action, current).filter(binding => !sameBinding(binding, mutation.previous))
+      const bindings = mutationBindings(mutation.action, current, manager).filter(binding => !sameBinding(binding, mutation.previous))
       writeActionDeclarations(raw, mutation.action, [...bindings, mutation.binding])
       return raw
     }
     case 'remove': {
-      const bindings = mutationBindings(mutation.action, current).filter(binding => !sameBinding(binding, mutation.binding))
+      const bindings = mutationBindings(mutation.action, current, manager).filter(binding => !sameBinding(binding, mutation.binding))
       writeActionDeclarations(raw, mutation.action, bindings)
       return raw
     }
@@ -289,7 +301,7 @@ export class KeybindingEditorController {
         if (definition !== undefined && !APP_KEYBINDINGS[definition]!.configurable) {
           return { kind: 'rejected', message: 'This shortcut is fixed by the application and cannot be changed.' }
         }
-        const nextRaw = applyMutation(raw, current, mutation)
+        const nextRaw = applyMutation(raw, current, mutation, this.manager)
         const parsed = parseUserKeybindings(nextRaw)
         for (const diagnostic of parsed.diagnostics) this.onDiagnostic(diagnostic)
 
@@ -306,7 +318,9 @@ export class KeybindingEditorController {
         // example, adding a direct binding on the prefix key). Reject only a
         // newly introduced diagnostic so an unrelated edit can still repair a
         // configuration that was already persisted with a warning.
-        const leaderProblem = newManagerDiagnostics.find(diagnostic => diagnostic.includes('leader key') || diagnostic.includes('ambiguous leader sequence'))
+        const leaderProblem = newManagerDiagnostics.find(diagnostic => diagnostic.includes('leader key')
+          || diagnostic.includes('ambiguous leader sequence')
+          || diagnostic.includes('effective editor submit key'))
         if (leaderProblem !== undefined) {
           return { kind: 'rejected', message: `Cannot save: ${leaderProblem}` }
         }

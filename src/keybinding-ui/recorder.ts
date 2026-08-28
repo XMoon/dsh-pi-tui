@@ -9,6 +9,20 @@ import { color } from '../theme.ts'
 
 export type KeyRecorderPurpose = 'direct' | 'leader-completion' | 'leader-key'
 
+/** The short disambiguation window for assigning physical Escape. */
+export const DOUBLE_ESCAPE_MS = 300
+
+/** Injectable timer operations keep recorder lifecycle tests deterministic. */
+export interface KeyRecorderTimer {
+  readonly set: (callback: () => void, delayMs: number) => unknown
+  readonly clear: (handle: unknown) => void
+}
+
+const DEFAULT_TIMER: KeyRecorderTimer = {
+  set: (callback, delayMs) => setTimeout(callback, delayMs),
+  clear: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
+}
+
 export interface KeyRecorderOptions {
   readonly purpose: KeyRecorderPurpose
   readonly action?: AppKeybindingId
@@ -16,6 +30,7 @@ export interface KeyRecorderOptions {
   readonly onCapture: (key: KeyId) => void
   readonly onCancel: () => void
   readonly requestRender?: () => void
+  readonly timer?: KeyRecorderTimer
 }
 
 export interface KeyRecorderValidation {
@@ -67,7 +82,11 @@ export class KeyRecorder implements Component {
   private readonly onCapture: (key: KeyId) => void
   private readonly onCancel: () => void
   private readonly requestRender: () => void
+  private readonly timer: KeyRecorderTimer
   private error: string | undefined
+  private escapePending = false
+  private escapeTimer: unknown
+  private disposed = false
 
   constructor(options: KeyRecorderOptions) {
     this.purpose = options.purpose
@@ -76,10 +95,12 @@ export class KeyRecorder implements Component {
     this.onCapture = options.onCapture
     this.onCancel = options.onCancel
     this.requestRender = options.requestRender ?? (() => {})
+    this.timer = options.timer ?? DEFAULT_TIMER
   }
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
+    const interruptDirect = this.purpose === 'direct' && this.action === 'app.agent.interrupt'
     const lines = [
       color.textStrong('Record shortcut'),
       '',
@@ -91,11 +112,13 @@ export class KeyRecorder implements Component {
           : 'The key is parsed from the terminal and stored canonically.'),
       '',
       this.error === undefined
-        ? color.accent('Waiting for one key…')
+        ? color.accent(interruptDirect && this.escapePending
+          ? 'Esc again to assign Escape…'
+          : 'Waiting for one key…')
         : color.error(this.error),
       '',
-      color.textDim(this.purpose === 'direct' && this.action === 'app.agent.interrupt'
-        ? 'Esc: cancel · e: use Escape'
+      color.textDim(interruptDirect
+        ? 'Esc: cancel · double-Esc: assign Escape'
         : 'Esc: cancel'),
     ]
     return lines.map(line => truncateToWidth(line, safeWidth))
@@ -103,34 +126,83 @@ export class KeyRecorder implements Component {
 
   invalidate(): void {}
 
+  /** Stop the pending Escape disambiguation callback before the parent panel
+   * is torn down. Timer callbacks also check this flag for late safety. */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.clearEscapeTimer()
+    this.escapePending = false
+  }
+
+  private isInterruptDirect(): boolean {
+    return this.purpose === 'direct' && this.action === 'app.agent.interrupt'
+  }
+
+  private clearEscapeTimer(): void {
+    if (this.escapeTimer !== undefined) this.timer.clear(this.escapeTimer)
+    this.escapeTimer = undefined
+  }
+
+  private expirePendingEscape(): void {
+    this.escapeTimer = undefined
+    if (this.disposed || !this.escapePending) return
+    this.escapePending = false
+    this.onCancel()
+  }
+
+  private capture(key: KeyId): void {
+    try {
+      this.onCapture(key)
+    } catch {
+      this.error = 'The shortcut could not be recorded. Try again.'
+      this.requestRender()
+    }
+  }
+
+  private beginEscapeDisambiguation(): void {
+    this.error = undefined
+    this.escapePending = true
+    this.escapeTimer = this.timer.set(() => this.expirePendingEscape(), DOUBLE_ESCAPE_MS)
+    this.requestRender()
+  }
+
   handleInput(data: string): void {
-    if (data === '') return
+    if (this.disposed || data === '') return
     // Release/repeat reports are not a second binding. They are consumed by
     // the active editor overlay and must never reach the host editor.
     if (isKeyRelease(data) || isKeyRepeat(data)) return
-    // Raw Escape is the recorder's cancel gesture. Offer an explicit
-    // disambiguated command so the lifecycle interrupt action can retain its
-    // legal unmodified Escape KeyId without making the cancel path unreachable.
-    if (this.purpose === 'direct' && this.action === 'app.agent.interrupt'
-      && data.length === 1 && data.toLowerCase() === 'e') {
-      const validation = validateRecordedKey('escape', { purpose: this.purpose, action: this.action })
-      if (validation.key === undefined) {
-        this.error = validation.message
-        this.requestRender()
+
+    if (matchesKey(data, 'escape')) {
+      if (!this.isInterruptDirect()) {
+        this.onCancel()
         return
       }
-      try {
-        this.onCapture(validation.key)
-      } catch {
-        this.error = 'The shortcut could not be recorded. Try again.'
-        this.requestRender()
+      if (this.escapePending) {
+        this.clearEscapeTimer()
+        this.escapePending = false
+        const validation = validateRecordedKey('escape', { purpose: this.purpose, action: this.action })
+        if (validation.key === undefined) {
+          this.error = validation.message
+          this.requestRender()
+          return
+        }
+        this.capture(validation.key)
+      } else {
+        this.beginEscapeDisambiguation()
       }
       return
     }
-    if (matchesKey(data, 'escape')) {
+
+    // The first Escape expresses cancel intent. Any other key during its
+    // short pending window cancels the recorder and is not captured.
+    if (this.escapePending) {
+      this.clearEscapeTimer()
+      this.escapePending = false
       this.onCancel()
       return
     }
+
     let parsed: string | undefined
     try {
       parsed = parseKey(data)
@@ -148,11 +220,6 @@ export class KeyRecorder implements Component {
       this.requestRender()
       return
     }
-    try {
-      this.onCapture(validation.key)
-    } catch {
-      this.error = 'The shortcut could not be recorded. Try again.'
-      this.requestRender()
-    }
+    this.capture(validation.key)
   }
 }

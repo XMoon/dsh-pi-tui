@@ -372,32 +372,6 @@ export function parseUserKeybindings(
     }
   }
 
-  // The leader machine runs after the editor-owned submit seam for focused
-  // editors. Reject completions that the current effective submit binding
-  // would consume before the machine can see them (Enter by default, or a
-  // parsed user remap). This is done after all entries are parsed so nested
-  // and top-level declarations share the same policy.
-  const submitValue = bindings['app.input.submit']
-  const submitKeys = submitValue === false
-    ? new Set<KeyId>()
-    : submitValue === undefined
-      ? leaderOnlyActions.has('app.input.submit')
-        ? new Set<KeyId>()
-        : new Set(APP_KEYBINDINGS['app.input.submit'].defaultKeys)
-      : new Set(Array.isArray(submitValue) ? submitValue : [submitValue])
-  const usableLeaderBindings = leaderBindings.filter(binding => {
-    if (!submitKeys.has(binding.key)) return true
-    diagnostics.push(`keybindings: "${binding.action}" binds a "<leader>${binding.key}" sequence, but ${binding.key} is an editor-owned submit key — ignored`)
-    return false
-  })
-  if (usableLeaderBindings.length !== leaderBindings.length) {
-    leaderBindings.length = 0
-    leaderBindings.push(...usableLeaderBindings)
-    for (const action of leaderOnlyActions) {
-      if (!leaderBindings.some(binding => binding.action === action)) leaderOnlyActions.delete(action)
-    }
-  }
-
   // A leader sequence without a leader key is inert: warn once.
   if (leaderBindings.length > 0 && leader === undefined) {
     diagnostics.push('keybindings: leader sequences configured but no "leader" key — the sequences are ignored')
