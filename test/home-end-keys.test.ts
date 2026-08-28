@@ -40,7 +40,7 @@ function viewportHasLine(vt: VirtualTerminal, text: string): boolean {
 
 // ── the preset itself ────────────────────────────────────────────────────
 
-test('applyHomeEndKeyMode viewport: top=home, bottom=end (default behavior)', () => {
+test('applyHomeEndKeyMode viewport: top=home, bottom=end', () => {
   resetKeybindings()
   applyHomeEndKeyMode('viewport')
   const resolved = getKeybindings().getResolvedBindings()
@@ -66,12 +66,12 @@ test('applyHomeEndKeyMode keeps every other user binding', () => {
   assert.equal(user['tui.altScreen.bottom'], 'ctrl+end')
 })
 
-test('homeEndKeysModeOf falls back to viewport for invalid values', () => {
+test('homeEndKeysModeOf falls back to input for invalid values', () => {
   assert.equal(homeEndKeysModeOf('input'), 'input')
   assert.equal(homeEndKeysModeOf('viewport'), 'viewport')
-  assert.equal(homeEndKeysModeOf(undefined), 'viewport')
-  assert.equal(homeEndKeysModeOf(''), 'viewport')
-  assert.equal(homeEndKeysModeOf('pi'), 'viewport')
+  assert.equal(homeEndKeysModeOf(undefined), 'input')
+  assert.equal(homeEndKeysModeOf(''), 'input')
+  assert.equal(homeEndKeysModeOf('pi'), 'input')
 })
 
 // ── fullscreen behavior ─────────────────────────────────────────────────
@@ -90,7 +90,7 @@ function startFullscreenApp(): { vt: VirtualTerminal; app: TuiApp } {
   return { vt, app }
 }
 
-test('viewport mode (default): Home scrolls to the top, End to the bottom', async () => {
+test('viewport mode: Home scrolls to the top, End to the bottom', async () => {
   resetKeybindings()
   applyHomeEndKeyMode('viewport')
   const { vt, app } = startFullscreenApp()
@@ -228,7 +228,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     find: () => undefined,
     execute: async () => undefined,
   } as never)
-  const settings = fakeTuiSettings(options.homeEndKeys ?? 'viewport')
+  const settings = fakeTuiSettings(options.homeEndKeys ?? 'input')
   const runner: TuiCommandRunner = {
     ctx,
     app,
@@ -316,7 +316,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
   return { vt, app, run, view, settings }
 }
 
-test('/settings shows the Home/End keys row; an invalid persisted value falls back to viewport', async () => {
+test('/settings shows the Home/End keys row; an invalid persisted value falls back to input', async () => {
   resetKeybindings()
   const t = setupSettings({ homeEndKeys: 'garbage' })
   await t.run()
@@ -327,8 +327,13 @@ test('/settings shows the Home/End keys row; an invalid persisted value falls ba
   // visible fold.
   for (let i = 0; i < 7; i += 1) t.vt.sendInput('\x1b[B')
   const view = await t.view()
-  assert.ok(view.includes('Home/End keys'), `row missing:\n${view}`)
-  assert.ok(view.includes('viewport'), `an invalid persisted value must fall back to viewport:\n${view}`)
+  const row = view.split('\n').find(line => line.includes('Home/End keys')) ?? ''
+  assert.ok(row !== '', `row missing:\n${view}`)
+  // The row line carries only the label and the current value (the
+  // description is a separate line), so the value can be matched on the
+  // row itself.
+  assert.ok(row.includes('input'), `an invalid persisted value must fall back to input:\n${view}`)
+  assert.ok(!row.includes('viewport'), `an invalid persisted value must not fall back to viewport:\n${view}`)
   assert.ok(!view.includes('garbage'), `the raw invalid value must never render:\n${view}`)
   t.app.stop()
 })

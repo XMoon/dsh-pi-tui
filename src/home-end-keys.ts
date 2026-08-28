@@ -14,10 +14,10 @@
  * cursorLineStart/cursorLineEnd. So the preset only remaps the two
  * viewport bindings:
  *
- * - `viewport` (default, unchanged behavior): top=`home`, bottom=`end` —
- *   Home/End scroll, Ctrl+Home/End reach the editor.
- * - `input`: top=`ctrl+home`, bottom=`ctrl+end` — Home/End reach the
- *   editor, Ctrl+Home/End scroll.
+ * - `input` (default): top=`ctrl+home`, bottom=`ctrl+end` — Home/End
+ *   reach the editor, Ctrl+Home/End scroll.
+ * - `viewport`: top=`home`, bottom=`end` — Home/End scroll, Ctrl+Home/End
+ *   reach the editor (unchanged legacy behavior).
  *
  * Precedence (plan §4.7): explicit user keybindings > this preset >
  * vendor default. There is no independent user keybinding persistence
@@ -34,10 +34,10 @@ import { getKeybindings } from '@xmoon76/pi-tui'
 /** The two Home/End navigation behaviors. */
 export type HomeEndKeysMode = 'input' | 'viewport'
 
-/** Read the persisted mode with a `viewport` fallback for invalid values
+/** Read the persisted mode with an `input` fallback for invalid values
  * (a stale or hand-edited settings document must never crash the boot). */
 export function homeEndKeysModeOf(value: string | undefined): HomeEndKeysMode {
-  return value === 'input' ? 'input' : 'viewport'
+  return value === 'viewport' ? 'viewport' : 'input'
 }
 
 /**
