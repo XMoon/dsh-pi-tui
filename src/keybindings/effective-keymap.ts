@@ -442,6 +442,19 @@ export class EffectiveKeymap {
     return [...keys]
   }
 
+  /** Every ACTIVE key of one action, including a lower-priority rule that is
+   * shadowed in the ordinary read projection. The physical Escape lifecycle
+   * seam uses this to remain enabled when malformed injected state contains
+   * an ordinary Escape binding; parser-valid user remaps still remove the
+   * builtin rule from this active set. */
+  activeKeysFor(action: string): KeyId[] {
+    const keys = new Set<KeyId>()
+    for (const rule of this.activeRules) {
+      if (rule.action === action) keys.add(rule.key)
+    }
+    return [...keys]
+  }
+
   /** Every ACTIVE key of the HOST-owned sources only (builtin / user /
    * composition — PLUGIN and EDITOR rules excluded). The runtime
    * reservation and the leader-prefix collision check must consider only

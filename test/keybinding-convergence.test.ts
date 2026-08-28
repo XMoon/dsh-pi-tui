@@ -178,6 +178,22 @@ test('4.1h a shadowed builtin submit permits leader Enter', () => {
   assert.deepEqual(manager.leaderKeysFor('app.todo.toggle'), ['enter'])
 })
 
+test('4.1i a dead leader-only interrupt restores the physical Escape lifecycle', () => {
+  const manager = new HostKeybindingManager()
+  try {
+    manager.setUserConfiguration(parseUserKeybindings({
+      leader: 'ctrl+x',
+      'app.agent.interrupt': '<leader>enter',
+    }))
+    assert.deepEqual(manager.leaderKeysFor('app.agent.interrupt'), [])
+    assert.deepEqual(manager.keysFor('app.agent.interrupt'), ['escape'])
+    assert.equal(manager.keyHint('app.agent.interrupt'), 'Esc')
+    assert.equal(manager.physicalEscapeEnabled(), true)
+  } finally {
+    manager.dispose()
+  }
+})
+
 // ── 4.2 duplicate direct key ──────────────────────────────────────────────
 
 test('4.2a a duplicate direct key dedupes (no self-conflict)', () => {

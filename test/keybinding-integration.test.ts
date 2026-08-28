@@ -93,6 +93,25 @@ test('physical busy Escape cancels before an action binding can dispatch', async
   app.stop()
 })
 
+test('dead leader-only interrupt restores busy physical Escape cancellation', async () => {
+  let cancels = 0
+  const { vt, app } = startApp(
+    { onCancel: () => { cancels += 1 } },
+    managerWith({
+      leader: 'ctrl+x',
+      'app.agent.interrupt': '<leader>enter',
+    }),
+  )
+  app.setBusy(true)
+  assert.deepEqual(app.keybindingsManager().keysFor('app.agent.interrupt'), ['escape'])
+  assert.equal(app.keybindingsManager().keyHint('app.agent.interrupt'), 'Esc')
+  assert.equal(app.keybindingsManager().physicalEscapeEnabled(), true)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(cancels, 1, 'restored builtin Escape must cancel busy work')
+  app.stop()
+})
+
 test('physical Escape reaches a replacement editor before user action resolution', async () => {
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
