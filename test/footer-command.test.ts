@@ -12,6 +12,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { TuiApp } from '../src/tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import type { FooterLayoutV1 } from '../src/footer/types.ts'
+import type { FooterCustomItemSettings } from '../src/footer/custom-items.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
@@ -188,6 +190,129 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(applied.length, 1, 'Esc on the alias-opened panel must not write')
+  app.stop()
+})
+
+test('/footer serializes overlapping saves and re-reads future USER definitions', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const commands = fakeCommands()
+  ctx.provide('commands', commands.service as never)
+  const known = { schemaVersion: 1 as const, id: 'user:environment', kind: 'text' as const, text: 'OLD', tone: 'warning' as const }
+  const futureOne = { schemaVersion: 1, id: 'user:future-one', kind: 'command', command: 'one' }
+  const futureTwo = { schemaVersion: 1, id: 'user:future-two', kind: 'command', command: 'two' }
+  let userRaw: unknown[] = [known, futureOne]
+  let currentDoc: ReturnType<TuiSettingsLike['get']> = {
+    theme: 'auto',
+    iconStyle: 'emoji',
+    footer: 'default',
+    fullscreen: 'on',
+    busyEnter: 'queue',
+    localShellSandbox: 'bypass',
+    homeEndKeys: 'viewport',
+    focusMode: 'off',
+    footerCustomItems: userRaw,
+  }
+  const pendingWrites: Array<{ next: ReturnType<TuiSettingsLike['get']>; resolve: () => void }> = []
+  const settings: TuiSettingsLike = {
+    get: () => ({ ...currentDoc, footerCustomItems: userRaw }),
+    replace: (next) => new Promise<void>(resolve => pendingWrites.push({ next, resolve })),
+  }
+  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: userRaw } }] } as never)
+  const saveCallbacks: Array<Parameters<TuiApp['openFooterConfigurator']>[0]['onSave']> = []
+  app.openFooterConfigurator = ((options: Parameters<TuiApp['openFooterConfigurator']>[0]) => {
+    saveCallbacks.push(options.onSave)
+    return () => {}
+  }) as TuiApp['openFooterConfigurator']
+  const applied: Array<{ footerLayout?: unknown; footerCustomItems?: unknown }> = []
+  const runner: TuiCommandRunner = {
+    ctx,
+    app,
+    diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
+    get liveAgent() { return undefined },
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    tuiSettings: settings,
+    agents: {} as never,
+    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
+    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    hostFile: new DirectHostFilePort(() => undefined),
+    commandRegistry: ctx.get('commands') as never,
+    cwd: '/ws',
+    sessionCwd: () => '/ws',
+    imageStore: {} as never,
+    copyToClipboard: async () => true,
+    imageLimits: () => undefined,
+    insertIntoEditor: () => {},
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    get sessionGeneration() { return 0 },
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    get pendingPreset() { return undefined },
+    set pendingPreset(_id: string | undefined) {},
+    get effectivePresetId() { return undefined },
+    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
+    recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+    refreshStatus: () => {},
+    focusEnabled: () => false,
+    setFocusMode: () => {},
+    updateWelcomeCard: () => {},
+    openJobView: () => {},
+    openTasksBrowser: () => {},
+    openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {},
+    requestExit: () => {},
+    extensions: undefined,
+    exit: () => {},
+    applyFooterSettings: (doc) => {
+      if (doc !== undefined) applied.push({ footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems })
+    },
+  }
+  registerTuiCommands(runner)
+  const footer = commands.defs.find(entry => entry.name === 'footer')
+  assert.ok(footer?.handler !== undefined)
+  await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  assert.equal(saveCallbacks.length, 2)
+
+  const layoutOne: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'model' }], right: [] }] }
+  const layoutTwo: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'view-scope' }], right: [] }] }
+  saveCallbacks[0]!(layoutOne, [{ ...known, text: 'ONE' }])
+  saveCallbacks[1]!(layoutTwo, [{ ...known, text: 'TWO' }])
+  for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  assert.equal(pendingWrites.length, 1, 'the second save must wait for the first write')
+  assert.deepEqual(pendingWrites[0]!.next.footerCustomItems, [{ ...known, text: 'ONE' }, futureOne])
+
+  const first = pendingWrites[0]!
+  currentDoc = { ...first.next, footerCustomItems: first.next.footerCustomItems }
+  userRaw = [...(first.next.footerCustomItems as unknown[]), futureTwo]
+  currentDoc = { ...currentDoc, footerCustomItems: userRaw }
+  first.resolve()
+  for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  assert.equal(pendingWrites.length, 2, 'the queued second save must start after the first settles')
+  assert.deepEqual(pendingWrites[1]!.next.footerCustomItems, [{ ...known, text: 'TWO' }, futureOne, futureTwo])
+
+  const second = pendingWrites[1]!
+  currentDoc = { ...second.next, footerCustomItems: second.next.footerCustomItems }
+  userRaw = [...(second.next.footerCustomItems as unknown[])]
+  second.resolve()
+  for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  assert.equal(applied.length, 2)
+  assert.deepEqual((applied[1]!.footerLayout as FooterLayoutV1).rows[0]!.left[0]!.id, 'view-scope')
+  assert.deepEqual(app.getFooterCustomItems(), [{ ...known, text: 'TWO' }])
   app.stop()
 })
 
