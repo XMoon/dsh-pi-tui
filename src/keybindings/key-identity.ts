@@ -66,11 +66,12 @@ export function isValidKeyId(value: string): value is KeyId {
   if (parts.length === 0) return false
   const base = parts[parts.length - 1]!
   if (!BASE_KEYS_LOWER.has(base.toLowerCase())) return false
-  for (let index = 0; index < parts.length - 1; index += 1) {
-    if (!KEY_ID_MODIFIERS.has(parts[index]!)) return false
+  const modifiers = parts.slice(0, -1).map(modifier => modifier.toLowerCase())
+  for (const modifier of modifiers) {
+    if (!KEY_ID_MODIFIERS.has(modifier)) return false
   }
-  // No duplicate modifiers.
-  return new Set(parts.slice(0, -1)).size === parts.length - 1
+  // No duplicate modifiers (case-insensitively).
+  return new Set(modifiers).size === modifiers.length
 }
 
 /** Whether a key is TEXT-PRODUCING — it types a character into the

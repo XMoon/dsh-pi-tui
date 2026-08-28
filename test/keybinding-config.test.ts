@@ -24,6 +24,13 @@ test('KeyId validation accepts the fork grammar', () => {
   assert.ok(!isValidKeyId('ctrl+shift+'))
 })
 
+test('uppercase modifiers canonicalize before parser validation', () => {
+  assert.ok(isValidKeyId('SHIFT+CTRL+RETURN'))
+  const parsed = parseUserKeybindings({ 'app.input.steer': 'SHIFT+CTRL+P' })
+  assert.deepEqual(parsed.bindings, { 'app.input.steer': 'ctrl+shift+p' })
+  assert.deepEqual(parsed.diagnostics, [])
+})
+
 test('plain printable detection', () => {
   assert.ok(isPlainPrintableKey('a'))
   assert.ok(isPlainPrintableKey('1'))
