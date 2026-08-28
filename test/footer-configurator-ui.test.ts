@@ -492,6 +492,24 @@ test('a paste start clears stale prefix state before later chunks arrive', async
   app.stop()
 })
 
+test('a real Escape before a new same-chunk paste is not discarded', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('a')
+  await vt.waitForRender()
+
+  // The first paste ends, then Escape and a second paste follow in the same
+  // terminal chunk. Escape must clear the old query before the new paste lands.
+  vt.sendInput('\x1b[200~one\x1b[201~\x1b\x1b[200~two\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'add')
+  assert.equal(model.state().addQuery, 'two')
+  app.stop()
+})
+
 test('recovery rescans a valid paste marker after rejected prefixes', async () => {
   const { vt, app } = startApp()
   const model = openDefault(app)
@@ -508,11 +526,11 @@ test('recovery rescans a valid paste marker after rejected prefixes', async () =
   await vt.waitForRender()
   assert.equal(model.state().addQuery, 'cach')
 
-  // Repeat from an empty picker: the stale lone ESC cannot move out of the
-  // page before the fresh marker is rescanned.
-  vt.sendInput('\x1b')
+  // A rejected lone ESC is replayed before a fresh marker. The non-empty
+  // query makes both effects observable: Escape clears it, then the marker
+  // contributes the new paste text.
+  vt.sendInput('seed')
   await vt.waitForRender()
-  assert.equal(model.state().addQuery, '')
   vt.sendInput('\x1b')
   vt.sendInput('\x1b[200~hit\x1b[201~')
   await vt.waitForRender()
@@ -560,6 +578,24 @@ test('programmatic configurator close disposes a pending paste-prefix timer', as
   t.mock.timers.tick(30)
   assert.equal(model.state().addQuery, 'cache', 'closing must prevent stale Escape replay')
   app.stop()
+})
+
+test('final app disposal cancels a configurator paste-prefix timer', async (t) => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('a')
+  await vt.waitForRender()
+  vt.sendInput('cache')
+  await vt.waitForRender()
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.after(() => t.mock.timers.reset())
+  vt.sendInput('\x1b') // arm the ambiguous paste-prefix timer
+  app.dispose()
+  t.mock.timers.tick(30)
+  assert.equal(model.state().addQuery, 'cache', 'final disposal must prevent stale Escape replay')
 })
 
 test('malformed paste prefixes preserve Escape, arrows, and following text', async () => {

@@ -75,8 +75,11 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const customItems = [{ schemaVersion: 1 as const, id: 'user:environment', kind: 'text' as const, text: 'PROD', tone: 'warning' as const }]
+  const futureCustomItem = { schemaVersion: 1, id: 'user:future', kind: 'command', command: 'echo future' }
+  const persistedCustomItems = [...customItems, futureCustomItem]
   app.setFooterCustomItems(customItems)
-  const settings = fakeSettings({ footer: 'default', footerCustomItems: customItems })
+  const settings = fakeSettings({ footer: 'default', footerCustomItems: persistedCustomItems })
+  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: persistedCustomItems } }] } as never)
   const applied: Array<{ footer: string; footerLayout?: unknown; footerCustomItems?: unknown }> = []
   const runner: TuiCommandRunner = {
     ctx,
@@ -166,7 +169,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   assert.equal(settings.doc.footerFallbackMode, 'custom', 'the fallback mode must persist as custom')
   const saved = settings.doc.footerLayout as { rows: Array<{ left: Array<{ id: string }> }> }
   assert.ok(!saved.rows[0]!.left.some(ref => ref.id === 'view-scope'), 'the persisted layout must reflect the toggle')
-  assert.deepEqual(settings.doc.footerCustomItems, customItems, 'saving the layout must preserve custom definitions')
+  assert.deepEqual(settings.doc.footerCustomItems, persistedCustomItems, 'saving the layout must preserve known and future custom definitions')
   assert.deepEqual(applied[0]!.footerCustomItems, customItems, 'apply must carry custom definitions alongside the layout')
   assert.equal(app.getFooterMode(), 'custom', 'the app must apply the custom layout')
 
@@ -332,6 +335,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const settings = fakeSettings({ footer: 'compact' })
+  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
   const applied: Array<{ footer: string; footerLayout?: unknown }> = []
   const runner: TuiCommandRunner = {
     ctx, app, diag: {} as never,
@@ -403,6 +407,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   app.start()
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
   // A settings document whose replace REJECTS (the write fails).
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
