@@ -1576,8 +1576,11 @@ export function apply(ctx: Context, config: Config): void {
     // Declare this before mounting the TUI: fullscreen initialization can
     // synchronously invoke its persistence callback. Use the raw USER value so
     // unknown/future definitions survive unrelated writes unchanged.
-    const userFooterCustomItemsForSave = (): unknown =>
-      backend.config.footerCustomItems.rawForPersistence()
+    const userFooterCustomItemsForSave = (): unknown => {
+      const raw = backend.config.footerCustomItems.rawForPersistence()
+      if (raw.kind === 'unavailable') throw new Error('custom footer definitions unavailable; settings write aborted')
+      return raw.value
+    }
 
     // Launch-time preset entry: `--preset` wins over $DSH_PI_TUI_PRESET, and
     // both fall back to the saved default (settings `agent-presets.default`,

@@ -104,23 +104,29 @@ export function parseFooterCustomItem(input: unknown): FooterCustomItemSettings 
 }
 
 /** Parse the collection without letting one malformed or duplicate entry
- * break startup. The first definition for an id wins deterministically. */
+ * break startup. The first definition for an id wins deterministically. A
+ * hostile collection-level proxy/iterator fails closed as one invalid
+ * collection instead of escaping into startup or reload. */
 export function parseFooterCustomItems(input: unknown): FooterCustomItemsParseResult {
-  if (input === undefined) return { items: [], invalidCount: 0 }
-  if (!Array.isArray(input)) return { items: [], invalidCount: 1 }
-  const items: FooterCustomItemSettings[] = []
-  const ids = new Set<string>()
-  let invalidCount = 0
-  for (const candidate of input) {
-    const item = parseFooterCustomItem(candidate)
-    if (item === undefined || ids.has(item.id)) {
-      invalidCount += 1
-      continue
+  try {
+    if (input === undefined) return { items: [], invalidCount: 0 }
+    if (!Array.isArray(input)) return { items: [], invalidCount: 1 }
+    const items: FooterCustomItemSettings[] = []
+    const ids = new Set<string>()
+    let invalidCount = 0
+    for (const candidate of input) {
+      const item = parseFooterCustomItem(candidate)
+      if (item === undefined || ids.has(item.id)) {
+        invalidCount += 1
+        continue
+      }
+      ids.add(item.id)
+      items.push(item)
     }
-    ids.add(item.id)
-    items.push(item)
+    return { items, invalidCount }
+  } catch {
+    return { items: [], invalidCount: 1 }
   }
-  return { items, invalidCount }
 }
 
 /** Compile one validated custom definition into the ordinary footer item

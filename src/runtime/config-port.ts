@@ -123,15 +123,20 @@ export interface FooterCommandTrust {
 
 /** The USER-layer Custom Text definition read (PR C). The adapter reads the
  * settings descriptor's user section. `get()` is the safe runtime projection;
- * `rawForPersistence()` is the exact USER-layer storage value and exists only
- * for whole-document round-trips. Merged/project settings never reach either
- * surface. */
+ * `rawForPersistence()` is a detached exact USER-layer storage projection and
+ * exists only for whole-document round-trips. Merged/project settings never
+ * reach either surface. */
 export interface FooterCustomItemsConfig {
   /** Valid Custom Text definitions plus a fail-soft invalid-entry count. */
   get(): FooterCustomItemsParseResult
-  /** The exact raw USER-layer footerCustomItems value, or undefined if absent. */
-  rawForPersistence(): unknown
+  /** A detached raw value, or `unavailable` when it cannot be read safely. */
+  rawForPersistence(): FooterCustomItemsRaw
 }
+
+/** Result of reading the USER-layer raw custom-item storage value. */
+export type FooterCustomItemsRaw =
+  | { readonly kind: 'available'; readonly value: unknown }
+  | { readonly kind: 'unavailable' }
 
 /** The TUI settings document surface as the commands surface names it
  * (kept as the public commands-surface type — see commands.ts). Like
