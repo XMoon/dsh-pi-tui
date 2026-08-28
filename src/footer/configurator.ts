@@ -211,8 +211,7 @@ export class FooterConfiguratorPanel implements Component {
   }
 
   dispose(): void {
-    this.clearPasteStartTimer()
-    this.pasteStartPending = ''
+    this.clearPasteStartPending()
     this.pasteBuffer = ''
     this.isInPaste = false
     this.skipPasteOnce = false
@@ -289,8 +288,7 @@ export class FooterConfiguratorPanel implements Component {
   private feedPaste(data: string): boolean {
     const pendingStart = this.pasteStartPending
     if (pendingStart !== '') {
-      this.pasteStartPending = ''
-      this.clearPasteStartTimer()
+      this.clearPasteStartPending()
       const candidate = pendingStart + data
       if (continuesPasteStart(candidate)) {
         data = candidate
@@ -337,6 +335,9 @@ export class FooterConfiguratorPanel implements Component {
       // also handles a complete marker reconstructed from pasteStartPending.
       const before = data.slice(0, startIndex)
       if (before !== '') this.handleInput(before)
+      // Dispatching `before` may have buffered a malformed prefix of its own;
+      // that prefix is not part of the now-complete paste start marker.
+      this.clearPasteStartPending()
       this.isInPaste = true
       this.pasteBuffer = data.slice(startIndex + BRACKETED_PASTE_START.length)
       this.finishPastes()
@@ -403,6 +404,11 @@ export class FooterConfiguratorPanel implements Component {
     }, delay)
   }
 
+  private clearPasteStartPending(): void {
+    this.pasteStartPending = ''
+    this.clearPasteStartTimer()
+  }
+
   private clearPasteStartTimer(): void {
     if (this.pasteStartTimer === undefined) return
     clearTimeout(this.pasteStartTimer)
@@ -429,6 +435,9 @@ export class FooterConfiguratorPanel implements Component {
       if (startIndex >= 0) {
         const before = remaining.slice(0, startIndex)
         if (before !== '') this.handleInput(before)
+        // The ordinary bytes before the next marker may have left a stale
+        // malformed-prefix candidate; it must not leak into this paste.
+        this.clearPasteStartPending()
         this.isInPaste = true
         this.pasteBuffer = remaining.slice(startIndex + BRACKETED_PASTE_START.length)
         remaining = ''

@@ -466,6 +466,32 @@ test('a bracketed-paste start marker split exactly after ESC is recognized', asy
   app.stop()
 })
 
+test('a paste start clears stale prefix state before later chunks arrive', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('a')
+  await vt.waitForRender()
+
+  // The malformed prefix before the start marker must not remain active while
+  // the paste's content and end marker arrive in a later chunk.
+  vt.sendInput('\x1b[20\x1b[200~')
+  vt.sendInput('one\x1b[201~')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, 'one')
+
+  // Verify that the scanner can immediately accept another split paste and
+  // ordinary text after the first paste completes.
+  vt.sendInput('\x1b[200~two')
+  vt.sendInput('\x1b[201~')
+  vt.sendInput('tail')
+  await vt.waitForRender()
+  assert.equal(model.state().addQuery, 'onetwotail')
+  app.stop()
+})
+
 test('recovery rescans a valid paste marker after rejected prefixes', async () => {
   const { vt, app } = startApp()
   const model = openDefault(app)
