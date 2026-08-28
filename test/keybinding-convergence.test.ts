@@ -92,18 +92,20 @@ test('4.1d leader prefix alias (leader: esc) is lifecycle-reserved', () => {
     `no Escape reservation diagnostic: ${parsed.diagnostics.join(' | ')}`)
 })
 
-test('4.1e leader completion aliases are ambiguous (enter vs return)', () => {
+test('4.1e leader completion aliases on Enter are rejected by the editor submit seam', () => {
   const manager = new HostKeybindingManager()
-  manager.setUserConfiguration(parseUserKeybindings({
+  const parsed = parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: {
       'app.history.search': '<leader>enter',
       'app.todo.toggle': '<leader>return',
     },
-  }))
-  assert.equal(manager.leaderMachine()?.leaderBindings.length ?? 0, 0,
-    'enter/return completions must be ambiguous — neither fires')
-  assert.ok(manager.diagnosticsList().some(message => message.includes('ambiguous')))
+  })
+  manager.setUserConfiguration(parsed)
+  assert.equal(manager.leaderMachine(), undefined,
+    'Enter/Return completions must not arm a dead leader machine')
+  assert.equal(parsed.leaderBindings.length, 0)
+  assert.equal(parsed.diagnostics.filter(message => message.includes('editor-owned submit')).length, 2)
 })
 
 // ── 4.2 duplicate direct key ──────────────────────────────────────────────
