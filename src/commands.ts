@@ -75,7 +75,7 @@ import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
 import type { Catalog } from './runtime/catalog-port.ts'
-import type { ConfigPort, CredentialProviderOption, TuiSettingsDoc } from './runtime/config-port.ts'
+import type { ConfigPort, CredentialProviderOption } from './runtime/config-port.ts'
 import type { HostFilePort } from './runtime/host-file-port.ts'
 import {
   credentialOptionsFor,
@@ -3422,6 +3422,10 @@ export function registerTuiCommands(
         // it reports an error and the running keymap stays untouched.
         return serializeTuiSettingsMutation(settings, async (): Promise<CommandResult> => {
           try {
+            // The outer serializeTuiSettingsMutation call owns the whole
+            // transaction. Read and build the reset document only after all
+            // earlier footer/focus/fullscreen writes have settled, then
+            // persist it as the single next whole-document commit point.
             const doc = { ...withUserFooterCustomItems(settings.get(), runner.config) } as Record<string, unknown>
             delete doc.keybindings
             // Await the persistence write: the command result reflects the
