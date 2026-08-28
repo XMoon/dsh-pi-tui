@@ -416,15 +416,18 @@ and input routing are verified without a TTY or a model connection.
 
 ### Releasing (npm publish runs on GitHub CI)
 
-A release is: bump `version` in the root `package.json`, move the
-accumulated `[Unreleased]` entries into a dated `[X.Y.Z]` section in BOTH
-changelogs (bilingual sync), commit `chore: release vX.Y.Z`, tag `vX.Y.Z`,
-and push. **npm publishing is done by GitHub CI from the pushed tag**
-(`.github/workflows/ci.yml`, npm Trusted Publishing with `id-token: write`)
-— never run `npm publish` from a dev machine; the local npm token is not
-the publishing credential. On a changelog/version-only range the push runs
-`verify:prepush:nofork`; a range touching `packages/pi-tui/` runs the full
-`verify:prepush`.
+The canonical step-by-step checklist is [docs/releasing.md](docs/releasing.md).
+A release requires the root package version bump, synchronized bilingual
+changelogs, synchronized README changes when behavior changes, a green
+verification gate, commit `chore: release vX.Y.Z`, and a local `vX.Y.Z` tag.
+**Do not push the commit or tag without the user's explicit confirmation.**
+
+**npm publishing is done by GitHub CI from the pushed tag**
+(`.github/workflows/ci.yml`, npm Trusted Publishing with `id-token: write`).
+Never run `npm publish` from a dev machine; the local npm token is not the
+publishing credential. The checklist selects `verify:prepush:nofork` when the
+release range does not touch `packages/pi-tui/`, and the full
+`verify:prepush` when it does.
 
 ### Pre-push verification gate (husky)
 
@@ -538,6 +541,7 @@ The rules below must never be broken; the full contracts live in `docs/`.
 - CHANGELOG.md — 简体中文 release history (Keep a Changelog 1.1.0; see
   Working rules), with CHANGELOG.en.md kept in sync.
 - docs/README.md — index of the docs and how they evolve.
+- docs/releasing.md — the canonical release preparation, verification, tagging, and CI publication checklist.
 - docs/client-server-migration.md — the server/client migration source of truth (phase status, backend default, rollback state).
 - docs/client-server-coupling.md — the migration coupling allowlist (baseline + no-new-debt).
 - packages/pi-tui/AGENTS.md — the fork's divergence ledger (guarding tests per fix).

@@ -30,6 +30,8 @@ dsh --profile pi-tui
 * Approval 与 `ask_user_question` 交互
 * Plan Review
 * Todo / Goal 状态展示
+* 可读的终端窗口标题
+* Compaction / prune 后不会出现重复的幽灵 Tool Card
 
 `Ctrl+O` 控制工具和系统详情;在全屏 Focus 下它整体展开最近几个 Thought root,或全部收起。`Alt+T` 单独控制 Thinking。
 
@@ -37,7 +39,7 @@ dsh --profile pi-tui
 
 `/focus` 可以把运行中的 Thinking、Tool Call 和中间回复聚合为一个实时更新的 Thought 区块。
 
-需要查看过程时可以展开，关闭 Focus 后恢复普通 Transcript 展示。Focus 只影响界面投影，不修改 Session 中保存的事件。
+需要查看过程时可以展开，关闭 Focus 后恢复普通 Transcript 展示。全屏 Focus 中可以按 Thought root 批量展开/收起,也可以单独点击卡片;切换或缩放时会保留 viewport。Focus 只影响界面投影，不修改 Session 中保存的事件。
 
 ### Session
 
@@ -192,6 +194,8 @@ Reset)。预览由真实 Footer 引擎合成,与 contextual help 一起固定在
 保存(持久化),`Esc` 逐页返回、在首页关闭且不影响当前生效布局。
 无会话时也可使用。
 
+Add Picker 的末尾还可以选择 `+ Create Custom Text`,创建用户自定义的静态文本条目。创建后可编辑文本、默认语义色、显示名称,也可以删除;条目定义只从 USER 层读取并持久化。定义 Tone 与布局中的放置 Tone 分开,条目仍可在 `/footer` 中显示/隐藏、移动和排序。
+
 `footerLayout` 是嵌套设置对象(schemaVersion 1,1–2 行,左/右区域,
 分隔符,有限 formatter,语义 tone,prefix/suffix,importance)。
 `/footer` 配置器可交互地构建它;YAML 形状如下:
@@ -257,7 +261,7 @@ footerCommand:
 
 **安全:** 只有当命令位于你的设置文档的 USER 层时才会被执行。
 仓库/项目提供的 `footerCommand` 永远不会被执行——命令模式被禁用并
-回退到原生布局。失败(空输出、非零退出、超时)自动回退到原生布局。
+回退到原生布局。命令按 `refreshIntervalMs` 周期刷新,每次最多输出 2 行;失败(空输出、非零退出、超时)自动回退到原生布局。
 
 ### 扩展 Footer 条目
 
@@ -286,7 +290,7 @@ id 本身不得包含 `/`。旧的 `chrome.footer.status` 槽位不变:
 | `Esc Esc`     | 空闲时打开 Rewind           |
 | `Ctrl+C`      | 中断 / 清空当前输入            |
 | `Ctrl+D`      | 退出 TUI(等同 `/exit`)    |
-| `Ctrl+S`      | Steer:把草稿发给正在运行的回合     |
+| `Ctrl+S`      | Steer:把队列消息和草稿一起发送到正在运行的回合 |
 | `Ctrl+T`      | 切换 Todo 面板              |
 | `Ctrl+R`      | 搜索输入历史                 |
 | `Ctrl+F`      | 搜索 Transcript          |
@@ -299,7 +303,8 @@ id 本身不得包含 `/`。旧的 `chrome.footer.status` 槽位不变:
 | `!`           | 进入 Shell 模式            |
 | `!!`          | 进入 Local-only Shell 模式 |
 
-完整按键和命令以 TUI 中的 `/help` 为准。
+完整按键和命令以 TUI 中的 `/help` 为准。表中的快捷键是默认值;用户自定义后,以 `/help` 和 `/keybindings` 显示的生效键位为准。
+
 ### 自定义快捷键
 
 Host 快捷键是语义 action(`app.*`),通过 context-aware keymap 解析——
@@ -617,4 +622,3 @@ English:
 ## License
 
 [MIT](LICENSE)
-

@@ -30,6 +30,8 @@ dsh --profile pi-tui
 * Approval and `ask_user_question` dialogs
 * Plan Review
 * Todo / Goal status
+* Human-readable terminal window titles
+* No duplicate ghost Tool Cards after compaction / pruning
 
 `Ctrl+O` controls Tool and System details — and in fullscreen Focus it bulk-expands the recent Thought roots or collapses them all. `Alt+T` controls Thinking separately.
 
@@ -37,7 +39,7 @@ dsh --profile pi-tui
 
 `/focus` groups the current turn's Thinking, Tool Calls, and intermediate replies into a live Thought block.
 
-The full process can still be expanded when needed. Disabling Focus restores the normal Transcript projection. Focus only changes presentation; it does not modify Session events.
+The full process can still be expanded when needed. In fullscreen Focus, Thought roots can be expanded/collapsed in bulk or opened with an individual card click, and the viewport survives switches and resizes. Disabling Focus restores the normal Transcript projection. Focus only changes presentation; it does not modify Session events.
 
 ### Sessions
 
@@ -198,6 +200,8 @@ scrolls away at any terminal size. `S` on the Row Selector saves
 (persisted); `Esc` walks back page by page and closes on the first page
 without touching the active layout. Usable before any session exists.
 
+The Add Picker also offers `+ Create Custom Text` for user-defined static text items. Their text, default semantic tone, display name, and deletion are editable; definitions are read and persisted only from the USER layer. The definition tone is separate from the placement Tone, and the item can otherwise be shown/hidden, moved, and reordered like any other footer item.
+
 `footerLayout` is a nested settings object (schemaVersion 1, 1–2 rows,
 left/right zones, a separator, finite formatters, semantic tones,
 prefix/suffix, importance). The `/footer` configurator builds it
@@ -267,8 +271,9 @@ footerCommand:
 **Security:** the command is executed ONLY when it lives in the USER
 layer of your settings document. A repository/project-supplied
 `footerCommand` is never executed — command mode is disabled and the
-native layout applies. Failures (empty output, non-zero exit, timeout)
-fall back to the native layout automatically.
+native layout applies. The command refreshes periodically according to
+`refreshIntervalMs` and renders at most two rows; failures (empty output,
+non-zero exit, timeout) fall back to the native layout automatically.
 
 ### Extension footer items
 
@@ -301,7 +306,7 @@ segments aggregate into the single `ext:*` item. Full author guide:
 | `Esc Esc`     | Open Rewind while idle                              |
 | `Ctrl+C`      | Interrupt / clear current input                     |
 | `Ctrl+D`      | Quit the TUI (like `/exit`)                         |
-| `Ctrl+S`      | Steer the running turn with the draft               |
+| `Ctrl+S`      | Steer queued messages and the draft into the running turn |
 | `Ctrl+T`      | Toggle the todo panel                               |
 | `Ctrl+R`      | Search input history                                |
 | `Ctrl+F`      | Search Transcript                                   |
@@ -314,7 +319,8 @@ segments aggregate into the single `ext:*` item. Full author guide:
 | `!`           | Enter Shell mode                                    |
 | `!!`          | Enter local-only Shell mode                         |
 
-Use `/help` inside the TUI for the current command and keybinding list.
+Use `/help` inside the TUI for the current command and keybinding list. The table above shows the defaults; after customization, `/help` and `/keybindings` show the effective keys.
+
 ### Customizing keybindings
 
 Host shortcuts are semantic actions (`app.*`) resolved through a
@@ -640,4 +646,3 @@ English:
 ## License
 
 [MIT](LICENSE)
-

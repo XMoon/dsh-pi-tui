@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-08-28
+
 ### Added
 
 - **Pi/pi2dsh compatibility is now guarded by two blocking gates.**
@@ -52,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforces the persisted-layout parser's 32-items-per-row cap — the
   picker shows an explicit notice when the row is full instead of
   letting a 33rd item make every future save fail to parse.
+- **Footer now supports user-defined static text items.** The Add Picker ends with `+ Create Custom Text`, which creates a user item with editable text, default semantic tone, and display name; definitions can be edited, renamed, or deleted and are read only from the USER settings layer. Definition tone is separate from placement Tone, while the item remains show/hideable, movable, and reorderable in `/footer` like a builtin item.
 - **Builtin footer items now expose meaningful finite styles.** Existing
   `format` references remain the only persisted style field, while common
   items gain useful variants: model and permission badges can be plain or
@@ -188,7 +191,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   move them between the left/right zones, reorder with Shift+↑/↓, switch
   rows with Tab, cycle formatters with F, and watch a live preview
   composed by the real footer engine against the current session state.
-  `Enter` saves (persisted), `Esc` cancels without touching the active
+  `S` saves (persisted), `Esc` cancels without touching the active
   layout. Usable before any session exists. `/statusline` is its alias
   (named for other agents' muscle memory; `/status` keeps priority
   matching, and the alias is marked "(alias of /footer)" in the
@@ -228,6 +231,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole-document replace can never wipe it. **Security:** the command is
   executed only when it lives in the USER layer of your settings document
   — a repository/project-supplied `footerCommand` is never executed.
+- **Fullscreen Focus and narrow Transcript behavior are more stable.** Fullscreen Focus supports bulk expand/collapse by Thought root and per-card clicks, while viewport position survives switches and resizes; Thinking cards use the `🌊` marker. The Transcript reserves a 2-cell right gutter, so folding and repainting never cover the tail.
 
 ### Fixed
 
@@ -1460,7 +1464,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.1...v0.3.2

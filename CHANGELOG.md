@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-08-28
+
 ### 新增
 
 - **新增 Pi/pi2dsh 兼容性双门禁。** `gate:pi-surface-compat` 在真实
@@ -40,6 +42,7 @@
   扩展条目能力、默认布局输出与无迁移契约均不变。Add 路径同时执行
   持久化解析的每行 32 条上限——满行时 picker 显示明确提示,拒绝第
   33 条而不是让之后的保存永远失败。
+- **Footer 支持用户自定义静态文本条目。** Add Picker 末尾新增 `+ Create Custom Text`,可创建带文本、默认语义色和显示名称的用户条目;创建后的定义可编辑、重命名或删除,并且只从 USER 设置层读取。它们与布局中的放置 Tone 分开,仍可像内置条目一样在 `/footer` 中显示/隐藏、移动和排序。
 - **内置 Footer 条目现在提供有意义的有限 Style。** 持久化仍只使用既有的
   `format` 字段,常用条目新增了可区分的变体:Model 与 Permission preset
   支持 badge/plain/compact,Working directory 支持 short/basename/full,
@@ -146,7 +149,7 @@
   启动。
 - **`/footer` — 交互式 Footer 配置器。** 开关条目、在左/右区域间
   移动、Shift+↑/↓ 排序、Tab 切换行、F 循环 formatter,并实时预览由
-  真实 Footer 引擎基于当前会话状态合成的效果。`Enter` 保存(持久化),
+  真实 Footer 引擎基于当前会话状态合成的效果。`S` 保存(持久化),
   `Esc` 取消且不影响当前生效布局。无会话时也可使用。`/statusline`
   是它的别名(为其他 agent 的习惯命名;`/status` 保持优先匹配,
   别名在补全目录中标记为 "(alias of /footer)")。
@@ -174,6 +177,7 @@
   文档 DTO 的正式字段:未来 Remote 适配器的整文档 replace 不会把它
   擦掉。**安全:** 只有当命令位于你的设置文档的 USER 层时才会被执行
   ——仓库/项目提供的 `footerCommand` 永远不会被执行。
+- **Focus 与 Transcript 的窄屏/全屏表现进一步稳定。** 全屏 Focus 支持按 Thought root 批量展开/收起和单卡点击,切换与缩放时保留正确的 viewport;Thinking 卡片使用 `🌊` marker。Transcript 为内容保留右侧 2-cell gutter,折叠和重绘不会覆盖尾部。
 
 ### 修复
 
@@ -1156,7 +1160,8 @@
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.1...v0.3.2
