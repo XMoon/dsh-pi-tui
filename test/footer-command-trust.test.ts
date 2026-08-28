@@ -158,6 +158,18 @@ test('the Direct custom-item read separates USER raw storage from the safe runti
   } as never, undefined, () => undefined)
   assert.deepEqual(unavailable.footerCustomItems.get(), { items: [], invalidCount: 1 })
   assert.deepEqual(unavailable.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
+
+  const absentService = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => undefined,
+  } as never, undefined, () => undefined)
+  assert.deepEqual(absentService.footerCustomItems.get(), { items: [], invalidCount: 1 })
+  assert.deepEqual(absentService.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
+
+  const absentDescriptor = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [] }),
+  } as never, undefined, () => undefined)
+  assert.deepEqual(absentDescriptor.footerCustomItems.get(), { items: [], invalidCount: 1 })
+  assert.deepEqual(absentDescriptor.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
 })
 
 test('TuiSettingsDoc round-trip: a whole-document replace never wipes the trusted footerCommand (review P2 migration contract)', async () => {

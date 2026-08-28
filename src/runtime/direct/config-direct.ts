@@ -202,11 +202,12 @@ class DirectFooterCustomItems implements FooterCustomItemsConfig {
   private readRaw(): { value: unknown; failed: boolean } {
     try {
       const settings = this.ctx.get('settings') as { describe?(): readonly SettingsDescriptorLike[] | undefined } | undefined
-      if (settings !== undefined && typeof settings.describe !== 'function') return { value: undefined, failed: true }
-      const descriptors = settings?.describe?.()
-      if (settings !== undefined && descriptors === undefined) return { value: undefined, failed: true }
-      const descriptor = descriptors?.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
-      const user = descriptor?.user
+      if (settings === undefined || typeof settings.describe !== 'function') return { value: undefined, failed: true }
+      const descriptors = settings.describe()
+      if (descriptors === undefined) return { value: undefined, failed: true }
+      const descriptor = descriptors.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
+      if (descriptor === undefined) return { value: undefined, failed: true }
+      const user = descriptor.user
       if (user === undefined) return { value: undefined, failed: false }
       if (typeof user !== 'object' || user === null || Array.isArray(user)) return { value: undefined, failed: true }
       return { value: (user as Record<string, unknown>).footerCustomItems, failed: false }

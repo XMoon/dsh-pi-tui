@@ -875,6 +875,56 @@ test('/settings theme pick persists the BUILTIN choice too (review P1: the trans
   app.stop()
 })
 
+test('/settings theme write aborts when USER custom storage is unavailable', async () => {
+  // A whole-document settings write must not proceed when the Direct adapter
+  // cannot read the USER layer. Otherwise this fallback would write the merged
+  // document with footerCustomItems: undefined and erase the user's data.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  const projectFooterCustomItems = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
+  const doc: Record<string, unknown> = {
+    theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
+    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off',
+    footerCustomItems: projectFooterCustomItems,
+  }
+  const persisted: Record<string, unknown>[] = []
+  Object.assign(runner, {
+    tuiSettings: {
+      get: () => doc as never,
+      replace: (next: Record<string, unknown>) => {
+        persisted.push(next)
+        Object.assign(doc, next)
+        return next
+      },
+    },
+  })
+  registerTuiCommands(runner)
+  const settingsDef = services.defs.find(def => def.name === 'settings')
+  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
+  ;(settingsDef!.handler as () => unknown)()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // → Theme row (approval is first; the doc starts dark)
+  await vt.waitForRender()
+  vt.sendInput('\r') // open the Theme submenu
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // dark
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // light
+  await vt.waitForRender()
+  vt.sendInput('\r') // attempt to pick light
+  await vt.waitForRender()
+  for (let spin = 0; spin < 50; spin += 1) await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(persisted, [], 'an unavailable USER projection must abort the unrelated settings write')
+  assert.equal(doc.theme, 'dark', 'the merged document must remain untouched when the write is aborted')
+  assert.deepEqual(doc.footerCustomItems, projectFooterCustomItems, 'the project value must not be promoted')
+  app.stop()
+})
+
 test('/settings theme STALE pick through the REAL handler rolls the row and the choice back (review P2: production-path failure)', async () => {
   // The miniature in theme-picker.test.ts pins the fork contract; THIS test
   // drives the REAL /settings handler (registerTuiCommands → app panel →
