@@ -63,6 +63,8 @@ export interface FooterConfiguratorOptions {
   /** The overlay's row budget source: re-read at EVERY render so a
    * terminal resize never leaves the panel clipped or oversized. */
   readonly maxVisible: () => number
+  /** Request a render after timer-driven input replay. */
+  readonly requestRender?: () => void
   readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('./custom-items.ts').FooterCustomItemSettings[]) => void
   readonly onCancel: () => void
 }
@@ -76,6 +78,7 @@ export class FooterConfiguratorPanel implements Component {
   private readonly taskBrowserAvailable: () => boolean
   private readonly extensionFooterText: () => string
   private readonly maxVisible: () => number
+  private readonly requestRender: () => void
   private readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('./custom-items.ts').FooterCustomItemSettings[]) => void
   private readonly onCancel: () => void
   /** The body scrollport's top offset (stable across renders — the cursor
@@ -85,10 +88,13 @@ export class FooterConfiguratorPanel implements Component {
    * `isInPaste` between the \x1b[200~/\x1b[201~ markers, `pasteBuffer`
    * accumulating the chunks — the markers (and the content) may split
    * across terminal chunks. `pasteStartPending` holds an incomplete start
-   * marker after its ESC+[ prefix without delaying a standalone Escape key. */
+   * marker, including an ambiguous lone ESC for a bounded replay. */
   private isInPaste = false
   private pasteBuffer = ''
   private pasteStartPending = ''
+  private pasteStartTimer: ReturnType<typeof setTimeout> | undefined
+  /** Recursive scanner replays bypass paste recognition exactly once. */
+  private skipPasteOnce = false
   /** The fork dispatches input to the focused component's handleInput. */
   readonly handleInput: (data: string) => void
 
@@ -100,20 +106,11 @@ export class FooterConfiguratorPanel implements Component {
     this.taskBrowserAvailable = options.taskBrowserAvailable
     this.extensionFooterText = options.extensionFooterText
     this.maxVisible = options.maxVisible
+    this.requestRender = options.requestRender ?? (() => {})
     this.onSave = options.onSave
     this.onCancel = options.onCancel
     this.handleInput = (data: string): void => {
       const state = this.model.state()
-      if (matchesKey(data, 'escape')) {
-        // The model navigates back page by page; only the Row Selector's
-        // Esc closes the configurator (cancel without saving).
-        if (!this.model.cancel()) this.onCancel()
-        return
-      }
-      if (matchesKey(data, 'enter')) {
-        this.model.activate()
-        return
-      }
       // Text-input pages swallow text keys FIRST (space is a query
       // character there, never the remove action). Text arrives in three
       // shapes — a plain printable chunk, a Kitty CSI-u / modifyOtherKeys
@@ -126,12 +123,22 @@ export class FooterConfiguratorPanel implements Component {
         || state.mode === 'create-text'
         || (state.mode === 'advanced' && state.editing)
         || ((state.mode === 'custom-text' || state.mode === 'custom-name') && state.editing)
+      if (textMode && matchesKey(data, 'backspace')) {
+        this.model.backspace()
+        return
+      }
+      if (textMode && !this.skipPasteOnce && this.feedPaste(data)) return
+      if (matchesKey(data, 'escape')) {
+        // The model navigates back page by page; only the Row Selector's
+        // Esc closes the configurator (cancel without saving).
+        if (!this.model.cancel()) this.onCancel()
+        return
+      }
+      if (matchesKey(data, 'enter')) {
+        this.model.activate()
+        return
+      }
       if (textMode) {
-        if (matchesKey(data, 'backspace')) {
-          this.model.backspace()
-          return
-        }
-        if (this.feedPaste(data)) return
         // A plain printable chunk (one character OR a coalesced burst —
         // fast typists and non-bracketed pastes deliver multi-char runs)
         // is text: the model strips control characters and enforces the
@@ -275,18 +282,28 @@ export class FooterConfiguratorPanel implements Component {
     const pendingStart = this.pasteStartPending
     if (pendingStart !== '') {
       this.pasteStartPending = ''
+      this.clearPasteStartTimer()
       const candidate = pendingStart + data
       if (continuesPasteStart(candidate)) {
         data = candidate
       } else {
-        // The pending bytes were only a possible paste prefix. Do not replay
-        // them through feedPaste (that would buffer the same malformed prefix
-        // forever); replay the incoming chunk normally. A complete CSI key
-        // reconstructed by the split is still dispatched as one key.
-        if (isReplayableInput(candidate)) {
-          this.handleInput(candidate)
+        // A lone ESC is ambiguous: it may be the first byte of a split paste
+        // marker or a real Escape key. Replay it without re-entering this
+        // scanner, then feed the new chunk normally so a fresh marker suffix
+        // cannot be lost. Longer malformed prefixes retain their old
+        // fail-soft behavior: a reconstructed normal key is replayed as one
+        // key, otherwise only the incoming chunk is dispatched.
+        if (pendingStart === '\x1b') {
+          this.replayWithoutPaste(pendingStart)
+          if (data !== '') {
+            if (isReplayableInput(data)) this.replayWithoutPaste(data)
+            else this.handleInput(data)
+          }
+        } else if (isReplayableInput(candidate)) {
+          this.replayWithoutPaste(candidate)
         } else if (data !== '') {
-          this.handleInput(data)
+          if (isReplayableInput(data)) this.replayWithoutPaste(data)
+          else this.handleInput(data)
         }
         return true
       }
@@ -314,18 +331,63 @@ export class FooterConfiguratorPanel implements Component {
       return true
     }
 
-    // Keep only an incomplete ESC+[200~ suffix. A lone ESC remains ordinary
-    // input so the configurator's Escape navigation is never delayed; the
-    // terminal's usual split boundary (ESC+[20 / 0~) is buffered here.
+    // A raw ESC is the one complete key that is also a possible first byte
+    // of the paste marker, so hold it before the normal-key fast path.
+    if (data === '\x1b') {
+      this.holdPasteStart(data)
+      return true
+    }
+
+    // A complete normal key sequence (including arrows and Kitty printables)
+    // must not be mistaken for the shared ESC+[ paste prefix.
+    if (isReplayableInput(data)) return false
+
+    // Keep an incomplete ESC+[200~ suffix. A lone ESC is held briefly as an
+    // ambiguous prefix; if no continuation arrives, the timer replays it as
+    // the configurator's ordinary Escape navigation. Longer prefixes use a
+    // longer bounded hold because they are already unlikely to be standalone
+    // keys and existing split-marker callers need time between chunks.
     const partialLength = longestPasteStartSuffix(data)
     if (partialLength > 0) {
       const ordinary = data.slice(0, -partialLength)
       if (ordinary !== '') this.handleInput(ordinary)
-      this.pasteStartPending = data.slice(-partialLength)
+      this.holdPasteStart(data.slice(-partialLength))
       return true
     }
 
     return false
+  }
+
+  /** Dispatch replayed bytes without sending them back into paste scanning. */
+  private replayWithoutPaste(data: string): void {
+    const previous = this.skipPasteOnce
+    this.skipPasteOnce = true
+    try {
+      this.handleInput(data)
+    } finally {
+      this.skipPasteOnce = previous
+    }
+  }
+
+  private holdPasteStart(prefix: string): void {
+    this.pasteStartPending = prefix
+    this.clearPasteStartTimer()
+    const delay = prefix === '\x1b' ? PASTE_ESC_TIMEOUT_MS : PASTE_PREFIX_TIMEOUT_MS
+    this.pasteStartTimer = setTimeout(() => {
+      this.pasteStartTimer = undefined
+      if (this.pasteStartPending !== prefix) return
+      this.pasteStartPending = ''
+      if (prefix === '\x1b') {
+        this.replayWithoutPaste(prefix)
+        this.requestRender()
+      }
+    }, delay)
+  }
+
+  private clearPasteStartTimer(): void {
+    if (this.pasteStartTimer === undefined) return
+    clearTimeout(this.pasteStartTimer)
+    this.pasteStartTimer = undefined
   }
 
   /** Consume all complete paste end markers in the current buffer. */
@@ -357,7 +419,7 @@ export class FooterConfiguratorPanel implements Component {
       if (partialLength > 0) {
         const ordinary = remaining.slice(0, -partialLength)
         if (ordinary !== '') this.handleInput(ordinary)
-        this.pasteStartPending = remaining.slice(-partialLength)
+        this.holdPasteStart(remaining.slice(-partialLength))
         return
       }
       this.handleInput(remaining)
@@ -862,6 +924,8 @@ export class FooterConfiguratorPanel implements Component {
 
 const BRACKETED_PASTE_START = '\x1b[200~'
 const BRACKETED_PASTE_END = '\x1b[201~'
+const PASTE_ESC_TIMEOUT_MS = 10
+const PASTE_PREFIX_TIMEOUT_MS = 250
 const REPLAYABLE_ESC_KEYS: readonly KeyId[] = [
   'tab', 'enter', 'backspace', 'delete', 'insert', 'home', 'end',
   'pageUp', 'pageDown', 'up', 'down', 'left', 'right',
@@ -870,7 +934,8 @@ const REPLAYABLE_ESC_KEYS: readonly KeyId[] = [
 
 /** Whether a pending-prefix candidate is a complete normal key sequence. */
 function isReplayableInput(data: string): boolean {
-  return decodePrintableKey(data) !== undefined
+  return matchesKey(data, 'escape')
+    || decodePrintableKey(data) !== undefined
     || REPLAYABLE_ESC_KEYS.some(key => matchesKey(data, key))
 }
 
@@ -881,10 +946,10 @@ function continuesPasteStart(data: string): boolean {
 }
 
 /** Return the longest proper start-marker prefix at the end of a chunk.
- * A one-byte ESC is intentionally excluded: it is a standalone Escape key
- * in normal terminal traffic and must not be held waiting for another chunk. */
+ * A one-byte ESC is included because it is ambiguous at a chunk boundary;
+ * the panel holds it briefly and replays it as Escape if no marker follows. */
 function longestPasteStartSuffix(data: string): number {
-  for (let length = Math.min(BRACKETED_PASTE_START.length - 1, data.length); length >= 2; length -= 1) {
+  for (let length = Math.min(BRACKETED_PASTE_START.length - 1, data.length); length >= 1; length -= 1) {
     if (data.endsWith(BRACKETED_PASTE_START.slice(0, length))) return length
   }
   return 0
