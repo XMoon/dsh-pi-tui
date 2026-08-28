@@ -10,7 +10,7 @@
 `dsh-pi-tui` 作为独立的 dsh bundle 安装到 profile 中，提供流式对话、工具调用、会话管理、Subagent、历史搜索、Shell、审批与设置等终端交互。模型、工具、Session、权限、Skills、Plan、Goal、Subagent 等运行时能力仍由 DeepSeek Harness 提供。
 
 ```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 
@@ -373,14 +373,46 @@ dsh-pi-tui:
 * DeepSeek Harness
 * Node.js `^22.19.0 || >=24`
 
-项目当前跟随 DeepSeek Harness `0.1.1-rc.x` 版本线开发。
+### DSH 与 TUI 版本对应（重要）
+
+| TUI 包版本 | 对应 DSH 版本 | 说明 |
+|---|---|---|
+| `0.4.0-alpha.1`（`@next`） | `>=0.1.2-alpha.1 <0.2.0` | 当前预发布线；已按 `0.1.2-alpha.1` 验证 |
+| `0.3.x`（`@0.3`） | `0.1.1-rc.2` | 旧运行时兼容线 |
+
+不要把两条线混装：0.4 预发布包在 DSH 0.1.1 上会在启动时明确拒绝，
+不会通过兼容 shim 或 API 代理继续运行；保留 DSH 0.1.1 时请使用 0.3。
+`0.4.0-alpha.1` 的推荐安装顺序如下（先装 DSH，再把 TUI 装入 profile）：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+如果需要保留旧 DSH：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
+dsh --profile pi-tui
+```
+
+`0.4` 的支持范围是 `>=0.1.2-alpha.1 <0.2.0`；当前 alpha 精确验证的是
+`0.1.2-alpha.1`。未来运行时不会被 TUI 的启动门禁无证据地预先拒绝。
+仅执行 `npm install -g @xmoon76/dsh-pi-tui` 不会把插件安装进 DSH profile，
+实际使用仍应执行上面的 `dsh plugin` 命令。
+
+新的 Agent preset 使用 canonical `ptc` id；旧 Session 中持久化的
+`agentPreset=code` 仍会读取，并映射到 PTC 模式。
 
 ### npm
 
-推荐使用单独的 `pi-tui` profile：
+推荐使用单独的 `pi-tui` profile。稳定版发布后，使用与 DSH 版本匹配的
+TUI channel（稳定版用 `@latest`，预发布版用 `@next`）：
 
 ```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 

@@ -10,7 +10,7 @@ A Pi-style terminal frontend for [DeepSeek Harness](https://github.com/deepseek-
 `dsh-pi-tui` is installed as an independent dsh bundle inside a profile. It provides terminal interaction for streaming conversations, tool calls, session management, subagents, history search, shell commands, approvals, and settings. Models, tools, Sessions, permissions, Skills, Plan, Goal, and Subagent runtime behavior are still provided by DeepSeek Harness.
 
 ```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 
@@ -399,14 +399,49 @@ dsh-pi-tui:
 * DeepSeek Harness
 * Node.js `^22.19.0 || >=24`
 
-The project currently follows the DeepSeek Harness `0.1.1-rc.x` release line.
+### DSH/TUI version pairing (important)
+
+| TUI package line | Matching DSH line | Notes |
+|---|---|---|
+| `0.4.0-alpha.1` (`@next`) | `>=0.1.2-alpha.1 <0.2.0` | Current prerelease; validated against exact `0.1.2-alpha.1` |
+| `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
+
+Do not mix the two lines: a 0.4 prerelease package deliberately refuses to
+start on DSH 0.1.1 rather than using a compatibility shim or API proxy. If you
+keep DSH 0.1.1, use the 0.3 TUI line. For the current `0.4.0-alpha.1`, install
+DSH first and then add the TUI to a profile:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+If you need to keep the legacy DSH runtime:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
+dsh --profile pi-tui
+```
+
+The 0.4 support range is `>=0.1.2-alpha.1 <0.2.0`; the current alpha is
+validated exactly against `0.1.2-alpha.1`. Future runtimes are not rejected by
+the startup gate without evidence of a break. Running only
+`npm install -g @xmoon76/dsh-pi-tui` does not install the plugin into a DSH
+profile; the `dsh plugin` command is still required.
+
+New agent sessions use the canonical `ptc` preset id. Persisted sessions with
+`agentPreset=code` remain readable and are presented as PTC mode.
 
 ### npm
 
-Using a dedicated `pi-tui` profile is recommended:
+Using a dedicated `pi-tui` profile is recommended. Once a stable 0.4 release
+exists, use the matching stable TUI channel (`@latest`); use `@next` for the
+prerelease channel:
 
 ```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 
