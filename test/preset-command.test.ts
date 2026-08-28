@@ -236,6 +236,7 @@ function setup(options: {
   app.start()
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
+  if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
   const presets = presetService(options.rows ?? SHIPPED_ROWS)
   ctx.provide('agentPresets', presets.service as never)
   if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
