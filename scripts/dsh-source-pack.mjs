@@ -86,24 +86,47 @@ export function validateSourcePackOutput(outputPath, dshDir) {
   const info = lstatSync(output)
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output must be a real directory: ${output}`)
   const entries = readdirSync(output)
-  if (entries.length === 0) return output
+  if (entries.length === 0) fail(`source pack output already exists; remove it before packing: ${output}`)
   if (!entries.includes(SOURCE_MANIFEST_NAME)) {
-    fail(`refusing to remove non-source-pack directory: ${output}`)
+    fail(`refusing to use non-source-pack directory: ${output}`)
   }
   const allowed = entries.every(entry => {
     if (!(entry === SOURCE_MANIFEST_NAME || /^[A-Za-z0-9@._+-]+\.tgz$/u.test(entry))) return false
     return lstatSync(join(output, entry)).isFile()
   })
-  if (!allowed) fail(`refusing to remove a source-pack directory with unexpected files: ${output}`)
+  if (!allowed) fail(`refusing to use a source-pack directory with unexpected files: ${output}`)
   try {
     loadDshDistributionManifest(output, {
       packageJson: {},
       requiredPackages: [DSH_CLI_PACKAGE],
     })
   } catch (error) {
-    fail(`refusing to remove an invalid source-pack directory: ${output}${error instanceof Error ? `: ${error.message}` : ''}`)
+    fail(`refusing to use an invalid source-pack directory: ${output}${error instanceof Error ? `: ${error.message}` : ''}`)
   }
-  return output
+  fail(`source pack output already exists; remove it before packing: ${output}`)
+}
+
+/** Claim an absent output directory atomically before any packer writes to it. */
+function claimSourcePackOutput(output) {
+  mkdirSync(dirname(output), { recursive: true })
+  mkdirSync(output)
+  const info = lstatSync(output)
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output claim is not a real directory: ${output}`)
+  return { path: output, dev: info.dev, ino: info.ino }
+}
+
+/** Remove only the directory inode this process atomically claimed. */
+function removeClaimedSourcePackOutput(owner) {
+  let info
+  try {
+    info = lstatSync(owner.path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return true
+    throw error
+  }
+  if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+  rmSync(owner.path, { recursive: true, force: true })
+  return true
 }
 
 function parseCli() {
@@ -164,9 +187,8 @@ async function main() {
   if (identity.dirty) console.error('WARNING: DIRTY DSH SOURCE TREE (reproducible = false)')
 
   const output = validateSourcePackOutput(values.out ?? DEFAULT_OUTPUT, identity.directory)
-  rmSync(output, { recursive: true, force: true })
+  const owner = claimSourcePackOutput(output)
   try {
-    mkdirSync(output, { recursive: true })
 
     await runOfficial(identity.directory, ['install', '--frozen-lockfile'], OFFICIAL_TIMEOUTS.install)
     // Local source checkouts can retain ignored tsbuildinfo/lib state from an
@@ -204,7 +226,9 @@ async function main() {
     return output
   } catch (error) {
     try {
-      rmSync(output, { recursive: true, force: true })
+      if (!removeClaimedSourcePackOutput(owner)) {
+        throw new Error(`source pack output ownership changed; refusing cleanup: ${output}`)
+      }
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], `failed to clean incomplete source pack ${output}`)
     }
