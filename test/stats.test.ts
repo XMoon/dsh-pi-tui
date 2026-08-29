@@ -48,6 +48,38 @@ test('computes turns, steps, LLM time, and first-token latency', () => {
   assert.equal(stats.firstTokenMsAvg, 1_100)
 })
 
+test('replacement surface messages do not mutate either stats fold', () => {
+  const t = 1_700_000_000_000
+  const replacement = {
+    ...event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('replacement-message'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'compaction copy' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 25 },
+    }, 1, t + 100),
+    surfaceOp: { op: 'replace', start: 0, end: 0 },
+  } as SessionEvent
+  const log = [event('step/start', { turn: 0, step: 0 }, 0, t), replacement]
+  const folded = computeStats(log)
+  const incremental = new StatsFolder()
+  incremental.apply(log)
+  for (const stats of [folded, incremental.snapshot()]) {
+    assert.equal(stats.turns, 0)
+    assert.equal(stats.steps, 0)
+    assert.equal(stats.llmMs, 0)
+    assert.equal(stats.firstTokenMsAvg, 0)
+    assert.equal(stats.tokensPerSec, 0)
+    assert.equal(stats.inputTokens, 0)
+    assert.equal(stats.outputTokens, 0)
+    assert.equal(stats.cacheReadTokens, 0)
+  }
+})
+
 test('a step without an assistant message contributes no timing (Web parity)', () => {
   const t = 1_700_000_000_000
   const stats = computeStats([

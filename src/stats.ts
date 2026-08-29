@@ -27,7 +27,7 @@
  * @module @xmoon76/dsh-pi-tui/stats
  */
 
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { isReplacementSurfaceEvent, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { formatTokens, StepUsageAccumulator, type UsageLike } from './token-usage.ts'
 
 /** Aggregated session statistics. */
@@ -170,6 +170,9 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
   }
 
   for (const event of events) {
+    // Replacement surface events belong to the model-visible compaction view,
+    // not the human transcript or its performance totals.
+    if (isReplacementSurfaceEvent(event)) continue
     // The same lifecycle policy as the Focus fold: after turn/end a late
     // step/usage/message event of that turn is a replay artifact and is
     // ignored, so the footer and the Focus per-turn totals can never
@@ -415,6 +418,9 @@ export class StatsFolder {
   }
 
   private applyEvent(event: SessionEvent): void {
+    // Keep incremental stats on the same append-origin event stream as the
+    // transcript and Focus folds; compaction replacements are model-only.
+    if (isReplacementSurfaceEvent(event)) return
     if (event.type !== 'turn/end' && event.type !== 'request/context'
       && this.completedTurns.has((event.data as { turn?: unknown }).turn as number)) {
       return
