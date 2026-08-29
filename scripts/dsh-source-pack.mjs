@@ -408,7 +408,7 @@ async function main() {
     }
     assertStageOwnership(staging, stageOutputOwner, 'post-pack filtering')
 
-    const packageEntries = packageMapFromTarballs(stageHandle.path, effective.expectedVersion)
+    const packageEntries = packageMapFromTarballs(stageOutput, effective.expectedVersion)
     assertStageOwnership(staging, stageOutputOwner, 'package map validation')
     const manifestFor = owner => ({
       schemaVersion: 1,
@@ -428,7 +428,7 @@ async function main() {
     assertStageOwnership(staging, stageOutputOwner, 'staged manifest write')
     writeExclusiveFile(join(stageHandle.path, SOURCE_MANIFEST_NAME), `${JSON.stringify(stageManifest, null, 2)}\n`)
     assertStageOwnership(staging, stageOutputOwner, 'staged distribution validation')
-    validateSourceDistribution({ manifest: stageManifest, directory: stageHandle.path })
+    validateSourceDistribution({ manifest: stageManifest, directory: stageOutput })
     assertStageOwnership(staging, stageOutputOwner, 'staged final validation')
 
     // Reserve the caller's final path only after the complete source pack is
@@ -455,7 +455,7 @@ async function main() {
     assertClaimedSourcePackOutput(outputOwner, 'final manifest write')
     writeExclusiveFile(join(outputHandle.path, SOURCE_MANIFEST_NAME), `${JSON.stringify(finalManifest, null, 2)}\n`)
     assertClaimedSourcePackOutput(outputOwner, 'distribution validation')
-    const distribution = validateSourceDistribution({ manifest: finalManifest, directory: outputHandle.path })
+    const distribution = validateSourceDistribution({ manifest: finalManifest, directory: output })
     assertClaimedSourcePackOutput(outputOwner, 'final distribution validation')
     closeDirectoryHandle(outputHandle)
     outputHandle = undefined
