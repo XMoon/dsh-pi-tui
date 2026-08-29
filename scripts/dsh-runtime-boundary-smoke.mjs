@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,17 +47,17 @@ function candidateArgument(value) {
   return value === '--' ? process.argv[3] : value
 }
 
-function resolveTarball(explicit) {
+export function resolveTarball(explicit, packageRoot = PACKAGE_ROOT) {
   if (explicit !== undefined) {
     const path = resolve(explicit)
-    if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`candidate tarball not found: ${explicit}`)
+    if (!existsSync(path) || !lstatSync(path).isFile()) throw new Error(`candidate tarball must be a regular file: ${explicit}`)
     return path
   }
-  const candidates = readdirSync(PACKAGE_ROOT)
+  const candidates = readdirSync(packageRoot)
     .filter(name => /^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(name))
-    .map(name => join(PACKAGE_ROOT, name))
-    .filter(path => statSync(path).isFile())
-  if (candidates.length === 0) throw new Error(`no candidate tarball in ${PACKAGE_ROOT}; run pnpm pack:release first`)
+    .map(name => join(packageRoot, name))
+    .filter(path => lstatSync(path).isFile())
+  if (candidates.length === 0) throw new Error(`no candidate tarball in ${packageRoot}; run pnpm pack:release first`)
   if (candidates.length > 1) throw new Error(`expected one candidate tarball, found ${candidates.map(basename).join(', ')}`)
   return candidates[0]
 }

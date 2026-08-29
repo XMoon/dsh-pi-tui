@@ -1,6 +1,23 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import test from 'node:test'
-import { assertBoundary } from '../scripts/dsh-runtime-boundary-smoke.mjs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { assertBoundary, resolveTarball } from '../scripts/dsh-runtime-boundary-smoke.mjs'
+
+test('runtime boundary rejects explicit and discovered symlinked candidates', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-runtime-candidate-link-'))
+  try {
+    const target = join(directory, 'external.tgz')
+    const candidate = join(directory, 'xmoon76-dsh-pi-tui-0.4.0.tgz')
+    writeFileSync(target, 'not a tarball')
+    symlinkSync(target, candidate)
+    assert.throws(() => resolveTarball(candidate), /regular file/u)
+    assert.throws(() => resolveTarball(undefined, directory), /no candidate tarball/u)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
 
 test('runtime boundary accepts the friendly advisory notice', () => {
   const output = [
