@@ -13,11 +13,11 @@
  * @module dsh-source-pack
  */
 
+import { randomUUID } from 'node:crypto'
 import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -81,78 +81,97 @@ function canonicalPath(path) {
  * outputs; arbitrary checkout or filesystem directories are never destroyed.
  */
 export function validateSourcePackOutput(outputPath, dshDir) {
-  const output = resolve(outputPath)
+  const requested = resolve(outputPath)
   const source = resolve(dshDir)
-  const canonicalOutput = canonicalPath(output)
+  const requestedInfo = existsSync(requested) ? lstatSync(requested) : undefined
+  if (requestedInfo?.isSymbolicLink()) fail(`source pack output must not be a symlink: ${requested}`)
+  const canonicalOutput = canonicalPath(requested)
   const canonicalSource = canonicalPath(source)
   const canonicalTui = canonicalPath(PACKAGE_ROOT)
-  if (pathInside(canonicalOutput, canonicalSource)) fail(`source pack output must not be inside the DSH checkout: ${output}`)
-  if (pathInside(canonicalOutput, canonicalTui)) fail(`source pack output must not be inside the TUI checkout: ${output}`)
-  const parent = dirname(output)
-  if (parent === output || dirname(parent) === parent) {
-    fail(`source pack output must be a dedicated child directory: ${output}`)
+  if (pathInside(canonicalOutput, canonicalSource)) fail(`source pack output must not be inside the DSH checkout: ${requested}`)
+  if (pathInside(canonicalOutput, canonicalTui)) fail(`source pack output must not be inside the TUI checkout: ${requested}`)
+  const parent = dirname(canonicalOutput)
+  if (parent === canonicalOutput || dirname(parent) === parent) {
+    fail(`source pack output must be a dedicated child directory: ${requested}`)
   }
-  if (!existsSync(output)) return output
+  if (!existsSync(canonicalOutput)) return canonicalOutput
 
-  const info = lstatSync(output)
-  if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output must be a real directory: ${output}`)
-  const entries = readdirSync(output)
-  if (entries.length === 0) fail(`source pack output already exists; remove it before packing: ${output}`)
+  const info = lstatSync(canonicalOutput)
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output must be a real directory: ${requested}`)
+  const entries = readdirSync(canonicalOutput)
+  if (entries.length === 0) fail(`source pack output already exists; remove it before packing: ${requested}`)
   if (!entries.includes(SOURCE_MANIFEST_NAME)) {
-    fail(`refusing to use non-source-pack directory: ${output}`)
+    fail(`refusing to use non-source-pack directory: ${requested}`)
   }
   const allowed = entries.every(entry => {
     if (!(entry === SOURCE_MANIFEST_NAME || /^[A-Za-z0-9@._+-]+\.tgz$/u.test(entry))) return false
-    return lstatSync(join(output, entry)).isFile()
+    return lstatSync(join(canonicalOutput, entry)).isFile()
   })
-  if (!allowed) fail(`refusing to use a source-pack directory with unexpected files: ${output}`)
+  if (!allowed) fail(`refusing to use a source-pack directory with unexpected files: ${requested}`)
   try {
-    loadDshDistributionManifest(output, {
+    loadDshDistributionManifest(canonicalOutput, {
       packageJson: {},
       requiredPackages: [DSH_CLI_PACKAGE],
     })
   } catch (error) {
-    fail(`refusing to use an invalid source-pack directory: ${output}${error instanceof Error ? `: ${error.message}` : ''}`)
+    fail(`refusing to use an invalid source-pack directory: ${requested}${error instanceof Error ? `: ${error.message}` : ''}`)
   }
-  fail(`source pack output already exists; remove it before packing: ${output}`)
+  fail(`source pack output already exists; remove it before packing: ${requested}`)
 }
 
-/** Atomically claim a unique staging directory before any packer writes to it. */
-export function claimSourcePackStaging(output) {
-  const parent = dirname(output)
-  mkdirSync(parent, { recursive: true })
-  const staging = mkdtempSync(join(parent, '.dsh-source-pack-'))
-  const info = lstatSync(staging)
-  if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack staging claim is not a real directory: ${staging}`)
-  return { path: staging, dev: info.dev, ino: info.ino }
+/** Atomically claim an absent output directory before any packer writes to it. */
+export function claimSourcePackOutput(output) {
+  const parentPath = dirname(output)
+  mkdirSync(parentPath, { recursive: true })
+  const parent = lstatSync(parentPath)
+  if (!parent.isDirectory() || parent.isSymbolicLink()) fail(`source pack output parent is not a real directory: ${parentPath}`)
+  mkdirSync(output)
+  const info = lstatSync(output)
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output claim is not a real directory: ${output}`)
+  return { path: output, parentPath, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
 }
 
-/** Verify that the process still owns the claimed staging/final directory. */
+/** Verify that the process still owns the claimed output and its parent. */
 function assertClaimedSourcePackOutput(owner, action) {
+  let parent
   let info
   try {
+    parent = lstatSync(owner.parentPath)
     info = lstatSync(owner.path)
   } catch (error) {
     if (error?.code === 'ENOENT') fail(`source pack output disappeared during ${action}: ${owner.path}`)
     throw error
   }
-  if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) {
+  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.dev !== owner.parentDev || parent.ino !== owner.parentIno
+    || !info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) {
     fail(`source pack output ownership changed during ${action}: ${owner.path}`)
   }
   return info
 }
 
-/** Remove only the directory inode this process atomically claimed. */
+/** Quarantine and remove only the directory inode this process claimed. */
 export function removeClaimedSourcePackOutput(owner) {
+  let parent
   let info
   try {
+    parent = lstatSync(owner.parentPath)
     info = lstatSync(owner.path)
   } catch (error) {
     if (error?.code === 'ENOENT') return true
     throw error
   }
-  if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
-  rmSync(owner.path, { recursive: true, force: true })
+  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.dev !== owner.parentDev || parent.ino !== owner.parentIno
+    || !info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+  const quarantine = join(owner.parentPath, `.dsh-source-pack-cleanup-${process.pid}-${randomUUID()}`)
+  try {
+    renameSync(owner.path, quarantine)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return true
+    throw error
+  }
+  const moved = lstatSync(quarantine)
+  if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== owner.dev || moved.ino !== owner.ino) return false
+  rmSync(quarantine, { recursive: true, force: true })
   return true
 }
 
@@ -214,10 +233,8 @@ async function main() {
   if (identity.dirty) console.error('WARNING: DIRTY DSH SOURCE TREE (reproducible = false)')
 
   const output = validateSourcePackOutput(values.out ?? DEFAULT_OUTPUT, identity.directory)
-  const owner = claimSourcePackStaging(output)
-  let published = false
+  const owner = claimSourcePackOutput(output)
   try {
-    const staging = owner.path
     assertClaimedSourcePackOutput(owner, 'initialization')
     await runOfficial(identity.directory, ['install', '--frozen-lockfile'], OFFICIAL_TIMEOUTS.install)
     // Local source checkouts can retain ignored tsbuildinfo/lib state from an
@@ -225,23 +242,23 @@ async function main() {
     // official build is reproducible without requiring a pristine local tree.
     await runOfficial(identity.directory, ['clean'], OFFICIAL_TIMEOUTS.clean)
     await runOfficial(identity.directory, ['build:official'], OFFICIAL_TIMEOUTS.build)
-    await runOfficial(identity.directory, ['release:pack', '--family', 'dsh', '--out', staging], OFFICIAL_TIMEOUTS.pack)
+    await runOfficial(identity.directory, ['release:pack', '--family', 'dsh', '--out', output], OFFICIAL_TIMEOUTS.pack)
     assertClaimedSourcePackOutput(owner, 'official release pack')
 
     // The official packer writes publish-order.txt for registry publishing. Source
     // mode only needs immutable tarballs plus its generated distribution manifest;
     // discard every other top-level output before the artifact is uploaded.
-    for (const entry of readdirSync(staging)) {
+    for (const entry of readdirSync(output)) {
       if (entry.endsWith('.tgz')) continue
       assertClaimedSourcePackOutput(owner, `filtering ${entry}`)
-      const path = join(staging, entry)
+      const path = join(output, entry)
       const info = lstatSync(path)
       if (!info.isFile() || info.isSymbolicLink()) fail(`source pack produced a non-regular disposable entry: ${path}`)
       unlinkSync(path)
     }
     assertClaimedSourcePackOutput(owner, 'post-pack filtering')
 
-    const packageEntries = packageMapFromTarballs(staging, effective.expectedVersion)
+    const packageEntries = packageMapFromTarballs(output, effective.expectedVersion)
     assertClaimedSourcePackOutput(owner, 'package map validation')
     const manifest = {
       schemaVersion: 1,
@@ -258,24 +275,17 @@ async function main() {
         .map(([name, entry]) => [name, entry.fileName])),
     }
     assertClaimedSourcePackOutput(owner, 'manifest write')
-    writeFileSync(join(staging, 'dsh-source-distribution.json'), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+    writeFileSync(join(output, 'dsh-source-distribution.json'), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
     assertClaimedSourcePackOutput(owner, 'distribution validation')
-    validateSourceDistribution({ manifest, directory: staging })
-    assertClaimedSourcePackOutput(owner, 'finalization')
-    if (existsSync(output)) fail(`source pack output appeared during finalization: ${output}`)
-    renameSync(staging, output)
-    owner.path = output
-    published = true
-    assertClaimedSourcePackOutput(owner, 'published distribution validation')
-    const finalDistribution = validateSourceDistribution({ manifest, directory: output })
-    printDshProvenance(finalDistribution)
+    const distribution = validateSourceDistribution({ manifest, directory: output })
+    assertClaimedSourcePackOutput(owner, 'final distribution validation')
+    printDshProvenance(distribution)
     console.log(`DSH source distribution written to ${output}`)
     return output
   } catch (error) {
-    if (published) throw error
     try {
       if (!removeClaimedSourcePackOutput(owner)) {
-        throw new Error(`source pack staging ownership changed; refusing cleanup: ${owner.path}`)
+        throw new Error(`source pack output ownership changed; refusing cleanup: ${output}`)
       }
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], `failed to clean incomplete source pack ${output}`)

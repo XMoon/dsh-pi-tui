@@ -12,7 +12,7 @@ import {
   validateSourceIdentity,
 } from '../scripts/lib/dsh-distribution.mjs'
 import {
-  claimSourcePackStaging,
+  claimSourcePackOutput,
   officialCommandEnvironment,
   removeClaimedSourcePackOutput,
   validateSourcePackOutput,
@@ -208,7 +208,7 @@ test('source pack refuses destructive output directories', () => {
 test('source pack cleanup preserves a replacement after the staging inode changes', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsh-output-owner-test-'))
   try {
-    const owner = claimSourcePackStaging(join(root, 'pack'))
+    const owner = claimSourcePackOutput(join(root, 'pack'))
     rmSync(owner.path, { recursive: true, force: true })
     mkdirSync(owner.path)
     writeFileSync(join(owner.path, 'sentinel.txt'), 'replacement must survive')

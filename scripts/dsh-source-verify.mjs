@@ -13,9 +13,10 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
@@ -131,24 +132,39 @@ function generatedDistributionOwner(directory, manifest) {
   if (typeof identity?.dev !== 'string' || typeof identity.ino !== 'string') {
     fail(`generated source distribution has no output ownership proof: ${directory}`)
   }
+  const parentPath = dirname(directory)
+  const parent = lstatSync(parentPath)
   const info = lstatSync(directory)
-  if (!info.isDirectory() || info.isSymbolicLink() || String(info.dev) !== identity.dev || String(info.ino) !== identity.ino) {
+  if (!parent.isDirectory() || parent.isSymbolicLink() || !info.isDirectory() || info.isSymbolicLink()
+    || String(info.dev) !== identity.dev || String(info.ino) !== identity.ino) {
     fail(`generated source distribution ownership changed: ${directory}`)
   }
-  return { path: directory, dev: info.dev, ino: info.ino }
+  return { path: directory, parentPath, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
 }
 
-/** Remove a generated distribution only while its proved inode is intact. */
+/** Quarantine and remove a generated distribution only while its proved inode is intact. */
 function removeGeneratedDistribution(owner) {
+  let parent
   let info
   try {
+    parent = lstatSync(owner.parentPath)
     info = lstatSync(owner.path)
   } catch (error) {
     if (error?.code === 'ENOENT') return true
     throw error
   }
-  if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
-  rmSync(owner.path, { recursive: true, force: true })
+  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.dev !== owner.parentDev || parent.ino !== owner.parentIno
+    || !info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+  const quarantine = join(owner.parentPath, `.dsh-source-verify-cleanup-${process.pid}-${randomUUID()}`)
+  try {
+    renameSync(owner.path, quarantine)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return true
+    throw error
+  }
+  const moved = lstatSync(quarantine)
+  if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== owner.dev || moved.ino !== owner.ino) return false
+  rmSync(quarantine, { recursive: true, force: true })
   return true
 }
 

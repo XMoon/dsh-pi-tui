@@ -190,6 +190,9 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
       }
       case 'turn/end': {
         if (completedTurnFence === undefined || event.data.turn > completedTurnFence) completedTurnFence = event.data.turn
+        // Turn/end can arrive out of order in replayed logs. Advance the shared
+        // usage fence before finalizing so older open steps settle only once.
+        usage.onTurnStart(event.data.turn)
         // Finalize any still-open steps so the session total agrees with
         // the Focus per-turn total (review finding).
         usage.onTurnEnd(event.data.turn)
@@ -433,6 +436,9 @@ export class StatsFolder {
       }
       case 'turn/end': {
         if (this.completedTurnFence === undefined || event.data.turn > this.completedTurnFence) this.completedTurnFence = event.data.turn
+        // Turn/end can arrive out of order in replayed logs. Advance the shared
+        // usage fence before finalizing so older open steps settle only once.
+        this.usage.onTurnStart(event.data.turn)
         // Finalize any still-open steps so the session total agrees with
         // the Focus per-turn total (review finding).
         this.usage.onTurnEnd(event.data.turn)

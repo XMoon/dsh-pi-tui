@@ -227,6 +227,25 @@ test('StatsFolder bounds completed-turn lifecycle state with a monotonic fence',
   assert.equal(folder.snapshot().outputTokens, 0)
 })
 
+test('higher turn/end advances the shared usage fence before older turn/end', () => {
+  const t = 1_700_000_000_000
+  const prefix = [
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } },
+    }, 1, t + 100),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 2, t + 200),
+  ]
+  const folder = new StatsFolder()
+  folder.apply(prefix)
+  assert.equal(folder.snapshot().outputTokens, 20, 'higher turn/end must finalize the older open usage')
+  folder.apply([event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3, t + 300)])
+  assert.equal(folder.snapshot().outputTokens, 20, 'the late older boundary must not commit it twice')
+  assert.equal(computeStats(prefix).outputTokens, 20)
+})
+
 test('StatsFolder stores sampled decode duration as a scalar', () => {
   const t = 1_700_000_000_000
   const folder = new StatsFolder()
