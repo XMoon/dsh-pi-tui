@@ -200,6 +200,33 @@ test('StatsFolder matches computeStats and folds incrementally', () => {
   )
 })
 
+test('StatsFolder bounds completed-turn lifecycle state with a monotonic fence', () => {
+  const folder = new StatsFolder()
+  for (let turn = 0; turn < 1_024; turn += 1) {
+    folder.apply([event('turn/end', { turn, reason: { kind: 'completed' } }, turn)])
+  }
+  const internals = folder as unknown as {
+    completedTurns?: unknown
+    completedTurnFence?: number
+  }
+  assert.equal(internals.completedTurns, undefined)
+  assert.equal(internals.completedTurnFence, 1_023)
+
+  // The fence still rejects a late event from the oldest completed turn.
+  folder.apply([event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId('late-completed-turn'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'late replay' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    usage: { inputTokens: 10, outputTokens: 5 },
+  }, 2_000)])
+  assert.equal(folder.snapshot().outputTokens, 0)
+})
+
 test('StatsFolder stores sampled decode duration as a scalar', () => {
   const t = 1_700_000_000_000
   const folder = new StatsFolder()

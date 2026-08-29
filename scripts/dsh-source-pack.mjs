@@ -13,7 +13,18 @@
  * @module dsh-source-pack
  */
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 import { fileURLToPath } from 'node:url'
@@ -106,17 +117,33 @@ export function validateSourcePackOutput(outputPath, dshDir) {
   fail(`source pack output already exists; remove it before packing: ${output}`)
 }
 
-/** Claim an absent output directory atomically before any packer writes to it. */
-function claimSourcePackOutput(output) {
-  mkdirSync(dirname(output), { recursive: true })
-  mkdirSync(output)
-  const info = lstatSync(output)
-  if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output claim is not a real directory: ${output}`)
-  return { path: output, dev: info.dev, ino: info.ino }
+/** Atomically claim a unique staging directory before any packer writes to it. */
+export function claimSourcePackStaging(output) {
+  const parent = dirname(output)
+  mkdirSync(parent, { recursive: true })
+  const staging = mkdtempSync(join(parent, '.dsh-source-pack-'))
+  const info = lstatSync(staging)
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack staging claim is not a real directory: ${staging}`)
+  return { path: staging, dev: info.dev, ino: info.ino }
+}
+
+/** Verify that the process still owns the claimed staging/final directory. */
+function assertClaimedSourcePackOutput(owner, action) {
+  let info
+  try {
+    info = lstatSync(owner.path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') fail(`source pack output disappeared during ${action}: ${owner.path}`)
+    throw error
+  }
+  if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) {
+    fail(`source pack output ownership changed during ${action}: ${owner.path}`)
+  }
+  return info
 }
 
 /** Remove only the directory inode this process atomically claimed. */
-function removeClaimedSourcePackOutput(owner) {
+export function removeClaimedSourcePackOutput(owner) {
   let info
   try {
     info = lstatSync(owner.path)
@@ -187,25 +214,35 @@ async function main() {
   if (identity.dirty) console.error('WARNING: DIRTY DSH SOURCE TREE (reproducible = false)')
 
   const output = validateSourcePackOutput(values.out ?? DEFAULT_OUTPUT, identity.directory)
-  const owner = claimSourcePackOutput(output)
+  const owner = claimSourcePackStaging(output)
+  let published = false
   try {
-
+    const staging = owner.path
+    assertClaimedSourcePackOutput(owner, 'initialization')
     await runOfficial(identity.directory, ['install', '--frozen-lockfile'], OFFICIAL_TIMEOUTS.install)
     // Local source checkouts can retain ignored tsbuildinfo/lib state from an
     // earlier build. Clean only generated repository-owned outputs so the same
     // official build is reproducible without requiring a pristine local tree.
     await runOfficial(identity.directory, ['clean'], OFFICIAL_TIMEOUTS.clean)
     await runOfficial(identity.directory, ['build:official'], OFFICIAL_TIMEOUTS.build)
-    await runOfficial(identity.directory, ['release:pack', '--family', 'dsh', '--out', output], OFFICIAL_TIMEOUTS.pack)
+    await runOfficial(identity.directory, ['release:pack', '--family', 'dsh', '--out', staging], OFFICIAL_TIMEOUTS.pack)
+    assertClaimedSourcePackOutput(owner, 'official release pack')
 
     // The official packer writes publish-order.txt for registry publishing. Source
     // mode only needs immutable tarballs plus its generated distribution manifest;
     // discard every other top-level output before the artifact is uploaded.
-    for (const entry of readdirSync(output)) {
-      if (!entry.endsWith('.tgz')) rmSync(join(output, entry), { recursive: true, force: true })
+    for (const entry of readdirSync(staging)) {
+      if (entry.endsWith('.tgz')) continue
+      assertClaimedSourcePackOutput(owner, `filtering ${entry}`)
+      const path = join(staging, entry)
+      const info = lstatSync(path)
+      if (!info.isFile() || info.isSymbolicLink()) fail(`source pack produced a non-regular disposable entry: ${path}`)
+      unlinkSync(path)
     }
+    assertClaimedSourcePackOutput(owner, 'post-pack filtering')
 
-    const packageEntries = packageMapFromTarballs(output, effective.expectedVersion)
+    const packageEntries = packageMapFromTarballs(staging, effective.expectedVersion)
+    assertClaimedSourcePackOutput(owner, 'package map validation')
     const manifest = {
       schemaVersion: 1,
       mode: 'source-pack',
@@ -215,19 +252,30 @@ async function main() {
       version: effective.expectedVersion,
       dirty: identity.dirty,
       reproducible: identity.reproducible,
+      outputIdentity: { dev: String(owner.dev), ino: String(owner.ino) },
       packages: Object.fromEntries([...packageEntries.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([name, entry]) => [name, entry.fileName])),
     }
-    writeFileSync(join(output, 'dsh-source-distribution.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
-    const distribution = validateSourceDistribution({ manifest, directory: output })
-    printDshProvenance(distribution)
+    assertClaimedSourcePackOutput(owner, 'manifest write')
+    writeFileSync(join(staging, 'dsh-source-distribution.json'), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+    assertClaimedSourcePackOutput(owner, 'distribution validation')
+    validateSourceDistribution({ manifest, directory: staging })
+    assertClaimedSourcePackOutput(owner, 'finalization')
+    if (existsSync(output)) fail(`source pack output appeared during finalization: ${output}`)
+    renameSync(staging, output)
+    owner.path = output
+    published = true
+    assertClaimedSourcePackOutput(owner, 'published distribution validation')
+    const finalDistribution = validateSourceDistribution({ manifest, directory: output })
+    printDshProvenance(finalDistribution)
     console.log(`DSH source distribution written to ${output}`)
     return output
   } catch (error) {
+    if (published) throw error
     try {
       if (!removeClaimedSourcePackOutput(owner)) {
-        throw new Error(`source pack output ownership changed; refusing cleanup: ${output}`)
+        throw new Error(`source pack staging ownership changed; refusing cleanup: ${owner.path}`)
       }
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], `failed to clean incomplete source pack ${output}`)

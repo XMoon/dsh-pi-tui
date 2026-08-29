@@ -11,7 +11,12 @@ import {
   validateDshSourceConfig,
   validateSourceIdentity,
 } from '../scripts/lib/dsh-distribution.mjs'
-import { officialCommandEnvironment, validateSourcePackOutput } from '../scripts/dsh-source-pack.mjs'
+import {
+  claimSourcePackStaging,
+  officialCommandEnvironment,
+  removeClaimedSourcePackOutput,
+  validateSourcePackOutput,
+} from '../scripts/dsh-source-pack.mjs'
 import { sourceConfigForArgs } from '../scripts/official-presets-smoke.mjs'
 import { installEnvironment } from '../scripts/prepare-dsh-test-environment.mjs'
 import {
@@ -195,6 +200,21 @@ test('source pack refuses destructive output directories', () => {
     mkdirSync(prior)
     writeFileSync(join(prior, 'dsh-source-distribution.json'), JSON.stringify({ schemaVersion: 1, mode: 'source-pack' }))
     assert.throws(() => validateSourcePackOutput(prior, checkout), /invalid source-pack directory/u)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('source pack cleanup preserves a replacement after the staging inode changes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-output-owner-test-'))
+  try {
+    const owner = claimSourcePackStaging(join(root, 'pack'))
+    rmSync(owner.path, { recursive: true, force: true })
+    mkdirSync(owner.path)
+    writeFileSync(join(owner.path, 'sentinel.txt'), 'replacement must survive')
+    assert.equal(removeClaimedSourcePackOutput(owner), false)
+    assert.equal(readFileSync(join(owner.path, 'sentinel.txt'), 'utf8'), 'replacement must survive')
+    rmSync(owner.path, { recursive: true, force: true })
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

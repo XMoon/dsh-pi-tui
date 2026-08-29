@@ -162,7 +162,7 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
   const endedSteps = new Set<string>()
   const throughput: Throughput = { outputMsTotal: 0, decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
   const usage = new StepUsageAccumulator()
-  const completedTurns = new Set<number>()
+  let completedTurnFence: number | undefined
   let lastTurn: number | undefined
   let settledTurn: number | undefined
   const enterSettledTurn = (turn: number): void => {
@@ -177,9 +177,9 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
     // step/usage/message event of that turn is a replay artifact and is
     // ignored, so the footer and the Focus per-turn totals can never
     // diverge (review finding).
-    if (event.type !== 'turn/end' && event.type !== 'request/context'
-      && completedTurns.has((event.data as { turn?: unknown }).turn as number)) {
-      continue
+    if (event.type !== 'turn/end' && event.type !== 'request/context') {
+      const eventTurn = (event.data as { turn?: unknown }).turn
+      if (typeof eventTurn === 'number' && completedTurnFence !== undefined && eventTurn <= completedTurnFence) continue
     }
     switch (event.type) {
       case 'turn/start': {
@@ -189,7 +189,7 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
         break
       }
       case 'turn/end': {
-        completedTurns.add(event.data.turn)
+        if (completedTurnFence === undefined || event.data.turn > completedTurnFence) completedTurnFence = event.data.turn
         // Finalize any still-open steps so the session total agrees with
         // the Focus per-turn total (review finding).
         usage.onTurnEnd(event.data.turn)
@@ -373,10 +373,9 @@ export class StatsFolder {
   private readonly throughput: Throughput = { outputMsTotal: 0, decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
   /** The shared per-step usage accounting (same class as the Focus fold). */
   private readonly usage = new StepUsageAccumulator()
-  /** Turns finalized by turn/end: late events of theirs are replay
-   * artifacts and are ignored (the same lifecycle policy as the Focus
-   * fold — the footer and the Focus per-turn totals never diverge). */
-  private readonly completedTurns = new Set<number>()
+  /** Highest turn finalized by turn/end; older events are replay artifacts.
+   * A monotonic fence keeps lifecycle memory bounded across long sessions. */
+  private completedTurnFence: number | undefined
   private lastTurn: number | undefined
 
   /**
@@ -421,9 +420,9 @@ export class StatsFolder {
     // Keep incremental stats on the same append-origin event stream as the
     // transcript and Focus folds; compaction replacements are model-only.
     if (isReplacementSurfaceEvent(event)) return
-    if (event.type !== 'turn/end' && event.type !== 'request/context'
-      && this.completedTurns.has((event.data as { turn?: unknown }).turn as number)) {
-      return
+    if (event.type !== 'turn/end' && event.type !== 'request/context') {
+      const eventTurn = (event.data as { turn?: unknown }).turn
+      if (typeof eventTurn === 'number' && this.completedTurnFence !== undefined && eventTurn <= this.completedTurnFence) return
     }
     switch (event.type) {
       case 'turn/start': {
@@ -433,7 +432,7 @@ export class StatsFolder {
         break
       }
       case 'turn/end': {
-        this.completedTurns.add(event.data.turn)
+        if (this.completedTurnFence === undefined || event.data.turn > this.completedTurnFence) this.completedTurnFence = event.data.turn
         // Finalize any still-open steps so the session total agrees with
         // the Focus per-turn total (review finding).
         this.usage.onTurnEnd(event.data.turn)

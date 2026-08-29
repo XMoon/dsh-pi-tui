@@ -125,6 +125,33 @@ function sourcePackOutput(values) {
   return resolve(values.out ?? join(tmpdir(), `dsh-source-pack-${process.pid}`))
 }
 
+/** Require the inode proof emitted by the source pack before cleanup. */
+function generatedDistributionOwner(directory, manifest) {
+  const identity = manifest?.outputIdentity
+  if (typeof identity?.dev !== 'string' || typeof identity.ino !== 'string') {
+    fail(`generated source distribution has no output ownership proof: ${directory}`)
+  }
+  const info = lstatSync(directory)
+  if (!info.isDirectory() || info.isSymbolicLink() || String(info.dev) !== identity.dev || String(info.ino) !== identity.ino) {
+    fail(`generated source distribution ownership changed: ${directory}`)
+  }
+  return { path: directory, dev: info.dev, ino: info.ino }
+}
+
+/** Remove a generated distribution only while its proved inode is intact. */
+function removeGeneratedDistribution(owner) {
+  let info
+  try {
+    info = lstatSync(owner.path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return true
+    throw error
+  }
+  if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+  rmSync(owner.path, { recursive: true, force: true })
+  return true
+}
+
 async function runSourcePack(values, config) {
   const output = sourcePackOutput(values)
   const args = [SOURCE_PACK_SCRIPT, '--dsh-dir', values['dsh-dir']]
@@ -157,11 +184,13 @@ async function main() {
     TARBALL_SMOKE_SKIP_INSTALL: '1',
   }
   let root
+  let generatedOwner
   try {
     if (generatedDistribution) await runSourcePack(values, effective)
     const distribution = loadDshDistributionManifest(distributionDir, {
       packageJson: join(PACKAGE_ROOT, 'package.json'),
     })
+    if (generatedDistribution) generatedOwner = generatedDistributionOwner(distributionDir, distribution.manifest)
     if (distribution.repository !== effective.repository || distribution.sourceSha !== effective.ref || distribution.version !== effective.expectedVersion) {
       fail('packed DSH distribution does not match the effective source pin')
     }
@@ -217,7 +246,11 @@ async function main() {
       }
     }
     if (generatedDistribution && !distributionExisted && values.keep !== true && process.env.DSH_SOURCE_KEEP !== '1') {
-      rmSync(distributionDir, { recursive: true, force: true })
+      if (generatedOwner === undefined) {
+        if (existsSync(distributionDir)) console.error(`preserved source distribution without ownership proof: ${distributionDir}`)
+      } else if (!removeGeneratedDistribution(generatedOwner)) {
+        console.error(`preserved source distribution after ownership changed: ${distributionDir}`)
+      }
     } else if (generatedDistribution) {
       console.error(`preserved source distribution: ${distributionDir}`)
     }
