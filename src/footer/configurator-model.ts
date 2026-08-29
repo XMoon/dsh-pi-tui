@@ -226,7 +226,8 @@ function sameFooterRow(a: FooterRowLayout, b: FooterRowLayout): boolean {
 
 /** Structural layout equality (row count, item order, every editable ref
  * field, separators). Field order in the underlying objects is irrelevant
- * by construction — no JSON stringify round-trip. */
+ * by construction — no JSON stringify round-trip. Context-free BY DESIGN:
+ * dirty detection projects both sides through canonicalLayout first. */
 export function sameFooterLayout(a: FooterLayoutV1, b: FooterLayoutV1): boolean {
   if (a.rows.length !== b.rows.length) return false
   return a.rows.every((row, index) => sameFooterRow(row, b.rows[index]!))
@@ -252,6 +253,46 @@ export function sameFooterCustomItems(
 ): boolean {
   if (a.length !== b.length) return false
   return a.every((item, index) => sameFooterCustomItem(item, b[index]!))
+}
+
+/** Resolves an item id to its definition's default format (undefined for
+ * an unknown id — its formats are unknowable, so an explicit format is
+ * always a real override there). */
+type FooterDefaultFormatOf = (id: string) => string | undefined
+
+/** The canonical REF projection the dirty comparison uses (PR E review):
+ * facts the editor itself canonicalizes on the next interaction compare
+ * EQUAL to their absent form —
+ *   tone 'auto'          → absent
+ *   format = default     → absent (registry-aware)
+ *   prefix ''/suffix ''  → absent
+ * A no-op Style Enter (Enter on the already-selected default) or a no-op
+ * Advanced commit (empty buffer) must therefore never read as dirty. */
+function canonicalRef(ref: FooterItemRef, defaultFormatOf: FooterDefaultFormatOf): FooterItemRef {
+  const tone = normalizeToneForCompare(ref.tone)
+  return {
+    id: ref.id,
+    ...(ref.format !== undefined && ref.format !== defaultFormatOf(ref.id) ? { format: ref.format } : {}),
+    ...(tone === undefined ? {} : { tone: tone as FooterTone }),
+    ...(ref.prefix === undefined || ref.prefix === '' ? {} : { prefix: ref.prefix }),
+    ...(ref.suffix === undefined || ref.suffix === '' ? {} : { suffix: ref.suffix }),
+    ...(ref.importance === undefined ? {} : { importance: ref.importance }),
+  }
+}
+
+/** Canonical LAYOUT projection: row/zone ORDER and separators preserved,
+ * every ref projected through canonicalRef. Both sides of the dirty
+ * comparison are projected with the SAME (current) registry, so a
+ * definition change mid-session shifts both views identically. */
+function canonicalLayout(layout: FooterLayoutV1, defaultFormatOf: FooterDefaultFormatOf): FooterLayoutV1 {
+  return {
+    schemaVersion: 1,
+    rows: layout.rows.map(row => ({
+      left: row.left.map(ref => canonicalRef(ref, defaultFormatOf)),
+      right: row.right.map(ref => canonicalRef(ref, defaultFormatOf)),
+      ...(row.separator === undefined ? {} : { separator: { ...row.separator } }),
+    })),
+  }
 }
 
 /** A zone + index pair: where a flat position lives inside one row. */
@@ -408,9 +449,20 @@ export class FooterConfiguratorModel {
    * DEFINITION CATALOG are each compared against the construction
    * baseline. Reversible by contract — every mutation that returns the
    * draft to the baseline state (reorder + reorder back, tone + tone
-   * back, create + delete) returns to clean. */
+   * back, create + delete) returns to clean.
+   *
+   * Registry-aware canonicalization (review round 3): BOTH sides are
+   * projected through canonicalLayout with the CURRENT registry before
+   * comparison, so facts the editor canonicalizes anyway — an explicit
+   * 'auto' tone, a format equal to the definition's default, empty-string
+   * prefix/suffix — never read as dirty. The exported sameFooterLayout
+   * stays a pure comparator; this layer owns the projection. */
   isDirty(): boolean {
-    const layoutDirty = !sameFooterLayout(this.draft as unknown as FooterLayoutV1, this.baselineLayout as unknown as FooterLayoutV1)
+    const defaultFormatOf: FooterDefaultFormatOf = id => this.registry.get(id)?.defaultFormat
+    const layoutDirty = !sameFooterLayout(
+      canonicalLayout(this.draft as unknown as FooterLayoutV1, defaultFormatOf),
+      canonicalLayout(this.baselineLayout as unknown as FooterLayoutV1, defaultFormatOf),
+    )
     const itemsDirty = !sameFooterCustomItems(this.customItems.snapshot(), this.baselineCustomItems)
     return layoutDirty || itemsDirty
   }

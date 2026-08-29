@@ -653,6 +653,40 @@ test('PR E: an explicit auto tone normalizes against an absent tone', () => {
   assert.equal(m.isDirty(), false, 'auto → absent is the same fact')
 })
 
+test('PR E: an explicit DEFAULT format is the same fact as no format', () => {
+  const reg = createBuiltinFooterRegistry()
+  const def = reg.get('model')
+  assert.ok(def !== undefined && def.formats.includes(def.defaultFormat))
+  const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model', format: def.defaultFormat }], right: [] }] }
+  const m = new FooterConfiguratorModel(layout, reg)
+  assert.equal(m.isDirty(), false, 'explicit-default-format baseline is clean')
+  // The Style picker's NO-OP round-trip (review round 3): the picker opens
+  // on the current choice; Enter applies the SAME format — applyFormat
+  // canonicalizes the draft by DELETING the field. That must not read as
+  // dirty against the explicit-default baseline.
+  m.activate() // row
+  m.activate() // item (cursor 0 = model)
+  m.activate() // style picker (opens on the current format)
+  m.activate() // apply the same format → the draft drops the field
+  assert.equal(m.isDirty(), false, 'a no-op Style Enter must not read as dirty')
+})
+
+test('PR E: empty-string prefix/suffix are the same fact as absent', () => {
+  const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model', prefix: '', suffix: '' }], right: [] }] }
+  const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
+  assert.equal(m.isDirty(), false, 'empty-string baseline is clean')
+  // The Advanced editor's NO-OP commit: an empty buffer DELETES the
+  // field — that canonicalization must not read as dirty either.
+  m.activate() // row
+  m.activate() // item (cursor 0 = model)
+  m.moveDown() // menu: Style → Tone
+  m.moveDown() // Tone → Advanced
+  m.activate() // advanced page (Prefix selected)
+  m.activate() // open the inline editor (seeds '')
+  m.activate() // commit the empty buffer → the field is deleted
+  assert.equal(m.isDirty(), false, 'a no-op Advanced commit must not read as dirty')
+})
+
 test('PR E: custom definition text and tone edits dirty; restores clean', () => {
   const { m } = customModel()
   openItemMenu(m, 'user:env')
