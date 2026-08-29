@@ -76,9 +76,9 @@ function canonicalPath(path) {
 }
 
 /**
- * Validate an output path before the packer removes/recreates it. Existing
- * directories are replaceable only when they are clearly prior source-pack
- * outputs; arbitrary checkout or filesystem directories are never destroyed.
+ * Validate an output path before the packer claims it. Existing directories
+ * are never replaced: callers must choose a fresh dedicated output path so
+ * cleanup cannot destroy an arbitrary filesystem tree.
  */
 export function validateSourcePackOutput(outputPath, dshDir) {
   const requested = resolve(outputPath)
@@ -248,7 +248,9 @@ async function main() {
     // The official packer writes publish-order.txt for registry publishing. Source
     // mode only needs immutable tarballs plus its generated distribution manifest;
     // discard every other top-level output before the artifact is uploaded.
-    for (const entry of readdirSync(output)) {
+    const packedEntries = readdirSync(output)
+    assertClaimedSourcePackOutput(owner, 'listing packed output')
+    for (const entry of packedEntries) {
       if (entry.endsWith('.tgz')) continue
       assertClaimedSourcePackOutput(owner, `filtering ${entry}`)
       const path = join(output, entry)
