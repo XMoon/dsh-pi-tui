@@ -196,7 +196,14 @@ async function main() {
       distributionPaths: [distributionDir],
     })
     if (values['skip-runtime'] !== true) {
-      await run(process.execPath, [join(workspace, 'scripts', 'official-presets-smoke.mjs'), candidate, '--distribution', distributionDir], workspace, 'official DSH preset matrix', sourcePnpmEnv)
+      await run(process.execPath, [
+        join(workspace, 'scripts', 'official-presets-smoke.mjs'),
+        candidate,
+        '--distribution', distributionDir,
+        '--config', configPath,
+        '--ref', effective.ref,
+        '--expected-version', effective.expectedVersion,
+      ], workspace, 'official DSH preset matrix', sourcePnpmEnv)
       await run(process.execPath, [join(workspace, 'scripts', 'dsh-runtime-boundary-smoke.mjs'), candidate], workspace, 'old DSH boundary', sourcePnpmEnv)
     }
     console.log('SKIPPED: requires published compatible DSH/pi2dsh combination (source mode)')

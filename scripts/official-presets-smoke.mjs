@@ -38,6 +38,7 @@ import {
   DEFAULT_SOURCE_CONFIG,
   loadDshDistribution,
   loadDshSourceConfig,
+  validateDshSourceConfig,
 } from './lib/dsh-distribution.mjs'
 import { pnpmExecutable } from './lib/process.mjs'
 
@@ -53,14 +54,42 @@ function commandOutput(result) {
     .trim()
 }
 
+function optionValue(args, option) {
+  const index = args.indexOf(option)
+  if (index < 0) return undefined
+  const value = args[index + 1]
+  if (value === undefined || value.startsWith('--')) throw new Error(`${option} requires a value`)
+  return value
+}
+
+export function sourceConfigForArgs(args, defaultConfig = DEFAULT_SOURCE_CONFIG) {
+  const distributionPath = distributionArgument(args)
+  const ref = optionValue(args, '--ref')
+  const expectedVersion = optionValue(args, '--expected-version')
+  const configPath = optionValue(args, '--config')
+  if (distributionPath === undefined) {
+    if (ref !== undefined || expectedVersion !== undefined || configPath !== undefined) {
+      throw new Error('--ref, --expected-version, and --config require --distribution')
+    }
+    return undefined
+  }
+  const tracked = loadDshSourceConfig(configPath ?? defaultConfig)
+  return validateDshSourceConfig({
+    ...tracked,
+    ref: ref ?? tracked.ref,
+    expectedVersion: expectedVersion ?? tracked.expectedVersion,
+  }, tracked.path)
+}
+
 async function main() {
   const smokeArgs = process.argv.slice(2)
   const tarball = resolveTarball(candidateArgument(smokeArgs))
   validateCandidateTarball(tarball)
   const manifest = readJson(MANIFEST_PATH, 'compatibility manifest')
-  const targetDshVersion = validateTargetDshManifest(manifest)
+  const manifestDshVersion = validateTargetDshManifest(manifest)
   const distributionPath = distributionArgument(smokeArgs)
-  const sourceConfig = distributionPath === undefined ? undefined : loadDshSourceConfig(DEFAULT_SOURCE_CONFIG)
+  const sourceConfig = sourceConfigForArgs(smokeArgs)
+  const targetDshVersion = sourceConfig?.expectedVersion ?? manifestDshVersion
   const distribution = distributionPath === undefined
     ? loadDshDistribution({ mode: 'npm', version: targetDshVersion })
     : loadDshDistribution({
@@ -109,7 +138,9 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  console.error(`OFFICIAL_PRESETS_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
-  process.exitCode = 1
-})
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => {
+    console.error(`OFFICIAL_PRESETS_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 1
+  })
+}

@@ -12,6 +12,7 @@ import {
   validateSourceIdentity,
 } from '../scripts/lib/dsh-distribution.mjs'
 import { officialCommandEnvironment, validateSourcePackOutput } from '../scripts/dsh-source-pack.mjs'
+import { sourceConfigForArgs } from '../scripts/official-presets-smoke.mjs'
 import { installEnvironment } from '../scripts/prepare-dsh-test-environment.mjs'
 import {
   candidateTarball as sourceVerifyCandidateTarball,
@@ -52,7 +53,26 @@ test('source verification delegates packing to the dedicated pack script', () =>
   const sourceVerify = readFileSync(new URL('../scripts/dsh-source-verify.mjs', import.meta.url), 'utf8')
   assert.match(sourceVerify, /const SOURCE_PACK_SCRIPT = fileURLToPath\(new URL\('\.\/dsh-source-pack\.mjs', import\.meta\.url\)\)/u)
   assert.match(sourceVerify, /const args = \[SOURCE_PACK_SCRIPT, '--dsh-dir'/u)
+  assert.match(sourceVerify, /'--ref', effective\.ref/u)
+  assert.match(sourceVerify, /'--expected-version', effective\.expectedVersion/u)
+  assert.match(sourceVerify, /official DSH preset matrix/u)
   assert.doesNotMatch(sourceVerify, /const args = \[SCRIPT_PATH, '--dsh-dir'/u)
+})
+
+test('official preset source args retain effective source overrides', () => {
+  const ref = 'c'.repeat(40)
+  const config = sourceConfigForArgs([
+    '/tmp/candidate.tgz',
+    '--distribution', '/tmp/source-pack',
+    '--ref', ref,
+    '--expected-version', VERSION,
+  ])
+  assert.equal(config.ref, ref)
+  assert.equal(config.expectedVersion, VERSION)
+  assert.throws(
+    () => sourceConfigForArgs(['/tmp/candidate.tgz', '--ref', ref]),
+    /require --distribution/u,
+  )
 })
 
 test('source dependency preparation disables pnpm verification and self-management before install', () => {
