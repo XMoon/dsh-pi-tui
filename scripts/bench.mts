@@ -202,6 +202,34 @@ function repeatedText(length: number): string {
   return TEXT_HEAVY_BLOCK.repeat(Math.ceil(length / TEXT_HEAVY_BLOCK.length)).slice(0, length)
 }
 
+/** Build one long turn with many settled model steps (tool-loop shape). */
+function buildManyStepEvents(steps: number): SessionEvent[] {
+  const events: SessionEvent[] = []
+  pushEvent(events, 'turn/start', { turn: 0 })
+  for (let step = 0; step < steps; step += 1) {
+    pushEvent(events, 'step/start', { turn: 0, step })
+    pushEvent(events, 'assistant/chunk', {
+      turn: 0,
+      step,
+      chunk: { type: 'text-delta', index: 0, text: 'x' },
+    })
+    pushEvent(events, 'assistant/message', {
+      turn: 0,
+      step,
+      message: {
+        id: `many-step-message-${step}`,
+        role: 'assistant',
+        content: [{ type: 'text', text: 'x' }],
+        source: { kind: 'model', provider: 'bench', model: 'bench' },
+      },
+      usage: { inputTokens: 1, outputTokens: 1 },
+    })
+    pushEvent(events, 'step/end', { turn: 0, step })
+  }
+  pushEvent(events, 'turn/end', { turn: 0, reason: { kind: 'completed' } })
+  return events
+}
+
 /** Build a moderate-size text-heavy log without requiring real tokenization. */
 function buildTextHeavyEvents(turns: number, assistantChars: number, resultChars: number): SessionEvent[] {
   const events: SessionEvent[] = []
@@ -338,6 +366,18 @@ function measureLongSession(events: readonly SessionEvent[]): LongSessionMetrics
   }
 }
 
+/** Measure only the one-turn multi-step stats path. */
+function measureManyStepStats(events: readonly SessionEvent[]): { statsApply: number; snapshot: number } {
+  const statsApply = warmedP50(FAST ? 3 : 5, () => {
+    const folder = new StatsFolder()
+    folder.apply(events)
+  })
+  const folder = new StatsFolder()
+  folder.apply(events)
+  const snapshot = stats(timeIt(FULL_SAMPLES, () => { folder.snapshot() })).p50
+  return { statsApply, snapshot }
+}
+
 function fmtBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes.toFixed(0)} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
@@ -381,6 +421,16 @@ async function main(): Promise<void> {
     row('  StatsFolder.apply', fmtMs(metrics.statsApply))
     row(`  StatsFolder.snapshot ×${FAST ? 20 : 50}`, fmtDuration(metrics.snapshot))
     row('  memory heapUsed/rss', `${fmtBytes(memory.heapUsed)} / ${fmtBytes(memory.rss)}`)
+  }
+
+  // 1b. Keep the single-turn tool-loop shape visible: settledPerStep must
+  // retain current-turn samples without scanning them on every step event.
+  for (const steps of [100, 500, 1000]) {
+    const events = buildManyStepEvents(steps)
+    const metrics = measureManyStepStats(events)
+    row(`one-turn-many-steps ${events.length} events (${steps} steps)`, `${steps} settled steps`)
+    row('  StatsFolder.apply', fmtMs(metrics.statsApply))
+    row(`  StatsFolder.snapshot ×${FULL_SAMPLES}`, fmtDuration(metrics.snapshot))
   }
   {
     const turns = 1
