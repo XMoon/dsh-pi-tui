@@ -8,9 +8,9 @@
  * entries carrying their owning turn, so the view can expand only the most
  * recent turns (pi's Ctrl+O semantics).
  *
- * `TranscriptFolder` is the stateful engine: call `apply` with appended
- * events and read the message list; `foldTranscript` is the one-shot
- * wrapper. Both support an optional display window (`maxTurns`): turns older
+ * `TranscriptFolder` is the stateful engine: call `apply` with live appended
+ * events or `hydrate` with a cold log, then read the message list;
+ * `foldTranscript` is the one-shot wrapper. Both support an optional display window (`maxTurns`): turns older
  * than the window collapse into one summary entry, bounding the rendered
  * component tree on long sessions.
  * @module @xmoon76/dsh-pi-tui/transcript
@@ -410,6 +410,13 @@ export function groupConsecutiveReads(messages: readonly TranscriptMessage[]): T
  * the message list. Objects are mutated in place across applies, so a caller
  * that rebuilds its view from `messages()` stays consistent at every step.
  */
+type ReadGroupCard = Extract<TranscriptMessage, { kind: 'tool' }>
+
+interface ReadGroupMeta {
+  firstTurn: number
+  spansTurns: boolean
+}
+
 export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
   /** The assistant message object per (turn, step); streaming text lands in place. */
@@ -437,12 +444,20 @@ export class TranscriptFolder {
   /**
    * Incremental consecutive-read grouping (stage J): `groupOf` maps an item
    * index to its merged group card (only the FIRST member emits it in the
-   * output); `groupMembers` maps a group card to its member indices. The
-   * projection is maintained on append and on settle, so `messages()` never
-   * re-walks the history to group — only the output list is built.
+   * output); `groupMembers` maps a group card to its member indices. Live
+   * tail appends extend a run from its boundary, while non-tail settlements
+   * use the defensive reflow path. `messages()` never re-walks the history to
+   * group — only the output list is built.
    */
-  private readonly groupOf = new Map<number, Extract<TranscriptMessage, { kind: 'tool' }>>()
-  private readonly groupMembers = new Map<Extract<TranscriptMessage, { kind: 'tool' }>, number[]>()
+  private readonly groupOf = new Map<number, ReadGroupCard>()
+  private readonly groupMembers = new Map<ReadGroupCard, number[]>()
+  /** Constant-time turn-span facts for the live append path. */
+  private readonly groupMeta = new Map<ReadGroupCard, ReadGroupMeta>()
+  /** During cold replay, read cards settle in log order but must not rebuild
+   * their entire adjacent run after every result. The finalizer installs all
+   * groups in one linear pass once the event fold is complete. */
+  private hydrating = false
+  private groupingDirty = false
 
   /**
    * Turn index for the display window (stage J): the first item index of
@@ -650,6 +665,145 @@ export class TranscriptFolder {
     return message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
   }
 
+  /** Build one merged read card without repeatedly concatenating its result. */
+  private makeReadGroup(start: number, end: number): {
+    group: ReadGroupCard
+    members: number[]
+    firstTurn: number
+    spansTurns: boolean
+  } | undefined {
+    const first = this.items[start]
+    if (first === undefined || !TranscriptFolder.groupable(first)) return undefined
+    const members: number[] = []
+    const results: string[] = []
+    const turns = new Set<number>()
+    let firstResult: string | undefined
+    let maxTurn = first.turn
+    for (let index = start; index <= end; index += 1) {
+      const member = this.items[index]
+      if (member === undefined || !TranscriptFolder.groupable(member)) continue
+      members.push(index)
+      turns.add(member.turn)
+      maxTurn = Math.max(maxTurn, member.turn)
+      // Match the existing projection's empty-result behavior: leading empty
+      // results are omitted, but an empty result after the first non-empty one
+      // remains a real (separator-delimited) member.
+      if (firstResult === undefined) {
+        if (member.result !== '') firstResult = member.result
+      } else {
+        results.push(member.result)
+      }
+    }
+    const group: Extract<TranscriptMessage, { kind: 'tool' }> = {
+      ...first,
+      args: `${members.length} files`,
+      result: firstResult === undefined ? '' : [firstResult, ...results].join('\n\n'),
+      turn: maxTurn,
+    }
+    return { group, members, firstTurn: first.turn, spansTurns: turns.size > 1 }
+  }
+
+  /** Rebuild all read groups once after a cold event-log fold. */
+  private rebuildGrouping(): void {
+    this.groupOf.clear()
+    this.groupMembers.clear()
+    this.groupMeta.clear()
+    this.groupedToolCount = 0
+    this.crossTurnGroups = 0
+    for (let start = 0; start < this.items.length;) {
+      const item = this.items[start]!
+      if (item.kind !== 'tool' || item.name !== 'read' || item.status !== 'ok') {
+        if (item.kind === 'tool') this.groupedToolCount += 1
+        start += 1
+        continue
+      }
+      let end = start + 1
+      while (end < this.items.length && TranscriptFolder.groupable(this.items[end]!)) end += 1
+      if (end - start === 1) {
+        this.groupedToolCount += 1
+        start = end
+        continue
+      }
+      const built = this.makeReadGroup(start, end - 1)
+      if (built === undefined) {
+        // The run was checked above; keep a defensive fallback that preserves
+        // the output count if a future item shape invalidates that invariant.
+        this.groupedToolCount += 1
+        start = end
+        continue
+      }
+      for (const member of built.members) this.groupOf.set(member, built.group)
+      this.groupMembers.set(built.group, built.members)
+      this.groupMeta.set(built.group, { firstTurn: built.firstTurn, spansTurns: built.spansTurns })
+      this.groupedToolCount += 1
+      if (built.spansTurns) this.crossTurnGroups += 1
+      start = end
+    }
+  }
+
+  /**
+   * Extend a groupable card that was just settled at the item-list tail.
+   * Normal live delivery follows this path, so an adjacent read run does not
+   * scan its history on every result. A non-tail settlement still falls back
+   * to the defensive reflow path below because it may bridge two runs.
+   */
+  private appendTailGrouping(index: number): boolean {
+    if (index !== this.items.length - 1) return false
+    const item = this.items[index]
+    if (item === undefined || !TranscriptFolder.groupable(item)) return false
+    const previousIndex = index - 1
+    const previous = this.items[previousIndex]
+    if (previous === undefined || !TranscriptFolder.groupable(previous)) return true
+
+    const previousGroup = this.groupOf.get(previousIndex)
+    if (previousGroup !== undefined) {
+      const members = this.groupMembers.get(previousGroup)
+      if (members === undefined) return false
+      const meta = this.groupMeta.get(previousGroup)
+      const firstMember = this.items[members[0]!]
+      const firstTurn = meta?.firstTurn ?? (firstMember !== undefined && 'turn' in firstMember ? firstMember.turn : previous.turn)
+      const wasCross = meta?.spansTurns ?? this.crossTurn(members)
+      members.push(index)
+      this.groupOf.set(index, previousGroup)
+      previousGroup.args = `${members.length} files`
+      previousGroup.result = previousGroup.result === '' ? item.result : `${previousGroup.result}\n\n${item.result}`
+      previousGroup.turn = Math.max(previousGroup.turn, item.turn)
+      const spansTurns = wasCross || item.turn !== firstTurn
+      this.groupMeta.set(previousGroup, { firstTurn, spansTurns })
+      if (!wasCross && spansTurns) this.crossTurnGroups += 1
+      this.groupedToolCount -= 1
+      return true
+    }
+
+    // The previous item is a singleton read: promote it without scanning the
+    // run (there cannot be an older group across a non-groupable boundary).
+    const group: ReadGroupCard = {
+      ...previous,
+      args: '2 files',
+      result: previous.result === '' ? item.result : `${previous.result}\n\n${item.result}`,
+      turn: Math.max(previous.turn, item.turn),
+    }
+    this.groupOf.set(previousIndex, group)
+    this.groupOf.set(index, group)
+    this.groupMembers.set(group, [previousIndex, index])
+    this.groupMeta.set(group, { firstTurn: previous.turn, spansTurns: previous.turn !== item.turn })
+    if (previous.turn !== item.turn) this.crossTurnGroups += 1
+    this.groupedToolCount -= 1
+    return true
+  }
+
+  /** Schedule grouping now, or mark the cold fold for one final grouping pass. */
+  private scheduleGrouping(index: number): void {
+    const item = this.items[index]
+    if (item === undefined || !TranscriptFolder.groupable(item)) return
+    if (this.hydrating) {
+      this.groupingDirty = true
+      return
+    }
+    if (this.appendTailGrouping(index)) return
+    this.reflowGrouping(index)
+  }
+
   /**
    * Rebuild the grouping of the groupable run containing `index` (bounded
    * by non-groupable items). Called when an item BECOMES groupable (a read
@@ -676,10 +830,16 @@ export class TranscriptFolder {
             // `members.length` independent read cards, then the rebuild
             // merges them into one card again — keep the counters in sync.
             this.groupMembers.delete(group)
+            const spansTurns = this.groupMeta.get(group)?.spansTurns ?? this.crossTurn(members)
+            this.groupMeta.delete(group)
             this.groupedToolCount += members.length - 1
-            if (this.crossTurn(members)) this.crossTurnGroups -= 1
+            if (spansTurns) this.crossTurnGroups -= 1
           } else {
             this.groupMembers.set(group, remaining)
+            const first = this.items[remaining[0]!]
+            if (first !== undefined && TranscriptFolder.groupable(first)) {
+              this.groupMeta.set(group, { firstTurn: first.turn, spansTurns: this.crossTurn(remaining) })
+            }
           }
         }
         this.groupOf.delete(i)
@@ -693,7 +853,10 @@ export class TranscriptFolder {
         const prevGroup = this.groupOf.get(start - 1)
         if (prevGroup !== undefined) {
           const members = this.groupMembers.get(prevGroup)!
-          const wasCross = this.crossTurn(members)
+          const meta = this.groupMeta.get(prevGroup)
+          const firstMember = this.items[members[0]!]
+          const firstTurn = meta?.firstTurn ?? (firstMember !== undefined && 'turn' in firstMember ? firstMember.turn : prev.turn)
+          const wasCross = meta?.spansTurns ?? this.crossTurn(members)
           members.push(start)
           this.groupOf.set(start, prevGroup)
           prevGroup.args = `${members.length} files`
@@ -701,7 +864,9 @@ export class TranscriptFolder {
           prevGroup.turn = Math.max(prevGroup.turn, item.turn)
           // Joining a same-turn group with a different-turn read makes it
           // cross-turn (the emitted card now spans two turns).
-          if (!wasCross && this.crossTurn(members)) this.crossTurnGroups += 1
+          const spansTurns = wasCross || item.turn !== firstTurn
+          this.groupMeta.set(prevGroup, { firstTurn, spansTurns })
+          if (!wasCross && spansTurns) this.crossTurnGroups += 1
           return
         }
         // The previous item is a singleton read: promote it to a group.
@@ -712,34 +877,21 @@ export class TranscriptFolder {
         group.args = '2 files'
         group.result = group.result === '' ? item.result : `${group.result}\n\n${item.result}`
         group.turn = Math.max(group.turn, item.turn)
+        this.groupMeta.set(group, { firstTurn: prev.turn, spansTurns: prev.turn !== item.turn })
         if (prev.turn !== item.turn) this.crossTurnGroups += 1
       }
       return
     }
-    // Rebuild the whole run as one group. (The index variables are mutable,
-    // so the type guard is re-applied to locals rather than the array
-    // accesses, which TS cannot keep narrowed.)
-    const first = this.items[start]!
-    if (!TranscriptFolder.groupable(first)) return
-    const group: Extract<TranscriptMessage, { kind: 'tool' }> = { ...first }
-    const members: number[] = []
-    const memberTurns = new Set<number>()
-    for (let i = start; i <= end; i += 1) {
-      const member = this.items[i]!
-      if (!TranscriptFolder.groupable(member)) continue
-      this.groupOf.set(i, group)
-      members.push(i)
-      memberTurns.add(member.turn)
-      if (i > start) {
-        group.result = group.result === '' ? member.result : `${group.result}\n\n${member.result}`
-        group.turn = Math.max(group.turn, member.turn)
-      }
-    }
-    group.args = `${members.length} files`
-    this.groupMembers.set(group, members)
+    // Rebuild the whole run as one group. The result is assembled with one
+    // final join so a long adjacent-read run stays linear in the cold path.
+    const built = this.makeReadGroup(start, end)
+    if (built === undefined) return
+    for (const member of built.members) this.groupOf.set(member, built.group)
+    this.groupMembers.set(built.group, built.members)
+    this.groupMeta.set(built.group, { firstTurn: built.firstTurn, spansTurns: built.spansTurns })
     // The whole run collapsed into one output card.
-    this.groupedToolCount -= members.length - 1
-    if (memberTurns.size > 1) this.crossTurnGroups += 1
+    this.groupedToolCount -= built.members.length - 1
+    if (built.spansTurns) this.crossTurnGroups += 1
   }
 
   /** Whether the members at these indices span more than one turn. */
@@ -761,6 +913,28 @@ export class TranscriptFolder {
    */
   apply(events: readonly SessionEvent[]): void {
     for (const event of events) this.applyEvent(event)
+  }
+
+  /**
+   * Hydrate a cold session log in one batch. Folding remains event-ordered,
+   * but expensive read-run reflow is deferred until every event has settled;
+   * live suffixes must continue to use {@link apply} for immediate grouping.
+   */
+  hydrate(events: readonly SessionEvent[]): void {
+    if (this.hydrating) {
+      this.apply(events)
+      return
+    }
+    this.hydrating = true
+    try {
+      this.apply(events)
+    } finally {
+      this.hydrating = false
+      if (this.groupingDirty) {
+        this.rebuildGrouping()
+        this.groupingDirty = false
+      }
+    }
   }
 
   /** Build the grouped output list (the full projection). */
@@ -1252,7 +1426,7 @@ export class TranscriptFolder {
           card.error = event.data.error
           // A settled read may now be groupable: reflow the run it belongs
           // to (bounded by the nearest non-read cards).
-          this.reflowGrouping(pending.index)
+          this.scheduleGrouping(pending.index)
         } else {
           // Unknown call (e.g. post-compaction): fall back to the last
           // running card with this name IN THE RESULT'S OWN TURN — an
@@ -1269,11 +1443,11 @@ export class TranscriptFolder {
               running.resultBlocks = block?.content
               running.meta = event.data.meta
               running.error = event.data.error
-              this.reflowGrouping(runningIndex)
+              this.scheduleGrouping(runningIndex)
             }
           } else {
             this.appendItem({ kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta, error: event.data.error })
-            this.reflowGrouping(this.items.length - 1)
+            this.scheduleGrouping(this.items.length - 1)
           }
         }
         // Focus aggregation: settle the Tool slot ONLY when the result
@@ -1467,7 +1641,7 @@ export class TranscriptFolder {
  */
 export function foldTranscript(events: readonly SessionEvent[], options?: FoldOptions): TranscriptMessage[] {
   const folder = new TranscriptFolder()
-  folder.apply(events)
+  folder.hydrate(events)
   return folder.messages(options)
 }
 

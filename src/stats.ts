@@ -384,6 +384,15 @@ export class StatsFolder {
     for (const event of events) this.applyEvent(event)
   }
 
+  /**
+   * Hydrate a cold session log through the same ordered fold as {@link apply}.
+   * The explicit entry point lets session bootstrap distinguish a full log
+   * from live suffixes; stats already has no secondary projection to defer.
+   */
+  hydrate(events: readonly SessionEvent[]): void {
+    this.apply(events)
+  }
+
   /** The derived stats as of the last applied event. */
   snapshot(): SessionStats {
     const derived: SessionStats = { ...this.stats }

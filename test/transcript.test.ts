@@ -754,6 +754,92 @@ test('a failed read breaks the group; a read settling late re-groups into the ru
   assert.equal(tail[0]?.args, '2 files')
 })
 
+test('cold hydrate defers adjacent-read reflow and preserves apply semantics', () => {
+  const events: SessionEvent[] = [event('turn/start', { turn: 0 }, 0)]
+  for (let index = 0; index < 128; index += 1) {
+    const callId = CallId(`hydrate-read-${index}`)
+    events.push(event('tool/call', {
+      turn: 0,
+      step: 0,
+      callId,
+      name: 'read',
+      arguments: JSON.stringify({ file: `file-${index}.ts` }),
+    }, events.length))
+    events.push(event('tool/result', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId(`hydrate-read-message-${index}`),
+        role: 'user',
+        content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: `result-${index}` }] }],
+        source: { kind: 'tool', callId },
+      },
+    }, events.length))
+  }
+
+  const expected = new TranscriptFolder()
+  const liveInternals = expected as unknown as {
+    reflowGrouping: (index: number) => void
+  }
+  const originalLiveReflow = liveInternals.reflowGrouping
+  let liveReflowCount = 0
+  liveInternals.reflowGrouping = (index) => {
+    liveReflowCount += 1
+    originalLiveReflow.call(liveInternals, index)
+  }
+  try {
+    for (const item of events) expected.apply([item])
+  } finally {
+    liveInternals.reflowGrouping = originalLiveReflow
+  }
+  assert.equal(liveReflowCount, 0, 'tail live reads must append without a full-run reflow')
+
+  const hydrated = new TranscriptFolder()
+  const internals = hydrated as unknown as {
+    reflowGrouping: (index: number) => void
+  }
+  const originalReflow = internals.reflowGrouping
+  let reflowCount = 0
+  internals.reflowGrouping = (index) => {
+    reflowCount += 1
+    originalReflow.call(internals, index)
+  }
+  try {
+    hydrated.hydrate(events)
+  } finally {
+    internals.reflowGrouping = originalReflow
+  }
+
+  assert.equal(reflowCount, 0, 'cold hydration must finalize read runs once instead of reflowing each result')
+  assert.deepEqual(hydrated.messages(), expected.messages())
+  const tools = hydrated.messages().filter((message): message is Extract<TranscriptMessage, { kind: 'tool' }> => message.kind === 'tool')
+  assert.equal(tools.length, 1)
+  assert.equal(tools[0]?.args, '128 files')
+  assert.ok(tools[0]?.result.startsWith('result-0'))
+  assert.ok(tools[0]?.result.endsWith('result-127'))
+
+  // Hydration is a cold-only optimization: a later live suffix still uses the
+  // immediate grouping path and retains the same public projection semantics.
+  const nextCall = CallId('hydrate-read-live')
+  hydrated.apply([
+    event('tool/call', { turn: 0, step: 0, callId: nextCall, name: 'read', arguments: '{}' }, events.length),
+    event('tool/result', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('hydrate-read-live-message'),
+        role: 'user',
+        content: [{ type: 'tool-result', toolCallId: nextCall, content: [{ type: 'text', text: 'live-result' }] }],
+        source: { kind: 'tool', callId: nextCall },
+      },
+    }, events.length + 1),
+  ])
+  const liveTools = hydrated.messages().filter((message): message is Extract<TranscriptMessage, { kind: 'tool' }> => message.kind === 'tool')
+  assert.equal(liveTools.length, 1)
+  assert.equal(liveTools[0]?.args, '129 files')
+  assert.ok(liveTools[0]?.result.endsWith('live-result'))
+})
+
 test('subagent/descriptor folds into a delegation card', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),

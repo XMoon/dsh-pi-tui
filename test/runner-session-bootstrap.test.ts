@@ -155,6 +155,8 @@ async function disposeContext(ctx: Context): Promise<void> {
 interface RunnerProbe {
   transcriptApplyCount: number
   statsApplyCount: number
+  transcriptHydrateCount: number
+  statsHydrateCount: number
   capturedMessages: readonly { kind: string; text?: string }[] | undefined
   apps: TuiApp[]
   restore: () => void
@@ -165,12 +167,16 @@ function installProbe(): RunnerProbe {
   const probe: RunnerProbe = {
     transcriptApplyCount: 0,
     statsApplyCount: 0,
+    transcriptHydrateCount: 0,
+    statsHydrateCount: 0,
     capturedMessages: undefined,
     apps: [],
     restore: () => {},
   }
   const originalTranscriptApply = TranscriptFolder.prototype.apply
   const originalStatsApply = StatsFolder.prototype.apply
+  const originalTranscriptHydrate = TranscriptFolder.prototype.hydrate
+  const originalStatsHydrate = StatsFolder.prototype.hydrate
   const originalSetTranscript = TuiApp.prototype.setTranscript
   const originalStart = TuiApp.prototype.start
   TranscriptFolder.prototype.apply = function (events) {
@@ -180,6 +186,14 @@ function installProbe(): RunnerProbe {
   StatsFolder.prototype.apply = function (events) {
     probe.statsApplyCount += 1
     return originalStatsApply.call(this, events)
+  }
+  TranscriptFolder.prototype.hydrate = function (events) {
+    probe.transcriptHydrateCount += 1
+    return originalTranscriptHydrate.call(this, events)
+  }
+  StatsFolder.prototype.hydrate = function (events) {
+    probe.statsHydrateCount += 1
+    return originalStatsHydrate.call(this, events)
   }
   TuiApp.prototype.setTranscript = function (messages, activities) {
     probe.capturedMessages = messages
@@ -192,6 +206,8 @@ function installProbe(): RunnerProbe {
   probe.restore = () => {
     TranscriptFolder.prototype.apply = originalTranscriptApply
     StatsFolder.prototype.apply = originalStatsApply
+    TranscriptFolder.prototype.hydrate = originalTranscriptHydrate
+    StatsFolder.prototype.hydrate = originalStatsHydrate
     TuiApp.prototype.setTranscript = originalSetTranscript
     TuiApp.prototype.start = originalStart
   }
@@ -239,6 +255,8 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
     resumeFiber = await mountRunner(resumeContext, home, resumeHarness, { sessionId: resumed.id }, { sessionId: resumed.id })
     assert.equal(probe.transcriptApplyCount, 1)
     assert.equal(probe.statsApplyCount, 1)
+    assert.equal(probe.transcriptHydrateCount, 1)
+    assert.equal(probe.statsHydrateCount, 1)
     assert.ok(probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'resumed answer'))
 
     const newHandler = (resumeHarness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
@@ -247,6 +265,8 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
     await settle()
     assert.equal(probe.transcriptApplyCount, 2)
     assert.equal(probe.statsApplyCount, 2)
+    assert.equal(probe.transcriptHydrateCount, 2)
+    assert.equal(probe.statsHydrateCount, 2)
     assert.ok(probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'created answer'))
 
     await resumeFiber.dispose()
@@ -258,6 +278,8 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
     deferredFiber = await mountRunner(deferredContext, home, deferredHarness, {}, {})
     assert.equal(probe.transcriptApplyCount, 2, 'deferred startup must not hydrate an absent session')
     assert.equal(probe.statsApplyCount, 2, 'deferred startup must not hydrate an absent session')
+    assert.equal(probe.transcriptHydrateCount, 2, 'deferred startup must not hydrate an absent session')
+    assert.equal(probe.statsHydrateCount, 2, 'deferred startup must not hydrate an absent session')
     const app = probe.apps.at(-1)
     assert.ok(app, 'the production runner must create a TuiApp')
     app.setDraft('first deferred prompt')
@@ -265,6 +287,8 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
     await settle()
     assert.equal(probe.transcriptApplyCount, 3)
     assert.equal(probe.statsApplyCount, 3)
+    assert.equal(probe.transcriptHydrateCount, 3)
+    assert.equal(probe.statsHydrateCount, 3)
     assert.ok(probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'created answer'))
   } finally {
     if (resumeFiber !== undefined) await resumeFiber.dispose()

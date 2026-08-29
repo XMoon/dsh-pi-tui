@@ -335,35 +335,43 @@ function warmedP50(n: number, run: () => void): number {
 
 /** Long-session projection timings are intentionally separate from renderer timings. */
 interface LongSessionMetrics {
-  transcriptApply: number
-  statsApply: number
+  transcriptHydrate: number
+  statsHydrate: number
   snapshot: number
   messages: number
 }
 
 function measureLongSession(events: readonly SessionEvent[]): LongSessionMetrics {
   const samples = FAST ? 3 : 5
-  const transcriptApply = warmedP50(samples, () => {
+  const transcriptHydrate = warmedP50(samples, () => {
     const folder = new TranscriptFolder()
-    folder.apply(events)
+    folder.hydrate(events)
   })
-  const statsApply = warmedP50(samples, () => {
+  const statsHydrate = warmedP50(samples, () => {
     const folder = new StatsFolder()
-    folder.apply(events)
+    folder.hydrate(events)
   })
   const transcript = new TranscriptFolder()
-  transcript.apply(events)
+  transcript.hydrate(events)
   const statsFolder = new StatsFolder()
-  statsFolder.apply(events)
+  statsFolder.hydrate(events)
   // Snapshot is deliberately sampled repeatedly: the A2 regression was an
   // allocation-free scalar read, not a fold over every historical sample.
   const snapshot = timeIt(FAST ? 20 : 50, () => { statsFolder.snapshot() })
   return {
-    transcriptApply,
-    statsApply,
+    transcriptHydrate,
+    statsHydrate,
     snapshot: stats(snapshot).p50,
     messages: transcript.messages().length,
   }
+}
+
+/** Measure the event-by-event live path for a fresh transcript. */
+function measureTranscriptApply(events: readonly SessionEvent[]): number {
+  return warmedP50(FAST ? 3 : 5, () => {
+    const folder = new TranscriptFolder()
+    folder.apply(events)
+  })
 }
 
 /** Measure only the one-turn multi-step stats path. */
@@ -409,16 +417,17 @@ async function main(): Promise<void> {
     row(`  messages() ×${PROJ_SAMPLES} (${folder.messages().length} messages)`, fmt(st))
   }
 
-  // 1a. PR A long-session projection fixtures. These are intentionally
-  // separate from the renderer benchmark so replay/fold regressions remain
-  // visible even when the TUI cache masks them.
+  // 1a. Long-session projection fixtures. These are intentionally separate
+  // from the renderer benchmark so replay/fold regressions remain visible
+  // even when the TUI cache masks them. The hydrate path is the cold-resume
+  // contract; live suffixes continue to use apply().
   for (const turns of [100, 500, 1000]) {
     const events = buildReasoningHeavyEvents(turns)
     const metrics = measureLongSession(events)
     const memory = process.memoryUsage()
     row(`reasoning-heavy ${events.length} events (${turns} turns)`, `${metrics.messages} messages`)
-    row('  TranscriptFolder.apply', fmtMs(metrics.transcriptApply))
-    row('  StatsFolder.apply', fmtMs(metrics.statsApply))
+    row('  TranscriptFolder.hydrate', fmtMs(metrics.transcriptHydrate))
+    row('  StatsFolder.hydrate', fmtMs(metrics.statsHydrate))
     row(`  StatsFolder.snapshot ×${FAST ? 20 : 50}`, fmtDuration(metrics.snapshot))
     row('  memory heapUsed/rss', `${fmtBytes(memory.heapUsed)} / ${fmtBytes(memory.rss)}`)
   }
@@ -432,15 +441,15 @@ async function main(): Promise<void> {
     row('  StatsFolder.apply', fmtMs(metrics.statsApply))
     row(`  StatsFolder.snapshot ×${FULL_SAMPLES}`, fmtDuration(metrics.snapshot))
   }
-  {
-    const turns = 1
-    const reads = 1000
-    const events = buildReadHeavyEvents(turns, reads)
+  for (const reads of [100, 500, 1000]) {
+    const events = buildReadHeavyEvents(1, reads)
     const metrics = measureLongSession(events)
+    const liveApply = measureTranscriptApply(events)
     const memory = process.memoryUsage()
     row(`read-heavy ${events.length} events (${reads} adjacent reads)`, `${metrics.messages} messages`)
-    row('  TranscriptFolder.apply', fmtMs(metrics.transcriptApply))
-    row('  StatsFolder.apply', fmtMs(metrics.statsApply))
+    row('  TranscriptFolder.apply (live)', fmtMs(liveApply))
+    row('  TranscriptFolder.hydrate (cold)', fmtMs(metrics.transcriptHydrate))
+    row('  StatsFolder.hydrate', fmtMs(metrics.statsHydrate))
     row(`  StatsFolder.snapshot ×${FAST ? 20 : 50}`, fmtDuration(metrics.snapshot))
     row('  memory heapUsed/rss', `${fmtBytes(memory.heapUsed)} / ${fmtBytes(memory.rss)}`)
   }
@@ -450,8 +459,8 @@ async function main(): Promise<void> {
     const metrics = measureLongSession(events)
     const memory = process.memoryUsage()
     row(`700k-like ${events.length} events (${turns} turns, ${turns * (18_000 + 17_000)} chars)`, `${metrics.messages} messages`)
-    row('  TranscriptFolder.apply', fmtMs(metrics.transcriptApply))
-    row('  StatsFolder.apply', fmtMs(metrics.statsApply))
+    row('  TranscriptFolder.hydrate', fmtMs(metrics.transcriptHydrate))
+    row('  StatsFolder.hydrate', fmtMs(metrics.statsHydrate))
     row(`  StatsFolder.snapshot ×${FAST ? 20 : 50}`, fmtDuration(metrics.snapshot))
     row('  memory heapUsed/rss', `${fmtBytes(memory.heapUsed)} / ${fmtBytes(memory.rss)}`)
   }
