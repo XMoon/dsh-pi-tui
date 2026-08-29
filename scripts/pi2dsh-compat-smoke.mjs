@@ -45,8 +45,10 @@ import ts from 'typescript'
 import semver from 'semver'
 import {
   assertSourceResolution,
+  DEFAULT_SOURCE_CONFIG,
   DSH_CLI_PACKAGE,
   loadDshDistribution,
+  loadDshSourceConfig,
   prepareDshInstall,
   restoreDshInstall,
   sourceInstallPackages,
@@ -314,6 +316,7 @@ function resolveDshDistribution(args, targetVersion) {
     mode: 'source',
     manifest: resolve(distributionPath),
     packageJson: join(PACKAGE_ROOT, 'package.json'),
+    sourceConfig: loadDshSourceConfig(DEFAULT_SOURCE_CONFIG),
   })
 }
 

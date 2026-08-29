@@ -14,6 +14,8 @@ test('DSH mode resolver selects source only for next branch compatibility', () =
   assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/main' }), 'npm')
   assert.equal(resolveDshMode({ eventName: 'pull_request', ref: 'refs/pull/2/merge', baseRef: 'main' }), 'npm')
   assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/feature/next' }), 'npm')
+  assert.equal(resolveDshMode({ eventName: 'workflow_dispatch', ref: 'refs/heads/next' }), 'npm')
+  assert.equal(resolveDshMode({ eventName: 'schedule', ref: 'refs/heads/next' }), 'npm')
 })
 
 test('all release tags force npm mode, including next-v tags', () => {

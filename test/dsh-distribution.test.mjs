@@ -18,6 +18,7 @@ import {
   DshDistributionError,
   assertNoSourceLeak,
   buildDshOverrides,
+  loadDshDistribution,
   loadDshDistributionManifest,
   packageMapFromTarballs,
   prepareDshInstall,
@@ -100,6 +101,27 @@ test('source distribution validates embedded package identity, not filenames', (
     assert.equal(distribution.kind, 'source-pack')
     assert.deepEqual([...distribution.packages.keys()], [DSH_CLI_PACKAGE, '@deepseek-ai/dsh-agent'])
     assert.equal(distribution.packages.get(DSH_CLI_PACKAGE).fileName, 'not-the-cli-name.tgz')
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true })
+  }
+})
+
+test('source distribution enforces the configured source pin', () => {
+  const fixture = makeDistribution({ required: [DSH_CLI_PACKAGE] })
+  try {
+    assert.throws(
+      () => loadDshDistribution({
+        mode: 'source',
+        manifest: fixture.directory,
+        packageJson: fixture.packageJson,
+        sourceConfig: {
+          repository: fixture.manifest.repository,
+          ref: 'b'.repeat(40),
+          expectedVersion: VERSION,
+        },
+      }),
+      /configured source pin/u,
+    )
   } finally {
     rmSync(fixture.directory, { recursive: true, force: true })
   }

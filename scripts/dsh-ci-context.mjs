@@ -34,7 +34,7 @@ export function resolveDshMode({ eventName = '', ref = '', baseRef = '', forcedM
     ? 'npm'
     : eventName === 'pull_request' && baseRef === 'next'
       ? 'source'
-      : ref === 'refs/heads/next'
+      : eventName === 'push' && ref === 'refs/heads/next'
         ? 'source'
         : 'npm'
   if (tag && forcedMode === 'source') fail('release tag events must never use DSH source mode')

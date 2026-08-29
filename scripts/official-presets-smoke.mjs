@@ -34,7 +34,11 @@ import {
   validateTargetDshManifest,
   writeHeaderProbePackage,
 } from './pi2dsh-compat-smoke.mjs'
-import { loadDshDistribution } from './lib/dsh-distribution.mjs'
+import {
+  DEFAULT_SOURCE_CONFIG,
+  loadDshDistribution,
+  loadDshSourceConfig,
+} from './lib/dsh-distribution.mjs'
 import { pnpmExecutable } from './lib/process.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
@@ -56,9 +60,15 @@ async function main() {
   const manifest = readJson(MANIFEST_PATH, 'compatibility manifest')
   const targetDshVersion = validateTargetDshManifest(manifest)
   const distributionPath = distributionArgument(smokeArgs)
+  const sourceConfig = distributionPath === undefined ? undefined : loadDshSourceConfig(DEFAULT_SOURCE_CONFIG)
   const distribution = distributionPath === undefined
     ? loadDshDistribution({ mode: 'npm', version: targetDshVersion })
-    : loadDshDistribution({ mode: 'source', manifest: resolve(distributionPath), packageJson: join(PACKAGE_ROOT, 'package.json') })
+    : loadDshDistribution({
+      mode: 'source',
+      manifest: resolve(distributionPath),
+      packageJson: join(PACKAGE_ROOT, 'package.json'),
+      sourceConfig,
+    })
   if (distribution.version !== targetDshVersion) {
     throw new Error(`DSH distribution version mismatch: expected ${targetDshVersion}, got ${distribution.version}`)
   }
