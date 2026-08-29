@@ -30,12 +30,12 @@ import { spawnSync } from 'node:child_process'
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -320,13 +320,13 @@ function resolveDshDistribution(args, targetVersion) {
 function resolveTarball(explicit) {
   if (explicit !== undefined) {
     const absolute = resolve(explicit)
-    if (!existsSync(absolute) || !statSync(absolute).isFile()) fail('INFRA_INSTALL_FAILURE', `candidate tarball not found: ${explicit}`)
+    if (!existsSync(absolute) || !lstatSync(absolute).isFile()) fail('INFRA_INSTALL_FAILURE', `candidate tarball not found: ${explicit}`)
     return absolute
   }
   const candidates = readdirSync(PACKAGE_ROOT)
     .filter(name => /^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(name))
     .map(name => join(PACKAGE_ROOT, name))
-    .filter(path => statSync(path).isFile())
+    .filter(path => lstatSync(path).isFile())
   if (candidates.length === 0) {
     fail('INFRA_INSTALL_FAILURE', `no candidate tarball in ${PACKAGE_ROOT}; run pnpm pack:release first`)
   }
@@ -648,6 +648,8 @@ function isolatedEnvironment(workDir, home, dshHome, evidencePath) {
     NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
     npm_config_minimum_release_age: '0',
     pnpm_config_minimum_release_age: '0',
+    PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false',
+    PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
     npm_config_userconfig: join(workDir, 'npmrc'),
     NPM_CONFIG_USERCONFIG: join(workDir, 'npmrc'),
   }

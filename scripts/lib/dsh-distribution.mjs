@@ -311,7 +311,12 @@ export function validateSourceDistribution(input, options = {}) {
   const manifest = input.manifest ?? input
   objectValue(manifest, 'DSH distribution manifest')
   if (!existsSync(directory) || !lstatSync(directory).isDirectory()) fail(`DSH distribution directory is missing: ${directory}`)
-  const unexpectedFiles = readdirSync(directory).filter(name => name !== SOURCE_MANIFEST_NAME && !name.endsWith('.tgz'))
+  const unexpectedFiles = readdirSync(directory).filter(name => {
+    const path = join(directory, name)
+    const info = lstatSync(path)
+    const allowedName = name === SOURCE_MANIFEST_NAME || name.endsWith('.tgz')
+    return !allowedName || !info.isFile()
+  })
   if (unexpectedFiles.length > 0) fail(`DSH distribution contains unexpected top-level file(s): ${unexpectedFiles.join(', ')}`)
   if (manifest.schemaVersion !== 1) fail('DSH distribution schemaVersion must be 1')
   if (manifest.mode !== 'source-pack') fail('DSH distribution mode must be source-pack')

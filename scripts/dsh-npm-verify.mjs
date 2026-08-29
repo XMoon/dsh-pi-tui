@@ -9,7 +9,7 @@
  * @module dsh-npm-verify
  */
 
-import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -92,11 +92,11 @@ function copyRepository(destination) {
   })
 }
 
-function candidateTarball(workspace) {
+export function candidateTarball(workspace) {
   const candidates = readdirSync(workspace)
     .filter(name => /^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(name))
     .map(name => join(workspace, name))
-    .filter(path => existsSync(path))
+    .filter(path => lstatSync(path).isFile())
   if (candidates.length !== 1) fail(`expected one TUI candidate tarball, found ${candidates.length}`)
   return candidates[0]
 }

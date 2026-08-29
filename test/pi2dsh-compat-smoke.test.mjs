@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import test from 'node:test'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,6 +14,7 @@ import {
   isRetryableRegistryFailure,
   redact,
   requireExactVersion,
+  resolveTarball,
   retryDiagnostic,
   RESIZE_FAILURE_PHASE,
   validateCandidatePackageData,
@@ -43,9 +44,24 @@ test('pi2dsh smoke isolates credential-bearing parent environment variables', ()
     assert.equal(env.DSH_HOME, '/tmp/compat-dsh', 'the TUI must receive the temporary DSH_HOME')
     assert.equal(env.PI2DSH_COMPAT_EVIDENCE, '/tmp/evidence.json', 'the TUI must receive the isolated evidence path')
     assert.equal(env.PI2DSH_COMPAT_HEADER_EVIDENCE, '/tmp/compat-work/header-evidence.json', 'the TUI must receive the isolated durable-header evidence path')
+    assert.equal(env.PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN, 'false')
+    assert.equal(env.PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS, 'false')
   } finally {
     if (previous === undefined) delete process.env[canary]
     else process.env[canary] = previous
+  }
+})
+
+test('pi2dsh smoke rejects a symlinked candidate tarball', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-pi2dsh-candidate-link-'))
+  try {
+    const target = join(directory, 'external.tgz')
+    const candidate = join(directory, 'candidate.tgz')
+    writeFileSync(target, 'not a tarball')
+    symlinkSync(target, candidate)
+    assert.throws(() => resolveTarball(candidate), /candidate tarball not found/u)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
   }
 })
 

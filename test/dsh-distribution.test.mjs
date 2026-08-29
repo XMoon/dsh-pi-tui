@@ -178,6 +178,20 @@ test('source distribution rejects wrong SHA, version, duplicate paths, and non-f
     } finally {
       rmSync(extraTarball.directory, { recursive: true, force: true })
     }
+
+    const symlinkTarball = makeDistribution({ required: [DSH_CLI_PACKAGE] })
+    try {
+      symlinkSync(
+        symlinkTarball.manifest.packages[DSH_CLI_PACKAGE],
+        join(symlinkTarball.directory, 'unlisted.tgz'),
+      )
+      expectDistributionFailure(
+        () => loadDshDistributionManifest(symlinkTarball.directory, { packageJson: symlinkTarball.packageJson }),
+        /unexpected top-level/u,
+      )
+    } finally {
+      rmSync(symlinkTarball.directory, { recursive: true, force: true })
+    }
   } finally {
     rmSync(fixture.directory, { recursive: true, force: true })
   }
@@ -193,7 +207,7 @@ test('source distribution rejects tarball symlinks outside the artifact root', (
     symlinkSync(externalTarball, join(fixture.directory, fileName))
     expectDistributionFailure(
       () => loadDshDistributionManifest(fixture.directory, { packageJson: fixture.packageJson }),
-      /regular file/u,
+      /unexpected top-level/u,
     )
   } finally {
     rmSync(fixture.directory, { recursive: true, force: true })

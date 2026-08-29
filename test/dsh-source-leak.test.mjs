@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import test from 'node:test'
 
@@ -45,6 +46,22 @@ test('source leak gate covers peer metadata and concrete CI/source roots', () =>
       ].join('\n'),
     })
     assert.throws(() => assertNoSourceLeak(roots), /source leak/u)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('source leak CLI rejects a symlinked candidate tarball', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-source-leak-link-'))
+  try {
+    const target = join(directory, 'external.tgz')
+    const candidate = join(directory, 'candidate.tgz')
+    writeFileSync(target, 'not a tarball')
+    symlinkSync(target, candidate)
+    const script = fileURLToPath(new URL('../scripts/dsh-source-leak-gate.mjs', import.meta.url))
+    const result = spawnSync(process.execPath, [script, candidate], { encoding: 'utf8' })
+    assert.equal(result.status, 1, result.stdout)
+    assert.match(`${result.stdout}${result.stderr}`, /regular file/u)
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }

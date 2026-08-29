@@ -13,7 +13,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -112,11 +112,11 @@ function attachGitMetadata(workspace) {
   }
 }
 
-function candidateTarball(workspace) {
+export function candidateTarball(workspace) {
   const candidates = readdirSync(workspace)
     .filter(name => /^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(name))
     .map(name => join(workspace, name))
-    .filter(path => existsSync(path))
+    .filter(path => lstatSync(path).isFile())
   if (candidates.length !== 1) fail(`expected one TUI candidate tarball, found ${candidates.length}`)
   return candidates[0]
 }
@@ -151,6 +151,11 @@ async function main() {
   const generatedDistribution = values.distribution === undefined
   const distributionDir = generatedDistribution ? sourcePackOutput(values) : resolve(values.distribution)
   const distributionExisted = existsSync(distributionDir)
+  const sourcePnpmEnv = {
+    PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false',
+    PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
+    TARBALL_SMOKE_SKIP_INSTALL: '1',
+  }
   let root
   try {
     if (generatedDistribution) await runSourcePack(values, effective)
@@ -165,12 +170,7 @@ async function main() {
     const workspace = join(root, 'workspace')
     copyRepository(workspace)
     attachGitMetadata(workspace)
-    await run(process.execPath, [join(workspace, 'scripts', 'prepare-dsh-test-environment.mjs'), '--mode', 'source', '--distribution', distributionDir, '--workspace', workspace, '--config', configPath], PACKAGE_ROOT, 'source dependency preparation', {}, VERIFY_TIMEOUTS.preparation)
-    const sourcePnpmEnv = {
-      PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false',
-      PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
-      TARBALL_SMOKE_SKIP_INSTALL: '1',
-    }
+    await run(process.execPath, [join(workspace, 'scripts', 'prepare-dsh-test-environment.mjs'), '--mode', 'source', '--distribution', distributionDir, '--workspace', workspace, '--config', configPath], PACKAGE_ROOT, 'source dependency preparation', sourcePnpmEnv, VERIFY_TIMEOUTS.preparation)
     for (const [label, args] of [
       ['vendored pi-tui typecheck', ['typecheck:fork']],
       ['vendored pi-tui tests', ['test:fork']],
@@ -188,8 +188,8 @@ async function main() {
       distributionPaths: [distributionDir],
     })
     if (values['skip-runtime'] !== true) {
-      await run(process.execPath, [join(workspace, 'scripts', 'official-presets-smoke.mjs'), candidate, '--distribution', distributionDir], workspace, 'official DSH preset matrix')
-      await run(process.execPath, [join(workspace, 'scripts', 'dsh-runtime-boundary-smoke.mjs'), candidate], workspace, 'old DSH boundary')
+      await run(process.execPath, [join(workspace, 'scripts', 'official-presets-smoke.mjs'), candidate, '--distribution', distributionDir], workspace, 'official DSH preset matrix', sourcePnpmEnv)
+      await run(process.execPath, [join(workspace, 'scripts', 'dsh-runtime-boundary-smoke.mjs'), candidate], workspace, 'old DSH boundary', sourcePnpmEnv)
     }
     console.log('SKIPPED: requires published compatible DSH/pi2dsh combination (source mode)')
     console.log(`DSH Source Compatibility: CODE COMPLETE candidate ${basename(candidate)}`)

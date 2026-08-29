@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Verify that a packed TUI candidate contains no source-mode state. */
 
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, lstatSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
@@ -14,7 +14,7 @@ function fail(message) {
 function candidatePath(value) {
   if (typeof value !== 'string' || value.startsWith('--')) fail('usage: dsh-source-leak-gate.mjs <candidate.tgz> [--distribution path]')
   const path = resolve(value)
-  if (!existsSync(path) || !statSync(path).isFile()) fail(`candidate tarball is missing: ${value}`)
+  if (!existsSync(path) || !lstatSync(path).isFile()) fail(`candidate tarball must be a regular file: ${value}`)
   return path
 }
 

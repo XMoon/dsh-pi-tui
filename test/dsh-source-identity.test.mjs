@@ -12,7 +12,11 @@ import {
   validateSourceIdentity,
 } from '../scripts/lib/dsh-distribution.mjs'
 import { officialCommandEnvironment, validateSourcePackOutput } from '../scripts/dsh-source-pack.mjs'
-import { resolveSourceVerifyPaths } from '../scripts/dsh-source-verify.mjs'
+import { installEnvironment } from '../scripts/prepare-dsh-test-environment.mjs'
+import {
+  candidateTarball as sourceVerifyCandidateTarball,
+  resolveSourceVerifyPaths,
+} from '../scripts/dsh-source-verify.mjs'
 
 const VERSION = '0.1.2-alpha.1'
 
@@ -49,6 +53,30 @@ test('source verification delegates packing to the dedicated pack script', () =>
   assert.match(sourceVerify, /const SOURCE_PACK_SCRIPT = fileURLToPath\(new URL\('\.\/dsh-source-pack\.mjs', import\.meta\.url\)\)/u)
   assert.match(sourceVerify, /const args = \[SOURCE_PACK_SCRIPT, '--dsh-dir'/u)
   assert.doesNotMatch(sourceVerify, /const args = \[SCRIPT_PATH, '--dsh-dir'/u)
+})
+
+test('source dependency preparation disables pnpm verification and self-management before install', () => {
+  const environment = installEnvironment('source', {
+    PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'true',
+    PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS: 'true',
+    DSH_TEST_SENTINEL: 'preserved',
+  })
+  assert.equal(environment.PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN, 'false')
+  assert.equal(environment.PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS, 'false')
+  assert.equal(environment.DSH_TEST_SENTINEL, 'preserved')
+})
+
+test('source verification rejects a symlinked candidate tarball', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-source-candidate-test-'))
+  try {
+    const target = join(directory, 'external.tgz')
+    const candidate = join(directory, 'xmoon76-dsh-pi-tui-0.4.0.tgz')
+    writeFileSync(target, 'not a tarball')
+    symlinkSync(target, candidate)
+    assert.throws(() => sourceVerifyCandidateTarball(directory), /expected one TUI candidate/u)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('source verification fails once for a missing checkout instead of recursively spawning', () => {

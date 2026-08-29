@@ -56,11 +56,25 @@ function parseCli() {
   return values
 }
 
+export function installEnvironment(mode, base = process.env) {
+  return {
+    ...base,
+    npm_config_minimum_release_age: '0',
+    pnpm_config_minimum_release_age: '0',
+    ...(mode === 'source'
+      ? {
+        PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false',
+        PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
+      }
+      : {}),
+  }
+}
+
 export async function runInstall(workspace, args, { timeoutMs } = {}) {
   const mode = args.includes('--frozen-lockfile') ? 'npm' : 'source'
   const result = await runBounded(PNPM_COMMAND, args, {
     cwd: workspace,
-    env: { ...process.env, npm_config_minimum_release_age: '0', pnpm_config_minimum_release_age: '0' },
+    env: installEnvironment(mode),
     timeoutMs: timeoutMs ?? (mode === 'source' ? 20 * 60_000 : 10 * 60_000),
     label: `DSH ${mode} dependency install`,
   })
