@@ -9803,17 +9803,19 @@ export class TuiApp {
   /**
    * M3: open the interactive footer configurator overlay. The panel
    * renders the model's draft layout + a live preview composed by the REAL
-   * composer against the current snapshot; S (on the Row Selector page)
-   * saves through onSave, Enter navigates, and Esc walks back page by
-   * page, closing on the selector without touching the active layout.
-   * Returns a closer.
+   * composer against the current snapshot; the save paths (S, the "Save
+   * changes" row, "Save & Exit") AWAIT onSave, Enter navigates, and Esc
+   * walks back page by page — a clean selector closes, a dirty one opens
+   * the exit-confirm page. PR E transaction: the overlay closes only
+   * after onSave RESOLVES; a rejection keeps it open (the integration
+   * layer notifies). Returns a closer.
    */
   openFooterConfigurator(options: {
     model: FooterConfiguratorModel
     registry: FooterItemRegistry
     /** A layered composer for an unsaved custom-definition draft. */
     composer?: FooterComposer
-    onSave: (layout: FooterLayoutV1, customItems?: readonly import('./footer/custom-items.ts').FooterCustomItemSettings[]) => void
+    onSave: (layout: FooterLayoutV1, customItems?: readonly import('./footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
     onCancel: () => void
   }): () => void {
     let handle: OverlayHandle | undefined
@@ -9845,8 +9847,14 @@ export class TuiApp {
       },
       requestRender: () => this.requestRender(),
       onSave: (layout, customItems) => {
-        close()
-        options.onSave(layout, customItems)
+        // PR E §9: persist FIRST, close on RESOLUTION only — the old
+        // close-before-save order destroyed the editor on a failed
+        // settings write, leaving the draft unreachable.
+        return Promise.resolve()
+          .then(() => options.onSave(layout, customItems))
+          .then(() => { close() })
+        // A rejection propagates to the panel, which clears its saving
+        // state and keeps the configurator open.
       },
       onCancel: () => {
         close()

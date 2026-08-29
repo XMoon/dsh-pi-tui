@@ -304,6 +304,82 @@ test('interleaved steps keep separate assistant and thinking entries', () => {
   assert.equal(thinking1.text, 't1-')
 })
 
+test('thinking lifecycle index retains only unsettled entries by turn', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'reasoning-delta', index: 0, text: 'settled' },
+    }, 1),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('msg-settled'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'answer' }],
+        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+      },
+    }, 2),
+    event('turn/start', { turn: 1 }, 3),
+    event('assistant/chunk', {
+      turn: 1,
+      step: 0,
+      chunk: { type: 'reasoning-delta', index: 0, text: 'still thinking' },
+    }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'interrupted' } }, 5),
+  ])
+
+  const thinking = folder.messages().filter((message): message is Extract<TranscriptMessage, { kind: 'thinking' }> => message.kind === 'thinking')
+  assert.equal(thinking.find(message => message.turn === 0)?.running, false)
+  assert.equal(thinking.find(message => message.turn === 1)?.running, true,
+    'ending one turn must not settle another turn\'s open reasoning')
+  const open = (folder as unknown as { openThinkingByTurn: Map<number, Set<unknown>> }).openThinkingByTurn
+  assert.equal(open.has(0), false, 'settled entries must leave the open index')
+  assert.equal(open.get(1)?.size, 1)
+
+  folder.apply([event('turn/end', { turn: 1, reason: { kind: 'max-tokens' } }, 6)])
+  const endedThinking = folder.messages().find((message): message is Extract<TranscriptMessage, { kind: 'thinking' }> => message.kind === 'thinking' && message.turn === 1)
+  assert.equal(endedThinking?.running, false)
+  assert.equal(open.size, 0, 'turn/end should discard the ended turn bucket')
+})
+
+test('late reasoning keeps an assistant-settled thinking entry closed', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'reasoning-delta', index: 0, text: 'before' },
+    }, 0),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('msg-late-thinking'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'answer' }],
+        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+      },
+    }, 1),
+    // The transcript preserves the late replay fragment, but it must not
+    // re-enter the open lifecycle set or become running again.
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'reasoning-delta', index: 0, text: ' after' },
+    }, 2),
+  ])
+  const thinking = folder.messages().find((message): message is Extract<TranscriptMessage, { kind: 'thinking' }> => message.kind === 'thinking')
+  assert.ok(thinking)
+  assert.equal(thinking.running, false)
+  assert.equal(thinking.text, 'before after')
+  const open = (folder as unknown as { openThinkingByTurn: Map<number, Set<unknown>> }).openThinkingByTurn
+  assert.equal(open.size, 0)
+})
+
 test('windows older turns into one summary entry', () => {
   const events: SessionEvent[] = [
     // Turn 0: user prompt + tool call + result.
@@ -1238,6 +1314,48 @@ test('window summaries stay identical across a prune replacement', () => {
     pruneReplacement(11, 'r1', 'aaa-pruned', 2),
   ], { maxTurns: 2 })
   assert.deepEqual(after, before, 'the windowed projection must be byte-identical after a replacement')
+})
+
+test('a late duplicate assistant/message updates text once per step', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('late-message-1'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'first' }],
+        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+      },
+    }, 2),
+    event('step/end', { turn: 0, step: 0 }, 3),
+  ])
+  const before = folder.turnActivity(0)
+  assert.ok(before !== undefined)
+  assert.equal(before.assistantMessages, 1)
+
+  // The late authoritative replay arrives after step/end but before turn/end.
+  folder.apply([event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId('late-message-2'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'replacement' }],
+      source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+    },
+  }, 4)])
+
+  const after = folder.turnActivity(0)
+  assert.ok(after !== undefined)
+  assert.equal(after.assistantMessages, 1, 'late replay must not inflate per-step activity')
+  const messages = folder.messages()
+  assert.equal(messages.length, 1)
+  assert.ok(messages[0] !== undefined && messages[0].kind === 'assistant')
+  assert.equal(messages[0]?.kind === 'assistant' ? messages[0].text : '', 'replacement')
 })
 
 test('a replacement assistant/message does not mutate Focus activity', () => {

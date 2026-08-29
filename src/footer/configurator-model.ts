@@ -11,6 +11,8 @@
  *                                          └─ Rename/Delete definition
  *   row → add (searchable Add picker → Create Custom Text flow)
  *   row ⇄ row-move (Move Mode)
+ *   rows → exit-confirm (dirty-Esc: Save & Exit / Discard & Exit / Keep
+ *          Editing — PR E; plus the trailing "Save changes" home action)
  *
  * The UI component only renders and forwards keys; the whole model is
  * headless-testable. The persisted shape (FooterLayoutV1 / FooterItemRef)
@@ -42,6 +44,20 @@ export type FooterConfiguratorMode =
   | 'custom-tone'
   | 'custom-name'
   | 'custom-delete'
+  /** PR E: the dirty-Esc confirmation page (a MODEL mode, never a second
+   * overlay — input focus, resize and the Esc hierarchy stay trivial). */
+  | 'exit-confirm'
+
+/** The Row Selector's semantic selection (PR E §4.2): the cursor's range is
+ * `0..rows.length` — every row index selects that row, and the trailing
+ * entry is the Save action. `rowIndex` itself NEVER carries the sentinel:
+ * it keeps meaning "the row being edited". */
+export type FooterHomeSelection =
+  | { readonly kind: 'row'; readonly rowIndex: number }
+  | { readonly kind: 'save' }
+
+/** The exit-confirm page's actions (PR E §7.2). */
+export type FooterExitChoice = 'save' | 'discard' | 'keep'
 
 /** The advanced editor's fields (v1: the EXISTING ref fields only — no
  * new schema). `reset` is the trailing "Reset to default" action row. */
@@ -82,6 +98,15 @@ export interface FooterConfiguratorState {
   readonly customTone: FooterTone | 'auto'
   /** A fail-soft validation message for the current custom-item flow. */
   readonly customError: string
+  /** The Row Selector's cursor: `0..rows.length-1` are the rows,
+   * `rows.length` is the Save changes action (PR E §4). */
+  readonly homeCursor: number
+  /** The exit-confirm page's selected action (0 Save & Exit, 1 Discard &
+   * Exit, 2 Keep Editing). */
+  readonly exitConfirmCursor: number
+  /** Whether a save is currently in flight (PR E §10): duplicate saves
+   * are refused and the page shows Saving…. */
+  readonly saving: boolean
 }
 
 /** The tone picker's choices: persisted values use the EXISTING semantic
@@ -170,6 +195,106 @@ function cloneLayout(layout: FooterLayoutV1): MutableLayout {
   return { schemaVersion: 1, rows: layout.rows.map(cloneRow) }
 }
 
+/** Dirty comparison treats the ABSENT override and the explicit 'auto'
+ * token as the same fact (the model itself only ever deletes the field on
+ * 'auto' — PR E §5.4's normalized snapshot, not raw JSON equality). */
+function normalizeToneForCompare(tone: string | undefined): string | undefined {
+  return tone === undefined || tone === 'auto' ? undefined : tone
+}
+
+function sameFooterRef(a: FooterItemRef, b: FooterItemRef): boolean {
+  return a.id === b.id
+    && (a.format ?? undefined) === (b.format ?? undefined)
+    && normalizeToneForCompare(a.tone) === normalizeToneForCompare(b.tone)
+    && (a.prefix ?? undefined) === (b.prefix ?? undefined)
+    && (a.suffix ?? undefined) === (b.suffix ?? undefined)
+    && (a.importance ?? undefined) === (b.importance ?? undefined)
+}
+
+function sameFooterRow(a: FooterRowLayout, b: FooterRowLayout): boolean {
+  if (a.left.length !== b.left.length || a.right.length !== b.right.length) return false
+  for (let index = 0; index < a.left.length; index += 1) {
+    if (!sameFooterRef(a.left[index]!, b.left[index]!)) return false
+  }
+  for (let index = 0; index < a.right.length; index += 1) {
+    if (!sameFooterRef(a.right[index]!, b.right[index]!)) return false
+  }
+  if (a.separator === undefined || b.separator === undefined) return a.separator === b.separator
+  return a.separator.text === b.separator.text
+    && normalizeToneForCompare(a.separator.tone) === normalizeToneForCompare(b.separator.tone)
+}
+
+/** Structural layout equality (row count, item order, every editable ref
+ * field, separators). Field order in the underlying objects is irrelevant
+ * by construction — no JSON stringify round-trip. Context-free BY DESIGN:
+ * dirty detection projects both sides through canonicalLayout first. */
+export function sameFooterLayout(a: FooterLayoutV1, b: FooterLayoutV1): boolean {
+  if (a.rows.length !== b.rows.length) return false
+  return a.rows.every((row, index) => sameFooterRow(row, b.rows[index]!))
+}
+
+function sameFooterCustomItem(
+  a: FooterCustomItemSettings,
+  b: FooterCustomItemSettings,
+): boolean {
+  return a.schemaVersion === b.schemaVersion
+    && a.id === b.id
+    && a.kind === b.kind
+    && a.text === b.text
+    && normalizeToneForCompare(a.tone) === normalizeToneForCompare(b.tone)
+}
+
+/** Structural definition-catalog equality in PERSISTED ORDER (the order is
+ * part of the saved document — PR E §5.3). Covers create / text / tone /
+ * rename / delete: every mutation of the catalog changes this result. */
+export function sameFooterCustomItems(
+  a: readonly FooterCustomItemSettings[],
+  b: readonly FooterCustomItemSettings[],
+): boolean {
+  if (a.length !== b.length) return false
+  return a.every((item, index) => sameFooterCustomItem(item, b[index]!))
+}
+
+/** Resolves an item id to its definition's default format (undefined for
+ * an unknown id — its formats are unknowable, so an explicit format is
+ * always a real override there). */
+type FooterDefaultFormatOf = (id: string) => string | undefined
+
+/** The canonical REF projection the dirty comparison uses (PR E review):
+ * facts the editor itself canonicalizes on the next interaction compare
+ * EQUAL to their absent form —
+ *   tone 'auto'          → absent
+ *   format = default     → absent (registry-aware)
+ *   prefix ''/suffix ''  → absent
+ * A no-op Style Enter (Enter on the already-selected default) or a no-op
+ * Advanced commit (empty buffer) must therefore never read as dirty. */
+function canonicalRef(ref: FooterItemRef, defaultFormatOf: FooterDefaultFormatOf): FooterItemRef {
+  const tone = normalizeToneForCompare(ref.tone)
+  return {
+    id: ref.id,
+    ...(ref.format !== undefined && ref.format !== defaultFormatOf(ref.id) ? { format: ref.format } : {}),
+    ...(tone === undefined ? {} : { tone: tone as FooterTone }),
+    ...(ref.prefix === undefined || ref.prefix === '' ? {} : { prefix: ref.prefix }),
+    ...(ref.suffix === undefined || ref.suffix === '' ? {} : { suffix: ref.suffix }),
+    ...(ref.importance === undefined ? {} : { importance: ref.importance }),
+  }
+}
+
+/** Canonical LAYOUT projection: row/zone ORDER and separators preserved,
+ * every ref projected through canonicalRef. Both sides of the dirty
+ * comparison are projected with the SAME (current) registry, so a
+ * definition change mid-session shifts both views identically. */
+function canonicalLayout(layout: FooterLayoutV1, defaultFormatOf: FooterDefaultFormatOf): FooterLayoutV1 {
+  return {
+    schemaVersion: 1,
+    rows: layout.rows.map(row => ({
+      left: row.left.map(ref => canonicalRef(ref, defaultFormatOf)),
+      right: row.right.map(ref => canonicalRef(ref, defaultFormatOf)),
+      ...(row.separator === undefined ? {} : { separator: { ...row.separator } }),
+    })),
+  }
+}
+
 /** A zone + index pair: where a flat position lives inside one row. */
 export interface FlatPosition {
   readonly zone: 'left' | 'right'
@@ -242,6 +367,16 @@ export class FooterConfiguratorModel {
   private customText = ''
   private customTone: FooterTone | 'auto' = 'auto'
   private customError = ''
+  /** The Row Selector's cursor (Row N, or the trailing Save action). */
+  private homeCursor = 0
+  /** The exit-confirm page's selected action. */
+  private exitConfirmCursor = 0
+  /** True while a save promise is in flight (PR E §10). */
+  private saving = false
+  /** The detached save baseline (PR E §5.2): captured at construction,
+   * never mutated afterwards — draft mutations cannot reach it. */
+  private readonly baselineLayout: MutableLayout
+  private readonly baselineCustomItems: readonly FooterCustomItemSettings[]
   private readonly registry: FooterItemRegistry
   private readonly customItems: FooterCustomItemCatalog
 
@@ -255,8 +390,14 @@ export class FooterConfiguratorModel {
     this.draft = cloneLayout(initial.rows.length === 0
       ? { schemaVersion: 1, rows: [{ left: [], right: [] }] }
       : initial)
+    // The baseline mirrors the NORMALIZED draft (a zero-row initial must
+    // not read as dirty on open) and is double-detached: the catalog
+    // snapshot already copies, but the baseline must survive even a
+    // future snapshot change (PR E §5.2).
+    this.baselineLayout = cloneLayout(this.draft as unknown as FooterLayoutV1)
     this.registry = registry
     this.customItems = customItems ?? new FooterCustomItemCatalog()
+    this.baselineCustomItems = this.customItems.snapshot().map(item => ({ ...item }))
     // A caller that supplies a draft catalog expects the editor's picker and
     // preview to see it through the same registry. Do not replace an existing
     // app source when no draft catalog was requested (legacy callers use the
@@ -282,6 +423,9 @@ export class FooterConfiguratorModel {
       customText: this.customText,
       customTone: this.customTone,
       customError: this.customError,
+      homeCursor: this.homeCursor,
+      exitConfirmCursor: this.exitConfirmCursor,
+      saving: this.saving,
     }
   }
 
@@ -299,6 +443,60 @@ export class FooterConfiguratorModel {
   /** Detached custom definitions in their persisted order. */
   customItemSettings(): FooterCustomItemSettings[] {
     return this.customItems.snapshot()
+  }
+
+  /** Structured dirty detection (PR E §5): the draft LAYOUT and the draft
+   * DEFINITION CATALOG are each compared against the construction
+   * baseline. Reversible by contract — every mutation that returns the
+   * draft to the baseline state (reorder + reorder back, tone + tone
+   * back, create + delete) returns to clean.
+   *
+   * Registry-aware canonicalization (review round 3): BOTH sides are
+   * projected through canonicalLayout with the CURRENT registry before
+   * comparison, so facts the editor canonicalizes anyway — an explicit
+   * 'auto' tone, a format equal to the definition's default, empty-string
+   * prefix/suffix — never read as dirty. The exported sameFooterLayout
+   * stays a pure comparator; this layer owns the projection. */
+  isDirty(): boolean {
+    const defaultFormatOf: FooterDefaultFormatOf = id => this.registry.get(id)?.defaultFormat
+    const layoutDirty = !sameFooterLayout(
+      canonicalLayout(this.draft as unknown as FooterLayoutV1, defaultFormatOf),
+      canonicalLayout(this.baselineLayout as unknown as FooterLayoutV1, defaultFormatOf),
+    )
+    const itemsDirty = !sameFooterCustomItems(this.customItems.snapshot(), this.baselineCustomItems)
+    return layoutDirty || itemsDirty
+  }
+
+  /** Enter the saving state (PR E §10): the panel refuses duplicate save
+   * requests and Esc-close while a save promise is in flight. */
+  beginSave(): void {
+    this.saving = true
+  }
+
+  /** Clear the saving state after a FAILED save (success closes the whole
+   * configurator — there is nothing left to reset). */
+  endSave(): void {
+    this.saving = false
+  }
+
+  /** The Row Selector's semantic selection (PR E §4.2): rows map to their
+   * index; the trailing entry is the Save action. */
+  homeSelection(): FooterHomeSelection {
+    if (this.homeCursor >= this.draft.rows.length) return { kind: 'save' }
+    return { kind: 'row', rowIndex: this.homeCursor }
+  }
+
+  /** Enter on the exit-confirm page (PR E §7.2). 'keep' re-enters the Row
+   * Selector immediately; 'save' and 'discard' keep the mode — the PANEL
+   * performs them (async save path / close-without-write), and what the
+   * user sees next is decided by the save's outcome, not by this method. */
+  exitConfirmAction(): FooterExitChoice {
+    if (this.mode !== 'exit-confirm') return 'keep'
+    if (this.exitConfirmCursor === 0) return 'save'
+    if (this.exitConfirmCursor === 1) return 'discard'
+    this.mode = 'rows'
+    this.exitConfirmCursor = 0
+    return 'keep'
   }
 
   /** Whether an id is one of this editor's user-owned definitions. */
@@ -361,7 +559,7 @@ export class FooterConfiguratorModel {
   moveUp(): void {
     switch (this.mode) {
       case 'rows':
-        this.rowIndex = Math.max(0, this.rowIndex - 1)
+        this.homeCursor = Math.max(0, this.homeCursor - 1)
         return
       case 'row':
         this.cursor = Math.max(0, this.cursor - 1)
@@ -387,6 +585,9 @@ export class FooterConfiguratorModel {
       case 'add':
         this.pickerIndex = Math.max(0, this.pickerIndex - 1)
         return
+      case 'exit-confirm':
+        this.exitConfirmCursor = Math.max(0, this.exitConfirmCursor - 1)
+        return
     }
   }
 
@@ -394,7 +595,8 @@ export class FooterConfiguratorModel {
   moveDown(): void {
     switch (this.mode) {
       case 'rows':
-        this.rowIndex = Math.min(this.draft.rows.length - 1, this.rowIndex + 1)
+        // One past the last row sits the Save changes action (PR E §4).
+        this.homeCursor = Math.min(this.draft.rows.length, this.homeCursor + 1)
         return
       case 'row':
         this.cursor = Math.min(Math.max(0, this.flatCount() - 1), this.cursor + 1)
@@ -427,6 +629,9 @@ export class FooterConfiguratorModel {
         return
       case 'add':
         this.pickerIndex = Math.min(this.addMatches().length, this.pickerIndex + 1)
+        return
+      case 'exit-confirm':
+        this.exitConfirmCursor = Math.min(2, this.exitConfirmCursor + 1)
         return
     }
   }
@@ -589,12 +794,18 @@ export class FooterConfiguratorModel {
   /** Enter: the page's primary action. */
   activate(): void {
     switch (this.mode) {
-      case 'rows':
-        // Enter the highlighted row.
-        this.rowIndex = Math.min(this.rowIndex, this.draft.rows.length - 1)
+      case 'rows': {
+        // Enter opens the SELECTED ROW. The Save action (the trailing
+        // home entry) is deliberately NOT handled here: persistence is
+        // async and therefore panel business (PR E §14) — the panel
+        // routes that Enter to its single save path before activating.
+        const selection = this.homeSelection()
+        if (selection.kind === 'save') return
+        this.rowIndex = selection.rowIndex
         this.mode = 'row'
         this.cursor = 0
         return
+      }
       case 'row':
         if (this.flatCount() > 0) {
           this.mode = 'item'
@@ -775,11 +986,16 @@ export class FooterConfiguratorModel {
         if (added) this.mode = 'row'
         return
       }
+      case 'exit-confirm':
+        // Handled by the panel (PR E §14): Enter maps to the selected
+        // exitConfirmAction(), which routes save/discard through the
+        // panel's single save path and the close-without-write callback.
+        return
     }
   }
 
   /** Esc: navigate back. Returns false exactly when the configurator
-   * should CLOSE (Esc on the Row Selector). */
+   * should CLOSE (Esc on a clean Row Selector). */
   cancel(): boolean {
     if ((this.mode === 'advanced' || this.mode === 'custom-text' || this.mode === 'custom-name') && this.editing) {
       // First Esc inside an inline edit cancels the edit, not the page.
@@ -791,7 +1007,24 @@ export class FooterConfiguratorModel {
     }
     switch (this.mode) {
       case 'rows':
+        // PR E §7: a clean draft closes immediately; a dirty draft opens
+        // the exit-confirm page. A save in flight swallows the Esc — the
+        // close decision belongs to the save's outcome, never to a
+        // second concurrent exit path.
+        if (this.saving) return true
+        if (this.isDirty()) {
+          this.mode = 'exit-confirm'
+          this.exitConfirmCursor = 0
+          return true
+        }
         return false
+      case 'exit-confirm':
+        // Esc on the confirmation page IS "Keep Editing" (PR E §7.2) —
+        // never a second close.
+        if (this.saving) return true
+        this.mode = 'rows'
+        this.exitConfirmCursor = 0
+        return true
       case 'add':
         if (this.addQuery !== '') {
           // A search term swallows the first Esc: clear the search.
@@ -1142,6 +1375,11 @@ export class FooterConfiguratorModel {
     this.customText = ''
     this.customTone = 'auto'
     this.customError = ''
+    // The home selection returns to the first row: the layout identity
+    // just changed, so a stale cursor could point past the Save action's
+    // new index (PR E §4.2 — clamp/reanchor the home cursor).
+    this.homeCursor = 0
+    this.exitConfirmCursor = 0
   }
 
   /** Reset the draft to the builtin default layout. */

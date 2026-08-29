@@ -1793,10 +1793,11 @@ export function registerTuiCommands(
   // `/footer` — the interactive footer configurator (plan M3): LOCAL +
   // SESSIONLESS (usable before any session exists — the preview shows
   // placeholders/unavailable items and the config stays editable). The
-  // panel is a hierarchical editor; S on its Row Selector page validates
-  // + persists + applies, Enter is a navigation key, and Esc walks back
-  // page by page, closing on the selector without touching the active
-  // layout.
+  // panel is a hierarchical editor; the save paths (S, the "Save changes"
+  // row, "Save & Exit") validate + persist + apply through ONE awaited
+  // onSave — the overlay closes only on success (PR E). Enter is a
+  // navigation key, and Esc walks back page by page: a clean selector
+  // closes without touching the active layout, a dirty one asks first.
   //
   // `/statusline` is a deliberate alias (approved): other agents (and
   // users coming from tools that name this surface "statusline") reach
@@ -1839,29 +1840,32 @@ export function registerTuiCommands(
         model,
         registry,
         composer,
-        onSave: (layout, draftCustomItems) => {
+        onSave: async (layout, draftCustomItems) => {
+          // PR E contract: RESOLVE = persisted + applied (the overlay then
+          // closes); THROW = failed — the configurator stays open with the
+          // draft intact, and THIS layer owns the user-facing notify.
+          //
           // Validate the draft (the model's operations keep it well-formed,
           // but the persisted value is never trusted).
           const parsed = parseFooterLayout(layout)
           if (!isFooterLayout(parsed)) {
             app.notify(`footer layout invalid: ${parsed.message}`, 'error')
-            return
+            throw new Error(`footer layout invalid: ${parsed.message}`)
           }
           const customResult = parseFooterCustomItems(draftCustomItems ?? [])
           if (customResult.invalidCount > 0 || customResult.items.length !== (draftCustomItems ?? []).length) {
             app.notify('custom footer items invalid', 'error')
-            return
+            throw new Error('custom footer items invalid')
           }
           const savedCustomItems = customResult.items.map(item => ({ ...item }))
           if (settings !== undefined) {
             // Persist FIRST; the memory commit happens only after the
             // settings write succeeds (plan §15.7 — a failed write keeps
-            // the old layout and definitions and notifies). footerFallbackMode
-            // rides ALONG: the /settings path records the last native mode,
-            // and saving a custom layout IS a native-mode change — the command
+            // the old layout and definitions). footerFallbackMode rides
+            // ALONG: the /settings path records the last native mode, and
+            // saving a custom layout IS a native-mode change — the command
             // surface's restart fallback must resolve to THIS custom layout.
-            detach('footer configurator write', async () => {
-              if (app.isDisposed()) return
+            try {
               await serializeTuiSettingsMutation(settings, async () => {
                 if (app.isDisposed()) return
                 // `/footer` intentionally edits the custom-definition
@@ -1879,12 +1883,19 @@ export function registerTuiCommands(
                   footerCustomItems: persistedCustomItems,
                 })
               })
-              if (app.isDisposed()) return
-              app.setFooterCustomItems(savedCustomItems)
-              runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems }, savedCustomItems)
-              app.notify('footer layout saved', 'info')
-            }, { notify: true })
+            } catch (error) {
+              if (!app.isDisposed()) {
+                app.notify(`footer layout save failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+              }
+              throw error
+            }
+            if (app.isDisposed()) return
+            app.setFooterCustomItems(savedCustomItems)
+            runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems }, savedCustomItems)
+            app.notify('footer layout saved', 'info')
           } else {
+            // No settings backend: the memory commit IS the save (PR E
+            // §9.3) — resolve into an immediate close.
             app.setFooterCustomItems(savedCustomItems)
             runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems }, savedCustomItems)
             app.notify('footer layout saved', 'info')

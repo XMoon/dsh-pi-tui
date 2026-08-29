@@ -66,7 +66,8 @@ test('navigation: Enter a row, Esc back, Esc closes', () => {
 test('the Row Selector moves between rows; Enter enters the highlighted row', () => {
   const m = model()
   m.moveDown()
-  assert.equal(m.state().rowIndex, 1)
+  assert.equal(m.state().homeCursor, 1)
+  assert.equal(m.state().rowIndex, 0, 'the selector cursor never moves rowIndex')
   m.activate()
   assert.equal(m.state().mode, 'row')
   assert.equal(m.state().rowIndex, 1)
@@ -557,4 +558,287 @@ test('preset resets and the 1..2 row bound still work alongside the pages', () =
   assert.equal(m.state().layout.rows.length, 2)
   assert.equal(m.state().rowIndex, 0)
   assert.equal(m.state().cursor, 0)
+})
+
+/* ─── PR E: explicit save flow + unsaved-exit guard ──────────────────── */
+
+import { FooterCustomItemCatalog } from '../src/footer/custom-items.ts'
+
+/** A model over a one-row layout that PLACES one custom definition, with
+ * a fresh registry (the model wires the draft catalog into it). */
+function customModel(): { m: FooterConfiguratorModel; catalog: FooterCustomItemCatalog } {
+  const catalog = new FooterCustomItemCatalog([
+    { schemaVersion: 1, id: 'user:env', kind: 'text', text: 'PROD', tone: 'auto' },
+  ])
+  const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model' }, { id: 'user:env' }], right: [] }] }
+  return { m: new FooterConfiguratorModel(layout, createBuiltinFooterRegistry(), catalog), catalog }
+}
+
+/** Walk the flat cursor onto the named item of the edited row (clamps at
+ * the row end). */
+function walkToId(m: FooterConfiguratorModel, id: string): void {
+  for (let i = 0; i < 64; i += 1) {
+    const row = m.state().layout.rows[m.state().rowIndex]!
+    const flat = m.state().cursor
+    const ref = flat < row.left.length ? row.left[flat] : row.right[flat - row.left.length]
+    if (ref?.id === id) return
+    if (flat >= row.left.length + row.right.length - 1) {
+      while (m.state().cursor > 0) m.moveUp()
+      return
+    }
+    m.moveDown()
+  }
+  assert.fail(`cursor never reached "${id}"`)
+}
+
+/** Open the item editor on the named item of row 1. */
+function openItemMenu(m: FooterConfiguratorModel, id: string): void {
+  m.activate() // rows → row
+  walkToId(m, id)
+  m.activate() // row → item
+}
+
+test('PR E: isDirty starts clean on open', () => {
+  assert.equal(model().isDirty(), false)
+  assert.equal(customModel().m.isDirty(), false, 'a placed custom definition does not read as dirty')
+})
+
+test('PR E: removing an item is dirty; re-adding it at the same slot is clean', () => {
+  const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model' }], right: [] }] }
+  const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
+  m.activate()
+  m.removeActive()
+  assert.equal(m.isDirty(), true, 'removal is dirty')
+  m.startAdd() // empty row → the Left default side
+  assert.ok(m.addMatches().includes('model'), 'the removed item returns to the pool')
+  let guard = 0
+  while (m.addMatches()[Math.min(m.state().pickerIndex, m.addMatches().length - 1)] !== 'model' && guard < 64) {
+    m.moveDown()
+    guard += 1
+  }
+  m.activate() // add it back — appended to the (empty) left zone
+  assert.equal(m.state().mode, 'row')
+  assert.equal(m.isDirty(), false, 'the restored layout matches the baseline')
+})
+
+test('PR E: item order is dirty; the order round-trip is clean (Move Mode)', () => {
+  const m = model()
+  m.activate()
+  m.startMove()
+  m.moveDown()
+  assert.equal(m.isDirty(), true, 'reorder is dirty')
+  m.moveUp()
+  assert.equal(m.isDirty(), false, 'reorder back is clean')
+})
+
+test('PR E: a zone round-trip of the last left item restores clean', () => {
+  const m = model()
+  m.activate()
+  walkToId(m, 'ext:*') // the right zone starts empty; ext:* is the last left ref
+  m.moveZone('right')
+  assert.equal(m.isDirty(), true, 'the zone move is dirty')
+  m.moveZone('left')
+  assert.equal(m.isDirty(), false, 'moving back re-appends at the original slot')
+})
+
+test('PR E: an explicit auto tone normalizes against an absent tone', () => {
+  const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model', tone: 'auto' as const }], right: [] }] }
+  const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
+  assert.equal(m.isDirty(), false, 'tone:auto baseline is clean')
+  m.activate() // row
+  m.activate() // item (cursor 0 = model)
+  m.moveDown() // menu: Style → Tone
+  m.activate() // tone picker (opens on the current choice)
+  m.activate() // apply Auto — the draft deletes the field
+  assert.equal(m.isDirty(), false, 'auto → absent is the same fact')
+})
+
+test('PR E: an explicit DEFAULT format is the same fact as no format', () => {
+  const reg = createBuiltinFooterRegistry()
+  const def = reg.get('model')
+  assert.ok(def !== undefined && def.formats.includes(def.defaultFormat))
+  const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model', format: def.defaultFormat }], right: [] }] }
+  const m = new FooterConfiguratorModel(layout, reg)
+  assert.equal(m.isDirty(), false, 'explicit-default-format baseline is clean')
+  // The Style picker's NO-OP round-trip (review round 3): the picker opens
+  // on the current choice; Enter applies the SAME format — applyFormat
+  // canonicalizes the draft by DELETING the field. That must not read as
+  // dirty against the explicit-default baseline.
+  m.activate() // row
+  m.activate() // item (cursor 0 = model)
+  m.activate() // style picker (opens on the current format)
+  m.activate() // apply the same format → the draft drops the field
+  assert.equal(m.isDirty(), false, 'a no-op Style Enter must not read as dirty')
+})
+
+test('PR E: empty-string prefix/suffix are the same fact as absent', () => {
+  const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model', prefix: '', suffix: '' }], right: [] }] }
+  const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
+  assert.equal(m.isDirty(), false, 'empty-string baseline is clean')
+  // The Advanced editor's NO-OP commit: an empty buffer DELETES the
+  // field — that canonicalization must not read as dirty either.
+  m.activate() // row
+  m.activate() // item (cursor 0 = model)
+  m.moveDown() // menu: Style → Tone
+  m.moveDown() // Tone → Advanced
+  m.activate() // advanced page (Prefix selected)
+  m.activate() // open the inline editor (seeds '')
+  m.activate() // commit the empty buffer → the field is deleted
+  assert.equal(m.isDirty(), false, 'a no-op Advanced commit must not read as dirty')
+})
+
+test('PR E: custom definition text and tone edits dirty; restores clean', () => {
+  const { m } = customModel()
+  openItemMenu(m, 'user:env')
+  assert.equal(m.state().mode, 'item')
+
+  // Text (menu entry 0): edit → dirty; restore → clean.
+  m.activate()
+  assert.equal(m.state().mode, 'custom-text')
+  m.text('X')
+  m.activate() // commit
+  assert.equal(m.isDirty(), true, 'text edit is dirty')
+  m.activate() // custom-text again
+  m.backspace()
+  m.activate() // commit
+  assert.equal(m.isDirty(), false, 'text restore is clean')
+
+  // Definition tone (menu entry 1): change → dirty; restore → clean.
+  m.moveDown()
+  m.activate() // custom-tone picker (opens on Auto)
+  assert.equal(m.state().mode, 'custom-tone')
+  m.moveDown()
+  m.activate() // apply Primary
+  assert.equal(m.isDirty(), true, 'definition tone is dirty')
+  m.activate() // picker again
+  m.moveUp()
+  m.activate() // apply Auto
+  assert.equal(m.isDirty(), false, 'definition tone restore is clean')
+})
+
+test('PR E: rename and delete of a custom definition count as dirty', () => {
+  const { m } = customModel()
+  openItemMenu(m, 'user:env')
+  // Menu: 0 Text, 1 Default tone, 2 Tone, 3 Advanced, 4 Rename, 5 Delete.
+  m.moveDown()
+  m.moveDown()
+  m.moveDown()
+  m.moveDown()
+  m.activate() // custom-name (buffer seeded with the current name)
+  assert.equal(m.state().mode, 'custom-name')
+  m.text('2')
+  m.activate() // commit the rename
+  assert.equal(m.isDirty(), true, 'rename is dirty')
+  m.activate() // custom-name again
+  m.backspace()
+  m.activate() // rename back
+  assert.equal(m.isDirty(), false, 'rename back is clean')
+
+  m.moveDown() // menu entry 5 = Delete definition
+  m.activate() // delete page
+  m.activate() // confirm
+  assert.equal(m.state().mode, 'row', 'delete returns to the row page')
+  assert.equal(m.isDirty(), true, 'delete is dirty')
+})
+
+test('PR E: the home selection covers rows plus the Save action', () => {
+  const m = model()
+  assert.deepEqual(m.homeSelection(), { kind: 'row', rowIndex: 0 })
+  m.moveDown()
+  assert.deepEqual(m.homeSelection(), { kind: 'row', rowIndex: 1 })
+  m.moveDown()
+  assert.deepEqual(m.homeSelection(), { kind: 'save' })
+  m.moveDown()
+  assert.deepEqual(m.homeSelection(), { kind: 'save' }, 'the save entry is the clamp')
+  m.activate()
+  assert.equal(m.state().mode, 'rows', 'model-activate on the Save entry is a no-op (the panel owns persistence)')
+  m.moveUp()
+  assert.deepEqual(m.homeSelection(), { kind: 'row', rowIndex: 1 })
+})
+
+test('PR E: addRow shifts the Save entry; removeRow reanchors the home cursor', () => {
+  const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model' }], right: [] }] }
+  const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
+  m.moveDown() // → Save (the only entry after row 1)
+  assert.deepEqual(m.homeSelection(), { kind: 'save' })
+  m.addRow()
+  assert.equal(m.state().layout.rows.length, 2)
+  assert.deepEqual(m.homeSelection(), { kind: 'row', rowIndex: 1 }, 'the save entry moved one line down')
+  m.moveDown()
+  assert.deepEqual(m.homeSelection(), { kind: 'save' })
+  m.removeRow() // row identity change → reanchor
+  assert.equal(m.state().homeCursor, 0)
+  assert.deepEqual(m.homeSelection(), { kind: 'row', rowIndex: 0 })
+})
+
+test('PR E: a dirty selector Esc opens exit-confirm; a clean one closes', () => {
+  const m = model()
+  assert.equal(m.cancel(), false, 'clean → close')
+  assert.equal(m.state().mode, 'rows')
+  m.activate()
+  m.removeActive()
+  m.cancel() // → rows
+  assert.equal(m.isDirty(), true)
+  assert.equal(m.cancel(), true, 'dirty → the guard opens')
+  assert.equal(m.state().mode, 'exit-confirm')
+  assert.equal(m.state().exitConfirmCursor, 0)
+  assert.equal(m.cancel(), true, 'Esc inside the guard is Keep Editing')
+  assert.equal(m.state().mode, 'rows')
+  assert.equal(m.isDirty(), true, 'the draft is preserved')
+})
+
+test('PR E: exit-confirm actions route save/discard/keep', () => {
+  const m = model()
+  m.activate()
+  m.removeActive()
+  m.cancel() // row → rows
+  m.cancel() // dirty → exit-confirm
+  assert.equal(m.exitConfirmAction(), 'save')
+  assert.equal(m.state().mode, 'exit-confirm', 'save keeps the page — the save outcome decides what comes next')
+  m.moveDown()
+  assert.equal(m.exitConfirmAction(), 'discard')
+  assert.equal(m.state().mode, 'exit-confirm', 'discard keeps the mode; the panel closes without writing')
+  m.moveDown()
+  assert.equal(m.exitConfirmAction(), 'keep')
+  assert.equal(m.state().mode, 'rows', 'keep returns to the selector')
+  assert.equal(m.exitConfirmAction(), 'keep', 'outside the guard it is a plain keep')
+})
+
+test('PR E: the saving flag gates Esc-close until the save settles', () => {
+  const m = model()
+  m.activate()
+  m.removeActive()
+  m.cancel() // row → rows
+  m.cancel() // dirty → exit-confirm
+  m.beginSave()
+  assert.equal(m.state().saving, true)
+  assert.equal(m.cancel(), true, 'Esc during a save is swallowed')
+  assert.equal(m.state().mode, 'exit-confirm', 'no mode escape mid-save')
+  m.endSave()
+  assert.equal(m.state().saving, false)
+  assert.equal(m.cancel(), true, 'after a failure the guard works again (Esc = Keep Editing)')
+  assert.equal(m.state().mode, 'rows')
+})
+
+test('PR E: create then delete of a NEW custom item returns to clean', () => {
+  const m = model()
+  m.activate() // → row 1
+  m.startAdd()
+  m.text('zz-no-match')
+  assert.equal(m.addMatches().length, 0, 'the filter isolates the create action')
+  assert.ok(m.isCreateOption())
+  m.activate() // → create-name
+  m.text('Temp')
+  m.activate() // → create-text
+  m.text('TMP')
+  m.activate() // → create-tone
+  m.activate() // create with Auto — the definition is created AND placed
+  assert.equal(m.isDirty(), true, 'the created definition + its placement are dirty')
+  m.activate() // item editor (the cursor landed on the new item)
+  // Menu: 0 Text, 1 Default tone, 2 Tone, 3 Advanced, 4 Rename, 5 Delete.
+  for (let i = 0; i < 5; i += 1) m.moveDown()
+  m.activate() // delete page
+  m.activate() // confirm — removes the definition and every reference
+  assert.equal(m.state().mode, 'row')
+  assert.equal(m.isDirty(), false, 'create + delete of the new item restores the baseline exactly')
 })

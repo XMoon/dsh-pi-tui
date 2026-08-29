@@ -651,13 +651,34 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('Row 1'), `the compact row must be listed:\n${view}`)
   assert.ok(!view.includes('Row 2'), `the compact layout must not start from the two-row default:\n${view}`)
-  // Save UNCHANGED (S): the saved custom layout must stay ONE row.
+  // PR E §12/§18: S on an UNCHANGED (clean) draft closes WITHOUT writing
+  // — an idle save must not flip the compact mode to custom.
   vt.sendInput('s')
   await vt.waitForRender()
   for (let index = 0; index < 20; index += 1) await Promise.resolve()
-  assert.equal(applied.length, 1, 'S must apply the layout')
+  assert.equal(applied.length, 0, 'a clean S must not persist')
+  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the clean save closes')
+  assert.equal(app.getFooterMode(), 'compact', 'the compact mode stays untouched')
+
+  // The seeding guarantee still holds where it matters: a DIRTY compact
+  // draft saves as ONE row (the draft started from the EFFECTIVE compact
+  // layout, never the two-row default).
+  await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1
+  await vt.waitForRender()
+  vt.sendInput('a') // → Add picker
+  await vt.waitForRender()
+  vt.sendInput('\r') // add the first available item (makes the draft dirty)
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // → selector
+  await vt.waitForRender()
+  vt.sendInput('s')
+  await vt.waitForRender()
+  for (let index = 0; index < 20; index += 1) await Promise.resolve()
+  assert.equal(applied.length, 1, 'a dirty compact save persists')
   const saved = applied[0]!.footerLayout as { rows: unknown[] }
-  assert.equal(saved.rows.length, 1, `an unchanged compact save must stay one row:\n${JSON.stringify(saved)}`)
+  assert.equal(saved.rows.length, 1, `a dirty compact save must stay one row:\n${JSON.stringify(saved)}`)
   app.stop()
 })
 
@@ -889,5 +910,119 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   }
   assert.equal(settings.doc.footer, 'compact', 'the mode must persist')
   assert.equal(settings.doc.footerFallbackMode, 'compact', 'the fallback mode must persist alongside')
+  app.stop()
+})
+
+test('/footer save failures notify exactly once (validation and write failures)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const commands = fakeCommands()
+  ctx.provide('commands', commands.service as never)
+  const notifications: Array<string> = []
+  ;(app as unknown as { notify: (message: string, level?: string) => void }).notify = (message) => {
+    notifications.push(message)
+  }
+  const saveCallbacks: Array<Parameters<TuiApp['openFooterConfigurator']>[0]['onSave']> = []
+  app.openFooterConfigurator = ((options: Parameters<TuiApp['openFooterConfigurator']>[0]) => {
+    saveCallbacks.push(options.onSave)
+    return () => {}
+  }) as TuiApp['openFooterConfigurator']
+  const known = { schemaVersion: 1 as const, id: 'user:environment', kind: 'text' as const, text: 'OLD', tone: 'warning' as const }
+  let rejectReplace: ((reason?: unknown) => void) | undefined
+  const settings: TuiSettingsLike = {
+    get: () => ({
+      theme: 'auto', iconStyle: 'emoji', footer: 'default', fullscreen: 'on',
+      busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport',
+      focusMode: 'off', footerCustomItems: [known],
+    }),
+    replace: () => new Promise<void>((_resolve, reject) => { rejectReplace = reject }),
+  }
+  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: [known] } }] } as never)
+  const applied: Array<{ footerLayout?: unknown }> = []
+  const runner: TuiCommandRunner = {
+    ctx,
+    app,
+    diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
+    get liveAgent() { return undefined },
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    tuiSettings: settings,
+    agents: {} as never,
+    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
+    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    hostFile: new DirectHostFilePort(() => undefined),
+    commandRegistry: ctx.get('commands') as never,
+    cwd: '/ws',
+    sessionCwd: () => '/ws',
+    imageStore: {} as never,
+    copyToClipboard: async () => true,
+    imageLimits: () => undefined,
+    insertIntoEditor: () => {},
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    get sessionGeneration() { return 0 },
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    get pendingPreset() { return undefined },
+    set pendingPreset(_id: string | undefined) {},
+    get effectivePresetId() { return undefined },
+    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
+    recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+    refreshStatus: () => {},
+    focusEnabled: () => false,
+    setFocusMode: () => {},
+    updateWelcomeCard: () => {},
+    openJobView: () => {},
+    openTasksBrowser: () => {},
+    openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {},
+    requestExit: () => {},
+    extensions: undefined,
+    exit: () => {},
+    applyFooterSettings: (doc) => {
+      if (doc !== undefined) applied.push({ footerLayout: doc.footerLayout })
+    },
+  }
+  registerTuiCommands(runner)
+  const footer = commands.defs.find(entry => entry.name === 'footer')
+  assert.ok(footer?.handler !== undefined)
+  await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  assert.equal(saveCallbacks.length, 1)
+
+  // Scenario A — an INVALID draft (3 rows exceed the v1 cap) rejects and
+  // notifies EXACTLY once; the write path is never reached.
+  notifications.length = 0
+  const invalid = { schemaVersion: 1, rows: [{ left: [{ id: 'model' }], right: [] }, { left: [], right: [] }, { left: [], right: [] }] }
+  await assert.rejects(Promise.resolve().then(() => saveCallbacks[0]!(invalid as FooterLayoutV1, [])))
+  for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  assert.equal(notifications.length, 1, `validation notifies once:\n${notifications.join('\n')}`)
+  assert.match(notifications[0]!, /footer layout invalid/)
+  assert.equal(applied.length, 0, 'an invalid draft never applies')
+
+  // Scenario B — a VALID draft whose settings write REJECTS notifies
+  // exactly once (the catch), never twice, and never a success message.
+  notifications.length = 0
+  const valid: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'model' }], right: [] }] }
+  const pending = Promise.resolve().then(() => saveCallbacks[0]!(valid, [{ ...known, text: 'NEW' }]))
+  for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  assert.ok(rejectReplace !== undefined, 'the write was reached')
+  rejectReplace!(new Error('disk on fire'))
+  await assert.rejects(() => pending)
+  for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  assert.equal(notifications.length, 1, `a failed write notifies once:\n${notifications.join('\n')}`)
+  assert.match(notifications[0]!, /footer layout save failed/)
+  assert.equal(applied.length, 0, 'a failed write never applies the memory commit')
   app.stop()
 })

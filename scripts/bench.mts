@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
  * @xmoon76/dsh-pi-tui/scripts/bench — non-default performance benchmark
- * (run explicitly: `node scripts/bench.mjs`; never part of the test suite).
+ * (run explicitly: `node --import tsx/esm scripts/bench.mts`; never part of the test suite).
  *
  * Builds synthetic session logs (markdown, diffs, consecutive reads, tool
  * calls, CJK/emoji) and measures, across widths and themes:
  *
+ *   - long-session folds: reasoning-heavy, adjacent-read, and 700k-like
+ *     TranscriptFolder/StatsFolder apply and snapshot timings;
  *   - ingest: TranscriptFolder.apply() time per event count;
  *   - projection: messages() p50/p95/p99 (the incremental read-grouping);
  *   - rebuild: TuiApp.setTranscript cold (full markdown parse) vs warm
@@ -23,6 +25,7 @@
 import xterm from '@xterm/headless'
 import { TuiApp } from '../src/tui-app.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
+import { StatsFolder } from '../src/stats.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TranscriptMessage } from '../src/transcript.ts'
 
@@ -67,7 +70,7 @@ const MARKDOWN_BLOCKS = [
 
 const DIFF_BODY = 'diff --git a/src/a.ts b/src/a.ts\nindex 111..222 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,3 +1,4 @@\n const a = 1\n+const b = 2\n-const old = 3\n // tail'
 
-/** Build `turns` turns of events; each turn ≈ 9 events. */
+/** Build `turns` turns of events; each turn is about 16 events. */
 function buildEvents(turns: number): SessionEvent[] {
   const events: SessionEvent[] = []
   let seq = 0
@@ -126,6 +129,154 @@ function buildEvents(turns: number): SessionEvent[] {
   return events
 }
 
+/** Append a synthetic event while keeping fixture construction readable. */
+function pushEvent(events: SessionEvent[], type: string, data: unknown): void {
+  const seq = events.length
+  events.push({ type, seq, time: seq, data } as SessionEvent)
+}
+
+/** Build reasoning-heavy history: every turn opens a reasoning entry before it settles. */
+function buildReasoningHeavyEvents(turns: number): SessionEvent[] {
+  const events: SessionEvent[] = []
+  for (let turn = 0; turn < turns; turn += 1) {
+    pushEvent(events, 'turn/start', { turn })
+    pushEvent(events, 'step/start', { turn, step: 0 })
+    for (let delta = 0; delta < 4; delta += 1) {
+      pushEvent(events, 'assistant/chunk', {
+        turn,
+        step: 0,
+        chunk: { type: 'reasoning-delta', index: delta, text: `reasoning ${turn}/${delta}` },
+      })
+    }
+    pushEvent(events, 'assistant/message', {
+      turn,
+      step: 0,
+      message: {
+        id: `reasoning-message-${turn}`,
+        role: 'assistant',
+        content: [{ type: 'text', text: `answer ${turn}` }],
+        source: { kind: 'model', provider: 'bench', model: 'bench' },
+      },
+      usage: { inputTokens: 100, outputTokens: 40 },
+    })
+    pushEvent(events, 'step/end', { turn, step: 0 })
+    pushEvent(events, 'turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  return events
+}
+
+/** Build a run of adjacent settled reads to exercise historical grouping. */
+function buildReadHeavyEvents(turns: number, readsPerTurn: number): SessionEvent[] {
+  const events: SessionEvent[] = []
+  let call = 0
+  for (let turn = 0; turn < turns; turn += 1) {
+    pushEvent(events, 'turn/start', { turn })
+    for (let read = 0; read < readsPerTurn; read += 1) {
+      const callId = `read-${call++}`
+      pushEvent(events, 'tool/call', {
+        turn,
+        step: 0,
+        callId,
+        name: 'read',
+        arguments: JSON.stringify({ file: `src/file-${callId}.ts` }),
+      })
+      pushEvent(events, 'tool/result', {
+        turn,
+        step: 0,
+        message: {
+          id: `read-message-${callId}`,
+          role: 'user',
+          content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: `file ${callId}` }] }],
+          source: { kind: 'tool', callId },
+        },
+      })
+    }
+    pushEvent(events, 'turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  return events
+}
+
+const TEXT_HEAVY_BLOCK = 'The long-session fixture keeps a large assistant response and a large tool result in the folded history. '
+
+function repeatedText(length: number): string {
+  return TEXT_HEAVY_BLOCK.repeat(Math.ceil(length / TEXT_HEAVY_BLOCK.length)).slice(0, length)
+}
+
+/** Build one long turn with many settled model steps (tool-loop shape). */
+function buildManyStepEvents(steps: number): SessionEvent[] {
+  const events: SessionEvent[] = []
+  pushEvent(events, 'turn/start', { turn: 0 })
+  for (let step = 0; step < steps; step += 1) {
+    pushEvent(events, 'step/start', { turn: 0, step })
+    pushEvent(events, 'assistant/chunk', {
+      turn: 0,
+      step,
+      chunk: { type: 'text-delta', index: 0, text: 'x' },
+    })
+    pushEvent(events, 'assistant/message', {
+      turn: 0,
+      step,
+      message: {
+        id: `many-step-message-${step}`,
+        role: 'assistant',
+        content: [{ type: 'text', text: 'x' }],
+        source: { kind: 'model', provider: 'bench', model: 'bench' },
+      },
+      usage: { inputTokens: 1, outputTokens: 1 },
+    })
+    pushEvent(events, 'step/end', { turn: 0, step })
+  }
+  pushEvent(events, 'turn/end', { turn: 0, reason: { kind: 'completed' } })
+  return events
+}
+
+/** Build a moderate-size text-heavy log without requiring real tokenization. */
+function buildTextHeavyEvents(turns: number, assistantChars: number, resultChars: number): SessionEvent[] {
+  const events: SessionEvent[] = []
+  for (let turn = 0; turn < turns; turn += 1) {
+    pushEvent(events, 'turn/start', { turn })
+    pushEvent(events, 'user/message', {
+      id: `text-heavy-user-${turn}`,
+      role: 'user',
+      content: [{ type: 'text', text: `summarize fixture ${turn}` }],
+      source: { kind: 'user' },
+    })
+    pushEvent(events, 'step/start', { turn, step: 0 })
+    pushEvent(events, 'assistant/message', {
+      turn,
+      step: 0,
+      message: {
+        id: `text-heavy-assistant-${turn}`,
+        role: 'assistant',
+        content: [{ type: 'text', text: repeatedText(assistantChars) }],
+        source: { kind: 'model', provider: 'bench', model: 'bench' },
+      },
+      usage: { inputTokens: assistantChars, outputTokens: assistantChars },
+    })
+    pushEvent(events, 'step/end', { turn, step: 0 })
+    const callId = `text-heavy-tool-${turn}`
+    pushEvent(events, 'tool/call', {
+      turn,
+      step: 0,
+      callId,
+      name: 'bash',
+      arguments: JSON.stringify({ command: 'cat large-output.txt' }),
+    })
+    pushEvent(events, 'tool/result', {
+      turn,
+      step: 0,
+      message: {
+        id: `text-heavy-result-${turn}`,
+        role: 'user',
+        content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: repeatedText(resultChars) }] }],
+        source: { kind: 'tool', callId },
+      },
+    })
+    pushEvent(events, 'turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  return events
+}
+
 // --- measurement helpers ----------------------------------------------------
 
 function percentile(sorted: number[], p: number): number {
@@ -152,6 +303,11 @@ function fmtMs(ms: number): string {
   return `${ms.toFixed(2)}ms`
 }
 
+/** Keep sub-millisecond projection timings visible in the report. */
+function fmtDuration(ms: number): string {
+  return ms < 1 ? `${(ms * 1000).toFixed(2)}µs` : fmtMs(ms)
+}
+
 /** Run a callback `n` times and return per-call wall times. */
 function timeIt(n: number, run: () => void): number[] {
   const samples: number[] = []
@@ -171,6 +327,63 @@ const STREAM_SAMPLES = FAST ? 50 : 200
 const FULL_SAMPLES = FAST ? 20 : 50
 const HEAP_REBUILDS = FAST ? 300 : 2000
 
+/** Warm one callback, then report its median measured sample. */
+function warmedP50(n: number, run: () => void): number {
+  run()
+  return stats(timeIt(n, run)).p50
+}
+
+/** Long-session projection timings are intentionally separate from renderer timings. */
+interface LongSessionMetrics {
+  transcriptApply: number
+  statsApply: number
+  snapshot: number
+  messages: number
+}
+
+function measureLongSession(events: readonly SessionEvent[]): LongSessionMetrics {
+  const samples = FAST ? 3 : 5
+  const transcriptApply = warmedP50(samples, () => {
+    const folder = new TranscriptFolder()
+    folder.apply(events)
+  })
+  const statsApply = warmedP50(samples, () => {
+    const folder = new StatsFolder()
+    folder.apply(events)
+  })
+  const transcript = new TranscriptFolder()
+  transcript.apply(events)
+  const statsFolder = new StatsFolder()
+  statsFolder.apply(events)
+  // Snapshot is deliberately sampled repeatedly: the A2 regression was an
+  // allocation-free scalar read, not a fold over every historical sample.
+  const snapshot = timeIt(FAST ? 20 : 50, () => { statsFolder.snapshot() })
+  return {
+    transcriptApply,
+    statsApply,
+    snapshot: stats(snapshot).p50,
+    messages: transcript.messages().length,
+  }
+}
+
+/** Measure only the one-turn multi-step stats path. */
+function measureManyStepStats(events: readonly SessionEvent[]): { statsApply: number; snapshot: number } {
+  const statsApply = warmedP50(FAST ? 3 : 5, () => {
+    const folder = new StatsFolder()
+    folder.apply(events)
+  })
+  const folder = new StatsFolder()
+  folder.apply(events)
+  const snapshot = stats(timeIt(FULL_SAMPLES, () => { folder.snapshot() })).p50
+  return { statsApply, snapshot }
+}
+
+function fmtBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes.toFixed(0)} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
+}
+
 // --- the benchmark ----------------------------------------------------------
 
 async function main(): Promise<void> {
@@ -182,12 +395,65 @@ async function main(): Promise<void> {
   // 1. ingest + projection
   for (const turns of [111, 1111, 5555]) {
     const events = buildEvents(turns)
+    // Each timing sample gets a fresh folder. Re-applying the same log to a
+    // stateful folder would benchmark duplicated history, not ingestion.
+    const ingest = warmedP50(FAST ? 3 : 5, () => {
+      const candidate = new TranscriptFolder()
+      candidate.apply(events)
+    })
     const folder = new TranscriptFolder()
-    const ingest = timeIt(3, () => folder.apply(events))
+    folder.apply(events)
     const projection = timeIt(PROJ_SAMPLES, () => folder.messages())
     const st = stats(projection)
-    row(`ingest ${events.length} events (${turns} turns)`, fmtMs(ingest[0]!))
-    row(`  messages() ×200 (${folder.messages().length} messages)`, fmt(st))
+    row(`ingest ${events.length} events (${turns} turns)`, fmtMs(ingest))
+    row(`  messages() ×${PROJ_SAMPLES} (${folder.messages().length} messages)`, fmt(st))
+  }
+
+  // 1a. PR A long-session projection fixtures. These are intentionally
+  // separate from the renderer benchmark so replay/fold regressions remain
+  // visible even when the TUI cache masks them.
+  for (const turns of [100, 500, 1000]) {
+    const events = buildReasoningHeavyEvents(turns)
+    const metrics = measureLongSession(events)
+    const memory = process.memoryUsage()
+    row(`reasoning-heavy ${events.length} events (${turns} turns)`, `${metrics.messages} messages`)
+    row('  TranscriptFolder.apply', fmtMs(metrics.transcriptApply))
+    row('  StatsFolder.apply', fmtMs(metrics.statsApply))
+    row(`  StatsFolder.snapshot ×${FAST ? 20 : 50}`, fmtDuration(metrics.snapshot))
+    row('  memory heapUsed/rss', `${fmtBytes(memory.heapUsed)} / ${fmtBytes(memory.rss)}`)
+  }
+
+  // 1b. Keep the single-turn tool-loop shape visible: settledPerStep must
+  // retain current-turn samples without scanning them on every step event.
+  for (const steps of [100, 500, 1000]) {
+    const events = buildManyStepEvents(steps)
+    const metrics = measureManyStepStats(events)
+    row(`one-turn-many-steps ${events.length} events (${steps} steps)`, `${steps} settled steps`)
+    row('  StatsFolder.apply', fmtMs(metrics.statsApply))
+    row(`  StatsFolder.snapshot ×${FULL_SAMPLES}`, fmtDuration(metrics.snapshot))
+  }
+  {
+    const turns = 1
+    const reads = 1000
+    const events = buildReadHeavyEvents(turns, reads)
+    const metrics = measureLongSession(events)
+    const memory = process.memoryUsage()
+    row(`read-heavy ${events.length} events (${reads} adjacent reads)`, `${metrics.messages} messages`)
+    row('  TranscriptFolder.apply', fmtMs(metrics.transcriptApply))
+    row('  StatsFolder.apply', fmtMs(metrics.statsApply))
+    row(`  StatsFolder.snapshot ×${FAST ? 20 : 50}`, fmtDuration(metrics.snapshot))
+    row('  memory heapUsed/rss', `${fmtBytes(memory.heapUsed)} / ${fmtBytes(memory.rss)}`)
+  }
+  {
+    const turns = 20
+    const events = buildTextHeavyEvents(turns, 18_000, 17_000)
+    const metrics = measureLongSession(events)
+    const memory = process.memoryUsage()
+    row(`700k-like ${events.length} events (${turns} turns, ${turns * (18_000 + 17_000)} chars)`, `${metrics.messages} messages`)
+    row('  TranscriptFolder.apply', fmtMs(metrics.transcriptApply))
+    row('  StatsFolder.apply', fmtMs(metrics.statsApply))
+    row(`  StatsFolder.snapshot ×${FAST ? 20 : 50}`, fmtDuration(metrics.snapshot))
+    row('  memory heapUsed/rss', `${fmtBytes(memory.heapUsed)} / ${fmtBytes(memory.rss)}`)
   }
 
   // 2. rebuild (cold vs warm) across widths, plus the streaming case
@@ -209,17 +475,31 @@ async function main(): Promise<void> {
     row(`rebuild ${messages.length} messages @${width} cols (cold, fresh app)`, fmtMs(cold[0]!))
     row(`  same content (warm cache)`, fmt(stats(warm)))
     // 20 Hz streaming: one assistant message's text replaced per frame.
-    const streaming = [...messages]
-    const target = streaming.findIndex(message => message.kind === 'assistant')
+    // Clone only the target card so the baseline fixture remains immutable for
+    // the fullscreen and heap scenarios below; each frame keeps a fixed-size
+    // replacement instead of appending an ever-growing suffix.
+    const target = messages.findIndex(message => message.kind === 'assistant')
+    const streaming = messages.map((message, index) => {
+      if (index !== target || message.kind !== 'assistant') return message
+      return { ...message }
+    })
+    const streamEntry = streaming[target]
+    const streamBase = streamEntry?.kind === 'assistant' ? streamEntry.text : ''
+    const streamPrefix = streamBase.slice(0, Math.max(0, streamBase.length - 8))
+    let streamFrame = 0
     const warmStream = timeIt(STREAM_SAMPLES, () => {
-      const entry = streaming[target]
-      if (entry !== undefined && entry.kind === 'assistant') entry.text += ' tail'
+      if (streamEntry !== undefined && streamEntry.kind === 'assistant') {
+        streamEntry.text = `${streamPrefix}frame-${String(streamFrame++ % 100).padStart(2, '0')}`
+      }
       app.setTranscript(streaming)
     })
     row(`  streaming 1 message/frame @${width}`, fmt(stats(warmStream)))
-    // Theme switch cost (once per switch).
-    const theme = timeIt(5, () => app.applyTheme('light'))
-    row(`  theme dark→light @${width}`, fmtMs(theme[0]!))
+    // Theme switch cost: alternate palettes so every sample is a real switch.
+    let themeFrame = 0
+    const theme = timeIt(5, () => {
+      app.applyTheme(themeFrame++ % 2 === 0 ? 'light' : 'dark')
+    })
+    row(`  theme dark↔light @${width}`, fmt(stats(theme)))
     app.stop()
   }
 
@@ -247,7 +527,7 @@ async function main(): Promise<void> {
     for (let i = 0; i < HEAP_REBUILDS; i += 1) app.setTranscript(messages)
     gc()
     const after = process.memoryUsage().heapUsed
-    row(`heap growth per warm rebuild (${HEAP_REBUILDS}×, gc)`, `${((after - before) / 2000).toFixed(1)} B/rebuild`)
+    row(`heap growth per warm rebuild (${HEAP_REBUILDS}×, gc)`, `${((after - before) / Math.max(1, HEAP_REBUILDS)).toFixed(1)} B/rebuild`)
     gc()
     const settled = process.memoryUsage().heapUsed
     row(`settled heap for ${messages.length} messages @120`, `${(settled / 1024 / 1024).toFixed(1)} MiB`)

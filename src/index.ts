@@ -87,6 +87,7 @@ import { childOwnEvents, textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
 import { formatStats, StatsFolder } from './stats.ts'
+import { hydrateSessionUi } from './session-ui-hydrate.ts'
 import { plainSectionEqual } from './status/equal.ts'
 import { deriveRunnerPermission } from './status/derive-permission.ts'
 import { StatusStore } from './status/store.ts'
@@ -1067,6 +1068,18 @@ function foldGoal(events: readonly SessionEvent[]): string | undefined {
   return undefined
 }
 
+/** Time one cold-bootstrap fold without changing its authoritative semantics. */
+function timedBootstrapScan<T>(diag: Diag, name: string, eventCount: number, scan: () => T): T {
+  const started = performance.now()
+  const result = scan()
+  diag.debug('session bootstrap scan', {
+    scan: name,
+    eventCount,
+    elapsedMs: Number((performance.now() - started).toFixed(3)),
+  })
+  return result
+}
+
 /** A balanced completed-turn prefix for forking: the log up to (and including)
  * the last `turn/end`. Undefined when no turn has completed yet.
  * @param events - the session log.
@@ -1998,16 +2011,12 @@ export function apply(ctx: Context, config: Config): void {
       }
       return sessionPresetOf(ctx, liveAgent.session)
     }
-    // Incremental fold state for the live session's log; reset on switch. The
-    // folder/stats/goal stay empty until a session exists (deferred start).
+    // Incremental fold state for the live session's log; reset on switch. A
+    // resumed session is hydrated only by initLiveSession below, so startup
+    // wiring never pre-folds the same event log a second time.
     let folder = new TranscriptFolder()
     let statsFolder = new StatsFolder()
     let goalText: string | undefined
-    if (liveAgent !== undefined) {
-      folder.apply(liveAgent.session.events)
-      statsFolder.apply(liveAgent.session.events)
-      goalText = foldGoal(liveAgent.session.events)
-    }
 
     /** Repaint the welcome card from the live agent's current facts. Re-read
      * on every call so a still-blank session's preset switch shows up. */
@@ -5385,7 +5394,9 @@ export function apply(ctx: Context, config: Config): void {
 
     // The TUI-owned slash commands are registered by registerCommands()
     // inside initLiveSession, exactly once after the first session exists.
-    refreshStatus()
+    // The initial status projection is committed after session hydration (or
+    // in the deferred branch below), so a resumed session never paints a
+    // temporary empty stats projection.
     // The persistent dock's task lines + the footer badge follow the
     // background-job registry: every change refreshes the active-task
     // snapshot (no polling). `refreshTasks` is hoisted so the task browser
@@ -5643,13 +5654,51 @@ export function apply(ctx: Context, config: Config): void {
       // the all-directory search): a legacy-only history file in this cwd
       // becomes recoverable immediately, even if it predates this process.
       rememberHistoryCwd(agent.session.header.cwd ?? '')
-      folder = new TranscriptFolder()
-      folder.apply(agent.session.events)
-      statsFolder = new StatsFolder()
-      statsFolder.apply(agent.session.events)
-      goalText = foldGoal(agent.session.events)
-      app.setWorking(workingFromLog(agent.session.events))
-      app.setSessionTitle(foldSessionTitle(agent.session.events)?.title)
+      const events = agent.session.events
+      // This is the single cold-hydration path for a live session. Do not
+      // pre-apply the same event log during runner wiring: a resumed session
+      // otherwise pays for two full transcript and stats replays before its
+      // first usable frame.
+      const hydrated = hydrateSessionUi(events)
+      folder = hydrated.folder
+      statsFolder = hydrated.statsFolder
+      diag.debug('session bootstrap scan', {
+        scan: 'transcript',
+        eventCount: events.length,
+        elapsedMs: Number(hydrated.scanTimings.transcriptMs.toFixed(3)),
+      })
+      diag.debug('session bootstrap scan', {
+        scan: 'stats',
+        eventCount: events.length,
+        elapsedMs: Number(hydrated.scanTimings.statsMs.toFixed(3)),
+      })
+      goalText = timedBootstrapScan(diag, 'goal', events.length, () => foldGoal(events))
+      const working = timedBootstrapScan(diag, 'working', events.length, () => workingFromLog(events))
+      const planMode = timedBootstrapScan(diag, 'plan', events.length, () => foldPlanMode(events))
+      const title = timedBootstrapScan(diag, 'title', events.length, () => foldSessionTitle(events)?.title)
+      app.setPlanMode(planMode)
+      app.setWorking(working)
+      app.setBusy(working)
+      app.setSessionTitle(title)
+      // Session-local bootstrap state must not leak across a switch. Fold the
+      // latest todo snapshot once from the same log (an empty log clears it).
+      const todos = timedBootstrapScan(diag, 'todo', events.length, () => {
+        for (let index = events.length - 1; index >= 0; index -= 1) {
+          const event = events[index]
+          if (event?.type === 'todo/write') return event.data.todos
+        }
+        return []
+      })
+      app.setTodoSummary(todos)
+      // A resumed session may be mid-compaction. Reset the old phase first;
+      // then re-arm only the newest live bracket, matching the log fold.
+      const resumedCompaction = timedBootstrapScan(diag, 'compaction', events.length, () => compactingFromLog(events))
+      compactingId = resumedCompaction.id
+      app.setCompactionPhase(resumedCompaction.active ? 'summarizing' : 'idle')
+      if (resumedCompaction.active) {
+        app.setBusy(true)
+        app.setWorking(true)
+      }
       app.clearLocalMessages()
       app.clearNotify() // a notice from the previous session is stale here
       // Issue #8: a stale armed exit chord must not exit the NEW session.
@@ -6417,38 +6466,10 @@ export function apply(ctx: Context, config: Config): void {
     // accumulate duplicate Host listeners (review finding).
     const disposeCredentialSubscription = backend.config.credentials.onChanged(refreshCredentialSurface)
     lifecycleController.signal.addEventListener('abort', disposeCredentialSubscription, { once: true })
-    // Initial plan badge, busy indicator, and auto title from the log (a
-    // resumed session may be persisted mid-turn). Without a session the
-    // surfaces stay at their idle defaults.
-    if (liveAgent !== undefined) {
-      app.setPlanMode(foldPlanMode(liveAgent.session.events))
-      app.setWorking(workingFromLog(liveAgent.session.events))
-      app.setBusy(workingFromLog(liveAgent.session.events))
-      app.setSessionTitle(foldSessionTitle(liveAgent.session.events)?.title)
-      // Initial compaction state: a resumed session may be persisted
-      // MID-compaction (compaction/start without a matching end) — the
-      // working row shows the unified label and the busy flag keeps the
-      // single-Esc cancel armed. A session/end-seed boundary makes any
-      // EARLIER unmatched start stale (upstream invariant), so only a
-      // bracket in the LIVE part of the log re-arms the surface. The log
-      // holds no summary/end yet, so the safest phase inference is
-      // 'summarizing' (in progress).
-      const resumedCompaction = compactingFromLog(liveAgent.session.events)
-      if (resumedCompaction.active) {
-        compactingId = resumedCompaction.id
-        app.setCompactionPhase('summarizing')
-        app.setBusy(true)
-        app.setWorking(true)
-      }
-      // Initial todo state: the last todo/write snapshot in the log.
-      for (let index = liveAgent.session.events.length - 1; index >= 0; index -= 1) {
-        const event = liveAgent.session.events[index]
-        if (event.type === 'todo/write') {
-          app.setTodoSummary(event.data.todos)
-          break
-        }
-      }
-    }
+    // Plan, busy, title, compaction, and todo bootstrap state are installed by
+    // initLiveSession together with the two hydrated projections. Keeping all
+    // session-owned bootstrap work there avoids a second full-log scan on
+    // resume and also makes session switches restore the same state.
 
     // The interactive answerer: every approval ask becomes a dialog. An
     // already-aborted request settles cancelled synchronously; otherwise the

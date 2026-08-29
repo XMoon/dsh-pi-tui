@@ -4,7 +4,7 @@
 > the optimization (incremental read grouping + per-message render cache) ·
 > Node v26.7.0 · headless xterm at 24 rows · `BENCH_FAST=1` iteration counts.
 >
-> Re-run: `node --expose-gc scripts/bench.mts`
+> Re-run: `node --expose-gc --import tsx/esm scripts/bench.mts`
 > (full sweep without `BENCH_FAST`). The benchmark is NOT part of the test
 > suite — it is a manual, non-default tool by design.
 
@@ -65,6 +65,34 @@
   (0.5ms p50 regardless of the 2220-message transcript);
 - ✅ heap enters a stable range under sustained streaming (growth ≈ 0);
 - ✅ all transcript golden/headless tests keep identical output.
+
+## Long-session projection baseline (PR A)
+
+PR A keeps the full session log and changes only local replay bookkeeping:
+
+- open reasoning entries are indexed by turn, so `turn/end` settles only the
+  still-open entries it owns;
+- decode-window duration is accumulated as a scalar, so
+  `StatsFolder.snapshot()` does not revisit completed samples;
+- resume, create, and session-switch surface setup share
+  `hydrateSessionUi(events)` instead of pre-folding a resumed log and then
+  hydrating it again;
+- the benchmark includes reasoning-heavy, adjacent-read, one-turn-many-step,
+  and a 700k-character text-heavy fixture, and reports transcript/stats apply,
+  snapshot, and heap/RSS measurements separately from renderer timings;
+- late replay timing is fenced to the current turn and ignores token deltas
+  after a step has already settled, so tool-loop replay remains linear.
+
+Run the projection and renderer sweep with:
+
+```sh
+BENCH_FAST=1 node --expose-gc --import tsx/esm scripts/bench.mts
+```
+
+The benchmark is intentionally observational rather than a wall-clock test;
+compare runs on the same machine and Node version. Its semantic gates remain
+cold-fold/incremental parity and the existing transcript/stats regression
+suites.
 
 ## M11: extension-plugin overhead (plan §23)
 

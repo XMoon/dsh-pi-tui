@@ -8,7 +8,10 @@
  * lives in the model (headless-testable).
  *
  * Pages (the plan's hierarchy):
- *   rows  — Row Selector (↑↓ select, Enter edit, S save, Esc cancel)
+ *   rows  — Row Selector (↑↓ select, Enter edit, S save, Esc close; the
+ *           trailing "Save changes" action + Unsaved/No changes status)
+ *   exit-confirm — dirty-Esc guard (Save & Exit / Discard & Exit / Keep
+ *           Editing) — a panel+model mode, never a second overlay
  *   row   — Edit Row (Left/Right as VISUAL grouping; ←→ moves sides)
  *   item  — Item Editor (Style / Text / Default tone / Tone / Advanced…)
  *   style — Style picker (live per-format examples)
@@ -16,6 +19,12 @@
  *   advanced — Prefix / Suffix / Importance inline editors + Reset
  *   add   — searchable Add picker (type to filter; Esc clears first)
  *   row-move — Move Mode (↑↓ reorder within the zone)
+ *
+ * Save transaction (PR E): S, the "Save changes" row and the confirm
+ * page's "Save & Exit" all route through ONE requestSave() — the draft is
+ * captured atomically, onSave is awaited, and the overlay closes only on
+ * RESOLVE. A rejection (already notified by the integration layer) keeps
+ * the configurator open with the draft intact and dirty.
  *
  * All key matches go through the project's matchesKey vocabulary (legacy
  * AND Kitty CSI-u / modifyOtherKeys encodings — no raw sequence compares),
@@ -65,7 +74,12 @@ export interface FooterConfiguratorOptions {
   readonly maxVisible: () => number
   /** Request a render after timer-driven input replay. */
   readonly requestRender?: () => void
-  readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('./custom-items.ts').FooterCustomItemSettings[]) => void
+  /** PR E: the save is AWAITED. Resolve = persisted (and the memory
+   * commit applied) — the host then closes the overlay. Reject = failed:
+   * the integration layer has already notified, and the panel stays open
+   * with the draft intact. A sync `void` return is tolerated (instant
+   * success) for callers without a settings backend. */
+  readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('./custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
   readonly onCancel: () => void
 }
 
@@ -79,7 +93,7 @@ export class FooterConfiguratorPanel implements Component {
   private readonly extensionFooterText: () => string
   private readonly maxVisible: () => number
   private readonly requestRender: () => void
-  private readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('./custom-items.ts').FooterCustomItemSettings[]) => void
+  private readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('./custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
   private readonly onCancel: () => void
   /** The body scrollport's top offset (stable across renders — the cursor
    * scrolls the body minimally; the fixed shell never moves). */
@@ -111,6 +125,11 @@ export class FooterConfiguratorPanel implements Component {
     this.onCancel = options.onCancel
     this.handleInput = (data: string): void => {
       const state = this.model.state()
+      // A save in flight freezes INPUT (PR E §10): the draft captured for
+      // the pending write must stay the draft on screen, duplicate
+      // Enter/S are refused by construction, and Esc can never race a
+      // second close path. Rendering stays live (resize works).
+      if (state.saving) return
       // Text-input pages swallow text keys FIRST (space is a query
       // character there, never the remove action). Text arrives in three
       // shapes — a plain printable chunk, a Kitty CSI-u / modifyOtherKeys
@@ -129,12 +148,22 @@ export class FooterConfiguratorPanel implements Component {
       }
       if (textMode && !this.skipPasteOnce && this.feedPaste(data)) return
       if (matchesKey(data, 'escape')) {
-        // The model navigates back page by page; only the Row Selector's
-        // Esc closes the configurator (cancel without saving).
+        // The model navigates back page by page; a clean Row Selector's
+        // Esc closes, a dirty one opens the exit-confirm page (PR E §7).
         if (!this.model.cancel()) this.onCancel()
         return
       }
       if (matchesKey(data, 'enter')) {
+        if (state.mode === 'rows' && this.model.homeSelection().kind === 'save') {
+          // Enter on the "Save changes" action — the discoverable save
+          // path (PR E §4.1).
+          this.requestSave()
+          return
+        }
+        if (state.mode === 'exit-confirm') {
+          this.runExitChoice(this.model.exitConfirmAction())
+          return
+        }
         this.model.activate()
         return
       }
@@ -153,9 +182,10 @@ export class FooterConfiguratorPanel implements Component {
         // the navigation keys below (arrows move the add list).
       }
       if (state.mode === 'rows' && matchesKey(data, 's')) {
-        // The Row Selector is the save point: S persists the layout and the
-        // definition catalog as one draft snapshot.
-        this.onSave(this.model.preview(), this.model.customItemSettings())
+        // The power-user shortcut shares the ONE save path with the
+        // "Save changes" row and "Save & Exit" (PR E §13) — never a
+        // second save implementation.
+        this.requestSave()
         return
       }
       if (state.mode === 'row') {
@@ -205,6 +235,57 @@ export class FooterConfiguratorPanel implements Component {
     }
   }
 
+  /** The ONE save path (PR E §13): the S shortcut, the Row Selector's
+   * "Save changes" action and the exit-confirm's "Save & Exit" all land
+   * here — saving guard, atomic draft capture, close-on-success only. */
+  private requestSave(): void {
+    if (this.model.state().saving) return
+    // Plan §12: a CLEAN draft has nothing to persist — closing IS the
+    // save outcome. This also keeps an unchanged default/compact footer
+    // from being silently rewritten as footer:'custom' by an idle save.
+    // (The exit-confirm page only exists while dirty, so this branch is
+    // reachable from the selector's S / Save changes row only.)
+    if (!this.model.isDirty()) {
+      this.onCancel()
+      return
+    }
+    this.model.beginSave()
+    this.requestRender()
+    // The draft is captured BEFORE the await: the persistence layer must
+    // observe one atomic snapshot of layout + definitions.
+    const layout = this.model.preview()
+    const customItems = this.model.customItemSettings()
+    void Promise.resolve() // allowlist: the panel is the chain's terminal sink — .then closes on success, .catch keeps the editor open (never rejects unhandled)
+      .then(() => this.onSave(layout, customItems))
+      .then(() => {
+        // Success: the host wrapper has already closed the overlay after
+        // the persistence resolved (PR E §9). Reset the flag for the
+        // disposed-panel edge (a close() that did not dispose us).
+        this.model.endSave()
+      })
+      .catch(() => {
+        // Failure: the integration layer already notified (PR E §11).
+        // The overlay stays open, the draft is untouched, dirty stays
+        // true — the user can keep editing, retry, or Discard & Exit.
+        this.model.endSave()
+        this.requestRender()
+      })
+  }
+
+  /** Dispatch the exit-confirm page's Enter (PR E §7.2). */
+  private runExitChoice(choice: 'save' | 'discard' | 'keep'): void {
+    if (choice === 'save') {
+      this.requestSave()
+      return
+    }
+    if (choice === 'discard') {
+      // Explicit close-without-write: no persistence of layout or
+      // definitions (PR E §7.2 Discard & Exit).
+      this.onCancel()
+    }
+    // 'keep': the model already returned to the Row Selector.
+  }
+
   invalidate(): void {
     // The fork re-renders after every handleInput dispatch; a model
     // mutation from outside (reset helpers) calls this.
@@ -246,7 +327,9 @@ export class FooterConfiguratorPanel implements Component {
       // borders stay visible — the physical minimum).
       return [...head, ...pre].slice(0, budget).map(line => truncateToWidth(line, Math.max(1, width), '…'))
     }
-    const bodyMin = Math.min(body.lines.length, 2)
+    const bodyMin = state.mode === 'exit-confirm' || state.mode === 'rows'
+      ? body.lines.length // PR E §17.9: the guard's question + three actions, and the whole
+      : Math.min(body.lines.length, 2) // selector (rows + Save changes), never scroll away
     let bodyBudget: number
     let previewBlock: string[]
     if (left <= bodyMin + 1) {
@@ -491,6 +574,8 @@ export class FooterConfiguratorPanel implements Component {
         // zone): showing it spares the user guessing where the item will
         // land.
         return `Add Item → Row ${state.rowIndex + 1} · ${state.addSide === 'left' ? 'Left' : 'Right'}`
+      case 'exit-confirm':
+        return 'Unsaved Changes'
       default:
         return 'Configure Footer'
     }
@@ -500,7 +585,9 @@ export class FooterConfiguratorPanel implements Component {
   private help(state: { mode: string; editing: boolean }): string {
     switch (state.mode) {
       case 'rows':
-        return '↑↓ Select · Enter Edit · S Save · Esc Cancel'
+        return '↑↓ Select · Enter Open · S Save · Esc Close'
+      case 'exit-confirm':
+        return '↑↓ Select · Enter Confirm · Esc Keep Editing'
       case 'row':
         return 'A Add · Enter Edit · M Move · ←→ Side · Space Remove · F Style · Esc Back'
       case 'row-move':
@@ -603,7 +690,9 @@ export class FooterConfiguratorPanel implements Component {
       case 'rows': {
         const lines = [color.textStrong('Select row to edit')]
         state.layout.rows.forEach((row, index) => {
-          const active = index === state.rowIndex
+          // The home cursor — not rowIndex — drives the selector highlight
+          // (PR E §4.2: rowIndex stays the EDITED row).
+          const active = index === state.homeCursor
           const marker = active ? color.primary('›') : ' '
           const count = flatLengthOf(row)
           const noun = count === 1 ? 'item' : 'items'
@@ -613,7 +702,36 @@ export class FooterConfiguratorPanel implements Component {
           const line = `${marker} ${active ? color.textStrong(label) : color.text(label)}${' '.repeat(pad)}${color.textMuted(tail)}`
           lines.push(line)
         })
-        return { lines, cursor: 1 + state.rowIndex }
+        // The trailing "Save changes" action (PR E §4/§6): the discoverable
+        // save entry with its transactional status.
+        const saveActive = state.homeCursor >= state.layout.rows.length
+        const status = state.saving
+          ? 'Saving…'
+          : this.model.isDirty() ? 'Unsaved' : 'No changes'
+        const statusPainted = state.saving || !this.model.isDirty()
+          ? color.textMuted(status)
+          : color.warning(status)
+        const pad = Math.max(1, width - 'Save changes'.length - status.length - 4)
+        lines.push(`${saveActive ? color.primary('›') : ' '} ${saveActive ? color.textStrong('Save changes') : color.text('Save changes')}${' '.repeat(pad)}${statusPainted}`)
+        return { lines, cursor: 1 + Math.min(state.homeCursor, state.layout.rows.length) }
+      }
+      case 'exit-confirm': {
+        // PR E §7.2: three explicit exits, no Y/N pair. The save action
+        // reports the in-flight state (PR E §10).
+        const choices = ['Save & Exit', 'Discard & Exit', 'Keep Editing']
+        const activeIndex = Math.min(state.exitConfirmCursor, choices.length - 1)
+        const lines = [color.warning('Save changes before exiting?')]
+        choices.forEach((label, index) => {
+          const active = index === activeIndex
+          const marker = active ? color.primary('›') : ' '
+          const name = active ? color.textStrong(label) : color.text(label)
+          let line = `${marker} ${name}`
+          if (active && label === 'Save & Exit' && state.saving) {
+            line += `${' '.repeat(Math.max(1, 16 - label.length))}${color.textMuted('Saving…')}`
+          }
+          lines.push(line)
+        })
+        return { lines, cursor: 1 + activeIndex }
       }
       case 'row':
       case 'row-move': {
