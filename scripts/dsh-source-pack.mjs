@@ -131,7 +131,8 @@ export function validateSourcePackOutputInfo(outputPath, dshDir) {
   }
   const allowed = entries.every(entry => {
     if (!(entry === SOURCE_MANIFEST_NAME || /^[A-Za-z0-9@._+-]+\.tgz$/u.test(entry))) return false
-    return lstatSync(join(canonicalOutput, entry)).isFile()
+    const info = lstatSync(join(canonicalOutput, entry))
+    return info.isFile() && !info.isSymbolicLink() && info.nlink === 1
   })
   if (!allowed) fail(`refusing to use a source-pack directory with unexpected files: ${requested}`)
   try {
@@ -186,9 +187,10 @@ export function claimSourcePackStaging() {
   const path = mkdtempSync(join(tmpdir(), `dsh-source-pack-stage-${process.pid}-`))
   const parentPath = dirname(path)
   const ancestors = directoryAncestors(parentPath)
+  const parent = lstatSync(parentPath)
   const info = lstatSync(path)
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack staging root is not a real directory: ${path}`)
-  return { path, parentPath, ancestors, parentDev: lstatSync(parentPath).dev, parentIno: lstatSync(parentPath).ino, dev: info.dev, ino: info.ino }
+  return { path, parentPath, ancestors, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
 }
 
 function ownerState(owner) {
@@ -210,9 +212,10 @@ function ownerState(owner) {
 export function claimProducedDirectory(path) {
   const parentPath = dirname(path)
   const ancestors = directoryAncestors(parentPath)
+  const parent = lstatSync(parentPath)
   const info = lstatSync(path)
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack produced an invalid output directory: ${path}`)
-  return { path, parentPath, ancestors, dev: info.dev, ino: info.ino }
+  return { path, parentPath, ancestors, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
 }
 
 /** Open a directory through a stable descriptor where the platform exposes one. */
@@ -231,6 +234,52 @@ export function closeDirectoryHandle(handle) {
   }
 }
 
+/** Move a proved directory through held parent descriptors, never a raced path. */
+// The optional hook exists only for deterministic race regression tests.
+export function renameClaimedDirectory(owner, destinationOwner, destinationName = 'claimed', hooks = undefined) {
+  if (process.platform === 'win32') return false
+  const sourceParent = openDirectoryHandle(owner.parentPath)
+  const destinationParent = openDirectoryHandle(destinationOwner.path)
+  try {
+    if (sourceParent.fd === undefined || destinationParent.fd === undefined) return false
+    const parent = fstatSync(sourceParent.fd)
+    if (parent.dev !== owner.parentDev || parent.ino !== owner.parentIno) return false
+    if (ownerState(owner) !== true || ownerState(destinationOwner) !== true) return false
+    hooks?.beforeRename?.()
+    const currentParent = fstatSync(sourceParent.fd)
+    if (currentParent.dev !== owner.parentDev || currentParent.ino !== owner.parentIno) return false
+    if (ownerState(owner) !== true || ownerState(destinationOwner) !== true) return false
+    renameSync(
+      join(sourceParent.path, basename(owner.path)),
+      join(destinationParent.path, destinationName),
+    )
+    return true
+  } finally {
+    closeDirectoryHandle(sourceParent)
+    closeDirectoryHandle(destinationParent)
+  }
+}
+
+/** Remove an empty proved directory through its held parent descriptor. */
+export function removeEmptyClaimedDirectory(owner) {
+  if (process.platform === 'win32') return false
+  if (ownerState(owner) !== true) return false
+  const parentHandle = openDirectoryHandle(owner.parentPath)
+  try {
+    if (parentHandle.fd === undefined) return false
+    const parent = fstatSync(parentHandle.fd)
+    if (parent.dev !== owner.parentDev || parent.ino !== owner.parentIno || ownerState(owner) !== true) return false
+    try {
+      rmdirSync(join(parentHandle.path, basename(owner.path)))
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+    return ownerState(owner) === undefined
+  } finally {
+    closeDirectoryHandle(parentHandle)
+  }
+}
+
 function writeAll(fd, buffer) {
   let offset = 0
   while (offset < buffer.length) {
@@ -246,8 +295,8 @@ export function copyOwnedFile(source, destination, expected) {
   let destinationFd
   try {
     const opened = fstatSync(sourceFd)
-    if (!opened.isFile() || opened.isSymbolicLink() || opened.dev !== expected.dev || opened.ino !== expected.ino) {
-      fail(`source pack staged file changed before copy: ${source}`)
+    if (!opened.isFile() || opened.isSymbolicLink() || opened.nlink !== 1 || opened.dev !== expected.dev || opened.ino !== expected.ino) {
+      fail(`source pack staged file changed or is hardlinked before copy: ${source}`)
     }
     destinationFd = openSync(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o644)
     const buffer = Buffer.allocUnsafe(1024 * 1024)
@@ -257,8 +306,8 @@ export function copyOwnedFile(source, destination, expected) {
       if (bytes > 0) writeAll(destinationFd, buffer.subarray(0, bytes))
     } while (bytes > 0)
     const after = fstatSync(sourceFd)
-    if (after.dev !== expected.dev || after.ino !== expected.ino || after.size !== opened.size) {
-      fail(`source pack staged file changed during copy: ${source}`)
+    if (after.dev !== expected.dev || after.ino !== expected.ino || after.nlink !== 1 || after.size !== opened.size) {
+      fail(`source pack staged file changed or is hardlinked during copy: ${source}`)
     }
   } finally {
     if (destinationFd !== undefined) closeSync(destinationFd)
@@ -289,26 +338,30 @@ function assertStageOwnership(staging, stageOutput, action) {
 
 /** Quarantine and remove only the directory inode this process claimed. */
 export function removeClaimedSourcePackOutput(owner) {
+  if (process.platform === 'win32') return false
   const state = ownerState(owner)
   if (state === undefined) return true
   if (!state) return false
   // The private quarantine prevents a raced destination path from becoming a
-  // recursive-delete target. If the source path was replaced before rename,
-  // the moved inode fails the proof and this private tree is intentionally kept.
+  // recursive-delete target. The held parent descriptor also prevents an
+  // ancestor replacement from redirecting the rename.
   const quarantineRoot = mkdtempSync(join(tmpdir(), `dsh-source-pack-cleanup-${process.pid}-`))
-  const quarantine = join(quarantineRoot, 'claimed')
+  const quarantineOwner = claimProducedDirectory(quarantineRoot)
+  if (!renameClaimedDirectory(owner, quarantineOwner)) return false
+  const quarantineHandle = openDirectoryHandle(quarantineRoot)
   try {
-    renameSync(owner.path, quarantine)
-  } catch (error) {
-    rmdirSync(quarantineRoot)
-    if (error?.code === 'ENOENT') return true
-    throw error
+    const quarantine = join(quarantineHandle.path, 'claimed')
+    const moved = lstatSync(quarantine)
+    if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== owner.dev || moved.ino !== owner.ino) return false
+    rmSync(quarantine, { recursive: true, force: true })
+  } finally {
+    closeDirectoryHandle(quarantineHandle)
   }
-  const moved = lstatSync(quarantine)
-  if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== owner.dev || moved.ino !== owner.ino) return false
-  rmSync(quarantine, { recursive: true, force: true })
-  rmdirSync(quarantineRoot)
-  return true
+  return removeEmptyClaimedDirectory(quarantineOwner)
+}
+
+export function sourcePackPlatformSupported(platform = process.platform) {
+  return platform !== 'win32'
 }
 
 function parseCli() {
@@ -351,6 +404,7 @@ async function runOfficial(dshDir, args, timeoutMs) {
 }
 
 async function main() {
+  if (!sourcePackPlatformSupported()) fail('DSH source pack requires POSIX directory descriptors and is unsupported on Windows')
   const values = parseCli()
   const configPath = values.config ?? DEFAULT_SOURCE_CONFIG
   const tracked = loadDshSourceConfig(configPath)
@@ -402,7 +456,7 @@ async function main() {
       assertStageOwnership(staging, stageOutputOwner, `filtering ${entry}`)
       const path = join(stageHandle.path, entry)
       const info = lstatSync(path)
-      if (!info.isFile() || info.isSymbolicLink()) fail(`source pack produced a non-regular disposable entry: ${path}`)
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) fail(`source pack produced a non-regular or hardlinked disposable entry: ${path}`)
       unlinkSync(path)
       assertStageOwnership(staging, stageOutputOwner, `filtered ${entry}`)
     }
@@ -444,7 +498,7 @@ async function main() {
       assertClaimedSourcePackOutput(outputOwner, `final copy ${entry}`)
       const source = join(stageHandle.path, entry)
       const info = lstatSync(source)
-      if (!info.isFile() || info.isSymbolicLink()) fail(`source pack staged tarball is not a regular file: ${source}`)
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) fail(`source pack staged tarball is not a regular file with exactly one link: ${source}`)
       copyOwnedFile(source, join(outputHandle.path, entry), info)
       assertClaimedSourcePackOutput(outputOwner, `final copy ${entry}`)
       assertStageOwnership(staging, stageOutputOwner, `staged unlink ${entry}`)

@@ -96,7 +96,10 @@ export function candidateTarball(workspace) {
   const candidates = readdirSync(workspace)
     .filter(name => /^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(name))
     .map(name => join(workspace, name))
-    .filter(path => lstatSync(path).isFile())
+    .filter(path => {
+      const info = lstatSync(path)
+      return info.isFile() && !info.isSymbolicLink() && info.nlink === 1
+    })
   if (candidates.length !== 1) fail(`expected one TUI candidate tarball, found ${candidates.length}`)
   return candidates[0]
 }

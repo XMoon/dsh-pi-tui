@@ -14,7 +14,8 @@ function fail(message) {
 function candidatePath(value) {
   if (typeof value !== 'string' || value.startsWith('--')) fail('usage: dsh-source-leak-gate.mjs <candidate.tgz> [--distribution path]')
   const path = resolve(value)
-  if (!existsSync(path) || !lstatSync(path).isFile()) fail(`candidate tarball must be a regular file: ${value}`)
+  const info = existsSync(path) ? lstatSync(path) : undefined
+  if (!info?.isFile() || info.isSymbolicLink() || info.nlink !== 1) fail(`candidate tarball must be a regular file with exactly one link: ${value}`)
   return path
 }
 

@@ -62,6 +62,10 @@ function stringValue(value, label) {
   return value
 }
 
+function isRegularUnlinkedFile(info) {
+  return info?.isFile() === true && info.isSymbolicLink() === false && info.nlink === 1
+}
+
 function readJson(path, label) {
   try {
     return objectValue(JSON.parse(readFileSync(path, 'utf8')), label)
@@ -214,6 +218,8 @@ function runTarBuffer(args) {
 
 /** Read package/package.json from one official tarball. */
 export function readPackedPackageJson(tarball) {
+  const info = existsSync(tarball) ? lstatSync(tarball) : undefined
+  if (!isRegularUnlinkedFile(info)) fail(`${tarball} must be a regular file with exactly one link`)
   try {
     return objectValue(JSON.parse(runTar(['-xOf', tarball, 'package/package.json'])), `${tarball} package.json`)
   } catch (error) {
@@ -227,7 +233,7 @@ function tgzFiles(directory) {
   return readdirSync(directory)
     .filter(name => name.endsWith('.tgz'))
     .map(name => join(directory, name))
-    .filter(path => lstatSync(path).isFile())
+    .filter(path => isRegularUnlinkedFile(lstatSync(path)))
     .sort()
 }
 
@@ -245,8 +251,8 @@ function safeDistributionFile(directory, fileName) {
     fail(`DSH distribution artifact escapes its directory: ${fileName}`)
   }
   const info = existsSync(path) ? lstatSync(path) : undefined
-  if (info === undefined || !info.isFile() || info.isSymbolicLink()) {
-    fail(`DSH distribution artifact must be a regular file: ${path}`)
+  if (!isRegularUnlinkedFile(info)) {
+    fail(`DSH distribution artifact must be a regular file with exactly one link: ${path}`)
   }
   const canonical = realpathSync(path)
   const canonicalRel = relative(root, canonical)
@@ -315,7 +321,7 @@ export function validateSourceDistribution(input, options = {}) {
     const path = join(directory, name)
     const info = lstatSync(path)
     const allowedName = name === SOURCE_MANIFEST_NAME || name.endsWith('.tgz')
-    return !allowedName || !info.isFile()
+    return !allowedName || !isRegularUnlinkedFile(info)
   })
   if (unexpectedFiles.length > 0) fail(`DSH distribution contains unexpected top-level file(s): ${unexpectedFiles.join(', ')}`)
   if (manifest.schemaVersion !== 1) fail('DSH distribution schemaVersion must be 1')
@@ -372,8 +378,8 @@ export function loadDshDistributionManifest(path, options = {}) {
     : resolved
   if (!existsSync(manifestPath)) fail(`DSH distribution manifest is missing: ${manifestPath}`)
   const manifestInfo = lstatSync(manifestPath)
-  if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink()) {
-    fail(`DSH distribution manifest must be a regular file: ${manifestPath}`)
+  if (!isRegularUnlinkedFile(manifestInfo)) {
+    fail(`DSH distribution manifest must be a regular file with exactly one link: ${manifestPath}`)
   }
   const manifest = readJson(manifestPath, 'DSH distribution manifest')
   return validateSourceDistribution({ manifest, directory }, options)

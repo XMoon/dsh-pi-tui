@@ -323,13 +323,17 @@ function resolveDshDistribution(args, targetVersion) {
 function resolveTarball(explicit) {
   if (explicit !== undefined) {
     const absolute = resolve(explicit)
-    if (!existsSync(absolute) || !lstatSync(absolute).isFile()) fail('INFRA_INSTALL_FAILURE', `candidate tarball not found: ${explicit}`)
+    const info = existsSync(absolute) ? lstatSync(absolute) : undefined
+    if (!info?.isFile() || info.isSymbolicLink() || info.nlink !== 1) fail('INFRA_INSTALL_FAILURE', `candidate tarball not found or is not a regular file with exactly one link: ${explicit}`)
     return absolute
   }
   const candidates = readdirSync(PACKAGE_ROOT)
     .filter(name => /^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(name))
     .map(name => join(PACKAGE_ROOT, name))
-    .filter(path => lstatSync(path).isFile())
+    .filter(path => {
+      const info = lstatSync(path)
+      return info.isFile() && !info.isSymbolicLink() && info.nlink === 1
+    })
   if (candidates.length === 0) {
     fail('INFRA_INSTALL_FAILURE', `no candidate tarball in ${PACKAGE_ROOT}; run pnpm pack:release first`)
   }

@@ -50,6 +50,9 @@ pnpm release:pack --family dsh --out "$TMPDIR/dsh-source-pack"
 `dsh-source-pack.mjs` performs this sequence, validates the exact checkout SHA,
 reads package identity from each tarball's embedded manifest, removes the
 registry-only `publish-order.txt`, and writes the source distribution manifest.
+The packer intentionally requires POSIX directory-descriptor support; the CI
+source-pack job runs on Ubuntu. On Windows, verify a downloaded source pack with
+`--distribution` instead of attempting to generate one locally.
 For the complete isolated TUI flow use `pnpm compat:dsh:source`; do not replace
 it with direct workspace links. If the official pack already exists, reuse it
 without rebuilding DSH:

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join, resolve } from 'node:path'
@@ -21,6 +21,8 @@ import {
   officialCommandEnvironment,
   openDirectoryHandle,
   removeClaimedSourcePackOutput,
+  renameClaimedDirectory,
+  sourcePackPlatformSupported,
   validateSourcePackOutput,
   validateSourcePackOutputInfo,
 } from '../scripts/dsh-source-pack.mjs'
@@ -275,19 +277,62 @@ test('source verification workspace cleanup preserves a replaced root', () => {
   }
 })
 
-test('source pack rejects staged directory and file replacement races', () => {
+test('source pack declares its Windows publication boundary', () => {
+  assert.equal(sourcePackPlatformSupported('win32'), false)
+  assert.equal(sourcePackPlatformSupported('linux'), true)
+  assert.equal(sourcePackPlatformSupported('darwin'), true)
+})
+
+test('source pack cleanup refuses an ancestor replacement between proof and rename', t => {
+  if (process.platform === 'win32') {
+    t.skip('descriptor cleanup is unavailable on Windows')
+    return
+  }
+  const root = mkdtempSync(join(tmpdir(), 'dsh-cleanup-race-test-'))
+  const parent = join(root, 'parent')
+  const movedParent = join(root, 'moved-parent')
+  mkdirSync(parent)
+  const owner = claimSourcePackOutput(join(parent, 'output'))
+  const destination = claimSourcePackStaging()
+  try {
+    assert.equal(renameClaimedDirectory(owner, destination, 'claimed', {
+      beforeRename() {
+        renameSync(parent, movedParent)
+        mkdirSync(parent)
+      },
+    }), false)
+    assert.equal(existsSync(join(movedParent, 'output')), true)
+    assert.equal(existsSync(join(destination.path, 'claimed')), false)
+  } finally {
+    assert.equal(removeClaimedSourcePackOutput(destination), true)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('source pack rejects staged directory and file replacement races', t => {
+  if (process.platform === 'win32') {
+    t.skip('descriptor cleanup is unavailable on Windows')
+    return
+  }
   const staging = claimSourcePackStaging()
   try {
     const stageOutput = join(staging.path, 'output')
     mkdirSync(stageOutput)
     const stageOwner = claimProducedDirectory(stageOutput)
     const source = join(stageOutput, 'package.tgz')
+    const hardlink = join(stageOutput, 'package-hardlink.tgz')
     const destination = join(staging.path, 'copy.tgz')
     writeFileSync(source, 'original')
+    linkSync(source, hardlink)
+    const hardlinkInfo = lstatSync(hardlink)
+    assert.ok(hardlinkInfo.nlink > 1)
+    assert.throws(() => copyOwnedFile(hardlink, destination, hardlinkInfo), /hardlinked/u)
+    assert.equal(existsSync(destination), false)
+    rmSync(hardlink)
     const expected = lstatSync(source)
     rmSync(source)
     writeFileSync(source, 'replacement')
-    assert.throws(() => copyOwnedFile(source, destination, expected), /changed before copy/u)
+    assert.throws(() => copyOwnedFile(source, destination, expected), /hardlinked|before copy/u)
     assert.equal(existsSync(destination), false)
     rmSync(stageOutput, { recursive: true, force: true })
     mkdirSync(stageOutput)

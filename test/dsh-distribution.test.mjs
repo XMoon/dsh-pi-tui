@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -102,6 +103,22 @@ test('source distribution validates embedded package identity, not filenames', (
     assert.equal(distribution.kind, 'source-pack')
     assert.deepEqual([...distribution.packages.keys()], [DSH_CLI_PACKAGE, '@deepseek-ai/dsh-agent'])
     assert.equal(distribution.packages.get(DSH_CLI_PACKAGE).fileName, 'not-the-cli-name.tgz')
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true })
+  }
+})
+
+test('source distribution rejects hardlinked tarballs', () => {
+  const fixture = makeDistribution({ required: [DSH_CLI_PACKAGE] })
+  const original = join(fixture.directory, fixture.manifest.packages[DSH_CLI_PACKAGE])
+  const hardlink = join(fixture.directory, 'hardlinked-cli.tgz')
+  linkSync(original, hardlink)
+  fixture.manifest.packages[DSH_CLI_PACKAGE] = 'hardlinked-cli.tgz'
+  try {
+    expectDistributionFailure(
+      () => validateSourceDistribution({ manifest: fixture.manifest, directory: fixture.directory }, { packageJson: fixture.packageJson }),
+      /unexpected top-level/u,
+    )
   } finally {
     rmSync(fixture.directory, { recursive: true, force: true })
   }

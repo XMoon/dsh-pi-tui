@@ -50,13 +50,17 @@ function candidateArgument(value) {
 export function resolveTarball(explicit, packageRoot = PACKAGE_ROOT) {
   if (explicit !== undefined) {
     const path = resolve(explicit)
-    if (!existsSync(path) || !lstatSync(path).isFile()) throw new Error(`candidate tarball must be a regular file: ${explicit}`)
+    const info = existsSync(path) ? lstatSync(path) : undefined
+    if (!info?.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new Error(`candidate tarball must be a regular file with exactly one link: ${explicit}`)
     return path
   }
   const candidates = readdirSync(packageRoot)
     .filter(name => /^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(name))
     .map(name => join(packageRoot, name))
-    .filter(path => lstatSync(path).isFile())
+    .filter(path => {
+      const info = lstatSync(path)
+      return info.isFile() && !info.isSymbolicLink() && info.nlink === 1
+    })
   if (candidates.length === 0) throw new Error(`no candidate tarball in ${packageRoot}; run pnpm pack:release first`)
   if (candidates.length > 1) throw new Error(`expected one candidate tarball, found ${candidates.map(basename).join(', ')}`)
   return candidates[0]
