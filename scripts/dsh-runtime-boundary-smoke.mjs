@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { pnpmExecutable } from './lib/process.mjs'
+import { cleanupTimedOutProcessTree, pnpmExecutable } from './lib/process.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -31,7 +31,10 @@ const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|does not provide an export|Cann
 const EXPECTED_BOUNDARY_IMPORT = /@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|session|session-persistence|settings)/iu
 
 function run(command, args, options = {}) {
-  return spawnSync(command, args, { encoding: 'utf8', ...options })
+  const detached = options.detached ?? process.platform !== 'win32'
+  const result = spawnSync(command, args, { encoding: 'utf8', ...options, detached })
+  cleanupTimedOutProcessTree(result, { detached })
+  return result
 }
 
 function outputOf(result) {

@@ -13,15 +13,17 @@
  * @module dsh-source-pack
  */
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 import { fileURLToPath } from 'node:url'
 
 import {
   DEFAULT_SOURCE_CONFIG,
+  DSH_CLI_PACKAGE,
   PACKAGE_ROOT,
   SOURCE_MANIFEST_NAME,
+  loadDshDistributionManifest,
   packageMapFromTarballs,
   loadDshSourceConfig,
   validateDshSourceConfig,
@@ -49,6 +51,19 @@ function pathInside(child, parent) {
   return relativePath === '' || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`))
 }
 
+/** Resolve existing path components so symlinked parents cannot bypass roots. */
+function canonicalPath(path) {
+  const missing = []
+  let current = resolve(path)
+  while (!existsSync(current)) {
+    const parent = dirname(current)
+    if (parent === current) return current
+    missing.unshift(basename(current))
+    current = parent
+  }
+  return missing.reduce((parent, entry) => join(parent, entry), realpathSync(current))
+}
+
 /**
  * Validate an output path before the packer removes/recreates it. Existing
  * directories are replaceable only when they are clearly prior source-pack
@@ -57,8 +72,11 @@ function pathInside(child, parent) {
 export function validateSourcePackOutput(outputPath, dshDir) {
   const output = resolve(outputPath)
   const source = resolve(dshDir)
-  if (pathInside(output, source)) fail(`source pack output must not be inside the DSH checkout: ${output}`)
-  if (pathInside(output, PACKAGE_ROOT)) fail(`source pack output must not be inside the TUI checkout: ${output}`)
+  const canonicalOutput = canonicalPath(output)
+  const canonicalSource = canonicalPath(source)
+  const canonicalTui = canonicalPath(PACKAGE_ROOT)
+  if (pathInside(canonicalOutput, canonicalSource)) fail(`source pack output must not be inside the DSH checkout: ${output}`)
+  if (pathInside(canonicalOutput, canonicalTui)) fail(`source pack output must not be inside the TUI checkout: ${output}`)
   const parent = dirname(output)
   if (parent === output || dirname(parent) === parent) {
     fail(`source pack output must be a dedicated child directory: ${output}`)
@@ -69,24 +87,22 @@ export function validateSourcePackOutput(outputPath, dshDir) {
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output must be a real directory: ${output}`)
   const entries = readdirSync(output)
   if (entries.length === 0) return output
-  const manifestPath = join(output, SOURCE_MANIFEST_NAME)
   if (!entries.includes(SOURCE_MANIFEST_NAME)) {
     fail(`refusing to remove non-source-pack directory: ${output}`)
   }
-  try {
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-    if (manifest?.schemaVersion !== 1 || manifest?.mode !== 'source-pack') {
-      fail(`refusing to remove an unrecognized source-pack directory: ${output}`)
-    }
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith('refusing to remove')) throw error
-    fail(`refusing to remove an invalid source-pack directory: ${output}`)
-  }
   const allowed = entries.every(entry => {
-    if (!(entry === SOURCE_MANIFEST_NAME || entry === 'publish-order.txt' || /^[A-Za-z0-9@._+-]+\.tgz$/u.test(entry))) return false
+    if (!(entry === SOURCE_MANIFEST_NAME || /^[A-Za-z0-9@._+-]+\.tgz$/u.test(entry))) return false
     return lstatSync(join(output, entry)).isFile()
   })
   if (!allowed) fail(`refusing to remove a source-pack directory with unexpected files: ${output}`)
+  try {
+    loadDshDistributionManifest(output, {
+      packageJson: {},
+      requiredPackages: [DSH_CLI_PACKAGE],
+    })
+  } catch (error) {
+    fail(`refusing to remove an invalid source-pack directory: ${output}${error instanceof Error ? `: ${error.message}` : ''}`)
+  }
   return output
 }
 

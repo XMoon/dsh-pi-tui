@@ -51,7 +51,7 @@ import {
   restoreDshInstall,
   sourceInstallPackages,
 } from './lib/dsh-distribution.mjs'
-import { pnpmExecutable } from './lib/process.mjs'
+import { cleanupTimedOutProcessTree, pnpmExecutable } from './lib/process.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -123,13 +123,7 @@ function run(command, args, options = {}) {
     timeout,
     detached,
   })
-  if (result.error?.code === 'ETIMEDOUT' && detached && process.platform !== 'win32' && typeof result.pid === 'number') {
-    try {
-      process.kill(-result.pid, 'SIGKILL')
-    } catch {
-      // The child group may have exited between the timeout and this cleanup.
-    }
-  }
+  cleanupTimedOutProcessTree(result, { detached })
   return result
 }
 

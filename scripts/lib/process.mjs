@@ -39,9 +39,44 @@ export function pnpmExecutable() {
 
 const active = new Set()
 let forwardingSignal = false
+let pendingSignal
+let signalExitScheduled = false
 
 function signalNumber(signal) {
   return signal === 'SIGINT' ? 130 : 143
+}
+
+function scheduleSignalExit() {
+  if (pendingSignal === undefined || signalExitScheduled) return
+  signalExitScheduled = true
+  setImmediate(() => {
+    signalExitScheduled = false
+    if (active.size === 0) process.exit(signalNumber(pendingSignal))
+  })
+}
+
+function maybeExitAfterCleanup() {
+  if (active.size === 0) scheduleSignalExit()
+}
+
+/** Clean descendants left behind by a synchronous spawnSync timeout. */
+export function cleanupTimedOutProcessTree(result, options = {}) {
+  if (result?.error?.code !== 'ETIMEDOUT' || typeof result.pid !== 'number') return
+  const platform = options.platform ?? process.platform
+  if (platform === 'win32') {
+    try {
+      ;(options.spawnSync ?? spawnSync)('taskkill', ['/pid', String(result.pid), '/t', '/f'], { stdio: 'ignore', timeout: 5_000 })
+    } catch {
+      // The child may have exited between the timeout and tree cleanup.
+    }
+    return
+  }
+  if (options.detached === false) return
+  try {
+    ;(options.kill ?? process.kill)(-result.pid, 'SIGKILL')
+  } catch {
+    // The child group may have exited between the timeout and this cleanup.
+  }
 }
 
 function killProcessGroup(record, signal) {
@@ -69,11 +104,12 @@ function killProcessGroup(record, signal) {
 function forwardSignal(signal) {
   if (forwardingSignal) return
   forwardingSignal = true
+  pendingSignal = signal
   for (const record of active) {
     killProcessGroup(record, signal)
     killProcessGroup(record, 'SIGKILL')
   }
-  setTimeout(() => process.exit(signalNumber(signal)), 50).unref()
+  scheduleSignalExit()
 }
 
 process.once('SIGINT', () => forwardSignal('SIGINT'))
@@ -120,6 +156,7 @@ export function runBounded(command, args, options = {}) {
       if (!record.timedOut) clearTimeout(killTimeout)
       active.delete(record)
       resolve(result)
+      maybeExitAfterCleanup()
     }
 
     timeout = setTimeout(() => {

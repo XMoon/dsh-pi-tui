@@ -8,7 +8,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, type Config } from '../src/index.ts'
 import { StatsFolder } from '../src/stats.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
@@ -23,8 +23,15 @@ function event<K extends SessionEvent['type']>(
   type: K,
   data: SessionEvent<K>['data'],
   seq: number,
+  surfaceOp?: 'append',
 ): SessionEvent {
-  return { type, seq, time: 1_700_000_000_000 + seq * 1000, data } as SessionEvent
+  return {
+    type,
+    seq,
+    time: 1_700_000_000_000 + seq * 1000,
+    data,
+    ...(surfaceOp === undefined ? {} : { surfaceOp }),
+  } as SessionEvent
 }
 
 function sessionEvents(text: string): SessionEvent[] {
@@ -46,7 +53,7 @@ function sessionEvents(text: string): SessionEvent[] {
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 10, outputTokens: 2 },
-    }, 3),
+    }, 3, 'append'),
     event('step/end', { turn: 0, step: 0 }, 4),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
   ]
@@ -96,7 +103,11 @@ function makeHarness(home: string, initial?: FakeSession): RunnerHarness {
 
   const persistence = {
     list: async () => [...persisted.values()].map(session => session.header),
-    inspect: async (id: unknown) => ({ events: persisted.get(String(id))?.events ?? [] }),
+    inspect: async (id: unknown) => {
+      const session = persisted.get(String(id))
+      if (session === undefined) throw new Error(`unknown test session ${String(id)}`)
+      return { meta: session.header, events: session.events }
+    },
     readRaw: async () => undefined,
     locate: ({ id }: { id: string }) => ({ kind: 'session', path: join(home, 'sessions', `${id}.jsonl`) }),
   }
@@ -110,7 +121,7 @@ function makeHarness(home: string, initial?: FakeSession): RunnerHarness {
       const id = String(sessionId)
       const session: FakeSession = {
         id,
-        header: { id, cwd: home, createdAt: Date.now(), version: 1 },
+        header: { id, cwd: home, createdAt: Date.now(), version: SESSION_FORMAT_VERSION },
         events: sessionEvents('created answer'),
       }
       persisted.set(id, session)
@@ -231,7 +242,7 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
   try {
     const resumed: FakeSession = {
       id: 'runner-session-a',
-      header: { id: 'runner-session-a', cwd: home, createdAt: 1_700_000_000_000, version: 1 },
+      header: { id: 'runner-session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
       events: sessionEvents('resumed answer'),
     }
     const resumeHarness = makeHarness(home, resumed)

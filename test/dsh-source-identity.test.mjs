@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
@@ -84,11 +84,13 @@ test('source pack refuses destructive output directories', () => {
     writeFileSync(join(arbitrary, 'sentinel.txt'), 'do not delete')
     assert.throws(() => validateSourcePackOutput(arbitrary, checkout), /refusing to remove/u)
     assert.throws(() => validateSourcePackOutput(fileURLToPath(new URL('../', import.meta.url)), checkout), /TUI checkout/u)
+    symlinkSync(checkout, join(root, 'checkout-link'), 'dir')
+    assert.throws(() => validateSourcePackOutput(join(root, 'checkout-link', 'out'), checkout), /DSH checkout/u)
     assert.doesNotThrow(() => validateSourcePackOutput(join(root, 'new-pack'), checkout))
 
     mkdirSync(prior)
     writeFileSync(join(prior, 'dsh-source-distribution.json'), JSON.stringify({ schemaVersion: 1, mode: 'source-pack' }))
-    assert.equal(validateSourcePackOutput(prior, checkout), prior)
+    assert.throws(() => validateSourcePackOutput(prior, checkout), /invalid source-pack directory/u)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
