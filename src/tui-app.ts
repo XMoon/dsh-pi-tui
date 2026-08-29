@@ -2234,8 +2234,15 @@ export class TuiApp {
     this.tui = new TuiMainScreen(resizeAware)
     // The host default editor is the TuiEditor subclass: kimi parity for
     // `@dir/` mention completion (Tab-accepting a directory reopens the
-    // dropdown at its children; Esc closes it without re-triggering).
-    this.editor = new TuiEditor(this.tui, editorTheme)
+    // dropdown at its children; Esc closes it without re-triggering). Its
+    // render requests route through TuiApp.requestRender so the editor's
+    // own state changes — above all the ASYNC autocomplete commit, which
+    // fires long after the keystroke that started it — always repaint the
+    // CURRENTLY ACTIVE screen (the captured main screen is stopped in
+    // fullscreen; routing there left a hidden-but-active dropdown).
+    this.editor = new TuiEditor(this.tui, editorTheme, {
+      requestRender: (force) => this.requestRender(force),
+    })
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
       // The shell-editor-mode boundary: the editor buffer holds the bare
@@ -2448,37 +2455,32 @@ export class TuiApp {
     this.tui.addChild(this.widgetsBelow)
     this.tui.addChild(this.footer)
     this.tui.setFocus(this.editor)
-    // Input routes through routeInput (see its doc): the autocomplete
-    // repaint must follow every keystroke on whichever screen renders.
+    // Input routes through routeInput (see its doc): every screen's input
+    // funnels through the app's single dispatch path.
     this.tui.addInputListener((data) => this.routeInput(data))
   }
 
   /**
-   * App-level input routing plus the autocomplete repaint. The editor's
-   * slash-command autocomplete resolves on a promise microtask AFTER the
-   * keystroke's own paint, and the editor's own render requests go to the
-   * MAIN screen — which is STOPPED while the alt screen renders (fullscreen),
-   * so its renderRequested flag is stuck true and every request is dropped:
-   * the fresh suggestion list would never paint (the visible frame always
-   * shows the previous query's results — typing /res keeps showing /reload
-   * first). Schedule a forced frame on the ACTIVE screen once the provider's
-   * continuation has applied the fresh list. Deliberately a dsh-side fix:
-   * the vendored fork stays pristine (see AGENTS.md decision 8).
+   * App-level input routing: every screen's raw input (main + fullscreen)
+   * funnels through the app's single dispatch path, so shortcuts, question
+   * flows and the editor see one consistent key stream regardless of which
+   * screen is active.
+   *
+   * Repaint ownership (the old autocomplete bridge is GONE): the editor
+   * emits a render request for its own visible state at the exact moment it
+   * changes — including the ASYNC autocomplete commit, which lands long
+   * after the keystroke that started it — and TuiEditor routes that request
+   * into {@link TuiApp.requestRender}, which targets the current active
+   * screen. The former double-microtask guess ("the provider probably
+   * finished within two microtasks of the keystroke") missed every commit
+   * that took longer (directory accept's 20ms debounce + fd/fallback
+   * discovery) and forced a redundant full redraw on every keystroke while
+   * a dropdown was open; the routed render view replaces both behaviors
+   * deterministically.
    * @param data - the raw input sequence.
    */
   private routeInput(data: string): TuiInputListenerResult {
-    const result = this.handleInput(data)
-    // Two hops: the first microtask is queued BEFORE the editor's
-    // autocomplete continuation, so the check must be deferred to a second
-    // microtask that runs after the fresh list has been applied (otherwise
-    // the very first keystroke, whose state is still null at check time,
-    // never paints).
-    queueMicrotask(() => {
-      queueMicrotask(() => {
-        if (this.editor.isShowingAutocomplete()) this.requestRender(true)
-      })
-    })
-    return result
+    return this.handleInput(data)
   }
 
   /** Enter raw mode and start rendering. */
