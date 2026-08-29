@@ -168,6 +168,127 @@ test('StatsFolder matches computeStats and folds incrementally', () => {
   )
 })
 
+test('StatsFolder stores sampled decode duration as a scalar', () => {
+  const t = 1_700_000_000_000
+  const folder = new StatsFolder()
+  folder.apply([
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: 'answer' },
+    }, 1, t + 100),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('m-scalar'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'answer' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 10, outputTokens: 100 },
+    }, 2, t + 1_100),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 1_200),
+    event('step/start', { turn: 0, step: 1 }, 4, t + 2_000),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 1,
+      chunk: { type: 'text-delta', index: 0, text: 'more' },
+    }, 5, t + 2_100),
+    event('assistant/message', {
+      turn: 0,
+      step: 1,
+      message: {
+        id: MessageId('m-scalar-2'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'more' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 5, outputTokens: 50 },
+    }, 6, t + 2_600),
+    event('step/end', { turn: 0, step: 1 }, 7, t + 2_700),
+  ])
+  const throughput = (folder as unknown as { throughput: { outputMsTotal: number; outputMs?: unknown } }).throughput
+  assert.equal(throughput.outputMsTotal, 1_500)
+  assert.equal(throughput.outputMs, undefined, 'a long session must not retain every decode sample')
+  assert.equal(folder.snapshot().tokensPerSec, 100)
+  assert.equal(folder.snapshot().outputTokens, 150)
+})
+
+test('duplicate assistant messages settle timing only once', () => {
+  const t = 1_700_000_000_000
+  const message = (seq: number, time: number, outputTokens = 100): SessionEvent => event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId(`m-duplicate-${seq}`),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    usage: { inputTokens: 10, outputTokens },
+  }, seq, time)
+  const log = [
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: 'answer' },
+    }, 1, t + 100),
+    message(2, t + 1_000),
+    // A duplicate authoritative event is anomalous, but must not turn one
+    // model step into two timing/throughput samples.
+    message(3, t + 2_000, 200),
+    event('step/end', { turn: 0, step: 0 }, 4, t + 2_100),
+  ]
+  const oneShot = computeStats(log)
+  const folder = new StatsFolder()
+  folder.apply(log)
+  assert.equal(oneShot.llmMs, 1_000)
+  assert.equal(oneShot.firstTokenMsAvg, 100)
+  assert.equal(oneShot.tokensPerSec, 222)
+  assert.equal(oneShot.outputTokens, 200)
+  assert.deepEqual(folder.snapshot(), oneShot)
+})
+
+test('late assistant usage after step/end replaces the sampled throughput token count', () => {
+  const t = 1_700_000_000_000
+  const assistantMessage = (seq: number, time: number, outputTokens: number): SessionEvent => event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId(`m-late-${seq}`),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    usage: { inputTokens: 10, outputTokens },
+  }, seq, time)
+  const prefix = [
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: 'answer' },
+    }, 1, t + 100),
+    assistantMessage(2, t + 1_000, 100),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 1_100),
+  ]
+  const late = assistantMessage(4, t + 2_000, 200)
+  const suffix = [late, event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5, t + 2_100)]
+  const oneShot = computeStats([...prefix, ...suffix])
+  const folder = new StatsFolder()
+  folder.apply(prefix)
+  assert.equal(folder.snapshot().tokensPerSec, 111)
+  assert.equal((folder as unknown as { perStep: Map<unknown, unknown> }).perStep.size, 0)
+  folder.apply(suffix)
+  assert.equal(folder.snapshot().outputTokens, 200)
+  assert.equal(folder.snapshot().tokensPerSec, 222)
+  assert.deepEqual(folder.snapshot(), oneShot)
+  assert.equal((folder as unknown as { settledPerStep: Map<unknown, unknown> }).settledPerStep.size, 0)
+})
+
 test('formats the stats line in pi abbreviation vocabulary', () => {
   const line = formatStats({
     turns: 2,

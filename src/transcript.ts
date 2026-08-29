@@ -416,6 +416,10 @@ export class TranscriptFolder {
   private readonly assistantEntries = new Map<string, Extract<TranscriptMessage, { kind: 'assistant' }>>()
   /** The thinking entry object per (turn, step), for in-place text updates. */
   private readonly thinkingEntries = new Map<string, Extract<TranscriptMessage, { kind: 'thinking' }>>()
+  /** Thinking entries that still need a lifecycle boundary to settle. The
+   * complete entry map above is retained for replay updates; this index keeps
+   * turn/end from revisiting settled history. */
+  private readonly openThinkingByTurn = new Map<number, Set<Extract<TranscriptMessage, { kind: 'thinking' }>>>()
   /** Tool calls awaiting their result, keyed by callId with their running card. */
   private readonly pendingCalls = new Map<string, { name: string; args: string; turn: number; card: Extract<TranscriptMessage, { kind: 'tool' }>; index: number }>()
   /** Tool names by callId, for result pairing. */
@@ -831,6 +835,23 @@ export class TranscriptFolder {
     return this.windowedMessages(maxTurns)
   }
 
+  /** Remove one thinking entry from the open-lifecycle index. */
+  private closeThinking(entry: Extract<TranscriptMessage, { kind: 'thinking' }>): void {
+    entry.running = false
+    const open = this.openThinkingByTurn.get(entry.turn)
+    if (open === undefined) return
+    open.delete(entry)
+    if (open.size === 0) this.openThinkingByTurn.delete(entry.turn)
+  }
+
+  /** Settle only the thinking entries owned by one ended turn. */
+  private closeThinkingForTurn(turn: number): void {
+    const open = this.openThinkingByTurn.get(turn)
+    if (open === undefined) return
+    for (const entry of open) entry.running = false
+    this.openThinkingByTurn.delete(turn)
+  }
+
   /** The thinking entry object for one (turn, step), created on first reasoning. */
   private thinkingEntry(turn: number, step: number): Extract<TranscriptMessage, { kind: 'thinking' }> {
     const key = stepKey(turn, step)
@@ -838,6 +859,12 @@ export class TranscriptFolder {
     if (entry === undefined) {
       entry = { kind: 'thinking', turn, text: '', running: true }
       this.thinkingEntries.set(key, entry)
+      let open = this.openThinkingByTurn.get(turn)
+      if (open === undefined) {
+        open = new Set()
+        this.openThinkingByTurn.set(turn, open)
+      }
+      open.add(entry)
       this.appendItem(entry)
     }
     return entry
@@ -1058,6 +1085,7 @@ export class TranscriptFolder {
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
         const key = stepKey(event.data.turn, event.data.step)
+        const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
         const text = textOf(messageBlocks)
         const entry = this.assistantEntries.get(key)
@@ -1075,15 +1103,18 @@ export class TranscriptFolder {
           this.assistantEntries.set(key, created)
           this.appendItem(created)
         }
-        // The step is complete: its thinking entry stops streaming.
+        // The step is complete: its thinking entry stops streaming and leaves
+        // the open-lifecycle index, so a later turn/end never revisits it.
         const thinking = this.thinkingEntries.get(key)
-        if (thinking !== undefined) thinking.running = false
+        if (thinking !== undefined) this.closeThinking(thinking)
         // Focus aggregation: the settled assistant text OVERWRITES the
         // candidate's text (authoritative — plan §5.4) but does NOT decide
         // whether it is the final answer; the candidate keeps its step
         // identity and the turn/end resolution decides. The final answer
         // never enters the Message slot (plan §22).
-        activity.assistantMessages += 1
+        // Count one settled output per step; a late duplicate may replace the
+        // transcript text but must not inflate Focus activity.
+        if (!alreadySettled) activity.assistantMessages += 1
         // Every accepted authoritative message settles its step's output —
         // EMPTY and image-only messages included: a later text-delta for
         // it is a replay artifact and must never resurrect a preview
@@ -1263,13 +1294,16 @@ export class TranscriptFolder {
         // synthetic cards or re-settle the activity (review finding).
         const endActivity = this.activityFor(event.data.turn)
         if (endActivity.completed) break
-        // Every thinking entry stops streaming when the turn closes
-        // (interrupted steps never see their assistant/message).
-        for (const entry of this.thinkingEntries.values()) entry.running = false
+        // Every still-open thinking entry of THIS turn stops streaming when
+        // the turn closes (interrupted steps never see their
+        // assistant/message). Settled entries were removed when their
+        // assistant/message arrived, so this is proportional to the open
+        // work rather than to the full history.
         // The synthetic cards carry the EVENT's own turn — never
         // this.currentTurn: a turn-start-less fragment's end must land in
         // its own turn (review finding).
         const endTurn = event.data.turn
+        this.closeThinkingForTurn(endTurn)
         if (event.data.reason.kind === 'error') {
           // Defensive: a malformed/legacy reason without the error detail
           // degrades to the bare marker instead of crashing the fold
