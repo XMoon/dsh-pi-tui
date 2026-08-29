@@ -183,6 +183,24 @@ test('source distribution rejects wrong SHA, version, duplicate paths, and non-f
   }
 })
 
+test('source distribution rejects tarball symlinks outside the artifact root', () => {
+  const fixture = makeDistribution({ required: [DSH_CLI_PACKAGE] })
+  const external = mkdtempSync(join(tmpdir(), 'dsh-external-artifact-test-'))
+  try {
+    const fileName = fixture.manifest.packages[DSH_CLI_PACKAGE]
+    const externalTarball = tarPackage(external, fileName, { name: DSH_CLI_PACKAGE, version: VERSION })
+    rmSync(join(fixture.directory, fileName))
+    symlinkSync(externalTarball, join(fixture.directory, fileName))
+    expectDistributionFailure(
+      () => loadDshDistributionManifest(fixture.directory, { packageJson: fixture.packageJson }),
+      /regular file/u,
+    )
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true })
+    rmSync(external, { recursive: true, force: true })
+  }
+})
+
 test('source distribution overrides have exact package coverage and fail before install targets disappear', () => {
   const required = [DSH_CLI_PACKAGE, '@deepseek-ai/dsh-agent']
   const fixture = makeDistribution({ required })

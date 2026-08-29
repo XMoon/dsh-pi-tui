@@ -12,6 +12,7 @@
 import { spawnSync } from 'node:child_process'
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -222,11 +223,11 @@ export function readPackedPackageJson(tarball) {
 }
 
 function tgzFiles(directory) {
-  if (!existsSync(directory) || !statSync(directory).isDirectory()) fail(`DSH distribution directory is missing: ${directory}`)
+  if (!existsSync(directory) || !lstatSync(directory).isDirectory()) fail(`DSH distribution directory is missing: ${directory}`)
   return readdirSync(directory)
     .filter(name => name.endsWith('.tgz'))
     .map(name => join(directory, name))
-    .filter(path => statSync(path).isFile())
+    .filter(path => lstatSync(path).isFile())
     .sort()
 }
 
@@ -236,15 +237,23 @@ function safeDistributionFile(directory, fileName) {
     || !fileName.endsWith('.tgz')) {
     fail(`DSH distribution artifact must be a single relative .tgz filename: ${JSON.stringify(fileName)}`)
   }
-  if (!existsSync(directory) || !statSync(directory).isDirectory()) fail(`DSH distribution directory is missing: ${directory}`)
+  if (!existsSync(directory) || !lstatSync(directory).isDirectory()) fail(`DSH distribution directory is missing: ${directory}`)
   const root = realpathSync(directory)
   const path = resolve(directory, fileName)
   const rel = relative(root, path)
   if (rel === '' || rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) {
     fail(`DSH distribution artifact escapes its directory: ${fileName}`)
   }
-  if (!existsSync(path) || !statSync(path).isFile()) fail(`DSH distribution artifact is missing: ${path}`)
-  return path
+  const info = existsSync(path) ? lstatSync(path) : undefined
+  if (info === undefined || !info.isFile() || info.isSymbolicLink()) {
+    fail(`DSH distribution artifact must be a regular file: ${path}`)
+  }
+  const canonical = realpathSync(path)
+  const canonicalRel = relative(root, canonical)
+  if (canonicalRel === '' || canonicalRel.startsWith(`..${sep}`) || canonicalRel === '..' || isAbsolute(canonicalRel)) {
+    fail(`DSH distribution artifact escapes its directory: ${fileName}`)
+  }
+  return canonical
 }
 
 export function packageMapFromTarballs(directory, expectedVersion) {
@@ -301,7 +310,7 @@ export function validateSourceDistribution(input, options = {}) {
   const directory = resolve(options.directory ?? input.directory ?? '.')
   const manifest = input.manifest ?? input
   objectValue(manifest, 'DSH distribution manifest')
-  if (!existsSync(directory) || !statSync(directory).isDirectory()) fail(`DSH distribution directory is missing: ${directory}`)
+  if (!existsSync(directory) || !lstatSync(directory).isDirectory()) fail(`DSH distribution directory is missing: ${directory}`)
   const unexpectedFiles = readdirSync(directory).filter(name => name !== SOURCE_MANIFEST_NAME && !name.endsWith('.tgz'))
   if (unexpectedFiles.length > 0) fail(`DSH distribution contains unexpected top-level file(s): ${unexpectedFiles.join(', ')}`)
   if (manifest.schemaVersion !== 1) fail('DSH distribution schemaVersion must be 1')
@@ -351,11 +360,16 @@ export function validateSourceDistribution(input, options = {}) {
 /** Load a source distribution directory or its JSON manifest. */
 export function loadDshDistributionManifest(path, options = {}) {
   const resolved = resolve(path)
-  const directory = existsSync(resolved) && statSync(resolved).isDirectory() ? resolved : dirname(resolved)
-  const manifestPath = existsSync(resolved) && statSync(resolved).isDirectory()
+  const resolvedInfo = existsSync(resolved) ? lstatSync(resolved) : undefined
+  const directory = resolvedInfo?.isDirectory() === true ? resolved : dirname(resolved)
+  const manifestPath = resolvedInfo?.isDirectory() === true
     ? join(resolved, SOURCE_MANIFEST_NAME)
     : resolved
   if (!existsSync(manifestPath)) fail(`DSH distribution manifest is missing: ${manifestPath}`)
+  const manifestInfo = lstatSync(manifestPath)
+  if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink()) {
+    fail(`DSH distribution manifest must be a regular file: ${manifestPath}`)
+  }
   const manifest = readJson(manifestPath, 'DSH distribution manifest')
   return validateSourceDistribution({ manifest, directory }, options)
 }
