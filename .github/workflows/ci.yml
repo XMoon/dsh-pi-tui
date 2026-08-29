@@ -235,6 +235,12 @@ jobs:
                PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
                PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
                pnpm install --frozen-lockfile
+             {
+               echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+               echo 'npm_config_registry=https://registry.npmjs.org/'
+               echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+               echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+             } >> "$GITHUB_ENV"
           fi
 
       - name: Typecheck vendored pi-tui
@@ -334,6 +340,12 @@ jobs:
                PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
                PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
                pnpm install --frozen-lockfile
+             {
+               echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+               echo 'npm_config_registry=https://registry.npmjs.org/'
+               echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+               echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+             } >> "$GITHUB_ENV"
           fi
 
       - name: Build, test and pack
@@ -472,6 +484,12 @@ jobs:
                PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
                PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
                pnpm install --frozen-lockfile
+             {
+               echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+               echo 'npm_config_registry=https://registry.npmjs.org/'
+               echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+               echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+             } >> "$GITHUB_ENV"
           fi
 
       - name: Download release tarball
@@ -561,6 +579,12 @@ jobs:
                PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
                PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
                pnpm install --frozen-lockfile
+             {
+               echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+               echo 'npm_config_registry=https://registry.npmjs.org/'
+               echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+               echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+             } >> "$GITHUB_ENV"
           fi
 
       - name: Download release tarball
@@ -672,6 +696,12 @@ jobs:
                PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
                PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
                pnpm install --frozen-lockfile
+             {
+               echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+               echo 'npm_config_registry=https://registry.npmjs.org/'
+               echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+               echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+             } >> "$GITHUB_ENV"
           fi
 
       - name: Download release tarball
