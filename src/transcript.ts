@@ -1457,8 +1457,9 @@ export class TranscriptFolder {
         // After turn/end the Tool slot was settled: a late result (replay
         // artifact) must not mutate it (review finding). The transcript
         // card still settles.
-        if (!activity.completed && activity.tool?.callId === key) {
-          activity.tool.status = status
+        const activeTool = activity.tool
+        if (!activity.completed && activeTool?.callId === key) {
+          activeTool.status = status
           activity.revision += 1
         }
         break
