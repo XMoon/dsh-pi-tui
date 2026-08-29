@@ -126,6 +126,20 @@ function sourcePackOutput(values) {
   return resolve(values.out ?? join(tmpdir(), `dsh-source-pack-${process.pid}`))
 }
 
+function directoryAncestors(path) {
+  const ancestors = []
+  let current = path
+  while (true) {
+    const info = lstatSync(current)
+    if (!info.isDirectory() || info.isSymbolicLink()) fail(`source distribution ancestor must be a real directory: ${current}`)
+    ancestors.push({ path: current, dev: info.dev, ino: info.ino })
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return ancestors
+}
+
 /** Require the inode proof emitted by the source pack before cleanup. */
 function generatedDistributionOwner(directory, manifest) {
   const identity = manifest?.outputIdentity
@@ -133,28 +147,34 @@ function generatedDistributionOwner(directory, manifest) {
     fail(`generated source distribution has no output ownership proof: ${directory}`)
   }
   const parentPath = dirname(directory)
-  const parent = lstatSync(parentPath)
+  const ancestors = directoryAncestors(parentPath)
   const info = lstatSync(directory)
-  if (!parent.isDirectory() || parent.isSymbolicLink() || !info.isDirectory() || info.isSymbolicLink()
-    || String(info.dev) !== identity.dev || String(info.ino) !== identity.ino) {
+  if (!info.isDirectory() || info.isSymbolicLink() || String(info.dev) !== identity.dev || String(info.ino) !== identity.ino) {
     fail(`generated source distribution ownership changed: ${directory}`)
   }
-  return { path: directory, parentPath, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
+  return { path: directory, parentPath, ancestors, dev: info.dev, ino: info.ino }
+}
+
+function generatedOwnerState(owner) {
+  try {
+    for (const ancestor of owner.ancestors) {
+      const info = lstatSync(ancestor.path)
+      if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== ancestor.dev || info.ino !== ancestor.ino) return false
+    }
+    const info = lstatSync(owner.path)
+    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+    return true
+  } catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    throw error
+  }
 }
 
 /** Quarantine and remove a generated distribution only while its proved inode is intact. */
 function removeGeneratedDistribution(owner) {
-  let parent
-  let info
-  try {
-    parent = lstatSync(owner.parentPath)
-    info = lstatSync(owner.path)
-  } catch (error) {
-    if (error?.code === 'ENOENT') return true
-    throw error
-  }
-  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.dev !== owner.parentDev || parent.ino !== owner.parentIno
-    || !info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+  const state = generatedOwnerState(owner)
+  if (state === undefined) return true
+  if (!state) return false
   const quarantine = join(owner.parentPath, `.dsh-source-verify-cleanup-${process.pid}-${randomUUID()}`)
   try {
     renameSync(owner.path, quarantine)

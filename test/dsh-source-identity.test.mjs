@@ -16,6 +16,7 @@ import {
   officialCommandEnvironment,
   removeClaimedSourcePackOutput,
   validateSourcePackOutput,
+  validateSourcePackOutputInfo,
 } from '../scripts/dsh-source-pack.mjs'
 import { sourceConfigForArgs } from '../scripts/official-presets-smoke.mjs'
 import { installEnvironment } from '../scripts/prepare-dsh-test-environment.mjs'
@@ -205,7 +206,7 @@ test('source pack refuses destructive output directories', () => {
   }
 })
 
-test('source pack cleanup preserves a replacement after the staging inode changes', () => {
+test('source pack ownership survives output and ancestor replacement', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsh-output-owner-test-'))
   try {
     const owner = claimSourcePackOutput(join(root, 'pack'))
@@ -215,6 +216,31 @@ test('source pack cleanup preserves a replacement after the staging inode change
     assert.equal(removeClaimedSourcePackOutput(owner), false)
     assert.equal(readFileSync(join(owner.path, 'sentinel.txt'), 'utf8'), 'replacement must survive')
     rmSync(owner.path, { recursive: true, force: true })
+
+    const nestedParent = join(root, 'nested-parent')
+    mkdirSync(nestedParent)
+    const nestedOwner = claimSourcePackOutput(join(nestedParent, 'pack'))
+    rmSync(nestedOwner.path, { recursive: true, force: true })
+    rmSync(nestedOwner.parentPath, { recursive: true, force: true })
+    mkdirSync(nestedOwner.parentPath)
+    mkdirSync(nestedOwner.path)
+    writeFileSync(join(nestedOwner.path, 'sentinel.txt'), 'parent replacement must survive')
+    assert.equal(removeClaimedSourcePackOutput(nestedOwner), false)
+    assert.equal(readFileSync(join(nestedOwner.path, 'sentinel.txt'), 'utf8'), 'parent replacement must survive')
+
+    const ancestorRoot = join(root, 'ancestor-root')
+    const ancestorParent = join(ancestorRoot, 'parent')
+    const sourceRoot = join(root, 'source-root')
+    mkdirSync(ancestorParent, { recursive: true })
+    mkdirSync(sourceRoot)
+    const validation = validateSourcePackOutputInfo(join(ancestorParent, 'pack'), sourceRoot)
+    rmSync(ancestorRoot, { recursive: true, force: true })
+    mkdirSync(ancestorParent, { recursive: true })
+    assert.throws(
+      () => claimSourcePackOutput(validation.path, validation),
+      /source pack output ancestor changed/u,
+    )
+    assert.equal(existsSync(validation.path), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

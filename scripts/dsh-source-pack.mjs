@@ -75,17 +75,39 @@ function canonicalPath(path) {
   return missing.reduce((parent, entry) => join(parent, entry), realpathSync(current))
 }
 
+/** Record every existing canonical directory ancestor from the deepest anchor. */
+function directoryAncestors(anchor) {
+  const ancestors = []
+  let current = anchor
+  while (true) {
+    const info = lstatSync(current)
+    if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output ancestor must be a real directory: ${current}`)
+    ancestors.push({ path: current, dev: info.dev, ino: info.ino })
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return ancestors
+}
+
 /**
  * Validate an output path before the packer claims it. Existing directories
  * are never replaced: callers must choose a fresh dedicated output path so
  * cleanup cannot destroy an arbitrary filesystem tree.
  */
-export function validateSourcePackOutput(outputPath, dshDir) {
+export function validateSourcePackOutputInfo(outputPath, dshDir) {
   const requested = resolve(outputPath)
   const source = resolve(dshDir)
   const requestedInfo = existsSync(requested) ? lstatSync(requested) : undefined
   if (requestedInfo?.isSymbolicLink()) fail(`source pack output must not be a symlink: ${requested}`)
   const canonicalOutput = canonicalPath(requested)
+  const outputExists = existsSync(canonicalOutput)
+  const anchor = outputExists ? dirname(canonicalOutput) : (() => {
+    let current = canonicalOutput
+    while (!existsSync(current)) current = dirname(current)
+    return current
+  })()
+  const ancestors = directoryAncestors(anchor)
   const canonicalSource = canonicalPath(source)
   const canonicalTui = canonicalPath(PACKAGE_ROOT)
   if (pathInside(canonicalOutput, canonicalSource)) fail(`source pack output must not be inside the DSH checkout: ${requested}`)
@@ -94,7 +116,7 @@ export function validateSourcePackOutput(outputPath, dshDir) {
   if (parent === canonicalOutput || dirname(parent) === parent) {
     fail(`source pack output must be a dedicated child directory: ${requested}`)
   }
-  if (!existsSync(canonicalOutput)) return canonicalOutput
+  if (!outputExists) return { path: canonicalOutput, anchor, ancestors }
 
   const info = lstatSync(canonicalOutput)
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output must be a real directory: ${requested}`)
@@ -119,49 +141,70 @@ export function validateSourcePackOutput(outputPath, dshDir) {
   fail(`source pack output already exists; remove it before packing: ${requested}`)
 }
 
+export function validateSourcePackOutput(outputPath, dshDir) {
+  return validateSourcePackOutputInfo(outputPath, dshDir).path
+}
+
+/** Confirm that every canonical ancestor still has its validated inode. */
+function verifyAncestors(ancestors, action) {
+  for (const ancestor of ancestors) {
+    let info
+    try {
+      info = lstatSync(ancestor.path)
+    } catch (error) {
+      if (error?.code === 'ENOENT') fail(`source pack output ancestor disappeared during ${action}: ${ancestor.path}`)
+      throw error
+    }
+    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== ancestor.dev || info.ino !== ancestor.ino) {
+      fail(`source pack output ancestor changed during ${action}: ${ancestor.path}`)
+    }
+  }
+}
+
 /** Atomically claim an absent output directory before any packer writes to it. */
-export function claimSourcePackOutput(output) {
+export function claimSourcePackOutput(output, validation = undefined) {
   const parentPath = dirname(output)
+  const expectedAncestors = validation?.ancestors ?? directoryAncestors(parentPath)
+  verifyAncestors(expectedAncestors, 'claim')
   mkdirSync(parentPath, { recursive: true })
   const parent = lstatSync(parentPath)
   if (!parent.isDirectory() || parent.isSymbolicLink()) fail(`source pack output parent is not a real directory: ${parentPath}`)
+  verifyAncestors(expectedAncestors, 'claim')
   mkdirSync(output)
   const info = lstatSync(output)
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output claim is not a real directory: ${output}`)
-  return { path: output, parentPath, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
+  const ancestors = directoryAncestors(parentPath)
+  verifyAncestors(expectedAncestors, 'claim')
+  return { path: output, parentPath, ancestors, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
 }
 
-/** Verify that the process still owns the claimed output and its parent. */
-function assertClaimedSourcePackOutput(owner, action) {
-  let parent
-  let info
+function ownerState(owner) {
   try {
-    parent = lstatSync(owner.parentPath)
-    info = lstatSync(owner.path)
+    for (const ancestor of owner.ancestors) {
+      const info = lstatSync(ancestor.path)
+      if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== ancestor.dev || info.ino !== ancestor.ino) return false
+    }
+    const info = lstatSync(owner.path)
+    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+    return true
   } catch (error) {
-    if (error?.code === 'ENOENT') fail(`source pack output disappeared during ${action}: ${owner.path}`)
+    if (error?.code === 'ENOENT') return undefined
     throw error
   }
-  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.dev !== owner.parentDev || parent.ino !== owner.parentIno
-    || !info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) {
-    fail(`source pack output ownership changed during ${action}: ${owner.path}`)
-  }
-  return info
+}
+
+/** Verify that the process still owns the claimed output and every ancestor. */
+function assertClaimedSourcePackOutput(owner, action) {
+  const state = ownerState(owner)
+  if (state === undefined) fail(`source pack output disappeared during ${action}: ${owner.path}`)
+  if (!state) fail(`source pack output ownership changed during ${action}: ${owner.path}`)
 }
 
 /** Quarantine and remove only the directory inode this process claimed. */
 export function removeClaimedSourcePackOutput(owner) {
-  let parent
-  let info
-  try {
-    parent = lstatSync(owner.parentPath)
-    info = lstatSync(owner.path)
-  } catch (error) {
-    if (error?.code === 'ENOENT') return true
-    throw error
-  }
-  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.dev !== owner.parentDev || parent.ino !== owner.parentIno
-    || !info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+  const state = ownerState(owner)
+  if (state === undefined) return true
+  if (!state) return false
   const quarantine = join(owner.parentPath, `.dsh-source-pack-cleanup-${process.pid}-${randomUUID()}`)
   try {
     renameSync(owner.path, quarantine)
@@ -232,8 +275,9 @@ async function main() {
   })
   if (identity.dirty) console.error('WARNING: DIRTY DSH SOURCE TREE (reproducible = false)')
 
-  const output = validateSourcePackOutput(values.out ?? DEFAULT_OUTPUT, identity.directory)
-  const owner = claimSourcePackOutput(output)
+  const validation = validateSourcePackOutputInfo(values.out ?? DEFAULT_OUTPUT, identity.directory)
+  const output = validation.path
+  const owner = claimSourcePackOutput(output, validation)
   try {
     assertClaimedSourcePackOutput(owner, 'initialization')
     await runOfficial(identity.directory, ['install', '--frozen-lockfile'], OFFICIAL_TIMEOUTS.install)
