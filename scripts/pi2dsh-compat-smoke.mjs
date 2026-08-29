@@ -4,16 +4,19 @@
  * pi2dsh consumer against the target DSH version recorded in
  * test/compat/pi2dsh.json.
  *
- * The gate installs the exact published DSH and pi2dsh versions into an
- * isolated temporary profile, adds an unmodified Pi-shaped fixture, and drives
- * the resulting TUI through tmux. The fixture is intentionally not allowed to
+ * The gate first reads the published pi2dsh metadata and blocks an unsupported
+ * DSH/TUI peer contract before attempting runtime installation. If that passes,
+ * it installs the exact published DSH and pi2dsh versions into an isolated
+ * temporary profile, adds an unmodified Pi-shaped fixture, and drives the
+ * resulting TUI through tmux. The fixture is intentionally not allowed to
  * import this repository or any pi2dsh private module.
  *
  * Usage: node scripts/pi2dsh-compat-smoke.mjs [path-to-candidate-tgz]
  *        pnpm smoke:pi2dsh -- [path-to-candidate-tgz]
  *
  * Set PI2DSH_COMPAT_DEBUG_DIR to preserve pane.txt, tui.log, evidence.json,
- * and versions.json when the gate fails. Set PI2DSH_COMPAT_KEEP=1 to retain
+ * header-evidence.json, and versions.json when the gate fails. Set
+ * PI2DSH_COMPAT_KEEP=1 to retain
  * the complete temporary test environment as well.
  * @module pi2dsh-compat-smoke
  */
@@ -36,12 +39,12 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep as pathSeparator } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
+import semver from 'semver'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
-const EXPECTED_PI2DSH_VERSION = '0.20.0'
-const EXPECTED_DSH_VERSION = '0.1.2-alpha.1'
+const CONSUMER_PACKAGE_NAME = 'pi2dsh'
 const OFFICIAL_PRESET_IDS = ['standard', 'ptc', 'minimal', 'cordis']
 const MANIFEST_PATH = join(PACKAGE_ROOT, 'test', 'compat', 'pi2dsh.json')
 const FIXTURE_ROOT = join(PACKAGE_ROOT, 'test', 'fixtures', 'pi2dsh-compat')
@@ -204,11 +207,73 @@ function assertNoCompatibilityFailures(tuiLog, tmux) {
   }
 }
 
+const ANSI_OSC = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)/gu
+const ANSI_CSI = /\u001b\[[0-?]*[ -/]*[@-~]/gu
+const CURSOR_MARKER = /\u001b_pi:c\u0007/gu
+
+function stripTerminalControl(text) {
+  return String(text).replace(ANSI_OSC, '').replace(ANSI_CSI, '').replace(CURSOR_MARKER, '')
+}
+
+function roundedFrameBody(pane) {
+  const lines = stripTerminalControl(pane).split(/\r?\n/u)
+  const start = lines.findLastIndex(line => line.includes('╭'))
+  if (start < 0) return []
+  const end = lines.findIndex((line, index) => index > start && line.includes('╰'))
+  return end < 0 ? [] : lines.slice(start + 1, end)
+}
+
+function settingsSearchSnapshot(pane) {
+  const body = roundedFrameBody(pane)
+  const searchVisible = body.some(line => line.includes('Type to search'))
+  const query = body[0]
+    ?.replace(/^\s*│?\s*>\s*/u, '')
+    .replace(/\s*│\s*$/u, '')
+    .trim() ?? ''
+  const commandRows = body.flatMap(line => {
+    const match = line.match(/(?:^|│)\s*(?:❯|>)?\s*(\/[A-Za-z][A-Za-z0-9_-]*)(?=\s|│|$)/u)
+    return match === null ? [] : [match[1]]
+  })
+  return {
+    searchVisible,
+    query,
+    commandRows,
+    noMatches: body.some(line => line.includes('No matching settings')),
+  }
+}
+
+const PRESET_DEGRADATION_PATTERNS = [
+  /\blaunch preset unavailable\b/iu,
+  /\bpreset resolution failed at startup\b/iu,
+  /\bskill catalog unavailable for preset\b/iu,
+  /\bpreset\b[^\n]*(?:did not mount|failed to mount|mount failed)\b/iu,
+  /\b(?:fallback|falling back)\b[^\n]*\bdefault\b/iu,
+  /\bstanding\b[^\n]*(?:mount|preset)[^\n]*(?:fail|unavailable|error)\b/iu,
+]
+
+function presetDegradationLine(text) {
+  return stripTerminalControl(text).split(/\r?\n/u).find(line =>
+    PRESET_DEGRADATION_PATTERNS.some(pattern => pattern.test(line)))
+}
+
 function assertOfficialPresetMounted(presetId, tuiLog, tmux) {
   const text = `${readText(tuiLog)}\n${tmux.capturePane()}`
-  const fallback = text.split(/\r?\n/u).find(line => /tui-runner:\s*launch preset unavailable/iu.test(line))
-  if (fallback !== undefined) {
-    fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} did not mount; TUI fell back to the default: ${fallback.trim()}`)
+  const degradation = presetDegradationLine(text)
+  if (degradation !== undefined) {
+    fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} degraded instead of mounting: ${degradation.trim()}`)
+  }
+}
+
+function assertOfficialPresetHeader(presetId, evidencePath) {
+  const evidence = readOptionalJson(evidencePath)
+  if (evidence?.error !== undefined) {
+    fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} durable header probe failed: ${String(evidence.error)}`)
+  }
+  if (evidence?.agentPreset !== presetId) {
+    fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} durable header mismatch: ${String(evidence?.agentPreset ?? '(missing)')}`)
+  }
+  if (typeof evidence?.sessionId !== 'string' || evidence.sessionId.length === 0) {
+    fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} durable header probe returned no session id`)
   }
 }
 
@@ -275,17 +340,54 @@ function validateManifest(manifest) {
   if (!exactVersion.test(manifest.pi2dshVersion ?? '')) {
     fail('COMPAT_BOOT_FAILURE', 'pi2dsh compatibility manifest must pin an exact pi2dsh version')
   }
-  if (manifest.pi2dshVersion !== EXPECTED_PI2DSH_VERSION) {
-    fail('COMPAT_BOOT_FAILURE', `pi2dsh compatibility manifest must pin ${EXPECTED_PI2DSH_VERSION}`)
-  }
   if (!exactVersion.test(manifest.dshVersion ?? '')) {
     fail('COMPAT_BOOT_FAILURE', 'pi2dsh compatibility manifest must pin an exact target DSH version')
   }
-  if (manifest.dshVersion !== EXPECTED_DSH_VERSION) {
-    fail('COMPAT_BOOT_FAILURE', `pi2dsh compatibility manifest must pin ${EXPECTED_DSH_VERSION}`)
-  }
   if (!Array.isArray(manifest.contracts) || REQUIRED_CONTRACTS.some(contract => !manifest.contracts.includes(contract))) {
     fail('COMPAT_BOOT_FAILURE', 'pi2dsh compatibility manifest is missing a required contract')
+  }
+}
+
+function relevantDshPeerEntries(packageJson) {
+  return Object.entries(packageJson?.peerDependencies ?? {})
+    .filter(([name, range]) => (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
+      && typeof range === 'string' && range.trim() !== '')
+}
+
+function rangeIncludesVersion(range, version) {
+  if (typeof range !== 'string' || semver.valid(version) === null) return false
+  try {
+    return semver.validRange(range) !== null && semver.satisfies(version, range)
+  } catch {
+    return false
+  }
+}
+
+function validateConsumerMetadata(consumerPackage, manifest, candidatePackage) {
+  const consumerName = typeof consumerPackage?.name === 'string' ? consumerPackage.name : 'pi2dsh'
+  const consumerVersion = typeof consumerPackage?.version === 'string' ? consumerPackage.version : '(unknown version)'
+  const peerDependencies = consumerPackage?.peerDependencies
+  const tuiRange = peerDependencies?.[EXPECTED_PACKAGE_NAME]
+  const dshPeers = relevantDshPeerEntries(consumerPackage)
+  const unsupportedDshPeers = dshPeers.filter(([, range]) => !rangeIncludesVersion(range, manifest.dshVersion))
+  const problems = []
+
+  if (!rangeIncludesVersion(tuiRange, candidatePackage.version)) {
+    problems.push(`  ${EXPECTED_PACKAGE_NAME}: ${typeof tuiRange === 'string' ? tuiRange : '(missing)'}`)
+  }
+  if (dshPeers.length === 0) {
+    problems.push('  @deepseek-ai/dsh-* peers: (none declared)')
+  } else {
+    for (const [name, range] of unsupportedDshPeers) problems.push(`  ${name}: ${range}`)
+  }
+  if (problems.length > 0) {
+    fail('ECOSYSTEM_CONTRACT_BLOCKER', [
+      `${consumerName}@${consumerVersion} does not declare support for:`,
+      `  DSH ${manifest.dshVersion}`,
+      `  ${EXPECTED_PACKAGE_NAME} ${candidatePackage.version}`,
+      'Declared ranges that do not cover the candidate:',
+      ...problems,
+    ].join('\n'))
   }
 }
 
@@ -499,6 +601,7 @@ function isolatedEnvironment(workDir, home, dshHome, evidencePath) {
     HOME: home,
     DSH_HOME: dshHome,
     PI2DSH_COMPAT_EVIDENCE: evidencePath,
+    PI2DSH_COMPAT_HEADER_EVIDENCE: join(workDir, 'header-evidence.json'),
     npm_config_registry: 'https://registry.npmjs.org',
     NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
     npm_config_minimum_release_age: '0',
@@ -552,6 +655,30 @@ function packageMetadata(profileDir, packageName) {
   return readOptionalJson(path)
 }
 
+function publishedPackageMetadata(packageName, version, env) {
+  const spec = `${packageName}@${version}`
+  const result = run('npm', [
+    'view', spec, '--json', '--registry=https://registry.npmjs.org',
+  ], { cwd: PACKAGE_ROOT, env, timeout: SUBPROCESS_TIMEOUTS.install })
+  if (result.status !== 0) {
+    fail('INFRA_INSTALL_FAILURE', `published ${spec} metadata could not be read:\n${resultText(result)}`)
+  }
+  let metadata
+  try {
+    metadata = JSON.parse(result.stdout)
+  } catch (error) {
+    fail('INFRA_INSTALL_FAILURE', `published ${spec} metadata is invalid JSON: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  // npm view may return a one-element array when the registry client treats
+  // the request as a multi-field projection. Accept that transport shape but
+  // keep the contract validator's input a single package object.
+  if (Array.isArray(metadata)) metadata = metadata[0]
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    fail('INFRA_INSTALL_FAILURE', `published ${spec} metadata did not contain a package object`)
+  }
+  return metadata
+}
+
 function packageVersion(profileDir, packageName) {
   return packageMetadata(profileDir, packageName)?.version
 }
@@ -562,6 +689,69 @@ function requireExactVersion(label, actual, expected) {
   }
 }
 
+function writeHeaderProbePackage(workDir) {
+  const packageName = 'dsh-pi-tui-compat-header-probe'
+  const probeDir = join(workDir, 'header-probe')
+  mkdirSync(probeDir, { recursive: true })
+  writeFileSync(join(probeDir, 'package.json'), JSON.stringify({
+    name: packageName,
+    version: '0.0.0',
+    type: 'module',
+    main: 'index.mjs',
+    exports: { '.': './index.mjs' },
+    files: ['index.mjs', 'cordis.patch.yml'],
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }, null, 2) + '\n', 'utf8')
+  writeFileSync(join(probeDir, 'cordis.patch.yml'), [
+    '- insert:',
+    '    - id: dsh-pi-tui-compat-header-probe',
+    `      name: '${packageName}'`,
+    '      inject: [sessionPersistence]',
+    '',
+  ].join('\n'), 'utf8')
+  writeFileSync(join(probeDir, 'index.mjs'), [
+    "import { writeFileSync } from 'node:fs'",
+    '',
+    'const evidencePath = process.env.PI2DSH_COMPAT_HEADER_EVIDENCE',
+    'function writeEvidence(value) {',
+    "  if (typeof evidencePath !== 'string' || evidencePath.length === 0) return",
+    "  writeFileSync(evidencePath, JSON.stringify(value, null, 2) + '\\n', { encoding: 'utf8', mode: 0o600 })",
+    '}',
+    '',
+    `export const name = '${packageName}'`,
+    "export const inject = ['sessionPersistence']",
+    '',
+    'export function apply(ctx) {',
+    "  const persistence = ctx.get('sessionPersistence')",
+    "  if (persistence === undefined) {",
+    "    writeEvidence({ error: 'session persistence service unavailable' })",
+    '    return',
+    '  }',
+    "  ctx.on('agent/created', ({ agent }) => {",
+    '    const session = agent?.session',
+    "    if (session === undefined || session.header?.origin === 'subagent') return",
+    '    void (async () => {',
+    '      try {',
+    "        if (typeof persistence.ensureMaterialized === 'function') await persistence.ensureMaterialized(session)",
+    '        const inspection = await persistence.inspect(session.id)',
+    '        writeEvidence({',
+    '          sessionId: String(inspection.meta.id),',
+    '          agentPreset: inspection.meta.agentPreset,',
+    '        })',
+    '      } catch (error) {',
+    '        writeEvidence({',
+    '          sessionId: String(session.id),',
+    "          error: error instanceof Error ? error.message : String(error),",
+    '        })',
+    '      }',
+    '    })()',
+    '  })',
+    '}',
+    '',
+  ].join('\n'), 'utf8')
+  return probeDir
+}
+
 function writeLauncher(path, invocation, env, presetId) {
   const preset = presetId === undefined ? '' : ` --preset ${shellQuote(presetId)}`
   const lines = [
@@ -570,6 +760,7 @@ function writeLauncher(path, invocation, env, presetId) {
     `export HOME=${shellQuote(env.HOME)}`,
     `export DSH_HOME=${shellQuote(env.DSH_HOME)}`,
     `export PI2DSH_COMPAT_EVIDENCE=${shellQuote(env.PI2DSH_COMPAT_EVIDENCE)}`,
+    `export PI2DSH_COMPAT_HEADER_EVIDENCE=${shellQuote(env.PI2DSH_COMPAT_HEADER_EVIDENCE)}`,
     `export npm_config_registry=${shellQuote(env.npm_config_registry)}`,
     `export NPM_CONFIG_REGISTRY=${shellQuote(env.NPM_CONFIG_REGISTRY)}`,
     `export npm_config_minimum_release_age=${shellQuote(env.npm_config_minimum_release_age)}`,
@@ -618,11 +809,11 @@ function tmuxRunner(socket, session, env) {
 }
 
 /**
- * Boot every DSH-shipped preset explicitly. The normal compatibility path boots
- * the default (standard) preset, but a healthy roster also requires the other
- * official rows to resolve and mount in the real target profile. Each launch
- * starts sessionless, so `--preset` is applied to a fresh agent and no model
- * request or durable session is needed.
+ * Exercise every DSH-shipped preset in two stages. Stage 1 boots the requested
+ * `--preset` sessionless surface. Stage 2 creates a real session without a
+ * model request, verifies the live projection reports the requested preset,
+ * and checks the scoped command catalog. A standing fallback or mount error is
+ * always a failure rather than a successful degraded boot.
  */
 async function smokeOfficialPresetMounts(invocation, workDir, env) {
   for (const presetId of OFFICIAL_PRESET_IDS) {
@@ -633,6 +824,7 @@ async function smokeOfficialPresetMounts(invocation, workDir, env) {
     const tuiLog = join(workDir, `preset-${presetId}.tui.log`)
     writeLauncher(launcher, invocation, env, presetId)
     try {
+      rmSync(env.PI2DSH_COMPAT_HEADER_EVIDENCE, { force: true })
       const started = tmux.tmux([
         'new-session', '-d', '-s', session, '-x', '80', '-y', '24',
         `script -qefc ${shellQuote(launcher)} ${shellQuote(tuiLog)}`,
@@ -646,6 +838,70 @@ async function smokeOfficialPresetMounts(invocation, workDir, env) {
       }, 'COMPAT_BOOT_FAILURE')
       assertNoCompatibilityFailures(tuiLog, tmux)
       assertOfficialPresetMounted(presetId, tuiLog, tmux)
+
+      // No pending /preset override is installed here: /new must carry the
+      // launch-time --preset through the effective-preset path. This makes the
+      // matrix prove the actual launch contract instead of retesting a manual
+      // sessionless override.
+      tmux.sendLiteral('/new')
+      await delay(350)
+      tmux.sendKey('Enter')
+      await waitUntil(`official preset ${presetId} session`, TIMEOUTS.command, () => {
+        if (!tmux.hasSession()) return false
+        return tmux.capturePane().includes('started a fresh session')
+      }, 'COMPAT_BOOT_FAILURE')
+      await waitUntil(`official preset ${presetId} durable header`, TIMEOUTS.command, () => {
+        const evidence = readOptionalJson(env.PI2DSH_COMPAT_HEADER_EVIDENCE)
+        if (evidence?.error !== undefined) {
+          fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} durable header probe failed: ${String(evidence.error)}`)
+        }
+        if (evidence?.agentPreset !== undefined && evidence.agentPreset !== presetId) {
+          fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} durable header mismatch: ${String(evidence.agentPreset)}`)
+        }
+        return evidence?.agentPreset === presetId
+          && typeof evidence?.sessionId === 'string'
+          && evidence.sessionId.length > 0
+      }, 'COMPAT_BOOT_FAILURE')
+      assertOfficialPresetHeader(presetId, env.PI2DSH_COMPAT_HEADER_EVIDENCE)
+      tmux.sendLiteral('/preset')
+      await delay(350)
+      tmux.sendKey('Enter')
+      await waitUntil(`official preset ${presetId} projection`, TIMEOUTS.command, () => {
+        if (!tmux.hasSession()) return false
+        return tmux.capturePane().includes(`preset: ${presetId} ·`)
+      }, 'COMPAT_BOOT_FAILURE')
+      assertNoCompatibilityFailures(tuiLog, tmux)
+      assertOfficialPresetMounted(presetId, tuiLog, tmux)
+
+      tmux.sendLiteral('/help')
+      await delay(350)
+      tmux.sendKey('Enter')
+      await waitUntil(`official preset ${presetId} command catalog`, TIMEOUTS.command, () => {
+        if (!tmux.hasSession()) return false
+        const snapshot = settingsSearchSnapshot(tmux.capturePane())
+        return snapshot.searchVisible && snapshot.query === ''
+      }, 'COMPAT_BOOT_FAILURE')
+      tmux.sendLiteral('goal')
+      const shouldHaveGoal = presetId !== 'minimal'
+      await waitUntil(`official preset ${presetId} goal command isolation`, TIMEOUTS.command, () => {
+        if (!tmux.hasSession()) return false
+        const pane = tmux.capturePane()
+        const snapshot = settingsSearchSnapshot(pane)
+        const hasOnlyGoal = snapshot.commandRows.length === 1 && snapshot.commandRows[0] === '/goal'
+        return snapshot.searchVisible
+          && snapshot.query === 'goal'
+          && hasOnlyGoal === shouldHaveGoal
+          && snapshot.noMatches === !shouldHaveGoal
+      }, 'COMPAT_BOOT_FAILURE')
+      tmux.sendKey('Escape')
+      await waitUntil(`official preset ${presetId} command catalog close`, TIMEOUTS.input, () => {
+        if (!tmux.hasSession()) return false
+        return !settingsSearchSnapshot(tmux.capturePane()).searchVisible
+      }, 'COMPAT_BOOT_FAILURE')
+      tmux.sendLiteral('/exit')
+      await delay(350)
+      tmux.sendKey('Enter')
+      await waitUntil(`official preset ${presetId} shutdown`, TIMEOUTS.dispose, () => !tmux.hasSession(), 'COMPAT_DISPOSE_FAILURE')
     } finally {
       tmux.stop()
     }
@@ -724,10 +980,16 @@ function diagnosticsContext(context) {
       dshVersion: manifest.dshVersion,
       pi2dshVersion: manifest.pi2dshVersion,
     },
+    consumer: context.consumerPackage === undefined ? undefined : {
+      name: context.consumerPackage.name,
+      version: context.consumerPackage.version,
+      peers: Object.fromEntries(relevantDshPeerEntries(context.consumerPackage)),
+      tuiPeer: context.consumerPackage.peerDependencies?.[EXPECTED_PACKAGE_NAME],
+    },
     node: process.version,
     pnpm: context.pnpmVersion,
-    dsh: context.dshVersion ?? manifest?.dshVersion,
-    pi2dsh: profileDir === undefined ? manifest?.pi2dshVersion : packageVersion(profileDir, 'pi2dsh') ?? manifest?.pi2dshVersion,
+    dsh: context.dshVersion,
+    pi2dsh: profileDir === undefined ? undefined : packageVersion(profileDir, CONSUMER_PACKAGE_NAME),
   }
   return versions
 }
@@ -742,6 +1004,7 @@ function preserveDiagnostics(context) {
     }
   })()
   const evidence = context.evidencePath === undefined ? undefined : readOptionalJson(context.evidencePath)
+  const headerEvidence = context.headerEvidencePath === undefined ? undefined : readOptionalJson(context.headerEvidencePath)
   const versions = diagnosticsContext(context)
   const debugDir = process.env.PI2DSH_COMPAT_DEBUG_DIR === undefined
     ? undefined
@@ -751,6 +1014,7 @@ function preserveDiagnostics(context) {
     writeFileSync(join(debugDir, 'pane.txt'), redact(pane), 'utf8')
     writeFileSync(join(debugDir, 'tui.log'), redact(tuiLog), 'utf8')
     writeFileSync(join(debugDir, 'evidence.json'), redactedJson(evidence ?? {}), 'utf8')
+    writeFileSync(join(debugDir, 'header-evidence.json'), redactedJson(headerEvidence ?? {}), 'utf8')
     writeFileSync(join(debugDir, 'versions.json'), redactedJson(versions), 'utf8')
   }
   const failure = context.error
@@ -780,9 +1044,11 @@ async function main() {
     tarball: undefined,
     candidatePackage: undefined,
     manifest: undefined,
+    consumerPackage: undefined,
     workDir: undefined,
     dshHome: undefined,
     evidencePath: undefined,
+    headerEvidencePath: undefined,
     tuiLog: undefined,
     tmux: undefined,
     error: undefined,
@@ -809,13 +1075,17 @@ async function main() {
     mkdirSync(harnessDir, { recursive: true })
     cpSync(FIXTURE_ROOT, fixtureDir, { recursive: true })
     const evidencePath = join(workDir, 'evidence.json')
+    const headerEvidencePath = join(workDir, 'header-evidence.json')
     const tuiLog = join(workDir, 'tui.log')
     context.dshHome = dshHome
     context.evidencePath = evidencePath
+    context.headerEvidencePath = headerEvidencePath
     context.tuiLog = tuiLog
     writeFileSync(join(workDir, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
 
     const env = isolatedEnvironment(workDir, home, dshHome, evidencePath)
+    context.consumerPackage = publishedPackageMetadata(CONSUMER_PACKAGE_NAME, context.manifest.pi2dshVersion, env)
+    validateConsumerMetadata(context.consumerPackage, context.manifest, context.candidatePackage)
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
       name: 'dsh-pi2dsh-compat-harness',
       private: true,
@@ -839,8 +1109,12 @@ async function main() {
     installPlugin(dsh, context.tarball, harnessDir, env, false)
     const profileDir = join(dshHome, 'profiles', 'pi-tui')
     validateCandidatePackageData(packageMetadata(profileDir, context.candidatePackage.name), context.candidatePackage)
-    installPlugin(dsh, `pi2dsh@${context.manifest.pi2dshVersion}`, harnessDir, env, true)
-    requireExactVersion('pi2dsh', packageVersion(profileDir, 'pi2dsh'), context.manifest.pi2dshVersion)
+    installPlugin(dsh, `${CONSUMER_PACKAGE_NAME}@${context.manifest.pi2dshVersion}`, harnessDir, env, true)
+    requireExactVersion(CONSUMER_PACKAGE_NAME, packageVersion(profileDir, CONSUMER_PACKAGE_NAME), context.manifest.pi2dshVersion)
+    if (packageMetadata(profileDir, CONSUMER_PACKAGE_NAME) === undefined) {
+      fail('INFRA_INSTALL_FAILURE', `installed ${CONSUMER_PACKAGE_NAME} package metadata is missing from the isolated profile`)
+    }
+    installPlugin(dsh, writeHeaderProbePackage(workDir), harnessDir, env, false)
     installPlugin(dsh, fixtureDir, harnessDir, env, false)
 
     // Gate all official DSH preset mounts before exercising the Pi surface.
@@ -964,10 +1238,14 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
 
 export {
   assertNoCompatibilityFailures,
+  assertOfficialPresetHeader,
   candidateArgument,
   compatibilityFailureLine,
+  presetDegradationLine,
   fixtureImportViolations,
+  settingsSearchSnapshot,
   validateCandidatePackageData,
+  validateConsumerMetadata,
   hasFreshResizeWidth,
   isolatedEnvironment,
   isRetryableRegistryFailure,

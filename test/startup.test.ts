@@ -148,6 +148,25 @@ test('bundleVersionLabel falls back to the release line that imposed the require
   assert.ok(bundleVersionLabel('0.4.0-alpha.1').startsWith('v'), `read version label: ${bundleVersionLabel('0.4.0-alpha.1')}`)
 })
 
+test('DSH peer ranges preserve the validated 0.1.2 support window', () => {
+  const packageJson = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as {
+    peerDependencies?: Record<string, string>
+    devDependencies?: Record<string, string>
+  }
+  const dshPeers = Object.entries(packageJson.peerDependencies ?? {})
+    .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
+  assert.ok(dshPeers.length > 0, 'the bundle must declare DSH peers')
+  for (const [name, range] of dshPeers) {
+    assert.equal(range, '>=0.1.2-alpha.1 <0.1.3', `${name} must use the validated DSH 0.1.2 window`)
+    assert.ok(!range.includes('0.1.1'), `${name} must not claim DSH 0.1.1`)
+  }
+  for (const [name, version] of Object.entries(packageJson.devDependencies ?? {})) {
+    if (name.startsWith('@deepseek-ai/dsh')) {
+      assert.equal(version, '0.1.2-alpha.1', `${name} dev dependency must stay exact`)
+    }
+  }
+})
+
 test('harnessCompatEntryFor protects only the too-old runtime boundary', () => {
   const old = HARNESS_COMPAT.find(candidate => candidate.max === '0.1.2-alpha.1')
   assert.ok(old !== undefined, 'the pre-alpha.1 entry must exist')

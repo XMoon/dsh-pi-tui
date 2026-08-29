@@ -13,7 +13,7 @@
  * the canonical `ptc` id from the caller and must never use this as a preset
  * registration or a second composition definition.
  */
-export function normalizeSessionPresetId(value: string | null | undefined): string | undefined {
+export function normalizePersistedSessionPresetId(value: string | null | undefined): string | undefined {
   if (value === undefined || value === null) return undefined
   return value === 'code' ? 'ptc' : value
 }

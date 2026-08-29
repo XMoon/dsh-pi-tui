@@ -90,6 +90,14 @@ test('composeAgent without a roster composes nothing and installs only model sel
   assert.equal(typeof composition.setup, 'function')
 })
 
+test('composeAgent rejects a newly requested code alias without a roster', async () => {
+  const ctx = ctxWith(() => undefined)
+  await assert.rejects(
+    composeAgent(ctx, selection(), 'code'),
+    /renamed to "ptc"/,
+  )
+})
+
 test('composeAgent with a roster resolves the default and mounts it in setup', async () => {
   const fake = roster()
   const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)

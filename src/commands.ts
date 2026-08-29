@@ -21,7 +21,6 @@ import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import { createForkedAgent } from './session-fork.ts'
-import { normalizeSessionPresetId } from './runtime/session-preset.ts'
 import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { mergeDraft } from './steer.ts'
@@ -1951,7 +1950,7 @@ export function registerTuiCommands(
     const currentId = runner.liveAgent?.session.id
     // The session READ port (migration M1.3): live-preferred listing with
     // the persistence fallback lives in the Direct adapter, never here.
-    const rows = await runner.sessionReader.list(currentId)
+    const rows = await runner.sessionReader.list(currentId, signal)
     if (rows === undefined) return { kind: 'error', text: 'session persistence unavailable' }
     if (rows.length === 0) return { kind: 'error', text: 'no persisted sessions' }
     // The picker opens instantly on the headers; titles land in the
@@ -2038,7 +2037,7 @@ export function registerTuiCommands(
           // Direct resume: exact id, a session- prefixed prefix, or the short
           // id prefix. Falls back to the picker when nothing matches.
           const currentId = runner.liveAgent?.session.id
-          const rows = await runner.sessionReader.list(currentId)
+          const rows = await runner.sessionReader.list(currentId, signal)
           if (rows !== undefined) {
             const match = findSessionMatch(rows, raw)
             if (match !== undefined) {
@@ -2584,7 +2583,7 @@ export function registerTuiCommands(
       // COMPOSITION (setup callback) is resolved inside the Direct session
       // lifecycle from this id — the command surface only ever sees the
       // identity (migration M1.11).
-      const resolved = await runner.catalog.presets.resolve(runner.pendingPreset)
+      const resolved = await runner.catalog.presets.resolve(runner.effectivePresetId)
       const newOptions = {
         provider: runner.liveAgent?.options.provider ?? runner.selected.current?.provider,
         model: runner.liveAgent?.options.model ?? runner.selected.current?.model,
@@ -2692,25 +2691,26 @@ export function registerTuiCommands(
         // override (run-local pending or launch-time --preset) masks the
         // new default — the masked case must not re-read a preset the next
         // session will not compose on.
-        const canonical = normalizeSessionPresetId(rest) ?? rest
+        if (rest === 'code') {
+          return { kind: 'error', text: 'preset "code" was renamed to "ptc"; use /preset default ptc' }
+        }
         try {
-          // Validate before writing settings. `code` is accepted only as a
-          // legacy persisted identity and is rewritten to the official `ptc`
-          // id; it is never a selectable roster entry.
-          await presets.resolve(canonical)
-          await runner.config.presetDefault.set(canonical)
+          // Validate before writing settings. Legacy `code` is accepted only
+          // when reading persisted data; new command/config writes must use
+          // the official `ptc` id explicitly.
+          await presets.resolve(rest)
+          await runner.config.presetDefault.set(rest)
         } catch (error) {
           return { kind: 'error', text: safeErrorMessage(error) }
         }
         if (runner.effectivePresetId === undefined) {
           const outcome = await runner.refreshCatalog({
             source: 'preset',
-            target: { kind: 'preset', presetId: canonical },
+            target: { kind: 'preset', presetId: rest },
           })
           if (outcome.kind === 'applied' && outcome.notice !== undefined) app.notify(outcome.notice, 'error')
         }
-        const rename = canonical !== rest ? ` (renamed from ${rest})` : ''
-        return { kind: 'success', text: `default preset set: ${canonical}${rename}` }
+        return { kind: 'success', text: `default preset set: ${rest}` }
       }
       // Selecting swaps the composition; only a blank session (no turn
       // has run yet) may do so — a started conversation's history was

@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { DirectSessionReader, type HostContextLike, type SessionPersistenceLike } from '../src/runtime/direct/session-direct.ts'
+import { DirectSessionReader, SESSION_PRESET_READ_CONCURRENCY, type HostContextLike, type SessionPersistenceLike } from '../src/runtime/direct/session-direct.ts'
 import type { SessionQueryLike } from '../src/sessions.ts'
 
 function header(id: string, createdAt: number, extra: Partial<{ cwd: string; agentPreset: string; parentSession: string; origin: 'subagent' }> = {}) {
@@ -114,6 +114,80 @@ test('list does not treat a persisted header as effective preset without the pro
   assert.ok(rows !== undefined)
   assert.equal(rows[0]?.preset, undefined)
   assert.equal(inspected, 0)
+})
+
+test('list bounds cold-session projection inspections', async () => {
+  let active = 0
+  let maximum = 0
+  let persistenceLists = 0
+  const headers = Array.from({ length: SESSION_PRESET_READ_CONCURRENCY * 3 }, (_, index) => header(`session-cold-${index}`, index))
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query(headers.map(item => ({ header: item, live: false }))),
+    sessionProjections: { stateOf: () => 'standard' },
+    sessionPersistence: {
+      list: async () => {
+        persistenceLists += 1
+        return headers
+      },
+      readRaw: async () => undefined,
+      inspect: async (sessionId: SessionId) => {
+        active += 1
+        maximum = Math.max(maximum, active)
+        await new Promise(resolve => setTimeout(resolve, 5))
+        active -= 1
+        const meta = headers.find(item => String(item.id) === String(sessionId))
+        return { meta: meta as never, events: [] }
+      },
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.equal(rows?.length, headers.length)
+  assert.ok(maximum <= SESSION_PRESET_READ_CONCURRENCY,
+    `cold-session inspections exceeded the bound: ${maximum}`)
+  assert.equal(persistenceLists, 0, 'query-backed listing must pass known headers and never relist persistence')
+})
+
+test('list fails closed when a cold projection inspection rejects', async () => {
+  const refusal = new Error('projection replay failed')
+  const persistedHeader = header('session-broken', 100)
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: persistedHeader, live: false }]),
+    sessionProjections: { stateOf: () => 'standard' },
+    sessionPersistence: {
+      list: async () => [persistedHeader],
+      readRaw: async () => undefined,
+      inspect: async () => { throw refusal },
+    },
+  }))
+  await assert.rejects(reader.list(undefined), error => error === refusal)
+})
+
+test('list cancellation stops new cold inspections and forwards the signal', async () => {
+  const controller = new AbortController()
+  const refusal = new Error('listing cancelled')
+  const headers = Array.from({ length: SESSION_PRESET_READ_CONCURRENCY * 2 }, (_, index) =>
+    header(`session-cancel-${index}`, index))
+  let inspections = 0
+  let receivedSignal: AbortSignal | undefined
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query(headers.map(item => ({ header: item, live: false }))),
+    sessionProjections: { stateOf: () => 'standard' },
+    sessionPersistence: {
+      list: async () => headers,
+      readRaw: async () => undefined,
+      inspect: async (sessionId: SessionId, signal?: AbortSignal) => {
+        receivedSignal = signal
+        inspections += 1
+        if (inspections === 1) controller.abort(refusal)
+        signal?.throwIfAborted()
+        const meta = headers.find(item => String(item.id) === String(sessionId))
+        return { meta: meta as never, events: [] }
+      },
+    },
+  }))
+  await assert.rejects(reader.list(undefined, controller.signal), error => error === refusal)
+  assert.equal(receivedSignal, controller.signal)
+  assert.equal(inspections, 1, 'no cold inspection may start after cancellation')
 })
 
 test('list returns undefined when persistence is unavailable', async () => {

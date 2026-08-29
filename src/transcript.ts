@@ -23,7 +23,7 @@ import { contextIconSemantic, contextProvenance, contextSummary } from './contex
 import type { IconSemantic } from './icons.ts'
 import { firstLine, latestLine } from './present.ts'
 import { StepUsageAccumulator, totalTokens, type TokenUsageTotals } from './token-usage.ts'
-import { normalizeSessionPresetId } from './runtime/session-preset.ts'
+import { normalizePersistedSessionPresetId } from './runtime/session-preset.ts'
 // Load the official command event declarations.
 import type {} from '@deepseek-ai/dsh-commands'
 // Load the official subagent event declarations.
@@ -1492,9 +1492,9 @@ export function renderTranscriptMarkdown(session: {
   const lines: string[] = [
     `# Session ${session.header.id}`,
     `- cwd: ${session.header.cwd ?? 'unknown'}`,
-    ...normalizeSessionPresetId(session.header.agentPreset) === undefined
+    ...normalizePersistedSessionPresetId(session.header.agentPreset) === undefined
       ? []
-      : [`- agent preset: ${normalizeSessionPresetId(session.header.agentPreset)}`],
+      : [`- agent preset: ${normalizePersistedSessionPresetId(session.header.agentPreset)}`],
     '',
   ]
   for (const event of session.events) {

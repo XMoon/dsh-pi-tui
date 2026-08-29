@@ -14,7 +14,7 @@
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
-import { normalizeSessionPresetId } from '../session-preset.ts'
+import { normalizePersistedSessionPresetId } from '../session-preset.ts'
 
 type AgentPresetProjectionKey = typeof agentPresetProjectionDefinition.key
 
@@ -25,8 +25,8 @@ export interface SessionProjectionReader {
 
 /** The persistence read surface needed to resolve a cold session. */
 export interface SessionPersistenceReader {
-  list(): Promise<readonly SessionHeader[]>
-  inspect(id: SessionId): Promise<{ meta: SessionHeader; events: readonly SessionEvent[] }>
+  list(signal?: AbortSignal): Promise<readonly SessionHeader[]>
+  inspect(id: SessionId, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: readonly SessionEvent[] }>
 }
 
 /** The minimum context surface of the runner. */
@@ -41,7 +41,7 @@ export function sessionPresetOf(
 ): string | undefined {
   const projections = ctx.get('sessionProjections') as SessionProjectionReader | undefined
   if (projections === undefined) return undefined
-  return normalizeSessionPresetId(projections.stateOf(session, 'agentPreset'))
+  return normalizePersistedSessionPresetId(projections.stateOf(session, 'agentPreset'))
 }
 
 /**
@@ -55,14 +55,18 @@ export async function recordedSessionPreset(
   ctx: SessionPresetContext,
   sessionId: string,
   knownHeader?: SessionHeader,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   const persistence = ctx.get('sessionPersistence') as SessionPersistenceReader | undefined
   if (persistence === undefined) return undefined
 
-  const known = knownHeader ?? (await persistence.list()).find(candidate => String(candidate.id) === sessionId)
+  signal?.throwIfAborted()
+  const known = knownHeader ?? (await persistence.list(signal)).find(candidate => String(candidate.id) === sessionId)
+  signal?.throwIfAborted()
   if (known === undefined) return undefined
 
-  const inspection = await persistence.inspect(SessionId(sessionId))
+  const inspection = await persistence.inspect(SessionId(sessionId), signal)
+  signal?.throwIfAborted()
   // Session.fromRestore and the persistence service retain DSH's fail-closed
   // unknown-event behavior. Do not turn an unsupported log into a header-only
   // session or silently compose the wrong preset.

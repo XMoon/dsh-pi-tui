@@ -53,12 +53,15 @@ const SHIPPED_ROWS = [
   { id: 'cordis', name: '创造模式', description: '自定义 Agent preset。', trust: 'system' },
 ]
 
-function presetService(rows: { id: string; name?: string; description?: string; trust?: string }[]) {
+function presetService(
+  rows: { id: string; name?: string; description?: string; trust?: string }[],
+  defaultPresetId = 'standard',
+) {
   const resolved: string[] = []
   return {
     resolved,
     service: {
-      defaultId: 'standard',
+      defaultId: defaultPresetId,
       list: async () => rows.map(row => ({
         id: row.id,
         trust: row.trust ?? 'system',
@@ -108,6 +111,8 @@ function stubRunner(options: {
   tuiSettings?: TuiSettingsLike
   applyFooterSettings?: () => void
   extensions?: TuiCommandRunner['extensions']
+  agents?: TuiCommandRunner['agents']
+  effectivePresetId?: string
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
   /** Defaults to a pass-through capture (the test themes use id === name). */
@@ -124,7 +129,10 @@ function stubRunner(options: {
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
-    agents: {} as never,
+    agents: options.agents ?? {
+      create: async () => ({}) as never,
+      resume: async () => ({}) as never,
+    },
     sessionReader: {
       list: async () => [],
       search: async () => [],
@@ -166,7 +174,7 @@ function stubRunner(options: {
     currentPreset: () => undefined,
     get pendingPreset() { return pending.value },
     set pendingPreset(id: string | undefined) { pending.value = id },
-    get effectivePresetId() { return pending.value },
+    get effectivePresetId() { return pending.value ?? options.effectivePresetId },
     refreshCatalog: async (request) => {
       refreshes.push(request)
       return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
@@ -224,6 +232,9 @@ function setup(options: {
   settings?: { get(ns: string): unknown; mutate(ns: string, patch: unknown[]): Promise<unknown> }
   tuiSettings?: TuiSettingsLike
   extensions?: TuiCommandRunner['extensions']
+  defaultPresetId?: string
+  agents?: TuiCommandRunner['agents']
+  effectivePresetId?: string
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
   captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
@@ -236,7 +247,7 @@ function setup(options: {
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
-  const presets = presetService(options.rows ?? SHIPPED_ROWS)
+  const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId)
   ctx.provide('agentPresets', presets.service as never)
   if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
   const ensureCalls: string[] = []
@@ -250,6 +261,8 @@ function setup(options: {
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
     extensions: options.extensions,
+    agents: options.agents,
+    effectivePresetId: options.effectivePresetId,
     captureExtensionHealthRef: options.captureExtensionHealthRef
       ?? ((slot, id) => {
         // Real-service semantics: only a REGISTERED plugin theme resolves
@@ -362,6 +375,44 @@ test('/preset code is not a selectable alias for the official ptc preset', async
   assert.equal(result.kind, 'error')
   assert.match(result.text, /renamed to "ptc"/)
   assert.equal(t.pending.value, undefined)
+  t.app.stop()
+})
+
+test('/new resolves a persisted legacy default as canonical ptc', async () => {
+  const created: { agentPreset?: string }[] = []
+  const t = setup({
+    defaultPresetId: 'code',
+    agents: {
+      create: async options => {
+        created.push({ agentPreset: options.agentPreset })
+        return {} as never
+      },
+      resume: async () => ({}) as never,
+    },
+  })
+  const result = await t.runCommand('new') as { kind: string; text?: string }
+  assert.deepEqual(result, { kind: 'success', text: 'started a fresh session' })
+  assert.deepEqual(t.presets.resolved, ['ptc'], 'omitted /new resolve must normalize only the persisted default')
+  assert.deepEqual(created, [{ agentPreset: 'ptc' }], 'new session metadata must stay canonical')
+  t.app.stop()
+})
+
+test('/new honors the launch-time effective preset', async () => {
+  const created: { agentPreset?: string }[] = []
+  const t = setup({
+    effectivePresetId: 'minimal',
+    agents: {
+      create: async options => {
+        created.push({ agentPreset: options.agentPreset })
+        return {} as never
+      },
+      resume: async () => ({}) as never,
+    },
+  })
+  const result = await t.runCommand('new') as { kind: string; text?: string }
+  assert.deepEqual(result, { kind: 'success', text: 'started a fresh session' })
+  assert.deepEqual(t.presets.resolved, ['minimal'])
+  assert.deepEqual(created, [{ agentPreset: 'minimal' }])
   t.app.stop()
 })
 
@@ -495,7 +546,7 @@ test('/preset default <id> with no override requests a standing refresh of the n
   t.app.stop()
 })
 
-test('/preset default code rewrites the legacy input to canonical ptc', async () => {
+test('/preset default code rejects a new legacy write', async () => {
   const writes: unknown[] = []
   const t = setup({
     refreshCatalog: async () => standingOutcome(['glab']),
@@ -505,10 +556,10 @@ test('/preset default code rewrites the legacy input to canonical ptc', async ()
     },
   })
   const result = await t.run('default code') as { kind: string; text: string }
-  assert.equal(result.kind, 'success')
-  assert.equal(result.text, 'default preset set: ptc (renamed from code)')
-  assert.deepEqual(writes, [[{ op: 'set', path: ['default'], value: 'ptc' }]])
-  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'ptc' })
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /preset "code" was renamed to "ptc"/u)
+  assert.deepEqual(writes, [], 'the command must not persist a normalized legacy id')
+  assert.deepEqual(t.refreshes, [])
   t.app.stop()
 })
 

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   assertNoCompatibilityFailures,
+  assertOfficialPresetHeader,
   candidateArgument,
   compatibilityFailureLine,
   fixtureImportViolations,
@@ -16,8 +17,11 @@ import {
   retryDiagnostic,
   RESIZE_FAILURE_PHASE,
   validateCandidatePackageData,
+  validateConsumerMetadata,
   validateFixturePackageData,
   validateManifest,
+  settingsSearchSnapshot,
+  presetDegradationLine,
   CI_ECOSYSTEM_TIMEOUT_MS,
   CLEANUP_BUDGET_MS,
   GATE_BUDGET_MS,
@@ -34,6 +38,7 @@ test('pi2dsh smoke isolates credential-bearing parent environment variables', ()
     assert.equal(env.HOME, '/tmp/compat-home', 'the TUI must receive the temporary HOME')
     assert.equal(env.DSH_HOME, '/tmp/compat-dsh', 'the TUI must receive the temporary DSH_HOME')
     assert.equal(env.PI2DSH_COMPAT_EVIDENCE, '/tmp/evidence.json', 'the TUI must receive the isolated evidence path')
+    assert.equal(env.PI2DSH_COMPAT_HEADER_EVIDENCE, '/tmp/compat-work/header-evidence.json', 'the TUI must receive the isolated durable-header evidence path')
   } finally {
     if (previous === undefined) delete process.env[canary]
     else process.env[canary] = previous
@@ -50,11 +55,107 @@ test('pi2dsh smoke accepts pnpm separator arguments and enforces installed versi
   assert.throws(() => validateCandidatePackageData({ name: '@xmoon76/dsh-pi-tui', version: '0.3.3' }, { name: '@xmoon76/dsh-pi-tui', version: '0.3.4' }), /candidate package mismatch/u)
 })
 
-test('pi2dsh smoke pins the required published compatibility baseline', () => {
+test('pi2dsh smoke treats the compatibility manifest as its version source of truth', () => {
   const manifest = JSON.parse(readFileSync(join(process.cwd(), 'test', 'compat', 'pi2dsh.json'), 'utf8'))
   assert.doesNotThrow(() => validateManifest(manifest))
-  assert.throws(() => validateManifest({ ...manifest, pi2dshVersion: '0.20.1' }), /must pin 0\.20\.0/u)
-  assert.throws(() => validateManifest({ ...manifest, dshVersion: '0.1.1-rc.3' }), /must pin 0\.1\.2-alpha\.1/u)
+  assert.throws(() => validateManifest({ ...manifest, pi2dshVersion: 'not-a-version' }), /exact pi2dsh version/u)
+  assert.throws(() => validateManifest({ ...manifest, dshVersion: 'not-a-version' }), /exact target DSH version/u)
+})
+
+test('pi2dsh metadata preflight blocks an unsupported consumer contract', () => {
+  const manifest = { dshVersion: '0.1.2-alpha.1' }
+  const candidate = { name: '@xmoon76/dsh-pi-tui', version: '0.4.0-alpha.1' }
+  const supported = {
+    name: 'pi2dsh',
+    version: '0.23.0',
+    peerDependencies: {
+      '@xmoon76/dsh-pi-tui': '^0.4.0-alpha.1',
+      '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1 <0.1.3',
+      '@deepseek-ai/dsh-commands': '>=0.1.2-alpha.1 <0.1.3',
+    },
+  }
+  assert.doesNotThrow(() => validateConsumerMetadata(supported, manifest, candidate))
+
+  for (const consumerPackage of [
+    { ...supported, peerDependencies: { ...supported.peerDependencies, '@xmoon76/dsh-pi-tui': '^0.3.3' } },
+    { ...supported, peerDependencies: { ...supported.peerDependencies, '@deepseek-ai/dsh-agent': '^0.1.1' } },
+    { ...supported, peerDependencies: { '@xmoon76/dsh-pi-tui': '^0.4.0-alpha.1' } },
+  ]) {
+    assert.throws(
+      () => validateConsumerMetadata(consumerPackage, manifest, candidate),
+      error => error?.name === 'CompatFailure'
+        && error?.phase === 'ECOSYSTEM_CONTRACT_BLOCKER'
+        && error.message.includes('DSH 0.1.2-alpha.1')
+        && error.message.includes('@xmoon76/dsh-pi-tui 0.4.0-alpha.1'),
+    )
+  }
+})
+
+test('pi2dsh preset checks inspect the filtered /help frame rather than stale pane text', () => {
+  const goalPane = [
+    'transcript mentioned /goal before the overlay',
+    '╭────────────────────────╮',
+    '│ > goal                 │',
+    '│                        │',
+    '│ ❯ /goal               │',
+    '│                        │',
+    '│ Type to search · Enter/Space to change · Esc to cancel │',
+    '╰────────────────────────╯',
+  ].join('\n')
+  assert.deepEqual(settingsSearchSnapshot(goalPane), {
+    searchVisible: true,
+    query: 'goal',
+    commandRows: ['/goal'],
+    noMatches: false,
+  })
+
+  const minimalPane = [
+    'transcript mentioned /goal before the overlay',
+    '╭────────────────────────╮',
+    '│ > goal                 │',
+    '│ No matching settings   │',
+    '│ Type to search · Enter/Space to change · Esc to cancel │',
+    '╰────────────────────────╯',
+  ].join('\n')
+  assert.deepEqual(settingsSearchSnapshot(minimalPane), {
+    searchVisible: true,
+    query: 'goal',
+    commandRows: [],
+    noMatches: true,
+  })
+})
+
+test('pi2dsh preset degradation diagnostics never count as a healthy mount', () => {
+  assert.equal(presetDegradationLine('preset mounted successfully'), undefined)
+  assert.equal(
+    presetDegradationLine('tui-runner: launch preset unavailable; falling back to default'),
+    'tui-runner: launch preset unavailable; falling back to default',
+  )
+  assert.equal(
+    presetDegradationLine('skill catalog unavailable for preset standard'),
+    'skill catalog unavailable for preset standard',
+  )
+})
+
+test('pi2dsh preset smoke requires a durable canonical session header', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pi2dsh-compat-header-'))
+  const evidencePath = join(directory, 'header.json')
+  try {
+    writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'minimal' }))
+    assert.doesNotThrow(() => assertOfficialPresetHeader('minimal', evidencePath))
+    writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'standard' }))
+    assert.throws(
+      () => assertOfficialPresetHeader('minimal', evidencePath),
+      error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header mismatch'),
+    )
+    writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', error: 'inspect failed' }))
+    assert.throws(
+      () => assertOfficialPresetHeader('minimal', evidencePath),
+      error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header probe failed'),
+    )
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('pi2dsh smoke classifies resize failures as surface failures', () => {

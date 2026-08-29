@@ -30,7 +30,7 @@ export interface HostContextLike {
 
 /** The structural `sessionPersistence` surface the reader needs. */
 export interface SessionPersistenceLike {
-  list(): Promise<Array<{ id: string; createdAt: number; version: number; cwd?: string; agentPreset?: string; parentSession?: string; origin?: 'subagent' }>>
+  list(signal?: AbortSignal): Promise<Array<{ id: string; createdAt: number; version: number; cwd?: string; agentPreset?: string; parentSession?: string; origin?: 'subagent' }>>
   readRaw(id: string): Promise<{ content: string; filename?: string } | undefined>
   /** The fallback title path's per-session event inspection. */
   inspect: SessionPickerPersistence['inspect']
@@ -44,6 +44,36 @@ export interface TokenMeterLike {
 /** A live agent as the reader resolves it (structural projection). */
 export interface LiveAgentLike {
   readonly session: Session
+}
+
+/** Keep cold-session projection reads below the persistence engine's own small
+ * inspection batch size. This bounds log replay/FD/memory pressure when the
+ * picker contains many historical sessions. */
+export const SESSION_PRESET_READ_CONCURRENCY = 4
+
+async function mapConcurrent<T, R>(
+  items: readonly T[],
+  limit: number,
+  map: (item: T, index: number) => Promise<R>,
+  signal?: AbortSignal,
+): Promise<R[]> {
+  if (items.length === 0) return []
+  const results = new Array<R>(items.length)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (true) {
+      // Claiming the next item is synchronous after this check, so a worker
+      // that observes cancellation never starts another cold projection read.
+      signal?.throwIfAborted()
+      const index = next++
+      if (index >= items.length) return
+      results[index] = await map(items[index]!, index)
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, limit), items.length) }, () => worker()),
+  )
+  return results
 }
 
 /** Read a typed query-service error without depending on its package surface. */
@@ -89,7 +119,7 @@ export class DirectSessionReader implements SessionReader {
    * projectionless deployment cannot claim that creation metadata is the
    * current composition, so it reports no effective preset instead.
    */
-  private async presetFor(header: SessionHeader): Promise<string | undefined> {
+  private async presetFor(header: SessionHeader, signal?: AbortSignal): Promise<string | undefined> {
     const projections = this.ctx.get('sessionProjections')
     if (projections === undefined) return undefined
 
@@ -98,44 +128,50 @@ export class DirectSessionReader implements SessionReader {
     if (live !== undefined) return sessionPresetOf(this.ctx, live.session)
 
     if (this.ctx.get('sessionPersistence') !== undefined) {
-      return recordedSessionPreset(this.ctx, sessionId, header)
+      return recordedSessionPreset(this.ctx, sessionId, header, signal)
     }
     return undefined
   }
 
-  async list(currentSessionId: string | undefined): Promise<SessionSummary[] | undefined> {
+  async list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined> {
     const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
     const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
+    signal?.throwIfAborted()
     let rows: SessionSummary[]
     if (query !== undefined) {
       // Live-preferred listing: the session-query engine marks sessions
       // currently loaded in the store. Resolve each row's effective preset
       // separately because listSessions exposes the creation header, not the
       // latest `agent-preset/selected` projection state.
-      rows = await Promise.all((await query.listSessions()).map(async record => ({
+      const records = await query.listSessions(signal)
+      signal?.throwIfAborted()
+      rows = await mapConcurrent(records, SESSION_PRESET_READ_CONCURRENCY, async record => ({
         id: record.header.id,
         createdAt: record.header.createdAt,
         cwd: record.header.cwd,
-        preset: await this.presetFor(record.header),
+        preset: await this.presetFor(record.header, signal),
         parentSession: record.header.parentSession,
         origin: record.header.origin,
         live: record.live,
-      })))
+      }), signal)
     } else {
       if (persistence === undefined) return undefined
       // Persistence fallback: the plain list; the current session is the
       // only live marker. The known header is passed into presetFor so the
       // projection path does not repeat the list query.
-      rows = await Promise.all((await persistence.list()).map(async header => ({
+      const headers = await persistence.list(signal)
+      signal?.throwIfAborted()
+      rows = await mapConcurrent(headers, SESSION_PRESET_READ_CONCURRENCY, async header => ({
         id: header.id,
         createdAt: header.createdAt,
         cwd: header.cwd,
-        preset: await this.presetFor(header as SessionHeader),
+        preset: await this.presetFor(header as SessionHeader, signal),
         parentSession: header.parentSession,
         origin: header.origin,
         live: header.id === currentSessionId,
-      })))
+      }), signal)
     }
+    signal?.throwIfAborted()
     rows.sort((a, b) => b.createdAt - a.createdAt)
     return rows
   }

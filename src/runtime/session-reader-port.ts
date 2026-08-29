@@ -62,8 +62,9 @@ export type ExportReadResult =
 export interface SessionReader {
   /** List persisted sessions newest-first, live-preferred (the session
    * query engine when available, the persistence fallback otherwise).
-   * `undefined` = the persistence service is unavailable. */
-  list(currentSessionId: string | undefined): Promise<SessionSummary[] | undefined>
+   * `undefined` = the persistence service is unavailable. `signal` cancels
+   * cold-session projection inspection without changing the row contract. */
+  list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined>
   /** Search semantic session content for a query (bounded: newest 100
    * sessions, first 20 hits). The Direct adapter uses SessionQuery when its
    * semantic filter capability is available and only falls back to raw

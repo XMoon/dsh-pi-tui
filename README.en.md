@@ -403,7 +403,7 @@ dsh-pi-tui:
 
 | TUI package line | Matching DSH line | Notes |
 |---|---|---|
-| `0.4.0-alpha.1` (`@next`) | `>=0.1.2-alpha.1 <0.2.0` | Current prerelease; validated against exact `0.1.2-alpha.1` |
+| `0.4.0-alpha.1` (`@next`) | `>=0.1.2-alpha.1 <0.1.3` | Current prerelease; validated against exact `0.1.2-alpha.1` |
 | `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
 
 Do not mix the two lines: a 0.4 prerelease package deliberately refuses to
@@ -425,9 +425,9 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 dsh --profile pi-tui
 ```
 
-The 0.4 support range is `>=0.1.2-alpha.1 <0.2.0`; the current alpha is
-validated exactly against `0.1.2-alpha.1`. Future runtimes are not rejected by
-the startup gate without evidence of a break. Running only
+The declared 0.4 support range is `>=0.1.2-alpha.1 <0.1.3`; the current alpha is
+validated exactly against `0.1.2-alpha.1`. DSH 0.1.3 and later must be
+revalidated before this range is widened. Running only
 `npm install -g @xmoon76/dsh-pi-tui` does not install the plugin into a DSH
 profile; the `dsh plugin` command is still required.
 

@@ -52,6 +52,12 @@
       config:
         default: standard
 
+    # The official standard preset enables per-session subagent model
+    # selection. Its tool-subagent row requires this Host service when it
+    # mounts; without the row the default standard composition throws.
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+
     # Host-plane TypeScript runtime: the `ptc` preset's `tool-presentation`
     # row waits for `codeRuntime` and fails the preset at mount without it
     # (same host row the web bundle inserts).
@@ -78,10 +84,12 @@
 #
 # Rows that STAY on the host plane (not listed): `tools` (registry), `shell-env`
 # (publishes the DSH env the model's shell sees), `subagent` + its spawn/fork
-# backends (process singletons), `tool-subagent-report` (host singleton), the
-# goal/jobs/compaction services and their commands, `permission`, `approval`,
-# `sandbox*`, `fs-observation-policy`, `spill*`, `timeout-policy`,
-# `repeat-tool-reminder`, `session-*`, `token-meter`.
+# backends (process singletons), `tool-subagent-report` (host singleton),
+# `subagent-model-selection-settings`, the goal/jobs/compaction services and
+# their host infrastructure, `permission`, `approval`, `sandbox*`,
+# `fs-observation-policy`, `spill*`, `timeout-policy`, `repeat-tool-reminder`,
+# `session-*`, `token-meter`. `command-goal` is disabled below and reintroduced
+# only by presets that own that command in their scoped composition.
 
 - id: tool-bash
   disabled: true
@@ -105,6 +113,9 @@
   disabled: true
 
 - id: tool-skill
+  disabled: true
+
+- id: command-goal
   disabled: true
 
 - id: tool-goal

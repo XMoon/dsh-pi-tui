@@ -42,6 +42,7 @@ import type {
 } from '../catalog-port.ts'
 import type { StandingSkillRead } from '../../skill-catalog-refresh.ts'
 import type { ProviderCatalogEntry } from '../../provider-catalog.ts'
+import { normalizePersistedSessionPresetId } from '../session-preset.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -231,16 +232,25 @@ export class DirectPresetCatalog implements PresetCatalog {
   }
 
   async resolve(id?: string): Promise<{ readonly id?: string }> {
+    if (id === 'code') {
+      throw new Error('preset "code" was renamed to "ptc"; use the canonical ptc preset')
+    }
     const presets = this.presets()
     // Rosterless deployment: no preset identity to record (the old compose
     // path returned `agentPreset: undefined`).
     if (presets === undefined) return {}
-    const preset = await presets.resolve(id)
+    // An omitted id means "use the persisted deployment default". Normalize
+    // that legacy read before the official resolver sees it; an explicit id
+    // is user input and must never pass through the persisted-data alias.
+    const requestedId = id === undefined
+      ? normalizePersistedSessionPresetId(presets.defaultId) ?? presets.defaultId
+      : id
+    const preset = await presets.resolve(requestedId)
     return { id: preset.id }
   }
 
   defaultId(): string | undefined {
-    return this.presets()?.defaultId
+    return normalizePersistedSessionPresetId(this.presets()?.defaultId)
   }
 }
 

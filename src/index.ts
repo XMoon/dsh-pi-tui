@@ -39,7 +39,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 // `agent-preset/selected` session projection owned by DSH.
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-tool-todo'
-import { normalizeSessionPresetId } from './runtime/session-preset.ts'
+import { normalizePersistedSessionPresetId } from './runtime/session-preset.ts'
 import { recordedSessionPreset, sessionPresetOf } from './runtime/direct/session-preset-direct.ts'
 // Empty type imports carry the loader Context merge for the settlement await
 // and the cmdline Context merge for the appExit host value.
@@ -1246,6 +1246,9 @@ export async function composeAgent(
   focusState?: { enabled: boolean },
   diag?: Diag,
 ): Promise<AgentComposition> {
+  if (presetId === 'code') {
+    throw new Error('preset "code" was renamed to "ptc"; use the canonical ptc preset')
+  }
   const presets = ctx.get('agentPresets')
   if (presets === undefined) {
     return {
@@ -1258,26 +1261,21 @@ export async function composeAgent(
       },
     }
   }
-  if (presetId === 'code') {
-    throw new Error('preset "code" was renamed to "ptc"; use the canonical ptc preset')
-  }
   // DSH resolves an omitted id from its persisted default before returning a
   // preset. Normalize that data first, otherwise a legacy default of `code`
   // is rejected by the official roster before we can map it to `ptc`.
   const requestedPresetId = presetId === undefined
-    ? normalizeSessionPresetId(presets.defaultId) ?? presets.defaultId
+    ? normalizePersistedSessionPresetId(presets.defaultId) ?? presets.defaultId
     : presetId
   const resolved = await presets.resolve(requestedPresetId)
-  // Normalize once more at the session-composition identity boundary so the
-  // official `ptc` mount is used and the newly created header records only
-  // `ptc`. An explicit new `--preset code` remains invalid rather than
-  // becoming a new alias.
-  const resolvedId = normalizeSessionPresetId(resolved.id) ?? resolved.id
+  // The resolver returns an official preset identity. It is already
+  // canonical because legacy normalization happened only on the persisted
+  // default input above; explicit new `--preset code` was rejected earlier.
   return {
-    agentPreset: resolvedId,
+    agentPreset: resolved.id,
     setup: async (agentCtx: Context): Promise<void> => {
       installModelSelection(agentCtx, selected)
-      await presets.mount(agentCtx, resolvedId)
+      await presets.mount(agentCtx, resolved.id)
       // Focus is a TUI surface policy, installed AFTER the preset mount so
       // it exists consistently across every preset (standard/ptc/minimal/
       // cordis) without depending on what the preset itself installs

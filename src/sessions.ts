@@ -12,7 +12,7 @@ import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, normalize } from 'node:path'
 import { safeErrorMessage } from './error-boundary.ts'
-import { normalizeSessionPresetId } from './runtime/session-preset.ts'
+import { normalizePersistedSessionPresetId } from './runtime/session-preset.ts'
 
 /**
  * Legacy exported window size: how many most-recent sessions the picker's
@@ -283,7 +283,7 @@ export function headerToPickerRow(header: SessionHeader, live: boolean): Session
     id: header.id,
     createdAt: header.createdAt,
     cwd: header.cwd,
-    preset: normalizeSessionPresetId(header.agentPreset),
+    preset: normalizePersistedSessionPresetId(header.agentPreset),
     parentSession: header.parentSession,
     origin: header.origin,
     live,

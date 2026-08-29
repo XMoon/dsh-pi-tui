@@ -597,7 +597,7 @@ test('applyPermissionPreset refuses a preset id the composed table does not offe
 
 // ── preset default ────────────────────────────────────────────────────────
 
-test('presetDefault reads the settings doc with the roster default fallback and persists', async () => {
+test('presetDefault normalizes legacy reads but rejects legacy writes', async () => {
   const writes: Array<{ ns: string; ops: unknown }> = []
   const presetDefault = port({
     settings: settings({ 'agent-presets': { default: 'code' } }, writes),
@@ -605,7 +605,13 @@ test('presetDefault reads the settings doc with the roster default fallback and 
   }).presetDefault
   assert.equal(presetDefault.available(), true)
   assert.equal(presetDefault.get(), 'ptc', 'the legacy saved value is normalized at the data boundary')
-  await presetDefault.set('code')
+  await assert.rejects(
+    presetDefault.set('code'),
+    /preset "code" was renamed to "ptc"/u,
+    'new config writes must use the canonical id explicitly',
+  )
+  assert.deepEqual(writes, [])
+  await presetDefault.set('ptc')
   assert.deepEqual(writes, [{ ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'ptc' }] }])
 })
 

@@ -11,9 +11,14 @@
 
 ### 迁移说明
 
-- **0.4.0-alpha.1 切换到 DeepSeek Harness 0.1.2。** 运行时最低要求为
-  `>=0.1.2-alpha.1`，不再兼容 DSH 0.1.1；没有已确认 break 时不设置未来
-  版本上限。保留 DSH 0.1.1 的用户应固定安装 `@xmoon76/dsh-pi-tui@0.3`。
+- **0.4.0-alpha.1 切换到 DeepSeek Harness 0.1.2。** 声明支持范围为
+  `>=0.1.2-alpha.1 <0.1.3`，不再兼容 DSH 0.1.1；DSH 0.1.3 及以上需
+  重新验证后才能扩大范围。保留 DSH 0.1.1 的用户应固定安装
+  `@xmoon76/dsh-pi-tui@0.3`。
+- **Gate B 现在先校验已发布 consumer 的 peer metadata。** 如果目标 DSH 或
+  candidate TUI 不在 `pi2dsh` 的声明范围内，兼容性发布门禁以
+  `ECOSYSTEM_CONTRACT_BLOCKER` 失败；不会用 `--force` 把外部生态 blocker
+  伪装成 runtime smoke 通过。
 - **Agent preset 更名为 canonical `ptc`。** 官方 `standard`/`ptc`/
   `minimal`/`cordis` preset 直接来自 DSH shipped root，不再打包本地 copy
   或 `code` alias；需要时旧 Session 的 `agentPreset=code` 在恢复边界归一化为

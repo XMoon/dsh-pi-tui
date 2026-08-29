@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
@@ -18,6 +18,57 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 test('the TUI checkout carries no copied official preset root', () => {
   assert.equal(existsSync(join(REPO_ROOT, 'config', 'agent-presets')), false)
+})
+
+test('the TUI overlay supplies preset-required Host services', () => {
+  const patch = readFileSync(join(REPO_ROOT, 'cordis.patch.yml'), 'utf8')
+  for (const [id, packageName] of [
+    ['agent-presets', '@deepseek-ai/dsh-agent-presets'],
+    ['subagent-model-selection-settings', '@deepseek-ai/dsh-tool-subagent/model-selection-settings'],
+    ['code-runtime', '@deepseek-ai/dsh-code-runtime-worker-thread'],
+    ['cordis-host-runner', '@deepseek-ai/dsh-cordis-host-runner'],
+    ['authorization', '@deepseek-ai/dsh-authorization'],
+  ] as const) {
+    assert.match(patch, new RegExp(`^    - id: ${id}\\n      name: '${packageName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}'$`, 'mu'),
+      `${id} must be present on the host overlay`)
+  }
+})
+
+test('the TUI overlay keeps the complete agent-plane disable closure', () => {
+  const patch = readFileSync(join(REPO_ROOT, 'cordis.patch.yml'), 'utf8')
+  // This is the smallest closure that prevents base agent-plane rows from
+  // leaking into a per-session official preset. Extra rows are intentionally
+  // pinned too: deleting one silently changes the effective agent surface.
+  const disabledAgentRows = [
+    'tool-bash',
+    'tool-pwsh',
+    'tool-jobs',
+    'tool-fs',
+    'tool-fs-search',
+    'tool-str-replace-editor',
+    'skill-filesystem',
+    'tool-skill',
+    'command-goal',
+    'tool-goal',
+    'plan-mode',
+    'compaction-basic',
+    'command-compact',
+    'tool-result-pruner',
+    'tool-subagent-control',
+    'tool-subagent-list-agents',
+    'tool-subagent',
+    'tool-subagent-fork',
+    'workflow-worker-thread',
+    'tool-workflow',
+    'tool-ralph',
+    'agent-instructions',
+    'tool-todo',
+    'tool-web',
+  ]
+  for (const id of disabledAgentRows) {
+    assert.match(patch, new RegExp(`^- id: ${id}\\n  disabled: true$`, 'mu'),
+      `${id} must stay disabled on the host overlay so preset scope owns it`)
+  }
 })
 
 async function dispose(fibers: readonly { dispose(): unknown }[]): Promise<void> {
