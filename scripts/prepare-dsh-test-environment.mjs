@@ -15,11 +15,13 @@ import { parseArgs } from 'node:util'
 import {
   DEFAULT_SOURCE_CONFIG,
   loadDshDistribution,
+  loadDshSourceConfig,
   npmDshDistribution,
   prepareDshInstall,
   restoreDshInstall,
   sourceInstallPackages,
   assertSourceResolution,
+  validateDshSourceConfig,
   printDshProvenance,
 } from './lib/dsh-distribution.mjs'
 import { pnpmExecutable, runBounded } from './lib/process.mjs'
@@ -49,6 +51,8 @@ function parseCli() {
       distribution: { type: 'string' },
       workspace: { type: 'string' },
       'dsh-version': { type: 'string' },
+      ref: { type: 'string' },
+      'expected-version': { type: 'string' },
       config: { type: 'string' },
     },
     allowPositionals: false,
@@ -89,11 +93,19 @@ export async function prepareDshTestEnvironment({
   workspace = ROOT,
   dshVersion = readTargetVersion(),
   config = DEFAULT_SOURCE_CONFIG,
+  ref,
+  expectedVersion,
 } = {}) {
   const target = resolve(workspace)
   if (!existsSync(join(target, 'package.json'))) fail(`TUI workspace package.json is missing: ${target}`)
+  const trackedSourceConfig = mode === 'source' ? loadDshSourceConfig(config) : undefined
+  const sourceConfig = trackedSourceConfig === undefined ? undefined : validateDshSourceConfig({
+    ...trackedSourceConfig,
+    ref: ref ?? trackedSourceConfig.ref,
+    expectedVersion: expectedVersion ?? trackedSourceConfig.expectedVersion,
+  }, trackedSourceConfig.path)
   const selected = mode === 'source'
-    ? loadDshDistribution({ mode, manifest: distribution, packageJson: join(target, 'package.json'), sourceConfig: config })
+    ? loadDshDistribution({ mode, manifest: distribution, packageJson: join(target, 'package.json'), sourceConfig })
     : npmDshDistribution(dshVersion)
   const prepared = prepareDshInstall(selected, target, {
     materializeSourceDependencies: selected.kind === 'source-pack',
@@ -123,6 +135,8 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
       workspace: values.workspace ?? ROOT,
       dshVersion: values['dsh-version'] ?? readTargetVersion(),
       config: values.config ?? DEFAULT_SOURCE_CONFIG,
+      ref: values.ref,
+      expectedVersion: values['expected-version'],
     })
     console.log(`DSH test environment ready: ${values.mode}`)
   } catch (error) {

@@ -170,7 +170,15 @@ async function main() {
     const workspace = join(root, 'workspace')
     copyRepository(workspace)
     attachGitMetadata(workspace)
-    await run(process.execPath, [join(workspace, 'scripts', 'prepare-dsh-test-environment.mjs'), '--mode', 'source', '--distribution', distributionDir, '--workspace', workspace, '--config', configPath], PACKAGE_ROOT, 'source dependency preparation', sourcePnpmEnv, VERIFY_TIMEOUTS.preparation)
+    await run(process.execPath, [
+      join(workspace, 'scripts', 'prepare-dsh-test-environment.mjs'),
+      '--mode', 'source',
+      '--distribution', distributionDir,
+      '--workspace', workspace,
+      '--config', configPath,
+      '--ref', effective.ref,
+      '--expected-version', effective.expectedVersion,
+    ], PACKAGE_ROOT, 'source dependency preparation', sourcePnpmEnv, VERIFY_TIMEOUTS.preparation)
     for (const [label, args] of [
       ['vendored pi-tui typecheck', ['typecheck:fork']],
       ['vendored pi-tui tests', ['test:fork']],

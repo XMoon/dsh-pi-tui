@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { prepareDshTestEnvironment } from '../scripts/prepare-dsh-test-environment.mjs'
 import {
   DSH_CLI_PACKAGE,
   DshDistributionError,
@@ -124,6 +125,41 @@ test('source distribution enforces the configured source pin', () => {
     )
   } finally {
     rmSync(fixture.directory, { recursive: true, force: true })
+  }
+})
+
+test('source preparation accepts an effective source pin override', async () => {
+  const fixture = makeDistribution({ required: [DSH_CLI_PACKAGE] })
+  const workspace = mkdtempSync(join(tmpdir(), 'dsh-source-override-test-'))
+  const configPath = join(workspace, 'source-config.json')
+  const packagePath = join(workspace, 'package.json')
+  const originalPackage = {
+    name: '@xmoon76/dsh-pi-tui-test',
+    version: '1.0.0',
+    private: true,
+    devDependencies: { [DSH_CLI_PACKAGE]: VERSION },
+  }
+  writeFileSync(packagePath, `${JSON.stringify(originalPackage)}\n`)
+  writeFileSync(configPath, `${JSON.stringify({
+    schemaVersion: 1,
+    repository: fixture.manifest.repository,
+    ref: 'b'.repeat(40),
+    expectedVersion: VERSION,
+  })}\n`)
+  try {
+    const prepared = await prepareDshTestEnvironment({
+      mode: 'source',
+      distribution: fixture.directory,
+      workspace,
+      config: configPath,
+      ref: SHA,
+      expectedVersion: VERSION,
+    })
+    assert.equal(prepared.distribution.sourceSha, SHA)
+    assert.deepEqual(JSON.parse(readFileSync(packagePath, 'utf8')), originalPackage)
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true })
+    rmSync(workspace, { recursive: true, force: true })
   }
 })
 
