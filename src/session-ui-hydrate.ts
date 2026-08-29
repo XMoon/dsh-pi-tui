@@ -33,11 +33,11 @@ export interface HydratedSessionUi {
 export function hydrateSessionUi(events: SessionEvents): HydratedSessionUi {
   const transcriptStarted = performance.now()
   const folder = new TranscriptFolder()
-  folder.apply(events)
+  folder.hydrate(events)
   const transcriptMs = performance.now() - transcriptStarted
   const statsStarted = performance.now()
   const statsFolder = new StatsFolder()
-  statsFolder.apply(events)
+  statsFolder.hydrate(events)
   const statsMs = performance.now() - statsStarted
   return {
     folder,

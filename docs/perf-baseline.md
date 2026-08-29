@@ -66,7 +66,7 @@
 - ✅ heap enters a stable range under sustained streaming (growth ≈ 0);
 - ✅ all transcript golden/headless tests keep identical output.
 
-## Long-session projection baseline (PR A)
+## Long-session projection baseline (PR A foundations)
 
 PR A keeps the full session log and changes only local replay bookkeeping:
 
@@ -77,9 +77,11 @@ PR A keeps the full session log and changes only local replay bookkeeping:
 - resume, create, and session-switch surface setup share
   `hydrateSessionUi(events)` instead of pre-folding a resumed log and then
   hydrating it again;
-- the benchmark includes reasoning-heavy, adjacent-read, one-turn-many-step,
-  and a 700k-character text-heavy fixture, and reports transcript/stats apply,
-  snapshot, and heap/RSS measurements separately from renderer timings;
+- the benchmark fixtures include reasoning-heavy, adjacent-read,
+  one-turn-many-step, and a 700k-character text-heavy session. Current
+  projection measurements use the PR B cold `hydrate` path and report
+  transcript/stats hydration, snapshot, and heap/RSS separately from renderer
+  timings;
 - late replay timing is fenced to the current turn and ignores token deltas
   after a step has already settled, so tool-loop replay remains linear.
 
@@ -93,6 +95,30 @@ The benchmark is intentionally observational rather than a wall-clock test;
 compare runs on the same machine and Node version. Its semantic gates remain
 cold-fold/incremental parity and the existing transcript/stats regression
 suites.
+
+## Long-session bulk hydration (PR B)
+
+PR B separates the cold-session path from live event delivery. `hydrate()` folds
+all events in order but defers adjacent settled-read grouping until one final
+linear pass. Normal live tail suffixes continue to use `apply()` and extend a
+read run from its boundary in constant bookkeeping time; non-tail settlements
+retain the defensive reflow fallback. `StatsFolder.hydrate()` exposes the same
+cold-resume boundary while preserving its existing incremental fold.
+
+The following warmed p50 comparison uses the same synthetic one-turn log on
+Node v24.15.0 in the PR B worktree. `apply()` is the event-by-event baseline;
+`hydrate()` is the cold path:
+
+| adjacent settled reads | `TranscriptFolder.apply()` | `TranscriptFolder.hydrate()` |
+|---:|---:|---:|
+| 100 | 0.42ms | 0.38ms |
+| 500 | 0.64ms | 0.95ms |
+| 1000 | 1.21ms | 1.07ms |
+
+The result is still one grouped card with the same arguments, ordering, and
+full result text. The benchmark script reports the cold path as
+`TranscriptFolder.hydrate` / `StatsFolder.hydrate` in its reasoning-heavy,
+read-heavy, and 700k-like scenarios.
 
 ## M11: extension-plugin overhead (plan §23)
 
