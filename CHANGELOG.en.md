@@ -7,14 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### CI and compatibility
+
+- Added Source Mode local/CI validation: pin the complete DeepSeek Harness SHA, run the official `build:official` and `release:pack --family dsh` commands, then validate the complete tarball family through temporary pnpm overrides without writing source paths into the package contract or lockfile.
+- `next` pushes/PRs use Source Mode; `main` and every tag (including `next-v*`) use frozen npm Mode. The source lane explicitly skips the published `pi2dsh` check until a compatible published combination exists, while npm mode remains blocking.
+
 ## [0.4.0-alpha.1] - 2026-08-28
 
 ### Migration notes
 
 - **0.4.0-alpha.1 moves to DeepSeek Harness 0.1.2.** The declared support range
-  is `>=0.1.2-alpha.1 <0.1.3`; DSH 0.1.1 is no longer supported, and DSH 0.1.3
-  or later must be revalidated before the range is widened. Users keeping DSH
-  0.1.1 should pin `@xmoon76/dsh-pi-tui@0.3`.
+  is `>=0.1.2-alpha.1`; DSH 0.1.1 is no longer supported, and each release
+  validates its concrete DSH family. Users keeping DSH 0.1.1 should pin
+  `@xmoon76/dsh-pi-tui@0.3`.
 - **Gate B now preflights published consumer peer metadata.** If the target DSH or
   candidate TUI is outside `pi2dsh`'s declared ranges, the release gate fails as
   `ECOSYSTEM_CONTRACT_BLOCKER`; it never uses `--force` to disguise an external

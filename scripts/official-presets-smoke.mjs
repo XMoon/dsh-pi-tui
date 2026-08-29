@@ -14,11 +14,12 @@
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
   candidateArgument,
+  distributionArgument,
   dshInvocation,
   installPlugin,
   isolatedEnvironment,
@@ -33,7 +34,10 @@ import {
   validateTargetDshManifest,
   writeHeaderProbePackage,
 } from './pi2dsh-compat-smoke.mjs'
+import { loadDshDistribution } from './lib/dsh-distribution.mjs'
+import { pnpmExecutable } from './lib/process.mjs'
 
+const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
 const MANIFEST_PATH = join(PACKAGE_ROOT, 'test', 'compat', 'pi2dsh.json')
@@ -46,10 +50,18 @@ function commandOutput(result) {
 }
 
 async function main() {
-  const tarball = resolveTarball(candidateArgument(process.argv.slice(2)))
+  const smokeArgs = process.argv.slice(2)
+  const tarball = resolveTarball(candidateArgument(smokeArgs))
   validateCandidateTarball(tarball)
   const manifest = readJson(MANIFEST_PATH, 'compatibility manifest')
   const targetDshVersion = validateTargetDshManifest(manifest)
+  const distributionPath = distributionArgument(smokeArgs)
+  const distribution = distributionPath === undefined
+    ? loadDshDistribution({ mode: 'npm', version: targetDshVersion })
+    : loadDshDistribution({ mode: 'source', manifest: resolve(distributionPath), packageJson: join(PACKAGE_ROOT, 'package.json') })
+  if (distribution.version !== targetDshVersion) {
+    throw new Error(`DSH distribution version mismatch: expected ${targetDshVersion}, got ${distribution.version}`)
+  }
   const workDir = mkdtempSync(join(tmpdir(), 'dsh-official-presets-'))
   const home = join(workDir, 'home')
   const dshHome = join(workDir, 'dsh-home')
@@ -68,9 +80,9 @@ async function main() {
       type: 'module',
       dependencies: { '@deepseek-ai/dsh': targetDshVersion },
     }, null, 2) + '\n', 'utf8')
-    const pnpm = run('pnpm', ['--version'], { cwd: harnessDir, env })
+    const pnpm = run(PNPM_COMMAND, ['--version'], { cwd: harnessDir, env })
     if (pnpm.status !== 0) throw new Error(`pnpm is unavailable:\n${commandOutput(pnpm)}`)
-    runPnpmInstall(harnessDir, env)
+    runPnpmInstall(harnessDir, env, distribution)
 
     const dsh = dshInvocation(harnessDir)
     const version = runDsh(dsh, ['--version'], harnessDir, env)

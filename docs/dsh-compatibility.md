@@ -8,12 +8,14 @@ boundary.
 | dsh-pi-tui line | DeepSeek Harness line | Policy |
 |---|---|---|
 | `0.3.x` | `0.1.1` | Supported legacy runtime line |
-| `0.4.x-alpha` | `>=0.1.2-alpha.1 <0.1.3` | Supported target line; DSH 0.1.3+ is validated per release |
+| `0.4.x-alpha` | `>=0.1.2-alpha.1` | Supported target line; each release validates the concrete DSH family |
 
 The 0.4 line has no 0.1.1 runtime shim. An old Harness remains outside the
 supported peer window and must fail at the normal incompatible-runtime
 boundary. The startup row prints both recovery paths when its concurrent
-Loader mount gets to run first, but that friendly notice is best-effort:
+Loader mount gets to run first, but that friendly notice is best-effort. The
+published peer contract intentionally uses a lower bound only: later DSH
+versions remain eligible until a concrete compatibility failure is found.
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.2-alpha.1
@@ -21,17 +23,17 @@ npm install -g @xmoon76/dsh-pi-tui@0.3
 ```
 
 The first command upgrades the Harness for 0.4. The second pins the compatible
-TUI line when the installed Harness must remain on 0.1.1. The package peer
-window rejects DSH 0.1.3 and later until that line is revalidated. The startup
-notice only reports versions below `0.1.2-alpha.1`; a manually forced future
-runtime fails through the normal package contract rather than an early
-TUI-specific API branch. Peer prerelease tuples are validated separately before
-each release.
+TUI line when the installed Harness must remain on 0.1.1. Later DSH versions are
+eligible under the lower-bound-only peer contract; each release still runs its
+concrete runtime and preset gates. The startup notice only reports versions
+below `0.1.2-alpha.1`; an incompatible future runtime fails through the normal
+package contract rather than an early TUI-specific API branch. Peer prerelease
+tuples are validated separately before each release.
 
 ## Data compatibility
 
 Runtime compatibility and data compatibility are separate. A 0.4 runtime
-requires the declared DSH 0.1.2 support window, but it continues to read
+requires the declared DSH lower bound, but it continues to read
 sessions created by 0.3.x.
 Preset state is read through DSH's `agentPreset` session projection: the
 creation header initializes the state and the newest `agent-preset/selected`
@@ -44,6 +46,45 @@ literally named `code`: explicit input and durable state preserve `code` when
 that roster entry exists. Only an omitted legacy default or session value is
 mapped to `ptc` after the current roster proves that `code` is absent; new
 command/config writes are validated against the roster before they are saved.
+
+## Source Mode validation
+
+Source Mode is a CI and local-validation adapter for an unpublished DSH
+checkout. It is not a published package-install mode and it never changes the
+package contract or vendors DSH into this repository.
+
+The pin lives in [`test/compat/dsh-source.json`](../test/compat/dsh-source.json)
+and contains the full DeepSeek Harness commit SHA and expected version. The
+source lane then:
+
+1. checks out that exact SHA;
+2. runs the official `pnpm install --frozen-lockfile`, `pnpm build:official`,
+   and `pnpm release:pack --family dsh` commands; the temporary consumer install
+uses `--no-frozen-lockfile --lockfile=false` so the tracked registry lockfile
+cannot be consulted for unpublished DSH metadata;
+3. validates the embedded `package/package.json` metadata for the complete DSH
+   tarball family required by this TUI; and
+4. installs those tarballs through temporary pnpm overrides before running the
+   ordinary TUI, preset, and old-runtime checks.
+
+The CI policy is deliberately explicit: `next` pushes and pull requests whose
+base is `next` use Source Mode; `main` and every tag, including `next-v*`, use
+registry-backed npm mode with a frozen lockfile. The Source Mode ecosystem
+check prints `SKIPPED: requires published compatible DSH/pi2dsh combination`
+because the published `pi2dsh` bridge cannot prove compatibility against an
+unpublished source family. That check remains blocking in npm mode.
+
+For local validation, use the isolated driver rather than workspace symlinks:
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
+```
+
+A dirty local DSH tree is allowed only with a visible reproducibility warning;
+CI requires a clean checkout. Source-only overrides and generated manifests are
+removed with the temporary validation workspace and must never be committed to
+`package.json`, the lockfile, or a release tarball.
 
 ## Validation
 

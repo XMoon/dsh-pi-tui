@@ -84,8 +84,8 @@ test('pi2dsh metadata preflight blocks an unsupported consumer contract', () => 
     version: '0.23.0',
     peerDependencies: {
       '@xmoon76/dsh-pi-tui': '^0.4.0-alpha.1',
-      '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1 <0.1.3',
-      '@deepseek-ai/dsh-commands': '>=0.1.2-alpha.1 <0.1.3',
+      '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1',
+      '@deepseek-ai/dsh-commands': '>=0.1.2-alpha.1',
     },
   }
   assert.doesNotThrow(() => validateConsumerMetadata(supported, manifest, candidate))

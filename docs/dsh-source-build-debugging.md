@@ -34,16 +34,35 @@ relative paths then resolve against the wrong checkout.
 
 ## Build order
 
-The DSH packages export built `lib` artifacts. Build the DSH source before
-trying to compile or run the TUI:
+The DSH packages export built `lib` artifacts. Source Mode deliberately uses
+the upstream release commands so the validation boundary matches the artifact
+that DSH publishes:
 
 ```sh
 cd "$DSH_SOURCE"
 node --version                 # DSH supports ^22.19.0 or >=24.0.0
 pnpm install --frozen-lockfile
-pnpm build:lib                 # host and client library artifacts
-pnpm build                     # full DSH application/profile artifacts, if needed
+pnpm clean                     # remove stale local generated state only
+pnpm build:official
+pnpm release:pack --family dsh --out "$TMPDIR/dsh-source-pack"
 ```
+
+`dsh-source-pack.mjs` performs this sequence, validates the exact checkout SHA,
+reads package identity from each tarball's embedded manifest, removes the
+registry-only `publish-order.txt`, and writes the source distribution manifest.
+For the complete isolated TUI flow use `pnpm compat:dsh:source`; do not replace
+it with direct workspace links. If the official pack already exists, reuse it
+without rebuilding DSH:
+
+```sh
+pnpm compat:dsh:source -- \
+  --distribution "$TMPDIR/dsh-source-pack" \
+  --skip-runtime
+```
+
+The DSH checkout is required only when building a new pack; manifest-only
+verification can reuse a downloaded distribution without `--dsh-dir`. Do not
+start two Source Mode drivers against the same output directory at once.
 
 For a TUI-only source check, the useful order is:
 
@@ -66,66 +85,60 @@ older fork `dist`.
 
 Every `@deepseek-ai/*` import in the TUI is peer-owned. The package is supposed
 to resolve those modules from the DSH host, not bundle or publish duplicate DSH
-packages. For source-only tests, create temporary links for the built DSH
-package directories in the TUI checkout's `node_modules`:
+packages. Source Mode therefore uses the official DSH release tarballs, not
+workspace symlinks:
 
 ```sh
-python3 - <<'PY'
-from pathlib import Path
-import json
-import os
-
-source = Path(os.environ['DSH_SOURCE'])
-target = Path(os.environ['TUI_ROOT']) / 'node_modules'
-for base in ('packages', 'vendor'):
-    for manifest in (source / base).glob('**/package.json'):
-        try:
-            package = json.loads(manifest.read_text())
-        except Exception:
-            continue
-        name = package.get('name')
-        if not isinstance(name, str) or not name.startswith('@deepseek-ai/'):
-            continue
-        destination = target / name
-        if destination.exists() or destination.is_symlink():
-            continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.symlink_to(manifest.parent, target_is_directory=True)
-PY
+cd "$TUI_ROOT"
+pnpm dsh:source:pack -- --dsh-dir "$DSH_SOURCE" --out "$TMPDIR/dsh-source-pack"
+pnpm prepare:dsh:test -- \
+  --mode source \
+  --distribution "$TMPDIR/dsh-source-pack" \
+  --workspace "$TUI_ROOT" \
+  --config test/compat/dsh-source.json
 ```
 
-These are validation links only. They must not be committed, and they must not
-be installed into a real DSH profile. In particular, a real profile should not
-contain an extra `node_modules/@deepseek-ai` tree: in-box packages must resolve
-from the DSH installation itself. A duplicated profile copy can fail on the
-first tool call with an error such as `reading prepare`.
+`prepare-dsh-test-environment.mjs` validates the manifest and every embedded
+`package/package.json`, writes a marked temporary pnpm override block, installs
+with `--no-frozen-lockfile --lockfile=false` (the temporary source lane must not
+consult the registry lockfile), and verifies that the installed DSH packages
+came from local `.tgz` files. The tracked `package.json` and lockfile are never
+rewritten with `file:`, `link:`, or `workspace:` dependency specs. The source
+pack itself contains only the official `.tgz` family plus
+`dsh-source-distribution.json`.
 
-After linking, verify the package exports point at built files and that the
-corresponding `lib` directories exist. A missing module usually means one of
-three things:
+Do not use workspace symlinks as compatibility evidence. They bypass the
+published package boundary and can resolve against the wrong worktree. A
+missing module in the tarball flow usually means one of three things:
 
-1. the DSH package was not built;
-2. the package was omitted from the temporary link set; or
-3. the package's `exports` map points at a stale or source-only path.
+1. the pinned DSH package was not built;
+2. the package was omitted from the official family pack; or
+3. the package's embedded `exports` map points at a stale or source-only path.
+
+A real DSH profile must not contain an extra `node_modules/@deepseek-ai` tree:
+in-box packages must resolve from the DSH installation itself. A duplicated
+profile copy can fail on the first tool call with an error such as `reading
+prepare`.
 
 ## pnpm and unpublished-version traps
 
 The repository's pnpm setup verifies dependency metadata before running many
-scripts. With unpublished target versions, that verification can report
-`ERR_PNPM_TARBALL_URL_MISMATCH` and remove or replace temporary local links.
-For a source-linked validation run, either bypass the verification step for
-that invocation or call the installed binaries directly:
+scripts. With unpublished target versions, a plain registry install can report
+`ERR_PNPM_TARBALL_URL_MISMATCH`. In Source Mode, run the preparation helper
+first; it installs the complete tarball family through temporary overrides and
+then checks the actual installed paths. Do not rewrite the lockfile, downgrade
+the DSH version, or restore a workspace-link workaround when a registry
+resolution is attempted.
+
+For a diagnostic run that already has a prepared source workspace, call the
+installed binaries directly if pnpm's command wrapper performs an unrelated
+registry check:
 
 ```sh
-PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false node --test test/*.test.ts test/*.test.mjs
+node --test test/*.test.ts test/*.test.mjs
 node_modules/.bin/tsc -p tsconfig.json --noEmit
 node_modules/.bin/tsdown
 ```
-
-The uppercase variable is deliberate: it is the pnpm configuration spelling
-that worked for the local command chain. If a pnpm command still performs a
-registry resolution, do not rewrite the lockfile or downgrade the DSH version;
-restore the local links and use the direct binary path instead.
 
 The production dependency audit can still run independently of the missing
 alpha tarballs:
@@ -136,7 +149,7 @@ pnpm audit --prod --audit-level high
 
 ## Test sequence
 
-With DSH artifacts built and temporary links present:
+With the DSH tarball family built and the temporary source overrides prepared:
 
 ```sh
 cd "$TUI_ROOT"
@@ -158,15 +171,18 @@ git diff --check
 The target-profile smoke is a separate level of evidence:
 
 ```sh
-node scripts/pi2dsh-compat-smoke.mjs
+node scripts/official-presets-smoke.mjs \
+  ./xmoon76-dsh-pi-tui-*.tgz \
+  --distribution "$TMPDIR/dsh-source-pack"
 ```
 
-It installs the candidate into an isolated DSH profile and drives the TUI in
-`tmux`. The migration version also boots `standard`, `ptc`, `minimal`, and
-`cordis` explicitly with `--preset`; this catches a missing Host service that a
-standard-only boot would hide. It must be run against the exact published DSH
-and `pi2dsh` versions from `test/compat/pi2dsh.json`, not against a locally
-substituted older DSH.
+It installs the exact source tarball family into an isolated DSH profile and
+boots `standard`, `ptc`, `minimal`, and `cordis` explicitly with `--preset`;
+this catches a missing Host service that a standard-only boot would hide. The
+published `pi2dsh` consumer check is intentionally skipped for Source Mode and
+must print `SKIPPED: requires published compatible DSH/pi2dsh combination`.
+Run `node scripts/pi2dsh-compat-smoke.mjs` without `--distribution` only for the
+npm lane, using the exact published versions from `test/compat/pi2dsh.json`.
 
 For a packed artifact, run the structure/content checks offline when the target
 peer packages are unavailable:
@@ -217,8 +233,8 @@ composition or Host rows.
   TypeScript from `node_modules`; build the package and consume its compiled
   export.
 - **`ERR_PNPM_TARBALL_URL_MISMATCH`:** pnpm cannot verify an unpublished/local
-  target tarball. Preserve the lockfile and use the direct binary or the
-  verification override for local testing.
+  target tarball. Preserve the tracked lockfile and use the Source Mode helper,
+  which disables lockfile resolution only in its temporary install.
 - **`reading prepare` on the first tool call:** A duplicate `@deepseek-ai`
   package was installed in the DSH profile. Remove the profile copy and let DSH
   resolve its in-box packages.
@@ -237,7 +253,7 @@ Before committing TUI changes:
 # Restore any temporary edits made inside the DSH checkout.
 git -C "$DSH_SOURCE" status --short
 
-# Remove source-validation links if they are not ignored by the checkout.
+# Remove any generated source override/manifest files when they are not needed.
 # Remove generated dist/tarball files when they are not needed for another gate.
 
 cd "$TUI_ROOT"

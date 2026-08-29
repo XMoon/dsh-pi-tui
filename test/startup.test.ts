@@ -149,7 +149,7 @@ test('bundleVersionLabel falls back to the release line that imposed the require
   assert.ok(bundleVersionLabel('0.4.0-alpha.1').startsWith('v'), `read version label: ${bundleVersionLabel('0.4.0-alpha.1')}`)
 })
 
-test('DSH peer ranges preserve the validated 0.1.2 support window', () => {
+test('DSH peer ranges keep the lower-bound compatibility contract', () => {
   const packageJson = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as {
     peerDependencies?: Record<string, string>
     devDependencies?: Record<string, string>
@@ -158,7 +158,7 @@ test('DSH peer ranges preserve the validated 0.1.2 support window', () => {
     .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
   assert.ok(dshPeers.length > 0, 'the bundle must declare DSH peers')
   for (const [name, range] of dshPeers) {
-    assert.equal(range, '>=0.1.2-alpha.1 <0.1.3', `${name} must use the validated DSH 0.1.2 window`)
+    assert.equal(range, '>=0.1.2-alpha.1', `${name} must use the lower-bound DSH compatibility contract`)
     assert.ok(!range.includes('0.1.1'), `${name} must not claim DSH 0.1.1`)
   }
   for (const [name, version] of Object.entries(packageJson.devDependencies ?? {})) {

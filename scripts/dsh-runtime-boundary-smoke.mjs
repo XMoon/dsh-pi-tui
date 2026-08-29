@@ -18,6 +18,9 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { pnpmExecutable } from './lib/process.mjs'
+
+const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
@@ -85,7 +88,7 @@ function isolatedEnvironment(workDir, home, dshHome) {
 }
 
 function installDsh(harnessDir, env) {
-  const result = run('pnpm', [
+  const result = run(PNPM_COMMAND, [
     'install', '--ignore-scripts', '--no-frozen-lockfile', '--config.minimum-release-age=0', '--reporter=append-only',
   ], { cwd: harnessDir, env, timeout: 180_000 })
   if (result.status !== 0) throw new Error(`isolated old DSH install failed:\n${outputOf(result)}`)

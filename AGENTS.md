@@ -370,6 +370,31 @@ pnpm typecheck
 node --import tsx/esm demo.ts   # standalone demo in a real TTY
 ```
 
+### DSH distribution validation
+
+The published package contract is the lower-bound-only DSH peer range
+`>=0.1.2-alpha.1`; do not add `file:`, `link:`, or `workspace:` DSH specs to
+`package.json` or the tracked lockfile. Source Mode is test-only and is used
+for `next` pushes and pull requests targeting `next` when the exact upstream
+DSH family is not yet published. It checks out the full SHA in
+`test/compat/dsh-source.json`, runs the official DSH build/pack commands, and
+installs the resulting tarballs through temporary pnpm overrides. `main` and
+all tags, including `next-v*`, use the frozen registry/npm lane.
+
+Use the isolated local drivers instead of workspace symlinks:
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
+```
+
+A dirty local DSH checkout is allowed only with a visible reproducibility
+warning; CI requires a clean exact-SHA checkout. Source mode skips the
+published `pi2dsh` ecosystem check with an explicit reason because that bridge
+cannot validate an unpublished source family; npm mode keeps that check
+blocking. See [docs/dsh-compatibility.md](docs/dsh-compatibility.md) and
+[docs/dsh-source-build-debugging.md](docs/dsh-source-build-debugging.md).
+
 ### Installing into the local dsh profile (dev loop)
 
 Two profiles exist. **Never touch `pi-tui`** — it is the real-use profile and

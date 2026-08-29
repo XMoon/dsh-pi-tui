@@ -16,6 +16,18 @@ dsh --profile pi-tui
 
 ![dsh-pi-tui](docs/dsh-pi-tui.png)
 
+## DSH 兼容性与源码验证
+
+发布包通过 `package.json` peer contract 使用 DSH `>=0.1.2-alpha.1`；源码验证不会修改这个发布契约，也不会把 DSH vendor 进本仓库。
+
+当目标 DSH 版本尚未发布到 npm 时，可以用固定 commit 的官方源码包做本地验证：
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+```
+
+CI 中 `next` 使用 Source Mode，`main` 和所有 tag 使用 npm Mode。源码 lane 会验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界；依赖已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md)。
+
 ## 功能
 
 ### 对话与工具
@@ -377,7 +389,7 @@ dsh-pi-tui:
 
 | TUI 包版本 | 对应 DSH 版本 | 说明 |
 |---|---|---|
-| `0.4.0-alpha.1`（`@next`） | `>=0.1.2-alpha.1 <0.1.3` | 当前预发布线；已按 `0.1.2-alpha.1` 验证 |
+| `0.4.0-alpha.1`（`@next`） | `>=0.1.2-alpha.1` | 当前预发布线；按每个发布版本的具体 DSH family 验证 |
 | `0.3.x`（`@0.3`） | `0.1.1-rc.2` | 旧运行时兼容线 |
 
 不要把两条线混装：DSH 0.1.1 不在 0.4 的 peer 支持范围内，运行时会在
@@ -400,10 +412,9 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 dsh --profile pi-tui
 ```
 
-`0.4` 的声明支持范围是 `>=0.1.2-alpha.1 <0.1.3`；当前 alpha 精确验证的是
-`0.1.2-alpha.1`。DSH 0.1.3 及以上须在后续版本重新验证后再扩大范围。
-仅执行 `npm install -g @xmoon76/dsh-pi-tui` 不会把插件安装进 DSH profile，
-实际使用仍应执行上面的 `dsh plugin` 命令。
+`0.4` 的声明支持范围是 `>=0.1.2-alpha.1`；每个发布版本都会验证具体的
+DSH family。仅执行 `npm install -g @xmoon76/dsh-pi-tui` 不会把插件安装进
+DSH profile，实际使用仍应执行上面的 `dsh plugin` 命令。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
@@ -424,6 +435,15 @@ dsh --profile pi-tui
 
 ```sh
 dsh --profile pi-tui --session <session-id>
+```
+
+### Source Mode（仅验证）
+
+Source Mode 只用于 `next` 的 CI 和本地兼容性验证，不是发布或用户安装方式。它从 `test/compat/dsh-source.json` 的完整 commit SHA 构建官方 DSH tarball family，通过临时 pnpm overrides 安装，并在完成后清理临时状态。不要把 DSH 源码路径、`file:` 依赖或 workspace symlink 写入发布 package。
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
 ```
 
 安装包已经包含运行所需的 Pi TUI fork，不需要额外安装内部的 TUI package。

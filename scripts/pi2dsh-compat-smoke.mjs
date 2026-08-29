@@ -43,7 +43,17 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep as pathSepa
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import semver from 'semver'
+import {
+  assertSourceResolution,
+  DSH_CLI_PACKAGE,
+  loadDshDistribution,
+  prepareDshInstall,
+  restoreDshInstall,
+  sourceInstallPackages,
+} from './lib/dsh-distribution.mjs'
+import { pnpmExecutable } from './lib/process.mjs'
 
+const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
@@ -69,7 +79,7 @@ const TIMEOUTS = {
   input: 10_000,
   dispose: 10_000,
 }
-const SAFE_ENV_KEYS = ['LANG', 'LC_ALL', 'LC_CTYPE', 'TMPDIR', 'TMP', 'TEMP', 'CI']
+const SAFE_ENV_KEYS = ['LANG', 'LC_ALL', 'LC_CTYPE', 'TMPDIR', 'TMP', 'TEMP', 'CI', 'PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN', 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS', 'TARBALL_SMOKE_SKIP_INSTALL']
 const SUBPROCESS_TIMEOUTS = {
   default: 15_000,
   install: 180_000,
@@ -291,6 +301,26 @@ function officialPresetStatusVisible(presetId, pane) {
 
 function candidateArgument(args) {
   return args[0] === '--' ? args[1] : args[0]
+}
+
+function distributionArgument(args) {
+  const index = args.indexOf('--distribution')
+  if (index < 0) return undefined
+  const value = args[index + 1]
+  if (value === undefined || value.startsWith('--')) {
+    fail('COMPAT_BOOT_FAILURE', '--distribution requires a source distribution directory or manifest')
+  }
+  return value
+}
+
+function resolveDshDistribution(args, targetVersion) {
+  const distributionPath = distributionArgument(args)
+  if (distributionPath === undefined) return loadDshDistribution({ mode: 'npm', version: targetVersion })
+  return loadDshDistribution({
+    mode: 'source',
+    manifest: resolve(distributionPath),
+    packageJson: join(PACKAGE_ROOT, 'package.json'),
+  })
 }
 
 function resolveTarball(explicit) {
@@ -629,17 +659,39 @@ function isolatedEnvironment(workDir, home, dshHome, evidencePath) {
   }
 }
 
-function runPnpmInstall(harnessDir, env) {
-  const result = run('pnpm', [
-    'install',
-    '--ignore-scripts',
-    '--no-frozen-lockfile',
-    '--config.minimum-release-age=0',
-    '--reporter=append-only',
-  ], { cwd: harnessDir, env, timeout: SUBPROCESS_TIMEOUTS.install })
+function runPnpmInstall(harnessDir, env, distribution) {
+  const prepared = distribution === undefined
+    ? undefined
+    : prepareDshInstall(distribution, harnessDir, {
+      addCliDependency: true,
+      materializeSourceDependencies: distribution.kind === 'source-pack',
+       stripPackageManager: true,
+    })
+  const installArgs = distribution?.kind === 'source-pack'
+    ? [...prepared.installArgs, '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only']
+    : ['install', '--ignore-scripts', '--no-frozen-lockfile', '--config.minimum-release-age=0', '--reporter=append-only']
+  let result
+  try {
+    result = run(PNPM_COMMAND, installArgs, {
+      cwd: harnessDir,
+      env,
+      timeout: distribution?.kind === 'source-pack' ? 20 * 60_000 : SUBPROCESS_TIMEOUTS.install,
+    })
+  } finally {
+    restoreDshInstall(prepared)
+  }
   if (result.status !== 0) {
     fail('INFRA_INSTALL_FAILURE', `isolated DSH install failed:\n${resultText(result)}`)
   }
+  if (distribution?.kind === 'source-pack') {
+    try {
+      const packageJson = JSON.parse(readFileSync(join(harnessDir, 'package.json'), 'utf8'))
+      assertSourceResolution(harnessDir, distribution, sourceInstallPackages(distribution, packageJson))
+    } catch (error) {
+      fail('INFRA_INSTALL_FAILURE', error instanceof Error ? error.message : String(error))
+    }
+  }
+  return prepared
 }
 
 function dshInvocation(harnessDir) {
@@ -1062,6 +1114,7 @@ async function main() {
     tarball: undefined,
     candidatePackage: undefined,
     manifest: undefined,
+    distribution: undefined,
     consumerPackage: undefined,
     workDir: undefined,
     dshHome: undefined,
@@ -1075,10 +1128,19 @@ async function main() {
   }
   activeGateDeadline = Date.now() + GATE_BUDGET_MS
   try {
-    context.tarball = resolveTarball(candidateArgument(process.argv.slice(2)))
+    const smokeArgs = process.argv.slice(2)
+    context.tarball = resolveTarball(candidateArgument(smokeArgs))
     context.manifest = readJson(MANIFEST_PATH, 'pi2dsh compatibility manifest')
     context.candidatePackage = validateCandidateTarball(context.tarball)
     validateManifest(context.manifest)
+    context.distribution = resolveDshDistribution(smokeArgs, context.manifest.dshVersion)
+    if (context.distribution.version !== context.manifest.dshVersion) {
+      fail('COMPAT_BOOT_FAILURE', `DSH distribution version mismatch: expected ${context.manifest.dshVersion}, got ${context.distribution.version}`)
+    }
+    if (context.distribution.kind === 'source-pack') {
+      console.log('SKIPPED: requires published compatible DSH/pi2dsh combination (source mode)')
+      return
+    }
     validateFixturePackage()
     scanFixture()
 
@@ -1113,10 +1175,10 @@ async function main() {
       },
     }, null, 2) + '\n', 'utf8')
 
-    const pnpm = run('pnpm', ['--version'], { cwd: harnessDir, env })
+    const pnpm = run(PNPM_COMMAND, ['--version'], { cwd: harnessDir, env })
     if (pnpm.status !== 0) fail('INFRA_INSTALL_FAILURE', `pnpm is unavailable:\n${resultText(pnpm)}`)
     context.pnpmVersion = (pnpm.stdout ?? '').trim()
-    runPnpmInstall(harnessDir, env)
+    runPnpmInstall(harnessDir, env, context.distribution)
 
     const dsh = dshInvocation(harnessDir)
     const dshVersion = runDsh(dsh, ['--version'], harnessDir, env)
@@ -1252,6 +1314,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
 export {
   assertNoCompatibilityFailures,
   candidateArgument,
+  distributionArgument,
   readJson,
   resolveTarball,
   validateCandidateTarball,

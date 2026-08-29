@@ -16,6 +16,18 @@ dsh --profile pi-tui
 
 ![dsh-pi-tui](docs/dsh-pi-tui.png)
 
+## DSH compatibility and source validation
+
+The published package declares the lower-bound-only DSH peer contract `>=0.1.2-alpha.1`. Source validation does not change that contract or vendor DSH into this repository.
+
+When the target DSH version is not yet available from npm, validate against the official checkout pinned by commit SHA:
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+```
+
+CI uses Source Mode for `next` and npm Mode for `main` and every tag. The source lane validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary; the published `pi2dsh` ecosystem check is explicitly marked skipped until a compatible published combination exists. See [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md) for the full workflow.
+
 ## Features
 
 ### Conversation and tools
@@ -403,7 +415,7 @@ dsh-pi-tui:
 
 | TUI package line | Matching DSH line | Notes |
 |---|---|---|
-| `0.4.0-alpha.1` (`@next`) | `>=0.1.2-alpha.1 <0.1.3` | Current prerelease; validated against exact `0.1.2-alpha.1` |
+| `0.4.0-alpha.1` (`@next`) | `>=0.1.2-alpha.1` | Current prerelease; each release validates its concrete DSH family |
 | `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
 
 Do not mix the two lines: DSH 0.1.1 is outside the 0.4 peer window and the
@@ -427,11 +439,10 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 dsh --profile pi-tui
 ```
 
-The declared 0.4 support range is `>=0.1.2-alpha.1 <0.1.3`; the current alpha is
-validated exactly against `0.1.2-alpha.1`. DSH 0.1.3 and later must be
-revalidated before this range is widened. Running only
-`npm install -g @xmoon76/dsh-pi-tui` does not install the plugin into a DSH
-profile; the `dsh plugin` command is still required.
+The declared 0.4 support range is `>=0.1.2-alpha.1`; each release validates
+its concrete DSH family. Running only `npm install -g @xmoon76/dsh-pi-tui` does
+not install the plugin into a DSH profile; the `dsh plugin` command is still
+required.
 
 New agent sessions use the official roster's selected preset id. A custom DSH
 preset literally named `code` is valid and remains `code` when it exists in the
@@ -453,6 +464,15 @@ Resume an existing Session:
 
 ```sh
 dsh --profile pi-tui --session <session-id>
+```
+
+### Source Mode (validation only)
+
+Source Mode is only for `next` CI and local compatibility validation. It reads the full commit pin in `test/compat/dsh-source.json`, builds the official DSH tarball family, installs it through temporary pnpm overrides, and removes the temporary state afterward. Do not write DSH source paths, `file:` dependencies, or workspace symlinks into a published package.
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
 ```
 
 The published package already contains the Pi TUI fork required at runtime. No separate internal TUI package needs to be installed.

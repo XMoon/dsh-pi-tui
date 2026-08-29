@@ -7,14 +7,18 @@
 
 ## [Unreleased]
 
+### CI 与兼容性
+
+- 新增 Source Mode 本地/CI 验证：固定 DeepSeek Harness 完整 SHA，使用官方 `build:official` 与 `release:pack --family dsh` 生成完整 tarball family，再通过临时 pnpm overrides 验证 TUI。发布包的 peer contract 保持为 `>=0.1.2-alpha.1`，不会把源码路径写入 package 或 lockfile。
+- `next` push/PR 使用 Source Mode；`main` 和所有 tag（包括 `next-v*`）使用 frozen npm Mode。源码 lane 对依赖已发布 `pi2dsh` 的检查明确标记为 skipped，npm lane 仍然阻断不兼容结果。
+
 ## [0.4.0-alpha.1] - 2026-08-28
 
 ### 迁移说明
 
 - **0.4.0-alpha.1 切换到 DeepSeek Harness 0.1.2。** 声明支持范围为
-  `>=0.1.2-alpha.1 <0.1.3`，不再兼容 DSH 0.1.1；DSH 0.1.3 及以上需
-  重新验证后才能扩大范围。保留 DSH 0.1.1 的用户应固定安装
-  `@xmoon76/dsh-pi-tui@0.3`。
+  `>=0.1.2-alpha.1`，不再兼容 DSH 0.1.1；每个发布版本都会验证具体的 DSH
+  family。保留 DSH 0.1.1 的用户应固定安装 `@xmoon76/dsh-pi-tui@0.3`。
 - **Gate B 现在先校验已发布 consumer 的 peer metadata。** 如果目标 DSH 或
   candidate TUI 不在 `pi2dsh` 的声明范围内，兼容性发布门禁以
   `ECOSYSTEM_CONTRACT_BLOCKER` 失败；不会用 `--force` 把外部生态 blocker
