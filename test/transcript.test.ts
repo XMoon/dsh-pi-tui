@@ -757,7 +757,7 @@ test('a failed read breaks the group; a read settling late re-groups into the ru
 test('cold hydrate defers adjacent-read reflow and preserves apply semantics', () => {
   const events: SessionEvent[] = [event('turn/start', { turn: 0 }, 0)]
   for (let index = 0; index < 128; index += 1) {
-    const callId = CallId(`hydrate-read-${index}`)
+    const callId = ToolCallId(`hydrate-read-${index}`)
     events.push(event('tool/call', {
       turn: 0,
       step: 0,
@@ -820,7 +820,7 @@ test('cold hydrate defers adjacent-read reflow and preserves apply semantics', (
 
   // Hydration is a cold-only optimization: a later live suffix still uses the
   // immediate grouping path and retains the same public projection semantics.
-  const nextCall = CallId('hydrate-read-live')
+  const nextCall = ToolCallId('hydrate-read-live')
   hydrated.apply([
     event('tool/call', { turn: 0, step: 0, callId: nextCall, name: 'read', arguments: '{}' }, events.length),
     event('tool/result', {
