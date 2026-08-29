@@ -33,6 +33,42 @@ interface AutocompleteInternals {
   requestAutocomplete(options: { force: boolean; explicitTab: boolean }): void
 }
 
+/** Host render-routing options for the host editor. */
+export interface TuiEditorOptions {
+  /**
+   * Routes every render request the editor makes for its OWN visible state —
+   * text/cursor staging, mode repaints and the AUTOCOMPLETE lifecycle
+   * (commit, cancel, single-result apply) — to the host's CURRENTLY ACTIVE
+   * screen. The vendored editor holds ONE captured TUI for life; in
+   * fullscreen that captured main screen is STOPPED, so an async completion
+   * commit routed there leaves a hidden-but-active dropdown (state open,
+   * surface stale). Active-screen identity stays host-owned: the editor
+   * only emits render intent, at the exact moment its state changes — any
+   * future commit, whatever its timing (debounce, fd, fallback scan), lands
+   * on the visible screen. No microtask/timeout guessing anywhere.
+   */
+  requestRender?: (force?: boolean) => void
+}
+
+/**
+ * A TUI view whose `requestRender` is re-pointed at the host router; every
+ * other member falls through to the captured screen along the prototype
+ * chain (the fork's Editor only ever calls `requestRender` and reads
+ * `terminal`, and both screens share one terminal). The interception is
+ * SYNCHRONOUS with the editor's own state change — not a deferred check —
+ * so the routing cannot miss a commit. `instanceof` and identity-sensitive
+ * consumers keep working (the view's prototype chain includes the real
+ * screen). Without a route the captured screen is returned unchanged, so
+ * every other Editor consumer behaves exactly as before (fork stays
+ * pristine — AGENTS.md decision 8).
+ */
+function routeEditorRenders(tui: TUI, route: ((force?: boolean) => void) | undefined): TUI {
+  if (route === undefined) return tui
+  const routed = Object.create(tui) as TUI
+  routed.requestRender = (force?: boolean): void => route(force)
+  return routed
+}
+
 /** Visible width of the mode prompt — must equal the editor's paddingX,
  * so content and wrapped continuations start right after the prompt. All
  * three prompts (`❯ `, `! `, `!!`) are exactly this wide. */
@@ -129,12 +165,15 @@ export class TuiEditor extends Editor {
    * at the top of handleInput. */
   private pendingPasteMarker: string | null = null
 
-  constructor(tui: TUI, theme: EditorTheme) {
+  constructor(tui: TUI, theme: EditorTheme, options: TuiEditorOptions = {}) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
     // by render(). Content and wrapped continuations start at column 2,
     // matching the transcript's user-message bullet indent, and the layout
     // width the fork uses for cursor navigation/wrapping stays in sync.
-    super(tui, theme, { paddingX: PROMPT_WIDTH })
+    // The routed TUI view re-points the editor's render requests (its OWN
+    // state repaints, incl. async autocomplete commits) at the host's
+    // active screen — see TuiEditorOptions.requestRender.
+    super(routeEditorRenders(tui, options.requestRender), theme, { paddingX: PROMPT_WIDTH })
     // Dynamic border: shell modes use the shellMode token, the prompt the
     // normal border. The function reads the LIVE color helpers on every
     // call, so a theme switch repaints correctly (never a cached Chalk
