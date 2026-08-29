@@ -1290,3 +1290,93 @@ test('PR E: the exit guard keeps all three actions visible at 40x10', async () =
   assert.equal(cancelled, 0)
   app.stop()
 })
+
+test('PR E: a clean draft closes WITHOUT persisting (Save changes / S)', async () => {
+  const { vt, app } = startApp()
+  let saved = 0
+  let closed = 0
+  openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { closed += 1 } })
+  await vt.waitForRender()
+  // ↓ ↓ lands on Save changes. Enter with NOTHING edited must close
+  // without a save (plan §12: skip the meaningless settings replace — an
+  // idle save must never flip the active default/compact footer to
+  // custom).
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(saved, 0, 'a clean save must not persist')
+  assert.equal(closed, 1, 'the configurator closed as the save outcome')
+  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'))
+  app.stop()
+})
+
+test('PR E: S on a clean draft closes without persisting', async () => {
+  const { vt, app } = startApp()
+  let saved = 0
+  let closed = 0
+  openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { closed += 1 } })
+  await vt.waitForRender()
+  vt.sendInput('s')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(saved, 0, 'the clean S shortcut must not persist')
+  assert.equal(closed, 1)
+  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'))
+  app.stop()
+})
+
+test('PR E: closing during an in-flight save is safe (no unhandled rejection)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  let attempts = 0
+  let release: (() => void) | undefined
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const close = app.openFooterConfigurator({
+    model: new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry()),
+    registry: app.getFooterItemRegistry(),
+    onSave: () => { attempts += 1; return gate },
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  vt.sendInput('s')
+  await settle()
+  assert.equal(attempts, 1)
+  close() // e.g. a session switch disposes the overlay mid-write
+  release?.()
+  await settle()
+  await settle()
+  await vt.waitForRender()
+  app.stop()
+})
+
+test('PR E: the Save row stays visible at 40x10 and Saving… survives a resize', async () => {
+  const vt = new VirtualTerminal(40, 10)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  let attempts = 0
+  let release: (() => void) | undefined
+  const gate = new Promise<void>(resolve => { release = resolve })
+  openWith(app, { onSave: () => { attempts += 1; return gate } })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Save changes'), `the save action must be visible at 40x10:\n${view}`)
+  assert.ok(view.includes('Unsaved'), `the dirty status must be visible at 40x10:\n${view}`)
+  vt.sendInput('s')
+  await settle()
+  vt.resize(80, 24)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Saving…'), `Saving… must survive a resize mid-save:\n${view}`)
+  release?.()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the released save closes on success')
+  app.stop()
+})
