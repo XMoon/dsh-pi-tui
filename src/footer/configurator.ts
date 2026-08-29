@@ -240,6 +240,15 @@ export class FooterConfiguratorPanel implements Component {
    * here — saving guard, atomic draft capture, close-on-success only. */
   private requestSave(): void {
     if (this.model.state().saving) return
+    // Plan §12: a CLEAN draft has nothing to persist — closing IS the
+    // save outcome. This also keeps an unchanged default/compact footer
+    // from being silently rewritten as footer:'custom' by an idle save.
+    // (The exit-confirm page only exists while dirty, so this branch is
+    // reachable from the selector's S / Save changes row only.)
+    if (!this.model.isDirty()) {
+      this.onCancel()
+      return
+    }
     this.model.beginSave()
     this.requestRender()
     // The draft is captured BEFORE the await: the persistence layer must
@@ -318,9 +327,9 @@ export class FooterConfiguratorPanel implements Component {
       // borders stay visible — the physical minimum).
       return [...head, ...pre].slice(0, budget).map(line => truncateToWidth(line, Math.max(1, width), '…'))
     }
-    const bodyMin = state.mode === 'exit-confirm'
-      ? body.lines.length // PR E §17.9: the guard's question + three actions never scroll away
-      : Math.min(body.lines.length, 2)
+    const bodyMin = state.mode === 'exit-confirm' || state.mode === 'rows'
+      ? body.lines.length // PR E §17.9: the guard's question + three actions, and the whole
+      : Math.min(body.lines.length, 2) // selector (rows + Save changes), never scroll away
     let bodyBudget: number
     let previewBlock: string[]
     if (left <= bodyMin + 1) {

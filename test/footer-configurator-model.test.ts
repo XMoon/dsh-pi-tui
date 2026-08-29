@@ -782,6 +782,29 @@ test('PR E: the saving flag gates Esc-close until the save settles', () => {
   assert.equal(m.state().mode, 'exit-confirm', 'no mode escape mid-save')
   m.endSave()
   assert.equal(m.state().saving, false)
-  assert.equal(m.cancel(), true, 'after a failure the guard works again')
+  assert.equal(m.cancel(), true, 'after a failure the guard works again (Esc = Keep Editing)')
   assert.equal(m.state().mode, 'rows')
+})
+
+test('PR E: create then delete of a NEW custom item returns to clean', () => {
+  const m = model()
+  m.activate() // → row 1
+  m.startAdd()
+  m.text('zz-no-match')
+  assert.equal(m.addMatches().length, 0, 'the filter isolates the create action')
+  assert.ok(m.isCreateOption())
+  m.activate() // → create-name
+  m.text('Temp')
+  m.activate() // → create-text
+  m.text('TMP')
+  m.activate() // → create-tone
+  m.activate() // create with Auto — the definition is created AND placed
+  assert.equal(m.isDirty(), true, 'the created definition + its placement are dirty')
+  m.activate() // item editor (the cursor landed on the new item)
+  // Menu: 0 Text, 1 Default tone, 2 Tone, 3 Advanced, 4 Rename, 5 Delete.
+  for (let i = 0; i < 5; i += 1) m.moveDown()
+  m.activate() // delete page
+  m.activate() // confirm — removes the definition and every reference
+  assert.equal(m.state().mode, 'row')
+  assert.equal(m.isDirty(), false, 'create + delete of the new item restores the baseline exactly')
 })
