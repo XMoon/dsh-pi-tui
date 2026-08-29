@@ -22,7 +22,9 @@ import { sourceConfigForArgs } from '../scripts/official-presets-smoke.mjs'
 import { installEnvironment } from '../scripts/prepare-dsh-test-environment.mjs'
 import {
   candidateTarball as sourceVerifyCandidateTarball,
+  removeTemporaryWorkspace,
   resolveSourceVerifyPaths,
+  temporaryWorkspaceOwner,
 } from '../scripts/dsh-source-verify.mjs'
 
 const VERSION = '0.1.2-alpha.1'
@@ -234,6 +236,13 @@ test('source pack ownership survives output and ancestor replacement', () => {
     mkdirSync(ancestorParent, { recursive: true })
     mkdirSync(sourceRoot)
     const validation = validateSourcePackOutputInfo(join(ancestorParent, 'pack'), sourceRoot)
+    const appeared = join(root, 'appeared-pack')
+    const appearedValidation = validateSourcePackOutputInfo(appeared, sourceRoot)
+    mkdirSync(appearedValidation.path)
+    writeFileSync(join(appearedValidation.path, 'sentinel.txt'), 'raced output must survive')
+    assert.throws(() => claimSourcePackOutput(appearedValidation.path, appearedValidation), /EEXIST/u)
+    assert.equal(readFileSync(join(appearedValidation.path, 'sentinel.txt'), 'utf8'), 'raced output must survive')
+    rmSync(appearedValidation.path, { recursive: true, force: true })
     rmSync(ancestorRoot, { recursive: true, force: true })
     mkdirSync(ancestorParent, { recursive: true })
     assert.throws(
@@ -241,6 +250,20 @@ test('source pack ownership survives output and ancestor replacement', () => {
       /source pack output ancestor changed/u,
     )
     assert.equal(existsSync(validation.path), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('source verification workspace cleanup preserves a replaced root', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-source-workspace-owner-test-'))
+  try {
+    const owner = temporaryWorkspaceOwner(root)
+    rmSync(root, { recursive: true, force: true })
+    mkdirSync(root)
+    writeFileSync(join(root, 'sentinel.txt'), 'replacement must survive')
+    assert.equal(removeTemporaryWorkspace(owner), false)
+    assert.equal(readFileSync(join(root, 'sentinel.txt'), 'utf8'), 'replacement must survive')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

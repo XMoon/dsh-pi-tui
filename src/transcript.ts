@@ -1458,7 +1458,7 @@ export class TranscriptFolder {
         // artifact) must not mutate it (review finding). The transcript
         // card still settles.
         const activeTool = activity.tool
-        if (!activity.completed && activeTool?.callId === key) {
+        if (!activity.completed && activeTool !== undefined && activeTool.callId === key) {
           activeTool.status = status
           activity.revision += 1
         }

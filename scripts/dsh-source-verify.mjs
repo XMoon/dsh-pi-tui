@@ -14,7 +14,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -175,16 +175,65 @@ function removeGeneratedDistribution(owner) {
   const state = generatedOwnerState(owner)
   if (state === undefined) return true
   if (!state) return false
-  const quarantine = join(owner.parentPath, `.dsh-source-verify-cleanup-${process.pid}-${randomUUID()}`)
+  // Quarantine in a private directory so a raced source path can never turn
+  // the caller-controlled parent into the recursive-delete target.
+  const quarantineRoot = mkdtempSync(join(tmpdir(), `dsh-source-verify-cleanup-${process.pid}-`))
+  const quarantine = join(quarantineRoot, 'claimed')
   try {
     renameSync(owner.path, quarantine)
   } catch (error) {
+    rmdirSync(quarantineRoot)
     if (error?.code === 'ENOENT') return true
     throw error
   }
   const moved = lstatSync(quarantine)
   if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== owner.dev || moved.ino !== owner.ino) return false
   rmSync(quarantine, { recursive: true, force: true })
+  rmdirSync(quarantineRoot)
+  return true
+}
+
+/** Claim the private verifier workspace so cleanup cannot remove a replacement. */
+export function temporaryWorkspaceOwner(directory) {
+  const parentPath = dirname(directory)
+  const ancestors = directoryAncestors(parentPath)
+  const info = lstatSync(directory)
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`temporary source verification workspace is not a real directory: ${directory}`)
+  return { path: directory, parentPath, ancestors, dev: info.dev, ino: info.ino }
+}
+
+function temporaryWorkspaceState(owner) {
+  try {
+    for (const ancestor of owner.ancestors) {
+      const info = lstatSync(ancestor.path)
+      if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== ancestor.dev || info.ino !== ancestor.ino) return false
+    }
+    const info = lstatSync(owner.path)
+    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+    return true
+  } catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+export function removeTemporaryWorkspace(owner) {
+  const state = temporaryWorkspaceState(owner)
+  if (state === undefined) return true
+  if (!state) return false
+  const quarantineRoot = mkdtempSync(join(tmpdir(), `dsh-source-verify-workspace-${process.pid}-`))
+  const quarantine = join(quarantineRoot, 'claimed')
+  try {
+    renameSync(owner.path, quarantine)
+  } catch (error) {
+    rmdirSync(quarantineRoot)
+    if (error?.code === 'ENOENT') return true
+    throw error
+  }
+  const moved = lstatSync(quarantine)
+  if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== owner.dev || moved.ino !== owner.ino) return false
+  rmSync(quarantine, { recursive: true, force: true })
+  rmdirSync(quarantineRoot)
   return true
 }
 
@@ -220,6 +269,7 @@ async function main() {
     TARBALL_SMOKE_SKIP_INSTALL: '1',
   }
   let root
+  let rootOwner
   let generatedOwner
   try {
     if (generatedDistribution) await runSourcePack(values, effective)
@@ -232,6 +282,7 @@ async function main() {
     }
 
     root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-source-'))
+    rootOwner = temporaryWorkspaceOwner(root)
     const workspace = join(root, 'workspace')
     copyRepository(workspace)
     attachGitMetadata(workspace)
@@ -277,8 +328,10 @@ async function main() {
     if (root !== undefined) {
       if (values.keep === true || process.env.DSH_SOURCE_KEEP === '1') {
         console.error(`preserved source verification workspace: ${root}`)
-      } else {
-        rmSync(root, { recursive: true, force: true })
+      } else if (rootOwner === undefined) {
+        console.error(`preserved source verification workspace without ownership proof: ${root}`)
+      } else if (!removeTemporaryWorkspace(rootOwner)) {
+        console.error(`preserved source verification workspace after ownership changed: ${root}`)
       }
     }
     if (generatedDistribution && !distributionExisted && values.keep !== true && process.env.DSH_SOURCE_KEEP !== '1') {

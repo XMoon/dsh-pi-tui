@@ -15,17 +15,22 @@
 
 import { randomUUID } from 'node:crypto'
 import {
+  constants,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   realpathSync,
   renameSync,
   rmSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { tmpdir } from 'node:os'
 import { parseArgs } from 'node:util'
 import { fileURLToPath } from 'node:url'
 
@@ -92,8 +97,8 @@ function directoryAncestors(anchor) {
 
 /**
  * Validate an output path before the packer claims it. Existing directories
- * are never replaced: callers must choose a fresh dedicated output path so
- * cleanup cannot destroy an arbitrary filesystem tree.
+ * are never replaced: callers must choose a fresh dedicated output path whose
+ * parent already exists, so cleanup cannot destroy an arbitrary filesystem tree.
  */
 export function validateSourcePackOutputInfo(outputPath, dshDir) {
   const requested = resolve(outputPath)
@@ -102,21 +107,17 @@ export function validateSourcePackOutputInfo(outputPath, dshDir) {
   if (requestedInfo?.isSymbolicLink()) fail(`source pack output must not be a symlink: ${requested}`)
   const canonicalOutput = canonicalPath(requested)
   const outputExists = existsSync(canonicalOutput)
-  const anchor = outputExists ? dirname(canonicalOutput) : (() => {
-    let current = canonicalOutput
-    while (!existsSync(current)) current = dirname(current)
-    return current
-  })()
-  const ancestors = directoryAncestors(anchor)
+  const parent = dirname(canonicalOutput)
+  if (!existsSync(parent)) fail(`source pack output parent must already exist: ${requested}`)
+  const ancestors = directoryAncestors(parent)
   const canonicalSource = canonicalPath(source)
   const canonicalTui = canonicalPath(PACKAGE_ROOT)
   if (pathInside(canonicalOutput, canonicalSource)) fail(`source pack output must not be inside the DSH checkout: ${requested}`)
   if (pathInside(canonicalOutput, canonicalTui)) fail(`source pack output must not be inside the TUI checkout: ${requested}`)
-  const parent = dirname(canonicalOutput)
   if (parent === canonicalOutput || dirname(parent) === parent) {
     fail(`source pack output must be a dedicated child directory: ${requested}`)
   }
-  if (!outputExists) return { path: canonicalOutput, anchor, ancestors }
+  if (!outputExists) return { path: canonicalOutput, ancestors }
 
   const info = lstatSync(canonicalOutput)
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output must be a real directory: ${requested}`)
@@ -166,7 +167,6 @@ export function claimSourcePackOutput(output, validation = undefined) {
   const parentPath = dirname(output)
   const expectedAncestors = validation?.ancestors ?? directoryAncestors(parentPath)
   verifyAncestors(expectedAncestors, 'claim')
-  mkdirSync(parentPath, { recursive: true })
   const parent = lstatSync(parentPath)
   if (!parent.isDirectory() || parent.isSymbolicLink()) fail(`source pack output parent is not a real directory: ${parentPath}`)
   verifyAncestors(expectedAncestors, 'claim')
@@ -176,6 +176,16 @@ export function claimSourcePackOutput(output, validation = undefined) {
   const ancestors = directoryAncestors(parentPath)
   verifyAncestors(expectedAncestors, 'claim')
   return { path: output, parentPath, ancestors, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
+}
+
+/** Create a private root that the official packer can freely replace below. */
+export function claimSourcePackStaging() {
+  const path = mkdtempSync(join(tmpdir(), `dsh-source-pack-stage-${process.pid}-`))
+  const parentPath = dirname(path)
+  const ancestors = directoryAncestors(parentPath)
+  const info = lstatSync(path)
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack staging root is not a real directory: ${path}`)
+  return { path, parentPath, ancestors, parentDev: lstatSync(parentPath).dev, parentIno: lstatSync(parentPath).ino, dev: info.dev, ino: info.ino }
 }
 
 function ownerState(owner) {
@@ -205,16 +215,22 @@ export function removeClaimedSourcePackOutput(owner) {
   const state = ownerState(owner)
   if (state === undefined) return true
   if (!state) return false
-  const quarantine = join(owner.parentPath, `.dsh-source-pack-cleanup-${process.pid}-${randomUUID()}`)
+  // The private quarantine prevents a raced destination path from becoming a
+  // recursive-delete target. If the source path was replaced before rename,
+  // the moved inode fails the proof and this private tree is intentionally kept.
+  const quarantineRoot = mkdtempSync(join(tmpdir(), `dsh-source-pack-cleanup-${process.pid}-`))
+  const quarantine = join(quarantineRoot, 'claimed')
   try {
     renameSync(owner.path, quarantine)
   } catch (error) {
+    rmdirSync(quarantineRoot)
     if (error?.code === 'ENOENT') return true
     throw error
   }
   const moved = lstatSync(quarantine)
   if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== owner.dev || moved.ino !== owner.ino) return false
   rmSync(quarantine, { recursive: true, force: true })
+  rmdirSync(quarantineRoot)
   return true
 }
 
@@ -277,36 +293,41 @@ async function main() {
 
   const validation = validateSourcePackOutputInfo(values.out ?? DEFAULT_OUTPUT, identity.directory)
   const output = validation.path
-  const owner = claimSourcePackOutput(output, validation)
+  const staging = claimSourcePackStaging()
+  let outputOwner
+  let stagingRemoved = false
   try {
-    assertClaimedSourcePackOutput(owner, 'initialization')
+    const stageOutput = join(staging.path, 'output')
+    assertClaimedSourcePackOutput(staging, 'initialization')
     await runOfficial(identity.directory, ['install', '--frozen-lockfile'], OFFICIAL_TIMEOUTS.install)
     // Local source checkouts can retain ignored tsbuildinfo/lib state from an
     // earlier build. Clean only generated repository-owned outputs so the same
     // official build is reproducible without requiring a pristine local tree.
     await runOfficial(identity.directory, ['clean'], OFFICIAL_TIMEOUTS.clean)
     await runOfficial(identity.directory, ['build:official'], OFFICIAL_TIMEOUTS.build)
-    await runOfficial(identity.directory, ['release:pack', '--family', 'dsh', '--out', output], OFFICIAL_TIMEOUTS.pack)
-    assertClaimedSourcePackOutput(owner, 'official release pack')
+    await runOfficial(identity.directory, ['release:pack', '--family', 'dsh', '--out', stageOutput], OFFICIAL_TIMEOUTS.pack)
+    assertClaimedSourcePackOutput(staging, 'official release pack')
 
+    const stageInfo = lstatSync(stageOutput)
+    if (!stageInfo.isDirectory() || stageInfo.isSymbolicLink()) fail(`source pack produced an invalid output directory: ${stageOutput}`)
     // The official packer writes publish-order.txt for registry publishing. Source
     // mode only needs immutable tarballs plus its generated distribution manifest;
     // discard every other top-level output before the artifact is uploaded.
-    const packedEntries = readdirSync(output)
-    assertClaimedSourcePackOutput(owner, 'listing packed output')
+    const packedEntries = readdirSync(stageOutput)
+    assertClaimedSourcePackOutput(staging, 'listing packed output')
     for (const entry of packedEntries) {
       if (entry.endsWith('.tgz')) continue
-      assertClaimedSourcePackOutput(owner, `filtering ${entry}`)
-      const path = join(output, entry)
+      assertClaimedSourcePackOutput(staging, `filtering ${entry}`)
+      const path = join(stageOutput, entry)
       const info = lstatSync(path)
       if (!info.isFile() || info.isSymbolicLink()) fail(`source pack produced a non-regular disposable entry: ${path}`)
       unlinkSync(path)
     }
-    assertClaimedSourcePackOutput(owner, 'post-pack filtering')
+    assertClaimedSourcePackOutput(staging, 'post-pack filtering')
 
-    const packageEntries = packageMapFromTarballs(output, effective.expectedVersion)
-    assertClaimedSourcePackOutput(owner, 'package map validation')
-    const manifest = {
+    const packageEntries = packageMapFromTarballs(stageOutput, effective.expectedVersion)
+    assertClaimedSourcePackOutput(staging, 'package map validation')
+    const manifestFor = owner => ({
       schemaVersion: 1,
       mode: 'source-pack',
       repository: effective.repository,
@@ -319,23 +340,59 @@ async function main() {
       packages: Object.fromEntries([...packageEntries.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([name, entry]) => [name, entry.fileName])),
+    })
+    const stageManifest = manifestFor(stageInfo)
+    assertClaimedSourcePackOutput(staging, 'staged manifest write')
+    writeFileSync(join(stageOutput, SOURCE_MANIFEST_NAME), `${JSON.stringify(stageManifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+    assertClaimedSourcePackOutput(staging, 'staged distribution validation')
+    validateSourceDistribution({ manifest: stageManifest, directory: stageOutput })
+    assertClaimedSourcePackOutput(staging, 'staged final validation')
+
+    // Reserve the caller's final path only after the complete source pack is
+    // validated. mkdir is exclusive, so an output that appeared meanwhile is
+    // never replaced; all packer-owned work remains in the private staging root.
+    outputOwner = claimSourcePackOutput(output, validation)
+    const finalManifest = manifestFor(outputOwner)
+    for (const entry of packedEntries) {
+      if (!entry.endsWith('.tgz')) continue
+      assertClaimedSourcePackOutput(staging, `staged copy ${entry}`)
+      assertClaimedSourcePackOutput(outputOwner, `final copy ${entry}`)
+      const source = join(stageOutput, entry)
+      const info = lstatSync(source)
+      if (!info.isFile() || info.isSymbolicLink()) fail(`source pack staged tarball is not a regular file: ${source}`)
+      copyFileSync(source, join(output, entry), constants.COPYFILE_EXCL)
+      assertClaimedSourcePackOutput(outputOwner, `final copy ${entry}`)
+      assertClaimedSourcePackOutput(staging, `staged unlink ${entry}`)
+      unlinkSync(source)
     }
-    assertClaimedSourcePackOutput(owner, 'manifest write')
-    writeFileSync(join(output, 'dsh-source-distribution.json'), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
-    assertClaimedSourcePackOutput(owner, 'distribution validation')
-    const distribution = validateSourceDistribution({ manifest, directory: output })
-    assertClaimedSourcePackOutput(owner, 'final distribution validation')
+    assertClaimedSourcePackOutput(staging, 'final artifact transfer')
+    assertClaimedSourcePackOutput(outputOwner, 'final manifest write')
+    writeFileSync(join(output, SOURCE_MANIFEST_NAME), `${JSON.stringify(finalManifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+    assertClaimedSourcePackOutput(outputOwner, 'distribution validation')
+    const distribution = validateSourceDistribution({ manifest: finalManifest, directory: output })
+    assertClaimedSourcePackOutput(outputOwner, 'final distribution validation')
+    if (!removeClaimedSourcePackOutput(staging)) fail(`source pack staging ownership changed; refusing cleanup: ${staging.path}`)
+    stagingRemoved = true
     printDshProvenance(distribution)
     console.log(`DSH source distribution written to ${output}`)
     return output
   } catch (error) {
-    try {
-      if (!removeClaimedSourcePackOutput(owner)) {
-        throw new Error(`source pack output ownership changed; refusing cleanup: ${output}`)
+    const cleanupErrors = []
+    if (outputOwner !== undefined) {
+      try {
+        if (!removeClaimedSourcePackOutput(outputOwner)) cleanupErrors.push(new Error(`source pack output ownership changed; refusing cleanup: ${output}`))
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError)
       }
-    } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], `failed to clean incomplete source pack ${output}`)
     }
+    if (!stagingRemoved) {
+      try {
+        if (!removeClaimedSourcePackOutput(staging)) cleanupErrors.push(new Error(`source pack staging ownership changed; refusing cleanup: ${staging.path}`))
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError)
+      }
+    }
+    if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors], `failed to clean incomplete source pack ${output}`)
     throw error
   }
 }
