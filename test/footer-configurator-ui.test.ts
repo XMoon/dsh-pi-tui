@@ -56,7 +56,7 @@ test('the configurator opens on the Row Selector with a live preview', async () 
   assert.ok(view.includes('Preview'), `preview label missing:\n${view}`)
   assert.ok(view.includes('Row 1'), `the row list missing:\n${view}`)
   assert.ok(view.includes('deepseek/flash'), `preview must compose the real snapshot:\n${view}`)
-  assert.ok(view.includes('↑↓ Select · Enter Edit · S Save · Esc Cancel'), `the selector help missing:\n${view}`)
+  assert.ok(view.includes('↑↓ Select · Enter Open · S Save · Esc Close'), `the selector help missing:\n${view}`)
   app.stop()
 })
 
@@ -1060,5 +1060,233 @@ test('a 4-physical-row preview cannot eat the editable body (10-row terminal)', 
   assert.ok(text.includes('A Add'), `the help must stay visible:\n${text}`)
   assert.ok(text.includes('Preview'), `the preview must stay visible:\n${text}`)
   assert.ok(text.includes('Extension items'), `the ACTIVE item must stay visible (the body must never be eaten):\n${text}`)
+  app.stop()
+})
+
+/* ─── PR E: explicit save flow + unsaved-exit guard ──────────────────── */
+
+/** Flush pending microtasks (save-promise chains) without a fixed delay. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve()
+  await new Promise<void>(resolve => setImmediate(resolve))
+}
+
+function openWith(
+  app: TuiApp,
+  hooks: { onSave?: () => void | Promise<void>; onCancel?: () => void } = {},
+): FooterConfiguratorModel {
+  const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
+  app.openFooterConfigurator({
+    model,
+    registry: app.getFooterItemRegistry(),
+    onSave: hooks.onSave ?? (() => {}),
+    onCancel: hooks.onCancel ?? (() => {}),
+  })
+  return model
+}
+
+/** Enter the row, remove the first item, walk back: a reliably dirty draft
+ * sitting on the Row Selector. */
+async function makeDirty(vt: VirtualTerminal): Promise<void> {
+  vt.sendInput('\r') // → Edit Row 1
+  await vt.waitForRender()
+  vt.sendInput(' ') // remove the cursor's item
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // → selector (dirty)
+  await vt.waitForRender()
+}
+
+test('PR E: the selector advertises Save changes with Unsaved / No changes', async () => {
+  const { vt, app } = startApp()
+  openWith(app)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Save changes'), `the save action missing:\n${view}`)
+  assert.ok(view.includes('No changes'), `the clean status missing:\n${view}`)
+  await makeDirty(vt)
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Unsaved'), `the dirty status missing:\n${view}`)
+  app.stop()
+})
+
+test('PR E: Enter on Save changes saves and closes the configurator', async () => {
+  const { vt, app } = startApp()
+  let saved = 0
+  let cancelled = 0
+  openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  vt.sendInput('\x1b[B') // ↓ Row 2
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // ↓ Save changes
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(saved, 1, 'Enter on the Save action saves')
+  assert.equal(cancelled, 0)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Configure Footer'), `a successful save closes the configurator:\n${view}`)
+  app.stop()
+})
+
+test('PR E: dirty Esc opens the exit guard; Esc there keeps editing', async () => {
+  const { vt, app } = startApp()
+  let cancelled = 0
+  openWith(app, { onCancel: () => { cancelled += 1 } })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Save changes before exiting?'), `the guard missing:\n${view}`)
+  assert.ok(view.includes('Save & Exit') && view.includes('Discard & Exit') && view.includes('Keep Editing'),
+    `the three actions missing:\n${view}`)
+  assert.equal(cancelled, 0, 'the guard must not close')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Select row to edit'), 'Esc in the guard keeps editing')
+  assert.ok(view.includes('Unsaved'), 'the draft stays dirty')
+  assert.equal(cancelled, 0)
+  app.stop()
+})
+
+test('PR E: Save & Exit saves; Discard & Exit closes without saving', async () => {
+  // Save & Exit.
+  {
+    const { vt, app } = startApp()
+    let saved = 0
+    let cancelled = 0
+    openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
+    await vt.waitForRender()
+    await makeDirty(vt)
+    vt.sendInput('\x1b')
+    await vt.waitForRender()
+    vt.sendInput('\r') // Save & Exit (cursor 0)
+    await settle()
+    await vt.waitForRender()
+    assert.equal(saved, 1)
+    assert.equal(cancelled, 0)
+    assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the overlay closed after success')
+    app.stop()
+  }
+  // Discard & Exit.
+  {
+    const { vt, app } = startApp()
+    let saved = 0
+    let cancelled = 0
+    openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
+    await vt.waitForRender()
+    await makeDirty(vt)
+    vt.sendInput('\x1b')
+    await vt.waitForRender()
+    vt.sendInput('\x1b[B') // → Discard & Exit
+    await vt.waitForRender()
+    vt.sendInput('\r')
+    await settle()
+    await vt.waitForRender()
+    assert.equal(saved, 0, 'discard never persists')
+    assert.equal(cancelled, 1, 'discard closes via onCancel')
+    assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the overlay closed')
+    app.stop()
+  }
+})
+
+test('PR E: Keep Editing returns to the selector with the draft intact', async () => {
+  const { vt, app } = startApp()
+  let saved = 0
+  let cancelled = 0
+  const model = openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  const draftBefore = JSON.stringify(model.preview())
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // → Keep Editing
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Select row to edit'), 'back on the selector')
+  assert.equal(saved, 0)
+  assert.equal(cancelled, 0)
+  assert.equal(JSON.stringify(model.preview()), draftBefore, 'the draft is untouched')
+  app.stop()
+})
+
+test('PR E: a failed save keeps the configurator open with the draft dirty', async () => {
+  const { vt, app } = startApp()
+  let attempts = 0
+  let cancelled = 0
+  let fail = true
+  openWith(app, {
+    onSave: async () => {
+      attempts += 1
+      if (fail) throw new Error('write failed')
+    },
+    onCancel: () => { cancelled += 1 },
+  })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  vt.sendInput('s')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(attempts, 1)
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Configure Footer'), `a failed save keeps the editor open:\n${view}`)
+  assert.ok(view.includes('Unsaved'), 'the draft stays dirty')
+  // The retry succeeds.
+  fail = false
+  vt.sendInput('s')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(attempts, 2)
+  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the successful retry closes')
+  assert.equal(cancelled, 0)
+  app.stop()
+})
+
+test('PR E: a save in flight refuses duplicate saves and Esc-close', async () => {
+  const { vt, app } = startApp()
+  let attempts = 0
+  let release: (() => void) | undefined
+  const gate = new Promise<void>(resolve => { release = resolve })
+  openWith(app, { onSave: () => { attempts += 1; return gate } })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  vt.sendInput('s')
+  await settle()
+  vt.sendInput('s') // duplicate — refused by the saving guard
+  await settle()
+  vt.sendInput('\x1b') // must not close mid-save either
+  await settle()
+  assert.equal(attempts, 1, 'only one persistence call')
+  release?.()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the gated save still closes on success')
+  app.stop()
+})
+
+test('PR E: the exit guard keeps all three actions visible at 40x10', async () => {
+  const vt = new VirtualTerminal(40, 10)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  let cancelled = 0
+  openWith(app, { onCancel: () => { cancelled += 1 } })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Save changes before exiting?'), `the question must be visible:\n${view}`)
+  assert.ok(view.includes('Save & Exit'), `Save & Exit must be visible:\n${view}`)
+  assert.ok(view.includes('Discard & Exit'), `Discard & Exit must be visible:\n${view}`)
+  assert.ok(view.includes('Keep Editing'), `Keep Editing must be visible:\n${view}`)
+  assert.ok(view.includes('╰'), 'the frame must survive')
+  assert.equal(cancelled, 0)
   app.stop()
 })
