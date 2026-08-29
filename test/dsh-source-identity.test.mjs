@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join, resolve } from 'node:path'
@@ -61,6 +61,31 @@ test('source verification fails once for a missing checkout instead of recursive
   const output = `${result.stdout}${result.stderr}`
   assert.equal((output.match(/official DSH source pack/gu) ?? []).length, 2)
   assert.match(output, /DSH source checkout is missing/u)
+})
+
+test('source verification removes a generated pack after official packing fails', () => {
+  const checkout = sourceCheckout()
+  const container = mkdtempSync(join(tmpdir(), 'dsh-source-pack-failure-test-'))
+  const output = join(container, 'pack')
+  const script = fileURLToPath(new URL('../scripts/dsh-source-verify.mjs', import.meta.url))
+  const configPath = fileURLToPath(new URL('../test/compat/dsh-source.json', import.meta.url))
+  try {
+    const head = git(checkout, 'rev-parse', 'HEAD')
+    const result = spawnSync(process.execPath, [
+      script,
+      '--dsh-dir', checkout,
+      '--ref', head,
+      '--expected-version', VERSION,
+      '--config', configPath,
+      '--out', output,
+    ], { encoding: 'utf8', timeout: 10_000 })
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(`${result.stdout}${result.stderr}`, /official DSH source pack/u)
+    assert.equal(existsSync(output), false)
+  } finally {
+    rmSync(checkout, { recursive: true, force: true })
+    rmSync(container, { recursive: true, force: true })
+  }
 })
 
 test('distribution-only source verification does not require a checkout argument', () => {

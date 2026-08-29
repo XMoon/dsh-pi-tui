@@ -9,7 +9,7 @@
  * @module dsh-npm-verify
  */
 
-import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,6 +36,21 @@ function fail(message) {
   throw new Error(message)
 }
 
+const PUBLIC_NPM_REGISTRY = 'https://registry.npmjs.org/'
+
+/** Keep npm-mode checks on the public registry with no ambient user config. */
+export function npmVerificationEnvironment(userConfigPath, base = process.env) {
+  return {
+    ...base,
+    npm_config_registry: PUBLIC_NPM_REGISTRY,
+    NPM_CONFIG_REGISTRY: PUBLIC_NPM_REGISTRY,
+    npm_config_userconfig: userConfigPath,
+    NPM_CONFIG_USERCONFIG: userConfigPath,
+    npm_config_minimum_release_age: '0',
+    pnpm_config_minimum_release_age: '0',
+  }
+}
+
 function parseCli() {
   const args = process.argv.slice(2)
   if (args[0] === '--') args.shift()
@@ -51,11 +66,11 @@ function parseCli() {
   return values
 }
 
-async function run(command, args, cwd, label, timeoutMs = NPM_VERIFY_TIMEOUTS.check) {
+async function run(command, args, cwd, label, environment = process.env, timeoutMs = NPM_VERIFY_TIMEOUTS.check) {
   console.log(`DSH npm verify: ${label}`)
   const result = await runBounded(command, args, {
     cwd,
-    env: { ...process.env, npm_config_minimum_release_age: '0', pnpm_config_minimum_release_age: '0' },
+    env: { ...environment, npm_config_minimum_release_age: '0', pnpm_config_minimum_release_age: '0' },
     timeoutMs,
     label,
   })
@@ -92,11 +107,14 @@ async function main() {
   const distribution = npmDshDistribution(values['dsh-version'] ?? config.expectedVersion)
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-npm-'))
   const workspace = join(root, 'workspace')
+  const npmConfigPath = join(root, 'npmrc')
+  const npmEnvironment = npmVerificationEnvironment(npmConfigPath)
   try {
+    writeFileSync(npmConfigPath, `registry=${PUBLIC_NPM_REGISTRY}\n`, 'utf8')
     copyRepository(workspace)
     const prepared = prepareDshInstall(distribution, workspace, { stripPackageManager: true })
     try {
-      await run(PNPM_COMMAND, [...prepared.installArgs, '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only'], workspace, 'frozen npm dependency install', NPM_VERIFY_TIMEOUTS.install)
+      await run(PNPM_COMMAND, [...prepared.installArgs, '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only'], workspace, 'frozen npm dependency install', npmEnvironment, NPM_VERIFY_TIMEOUTS.install)
     } finally {
       restoreDshInstall(prepared)
     }
@@ -107,7 +125,7 @@ async function main() {
       ['documentation tests', ['test:docs']],
       ['Pi surface compatibility gate', ['gate:pi-surface-compat']],
       ['TUI candidate build and pack', ['pack:release']],
-    ]) await run(PNPM_COMMAND, args, workspace, label)
+    ]) await run(PNPM_COMMAND, args, workspace, label, npmEnvironment)
     const candidate = candidateTarball(workspace)
     assertNoSourceLeak(candidate)
     console.log(`DSH npm compatibility passed — ${basename(candidate)} × DSH ${distribution.version}`)
@@ -117,7 +135,9 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  console.error(`DSH_NPM_VERIFY_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
-  process.exitCode = 1
-})
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => {
+    console.error(`DSH_NPM_VERIFY_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 1
+  })
+}

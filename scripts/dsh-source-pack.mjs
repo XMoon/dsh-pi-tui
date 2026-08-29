@@ -165,42 +165,51 @@ async function main() {
 
   const output = validateSourcePackOutput(values.out ?? DEFAULT_OUTPUT, identity.directory)
   rmSync(output, { recursive: true, force: true })
-  mkdirSync(output, { recursive: true })
+  try {
+    mkdirSync(output, { recursive: true })
 
-  await runOfficial(identity.directory, ['install', '--frozen-lockfile'], OFFICIAL_TIMEOUTS.install)
-  // Local source checkouts can retain ignored tsbuildinfo/lib state from an
-  // earlier build. Clean only generated repository-owned outputs so the same
-  // official build is reproducible without requiring a pristine local tree.
-  await runOfficial(identity.directory, ['clean'], OFFICIAL_TIMEOUTS.clean)
-  await runOfficial(identity.directory, ['build:official'], OFFICIAL_TIMEOUTS.build)
-  await runOfficial(identity.directory, ['release:pack', '--family', 'dsh', '--out', output], OFFICIAL_TIMEOUTS.pack)
+    await runOfficial(identity.directory, ['install', '--frozen-lockfile'], OFFICIAL_TIMEOUTS.install)
+    // Local source checkouts can retain ignored tsbuildinfo/lib state from an
+    // earlier build. Clean only generated repository-owned outputs so the same
+    // official build is reproducible without requiring a pristine local tree.
+    await runOfficial(identity.directory, ['clean'], OFFICIAL_TIMEOUTS.clean)
+    await runOfficial(identity.directory, ['build:official'], OFFICIAL_TIMEOUTS.build)
+    await runOfficial(identity.directory, ['release:pack', '--family', 'dsh', '--out', output], OFFICIAL_TIMEOUTS.pack)
 
-  // The official packer writes publish-order.txt for registry publishing. Source
-  // mode only needs immutable tarballs plus its generated distribution manifest;
-  // discard every other top-level output before the artifact is uploaded.
-  for (const entry of readdirSync(output)) {
-    if (!entry.endsWith('.tgz')) rmSync(join(output, entry), { recursive: true, force: true })
+    // The official packer writes publish-order.txt for registry publishing. Source
+    // mode only needs immutable tarballs plus its generated distribution manifest;
+    // discard every other top-level output before the artifact is uploaded.
+    for (const entry of readdirSync(output)) {
+      if (!entry.endsWith('.tgz')) rmSync(join(output, entry), { recursive: true, force: true })
+    }
+
+    const packageEntries = packageMapFromTarballs(output, effective.expectedVersion)
+    const manifest = {
+      schemaVersion: 1,
+      mode: 'source-pack',
+      repository: effective.repository,
+      sourceRef: identity.head,
+      sourceSha: identity.head,
+      version: effective.expectedVersion,
+      dirty: identity.dirty,
+      reproducible: identity.reproducible,
+      packages: Object.fromEntries([...packageEntries.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, entry]) => [name, entry.fileName])),
+    }
+    writeFileSync(join(output, 'dsh-source-distribution.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+    const distribution = validateSourceDistribution({ manifest, directory: output })
+    printDshProvenance(distribution)
+    console.log(`DSH source distribution written to ${output}`)
+    return output
+  } catch (error) {
+    try {
+      rmSync(output, { recursive: true, force: true })
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], `failed to clean incomplete source pack ${output}`)
+    }
+    throw error
   }
-
-  const packageEntries = packageMapFromTarballs(output, effective.expectedVersion)
-  const manifest = {
-    schemaVersion: 1,
-    mode: 'source-pack',
-    repository: effective.repository,
-    sourceRef: identity.head,
-    sourceSha: identity.head,
-    version: effective.expectedVersion,
-    dirty: identity.dirty,
-    reproducible: identity.reproducible,
-    packages: Object.fromEntries([...packageEntries.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([name, entry]) => [name, entry.fileName])),
-  }
-  writeFileSync(join(output, 'dsh-source-distribution.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
-  const distribution = validateSourceDistribution({ manifest, directory: output })
-  printDshProvenance(distribution)
-  console.log(`DSH source distribution written to ${output}`)
-  return output
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

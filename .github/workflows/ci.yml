@@ -227,7 +227,14 @@ jobs:
             echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false' >> "$GITHUB_ENV"
             echo 'TARBALL_SMOKE_SKIP_INSTALL=1' >> "$GITHUB_ENV"
           else
-            pnpm install --frozen-lockfile
+            printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+             NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+               npm_config_registry=https://registry.npmjs.org/ \
+               NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+               npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+               PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+               PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+               pnpm install --frozen-lockfile
           fi
 
       - name: Typecheck vendored pi-tui
@@ -319,7 +326,14 @@ jobs:
             echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false' >> "$GITHUB_ENV"
             echo 'TARBALL_SMOKE_SKIP_INSTALL=1' >> "$GITHUB_ENV"
           else
-            pnpm install --frozen-lockfile
+            printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+             NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+               npm_config_registry=https://registry.npmjs.org/ \
+               NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+               npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+               PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+               PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+               pnpm install --frozen-lockfile
           fi
 
       - name: Build, test and pack
@@ -450,7 +464,14 @@ jobs:
             echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false' >> "$GITHUB_ENV"
             echo 'TARBALL_SMOKE_SKIP_INSTALL=1' >> "$GITHUB_ENV"
           else
-            pnpm install --frozen-lockfile
+            printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+             NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+               npm_config_registry=https://registry.npmjs.org/ \
+               NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+               npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+               PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+               PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+               pnpm install --frozen-lockfile
           fi
 
       - name: Download release tarball
@@ -532,7 +553,14 @@ jobs:
             echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false' >> "$GITHUB_ENV"
             echo 'TARBALL_SMOKE_SKIP_INSTALL=1' >> "$GITHUB_ENV"
           else
-            pnpm install --frozen-lockfile
+            printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+             NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+               npm_config_registry=https://registry.npmjs.org/ \
+               NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+               npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+               PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+               PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+               pnpm install --frozen-lockfile
           fi
 
       - name: Download release tarball
@@ -636,7 +664,14 @@ jobs:
             echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false' >> "$GITHUB_ENV"
             echo 'TARBALL_SMOKE_SKIP_INSTALL=1' >> "$GITHUB_ENV"
           else
-            pnpm install --frozen-lockfile
+            printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+             NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+               npm_config_registry=https://registry.npmjs.org/ \
+               NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+               npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+               PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+               PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+               pnpm install --frozen-lockfile
           fi
 
       - name: Download release tarball

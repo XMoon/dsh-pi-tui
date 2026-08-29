@@ -121,8 +121,12 @@ function candidateTarball(workspace) {
   return candidates[0]
 }
 
+function sourcePackOutput(values) {
+  return resolve(values.out ?? join(tmpdir(), `dsh-source-pack-${process.pid}`))
+}
+
 async function runSourcePack(values, config) {
-  const output = resolve(values.out ?? join(tmpdir(), `dsh-source-pack-${process.pid}`))
+  const output = sourcePackOutput(values)
   const args = [SOURCE_PACK_SCRIPT, '--dsh-dir', values['dsh-dir']]
   if (values.ref !== undefined) args.push('--ref', values.ref)
   if (values['expected-version'] !== undefined) args.push('--expected-version', values['expected-version'])
@@ -144,19 +148,21 @@ async function main() {
     fail('--dsh-dir is required when --distribution is not provided')
   }
 
-  const distributionDir = values.distribution === undefined
-    ? await runSourcePack(values, effective)
-    : resolve(values.distribution)
-  const distribution = loadDshDistributionManifest(distributionDir, {
-    packageJson: join(PACKAGE_ROOT, 'package.json'),
-  })
-  if (distribution.repository !== effective.repository || distribution.sourceSha !== effective.ref || distribution.version !== effective.expectedVersion) {
-    fail('packed DSH distribution does not match the effective source pin')
-  }
-
-  const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-source-'))
-  const workspace = join(root, 'workspace')
+  const generatedDistribution = values.distribution === undefined
+  const distributionDir = generatedDistribution ? sourcePackOutput(values) : resolve(values.distribution)
+  const distributionExisted = existsSync(distributionDir)
+  let root
   try {
+    if (generatedDistribution) await runSourcePack(values, effective)
+    const distribution = loadDshDistributionManifest(distributionDir, {
+      packageJson: join(PACKAGE_ROOT, 'package.json'),
+    })
+    if (distribution.repository !== effective.repository || distribution.sourceSha !== effective.ref || distribution.version !== effective.expectedVersion) {
+      fail('packed DSH distribution does not match the effective source pin')
+    }
+
+    root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-source-'))
+    const workspace = join(root, 'workspace')
     copyRepository(workspace)
     attachGitMetadata(workspace)
     await run(process.execPath, [join(workspace, 'scripts', 'prepare-dsh-test-environment.mjs'), '--mode', 'source', '--distribution', distributionDir, '--workspace', workspace, '--config', configPath], PACKAGE_ROOT, 'source dependency preparation', {}, VERIFY_TIMEOUTS.preparation)
@@ -188,14 +194,16 @@ async function main() {
     console.log('SKIPPED: requires published compatible DSH/pi2dsh combination (source mode)')
     console.log(`DSH Source Compatibility: CODE COMPLETE candidate ${basename(candidate)}`)
   } finally {
-    if (values.keep === true || process.env.DSH_SOURCE_KEEP === '1') {
-      console.error(`preserved source verification workspace: ${root}`)
-    } else {
-      rmSync(root, { recursive: true, force: true })
+    if (root !== undefined) {
+      if (values.keep === true || process.env.DSH_SOURCE_KEEP === '1') {
+        console.error(`preserved source verification workspace: ${root}`)
+      } else {
+        rmSync(root, { recursive: true, force: true })
+      }
     }
-    if (values.distribution === undefined && values.keep !== true && process.env.DSH_SOURCE_KEEP !== '1') {
+    if (generatedDistribution && !distributionExisted && values.keep !== true && process.env.DSH_SOURCE_KEEP !== '1') {
       rmSync(distributionDir, { recursive: true, force: true })
-    } else {
+    } else if (generatedDistribution) {
       console.error(`preserved source distribution: ${distributionDir}`)
     }
   }
