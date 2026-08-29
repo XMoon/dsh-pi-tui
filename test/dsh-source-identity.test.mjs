@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join, resolve } from 'node:path'
@@ -12,8 +12,14 @@ import {
   validateSourceIdentity,
 } from '../scripts/lib/dsh-distribution.mjs'
 import {
+  assertClaimedSourcePackOutput,
+  claimProducedDirectory,
   claimSourcePackOutput,
+  claimSourcePackStaging,
+  closeDirectoryHandle,
+  copyOwnedFile,
   officialCommandEnvironment,
+  openDirectoryHandle,
   removeClaimedSourcePackOutput,
   validateSourcePackOutput,
   validateSourcePackOutputInfo,
@@ -266,6 +272,58 @@ test('source verification workspace cleanup preserves a replaced root', () => {
     assert.equal(readFileSync(join(root, 'sentinel.txt'), 'utf8'), 'replacement must survive')
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('source pack rejects staged directory and file replacement races', () => {
+  const staging = claimSourcePackStaging()
+  try {
+    const stageOutput = join(staging.path, 'output')
+    mkdirSync(stageOutput)
+    const stageOwner = claimProducedDirectory(stageOutput)
+    const source = join(stageOutput, 'package.tgz')
+    const destination = join(staging.path, 'copy.tgz')
+    writeFileSync(source, 'original')
+    const expected = lstatSync(source)
+    rmSync(source)
+    writeFileSync(source, 'replacement')
+    assert.throws(() => copyOwnedFile(source, destination, expected), /changed before copy/u)
+    assert.equal(existsSync(destination), false)
+    rmSync(stageOutput, { recursive: true, force: true })
+    mkdirSync(stageOutput)
+    assert.throws(() => assertClaimedSourcePackOutput(stageOwner, 'staged replacement'), /ownership changed/u)
+  } finally {
+    assert.equal(removeClaimedSourcePackOutput(staging), true)
+  }
+})
+
+test('source pack copies through the claimed output descriptor after path replacement', t => {
+  if (process.platform === 'win32') {
+    t.skip('descriptor paths are unavailable on Windows')
+    return
+  }
+  const container = mkdtempSync(join(tmpdir(), 'dsh-output-descriptor-test-'))
+  const source = join(container, 'source.tgz')
+  let owner
+  let handle
+  try {
+    mkdirSync(join(container, 'source-root'))
+    writeFileSync(source, 'source')
+    owner = claimSourcePackOutput(join(container, 'output'))
+    handle = openDirectoryHandle(owner.path)
+    const expected = lstatSync(source)
+    const movedOutput = join(container, 'moved-output')
+    renameSync(owner.path, movedOutput)
+    mkdirSync(owner.path)
+    writeFileSync(join(owner.path, 'sentinel.txt'), 'replacement must survive')
+    copyOwnedFile(source, join(handle.path, 'package.tgz'), expected)
+    assert.equal(readFileSync(join(handle.path, 'package.tgz'), 'utf8'), 'source')
+    assert.equal(readFileSync(join(owner.path, 'sentinel.txt'), 'utf8'), 'replacement must survive')
+  } finally {
+    closeDirectoryHandle(handle)
+    if (owner !== undefined) rmSync(owner.path, { recursive: true, force: true })
+    rmSync(join(container, 'moved-output'), { recursive: true, force: true })
+    rmSync(container, { recursive: true, force: true })
   }
 })
 

@@ -15,19 +15,22 @@
 
 import { randomUUID } from 'node:crypto'
 import {
+  closeSync,
   constants,
-  copyFileSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
+  readSync,
   readdirSync,
   realpathSync,
   renameSync,
   rmSync,
   rmdirSync,
   unlinkSync,
-  writeFileSync,
+  writeSync,
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -203,11 +206,85 @@ function ownerState(owner) {
   }
 }
 
+/** Claim an output directory already created by the official packer. */
+export function claimProducedDirectory(path) {
+  const parentPath = dirname(path)
+  const ancestors = directoryAncestors(parentPath)
+  const info = lstatSync(path)
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack produced an invalid output directory: ${path}`)
+  return { path, parentPath, ancestors, dev: info.dev, ino: info.ino }
+}
+
+/** Open a directory through a stable descriptor where the platform exposes one. */
+export function openDirectoryHandle(path) {
+  if (process.platform === 'win32') return { fd: undefined, path }
+  const flags = constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0)
+  const fd = openSync(path, flags)
+  const descriptorPath = process.platform === 'linux' ? join('/proc/self/fd', String(fd)) : join('/dev/fd', String(fd))
+  return { fd, path: descriptorPath }
+}
+
+export function closeDirectoryHandle(handle) {
+  if (handle?.fd !== undefined) {
+    closeSync(handle.fd)
+    handle.fd = undefined
+  }
+}
+
+function writeAll(fd, buffer) {
+  let offset = 0
+  while (offset < buffer.length) {
+    const written = writeSync(fd, buffer, offset, buffer.length - offset)
+    if (written <= 0) fail('source pack file write made no progress')
+    offset += written
+  }
+}
+
+/** Copy a regular source file through an opened source descriptor. */
+export function copyOwnedFile(source, destination, expected) {
+  const sourceFd = openSync(source, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  let destinationFd
+  try {
+    const opened = fstatSync(sourceFd)
+    if (!opened.isFile() || opened.isSymbolicLink() || opened.dev !== expected.dev || opened.ino !== expected.ino) {
+      fail(`source pack staged file changed before copy: ${source}`)
+    }
+    destinationFd = openSync(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o644)
+    const buffer = Buffer.allocUnsafe(1024 * 1024)
+    let bytes
+    do {
+      bytes = readSync(sourceFd, buffer, 0, buffer.length, null)
+      if (bytes > 0) writeAll(destinationFd, buffer.subarray(0, bytes))
+    } while (bytes > 0)
+    const after = fstatSync(sourceFd)
+    if (after.dev !== expected.dev || after.ino !== expected.ino || after.size !== opened.size) {
+      fail(`source pack staged file changed during copy: ${source}`)
+    }
+  } finally {
+    if (destinationFd !== undefined) closeSync(destinationFd)
+    closeSync(sourceFd)
+  }
+}
+
+function writeExclusiveFile(path, content) {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o644)
+  try {
+    writeAll(fd, Buffer.from(content, 'utf8'))
+  } finally {
+    closeSync(fd)
+  }
+}
+
 /** Verify that the process still owns the claimed output and every ancestor. */
-function assertClaimedSourcePackOutput(owner, action) {
+export function assertClaimedSourcePackOutput(owner, action) {
   const state = ownerState(owner)
   if (state === undefined) fail(`source pack output disappeared during ${action}: ${owner.path}`)
   if (!state) fail(`source pack output ownership changed during ${action}: ${owner.path}`)
+}
+
+function assertStageOwnership(staging, stageOutput, action) {
+  assertClaimedSourcePackOutput(staging, action)
+  if (stageOutput !== undefined) assertClaimedSourcePackOutput(stageOutput, action)
 }
 
 /** Quarantine and remove only the directory inode this process claimed. */
@@ -294,11 +371,14 @@ async function main() {
   const validation = validateSourcePackOutputInfo(values.out ?? DEFAULT_OUTPUT, identity.directory)
   const output = validation.path
   const staging = claimSourcePackStaging()
+  let stageOutputOwner
+  let stageHandle
   let outputOwner
+  let outputHandle
   let stagingRemoved = false
   try {
     const stageOutput = join(staging.path, 'output')
-    assertClaimedSourcePackOutput(staging, 'initialization')
+    assertStageOwnership(staging, undefined, 'initialization')
     await runOfficial(identity.directory, ['install', '--frozen-lockfile'], OFFICIAL_TIMEOUTS.install)
     // Local source checkouts can retain ignored tsbuildinfo/lib state from an
     // earlier build. Clean only generated repository-owned outputs so the same
@@ -307,26 +387,29 @@ async function main() {
     await runOfficial(identity.directory, ['build:official'], OFFICIAL_TIMEOUTS.build)
     await runOfficial(identity.directory, ['release:pack', '--family', 'dsh', '--out', stageOutput], OFFICIAL_TIMEOUTS.pack)
     assertClaimedSourcePackOutput(staging, 'official release pack')
+    stageOutputOwner = claimProducedDirectory(stageOutput)
+    assertStageOwnership(staging, stageOutputOwner, 'official release pack')
+    stageHandle = openDirectoryHandle(stageOutput)
+    assertStageOwnership(staging, stageOutputOwner, 'opening packed output')
 
-    const stageInfo = lstatSync(stageOutput)
-    if (!stageInfo.isDirectory() || stageInfo.isSymbolicLink()) fail(`source pack produced an invalid output directory: ${stageOutput}`)
     // The official packer writes publish-order.txt for registry publishing. Source
     // mode only needs immutable tarballs plus its generated distribution manifest;
     // discard every other top-level output before the artifact is uploaded.
-    const packedEntries = readdirSync(stageOutput)
-    assertClaimedSourcePackOutput(staging, 'listing packed output')
+    const packedEntries = readdirSync(stageHandle.path)
+    assertStageOwnership(staging, stageOutputOwner, 'listing packed output')
     for (const entry of packedEntries) {
       if (entry.endsWith('.tgz')) continue
-      assertClaimedSourcePackOutput(staging, `filtering ${entry}`)
-      const path = join(stageOutput, entry)
+      assertStageOwnership(staging, stageOutputOwner, `filtering ${entry}`)
+      const path = join(stageHandle.path, entry)
       const info = lstatSync(path)
       if (!info.isFile() || info.isSymbolicLink()) fail(`source pack produced a non-regular disposable entry: ${path}`)
       unlinkSync(path)
+      assertStageOwnership(staging, stageOutputOwner, `filtered ${entry}`)
     }
-    assertClaimedSourcePackOutput(staging, 'post-pack filtering')
+    assertStageOwnership(staging, stageOutputOwner, 'post-pack filtering')
 
-    const packageEntries = packageMapFromTarballs(stageOutput, effective.expectedVersion)
-    assertClaimedSourcePackOutput(staging, 'package map validation')
+    const packageEntries = packageMapFromTarballs(stageHandle.path, effective.expectedVersion)
+    assertStageOwnership(staging, stageOutputOwner, 'package map validation')
     const manifestFor = owner => ({
       schemaVersion: 1,
       mode: 'source-pack',
@@ -341,36 +424,43 @@ async function main() {
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([name, entry]) => [name, entry.fileName])),
     })
-    const stageManifest = manifestFor(stageInfo)
-    assertClaimedSourcePackOutput(staging, 'staged manifest write')
-    writeFileSync(join(stageOutput, SOURCE_MANIFEST_NAME), `${JSON.stringify(stageManifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
-    assertClaimedSourcePackOutput(staging, 'staged distribution validation')
-    validateSourceDistribution({ manifest: stageManifest, directory: stageOutput })
-    assertClaimedSourcePackOutput(staging, 'staged final validation')
+    const stageManifest = manifestFor(stageOutputOwner)
+    assertStageOwnership(staging, stageOutputOwner, 'staged manifest write')
+    writeExclusiveFile(join(stageHandle.path, SOURCE_MANIFEST_NAME), `${JSON.stringify(stageManifest, null, 2)}\n`)
+    assertStageOwnership(staging, stageOutputOwner, 'staged distribution validation')
+    validateSourceDistribution({ manifest: stageManifest, directory: stageHandle.path })
+    assertStageOwnership(staging, stageOutputOwner, 'staged final validation')
 
     // Reserve the caller's final path only after the complete source pack is
     // validated. mkdir is exclusive, so an output that appeared meanwhile is
     // never replaced; all packer-owned work remains in the private staging root.
     outputOwner = claimSourcePackOutput(output, validation)
+    outputHandle = openDirectoryHandle(output)
+    assertClaimedSourcePackOutput(outputOwner, 'opening final output')
     const finalManifest = manifestFor(outputOwner)
     for (const entry of packedEntries) {
       if (!entry.endsWith('.tgz')) continue
-      assertClaimedSourcePackOutput(staging, `staged copy ${entry}`)
+      assertStageOwnership(staging, stageOutputOwner, `staged copy ${entry}`)
       assertClaimedSourcePackOutput(outputOwner, `final copy ${entry}`)
-      const source = join(stageOutput, entry)
+      const source = join(stageHandle.path, entry)
       const info = lstatSync(source)
       if (!info.isFile() || info.isSymbolicLink()) fail(`source pack staged tarball is not a regular file: ${source}`)
-      copyFileSync(source, join(output, entry), constants.COPYFILE_EXCL)
+      copyOwnedFile(source, join(outputHandle.path, entry), info)
       assertClaimedSourcePackOutput(outputOwner, `final copy ${entry}`)
-      assertClaimedSourcePackOutput(staging, `staged unlink ${entry}`)
+      assertStageOwnership(staging, stageOutputOwner, `staged unlink ${entry}`)
       unlinkSync(source)
+      assertStageOwnership(staging, stageOutputOwner, `staged unlinked ${entry}`)
     }
-    assertClaimedSourcePackOutput(staging, 'final artifact transfer')
+    assertStageOwnership(staging, stageOutputOwner, 'final artifact transfer')
     assertClaimedSourcePackOutput(outputOwner, 'final manifest write')
-    writeFileSync(join(output, SOURCE_MANIFEST_NAME), `${JSON.stringify(finalManifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+    writeExclusiveFile(join(outputHandle.path, SOURCE_MANIFEST_NAME), `${JSON.stringify(finalManifest, null, 2)}\n`)
     assertClaimedSourcePackOutput(outputOwner, 'distribution validation')
-    const distribution = validateSourceDistribution({ manifest: finalManifest, directory: output })
+    const distribution = validateSourceDistribution({ manifest: finalManifest, directory: outputHandle.path })
     assertClaimedSourcePackOutput(outputOwner, 'final distribution validation')
+    closeDirectoryHandle(outputHandle)
+    outputHandle = undefined
+    closeDirectoryHandle(stageHandle)
+    stageHandle = undefined
     if (!removeClaimedSourcePackOutput(staging)) fail(`source pack staging ownership changed; refusing cleanup: ${staging.path}`)
     stagingRemoved = true
     printDshProvenance(distribution)
@@ -378,6 +468,14 @@ async function main() {
     return output
   } catch (error) {
     const cleanupErrors = []
+    try {
+      closeDirectoryHandle(outputHandle)
+      outputHandle = undefined
+      closeDirectoryHandle(stageHandle)
+      stageHandle = undefined
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError)
+    }
     if (outputOwner !== undefined) {
       try {
         if (!removeClaimedSourcePackOutput(outputOwner)) cleanupErrors.push(new Error(`source pack output ownership changed; refusing cleanup: ${output}`))
