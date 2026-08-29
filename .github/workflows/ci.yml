@@ -64,7 +64,7 @@ jobs:
     needs: dsh-context
     if: ${{ needs.dsh-context.result == 'success' && needs.dsh-context.outputs.mode == 'source' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 135
 
     steps:
       - name: Checkout dsh-pi-tui
@@ -874,12 +874,22 @@ jobs:
 
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      npm_config_registry: https://registry.npmjs.org/
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      npm_config_userconfig: ${{ runner.temp }}/dsh-publish-npmrc
+      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/dsh-publish-npmrc
 
     permissions:
       contents: read
       id-token: write
 
     steps:
+      - name: Configure isolated public npm registry
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-publish-npmrc"
+
       - name: Assert release uses npm DSH mode
         env:
           DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
@@ -956,7 +966,7 @@ jobs:
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
       - name: Publish to npm
-        run: npm publish "./${{ steps.package.outputs.tarball }}" --access public --tag "${{ needs.release-context.outputs.npm_tag }}"
+        run: npm publish "./${{ steps.package.outputs.tarball }}" --access public --tag "${{ needs.release-context.outputs.npm_tag }}" --registry=https://registry.npmjs.org/
 
   # ---------------------------------------------------------------------------
   # Create the GitHub Release AFTER npm publish succeeded, so a visible

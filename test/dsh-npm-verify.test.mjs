@@ -32,6 +32,14 @@ test('CI npm install branches pin the public registry and isolated config', () =
   assert.equal((workflow.match(/npm_config_userconfig="\$RUNNER_TEMP\/dsh-npmrc"/gu) ?? []).length, 5)
 })
 
+test('CI source preparation and publication have explicit time and registry boundaries', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  assert.match(workflow, /prepare-dsh-source:[\s\S]*?timeout-minutes: 135/u)
+  assert.match(workflow, /npm publish [^\n]*--registry=https:\/\/registry\.npmjs\.org\//u)
+  assert.match(workflow, /NPM_CONFIG_USERCONFIG: \$\{\{ runner\.temp \}\}\/dsh-publish-npmrc/u)
+  assert.ok(workflow.includes("printf 'registry=https://registry.npmjs.org/\\n' > \"$RUNNER_TEMP/dsh-publish-npmrc\""))
+})
+
 test('npm verification rejects a symlinked candidate tarball', () => {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-npm-candidate-test-'))
   try {
