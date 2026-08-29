@@ -96,11 +96,23 @@ interface StepTiming {
   sampledOutputTokens?: number
 }
 
-/** Retain late-replay timing only for the current turn. */
-function pruneSettledBefore(map: Map<string, StepTiming>, turn: number): void {
-  for (const key of map.keys()) {
-    if (turnOfStepKey(key) < turn) map.delete(key)
+/** Advance the late-replay fence and clear the previous turn once. */
+function advanceTimingTurn(
+  open: Map<string, StepTiming>,
+  settled: Map<string, StepTiming>,
+  ended: Set<string>,
+  current: number | undefined,
+  turn: number,
+): number | undefined {
+  // Event logs are normally monotonic. Keeping a monotonic fence also makes
+  // an out-of-order older replay unable to mutate the current turn's timing.
+  if (current === undefined || turn > current) {
+    open.clear()
+    settled.clear()
+    ended.clear()
+    return turn
   }
+  return current
 }
 
 /**
@@ -145,10 +157,17 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
   // assistant/message can replace its output-token sample without retaining
   // timing state for the full session.
   const settledPerStep = new Map<string, StepTiming>()
+  // Step boundaries are idempotent within the active turn; older boundaries
+  // are stale once the timing fence advances.
+  const endedSteps = new Set<string>()
   const throughput: Throughput = { outputMsTotal: 0, decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
   const usage = new StepUsageAccumulator()
   const completedTurns = new Set<number>()
   let lastTurn: number | undefined
+  let settledTurn: number | undefined
+  const enterSettledTurn = (turn: number): void => {
+    settledTurn = advanceTimingTurn(perStep, settledPerStep, endedSteps, settledTurn, turn)
+  }
 
   for (const event of events) {
     // The same lifecycle policy as the Focus fold: after turn/end a late
@@ -163,7 +182,7 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
       case 'turn/start': {
         // Advance the shared usage accounting (review finding).
         usage.onTurnStart(event.data.turn)
-        pruneSettledBefore(settledPerStep, event.data.turn)
+        enterSettledTurn(event.data.turn)
         break
       }
       case 'turn/end': {
@@ -171,52 +190,58 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
         // Finalize any still-open steps so the session total agrees with
         // the Focus per-turn total (review finding).
         usage.onTurnEnd(event.data.turn)
-        // Drop the open timing entries of the ended turn (interrupted
-        // steps never see their step/end) — review finding.
-        for (const key of perStep.keys()) {
-          if (turnOfStepKey(key) === event.data.turn) perStep.delete(key)
-        }
-        for (const key of settledPerStep.keys()) {
-          if (turnOfStepKey(key) === event.data.turn) settledPerStep.delete(key)
+        // Drop all timing state of the ended turn (interrupted steps never
+        // see their step/end; late events are replay artifacts).
+        enterSettledTurn(event.data.turn)
+        if (settledTurn === event.data.turn) {
+          perStep.clear()
+          settledPerStep.clear()
+          endedSteps.clear()
         }
         break
       }
       case 'step/start': {
         const key = stepKey(event.data.turn, event.data.step)
-        pruneSettledBefore(settledPerStep, event.data.turn)
+        enterSettledTurn(event.data.turn)
+        usage.onStepStart(event.data.turn, event.data.step)
+        if (settledTurn !== event.data.turn || endedSteps.has(key) || perStep.has(key)) break
         settledPerStep.delete(key)
         perStep.set(key, { start: event.time })
-        usage.onStepStart(event.data.turn, event.data.step)
         break
       }
       case 'step/end': {
-        pruneSettledBefore(settledPerStep, event.data.turn)
-        // The projection counts turns/steps here (unique turns) and discards
-        // steps that never produced an assistant message; usage is still
-        // counted once per step (the projection's tokenUsage is step-keyed).
-        if (lastTurn !== event.data.turn) {
-          stats.turns += 1
-          lastTurn = event.data.turn
+        const key = stepKey(event.data.turn, event.data.step)
+        enterSettledTurn(event.data.turn)
+        const currentTimingTurn = settledTurn === event.data.turn
+        const firstEnd = currentTimingTurn && !endedSteps.has(key)
+        // The projection counts turns/steps at one unique step/end and
+        // discards older-turn boundaries after the timing fence advances.
+        if (firstEnd) {
+          endedSteps.add(key)
+          if (lastTurn !== event.data.turn) {
+            stats.turns += 1
+            lastTurn = event.data.turn
+          }
+          stats.steps += 1
         }
-        stats.steps += 1
         usage.onStepEnd(event.data.turn, event.data.step)
         // The open timing entry is dropped at step/end, but retain its small
         // settled sample until turn/end so a late authoritative message can
         // replace output tokens without losing throughput parity.
-        const key = stepKey(event.data.turn, event.data.step)
-        const timing = perStep.get(key)
+        const timing = currentTimingTurn ? perStep.get(key) : undefined
         if (timing?.settled === true) settledPerStep.set(key, timing)
-        perStep.delete(key)
+        if (currentTimingTurn) perStep.delete(key)
         break
       }
       case 'assistant/chunk': {
+        enterSettledTurn(event.data.turn)
         const { chunk } = event.data
         if (chunk.type === 'usage') {
           // Streaming usage is provisional: assistant/message carries the same
           // value and replaces it at settle, so it is counted exactly once.
           usage.onUsageChunk(event.data.turn, event.data.step, chunk.usage)
           const key = stepKey(event.data.turn, event.data.step)
-          const timing = perStep.get(key)
+          const timing = settledTurn === event.data.turn ? perStep.get(key) : undefined
           if (timing !== undefined) {
             // The LATEST chunk wins (the assembler value is cumulative) —
             // the same replace rule as the shared accumulator.
@@ -225,17 +250,21 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
         } else if (isTokenDelta(chunk)) {
           // The FIRST token delta of the step stamps the decode-window start
           // (Web firstTokenTime). Reasoning and tool-call deltas count too.
-          const timing = perStep.get(stepKey(event.data.turn, event.data.step))
-          if (timing !== undefined && timing.firstDelta === undefined) {
+          const timing = settledTurn === event.data.turn
+            ? perStep.get(stepKey(event.data.turn, event.data.step))
+            : undefined
+          if (timing !== undefined && timing.settled !== true && timing.firstDelta === undefined) {
             timing.firstDelta = event.time
           }
         }
         break
       }
       case 'assistant/message': {
-        pruneSettledBefore(settledPerStep, event.data.turn)
+        enterSettledTurn(event.data.turn)
         const key = stepKey(event.data.turn, event.data.step)
-        const timing = perStep.get(key) ?? settledPerStep.get(key)
+        const timing = settledTurn === event.data.turn
+          ? perStep.get(key) ?? settledPerStep.get(key)
+          : undefined
         if (timing !== undefined) {
           // The message time is the step's decode end and its usage is the
           // authoritative one; the whole step settles HERE (projection
@@ -334,6 +363,10 @@ export class StatsFolder {
   private readonly perStep = new Map<string, StepTiming>()
   // Retain only the current turn's settled samples for late message replay.
   private readonly settledPerStep = new Map<string, StepTiming>()
+  // Step boundaries are idempotent within the active turn; older boundaries
+  // are stale once the timing fence advances.
+  private readonly endedSteps = new Set<string>()
+  private settledTurn: number | undefined
   private readonly throughput: Throughput = { outputMsTotal: 0, decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
   /** The shared per-step usage accounting (same class as the Focus fold). */
   private readonly usage = new StepUsageAccumulator()
@@ -367,6 +400,11 @@ export class StatsFolder {
     return derived
   }
 
+  /** Advance the replay fence; a turn's settled samples are cleared once. */
+  private enterSettledTurn(turn: number): void {
+    this.settledTurn = advanceTimingTurn(this.perStep, this.settledPerStep, this.endedSteps, this.settledTurn, turn)
+  }
+
   private applyEvent(event: SessionEvent): void {
     if (event.type !== 'turn/end' && event.type !== 'request/context'
       && this.completedTurns.has((event.data as { turn?: unknown }).turn as number)) {
@@ -376,9 +414,7 @@ export class StatsFolder {
       case 'turn/start': {
         // Advance the shared usage accounting (review finding).
         this.usage.onTurnStart(event.data.turn)
-        for (const key of this.settledPerStep.keys()) {
-          if (turnOfStepKey(key) < event.data.turn) this.settledPerStep.delete(key)
-        }
+        this.enterSettledTurn(event.data.turn)
         break
       }
       case 'turn/end': {
@@ -386,64 +422,77 @@ export class StatsFolder {
         // Finalize any still-open steps so the session total agrees with
         // the Focus per-turn total (review finding).
         this.usage.onTurnEnd(event.data.turn)
-        // Drop the open timing entries of the ended turn (interrupted
-        // steps never see their step/end) — review finding.
-        for (const key of this.perStep.keys()) {
-          if (turnOfStepKey(key) === event.data.turn) this.perStep.delete(key)
-        }
-        for (const key of this.settledPerStep.keys()) {
-          if (turnOfStepKey(key) === event.data.turn) this.settledPerStep.delete(key)
+        // Drop all timing state of the ended turn (interrupted steps never
+        // see their step/end; late events are replay artifacts).
+        this.enterSettledTurn(event.data.turn)
+        if (this.settledTurn === event.data.turn) {
+          this.perStep.clear()
+          this.settledPerStep.clear()
+          this.endedSteps.clear()
         }
         break
       }
       case 'step/start': {
         const key = stepKey(event.data.turn, event.data.step)
-        pruneSettledBefore(this.settledPerStep, event.data.turn)
+        this.enterSettledTurn(event.data.turn)
+        this.usage.onStepStart(event.data.turn, event.data.step)
+        if (this.settledTurn !== event.data.turn || this.endedSteps.has(key) || this.perStep.has(key)) break
         this.settledPerStep.delete(key)
         this.perStep.set(key, { start: event.time })
-        this.usage.onStepStart(event.data.turn, event.data.step)
         break
       }
       case 'step/end': {
-        pruneSettledBefore(this.settledPerStep, event.data.turn)
-        if (this.lastTurn !== event.data.turn) {
-          this.stats.turns += 1
-          this.lastTurn = event.data.turn
+        const key = stepKey(event.data.turn, event.data.step)
+        this.enterSettledTurn(event.data.turn)
+        const currentTimingTurn = this.settledTurn === event.data.turn
+        const firstEnd = currentTimingTurn && !this.endedSteps.has(key)
+        // The projection counts turns/steps at one unique step/end and
+        // discards older-turn boundaries after the timing fence advances.
+        if (firstEnd) {
+          this.endedSteps.add(key)
+          if (this.lastTurn !== event.data.turn) {
+            this.stats.turns += 1
+            this.lastTurn = event.data.turn
+          }
+          this.stats.steps += 1
         }
-        this.stats.steps += 1
         this.usage.onStepEnd(event.data.turn, event.data.step)
         // Drop the open entry, retaining only its small settled sample until
         // turn/end so a late authoritative message can preserve throughput
         // parity with the replacement token totals.
-        const key = stepKey(event.data.turn, event.data.step)
-        const timing = this.perStep.get(key)
+        const timing = currentTimingTurn ? this.perStep.get(key) : undefined
         if (timing?.settled === true) this.settledPerStep.set(key, timing)
-        this.perStep.delete(key)
+        if (currentTimingTurn) this.perStep.delete(key)
         break
       }
       case 'assistant/chunk': {
+        this.enterSettledTurn(event.data.turn)
         const { chunk } = event.data
         if (chunk.type === 'usage') {
           this.usage.onUsageChunk(event.data.turn, event.data.step, chunk.usage)
           const key = stepKey(event.data.turn, event.data.step)
-          const timing = this.perStep.get(key)
+          const timing = this.settledTurn === event.data.turn ? this.perStep.get(key) : undefined
           if (timing !== undefined) {
             // The LATEST chunk wins (the assembler value is cumulative) —
             // the same replace rule as the shared accumulator.
             timing.usage = chunk.usage
           }
         } else if (isTokenDelta(chunk)) {
-          const timing = this.perStep.get(stepKey(event.data.turn, event.data.step))
-          if (timing !== undefined && timing.firstDelta === undefined) {
+          const timing = this.settledTurn === event.data.turn
+            ? this.perStep.get(stepKey(event.data.turn, event.data.step))
+            : undefined
+          if (timing !== undefined && timing.settled !== true && timing.firstDelta === undefined) {
             timing.firstDelta = event.time
           }
         }
         break
       }
       case 'assistant/message': {
-        pruneSettledBefore(this.settledPerStep, event.data.turn)
+        this.enterSettledTurn(event.data.turn)
         const key = stepKey(event.data.turn, event.data.step)
-        const timing = this.perStep.get(key) ?? this.settledPerStep.get(key)
+        const timing = this.settledTurn === event.data.turn
+          ? this.perStep.get(key) ?? this.settledPerStep.get(key)
+          : undefined
         if (timing !== undefined) {
           // Keep timing and throughput idempotent if a malformed/replayed log
           // carries the same authoritative message more than once. The shared

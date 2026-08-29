@@ -77,9 +77,11 @@ PR A keeps the full session log and changes only local replay bookkeeping:
 - resume, create, and session-switch surface setup share
   `hydrateSessionUi(events)` instead of pre-folding a resumed log and then
   hydrating it again;
-- the benchmark includes reasoning-heavy, adjacent-read, and a 700k-character
-  text-heavy fixture, and reports transcript/stats apply, snapshot, and
-  heap/RSS measurements separately from renderer timings.
+- the benchmark includes reasoning-heavy, adjacent-read, one-turn-many-step,
+  and a 700k-character text-heavy fixture, and reports transcript/stats apply,
+  snapshot, and heap/RSS measurements separately from renderer timings;
+- late replay timing is fenced to the current turn and ignores token deltas
+  after a step has already settled, so tool-loop replay remains linear.
 
 Run the projection and renderer sweep with:
 
