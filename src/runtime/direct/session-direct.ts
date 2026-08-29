@@ -44,6 +44,8 @@ export interface TokenMeterLike {
 /** A live agent as the reader resolves it (structural projection). */
 export interface LiveAgentLike {
   readonly session: Session
+  /** Agent scope context used by DSH's composedPreset() projection. */
+  readonly ctx?: unknown
 }
 
 /** Keep cold-session projection reads below the persistence engine's own small
@@ -114,23 +116,42 @@ export class DirectSessionReader implements SessionReader {
     return this.agentFor(sessionId) as LiveAgentLike | undefined
   }
 
-  /**
-   * Resolve the effective preset for a row through DSH's projection. A
-   * projectionless deployment cannot claim that creation metadata is the
-   * current composition, so it reports no effective preset instead.
-   */
-  private async presetFor(header: SessionHeader, signal?: AbortSignal): Promise<string | undefined> {
-    const projections = this.ctx.get('sessionProjections')
-    if (projections === undefined) return undefined
-
-    const sessionId = String(header.id)
+  /** Resolve the actual preset of a currently loaded agent, when DSH exposes
+   * its composed roster entry. The projection fallback is intentionally raw:
+   * without a roster it cannot distinguish a legal custom `code` id from old
+   * pi-tui data. */
+  private livePreset(sessionId: string): string | undefined {
     const live = this.liveAgent(sessionId)
-    if (live !== undefined) return sessionPresetOf(this.ctx, live.session)
-
-    if (this.ctx.get('sessionPersistence') !== undefined) {
-      return recordedSessionPreset(this.ctx, sessionId, header, signal)
+    if (live === undefined) return undefined
+    const presets = this.ctx.get('agentPresets') as {
+      composedPreset?: (agentCtx: unknown) => unknown
+    } | undefined
+    if (live.ctx !== undefined && typeof presets?.composedPreset === 'function') {
+      try {
+        const composed = presets.composedPreset(live.ctx)
+        if (typeof composed === 'string') return composed
+      } catch {
+        // A live composition that is being torn down is not a picker error.
+      }
     }
-    return undefined
+    return sessionPresetOf(this.ctx, live.session)
+  }
+
+  private async presetRosterIds(signal?: AbortSignal): Promise<readonly string[] | undefined> {
+    const presets = this.ctx.get('agentPresets') as { list(): Promise<readonly { id: string }[]> } | undefined
+    if (presets === undefined) return undefined
+    signal?.throwIfAborted()
+    try {
+      const roster = await presets.list()
+      signal?.throwIfAborted()
+      return roster.map(preset => preset.id)
+    } catch {
+      signal?.throwIfAborted()
+      // A failed roster read must not turn a lightweight picker into a hard
+      // failure. Cold rows remain fail-closed if their projection cannot be
+      // resolved; the batch caller can still show all session identities.
+      return undefined
+    }
   }
 
   async list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined> {
@@ -139,41 +160,96 @@ export class DirectSessionReader implements SessionReader {
     signal?.throwIfAborted()
     let rows: SessionSummary[]
     if (query !== undefined) {
-      // Live-preferred listing: the session-query engine marks sessions
-      // currently loaded in the store. Resolve each row's effective preset
-      // separately because listSessions exposes the creation header, not the
-      // latest `agent-preset/selected` projection state.
+      // Listing is deliberately header/live-only. Cold projection replay is a
+      // separate presetBatch() operation so /sessions can open its first
+      // picker frame without waiting on every historical session log.
       const records = await query.listSessions(signal)
       signal?.throwIfAborted()
-      rows = await mapConcurrent(records, SESSION_PRESET_READ_CONCURRENCY, async record => ({
+      rows = records.map(record => ({
         id: record.header.id,
         createdAt: record.header.createdAt,
         cwd: record.header.cwd,
-        preset: await this.presetFor(record.header, signal),
         parentSession: record.header.parentSession,
         origin: record.header.origin,
         live: record.live,
-      }), signal)
+      }))
     } else {
       if (persistence === undefined) return undefined
-      // Persistence fallback: the plain list; the current session is the
-      // only live marker. The known header is passed into presetFor so the
-      // projection path does not repeat the list query.
       const headers = await persistence.list(signal)
       signal?.throwIfAborted()
-      rows = await mapConcurrent(headers, SESSION_PRESET_READ_CONCURRENCY, async header => ({
+      rows = headers.map(header => ({
         id: header.id,
         createdAt: header.createdAt,
         cwd: header.cwd,
-        preset: await this.presetFor(header as SessionHeader, signal),
         parentSession: header.parentSession,
         origin: header.origin,
         live: header.id === currentSessionId,
-      }), signal)
+      }))
     }
     signal?.throwIfAborted()
     rows.sort((a, b) => b.createdAt - a.createdAt)
     return rows
+  }
+
+  /**
+   * Enrich already-listed rows with effective preset ids. The source listing
+   * is repeated once to recover complete SessionHeader values for projection
+   * replay; it is never performed once per row. Cold inspection remains
+   * bounded/cancellable and corrupt or unsupported logs are omitted rather
+   * than being treated as a header-only effective preset.
+   */
+  async presetBatch(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, string>> {
+    const result = new Map<string, string>()
+    if (rows.length === 0) return result
+    signal?.throwIfAborted()
+
+    const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
+    const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
+    const projections = this.ctx.get('sessionProjections')
+    const records = query !== undefined
+      ? await query.listSessions(signal)
+      : persistence === undefined ? [] : await persistence.list(signal)
+    signal?.throwIfAborted()
+    const headers = new Map<string, SessionHeader>()
+    for (const record of records) {
+      const header = 'header' in record ? record.header : record
+      headers.set(String(header.id), header as SessionHeader)
+    }
+
+    // A live composed preset is already authoritative and does not need cold
+    // replay. The roster snapshot is shared by all historical rows so legacy
+    // `code` data is mapped only when no custom `code` entry exists.
+    for (const row of rows) {
+      const live = this.livePreset(row.id)
+      if (live !== undefined) result.set(row.id, live)
+    }
+    if (projections === undefined || persistence === undefined) return result
+    const coldRows = rows.filter(row => !result.has(row.id) && headers.has(row.id))
+    if (coldRows.length === 0) return result
+    const rosterIds = await this.presetRosterIds(signal)
+    const values = await mapConcurrent(coldRows, SESSION_PRESET_READ_CONCURRENCY, async row => {
+      try {
+        return await recordedSessionPreset(
+          this.ctx,
+          row.id,
+          headers.get(row.id),
+          signal,
+          rosterIds,
+        )
+      } catch (error) {
+        signal?.throwIfAborted()
+        // Fail closed per row: a corrupt/unsupported log cannot claim its
+        // creation header as the effective preset, but it must not hide other
+        // valid picker rows either.
+        return undefined
+      }
+    }, signal)
+    signal?.throwIfAborted()
+    for (let index = 0; index < coldRows.length; index += 1) {
+      const preset = values[index]
+      if (preset !== undefined) result.set(coldRows[index]!.id, preset)
+    }
+    return result
   }
 
   async search(query: string): Promise<SessionSearchHit[] | undefined> {

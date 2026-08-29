@@ -18,11 +18,17 @@
 - **Gate B 现在先校验已发布 consumer 的 peer metadata。** 如果目标 DSH 或
   candidate TUI 不在 `pi2dsh` 的声明范围内，兼容性发布门禁以
   `ECOSYSTEM_CONTRACT_BLOCKER` 失败；不会用 `--force` 把外部生态 blocker
-  伪装成 runtime smoke 通过。
-- **Agent preset 更名为 canonical `ptc`。** 官方 `standard`/`ptc`/
-  `minimal`/`cordis` preset 直接来自 DSH shipped root，不再打包本地 copy
-  或 `code` alias；需要时旧 Session 的 `agentPreset=code` 在恢复边界归一化为
-  `ptc`。
+  伪装成 runtime smoke 通过。官方 preset 组装矩阵现在独立为
+  `smoke:official-presets` 门禁，因此即使已发布的 `pi2dsh` 尚未支持目标版本，
+  仍可单独验证官方 preset。
+- **Agent preset 身份改为按 roster 解析。** 官方 `standard`/`ptc`/
+  `minimal`/`cordis` preset 仍直接来自 DSH shipped root，不打包本地 copy
+  或 `code` runtime alias。DSH 允许合法的自定义 `code` preset；只要当前 roster
+  存在它，显式输入和持久化状态就保留 `code`。只有旧数据中省略请求的
+  `code` default/session 值在确认 roster 不含 `code` 后才回退到 `ptc`。
+- **旧运行时门禁只要求非零失败，不依赖顺序。** DSH Loader 并发挂载 profile
+  rows，所以 DSH 0.1.1 的启动提示只能 best-effort；boundary smoke 接受该提示
+  或预期的不兼容 import failure。
 - **上游 alpha 注意事项。** DSH 0.1.2-alpha.1 的 subagent dispose
   行为仍有上游 caveat；发布前请按目标 Harness 版本运行兼容性门禁。
 

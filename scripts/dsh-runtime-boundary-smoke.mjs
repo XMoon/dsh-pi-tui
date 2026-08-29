@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
  * Verify the intentional 0.4/DSH runtime boundary with a real candidate
- * tarball and the last 0.1.1 runtime. The candidate must fail before the old
- * Harness can load its incompatible profile rows, and the visible failure
- * must explain both the upgrade and the 0.3 rollback.
+ * tarball and the last 0.1.1 runtime. The candidate must fail on the
+ * unsupported runtime. The startup row prints upgrade/rollback guidance when
+ * Loader ordering allows it, but that friendly notice is best-effort rather
+ * than a hard ordering contract.
  *
  * Usage: node scripts/dsh-runtime-boundary-smoke.mjs [path-to-candidate.tgz]
  *       pnpm smoke:boundary -- [path-to-candidate.tgz]
@@ -23,6 +24,8 @@ const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 const OLD_DSH_VERSION = '0.1.1-rc.2'
 const TARGET_DSH_VERSION = '0.1.2-alpha.1'
 const OLD_TUI_LINE = '0.3'
+const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
+const EXPECTED_BOUNDARY_IMPORT = /@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|session|session-persistence|settings)/iu
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: 'utf8', ...options })
@@ -109,23 +112,28 @@ function installCandidate(invocation, tarball, harnessDir, env) {
 
 function assertBoundary(output, status) {
   if (status === 0) throw new Error('0.4 candidate unexpectedly started on DSH 0.1.1-rc.2')
-  const required = [
-    'dsh-pi-tui',
-    `running dsh ${OLD_DSH_VERSION}`,
-    `DeepSeek Harness ${TARGET_DSH_VERSION} or later`,
-    `npm install -g @deepseek-ai/dsh@${TARGET_DSH_VERSION}`,
-    `npm install -g @xmoon76/dsh-pi-tui@${OLD_TUI_LINE}`,
-    'dsh --profile pi-tui',
-  ]
-  for (const text of required) {
-    if (!output.includes(text)) throw new Error(`boundary output is missing ${JSON.stringify(text)}:\n${output}`)
+  const friendly = output.includes(`running dsh ${OLD_DSH_VERSION}`)
+    && output.includes(`DeepSeek Harness ${TARGET_DSH_VERSION} or later`)
+  if (friendly) {
+    const required = [
+      'dsh-pi-tui',
+      `running dsh ${OLD_DSH_VERSION}`,
+      `DeepSeek Harness ${TARGET_DSH_VERSION} or later`,
+      `npm install -g @deepseek-ai/dsh@${TARGET_DSH_VERSION}`,
+      `npm install -g @xmoon76/dsh-pi-tui@${OLD_TUI_LINE}`,
+      'dsh --profile pi-tui',
+    ]
+    for (const text of required) {
+      if (!output.includes(text)) throw new Error(`boundary output is missing ${JSON.stringify(text)}:\n${output}`)
+    }
+    return
   }
-  const friendly = output.indexOf('dsh-pi-tui')
-  const rawFailure = [...output.matchAll(/ERR_MODULE_NOT_FOUND|does not provide an export|Cannot find module/giu)]
-    .map(match => match.index ?? Number.MAX_SAFE_INTEGER)
-    .find(index => index < friendly)
-  if (rawFailure !== undefined) {
-    throw new Error(`raw module/export failure preceded the friendly boundary message:\n${output}`)
+  // DSH Loader mounts rows concurrently, so an incompatible row may fail
+  // before the advisory startup notice gets to print. In that case the raw
+  // import boundary is the expected evidence; do not make message ordering a
+  // release requirement.
+  if (!RAW_BOUNDARY_ERROR.test(output) || !EXPECTED_BOUNDARY_IMPORT.test(output)) {
+    throw new Error(`unsupported runtime failed without either advisory guidance or an expected TUI/DSH import boundary:\n${output}`)
   }
 }
 
@@ -164,9 +172,13 @@ function main() {
   }
 }
 
-try {
-  main()
-} catch (error) {
-  console.error(`RUNTIME_BOUNDARY_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
-  process.exitCode = 1
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main()
+  } catch (error) {
+    console.error(`RUNTIME_BOUNDARY_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 1
+  }
 }
+
+export { assertBoundary }

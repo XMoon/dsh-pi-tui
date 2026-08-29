@@ -8,8 +8,11 @@
  * DSH/TUI peer contract before attempting runtime installation. If that passes,
  * it installs the exact published DSH and pi2dsh versions into an isolated
  * temporary profile, adds an unmodified Pi-shaped fixture, and drives the
- * resulting TUI through tmux. The fixture is intentionally not allowed to
- * import this repository or any pi2dsh private module.
+ * resulting TUI through tmux. Official DSH preset assembly is covered by the
+ * independent `official-presets-smoke.mjs` gate; this consumer gate does not
+ * hide that matrix behind the pi2dsh metadata preflight. The fixture is
+ * intentionally not allowed to import this repository or any pi2dsh private
+ * module.
  *
  * Usage: node scripts/pi2dsh-compat-smoke.mjs [path-to-candidate-tgz]
  *        pnpm smoke:pi2dsh -- [path-to-candidate-tgz]
@@ -277,6 +280,15 @@ function assertOfficialPresetHeader(presetId, evidencePath) {
   }
 }
 
+/** Query the live preset without mutating it through the /preset picker. */
+function officialPresetStatusCommand() {
+  return '/preset status'
+}
+
+function officialPresetStatusVisible(presetId, pane) {
+  return pane.includes(`preset: ${presetId} ·`)
+}
+
 function candidateArgument(args) {
   return args[0] === '--' ? args[1] : args[0]
 }
@@ -332,17 +344,23 @@ function validateCandidateTarball(tarball) {
   return candidatePackage
 }
 
+const EXACT_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/u
+
+function validateTargetDshManifest(manifest) {
+  if (!EXACT_VERSION.test(manifest?.dshVersion ?? '')) {
+    fail('COMPAT_BOOT_FAILURE', 'compatibility manifest must pin an exact target DSH version')
+  }
+  return manifest.dshVersion
+}
+
 function validateManifest(manifest) {
   if (manifest?.issue !== 26 || manifest.consumer !== 'pi2dsh') {
     fail('COMPAT_BOOT_FAILURE', 'test/compat/pi2dsh.json is not the Issue #26 pi2dsh manifest')
   }
-  const exactVersion = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/u
-  if (!exactVersion.test(manifest.pi2dshVersion ?? '')) {
+  if (!EXACT_VERSION.test(manifest.pi2dshVersion ?? '')) {
     fail('COMPAT_BOOT_FAILURE', 'pi2dsh compatibility manifest must pin an exact pi2dsh version')
   }
-  if (!exactVersion.test(manifest.dshVersion ?? '')) {
-    fail('COMPAT_BOOT_FAILURE', 'pi2dsh compatibility manifest must pin an exact target DSH version')
-  }
+  validateTargetDshManifest(manifest)
   if (!Array.isArray(manifest.contracts) || REQUIRED_CONTRACTS.some(contract => !manifest.contracts.includes(contract))) {
     fail('COMPAT_BOOT_FAILURE', 'pi2dsh compatibility manifest is missing a required contract')
   }
@@ -863,12 +881,12 @@ async function smokeOfficialPresetMounts(invocation, workDir, env) {
           && evidence.sessionId.length > 0
       }, 'COMPAT_BOOT_FAILURE')
       assertOfficialPresetHeader(presetId, env.PI2DSH_COMPAT_HEADER_EVIDENCE)
-      tmux.sendLiteral('/preset')
+      tmux.sendLiteral(officialPresetStatusCommand())
       await delay(350)
       tmux.sendKey('Enter')
       await waitUntil(`official preset ${presetId} projection`, TIMEOUTS.command, () => {
         if (!tmux.hasSession()) return false
-        return tmux.capturePane().includes(`preset: ${presetId} ·`)
+        return officialPresetStatusVisible(presetId, tmux.capturePane())
       }, 'COMPAT_BOOT_FAILURE')
       assertNoCompatibilityFailures(tuiLog, tmux)
       assertOfficialPresetMounted(presetId, tuiLog, tmux)
@@ -1117,11 +1135,6 @@ async function main() {
     installPlugin(dsh, writeHeaderProbePackage(workDir), harnessDir, env, false)
     installPlugin(dsh, fixtureDir, harnessDir, env, false)
 
-    // Gate all official DSH preset mounts before exercising the Pi surface.
-    // This catches a missing Host service for minimal/ptc/cordis that the
-    // default standard boot alone would never observe.
-    await smokeOfficialPresetMounts(dsh, workDir, env)
-
     const socket = `dsh-pi2dsh-compat-${process.pid}`
     const session = `compat-${process.pid}`
     const tmux = tmuxRunner(socket, session, env)
@@ -1238,8 +1251,22 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
 
 export {
   assertNoCompatibilityFailures,
-  assertOfficialPresetHeader,
   candidateArgument,
+  readJson,
+  resolveTarball,
+  validateCandidateTarball,
+  validateTargetDshManifest,
+  runPnpmInstall,
+  dshInvocation,
+  runDsh,
+  installPlugin,
+  writeHeaderProbePackage,
+  writeLauncher,
+  tmuxRunner,
+  smokeOfficialPresetMounts,
+  assertOfficialPresetHeader,
+  officialPresetStatusCommand,
+  officialPresetStatusVisible,
   compatibilityFailureLine,
   presetDegradationLine,
   fixtureImportViolations,

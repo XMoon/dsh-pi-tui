@@ -20,6 +20,10 @@ import {
   validateConsumerMetadata,
   validateFixturePackageData,
   validateManifest,
+  validateTargetDshManifest,
+  smokeOfficialPresetMounts,
+  officialPresetStatusCommand,
+  officialPresetStatusVisible,
   settingsSearchSnapshot,
   presetDegradationLine,
   CI_ECOSYSTEM_TIMEOUT_MS,
@@ -60,6 +64,16 @@ test('pi2dsh smoke treats the compatibility manifest as its version source of tr
   assert.doesNotThrow(() => validateManifest(manifest))
   assert.throws(() => validateManifest({ ...manifest, pi2dshVersion: 'not-a-version' }), /exact pi2dsh version/u)
   assert.throws(() => validateManifest({ ...manifest, dshVersion: 'not-a-version' }), /exact target DSH version/u)
+})
+
+test('official preset validation is independent of pi2dsh consumer metadata', () => {
+  assert.equal(validateTargetDshManifest({ dshVersion: '0.1.2-alpha.1' }), '0.1.2-alpha.1')
+  assert.doesNotThrow(() => validateTargetDshManifest({ dshVersion: '0.1.2-alpha.1', consumer: 'unreleased-bridge' }))
+  assert.throws(() => validateTargetDshManifest({ dshVersion: 'not-a-version' }), /exact target DSH version/u)
+  assert.equal(typeof smokeOfficialPresetMounts, 'function', 'the real official matrix must be independently callable')
+  assert.equal(officialPresetStatusCommand(), '/preset status')
+  assert.equal(officialPresetStatusVisible('ptc', 'preset: ptc · default: ptc'), true)
+  assert.equal(officialPresetStatusVisible('ptc', 'preset: standard · default: ptc'), false)
 })
 
 test('pi2dsh metadata preflight blocks an unsupported consumer contract', () => {

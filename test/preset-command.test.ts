@@ -112,6 +112,7 @@ function stubRunner(options: {
   applyFooterSettings?: () => void
   extensions?: TuiCommandRunner['extensions']
   agents?: TuiCommandRunner['agents']
+  sessionReader?: Partial<TuiCommandRunner['sessionReader']>
   effectivePresetId?: string
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
@@ -139,6 +140,7 @@ function stubRunner(options: {
       titles: async () => new Map(),
       measureContext: () => undefined,
       readExportData: async () => ({ kind: 'none' }),
+       ...options.sessionReader,
     },
     catalog: new DirectCatalogPort(options.ctx as never, () => undefined),
     config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),
@@ -234,6 +236,7 @@ function setup(options: {
   extensions?: TuiCommandRunner['extensions']
   defaultPresetId?: string
   agents?: TuiCommandRunner['agents']
+  sessionReader?: Partial<TuiCommandRunner['sessionReader']>
   effectivePresetId?: string
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
@@ -262,6 +265,7 @@ function setup(options: {
     applyFooterSettings: () => {},
     extensions: options.extensions,
     agents: options.agents,
+    sessionReader: options.sessionReader,
     effectivePresetId: options.effectivePresetId,
     captureExtensionHealthRef: options.captureExtensionHealthRef
       ?? ((slot, id) => {
@@ -369,16 +373,25 @@ test('/preset <id> with no session rejects an unknown id', async () => {
   t.app.stop()
 })
 
-test('/preset code is not a selectable alias for the official ptc preset', async () => {
+test('/preset code remains unknown when the roster has no code entry', async () => {
   const t = setup({})
   const result = await t.run('code') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
-  assert.match(result.text, /renamed to "ptc"/)
+  assert.match(result.text, /preset "code" not found/)
+  assert.match(result.text, /use preset "ptc"/)
   assert.equal(t.pending.value, undefined)
   t.app.stop()
 })
 
-test('/new resolves a persisted legacy default as canonical ptc', async () => {
+test('/preset code selects a legal custom code roster entry', async () => {
+  const t = setup({ rows: [...SHIPPED_ROWS, { id: 'code', name: 'Custom code', trust: 'user' }] })
+  const result = await t.run('code')
+  assert.deepEqual(result, { kind: 'success', text: 'new sessions will start on preset code' })
+  assert.equal(t.pending.value, 'code')
+  t.app.stop()
+})
+
+test('/new resolves an absent legacy code default as canonical ptc', async () => {
   const created: { agentPreset?: string }[] = []
   const t = setup({
     defaultPresetId: 'code',
@@ -392,8 +405,35 @@ test('/new resolves a persisted legacy default as canonical ptc', async () => {
   })
   const result = await t.runCommand('new') as { kind: string; text?: string }
   assert.deepEqual(result, { kind: 'success', text: 'started a fresh session' })
-  assert.deepEqual(t.presets.resolved, ['ptc'], 'omitted /new resolve must normalize only the persisted default')
+  assert.deepEqual(t.presets.resolved, ['ptc'], 'the legacy default falls back to the canonical ptc roster entry')
   assert.deepEqual(created, [{ agentPreset: 'ptc' }], 'new session metadata must stay canonical')
+  t.app.stop()
+})
+
+test('/sessions opens its first picker frame before cold preset enrichment settles', async () => {
+  let started = false
+  let resolveBatch!: (value: Map<string, string>) => void
+  const batch = new Promise<Map<string, string>>(resolve => { resolveBatch = resolve })
+  const t = setup({
+    sessionReader: {
+      list: async () => [{ id: 'session-cold', createdAt: 10, cwd: '/ws', live: false }],
+      presetBatch: async () => {
+        started = true
+        return batch
+      },
+      titles: async () => new Map(),
+    },
+  })
+  const result = await t.runCommand('sessions')
+  assert.deepEqual(result, { kind: 'success' })
+  assert.equal(started, true, 'cold preset replay starts after the picker is opened')
+  const initial = await t.view()
+  assert.ok(initial.includes('cold'), `initial picker frame is missing the session row:\n${initial}`)
+  assert.ok(!initial.includes('preset:standard'), 'the initial frame must not wait for an effective preset')
+  resolveBatch(new Map([['session-cold', 'standard']]))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  const enriched = await t.view()
+  assert.ok(enriched.includes('preset:standard'), `preset enrichment did not refresh the picker:\n${enriched}`)
   t.app.stop()
 })
 
@@ -546,7 +586,7 @@ test('/preset default <id> with no override requests a standing refresh of the n
   t.app.stop()
 })
 
-test('/preset default code rejects a new legacy write', async () => {
+test('/preset default code remains unknown when the roster has no code entry', async () => {
   const writes: unknown[] = []
   const t = setup({
     refreshCatalog: async () => standingOutcome(['glab']),
@@ -557,9 +597,27 @@ test('/preset default code rejects a new legacy write', async () => {
   })
   const result = await t.run('default code') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
-  assert.match(result.text, /preset "code" was renamed to "ptc"/u)
-  assert.deepEqual(writes, [], 'the command must not persist a normalized legacy id')
+  assert.match(result.text, /preset "code" not found/u)
+  assert.match(result.text, /use preset "ptc"/u)
+  assert.deepEqual(writes, [], 'an unknown code id must never be persisted')
   assert.deepEqual(t.refreshes, [])
+  t.app.stop()
+})
+
+test('/preset default code writes a legal custom roster entry', async () => {
+  const writes: unknown[] = []
+  const t = setup({
+    rows: [...SHIPPED_ROWS, { id: 'code', name: 'Custom code', trust: 'user' }],
+    refreshCatalog: async () => standingOutcome(['glab']),
+    settings: {
+      get: () => undefined,
+      mutate: async (_ns, patch) => { writes.push(patch); return undefined },
+    },
+  })
+  const result = await t.run('default code') as { kind: string; text: string }
+  assert.deepEqual(result, { kind: 'success', text: 'default preset set: code' })
+  assert.deepEqual(writes, [[{ op: 'set', path: ['default'], value: 'code' }]])
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
   t.app.stop()
 })
 

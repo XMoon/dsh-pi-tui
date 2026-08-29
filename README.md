@@ -380,9 +380,11 @@ dsh-pi-tui:
 | `0.4.0-alpha.1`（`@next`） | `>=0.1.2-alpha.1 <0.1.3` | 当前预发布线；已按 `0.1.2-alpha.1` 验证 |
 | `0.3.x`（`@0.3`） | `0.1.1-rc.2` | 旧运行时兼容线 |
 
-不要把两条线混装：0.4 预发布包在 DSH 0.1.1 上会在启动时明确拒绝，
-不会通过兼容 shim 或 API 代理继续运行；保留 DSH 0.1.1 时请使用 0.3。
-`0.4.0-alpha.1` 的推荐安装顺序如下（先装 DSH，再把 TUI 装入 profile）：
+不要把两条线混装：DSH 0.1.1 不在 0.4 的 peer 支持范围内，运行时会在
+正常的不兼容边界以非零状态失败。启动行会在 Loader 并发挂载顺序允许时打印
+升级和回退提示，但该友好提示是 best-effort，不是启动顺序保证；保留 DSH
+0.1.1 时请使用 0.3。`0.4.0-alpha.1` 的推荐安装顺序如下（先装 DSH，再把
+TUI 装入 profile）：
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.2-alpha.1
@@ -403,8 +405,10 @@ dsh --profile pi-tui
 仅执行 `npm install -g @xmoon76/dsh-pi-tui` 不会把插件安装进 DSH profile，
 实际使用仍应执行上面的 `dsh plugin` 命令。
 
-新的 Agent preset 使用 canonical `ptc` id；旧 Session 中持久化的
-`agentPreset=code` 仍会读取，并映射到 PTC 模式。
+新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
+`code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
+旧数据中省略请求的 `code` default/session 值只有在确认 roster 不含 `code` 后
+才会回退到 `ptc`。
 
 ### npm
 

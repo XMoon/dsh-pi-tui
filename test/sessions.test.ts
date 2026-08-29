@@ -137,14 +137,14 @@ test('headerToPickerRow maps a header onto the row shape', () => {
   assert.equal(row.live, true)
 })
 
-test('headerToPickerRow normalizes the legacy persisted code id', () => {
+test('headerToPickerRow preserves code until a roster-aware reader can disambiguate it', () => {
   const row = headerToPickerRow({
     version: 0,
     id: SessionId('session-legacy'),
     createdAt: 42,
     agentPreset: 'code',
   }, false)
-  assert.equal(row.preset, 'ptc')
+  assert.equal(row.preset, 'code')
 })
 
 test('loadSessionTitles uses the sessionQuery batch when mounted', async () => {

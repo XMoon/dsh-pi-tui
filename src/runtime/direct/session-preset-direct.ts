@@ -14,7 +14,10 @@
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
-import { normalizePersistedSessionPresetId } from '../session-preset.ts'
+import {
+  normalizePersistedSessionPresetId,
+  resolvePersistedSessionPresetId,
+} from '../session-preset.ts'
 
 type AgentPresetProjectionKey = typeof agentPresetProjectionDefinition.key
 
@@ -34,14 +37,15 @@ export interface SessionPresetContext {
   get(name: string): unknown
 }
 
-/** Read the current preset from the official DSH projection. */
+/** Read the raw current preset from the official DSH projection. */
 export function sessionPresetOf(
   ctx: SessionPresetContext,
   session: Session,
+  availablePresetIds?: readonly string[],
 ): string | undefined {
   const projections = ctx.get('sessionProjections') as SessionProjectionReader | undefined
   if (projections === undefined) return undefined
-  return normalizePersistedSessionPresetId(projections.stateOf(session, 'agentPreset'))
+  return normalizePersistedSessionPresetId(projections.stateOf(session, 'agentPreset'), availablePresetIds)
 }
 
 /**
@@ -50,12 +54,16 @@ export function sessionPresetOf(
  * projection registry can serve the same state it serves for a live Session.
  * A caller that already has the session header may pass it to avoid listing
  * the persistence backend a second time.
+ * @param signal - cancellation for the cold inspection.
+ * @param availablePresetIds - one roster snapshot shared by a batch caller;
+ *   omitting it performs the single-session resolver probe when needed.
  */
 export async function recordedSessionPreset(
   ctx: SessionPresetContext,
   sessionId: string,
   knownHeader?: SessionHeader,
   signal?: AbortSignal,
+  availablePresetIds?: readonly string[],
 ): Promise<string | undefined> {
   const persistence = ctx.get('sessionPersistence') as SessionPersistenceReader | undefined
   if (persistence === undefined) return undefined
@@ -71,5 +79,10 @@ export async function recordedSessionPreset(
   // unknown-event behavior. Do not turn an unsupported log into a header-only
   // session or silently compose the wrong preset.
   const session = Session.fromRestore(SessionId(sessionId), inspection.events, inspection.meta)
-  return sessionPresetOf(ctx, session)
+  const projected = sessionPresetOf(ctx, session)
+  return resolvePersistedSessionPresetId(
+    projected,
+    availablePresetIds,
+    ctx.get('agentPresets') as { readonly defaultId?: string; resolve(id?: string): Promise<{ readonly id: string }> } | undefined,
+  )
 }

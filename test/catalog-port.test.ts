@@ -134,7 +134,7 @@ test('presets degrade to unavailable without a roster service', async () => {
   assert.equal(presets.available(), false)
   assert.deepEqual(await presets.list(), [])
   assert.deepEqual(await presets.resolve('standard'), {}, 'rosterless resolve yields no preset identity')
-  await assert.rejects(presets.resolve('code'), /renamed to "ptc"/)
+  await assert.rejects(presets.resolve('code'), /preset "code" is unavailable/)
   assert.equal(presets.defaultId(), undefined)
 })
 
@@ -153,26 +153,27 @@ test('presets list/resolve/defaultId return detached roster DTOs', async () => {
     { id: 'code', trust: 'user', name: 'PTC', broken: 'x' },
   ])
   assert.deepEqual(await presets.resolve(undefined), { id: 'standard' }, 'concrete id only, no setup callback')
+  assert.deepEqual(await presets.resolve('code'), { id: 'code' }, 'a legal custom code id resolves as itself')
   assert.equal(presets.defaultId(), 'standard')
 })
 
-test('presets normalize a persisted code default before omitted resolve', async () => {
+test('presets resolves an absent legacy code default as ptc but preserves explicit code semantics', async () => {
   const resolved: Array<string | undefined> = []
   const presets = port({
     agentPresets: {
       list: async () => [preset('ptc')],
       resolve: async (id?: string) => {
         resolved.push(id)
-        if (id === 'code') throw new Error('legacy default must not reach the official resolver')
+        if (id === 'code') throw Object.assign(new Error('unknown preset'), { presetId: 'code' })
         return preset(id ?? 'ptc')
       },
       get defaultId() { return 'code' },
     },
   }).presets
   assert.deepEqual(await presets.resolve(undefined), { id: 'ptc' })
-  await assert.rejects(() => presets.resolve('code'), /renamed to "ptc"/u)
-  assert.deepEqual(resolved, ['ptc'], 'only the omitted persisted default may reach the official resolver')
-  assert.equal(presets.defaultId(), 'ptc', 'the default-id read is canonicalized')
+  await assert.rejects(() => presets.resolve('code'), /unknown preset/u)
+  assert.deepEqual(resolved, ['code', 'ptc', 'code'], 'only omitted default resolution gets the legacy fallback')
+  assert.equal(presets.defaultId(), 'code', 'the synchronous default read preserves roster ambiguity')
 })
 
 test('presets.resolve propagates an unknown-preset rejection', async () => {

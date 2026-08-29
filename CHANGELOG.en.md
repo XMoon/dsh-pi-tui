@@ -18,11 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gate B now preflights published consumer peer metadata.** If the target DSH or
   candidate TUI is outside `pi2dsh`'s declared ranges, the release gate fails as
   `ECOSYSTEM_CONTRACT_BLOCKER`; it never uses `--force` to disguise an external
-  ecosystem blocker as a passing runtime smoke.
-- **The Agent preset is now canonical `ptc`.** The official
-  `standard`/`ptc`/`minimal`/`cordis` presets come directly from DSH's shipped
-  root; no local copy or `code` alias is packaged. When required, a persisted
-  `agentPreset=code` is normalized to `ptc` at the restore boundary.
+  ecosystem blocker as a passing runtime smoke. The official preset assembly
+  matrix is now an independent `smoke:official-presets` gate, so it remains
+  runnable without a supported published `pi2dsh` release.
+- **Agent preset identity is roster-aware.** The official
+  `standard`/`ptc`/`minimal`/`cordis` presets still come directly from DSH's
+  shipped root with no local copy or `code` runtime alias. A legal custom preset
+  literally named `code` is preserved for explicit input and durable state;
+  only an omitted legacy `code` default/session value falls back to `ptc` after
+  the current roster proves that `code` is absent.
+- **The old-runtime boundary is nonzero, not order-dependent.** Startup guidance
+  for DSH 0.1.1 is best-effort because DSH Loader mounts profile entries
+  concurrently; the boundary smoke accepts either that notice or the expected
+  incompatible import failure.
 - **Upstream alpha caveat.** DSH 0.1.2-alpha.1 still has an upstream
   subagent-dispose caveat; run the target-Harness compatibility gates before
   publishing.

@@ -12,7 +12,6 @@ import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, normalize } from 'node:path'
 import { safeErrorMessage } from './error-boundary.ts'
-import { normalizePersistedSessionPresetId } from './runtime/session-preset.ts'
 
 /**
  * Legacy exported window size: how many most-recent sessions the picker's
@@ -167,7 +166,8 @@ export interface SessionPickerRow {
   title?: string
   /** Absolute working directory, for the workspace group. */
   cwd?: string
-  /** Agent preset id the session runs on, when the deployment composes one. */
+  /** Effective agent preset id, when the row has been enriched. Initial
+   * lightweight picker rows may omit it while projection replay is pending. */
   preset?: string
   /** The session this one was forked from, when it has lineage. */
   parentSession?: string
@@ -283,7 +283,11 @@ export function headerToPickerRow(header: SessionHeader, live: boolean): Session
     id: header.id,
     createdAt: header.createdAt,
     cwd: header.cwd,
-    preset: normalizePersistedSessionPresetId(header.agentPreset),
+    // This pure mapper has no roster to disambiguate the legal custom `code`
+    // id from old pi-tui data. Preserve the durable value; the Direct reader
+    // resolves effective preset state through the DSH projection before it
+    // exposes an enriched row.
+    ...header.agentPreset === undefined ? {} : { preset: header.agentPreset },
     parentSession: header.parentSession,
     origin: header.origin,
     live,

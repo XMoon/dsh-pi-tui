@@ -39,7 +39,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 // `agent-preset/selected` session projection owned by DSH.
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-tool-todo'
-import { normalizePersistedSessionPresetId } from './runtime/session-preset.ts'
+import { resolvePresetRequest } from './runtime/session-preset.ts'
 import { recordedSessionPreset, sessionPresetOf } from './runtime/direct/session-preset-direct.ts'
 // Empty type imports carry the loader Context merge for the settlement await
 // and the cmdline Context merge for the appExit host value.
@@ -1246,11 +1246,11 @@ export async function composeAgent(
   focusState?: { enabled: boolean },
   diag?: Diag,
 ): Promise<AgentComposition> {
-  if (presetId === 'code') {
-    throw new Error('preset "code" was renamed to "ptc"; use the canonical ptc preset')
-  }
   const presets = ctx.get('agentPresets')
   if (presets === undefined) {
+    if (presetId === 'code') {
+      throw new Error('preset "code" is unavailable in this deployment; use a configured preset')
+    }
     return {
       setup: (agentCtx: Context): void => {
         installModelSelection(agentCtx, selected)
@@ -1261,16 +1261,13 @@ export async function composeAgent(
       },
     }
   }
-  // DSH resolves an omitted id from its persisted default before returning a
-  // preset. Normalize that data first, otherwise a legacy default of `code`
-  // is rejected by the official roster before we can map it to `ptc`.
-  const requestedPresetId = presetId === undefined
-    ? normalizePersistedSessionPresetId(presets.defaultId) ?? presets.defaultId
-    : presetId
-  const resolved = await presets.resolve(requestedPresetId)
-  // The resolver returns an official preset identity. It is already
-  // canonical because legacy normalization happened only on the persisted
-  // default input above; explicit new `--preset code` was rejected earlier.
+  // DSH allows a user preset literally named `code`. Resolve the real roster
+  // entry first; only an omitted persisted default falls back from old pi-tui
+  // `code` data to the canonical `ptc` preset.
+  const resolved = await resolvePresetRequest(presets, presetId)
+  // The resolver returns the concrete roster identity, including a legitimate
+  // custom `code` entry. The only compatibility rewrite is inside the shared
+  // omitted-default resolver above.
   return {
     agentPreset: resolved.id,
     setup: async (agentCtx: Context): Promise<void> => {
@@ -1329,7 +1326,6 @@ export async function recomposeBlank(
 ): Promise<RecomposeOutcome> {
   const presets = ctx.get('agentPresets')
   if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
-  if (id === 'code') throw new Error('preset "code" was renamed to "ptc"; use the canonical ptc preset')
   if (agent.session.events.some(event => event.type === 'turn/start')) return { kind: 'locked' }
   const preset = await presets.recompose(agent.ctx, id)
   agent.session.append('agent-preset/selected', { agentPreset: preset.id })
@@ -1985,9 +1981,21 @@ export function apply(ctx: Context, config: Config): void {
           return { kind: 'unavailable' }
       }
     }
-    /** The preset the live agent runs on, read from the DSH session projection. */
+    /** The preset the live agent runs on. Prefer DSH's composed roster
+     * identity so a legal custom `code` cannot be confused with old data. */
     const currentPreset = (): string | undefined => {
       if (liveAgent === undefined) return undefined
+      const presets = ctx.get('agentPresets') as {
+        composedPreset?: (agentCtx: unknown) => unknown
+      } | undefined
+      if (typeof presets?.composedPreset === 'function') {
+        try {
+          const composed = presets.composedPreset(liveAgent.ctx)
+          if (typeof composed === 'string') return composed
+        } catch {
+          // During teardown, fall back to the DSH projection read below.
+        }
+      }
       return sessionPresetOf(ctx, liveAgent.session)
     }
     // Incremental fold state for the live session's log; reset on switch. The
@@ -5913,7 +5921,9 @@ export function apply(ctx: Context, config: Config): void {
       const sourceGeneration = sessionGeneration
       const commitHost: RewindCommitHost = {
         sessionCwd: () => sessionCwd(),
-        sessionPreset: (session) => sessionPresetOf(ctx, session),
+        sessionPreset: (session) => session.id === sourceId
+          ? currentPreset()
+          : sessionPresetOf(ctx, session),
         compose,
         agents: backend.sessionLifecycle,
         liveIdentity: () => ({ sessionId: liveAgent?.session.id, generation: sessionGeneration }),

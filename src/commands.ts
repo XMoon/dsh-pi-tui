@@ -1941,9 +1941,10 @@ export function registerTuiCommands(
     },
   })
 
-  // Shared /sessions + /resume body: list persisted sessions newest-first,
-  // open the picker, and enrich rows with titles in the background. The
-  // header parameter lets the resume alias present itself under its own name.
+  // Shared /sessions + /resume body: list lightweight session headers
+  // newest-first, open the picker, and enrich effective presets/titles in the
+  // background. The header parameter lets the resume alias present itself
+  // under its own name.
   const openSessionPicker = async (invocation: { rawInput: string }, header: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {    // The current marker is the live session's id; before the first session
     // (deferred start) no row is marked current, and the picker can still
     // browse and switch to a persisted session without creating one.
@@ -1960,8 +1961,13 @@ export function registerTuiCommands(
     // Live title map: the background loader fills it, and the category
     // factories re-read it on every activation (Tab cycle, refresh).
     const titlesById = new Map<string, string>()
+    const presetsById = new Map<string, string>()
     const itemFor = (row: SessionPickerRow, indent = 0): SessionPickerItem =>
-      sessionPickerItem({ ...row, title: titlesById.get(row.id) }, runner.liveAgent?.session.id ?? '', indent)
+      sessionPickerItem({
+        ...row,
+        title: titlesById.get(row.id),
+        preset: presetsById.get(row.id) ?? row.preset,
+      }, runner.liveAgent?.session.id ?? '', indent)
     // Category tabs (Tab cycles while the picker is open): the session
     // picker is a HUMAN surface, so subagent children never appear in
     // either scope — /tasks and the subagent viewer own that surface now
@@ -2007,6 +2013,13 @@ export function registerTuiCommands(
     // "Current directory" scope) would otherwise never get a title read and
     // would show a bare short id forever.
     const mainRows = rows.filter(row => row.origin !== 'subagent')
+    if (runner.sessionReader.presetBatch !== undefined) {
+      detach('session presets', async () => {
+        const presets = await runner.sessionReader.presetBatch!(mainRows, signal)
+        for (const [id, preset] of presets) presetsById.set(id, preset)
+        if (presets.size > 0) picker.refresh?.()
+      })
+    }
     detach('session titles', async () => {
       const loadBatch = async (batch: SessionPickerRow[]): Promise<void> => {
         const titles = await runner.sessionReader.titles(batch, signal)
@@ -2675,33 +2688,47 @@ export function registerTuiCommands(
       // The live composition is the runner's own read (Direct ownership);
       // the roster catalog the command surface needs is the port's.
       const current = runner.currentPreset()
+      const displayedDefault = async (): Promise<string | undefined> => {
+        const configured = runner.config.presetDefault.get()
+        if (configured !== 'code') return configured ?? presets.defaultId()
+        // A persisted legacy `code` value is resolved through the roster. This
+        // keeps status/default display consistent with composition: a real
+        // custom code remains code, while old data without code displays ptc.
+        try {
+          return (await presets.resolve()).id ?? configured
+        } catch {
+          return configured
+        }
+      }
+      const presetErrorText = (error: unknown, id: string): string => {
+        const message = safeErrorMessage(error)
+        if (id !== 'code' || !/\b(?:not found|unknown|unavailable)\b/iu.test(message)) return message
+        return `${message}; if you meant the legacy PTC session identity, use preset "ptc"`
+      }
       const matched = invocation.rawInput.trim().match(/^(\S+)(?:\s+(.*))?$/)
       const verb = matched?.[1] ?? ''
       const rest = matched?.[2]?.trim() ?? ''
       if (verb === 'status') {
-        return { kind: 'success', text: `preset: ${current ?? 'none'} · default: ${presets.defaultId()}` }
+        return { kind: 'success', text: `preset: ${current ?? 'none'} · default: ${await displayedDefault()}` }
       }
       if (verb === 'default') {
         if (!runner.config.presetDefault.available()) return { kind: 'error', text: 'settings service unavailable' }
         if (rest === '') {
-          return { kind: 'success', text: `default preset: ${runner.config.presetDefault.get() ?? presets.defaultId()}` }
+          return { kind: 'success', text: `default preset: ${await displayedDefault()}` }
         }
         // The saved default only affects sessions created from now on. A
         // standing catalog refresh follows ONLY when no higher-precedence
         // override (run-local pending or launch-time --preset) masks the
         // new default — the masked case must not re-read a preset the next
         // session will not compose on.
-        if (rest === 'code') {
-          return { kind: 'error', text: 'preset "code" was renamed to "ptc"; use /preset default ptc' }
-        }
         try {
-          // Validate before writing settings. Legacy `code` is accepted only
-          // when reading persisted data; new command/config writes must use
-          // the official `ptc` id explicitly.
+          // Validate before writing settings. `code` is legal when the current
+          // DSH roster contains a custom preset with that id; an unknown code
+          // remains an ordinary unknown-preset failure and is never aliased.
           await presets.resolve(rest)
           await runner.config.presetDefault.set(rest)
         } catch (error) {
-          return { kind: 'error', text: safeErrorMessage(error) }
+          return { kind: 'error', text: presetErrorText(error, rest) }
         }
         if (runner.effectivePresetId === undefined) {
           const outcome = await runner.refreshCatalog({
@@ -2720,9 +2747,6 @@ export function registerTuiCommands(
       // preset the next session composes on (nothing is created here).
       const applyPresetSelection = async (id: string):
         Promise<{ kind: 'pending'; preset: string } | { kind: 'switched'; preset: string } | { kind: 'locked'; sessionId: string }> => {
-        if (id === 'code') {
-          throw new Error('preset "code" was renamed to "ptc"; use /preset ptc')
-        }
         if (liveAgent === undefined) {
           const resolved = await presets.resolve(id)
           // A roster that vanished between the availability check and the
@@ -2767,7 +2791,7 @@ export function registerTuiCommands(
         try {
           outcome = await applyPresetSelection(id)
         } catch (error) {
-          app.notify(safeErrorMessage(error), 'error')
+          app.notify(presetErrorText(error, id), 'error')
           return
         }
         if (outcome.kind === 'pending') {
@@ -2794,11 +2818,12 @@ export function registerTuiCommands(
           }
           return { kind: 'success', text: `session preset switched to ${outcome.preset}` }
         } catch (error) {
-          return { kind: 'error', text: safeErrorMessage(error) }
+          return { kind: 'error', text: presetErrorText(error, verb) }
         }
       }
       const roster = await presets.list()
       if (roster.length === 0) return { kind: 'success', text: 'no agent presets configured' }
+      const defaultId = await displayedDefault()
       // A started conversation's history was produced under its preset's
       // tools: offer no selectable roster — say why instead (the typed
       // /preset <id> path above refuses the same way).
@@ -2816,7 +2841,7 @@ export function registerTuiCommands(
             description: [
               display.description,
               preset.trust === 'system' ? 'system' : 'user',
-              preset.id === presets.defaultId() ? 'default' : undefined,
+              preset.id === defaultId ? 'default' : undefined,
               preset.id === current ? '← current' : undefined,
               preset.broken,
             ].filter(Boolean).join(' · '),

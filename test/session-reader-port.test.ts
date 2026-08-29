@@ -80,20 +80,65 @@ test('list uses the semantic query roster without requiring raw persistence', as
   assert.equal(rows[0].live, true)
 })
 
-test('list uses the projection for effective preset state instead of the creation header', async () => {
+test('list is lightweight and presetBatch uses the projection for effective state', async () => {
   const persistedHeader = header('session-selected', 100, { agentPreset: 'standard' })
+  let inspected = 0
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: persistedHeader, live: false }]),
     sessionProjections: { stateOf: () => 'ptc' },
     sessionPersistence: {
       list: async () => [persistedHeader],
       readRaw: async () => undefined,
-      inspect: async () => ({ meta: persistedHeader as never, events: [] }),
+      inspect: async () => {
+        inspected += 1
+        return { meta: persistedHeader as never, events: [] }
+      },
     },
   }))
   const rows = await reader.list(undefined)
   assert.ok(rows !== undefined)
-  assert.equal(rows[0]?.preset, 'ptc')
+  assert.equal(rows[0]?.preset, undefined, 'initial rows do not wait for projection replay')
+  const presets = await reader.presetBatch!(rows)
+  assert.equal(presets.get('session-selected'), 'ptc')
+  assert.equal(inspected, 1)
+})
+
+test('presetBatch preserves a projected custom code preset when the roster contains code', async () => {
+  const persistedHeader = header('session-custom-code', 100, { agentPreset: 'standard' })
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: persistedHeader, live: false }]),
+    sessionProjections: { stateOf: () => 'code' },
+    sessionPersistence: {
+      list: async () => [persistedHeader],
+      readRaw: async () => undefined,
+      inspect: async () => ({ meta: persistedHeader as never, events: [] }),
+    },
+    agentPresets: {
+      list: async () => [{ id: 'ptc' }, { id: 'code' }],
+      resolve: async (id?: string) => ({ id: id ?? 'ptc' }),
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.equal((await reader.presetBatch!(rows!)).get('session-custom-code'), 'code')
+})
+
+test('presetBatch omits legacy code when the roster has neither code nor ptc', async () => {
+  const persistedHeader = header('session-empty-roster', 100, { agentPreset: 'code' })
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: persistedHeader, live: false }]),
+    sessionProjections: { stateOf: () => 'code' },
+    sessionPersistence: {
+      list: async () => [persistedHeader],
+      readRaw: async () => undefined,
+      inspect: async () => ({ meta: persistedHeader as never, events: [] }),
+    },
+    agentPresets: {
+      list: async () => [],
+      resolve: async (id?: string) => ({ id: id ?? 'ptc' }),
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.deepEqual(await reader.presetBatch!(rows!), new Map())
 })
 
 test('list does not treat a persisted header as effective preset without the projection service', async () => {
@@ -142,12 +187,13 @@ test('list bounds cold-session projection inspections', async () => {
   }))
   const rows = await reader.list(undefined)
   assert.equal(rows?.length, headers.length)
+  await reader.presetBatch!(rows!)
   assert.ok(maximum <= SESSION_PRESET_READ_CONCURRENCY,
     `cold-session inspections exceeded the bound: ${maximum}`)
-  assert.equal(persistenceLists, 0, 'query-backed listing must pass known headers and never relist persistence')
+  assert.equal(persistenceLists, 0, 'query-backed enrichment must use the semantic query roster and never list persistence')
 })
 
-test('list fails closed when a cold projection inspection rejects', async () => {
+test('presetBatch fails closed when a cold projection inspection rejects', async () => {
   const refusal = new Error('projection replay failed')
   const persistedHeader = header('session-broken', 100)
   const reader = new DirectSessionReader(host({
@@ -159,7 +205,8 @@ test('list fails closed when a cold projection inspection rejects', async () => 
       inspect: async () => { throw refusal },
     },
   }))
-  await assert.rejects(reader.list(undefined), error => error === refusal)
+  const rows = await reader.list(undefined)
+  assert.deepEqual(await reader.presetBatch!(rows!), new Map(), 'a failed log never falls back to header metadata')
 })
 
 test('list cancellation stops new cold inspections and forwards the signal', async () => {
@@ -185,7 +232,8 @@ test('list cancellation stops new cold inspections and forwards the signal', asy
       },
     },
   }))
-  await assert.rejects(reader.list(undefined, controller.signal), error => error === refusal)
+  const rows = await reader.list(undefined, controller.signal)
+  await assert.rejects(reader.presetBatch!(rows!, controller.signal), error => error === refusal)
   assert.equal(receivedSignal, controller.signal)
   assert.equal(inspections, 1, 'no cold inspection may start after cancellation')
 })

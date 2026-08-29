@@ -2,9 +2,9 @@
  * The session READ domain port (M1.3) — the semantic contract between the
  * TUI and persisted-session reads (list / search / titles), implemented by
  * `src/runtime/direct/` (Direct) today and by a Remote adapter in a later
- * milestone. The port owns the domain semantics (live-preferred listing
- * with persistence fallback, bounded content search, cached title
- * batches); the consumer keeps the picker presentation.
+ * milestone. The port owns the domain semantics (live-preferred lightweight
+ * listing with persistence fallback, progressive preset/title batches,
+ * bounded content search); the consumer keeps the picker presentation.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/session-reader-port
@@ -19,7 +19,8 @@ export interface SessionSummary {
   createdAt: number
   /** Absolute working directory, for the workspace group. */
   cwd?: string
-  /** Agent preset id the session runs on, when the deployment composes one. */
+  /** Effective agent preset id, when a caller has already enriched this row.
+   * Initial list results may omit it while projection replay is pending. */
   preset?: string
   /** The session this one was forked from, when it has lineage. */
   parentSession?: string
@@ -65,6 +66,12 @@ export interface SessionReader {
    * `undefined` = the persistence service is unavailable. `signal` cancels
    * cold-session projection inspection without changing the row contract. */
   list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined>
+  /** Progressively resolve effective preset ids through the DSH projection.
+   * This is deliberately separate from list() so the picker can open from
+   * lightweight headers before cold-session replay completes. Implementations
+   * may omit a value for a corrupt/unsupported session and must honor signal
+   * cancellation with bounded concurrency. */
+  presetBatch?(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, string>>
   /** Search semantic session content for a query (bounded: newest 100
    * sessions, first 20 hits). The Direct adapter uses SessionQuery when its
    * semantic filter capability is available and only falls back to raw

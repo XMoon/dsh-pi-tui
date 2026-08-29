@@ -54,12 +54,14 @@
   "userQuestions"
  ],
  "runtime/direct/session-direct.ts": [
+  "agentPresets",
   "import:dsh-session",
   "sessionPersistence",
   "sessionQuery",
   "tokenMeter"
  ],
  "runtime/direct/session-preset-direct.ts": [
+  "agentPresets",
   "import:dsh-agent",
   "import:dsh-session",
   "sessionPersistence"

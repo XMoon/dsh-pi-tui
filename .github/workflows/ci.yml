@@ -351,9 +351,65 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
-  # Verify the EXACT packed artifact rejects the old Harness with guidance.
-  # This is intentionally separate from Gate B: target DSH success and old DSH
-  # friendly rejection are opposite, independently blocking contracts.
+  # Verify the EXACT packed artifact against every official DSH preset without
+  # consulting any published consumer metadata. This remains runnable when
+  # pi2dsh is behind the target release line.
+  # ---------------------------------------------------------------------------
+  official-preset-assembly:
+    name: Official DSH preset assembly
+    needs:
+      - build-and-pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Install repository dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download release tarball
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-tarball
+          path: tarball
+
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+
+      - name: Run official preset assembly smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(
+            find tarball -maxdepth 1 -type f \
+              -name 'xmoon76-dsh-pi-tui-*.tgz' \
+              -print \
+              | sort
+          )
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tarball, found ${#TARBALLS[@]}" >&2
+            printf '%s\n' "${TARBALLS[@]}" >&2
+            exit 1
+          fi
+          node scripts/official-presets-smoke.mjs "${TARBALLS[0]}"
+
+  # ---------------------------------------------------------------------------
+  # Verify the EXACT packed artifact rejects the old Harness. The unsupported
+  # runtime is a nonzero boundary check; the startup's friendly guidance is
+  # best-effort because DSH Loader mounts profile entries concurrently.
   # ---------------------------------------------------------------------------
   runtime-boundary:
     name: Runtime boundary / old DSH rejection
@@ -507,6 +563,7 @@ jobs:
       - build-and-pack
       - compat-smoke
       - ecosystem-compat
+      - official-preset-assembly
       - runtime-boundary
       - security-audit
       - release-metadata

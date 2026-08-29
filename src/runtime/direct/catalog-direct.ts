@@ -42,7 +42,7 @@ import type {
 } from '../catalog-port.ts'
 import type { StandingSkillRead } from '../../skill-catalog-refresh.ts'
 import type { ProviderCatalogEntry } from '../../provider-catalog.ts'
-import { normalizePersistedSessionPresetId } from '../session-preset.ts'
+import { resolvePresetRequest } from '../session-preset.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -232,25 +232,25 @@ export class DirectPresetCatalog implements PresetCatalog {
   }
 
   async resolve(id?: string): Promise<{ readonly id?: string }> {
-    if (id === 'code') {
-      throw new Error('preset "code" was renamed to "ptc"; use the canonical ptc preset')
-    }
     const presets = this.presets()
     // Rosterless deployment: no preset identity to record (the old compose
     // path returned `agentPreset: undefined`).
-    if (presets === undefined) return {}
-    // An omitted id means "use the persisted deployment default". Normalize
-    // that legacy read before the official resolver sees it; an explicit id
-    // is user input and must never pass through the persisted-data alias.
-    const requestedId = id === undefined
-      ? normalizePersistedSessionPresetId(presets.defaultId) ?? presets.defaultId
-      : id
-    const preset = await presets.resolve(requestedId)
+    if (presets === undefined) {
+      if (id === 'code') throw new Error('preset "code" is unavailable in this deployment; use a configured preset')
+      return {}
+    }
+    // An omitted id means "use the persisted deployment default". DSH allows
+    // a user preset literally named `code`, so probe that real roster entry
+    // before applying the old pi-tui default-data compatibility mapping.
+    const preset = await resolvePresetRequest(presets, id)
     return { id: preset.id }
   }
 
   defaultId(): string | undefined {
-    return normalizePersistedSessionPresetId(this.presets()?.defaultId)
+    // This synchronous projection cannot inspect the async roster. Preserve a
+    // literal `code`; callers resolving a persisted default use resolve(),
+    // which disambiguates a real custom entry from old TUI data.
+    return this.presets()?.defaultId
   }
 }
 

@@ -406,8 +406,10 @@ dsh-pi-tui:
 | `0.4.0-alpha.1` (`@next`) | `>=0.1.2-alpha.1 <0.1.3` | Current prerelease; validated against exact `0.1.2-alpha.1` |
 | `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
 
-Do not mix the two lines: a 0.4 prerelease package deliberately refuses to
-start on DSH 0.1.1 rather than using a compatibility shim or API proxy. If you
+Do not mix the two lines: DSH 0.1.1 is outside the 0.4 peer window and the
+normal incompatible-runtime boundary will fail. The startup row prints upgrade
+and rollback guidance when concurrent Loader ordering allows it, but that
+friendly notice is best-effort rather than a startup-order guarantee. If you
 keep DSH 0.1.1, use the 0.3 TUI line. For the current `0.4.0-alpha.1`, install
 DSH first and then add the TUI to a profile:
 
@@ -431,8 +433,10 @@ revalidated before this range is widened. Running only
 `npm install -g @xmoon76/dsh-pi-tui` does not install the plugin into a DSH
 profile; the `dsh plugin` command is still required.
 
-New agent sessions use the canonical `ptc` preset id. Persisted sessions with
-`agentPreset=code` remain readable and are presented as PTC mode.
+New agent sessions use the official roster's selected preset id. A custom DSH
+preset literally named `code` is valid and remains `code` when it exists in the
+current roster. Old persisted `code` defaults/session values fall back to `ptc`
+only after the roster proves that no custom `code` preset exists.
 
 ### npm
 

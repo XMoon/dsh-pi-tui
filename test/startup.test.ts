@@ -1,10 +1,11 @@
 /**
- * Headless tests for the startup compatibility gate: on a DeepSeek Harness
- * older than the minimum (dsh-v0.1.2-alpha.1) the TUI must fail with an
- * ACTIONABLE message. The 0.4 line has no 0.1.1 compatibility shim: an old
- * runtime gets an upgrade command and a pin-to-0.3 rollback command. Future
- * runtime lines are not rejected without evidence of a break. `--help` stays
- * available on any harness (the action never runs).
+ * Headless tests for the startup compatibility notice: on a DeepSeek Harness
+ * older than the minimum (dsh-v0.1.2-alpha.1) the TUI prints ACTIONABLE
+ * upgrade/rollback guidance when it can prove the version, but does not make
+ * concurrent Loader ordering a hard startup contract. The 0.4 line has no
+ * 0.1.1 compatibility shim. Future runtime lines are not rejected without
+ * evidence of a break. `--help` stays available on any harness (the action
+ * never runs).
  * @module @xmoon76/dsh-pi-tui/startup.test
  */
 
@@ -72,15 +73,15 @@ test('versionAtLeast compares prerelease identifiers the semver way', () => {
 
 // ── the gate itself ────────────────────────────────────────────────────────
 
-test('an older harness fails startup with the actionable message', () => {
+test('an older harness gets actionable guidance without a hard Loader-ordering throw', () => {
   const launcher = fakeLauncher('0.1.0-rc.8')
   const stderr = captureStderr()
   try {
     const ctx = new Context()
     ctx.provide('cmdlineArgs', { get: () => ['--session', 's1'] })
     ctx.provide('appExit', ((code: number) => { void code }) as never)
-    assert.throws(() => applyStartup(ctx), (error: Error) => error.message.includes('requires DeepSeek Harness 0.1.2-alpha.1 or later'))
-    assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined, 'the startup service must not be provided on an old harness')
+    assert.doesNotThrow(() => applyStartup(ctx), 'the advisory notice must not block concurrent profile mounting')
+    assert.equal((ctx.get(TUI_STARTUP_SERVICE) as { sessionId: string }).sessionId, 's1')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes(`running dsh 0.1.0-rc.8`), `stderr must name the installed version:\n${joined}`)
     assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.1'), `stderr must give the upgrade path:\n${joined}`)

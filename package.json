@@ -173,6 +173,7 @@
     "smoke:phase4": "node scripts/phase4-plugin-smoke.mjs",
     "smoke:unstable": "node scripts/unstable-plugin-smoke.mjs",
     "smoke:pi2dsh": "node scripts/pi2dsh-compat-smoke.mjs",
+    "smoke:official-presets": "node scripts/official-presets-smoke.mjs",
     "smoke:boundary": "node scripts/dsh-runtime-boundary-smoke.mjs",
     "smoke:vim": "node scripts/vim-plugin-smoke.mjs",
     "gate:pi-surface-compat": "node --test test/pi-component-compat.test.ts",

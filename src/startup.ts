@@ -152,9 +152,11 @@ export function bundleVersionLabel(since: string): string {
   }
 }
 
-/** The actionable message printed before the loader's raw failure when the
- * installed harness falls in an incompatible range. `entry` MUST be the
- * entry {@link harnessCompatEntryFor} matched for `installed`. */
+/** The actionable compatibility notice printed when the installed harness
+ * falls in an incompatible range. `entry` MUST be the entry
+ * {@link harnessCompatEntryFor} matched for `installed`. The notice is
+ * advisory: DSH Loader mounts profile entries concurrently, so this row cannot
+ * guarantee that its output precedes another row's import failure. */
 export function incompatibleHarnessMessage(installed: string, entry: HarnessCompatEntry): string {
   const recovery: string[] = []
   if (entry.upgradeDsh !== undefined) {
@@ -215,23 +217,20 @@ Examples:
 export function apply(ctx: Context): void {
   const program = tuiCommand()
   program.action(() => {
-    // Startup compatibility gate: an incompatible harness (see
-    // HARNESS_COMPAT) cannot reliably resolve the `@deepseek-ai/dsh-authorization`
-    // row this profile mounts, so the loader WILL fail — but the user deserves
-    // to see WHY, not a raw
-    // ERR_MODULE_NOT_FOUND stack. This action runs synchronously while the
-    // loader creates the rows, so the actionable message lands on stderr
-    // before the loader's own failure report, and this row then fails with
-    // the same message as its cause. `--help` never reaches the action and
-    // stays available on any harness; an unresolvable launcher version is
-    // let through (the gate cannot prove incompatibility).
+    // Startup compatibility notice: an incompatible harness (see
+    // HARNESS_COMPAT) is outside this bundle's peer window, but this row must
+    // not make the loader's concurrent mount ordering part of the contract.
+    // Print the actionable upgrade/rollback guidance when we can prove the
+    // installed version, then let the normal incompatible import boundary (or
+    // the package peer contract) determine the actual nonzero outcome.
+    // `--help` never reaches the action; an unresolvable launcher version is
+    // let through because the notice cannot prove incompatibility.
     const installed = installedDshVersion()
     if (installed !== undefined) {
       const entry = harnessCompatEntryFor(installed)
       if (entry !== undefined) {
         const message = incompatibleHarnessMessage(installed, entry)
         process.stderr.write(`\n${message}\n\n`)
-        throw new Error(message)
       }
     }
     const options = program.opts<{ session?: string; preset?: string }>()
