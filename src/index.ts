@@ -3262,8 +3262,8 @@ export function apply(ctx: Context, config: Config): void {
       const child = sessions.get(childId)
       if (child !== undefined) {
         const own = childOwnEvents(child.events)
-        childFolder.apply(own)
-        childStats.apply(own)
+        childFolder.hydrate(own)
+        childStats.hydrate(own)
         // The live child's session header carries its workspace (the child
         // may have been born in another directory).
         childCwd = typeof (child as { header?: { cwd?: unknown } }).header?.cwd === 'string'
@@ -3275,8 +3275,8 @@ export function apply(ctx: Context, config: Config): void {
         if (persistence !== undefined) {
           try {
             const own = childOwnEvents((await persistence.inspect(childId)).events)
-            childFolder.apply(own)
-            childStats.apply(own)
+            childFolder.hydrate(own)
+            childStats.hydrate(own)
           } catch {
             // No persisted log either: the view stays empty.
           }
