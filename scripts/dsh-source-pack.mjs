@@ -123,11 +123,20 @@ function parseCli() {
   return values
 }
 
+export function officialCommandEnvironment(base = process.env) {
+  return {
+    ...base,
+    CI: base.CI ?? 'true',
+    PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false',
+    PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
+  }
+}
+
 async function runOfficial(dshDir, args, timeoutMs) {
   console.log(`DSH source command: pnpm ${args.join(' ')}`)
   const result = await runBounded(PNPM_COMMAND, args, {
     cwd: dshDir,
-    env: { ...process.env, CI: process.env.CI ?? 'true' },
+    env: officialCommandEnvironment(),
     timeoutMs,
     label: `official DSH command: pnpm ${args.join(' ')}`,
   })

@@ -62,6 +62,18 @@ function parseCli() {
   return values
 }
 
+/** Resolve every path-valued CLI option in the caller's working directory. */
+export function resolveSourceVerifyPaths(values, cwd = process.cwd()) {
+  const resolveOptional = value => value === undefined ? undefined : resolve(cwd, value)
+  return {
+    ...values,
+    config: resolve(cwd, values.config ?? DEFAULT_SOURCE_CONFIG),
+    'dsh-dir': resolveOptional(values['dsh-dir']),
+    distribution: resolveOptional(values.distribution),
+    out: resolveOptional(values.out),
+  }
+}
+
 async function run(command, args, cwd, label, extraEnv = {}, timeoutMs = VERIFY_TIMEOUTS.check) {
   console.log(`DSH source verify: ${label}`)
   const result = await runBounded(command, args, {
@@ -120,8 +132,8 @@ async function runSourcePack(values, config) {
 }
 
 async function main() {
-  const values = parseCli()
-  const configPath = values.config ?? DEFAULT_SOURCE_CONFIG
+  const values = resolveSourceVerifyPaths(parseCli())
+  const configPath = values.config
   const tracked = loadDshSourceConfig(configPath)
   const effective = validateDshSourceConfig({
     ...tracked,
@@ -189,7 +201,9 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  console.error(`DSH_SOURCE_VERIFY_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
-  process.exitCode = 1
-})
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {
+  main().catch(error => {
+    console.error(`DSH_SOURCE_VERIFY_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 1
+  })
+}

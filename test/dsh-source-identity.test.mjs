@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
@@ -11,7 +11,8 @@ import {
   validateDshSourceConfig,
   validateSourceIdentity,
 } from '../scripts/lib/dsh-distribution.mjs'
-import { validateSourcePackOutput } from '../scripts/dsh-source-pack.mjs'
+import { officialCommandEnvironment, validateSourcePackOutput } from '../scripts/dsh-source-pack.mjs'
+import { resolveSourceVerifyPaths } from '../scripts/dsh-source-verify.mjs'
 
 const VERSION = '0.1.2-alpha.1'
 
@@ -71,6 +72,32 @@ test('distribution-only source verification does not require a checkout argument
   assert.equal(result.status, 1, result.stderr)
   assert.match(`${result.stdout}${result.stderr}`, /DSH distribution manifest is missing/u)
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, /--dsh-dir is required/u)
+})
+
+test('source verify resolves relative paths before invoking child workspaces', () => {
+  const invocation = mkdtempSync(join(tmpdir(), 'dsh-source-verify-cwd-test-'))
+  try {
+    const paths = resolveSourceVerifyPaths({
+      config: 'config/dsh-source.json',
+      'dsh-dir': '../deepseek-harness',
+      distribution: 'artifacts/source-pack',
+      out: 'artifacts/next-pack',
+    }, invocation)
+    assert.equal(paths.config, resolve(invocation, 'config/dsh-source.json'))
+    assert.equal(paths['dsh-dir'], resolve(invocation, '../deepseek-harness'))
+    assert.equal(paths.distribution, resolve(invocation, 'artifacts/source-pack'))
+    assert.equal(paths.out, resolve(invocation, 'artifacts/next-pack'))
+  } finally {
+    rmSync(invocation, { recursive: true, force: true })
+  }
+})
+
+test('official source commands disable pnpm verification and self-management', () => {
+  const env = officialCommandEnvironment({ CI: 'false', DSH_TEST_SENTINEL: 'kept' })
+  assert.equal(env.CI, 'false')
+  assert.equal(env.DSH_TEST_SENTINEL, 'kept')
+  assert.equal(env.PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN, 'false')
+  assert.equal(env.PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS, 'false')
 })
 
 test('source pack refuses destructive output directories', () => {
