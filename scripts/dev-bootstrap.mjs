@@ -1,0 +1,884 @@
+#!/usr/bin/env node
+/**
+ * Materialize the DSH distribution selected by the current development
+ * context. npm mode uses the tracked frozen lockfile; source mode reuses or
+ * builds an exact-SHA source pack outside the worktree and then materializes
+ * it through the repository's existing distribution helper.
+ *
+ * @module dev-bootstrap
+ */
+
+import { randomUUID } from 'node:crypto'
+import { spawn, spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { parseArgs } from 'node:util'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+import {
+  DEV_ENV_FILE,
+  DEV_STATE_FILE,
+  hashFile,
+  resolveDshDevContext,
+  sourceEnvironment,
+} from './dsh-dev-context.mjs'
+import { inspectNpmResolution } from './dev-doctor.mjs'
+import { DSH_ROOT_PACKAGE, expectedDshRepositoryRemote, normalizeDshRepositoryRemote } from './lib/dsh-distribution.mjs'
+
+const SCRIPT_PATH = fileURLToPath(import.meta.url)
+const SOURCE_PACK_SCRIPT = 'scripts/dsh-source-pack.mjs'
+const SOURCE_PREPARE_SCRIPT = 'scripts/prepare-dsh-test-environment.mjs'
+const SOURCE_HELPER = 'scripts/lib/dsh-distribution.mjs'
+const LOCK_WAIT_MS = 15 * 60 * 1000
+const LOCK_STALE_MS = 10 * 60 * 1000
+const TIMEOUTS = {
+  git: 20 * 60 * 1000,
+  install: 20 * 60 * 1000,
+  sourcePack: 60 * 60 * 1000,
+}
+
+function fail(message) {
+  const error = new Error(message)
+  error.name = 'DshDevBootstrapError'
+  throw error
+}
+
+function commandText(result) {
+  return [result?.stdout, result?.stderr, result?.error?.message]
+    .filter(value => typeof value === 'string' && value.trim() !== '')
+    .join('\n')
+    .trim()
+}
+
+function configuredPnpm() {
+  if (typeof process.env.PNPM_EXECUTABLE === 'string' && process.env.PNPM_EXECUTABLE !== '') return process.env.PNPM_EXECUTABLE
+  const lookup = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['pnpm'], { encoding: 'utf8' })
+  return (lookup.stdout ?? '').split(/\r?\n/u).find(line => line.trim() !== '')?.trim() ?? 'pnpm'
+}
+
+function runCapture(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: options.cwd,
+    env: options.env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  if (result.status !== 0 || result.error !== undefined) {
+    fail(`${options.label ?? command} failed${commandText(result) ? `:\n${commandText(result)}` : ''}`)
+  }
+  return (result.stdout ?? '').trim()
+}
+
+function killChild(child, signal = 'SIGTERM') {
+  if (child.pid === undefined) return
+  if (process.platform !== 'win32') {
+    try { process.kill(-child.pid, signal) } catch { /* child may already be gone */ }
+  }
+  try { child.kill(signal) } catch { /* child may already be gone */ }
+}
+
+function runCommand(command, args, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 15 * 60 * 1000
+  const label = options.label ?? `${command} ${args.join(' ')}`
+  console.log(`DSH dev: ${label}`)
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: 'inherit',
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    })
+    let settled = false
+    let timedOut = false
+    let hardKillTimer
+    const timeout = setTimeout(() => {
+      if (settled) return
+      timedOut = true
+      killChild(child, 'SIGTERM')
+      hardKillTimer = setTimeout(() => {
+        if (settled) return
+        killChild(child, 'SIGKILL')
+        const error = new Error(`${label} timed out after ${timeoutMs}ms`)
+        error.code = 'ETIMEDOUT'
+        settle(undefined, error)
+      }, 1_000)
+    }, timeoutMs)
+    const settle = (result, error = undefined) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      if (hardKillTimer !== undefined) clearTimeout(hardKillTimer)
+      if (error !== undefined) reject(error)
+      else resolvePromise(result)
+    }
+    child.once('error', error => {
+      if (timedOut) return
+      settle(undefined, error)
+    })
+    child.once('exit', (status, signal) => {
+      // A direct child may exit after SIGTERM while descendants in its process
+      // group are still mutating the checkout. Keep the lock until the hard
+      // kill grace period completes.
+      if (timedOut) return
+      if (status === 0) {
+        settle({ status, signal })
+        return
+      }
+      const error = new Error(`${label} failed with exit ${status ?? 'unknown'}${signal ? ` (${signal})` : ''}`)
+      error.code = status === null ? 'ETIMEDOUT' : 'DSH_DEV_COMMAND_FAILED'
+      settle(undefined, error)
+    })
+  })
+}
+
+function currentPnpmVersion(command, root = undefined) {
+  return runCapture(command, ['--version'], {
+    env: commandEnvironment('npm', { root }),
+    label: 'read pnpm version',
+  })
+}
+
+function commandEnvironment(mode, { strictSourceIdentity = false, baseEnvironment = process.env, root = undefined } = {}) {
+  const base = {
+    ...baseEnvironment,
+    ...(root === undefined ? {} : { DSH_DEV_ROOT: resolve(root) }),
+    DSH_DEV_MODE: mode === 'source' ? 'source' : 'npm',
+    npm_config_minimum_release_age: '0',
+    pnpm_config_minimum_release_age: '0',
+    PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
+  }
+  if (mode !== 'source') {
+    delete base.DSH_MODE
+    delete base.DSH_SOURCE_CONFIG
+    delete base.DSH_SOURCE_DISTRIBUTION
+    delete base.DSH_DEV_EPHEMERAL
+    delete base.PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN
+    delete base.pnpm_config_verify_deps_before_run
+    delete base.TARBALL_SMOKE_SKIP_INSTALL
+    return base
+  }
+  const environment = sourceEnvironment(base)
+  if (strictSourceIdentity) environment.CI = 'true'
+  return environment
+}
+
+function assertRealDirectory(path, label) {
+  if (!existsSync(path)) {
+    mkdirSync(path, { recursive: true })
+    return
+  }
+  const info = lstatSync(path)
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`${label} must be an independent real directory: ${path}`)
+}
+
+function assertIndependentNodeModules(root) {
+  const path = join(root, 'node_modules')
+  if (!existsSync(path)) return false
+  const info = lstatSync(path)
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`node_modules must be an independent real directory: ${path}`)
+  return true
+}
+
+async function distributionHelper(context) {
+  const path = join(context.root, SOURCE_HELPER)
+  if (!existsSync(path)) fail(`source mode requires ${SOURCE_HELPER}; this workspace has no source distribution helper`)
+  try {
+    return await import(pathToFileURL(path).href)
+  } catch (error) {
+    fail(`could not load ${SOURCE_HELPER}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+function readState(context) {
+  if (!existsSync(context.statePath)) return undefined
+  try {
+    const info = lstatSync(context.statePath)
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) return undefined
+    const value = JSON.parse(readFileSync(context.statePath, 'utf8'))
+    return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function stateCoreMatches(context, state, pnpm) {
+  if (state === undefined || state.schemaVersion !== 1 || state.mode !== context.mode) return false
+  if (context.mode === 'source' && state.ephemeral === true) return false
+  const required = ['node', 'pnpm', 'root', 'packageJsonHash', 'lockfileHash']
+  if (required.some(field => !Object.hasOwn(state, field))) return false
+  if (typeof state.node !== 'string' || typeof state.pnpm !== 'string' || typeof state.root !== 'string'
+    || typeof state.packageJsonHash !== 'string' || !/^[0-9a-f]{64}$/u.test(state.packageJsonHash)
+    || typeof state.lockfileHash !== 'string' || !/^[0-9a-f]{64}$/u.test(state.lockfileHash)) return false
+  if (resolve(state.root) !== context.root) return false
+  if (state.node !== String(process.versions.node.split('.')[0])) return false
+  if (state.pnpm !== pnpm) return false
+  if (state.packageJsonHash !== hashFile(context.packageJsonPath)) return false
+  if (state.lockfileHash !== hashFile(join(context.root, 'pnpm-lock.yaml'))) return false
+  if (context.mode === 'source') {
+    return Object.hasOwn(state, 'repository')
+      && Object.hasOwn(state, 'ref')
+      && Object.hasOwn(state, 'expectedVersion')
+      && Object.hasOwn(state, 'distribution')
+      && typeof state.repository === 'string'
+      && typeof state.ref === 'string'
+      && typeof state.expectedVersion === 'string'
+      && typeof state.distribution === 'string'
+      && isAbsolute(state.distribution)
+      && state.repository === context.source.repository
+      && state.ref === context.source.ref
+      && state.expectedVersion === context.source.expectedVersion
+  }
+  return true
+}
+
+function writeAtomic(path, content, mode = 0o600) {
+  if (existsSync(path) && lstatSync(path).isSymbolicLink()) fail(`refusing to replace symlink: ${path}`)
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(temporary, content, { encoding: 'utf8', mode })
+    renameSync(temporary, path)
+  } finally {
+    if (existsSync(temporary)) rmSync(temporary, { force: true })
+  }
+}
+
+function writeState(context, pnpm, distributionPath = undefined, { ephemeral = false } = {}) {
+  const packageJsonHash = hashFile(context.packageJsonPath)
+  const lockfileHash = hashFile(join(context.root, 'pnpm-lock.yaml'))
+  if (packageJsonHash === undefined || lockfileHash === undefined) {
+    fail('cannot write local state without package.json and pnpm-lock.yaml')
+  }
+  const payload = {
+    schemaVersion: 1,
+    mode: context.mode,
+    node: String(process.versions.node.split('.')[0]),
+    pnpm,
+    root: context.root,
+    packageJsonHash,
+    lockfileHash,
+  }
+  if (context.mode === 'source') {
+    Object.assign(payload, {
+      repository: context.source.repository,
+      ref: context.source.ref,
+      expectedVersion: context.source.expectedVersion,
+      distribution: resolve(distributionPath),
+      ephemeral,
+    })
+  }
+  writeAtomic(context.statePath, `${JSON.stringify(payload, null, 2)}\n`)
+  return payload
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`
+}
+
+function writeDevelopmentEnvironment(context, distributionPath = undefined, { ephemeral = false } = {}) {
+  const lines = [
+    '# Generated by pnpm dev:bootstrap; do not commit.',
+    `export DSH_DEV_ROOT=${shellQuote(context.root)}`,
+    `export DSH_DEV_MODE=${shellQuote(context.mode)}`,
+    'export PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=\'false\'',
+  ]
+  if (context.mode === 'source') {
+    lines.push(
+      'export PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=\'false\'',
+      'export pnpm_config_verify_deps_before_run=\'false\'',
+    )
+    lines.push(`export DSH_SOURCE_CONFIG=${shellQuote(context.sourceConfigPath)}`)
+    lines.push(`export DSH_SOURCE_DISTRIBUTION=${shellQuote(resolve(distributionPath))}`)
+    lines.push(`export DSH_DEV_EPHEMERAL=${shellQuote(ephemeral ? '1' : '0')}`)
+    lines.push("export TARBALL_SMOKE_SKIP_INSTALL='1'")
+  } else {
+    lines.push('unset PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN')
+    lines.push('unset pnpm_config_verify_deps_before_run')
+    lines.push('unset DSH_MODE')
+    lines.push('unset DSH_SOURCE_CONFIG')
+    lines.push('unset DSH_SOURCE_DISTRIBUTION')
+    lines.push('unset DSH_DEV_EPHEMERAL')
+    lines.push('unset TARBALL_SMOKE_SKIP_INSTALL')
+  }
+  writeAtomic(context.envPath, `${lines.join('\n')}\n`)
+
+  const direnvPath = join(context.root, '.envrc')
+  if (!existsSync(direnvPath)) {
+    writeAtomic(direnvPath, `# Generated by pnpm dev:bootstrap\nsource ./${DEV_ENV_FILE}\n`)
+  }
+}
+
+function cachePackPath(context) {
+  if (context.sourcePack === undefined) fail('source context has no exact source pack path')
+  return context.sourcePack
+}
+
+function cachePackRoot(context) {
+  return dirname(cachePackPath(context))
+}
+
+function existingPathInfo(path) {
+  try {
+    return lstatSync(path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+function existingCachePath(path) {
+  const info = existingPathInfo(path)
+  if (info === undefined) return false
+  if (info.isSymbolicLink()) fail(`source pack cache must not be a symlink: ${path}`)
+  return true
+}
+
+function distributionFromPath(helper, context, path, { allowDirty = false, sourcePaths = [] } = {}) {
+  return helper.loadDshDistribution({
+    mode: 'source',
+    manifest: path,
+    packageJson: context.packageJsonPath,
+    sourceConfig: context.source,
+    allowDirty,
+    sourcePaths,
+    tempRoots: [context.cacheRoot],
+    distributionPaths: [path],
+  })
+}
+
+function assertReproducibleDistribution(distribution, path) {
+  if (distribution.dirty === true || distribution.reproducible !== true) {
+    fail(`shared source pack must be clean and reproducible: ${path}`)
+  }
+  return distribution
+}
+
+function tryCachedDistribution(helper, context, path, { requireReproducible = false } = {}) {
+  if (!existingCachePath(path)) return { distribution: undefined, error: undefined }
+  try {
+    const distribution = distributionFromPath(helper, context, path)
+    if (requireReproducible) assertReproducibleDistribution(distribution, path)
+    return { distribution, error: undefined }
+  } catch (error) {
+    return { distribution: undefined, error }
+  }
+}
+
+function quarantineInvalidCache(path) {
+  if (!existingCachePath(path)) return
+  const quarantine = `${path}.invalid-${process.pid}-${randomUUID()}`
+  try {
+    renameSync(path, quarantine)
+  } catch (error) {
+    fail(`cannot quarantine invalid source pack cache ${path}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  try {
+    rmSync(quarantine, { recursive: true, force: true })
+  } catch (error) {
+    fail(`cannot remove invalid source pack cache ${quarantine}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+function lockOwner(path) {
+  try {
+    const value = JSON.parse(readFileSync(join(path, 'owner.json'), 'utf8'))
+    if (value === null || typeof value !== 'object') return undefined
+    return value
+  } catch {
+    return undefined
+  }
+}
+
+function processAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
+function reapStaleLock(path, label = 'lock') {
+  if (!existsSync(path)) return false
+  const info = lstatSync(path)
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`${label} must be a real directory: ${path}`)
+  const owner = lockOwner(path)
+  const age = Date.now() - info.mtimeMs
+  if (age < LOCK_STALE_MS || processAlive(owner?.pid)) return false
+  const quarantine = `${path}.stale-${process.pid}-${randomUUID()}`
+  try {
+    renameSync(path, quarantine)
+  } catch {
+    return false
+  }
+  rmSync(quarantine, { recursive: true, force: true })
+  return true
+}
+
+async function acquireDirectoryLock(lockPath, label) {
+  const token = randomUUID()
+  const started = Date.now()
+  while (true) {
+    try {
+      mkdirSync(lockPath)
+      writeFileSync(join(lockPath, 'owner.json'), `${JSON.stringify({ pid: process.pid, token, startedAt: new Date().toISOString() })}\n`, { mode: 0o600 })
+      return { acquired: true, token, lockPath, label }
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      reapStaleLock(lockPath, label)
+      if (Date.now() - started >= LOCK_WAIT_MS) {
+        fail(`timed out waiting for ${label}: ${lockPath}`)
+      }
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 500))
+    }
+  }
+}
+
+function releaseDirectoryLock(lock) {
+  if (lock?.acquired !== true) return
+  const owner = lockOwner(lock.lockPath)
+  if (owner?.token !== lock.token || owner?.pid !== process.pid) return
+  rmSync(lock.lockPath, { recursive: true, force: true })
+}
+
+async function acquireSourceLock(helper, context) {
+  const root = cachePackRoot(context)
+  assertRealDirectory(root, 'source pack cache root')
+  const lockPath = join(root, `${context.source.ref}.lock`)
+  while (true) {
+    const cached = tryCachedDistribution(helper, context, cachePackPath(context), { requireReproducible: true })
+    if (cached.distribution !== undefined) return { acquired: false, distribution: cached.distribution, lockPath }
+    const lock = await acquireDirectoryLock(lockPath, 'source pack lock')
+    const afterLock = tryCachedDistribution(helper, context, cachePackPath(context), { requireReproducible: true })
+    if (afterLock.distribution !== undefined) {
+      releaseDirectoryLock(lock)
+      return { acquired: false, distribution: afterLock.distribution, lockPath }
+    }
+    return lock
+  }
+}
+
+function releaseSourceLock(lock) {
+  releaseDirectoryLock(lock)
+}
+
+function assertHarnessCheckout(directory, repository, { requirePackage = true } = {}) {
+  const top = runCapture('git', ['-C', directory, 'rev-parse', '--show-toplevel'], { label: 'inspect Harness checkout' })
+  if (resolve(top) !== resolve(directory)) fail(`Harness checkout is not a repository root: ${directory}`)
+  const remote = runCapture('git', ['-C', directory, 'remote', 'get-url', 'origin'], { label: 'inspect Harness checkout remote' })
+  if (normalizeDshRepositoryRemote(remote) !== expectedDshRepositoryRemote(repository)) {
+    fail(`Harness checkout remote must be ${expectedDshRepositoryRemote(repository)}, got ${remote}`)
+  }
+  const packagePath = join(directory, 'package.json')
+  if (!existsSync(packagePath)) {
+    if (requirePackage) fail(`Harness checkout package.json is missing: ${packagePath}`)
+    return
+  }
+  let metadata
+  try {
+    metadata = JSON.parse(readFileSync(packagePath, 'utf8'))
+  } catch (error) {
+    fail(`Harness checkout package.json is invalid: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (metadata?.name !== '@deepseek-ai/dsh-root') {
+    fail(`refusing to operate on a non-Harness checkout: ${directory}`)
+  }
+}
+
+function assertCleanHarnessCheckout(directory) {
+  const status = runCapture('git', ['-C', directory, 'status', '--porcelain', '--untracked-files=all'], {
+    label: 'check Harness checkout cleanliness',
+  })
+  if (status !== '') fail(`DSH source checkout is dirty; refusing shared source-pack build: ${directory}`)
+}
+
+function assertHarnessRepository(repositoryPath, repository) {
+  const bare = runCapture('git', ['--git-dir', repositoryPath, 'rev-parse', '--is-bare-repository'], {
+    label: 'inspect Harness object repository',
+  })
+  if (bare !== 'true') fail(`Harness object repository must be bare: ${repositoryPath}`)
+  const remote = runCapture('git', ['--git-dir', repositoryPath, 'remote', 'get-url', 'origin'], {
+    label: 'inspect Harness object repository remote',
+  })
+  if (normalizeDshRepositoryRemote(remote) !== expectedDshRepositoryRemote(repository)) {
+    fail(`Harness object repository remote must be ${expectedDshRepositoryRemote(repository)}, got ${remote}`)
+  }
+}
+
+function harnessWorktreeRecords(repositoryPath) {
+  const output = runCapture('git', ['--git-dir', repositoryPath, 'worktree', 'list', '--porcelain'], {
+    label: 'inspect Harness worktrees',
+  })
+  const records = []
+  let record
+  for (const line of output.split(/\r?\n/u)) {
+    if (line === '') {
+      if (record !== undefined) records.push(record)
+      record = undefined
+      continue
+    }
+    if (line.startsWith('worktree ')) record = { path: line.slice('worktree '.length) }
+    else if (record !== undefined && line.startsWith('HEAD ')) record.head = line.slice('HEAD '.length).toLowerCase()
+  }
+  if (record !== undefined) records.push(record)
+  return records
+}
+
+async function ensureHarnessRepository(context, environment) {
+  const repositoryPath = context.harnessRepository
+  const parent = dirname(repositoryPath)
+  assertRealDirectory(parent, 'Harness cache parent')
+  const existing = existingPathInfo(repositoryPath)
+  if (existing === undefined) {
+    await runCommand('git', ['clone', '--bare', '--no-tags', `https://github.com/${context.source.repository}.git`, repositoryPath], {
+      cwd: parent,
+      env: environment,
+      timeoutMs: TIMEOUTS.git,
+      label: 'clone shared DeepSeek Harness object repository',
+    })
+  } else if (!existing.isDirectory() || existing.isSymbolicLink()) {
+    fail(`Harness object repository must be a real directory: ${repositoryPath}`)
+  }
+  assertHarnessRepository(repositoryPath, context.source.repository)
+  await runCommand('git', ['--git-dir', repositoryPath, 'fetch', '--no-tags', 'origin', context.source.ref], {
+    cwd: context.root,
+    env: environment,
+    timeoutMs: TIMEOUTS.git,
+    label: `fetch DeepSeek Harness ${context.source.ref}`,
+  })
+  assertHarnessRepository(repositoryPath, context.source.repository)
+}
+
+async function ensureHarnessWorktree(context, environment) {
+  const repositoryPath = context.harnessRepository
+  const directory = context.harnessCheckout
+  assertRealDirectory(context.harnessWorktreeRoot, 'Harness worktree root')
+  const canonicalDirectory = resolve(directory)
+  const existing = harnessWorktreeRecords(repositoryPath).find(record => resolve(record.path) === canonicalDirectory)
+  const directoryInfo = existingPathInfo(directory)
+  if (directoryInfo?.isSymbolicLink()) {
+    fail(`Harness worktree path must be a real directory: ${directory}`)
+  }
+  if (existing !== undefined) {
+    if (existing.head !== context.source.ref) {
+      fail(`Harness worktree ${directory} is registered at ${existing.head}, expected ${context.source.ref}`)
+    }
+  } else if (directoryInfo !== undefined) {
+    fail(`Harness worktree path exists but is not registered with the dedicated object repository: ${directory}`)
+  } else {
+    await runCommand('git', ['--git-dir', repositoryPath, 'worktree', 'add', '--detach', directory, context.source.ref], {
+      cwd: context.root,
+      env: environment,
+      timeoutMs: TIMEOUTS.git,
+      label: `create DeepSeek Harness worktree ${context.source.ref}`,
+    })
+  }
+  assertHarnessCheckout(directory, context.source.repository)
+  assertCleanHarnessCheckout(directory)
+  return directory
+}
+
+async function ensureHarnessCheckout(context, requestedDirectory, { skipRepository = false } = {}) {
+  const hasProvidedDirectory = typeof requestedDirectory === 'string' && requestedDirectory.trim() !== ''
+  if (hasProvidedDirectory) {
+    const directory = resolve(requestedDirectory)
+    if (directory === context.root || directory.startsWith(`${context.root}${sep}`)) {
+      fail(`provided Harness checkout must be outside the TUI worktree: ${directory}`)
+    }
+    if (!existsSync(directory)) fail(`provided Harness checkout is missing: ${directory}`)
+    const info = lstatSync(directory)
+    if (!info.isDirectory() || info.isSymbolicLink()) fail(`provided Harness checkout must be a real directory: ${directory}`)
+    // A provided checkout is never fetched, checked out, or published into the
+    // shared SHA cache. This allows deliberate dirty-tree debugging safely.
+    assertHarnessCheckout(directory, context.source.repository)
+    return directory
+  }
+
+  assertRealDirectory(context.cacheRoot, 'Harness cache root')
+  const lock = await acquireDirectoryLock(join(context.cacheRoot, 'deepseek-harness.git.lock'), 'Harness object repository lock')
+  try {
+    const environment = commandEnvironment('source', { root: context.root })
+    if (!skipRepository) await ensureHarnessRepository(context, environment)
+    return await ensureHarnessWorktree(context, environment)
+  } finally {
+    releaseDirectoryLock(lock)
+  }
+}
+
+function sourcePackCommandArgs(sourcePackScript, dshDirectory, configPath, output, allowDirty) {
+  return [
+    sourcePackScript,
+    '--dsh-dir', dshDirectory,
+    '--config', configPath,
+    '--out', output,
+    ...(allowDirty ? ['--allow-dirty'] : []),
+  ]
+}
+
+async function runSourcePack(helper, context, dshDirectory, output, { strictSourceIdentity, allowDirty }) {
+  const sourcePackScript = join(context.root, SOURCE_PACK_SCRIPT)
+  if (!existsSync(sourcePackScript)) fail(`source mode requires ${SOURCE_PACK_SCRIPT}`)
+  await runCommand(process.execPath, sourcePackCommandArgs(
+    sourcePackScript,
+    dshDirectory,
+    context.sourceConfigPath,
+    output,
+    allowDirty,
+  ), {
+    cwd: context.root,
+    env: commandEnvironment('source', { strictSourceIdentity, root: context.root }),
+    timeoutMs: TIMEOUTS.sourcePack,
+    label: 'build and validate official DSH source pack',
+  })
+  return distributionFromPath(helper, context, output, {
+    allowDirty,
+    sourcePaths: [dshDirectory],
+  })
+}
+
+async function buildCachedSourcePack(helper, context) {
+  const finalPath = cachePackPath(context)
+  const cached = tryCachedDistribution(helper, context, finalPath, { requireReproducible: true })
+  if (cached.distribution !== undefined) return { distribution: cached.distribution, cacheHit: true }
+  quarantineInvalidCache(finalPath)
+
+  const dshDirectory = await ensureHarnessCheckout(context)
+  const stageRoot = mkdtempSync(join(cachePackRoot(context), `.dsh-source-${context.source.ref}-`))
+  const stageOutput = join(stageRoot, 'pack')
+  let moved = false
+  try {
+    const staged = await runSourcePack(helper, context, dshDirectory, stageOutput, {
+      strictSourceIdentity: true,
+      allowDirty: false,
+    })
+    assertReproducibleDistribution(staged, stageOutput)
+    if (existingCachePath(finalPath)) {
+      const raced = tryCachedDistribution(helper, context, finalPath, { requireReproducible: true })
+      if (raced.distribution !== undefined) return { distribution: raced.distribution, cacheHit: true }
+      fail(`source pack cache appeared with invalid contents while building: ${finalPath}`)
+    }
+    renameSync(stageOutput, finalPath)
+    moved = true
+    const distribution = assertReproducibleDistribution(distributionFromPath(helper, context, finalPath), finalPath)
+    console.log(`Source pack cache: miss (${distribution.packages.size} packages)`)
+    return { distribution, cacheHit: false }
+  } finally {
+    if (!moved && existsSync(stageOutput)) rmSync(stageOutput, { recursive: true, force: true })
+    if (existsSync(stageRoot)) rmSync(stageRoot, { recursive: true, force: true })
+  }
+}
+
+function ephemeralSourcePackRoot() {
+  // Provided/dirty builds must not be durable cache entries. Keep the output
+  // in the OS temporary area so the current shell can use it, while normal OS
+  // cleanup supplies the lifetime boundary.
+  return mkdtempSync(join(tmpdir(), 'dsh-pi-tui-source-'))
+}
+
+async function buildProvidedSourcePack(helper, context, requestedDirectory) {
+  const dshDirectory = await ensureHarnessCheckout(context, requestedDirectory)
+  const outputRoot = ephemeralSourcePackRoot()
+  const output = join(outputRoot, 'pack')
+  try {
+    const distribution = await runSourcePack(helper, context, dshDirectory, output, {
+      strictSourceIdentity: false,
+      allowDirty: true,
+    })
+    console.log(`Source pack: ephemeral (${output})`)
+    return { distribution, path: output, cacheHit: false, provided: true }
+  } catch (error) {
+    if (existsSync(outputRoot)) rmSync(outputRoot, { recursive: true, force: true })
+    throw error
+  }
+}
+
+async function sourceDistribution(helper, context, values) {
+  // An explicit checkout is the debug escape hatch and must win over a stale
+  // DSH_SOURCE_DISTRIBUTION inherited from a previously sourced shell.
+  const requestedDshDirectory = values['dsh-dir'] ?? (values.distribution === undefined ? process.env.DSH_DIR : undefined)
+  if (typeof requestedDshDirectory === 'string' && requestedDshDirectory.trim() !== '') {
+    return buildProvidedSourcePack(helper, context, requestedDshDirectory)
+  }
+  const requestedDistribution = values.distribution ?? context.distribution
+  if (requestedDistribution !== undefined) {
+    const providedPath = resolve(context.root, requestedDistribution)
+    const distribution = distributionFromPath(helper, context, providedPath, { allowDirty: true })
+    console.log(`Source pack: provided (${providedPath})`)
+    return { distribution, path: providedPath, cacheHit: false, provided: true }
+  }
+  const lock = await acquireSourceLock(helper, context)
+  try {
+    if (!lock.acquired) {
+      console.log('Source pack cache: hit (another process completed it)')
+      return { distribution: lock.distribution, path: cachePackPath(context), cacheHit: true }
+    }
+    const result = await buildCachedSourcePack(helper, context)
+    if (result.cacheHit) console.log('Source pack cache: hit')
+    return { ...result, path: cachePackPath(context) }
+  } finally {
+    releaseSourceLock(lock)
+  }
+}
+
+function sourceMaterialized(helper, context, distribution) {
+  if (!assertIndependentNodeModules(context.root)) return false
+  try {
+    const required = helper.sourceInstallPackages(distribution, context.packageJson)
+    helper.assertSourceResolution(context.root, distribution, required)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function materializeSource(helper, context, distribution, distributionPath, force, provided) {
+  const pnpmCommand = configuredPnpm()
+  const pnpm = currentPnpmVersion(pnpmCommand, context.root)
+  const state = readState(context)
+  const already = !force && provided !== true && stateCoreMatches(context, state, pnpm) && sourceMaterialized(helper, context, distribution)
+  if (!already) {
+    const prepareScript = join(context.root, SOURCE_PREPARE_SCRIPT)
+    if (!existsSync(prepareScript)) fail(`source mode requires ${SOURCE_PREPARE_SCRIPT}`)
+    const allowDirty = distribution.dirty === true || distribution.reproducible !== true
+    await runCommand(process.execPath, [
+      prepareScript,
+      '--mode', 'source',
+      '--distribution', distributionPath,
+      '--workspace', context.root,
+      '--config', context.sourceConfigPath,
+      '--ref', context.source.ref,
+      '--expected-version', context.source.expectedVersion,
+      ...(allowDirty ? ['--allow-dirty'] : []),
+    ], {
+      cwd: context.root,
+      env: commandEnvironment('source', { root: context.root }),
+      timeoutMs: TIMEOUTS.install,
+      label: 'materialize DSH source distribution in this worktree',
+    })
+  } else {
+    console.log('Workspace source distribution: already materialized')
+  }
+  assertIndependentNodeModules(context.root)
+  const required = helper.sourceInstallPackages(distribution, context.packageJson)
+  helper.assertSourceResolution(context.root, distribution, required)
+  const ephemeral = provided === true || resolve(distributionPath) !== resolve(context.sourcePack)
+  writeDevelopmentEnvironment(context, distributionPath, { ephemeral })
+  writeState(context, pnpm, distributionPath, { ephemeral })
+}
+
+function npmMaterialized(context, pnpm, force) {
+  if (force || !assertIndependentNodeModules(context.root)) return false
+  if (!stateCoreMatches(context, readState(context), pnpm)) return false
+  return inspectNpmResolution(context).problems.length === 0
+}
+
+async function materializeNpm(context, force) {
+  const pnpmCommand = configuredPnpm()
+  const pnpm = currentPnpmVersion(pnpmCommand, context.root)
+  if (!npmMaterialized(context, pnpm, force)) {
+    await runCommand(pnpmCommand, ['install', '--frozen-lockfile', '--reporter=append-only'], {
+      cwd: context.root,
+      env: commandEnvironment('npm', { root: context.root }),
+      timeoutMs: TIMEOUTS.install,
+      label: 'install frozen npm DSH dependencies',
+    })
+  } else {
+    console.log('Workspace npm dependencies: already materialized')
+  }
+  assertIndependentNodeModules(context.root)
+  writeDevelopmentEnvironment(context)
+  writeState(context, pnpm)
+}
+
+function parseCli() {
+  const args = process.argv.slice(2)
+  if (args[0] === '--') args.shift()
+  const { values } = parseArgs({
+    args,
+    options: {
+      root: { type: 'string' },
+      mode: { type: 'string' },
+      config: { type: 'string' },
+      distribution: { type: 'string' },
+      'dsh-dir': { type: 'string' },
+      force: { type: 'boolean' },
+    },
+    allowPositionals: false,
+  })
+  return values
+}
+
+export const _test = {
+  acquireSourceLock,
+  releaseSourceLock,
+  sourceDistribution,
+  sourcePackCommandArgs,
+  writeDevelopmentEnvironment,
+  existingCachePath,
+  reapStaleLock,
+  tryCachedDistribution,
+  stateCoreMatches,
+  assertHarnessCheckout,
+  ensureHarnessCheckout,
+  ensureHarnessRepository,
+  ensureHarnessWorktree,
+  runCommand,
+  commandEnvironment,
+}
+
+export async function bootstrapDevelopmentEnvironment(options = {}) {
+  const context = resolveDshDevContext(options)
+  const force = options.force === true
+  if (context.mode === 'npm') {
+    await materializeNpm(context, force)
+    return { context, distribution: undefined, cacheHit: undefined }
+  }
+  if (process.platform === 'win32') fail('source mode requires POSIX directory operations and is unsupported on Windows')
+  const helper = await distributionHelper(context)
+  const selected = await sourceDistribution(helper, context, options)
+  await materializeSource(helper, context, selected.distribution, selected.path, force, selected.provided)
+  return {
+    context,
+    distribution: selected.distribution,
+    distributionPath: selected.path,
+    cacheHit: selected.cacheHit,
+  }
+}
+
+async function main() {
+  const values = parseCli()
+  const result = await bootstrapDevelopmentEnvironment({
+    root: values.root,
+    mode: values.mode,
+    config: values.config,
+    distribution: values.distribution,
+    'dsh-dir': values['dsh-dir'],
+    force: values.force,
+  })
+  if (result.context.mode === 'source') {
+    console.log(`DSH mode: source`)
+    console.log(`DSH ref: ${result.context.source.ref}`)
+    console.log(`Source pack: ${result.distributionPath}`)
+  } else {
+    console.log('DSH mode: npm')
+  }
+  console.log('✓ development environment ready')
+}
+
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {
+  main().catch(error => {
+    console.error(`DSH_DEV_BOOTSTRAP_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 1
+  })
+}
