@@ -228,9 +228,20 @@ function roundedFrameBodies(pane) {
   const lines = stripTerminalControl(pane).split(/\r?\n/u)
   const bodies = []
   for (let start = 0; start < lines.length; start += 1) {
-    if (!lines[start].includes('╭')) continue
-    const end = lines.findIndex((line, index) => index > start && line.includes('╰'))
-    if (end >= 0) bodies.push(lines.slice(start + 1, end))
+    const left = lines[start].indexOf('╭')
+    if (left < 0) continue
+    const right = lines[start].indexOf('╮', left + 1)
+    if (right < 0) continue
+    const width = right - left + 1
+    const end = lines.findIndex((line, index) => index > start
+      && line[left] === '╰'
+      && line.slice(left, left + width).includes('╯'))
+    if (end >= 0) {
+      // Overlays are composited over the host frame. Keep only the columns
+      // belonging to this box; otherwise stale host text such as `/help`
+      // becomes indistinguishable from the filtered command rows.
+      bodies.push(lines.slice(start + 1, end).map(line => line.slice(left, left + width)))
+    }
   }
   return bodies
 }
@@ -247,11 +258,19 @@ function roundedFrameBody(pane) {
 
   // Some terminal captures clip a frame border at the viewport edge. The
   // settings hint is still an unambiguous anchor, so retain the visible frame
-  // body up to that line rather than treating the catalog as absent.
+  // body up to that line, preserving the overlay's horizontal slice when its
+  // top border is available.
   const hint = lines.findLastIndex(line => line.includes('Type to search'))
   if (hint >= 0) {
     const start = lines.findLastIndex((line, index) => index < hint && line.includes('╭'))
-    return lines.slice(start >= 0 ? start + 1 : Math.max(0, hint - 20), hint + 1)
+    if (start >= 0) {
+      const left = lines[start].indexOf('╭')
+      const right = lines[start].indexOf('╮', left + 1)
+      if (left >= 0 && right >= 0) {
+        return lines.slice(start + 1, hint + 1).map(line => line.slice(left, right - left + 1))
+      }
+    }
+    return lines.slice(Math.max(0, hint - 20), hint + 1)
   }
   return bodies.at(-1) ?? []
 }

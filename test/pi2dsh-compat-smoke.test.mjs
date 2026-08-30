@@ -153,6 +153,26 @@ test('pi2dsh preset checks inspect the filtered /help frame rather than stale pa
     commandRows: [],
     noMatches: true,
   })
+
+  // A capturing overlay is composited over the host frame, so the overlay's
+  // left border can share a line with stale host text. The parser must slice
+  // the inner frame before looking for query text or command rows.
+  const compositedPane = [
+    '╭──────────────────────────────────────────────────────────────────────────────╮',
+    '│ 🐋  session session-1                                                        │',
+    '│ de╭──────────────────────────────────────────────────────────────────────╮   │',
+    '│ /h│ >                                                                    │   │',
+    '╰───│                                                                      │───╯',
+    '    │   (1/48)                                                             │',
+    '────│   Type to search · Enter/Space to change · Esc to cancel             │────',
+    '❯   ╰──────────────────────────────────────────────────────────────────────╯',
+  ].join('\n')
+  assert.deepEqual(settingsSearchSnapshot(compositedPane), {
+    searchVisible: true,
+    query: '',
+    commandRows: [],
+    noMatches: false,
+  })
 })
 
 test('pi2dsh preset degradation diagnostics never count as a healthy mount', () => {
