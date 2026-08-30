@@ -355,6 +355,15 @@ async function main() {
       sourcePaths: values['dsh-dir'] === undefined ? [] : [resolve(values['dsh-dir'])],
       distributionPaths: [distributionDir],
     })
+    // pack:release keeps the postpack smoke offline, but Source Mode's
+    // compatibility driver must also prove the packed candidate can be
+    // installed in a clean project with the local DSH tarball closure.
+    const sourceFreshSmokeEnv = { ...sourcePnpmEnv, TARBALL_SMOKE_SKIP_INSTALL: '0' }
+    await run(process.execPath, [
+      join(workspace, 'scripts', 'tarball-smoke.mjs'),
+      candidate,
+      '--dsh-distribution', distributionDir,
+    ], workspace, 'source tarball fresh install', sourceFreshSmokeEnv, VERIFY_TIMEOUTS.check)
     if (values['skip-runtime'] !== true) {
       await run(process.execPath, [
         join(workspace, 'scripts', 'official-presets-smoke.mjs'),
