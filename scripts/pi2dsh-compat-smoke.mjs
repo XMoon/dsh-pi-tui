@@ -1014,16 +1014,21 @@ async function smokeOfficialPresetMounts(invocation, workDir, env) {
       }
       tmux.sendLiteral('goal')
       const shouldHaveGoal = presetId !== 'minimal'
-      await waitUntil(`official preset ${presetId} goal command isolation`, TIMEOUTS.command, () => {
-        if (!tmux.hasSession()) return false
-        const pane = tmux.capturePane()
-        const snapshot = settingsSearchSnapshot(pane)
-        const hasOnlyGoal = snapshot.commandRows.length === 1 && snapshot.commandRows[0] === '/goal'
-        return snapshot.searchVisible
-          && snapshot.query === 'goal'
-          && hasOnlyGoal === shouldHaveGoal
-          && snapshot.noMatches === !shouldHaveGoal
-      }, 'COMPAT_BOOT_FAILURE')
+      try {
+        await waitUntil(`official preset ${presetId} goal command isolation`, TIMEOUTS.command, () => {
+          if (!tmux.hasSession()) return false
+          const pane = tmux.capturePane()
+          const snapshot = settingsSearchSnapshot(pane)
+          const hasOnlyGoal = snapshot.commandRows.length === 1 && snapshot.commandRows[0] === '/goal'
+          return snapshot.searchVisible
+            && snapshot.query === 'goal'
+            && hasOnlyGoal === shouldHaveGoal
+            && snapshot.noMatches === !shouldHaveGoal
+        }, 'COMPAT_BOOT_FAILURE')
+      } catch (error) {
+        if (!(error instanceof CompatFailure)) throw error
+        fail(error.phase, `${error.message}\n${officialPresetCatalogDiagnostic(presetId, tuiLog, tmux)}`)
+      }
       tmux.sendKey('Escape')
       await waitUntil(`official preset ${presetId} command catalog close`, TIMEOUTS.input, () => {
         if (!tmux.hasSession()) return false
