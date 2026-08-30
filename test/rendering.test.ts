@@ -16,7 +16,7 @@ import {
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
 import { iconFor } from '../src/icons.ts'
-import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent } from '../src/tui-app.ts'
+import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent, type TranscriptViewportAnchor } from '../src/tui-app.ts'
 import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
 import { searchTranscript, TranscriptFolder, type TurnActivity } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
@@ -1473,6 +1473,81 @@ test('history hint uses the effective latest-jump keybinding', async () => {
   view = await viewport(vt)
   assert.ok(view.includes('Ctrl+L latest'), `remapped history hint missing:\n${view}`)
   assert.ok(!view.includes('Ctrl+End latest'), `stale history hint remains:\n${view}`)
+  app.stop()
+})
+
+test('viewport anchors distinguish duplicate messages and cloned Focus activities', async () => {
+  const { vt, app } = startApp(100, 30)
+  const duplicateMessages = [
+    { kind: 'assistant' as const, turn: 7, text: 'first duplicate' },
+    { kind: 'assistant' as const, turn: 7, text: 'second duplicate' },
+    ...Array.from({ length: 30 }, (_, index) => ({ kind: 'assistant' as const, turn: index + 8, text: `tail ${index}` })),
+  ]
+  app.setTranscript(duplicateMessages)
+  app.setFullscreen(true)
+  await viewport(vt)
+  const duplicateAnchor: TranscriptViewportAnchor = {
+    scrollTop: 0,
+    top: {
+      turn: 7,
+      rowKind: 'message',
+      occurrence: 1,
+      message: { kind: 'assistant', turn: 7, text: 'fresh duplicate' },
+      rowOffset: 0,
+      viewportOffset: 0,
+    },
+  }
+  assert.equal(app.restoreTranscriptViewportAnchor(duplicateAnchor, 'top'), true)
+  let scroll = app.fullscreenScrollForTest()
+  assert.ok(scroll !== undefined && scroll.scrollTop > 0, 'the duplicate anchor must land below the first same-turn message')
+  let view = await viewport(vt)
+  assert.ok(view.includes('second duplicate'), `the cloned duplicate anchor selected the wrong row:\n${view}`)
+  assert.ok(!view.includes('first duplicate'), `the cloned duplicate anchor left the first row at the viewport top:\n${view}`)
+
+  const activity: TurnActivity = {
+    turn: 7,
+    startedAt: 1_000,
+    endedAt: 2_000,
+    completed: true,
+    reason: { kind: 'completed' },
+    tools: new Map(),
+    toolCalls: 0,
+    assistantMessages: 1,
+    revision: 0,
+  }
+  const focusMessages = [
+    { kind: 'user' as const, turn: 7, text: 'focus user' },
+    { kind: 'assistant' as const, turn: 7, text: 'focus final' },
+    ...Array.from({ length: 30 }, (_, index) => ({ kind: 'assistant' as const, turn: index + 8, text: `focus tail ${index}` })),
+  ]
+  const focusActivities = new Map<number, TurnActivity>([
+    [7, activity],
+    ...Array.from({ length: 30 }, (_, index) => {
+      const turn = index + 8
+      return [turn, { ...activity, turn }] as const
+    }),
+  ])
+  app.setTranscript(focusMessages, focusActivities)
+  app.setFocusMode(true)
+  await viewport(vt)
+  const clonedActivity = { ...activity, tools: new Map(activity.tools) }
+  const activityAnchor: TranscriptViewportAnchor = {
+    scrollTop: 0,
+    top: {
+      turn: 7,
+      rowKind: 'activity',
+      occurrence: 0,
+      activity: clonedActivity,
+      rowOffset: 0,
+      viewportOffset: 0,
+    },
+  }
+  assert.equal(app.restoreTranscriptViewportAnchor(activityAnchor, 'top'), true)
+  scroll = app.fullscreenScrollForTest()
+  assert.ok(scroll !== undefined && scroll.scrollTop > 0, 'the cloned activity anchor must land below the same-turn user row')
+  view = await viewport(vt)
+  assert.ok(view.includes('Thought'), `the cloned activity anchor selected the same-turn message row:\n${view}`)
+  assert.ok(!view.includes('focus user'), `the cloned activity anchor left the user row at the viewport top:\n${view}`)
   app.stop()
 })
 

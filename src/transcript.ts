@@ -485,6 +485,8 @@ export class TranscriptFolder {
    * to discover its turn. The array itself is exposed read-only to the
    * presentation-only TranscriptWindowController without copying it. */
   private readonly turnValues: number[] = []
+  /** Distinct raw turns, including values discovered after monotonicity breaks. */
+  private readonly turnValueSet = new Set<number>()
   /** The grouped tool-card count (what `messages()` emits), maintained
    * incrementally for the window summary ("N tool calls" of the collapsed
    * history). */
@@ -664,22 +666,32 @@ export class TranscriptFolder {
     if (before !== after) activity.revision += 1
   }
 
+  /** Append one distinct raw turn to the retained index. */
+  private appendTurnIndex(turn: number): void {
+    this.turnStarts.push(this.items.length - 1)
+    this.turnValues.push(turn)
+    this.turnValueSet.add(turn)
+  }
+
   /** Append one folded message, maintaining the window projections. */
   private appendItem(message: TranscriptMessage): void {
     this.items.push(message)
     const turn = 'turn' in message ? message.turn : undefined
     if (turn !== undefined) {
       if (this.turnValues.length === 0) {
-        this.turnStarts.push(this.items.length - 1)
-        this.turnValues.push(turn)
-      } else {
+        this.appendTurnIndex(turn)
+      } else if (this.turnsMonotonic) {
         const lastTurn = this.turnValues[this.turnValues.length - 1]!
         if (turn > lastTurn) {
-          this.turnStarts.push(this.items.length - 1)
-          this.turnValues.push(turn)
+          this.appendTurnIndex(turn)
         } else if (turn < lastTurn) {
           this.turnsMonotonic = false
+          if (!this.turnValueSet.has(turn)) this.appendTurnIndex(turn)
         }
+      } else if (!this.turnValueSet.has(turn)) {
+        // Keep the log-order index complete after the fast path is disabled;
+        // the non-monotonic projection and controller use linear lookup.
+        this.appendTurnIndex(turn)
       }
     }
     if (turn !== undefined) this.addGroupedTurn(turn)

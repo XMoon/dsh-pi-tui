@@ -4520,25 +4520,26 @@ export function apply(ctx: Context, config: Config): void {
           rmSync(file, { force: true })
         }
       },
-      // Persist the Ctrl+F toggle (the settings panel writes the same field
-      // itself); `tuiSettings` is declared later, so the closure reads it
-      // lazily at toggle time. A failed write is user-recoverable.
+      // Virtual history boundaries preserve the rendered overlap anchor;
+      // paging changes only the presentation window, never the fold.
       onTranscriptMoveOlder: () => {
+        const anchor = app.captureTranscriptViewportAnchor()
         const controller = activeWindow()
         if (!controller.moveOlder()) return false
         repaint(app, activeFolder(), controller)
-        // The old top edge becomes the new window's overlap at its bottom.
-        // Preserve history mode: positioning at the bottom must not arm
-        // ScrollView follow-end for replacement content.
-        app.scrollToBottom({ disableFollow: true })
+        // Preserve the old top edge at the same rendered row in the overlap.
+        if (anchor === undefined) app.scrollToBottom({ disableFollow: true })
+        else app.restoreTranscriptViewportAnchor(anchor, 'top')
         return true
       },
       onTranscriptMoveNewer: () => {
+        const anchor = app.captureTranscriptViewportAnchor()
         const controller = activeWindow()
         if (!controller.moveNewer()) return false
         repaint(app, activeFolder(), controller)
         if (controller.isLatest()) app.scrollToBottom()
-        else app.scrollToTop({ disableFollow: true })
+        else if (anchor === undefined) app.scrollToTop({ disableFollow: true })
+        else app.restoreTranscriptViewportAnchor(anchor, 'bottom')
         return true
       },
       onTranscriptJumpLatest: () => {
