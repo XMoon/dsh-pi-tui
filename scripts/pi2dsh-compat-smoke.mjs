@@ -284,7 +284,7 @@ function settingsSearchSnapshot(pane) {
     .replace(/\s*│\s*$/u, '')
     .trim() ?? ''
   const commandRows = body.flatMap(line => {
-    const match = line.match(/(?:^|│)\s*(?:❯|>)?\s*(\/[A-Za-z][A-Za-z0-9_-]*)(?=\s|│|$)/u)
+    const match = line.match(/(?:^|│)\s*(?:❯|›|>)?\s*(\/[A-Za-z][A-Za-z0-9_-]*)(?=\s|│|$)/u)
     return match === null ? [] : [match[1]]
   })
   return {

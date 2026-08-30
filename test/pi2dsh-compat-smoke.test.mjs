@@ -173,6 +173,23 @@ test('pi2dsh preset checks inspect the filtered /help frame rather than stale pa
     commandRows: [],
     noMatches: false,
   })
+
+  const compositedGoalPane = [
+    '╭──────────────────────────────────────────────────────────────────────────────╮',
+    '│ 🐋  session session-1                                                        │',
+    '│ de╭──────────────────────────────────────────────────────────────────────╮   │',
+    '│ /h│ > goal                                                               │   │',
+    '╰───│ ›/goal                                                             │───╯',
+    '    │                                                                      │',
+    '────│   Type to search · Enter/Space to change · Esc to cancel             │────',
+    '❯   ╰──────────────────────────────────────────────────────────────────────╯',
+  ].join('\n')
+  assert.deepEqual(settingsSearchSnapshot(compositedGoalPane), {
+    searchVisible: true,
+    query: 'goal',
+    commandRows: ['/goal'],
+    noMatches: false,
+  })
 })
 
 test('pi2dsh preset degradation diagnostics never count as a healthy mount', () => {
