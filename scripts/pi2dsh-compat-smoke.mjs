@@ -224,18 +224,32 @@ function stripTerminalControl(text) {
   return String(text).replace(ANSI_OSC, '').replace(ANSI_CSI, '').replace(CURSOR_MARKER, '')
 }
 
-function roundedFrameBody(pane) {
+function roundedFrameBodies(pane) {
   const lines = stripTerminalControl(pane).split(/\r?\n/u)
-  const start = lines.findLastIndex(line => line.includes('╭'))
-  if (start < 0) return []
-  const end = lines.findIndex((line, index) => index > start && line.includes('╰'))
-  return end < 0 ? [] : lines.slice(start + 1, end)
+  const bodies = []
+  for (let start = 0; start < lines.length; start += 1) {
+    if (!lines[start].includes('╭')) continue
+    const end = lines.findIndex((line, index) => index > start && line.includes('╰'))
+    if (end >= 0) bodies.push(lines.slice(start + 1, end))
+  }
+  return bodies
+}
+
+function roundedFrameBody(pane) {
+  const bodies = roundedFrameBodies(pane)
+  // A later frame can be partially clipped while a settings frame remains
+  // visible. Select the frame by its semantic hint instead of letting an
+  // unrelated trailing border hide the command catalog.
+  return bodies.findLast(body => body.some(line => line.includes('Type to search')))
+    ?? bodies.at(-1)
+    ?? []
 }
 
 function settingsSearchSnapshot(pane) {
   const body = roundedFrameBody(pane)
   const searchVisible = body.some(line => line.includes('Type to search'))
-  const query = body[0]
+  const queryLine = body.find(line => /(?:^|│)\s*>\s*/u.test(line))
+  const query = queryLine
     ?.replace(/^\s*│?\s*>\s*/u, '')
     .replace(/\s*│\s*$/u, '')
     .trim() ?? ''
