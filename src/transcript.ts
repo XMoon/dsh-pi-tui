@@ -249,6 +249,18 @@ export interface FoldOptions {
   endTurn?: number
 }
 
+/** A bounded transcript projection plus navigation facts. */
+export interface TranscriptWindow {
+  /** The materialized messages for the selected turn range. */
+  messages: TranscriptMessage[]
+  /** First/last actual turns in the selected range (summary rows excluded). */
+  firstTurn?: number
+  lastTurn?: number
+  /** Whether another turn page exists on either side of this projection. */
+  hasOlder: boolean
+  hasNewer: boolean
+}
+
 /** Text of a message's content blocks, joined; empty when there is no text. */
 export function textOf(blocks: readonly ContentBlock[]): string {
   return blocks
@@ -461,13 +473,18 @@ export class TranscriptFolder {
 
   /**
    * Turn index for the display window (stage J): the first item index of
-   * every distinct turn, in log order. The window projection derives its
-   * start and its summary counts from this + `groupedToolCount`, so
-   * `messages({maxTurns})` never rescans the pre-window history. Turn
+   * every distinct turn, in log order. The bounded `window()` projection derives
+   * its start and summary counts from these indexes, so ordinary repainting
+   * never rescans the pre-window history. Turn
    * values are expected to be monotonic in log order; a non-monotonic log
    * (corrupt data) disables the fast path and falls back to the full scan.
    */
   private readonly turnStarts: number[] = []
+  /** The turn value at each corresponding {@link turnStarts} entry. Kept as
+   * a separate scalar index so window navigation never reads an old item just
+   * to discover its turn. The array itself is exposed read-only to the
+   * presentation-only TranscriptWindowController without copying it. */
+  private readonly turnValues: number[] = []
   /** The grouped tool-card count (what `messages()` emits), maintained
    * incrementally for the window summary ("N tool calls" of the collapsed
    * history). */
@@ -475,8 +492,15 @@ export class TranscriptFolder {
   /** Merged read groups whose members span MORE THAN ONE turn: their output
    * card carries only the max turn, so the raw-item turn index over-counts
    * the window summary. While any exist, the window path defers to the full
-   * scan (correctness first; cross-turn read runs are rare). */
+   * grouped-turn index below for exact summary facts. The item projection stays
+    * bounded even when any exist. */
   private crossTurnGroups = 0
+  /** Distinct turns represented by grouped output cards, kept monotonic for
+    * binary-searchable older/newer counts. A defensive middle reflow marks it
+    * dirty and rebuilds it once before the next bounded projection. */
+  private readonly groupedTurnCounts = new Map<number, number>()
+  private groupedTurnValues: number[] = []
+  private groupedTurnIndexDirty = false
   private turnsMonotonic = true
   /** Per-turn Focus activity, maintained incrementally in {@link applyEvent}
    * (plan §20.1) — a plain map is enough for the ≤ WINDOW_TURNS view. */
@@ -645,18 +669,20 @@ export class TranscriptFolder {
     this.items.push(message)
     const turn = 'turn' in message ? message.turn : undefined
     if (turn !== undefined) {
-      if (this.turnStarts.length === 0) {
+      if (this.turnValues.length === 0) {
         this.turnStarts.push(this.items.length - 1)
+        this.turnValues.push(turn)
       } else {
-        const lastMessage = this.items[this.turnStarts[this.turnStarts.length - 1]!]!
-        const lastTurn = 'turn' in lastMessage ? lastMessage.turn : undefined
-        if (lastTurn === undefined || turn > lastTurn) {
+        const lastTurn = this.turnValues[this.turnValues.length - 1]!
+        if (turn > lastTurn) {
           this.turnStarts.push(this.items.length - 1)
+          this.turnValues.push(turn)
         } else if (turn < lastTurn) {
           this.turnsMonotonic = false
         }
       }
     }
+    if (turn !== undefined) this.addGroupedTurn(turn)
     if (message.kind === 'tool') this.groupedToolCount += 1
   }
 
@@ -703,29 +729,162 @@ export class TranscriptFolder {
     return { group, members, firstTurn: first.turn, spansTurns: turns.size > 1 }
   }
 
+  /** Add one grouped-output turn to the monotonic display index. */
+  private addGroupedTurn(turn: number): void {
+    if (this.groupedTurnIndexDirty) return
+    const count = this.groupedTurnCounts.get(turn) ?? 0
+    if (count === 0) {
+      const last = this.groupedTurnValues[this.groupedTurnValues.length - 1]
+      if (last === undefined || turn >= last) {
+        this.groupedTurnValues.push(turn)
+      } else {
+        let low = 0
+        let high = this.groupedTurnValues.length
+        while (low < high) {
+          const middle = Math.floor((low + high) / 2)
+          if (this.groupedTurnValues[middle]! < turn) low = middle + 1
+          else high = middle
+        }
+        this.groupedTurnValues.splice(low, 0, turn)
+      }
+    }
+    this.groupedTurnCounts.set(turn, count + 1)
+  }
+
+  /** Remove one grouped-output turn, tolerating equal-turn contributions. */
+  private removeGroupedTurn(turn: number): void {
+    if (this.groupedTurnIndexDirty) return
+    const count = this.groupedTurnCounts.get(turn)
+    if (count === undefined) return
+    if (count > 1) {
+      this.groupedTurnCounts.set(turn, count - 1)
+      return
+    }
+    this.groupedTurnCounts.delete(turn)
+    const index = this.groupedTurnValues.indexOf(turn)
+    if (index >= 0) this.groupedTurnValues.splice(index, 1)
+  }
+
+  /** Rebuild grouped-output turns after cold grouping or a defensive reflow. */
+  private rebuildGroupedTurnIndex(): void {
+   this.groupedTurnIndexDirty = false
+     this.groupedTurnCounts.clear()
+    this.groupedTurnValues = []
+    for (let index = 0; index < this.items.length; index += 1) {
+      const group = this.groupOf.get(index)
+      if (group !== undefined) {
+        const members = this.groupMembers.get(group)
+        if (members !== undefined && members[0] === index) this.addGroupedTurn(group.turn)
+        continue
+      }
+      const item = this.items[index]
+      if (item !== undefined && 'turn' in item) this.addGroupedTurn(item.turn)
+    }
+   this.groupedTurnIndexDirty = false
+  }
+
+  /** Ensure exact grouped-turn counts before a cross-turn projection. */
+  private ensureGroupedTurnIndex(): void {
+    if (this.groupedTurnIndexDirty) this.rebuildGroupedTurnIndex()
+  }
+
+  /** Select a bounded range by grouped output turns, then map it to raw items. */
+  private groupedWindowRange(maxTurns: number, endTurn?: number): { start: number; end: number; anchored: boolean } | undefined {
+    this.ensureGroupedTurnIndex()
+    const values = this.groupedTurnValues
+    if (values.length === 0) return undefined
+    let end = values.length - 1
+    let anchored = false
+    if (endTurn !== undefined) {
+      let low = 0
+      let high = values.length
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2)
+        if (values[middle]! <= endTurn) low = middle + 1
+        else high = middle
+      }
+      const candidate = low - 1
+      // Keep the legacy anchored-window behavior: an unknown output anchor
+      // falls back to the latest grouped window.
+      if (candidate >= 0 && values[candidate] === endTurn) {
+        end = candidate
+        anchored = true
+      }
+    }
+    const firstValue = values[Math.max(0, end - maxTurns + 1)]!
+    const lastValue = values[end]!
+    let low = 0
+    let high = this.turnValues.length
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2)
+      if (this.turnValues[middle]! < firstValue) low = middle + 1
+      else high = middle
+    }
+    const start = low
+    low = 0
+    high = this.turnValues.length
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2)
+      if (this.turnValues[middle]! <= lastValue) low = middle + 1
+      else high = middle
+    }
+    return { start, end: Math.max(start, low - 1), anchored }
+  }
+
+  /** Binary-search output turns outside a raw bounded range. */
+  private groupedTurnFacts(firstTurn: number, lastTurn: number): { older: number; newer: number } {
+    this.ensureGroupedTurnIndex()
+    let low = 0
+    let high = this.groupedTurnValues.length
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2)
+      if (this.groupedTurnValues[middle]! < firstTurn) low = middle + 1
+      else high = middle
+    }
+    const older = low
+    low = 0
+    high = this.groupedTurnValues.length
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2)
+      if (this.groupedTurnValues[middle]! <= lastTurn) low = middle + 1
+      else high = middle
+    }
+    return { older, newer: this.groupedTurnValues.length - low }
+  }
+
   /** Rebuild all read groups once after a cold event-log fold. */
   private rebuildGrouping(): void {
     this.groupOf.clear()
     this.groupMembers.clear()
     this.groupMeta.clear()
-    this.groupedToolCount = 0
+    this.groupedTurnIndexDirty = false
+     this.groupedTurnCounts.clear()
+     this.groupedTurnValues = []
+     this.groupedToolCount = 0
     this.crossTurnGroups = 0
     for (let start = 0; start < this.items.length;) {
       const item = this.items[start]!
       if (item.kind !== 'tool' || item.name !== 'read' || item.status !== 'ok') {
         if (item.kind === 'tool') this.groupedToolCount += 1
+         if ('turn' in item) this.addGroupedTurn(item.turn)
         start += 1
         continue
       }
       let end = start + 1
       while (end < this.items.length && TranscriptFolder.groupable(this.items[end]!)) end += 1
       if (end - start === 1) {
+         this.addGroupedTurn(item.turn)
+         // The single read has no merged card yet.
         this.groupedToolCount += 1
         start = end
         continue
       }
       const built = this.makeReadGroup(start, end - 1)
       if (built === undefined) {
+        for (let memberIndex = start; memberIndex < end; memberIndex += 1) {
+          const member = this.items[memberIndex]
+          if (member !== undefined && 'turn' in member) this.addGroupedTurn(member.turn)
+        }
         // The run was checked above; keep a defensive fallback that preserves
         // the output count if a future item shape invalidates that invariant.
         this.groupedToolCount += 1
@@ -735,14 +894,17 @@ export class TranscriptFolder {
       for (const member of built.members) this.groupOf.set(member, built.group)
       this.groupMembers.set(built.group, built.members)
       this.groupMeta.set(built.group, { firstTurn: built.firstTurn, spansTurns: built.spansTurns })
+       this.addGroupedTurn(built.group.turn)
       this.groupedToolCount += 1
       if (built.spansTurns) this.crossTurnGroups += 1
       start = end
     }
   }
 
-  /**
-   * Extend a groupable card that was just settled at the item-list tail.
+
+
+   /**
+    * Extend a groupable card that was just settled at the item-list tail.
    * Normal live delivery follows this path, so an adjacent read run does not
    * scan its history on every result. A non-tail settlement still falls back
    * to the defensive reflow path below because it may bridge two runs.
@@ -763,11 +925,14 @@ export class TranscriptFolder {
       const firstMember = this.items[members[0]!]
       const firstTurn = meta?.firstTurn ?? (firstMember !== undefined && 'turn' in firstMember ? firstMember.turn : previous.turn)
       const wasCross = meta?.spansTurns ?? this.crossTurn(members)
-      members.push(index)
-      this.groupOf.set(index, previousGroup)
+      this.removeGroupedTurn(previousGroup.turn)
+       this.removeGroupedTurn(item.turn)
+       members.push(index)
+       this.groupOf.set(index, previousGroup)
       previousGroup.args = `${members.length} files`
       previousGroup.result = previousGroup.result === '' ? item.result : `${previousGroup.result}\n\n${item.result}`
       previousGroup.turn = Math.max(previousGroup.turn, item.turn)
+       this.addGroupedTurn(previousGroup.turn)
       const spansTurns = wasCross || item.turn !== firstTurn
       this.groupMeta.set(previousGroup, { firstTurn, spansTurns })
       if (!wasCross && spansTurns) this.crossTurnGroups += 1
@@ -777,7 +942,9 @@ export class TranscriptFolder {
 
     // The previous item is a singleton read: promote it without scanning the
     // run (there cannot be an older group across a non-groupable boundary).
-    const group: ReadGroupCard = {
+    this.removeGroupedTurn(previous.turn)
+     this.removeGroupedTurn(item.turn)
+     const group: ReadGroupCard = {
       ...previous,
       args: '2 files',
       result: previous.result === '' ? item.result : `${previous.result}\n\n${item.result}`,
@@ -787,6 +954,7 @@ export class TranscriptFolder {
     this.groupOf.set(index, group)
     this.groupMembers.set(group, [previousIndex, index])
     this.groupMeta.set(group, { firstTurn: previous.turn, spansTurns: previous.turn !== item.turn })
+     this.addGroupedTurn(group.turn)
     if (previous.turn !== item.turn) this.crossTurnGroups += 1
     this.groupedToolCount -= 1
     return true
@@ -813,7 +981,8 @@ export class TranscriptFolder {
   private reflowGrouping(index: number): void {
     const item = this.items[index]
     if (item === undefined || !TranscriptFolder.groupable(item)) return
-    let start = index
+    this.groupedTurnIndexDirty = true
+     let start = index
     while (start > 0 && TranscriptFolder.groupable(this.items[start - 1]!)) start -= 1
     let end = index
     while (end + 1 < this.items.length && TranscriptFolder.groupable(this.items[end + 1]!)) end += 1
@@ -845,43 +1014,7 @@ export class TranscriptFolder {
         this.groupOf.delete(i)
       }
     }
-    if (start === end) {
-      // A single groupable item: join the PRECEDING group when adjacent
-      // (append or settle at the tail of a run).
-      const prev = start > 0 ? this.items[start - 1] : undefined
-      if (prev !== undefined && TranscriptFolder.groupable(prev)) {
-        const prevGroup = this.groupOf.get(start - 1)
-        if (prevGroup !== undefined) {
-          const members = this.groupMembers.get(prevGroup)!
-          const meta = this.groupMeta.get(prevGroup)
-          const firstMember = this.items[members[0]!]
-          const firstTurn = meta?.firstTurn ?? (firstMember !== undefined && 'turn' in firstMember ? firstMember.turn : prev.turn)
-          const wasCross = meta?.spansTurns ?? this.crossTurn(members)
-          members.push(start)
-          this.groupOf.set(start, prevGroup)
-          prevGroup.args = `${members.length} files`
-          prevGroup.result = prevGroup.result === '' ? item.result : `${prevGroup.result}\n\n${item.result}`
-          prevGroup.turn = Math.max(prevGroup.turn, item.turn)
-          // Joining a same-turn group with a different-turn read makes it
-          // cross-turn (the emitted card now spans two turns).
-          const spansTurns = wasCross || item.turn !== firstTurn
-          this.groupMeta.set(prevGroup, { firstTurn, spansTurns })
-          if (!wasCross && spansTurns) this.crossTurnGroups += 1
-          return
-        }
-        // The previous item is a singleton read: promote it to a group.
-        const group: Extract<TranscriptMessage, { kind: 'tool' }> = { ...prev }
-        this.groupOf.set(start - 1, group)
-        this.groupOf.set(start, group)
-        this.groupMembers.set(group, [start - 1, start])
-        group.args = '2 files'
-        group.result = group.result === '' ? item.result : `${group.result}\n\n${item.result}`
-        group.turn = Math.max(group.turn, item.turn)
-        this.groupMeta.set(group, { firstTurn: prev.turn, spansTurns: prev.turn !== item.turn })
-        if (prev.turn !== item.turn) this.crossTurnGroups += 1
-      }
-      return
-    }
+    if (start === end) return
     // Rebuild the whole run as one group. The result is assembled with one
     // final join so a long adjacent-read run stays linear in the cold path.
     const built = this.makeReadGroup(start, end)
@@ -889,6 +1022,7 @@ export class TranscriptFolder {
     for (const member of built.members) this.groupOf.set(member, built.group)
     this.groupMembers.set(built.group, built.members)
     this.groupMeta.set(built.group, { firstTurn: built.firstTurn, spansTurns: built.spansTurns })
+       this.addGroupedTurn(built.group.turn)
     // The whole run collapsed into one output card.
     this.groupedToolCount -= built.members.length - 1
     if (built.spansTurns) this.crossTurnGroups += 1
@@ -953,60 +1087,185 @@ export class TranscriptFolder {
   }
 
   /**
-   * The windowed projection: only the LAST `maxTurns` turns are walked —
-   * the window start comes from the maintained turn index, and the summary
-   * counts come from the incremental projections (turn count, item count,
-   * grouped tool cards), so the per-frame cost no longer grows with the
-   * pre-window history. A merged read group whose first member sits BEFORE
-   * the window (its output card spans the boundary) falls back to the full
-   * scan — the group's turn is the max of its members, so the full-scan
-   * windowing semantics must decide its fate. Anchored windows (search
-   * jumps) always use the full scan.
+   * The live turn index used by the presentation window controller. The
+   * returned array is read-only by contract and intentionally shared: appending
+   * a new turn extends the same index in O(1), so repainting does not copy the
+   * full history.
    */
-  private windowedMessages(maxTurns: number): TranscriptMessage[] {
-    const totalTurns = this.turnStarts.length
-    if (!this.turnsMonotonic || totalTurns <= maxTurns || this.crossTurnGroups > 0) {
-      return windowMessages(this.groupedMessages(), maxTurns)
+  turns(): readonly number[] {
+    return this.turnValues
+  }
+
+  /** The distinct turn values represented by grouped output cards. */
+  groupedTurns(): readonly number[] {
+    this.ensureGroupedTurnIndex()
+    return this.groupedTurnValues
+  }
+
+  /** Locate the inclusive turn range for a window without materializing rows. */
+  private indexedWindowRange(maxTurns: number, endTurn?: number): { start: number; end: number; anchored: boolean } | undefined {
+    const totalTurns = this.turnValues.length
+    if (totalTurns === 0) return undefined
+    let end = totalTurns - 1
+    let anchored = false
+    if (endTurn !== undefined) {
+      let low = 0
+      let high = totalTurns
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2)
+        if (this.turnValues[middle]! <= endTurn) low = middle + 1
+        else high = middle
+      }
+      const candidate = low - 1
+      // Keep the legacy anchored-window behavior: an unknown search anchor
+      // falls back to the latest window rather than rendering an empty view.
+      if (candidate < 0 || this.turnValues[candidate] !== endTurn) end = totalTurns - 1
+      else {
+         end = candidate
+         anchored = true
+       }
     }
-    const windowStart = this.turnStarts[totalTurns - maxTurns]!
+    return { start: Math.max(0, end - maxTurns + 1), end, anchored }
+  }
+
+  /** Emit one indexed raw-item range, preserving complete same-turn groups. */
+  private projectIndexedRange(startTurn: number, endTurn: number): { messages: TranscriptMessage[]; tools: number } {
+    const itemStart = this.turnStarts[startTurn]
+    const itemEnd = endTurn + 1 < this.turnStarts.length
+      ? this.turnStarts[endTurn + 1]! - 1
+      : this.items.length - 1
     const kept: TranscriptMessage[] = []
-    let windowTools = 0
-    for (let index = windowStart; index < this.items.length; index += 1) {
+    const seenGroups = new Set<ReadGroupCard>()
+    let tools = 0
+    const firstTurnValue = this.turnValues[startTurn]
+    const lastTurnValue = this.turnValues[endTurn]
+    if (itemStart === undefined || itemEnd < itemStart || firstTurnValue === undefined || lastTurnValue === undefined) {
+      return { messages: kept, tools }
+    }
+    for (let index = itemStart; index <= itemEnd; index += 1) {
       const group = this.groupOf.get(index)
       if (group !== undefined) {
-        const members = this.groupMembers.get(group)
-        if (members !== undefined && members[0] === index) {
+        // A cross-turn group may begin before the selected raw range. Its
+        // emitted card is owned by its max/output turn, so include the whole
+        // card exactly once when that output turn belongs to the range.
+        if (!seenGroups.has(group) && group.turn >= firstTurnValue && group.turn <= lastTurnValue) {
+          seenGroups.add(group)
           kept.push(group)
-          if (group.kind === 'tool') windowTools += 1
-        } else if (members !== undefined && members[0]! < windowStart) {
-          // A merged group whose output point predates the window: the
-          // full-scan path may keep or collapse it by its (max) turn, so
-          // the incremental path must defer to the full scan for parity.
-          return windowMessages(this.groupedMessages(), maxTurns)
+          if (group.kind === 'tool') tools += 1
         }
         continue
       }
-      const message = this.items[index]!
+      const message = this.items[index]
+      if (message === undefined) continue
       kept.push(message)
-      if (message.kind === 'tool') windowTools += 1
+      if (message.kind === 'tool') tools += 1
     }
-    const oldTurns = totalTurns - maxTurns
-    const oldTools = this.groupedToolCount - windowTools
-    const turnsText = `${oldTurns} earlier turn${oldTurns === 1 ? '' : 's'}`
-    const toolsText = `${oldTools} tool call${oldTools === 1 ? '' : 's'}`
-    kept.unshift({ kind: 'summary', text: `… ${turnsText} · ${toolsText} — window ${maxTurns} turns` })
-    return kept
+    return { messages: kept, tools }
   }
 
+  /** Add the same compact summary used by the legacy window projection. */
+  private addWindowSummary(
+    messages: TranscriptMessage[],
+    maxTurns: number,
+    startTurn: number,
+    endTurn: number,
+    windowTools: number,
+     facts?: { older: number; newer: number },
+     anchored = false,
+  ): TranscriptMessage[] {
+    const older = facts?.older ?? startTurn
+    const newer = facts?.newer ?? this.turnValues.length - endTurn - 1
+    if (older === 0 && newer === 0) return messages
+    const parts: string[] = []
+    if (newer > 0) parts.push(`${newer} newer turn${newer === 1 ? '' : 's'}`)
+    if (older > 0) parts.push(`${older} earlier turn${older === 1 ? '' : 's'}`)
+    if (newer === 0 && !anchored) {
+      const oldTools = this.groupedToolCount - windowTools
+      const turnsText = `${older} earlier turn${older === 1 ? '' : 's'}`
+      const toolsText = `${oldTools} tool call${oldTools === 1 ? '' : 's'}`
+      messages.unshift({ kind: 'summary', text: `… ${turnsText} · ${toolsText} — window ${maxTurns} turns` })
+    } else {
+      messages.unshift({ kind: 'summary', text: `… ${parts.join(' · ')} — window ${maxTurns} turns` })
+    }
+    return messages
+  }
+
+  /** Build one bounded projection and its navigation facts. */
+  window(options: FoldOptions & { maxTurns: number }): TranscriptWindow {
+    const maxTurns = Math.max(1, Math.trunc(options.maxTurns))
+    let range = this.indexedWindowRange(maxTurns, options.endTurn)
+
+     if (range === undefined) return { messages: [], hasOlder: false, hasNewer: false }
+     if (this.turnsMonotonic && this.crossTurnGroups > 0) {
+       const groupedRange = this.groupedWindowRange(maxTurns, options.endTurn)
+       if (groupedRange !== undefined) {
+         range = groupedRange
+
+       }
+     }
+    if (range === undefined) return { messages: [], hasOlder: false, hasNewer: false }
+
+    const anchored = range.anchored
+
+     // Non-monotonic logs are the defensive slow path. Cross-turn read groups
+    // remain bounded: projectIndexedRange sees a member in the selected range
+    // and emits the complete group card by its output/max turn, so a single
+    // long read run cannot make every navigation repaint rescan history.
+    if (!this.turnsMonotonic) {
+      const full = this.groupedMessages()
+       const allTurns = [...new Set(full.filter(message => 'turn' in message).map(message => message.turn))]
+         .sort((a, b) => a - b)
+
+      const messages = windowMessages(full, maxTurns, options.endTurn)
+       const visibleSet = new Set(messages.filter(message => 'turn' in message).map(message => message.turn))
+       const visibleTurnValues = [...visibleSet].sort((a, b) => a - b)
+       const firstTurn = visibleTurnValues[0] ?? this.turnValues[range.start]
+       const lastTurn = visibleTurnValues[visibleTurnValues.length - 1] ?? this.turnValues[range.end]
+       const older = firstTurn === undefined
+         ? allTurns.length
+         : allTurns.filter(turn => turn < firstTurn && !visibleSet.has(turn)).length
+       const newer = lastTurn === undefined
+         ? 0
+         : allTurns.filter(turn => turn > lastTurn && !visibleSet.has(turn)).length
+
+      return {
+         messages,
+         firstTurn,
+        lastTurn,
+        hasOlder: older > 0,
+        hasNewer: newer > 0,
+      }
+    }
+
+    const projected = this.projectIndexedRange(range.start, range.end)
+    const visibleTurns = projected.messages
+      .filter(message => 'turn' in message)
+      .map(message => message.turn)
+    const firstTurn = visibleTurns[0] ?? this.turnValues[range.start]
+     const lastTurn = visibleTurns[visibleTurns.length - 1] ?? this.turnValues[range.end]
+     const facts = this.crossTurnGroups > 0
+     ? this.groupedTurnFacts(this.turnValues[range.start]!, this.turnValues[range.end]!)
+     : undefined
+     const older = facts?.older ?? range.start
+     const newer = facts?.newer ?? this.turnValues.length - range.end - 1
+     const messages = this.addWindowSummary(projected.messages, maxTurns, range.start, range.end, projected.tools, facts, anchored)
+    return {
+      messages,
+      firstTurn,
+      lastTurn,
+      hasOlder: older > 0,
+      hasNewer: newer > 0,
+    }
+  }
+
+  /** Build the grouped output list (the full projection or a bounded window). */
   messages(options?: FoldOptions): TranscriptMessage[] {
     const maxTurns = options?.maxTurns
     if (maxTurns === undefined || maxTurns <= 0) return this.groupedMessages()
-    // Anchored windows (transcript search) jump into history: the full scan
-    // is fine there — this is never the per-frame path.
-    if (options?.endTurn !== undefined) {
-      return windowMessages(this.groupedMessages(), maxTurns, options.endTurn)
-    }
-    return this.windowedMessages(maxTurns)
+    // The indexed path is group-aware, including cross-turn read cards, and
+    // falls back only for genuinely non-monotonic/corrupt logs. Full history
+    // remains available through the no-maxTurns call used by search.
+    return this.window({ maxTurns, ...options }).messages
   }
 
   /** Remove one thinking entry from the open-lifecycle index. */

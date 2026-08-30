@@ -97,6 +97,14 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     scope: 'global',
     configurable: true,
   },
+  'app.transcript.jumpLatest': {
+    id: 'app.transcript.jumpLatest',
+    defaultKeys: ['ctrl+end'],
+    description: 'Jump to the latest transcript output',
+    category: 'Transcript',
+    scope: 'global',
+    configurable: true,
+  },
   'app.transcript.search.next': {
     id: 'app.transcript.search.next',
     defaultKeys: ['enter'],

@@ -143,6 +143,22 @@ interface SearchHighlightRange {
 export interface TuiAltScreenOptions {
 	/** Number of logical lines moved for each mouse-wheel event. */
 	wheelScrollLines?: number;
+	/**
+	 * Called when a viewport navigation attempt reaches an edge. The callback
+	 * receives -1 for older/upward navigation and +1 for newer/downward
+	 * navigation, plus the input source. Returning true lets the host replace
+	 * the document (for example, by loading another virtual transcript window).
+	 * This is a public boundary seam; consumers never need the private layout or
+	 * ScrollView instance to implement virtualized history.
+	 */
+	onScrollBoundary?: (direction: -1 | 1, source: "wheel" | "page" | "scrollbar") => boolean | void;
+	/**
+	 * Give a host semantic action first refusal of a non-mouse viewport key.
+	 * Returning true consumes the key. This runs before the fork's built-in
+	 * Home/End/Page navigation, which lets a Host action such as Ctrl+End keep
+	 * its meaning even when a Home/End preset maps that chord to bottom-scroll.
+	 */
+	onBeforeViewportInput?: (data: string) => boolean | void;
 	/** Capture mouse events for viewport scrolling and application-owned text selection. */
 	mouse?: boolean;
 	/** Style a non-current transcript search match. */
@@ -198,6 +214,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private selectionAutoScrollTimer?: NodeJS.Timeout;
 	private selectionPressActive = false;
 	private scrollbarDrag?: ScrollbarDrag;
+	private scrollbarBoundaryNotified?: -1 | 1;
 	private scrollbarHover?: ScrollView;
 	private activeSearch?: ActiveSearch;
 	private pressedUrl?: string;
@@ -210,6 +227,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly onRightClickPaste?: () => void;
 	private readonly onCellClick?: (x: number, y: number) => void;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
+	private readonly onScrollBoundary?: (direction: -1 | 1, source: "wheel" | "page" | "scrollbar") => boolean | void;
+	private readonly onBeforeViewportInput?: (data: string) => boolean | void;
 
 	constructor(
 		terminal: Terminal,
@@ -234,6 +253,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.onCellClick = options.onCellClick;
 		this.copySelection = options.copySelection;
+		this.onScrollBoundary = options.onScrollBoundary;
+		this.onBeforeViewportInput = options.onBeforeViewportInput;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -468,6 +489,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.requestRender();
 	}
 
+	/** Close the built-in fullscreen transcript search, if one is active. */
+	clearSearch(): boolean {
+		if (!this.activeSearch) return false;
+		this.closeSearch();
+		return true;
+	}
+
 	private updateSearchQuery(query: string): void {
 		const search = this.activeSearch;
 		if (!search || query === search.query) return;
@@ -591,6 +619,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		const keybindings = getKeybindings();
 		const isRelease = isKeyRelease(data);
+		if (!isRelease && this.onBeforeViewportInput?.(data) === true) return { consume: true };
 		// When the primary scroll view has nothing to scroll (short content, or a
 		// full-screen component mounted as the layout root), let navigation keys
 		// fall through to the focused component instead of consuming them.
@@ -613,15 +642,31 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				return { consume: true };
 			}
 		}
-		if (primaryScrollable && keybindings.matches(data, "tui.altScreen.pageUp")) {
+		if (keybindings.matches(data, "tui.altScreen.pageUp")) {
+			if (!primaryScrollable) {
+				if (!isRelease && this.onScrollBoundary?.(-1, "page") === true) return { consume: true };
+				return undefined;
+			}
 			if (!isRelease) {
-				this.scrollBy(-Math.max(1, this.getPrimaryScrollView().viewportHeight - PAGE_SCROLL_OVERLAP));
+				const remaining = this.getPrimaryScrollView().scrollBy(
+					-Math.max(1, this.getPrimaryScrollView().viewportHeight - PAGE_SCROLL_OVERLAP),
+				);
+				if (remaining < 0) this.onScrollBoundary?.(-1, "page");
+				this.requestRender();
 			}
 			return { consume: true };
 		}
-		if (primaryScrollable && keybindings.matches(data, "tui.altScreen.pageDown")) {
+		if (keybindings.matches(data, "tui.altScreen.pageDown")) {
+			if (!primaryScrollable) {
+				if (!isRelease && this.onScrollBoundary?.(1, "page") === true) return { consume: true };
+				return undefined;
+			}
 			if (!isRelease) {
-				this.scrollBy(Math.max(1, this.getPrimaryScrollView().viewportHeight - PAGE_SCROLL_OVERLAP));
+				const remaining = this.getPrimaryScrollView().scrollBy(
+					Math.max(1, this.getPrimaryScrollView().viewportHeight - PAGE_SCROLL_OVERLAP),
+				);
+				if (remaining > 0) this.onScrollBoundary?.(1, "page");
+				this.requestRender();
 			}
 			return { consume: true };
 		}
@@ -690,13 +735,24 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private routeWheel(event: WheelEvent): void {
 		let remaining = event.direction * this.wheelScrollLines;
 		const seen = new Set<ScrollView>();
+		let primarySeen = false;
 		for (const scrollView of this.currentLayout ? getScrollViewsAt(this.currentLayout, event.x, event.y) : []) {
 			seen.add(scrollView);
+			if (scrollView === this.getPrimaryScrollView()) primarySeen = true;
 			remaining = scrollView.scrollBy(remaining);
 			if (remaining === 0 || scrollView.overscroll === "contain") break;
 		}
 		const primary = this.getPrimaryScrollView();
-		if (remaining !== 0 && !seen.has(primary)) primary.scrollBy(remaining);
+		if (remaining !== 0 && !seen.has(primary)) {
+			primarySeen = true;
+			remaining = primary.scrollBy(remaining);
+		}
+		// Only the final unconsumed remainder is a transcript boundary. A nested
+		// scroll view may hit its edge and bubble into an outer view; reporting
+		// the primary edge before that outer view consumes the remainder would
+		// load a virtual page even though the gesture still had somewhere to go.
+		if (primarySeen && remaining < 0) this.onScrollBoundary?.(-1, "wheel");
+		else if (primarySeen && remaining > 0) this.onScrollBoundary?.(1, "wheel");
 		this.updateScrollbarHover(event.x, event.y);
 		this.requestRender();
 	}
@@ -774,7 +830,23 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				);
 				const scrollTop =
 					maxThumbOffset === 0 ? 0 : Math.round((thumbOffset / maxThumbOffset) * geometry.maxScrollTop);
-				this.scrollbarDrag.scrollView.scrollTo(scrollTop);
+				const scrollView = this.scrollbarDrag.scrollView;
+				scrollView.scrollTo(scrollTop);
+				if (scrollView === this.getPrimaryScrollView() && geometry.maxScrollTop > 0) {
+					if (scrollView.scrollTop <= 0) {
+						if (this.scrollbarBoundaryNotified !== -1) {
+							this.scrollbarBoundaryNotified = -1;
+							this.onScrollBoundary?.(-1, "scrollbar");
+						}
+					} else if (scrollView.scrollTop >= geometry.maxScrollTop) {
+						if (this.scrollbarBoundaryNotified !== 1) {
+							this.scrollbarBoundaryNotified = 1;
+							this.onScrollBoundary?.(1, "scrollbar");
+						}
+					} else {
+						this.scrollbarBoundaryNotified = undefined;
+					}
+				}
 			}
 			return true;
 		}
@@ -792,6 +864,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
 		this.setScrollbarHover(target.scrollView);
+		this.scrollbarBoundaryNotified = undefined;
 		this.scrollbarDrag = {
 			scrollView: target.scrollView,
 			grabOffset: event.y - target.geometry.thumbTop,
@@ -801,6 +874,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private stopScrollbarDrag(): void {
 		this.scrollbarDrag = undefined;
+		this.scrollbarBoundaryNotified = undefined;
 	}
 
 	private getScrollSelectionPoint(scrollView: ScrollView, x: number, y: number): SelectionPoint | undefined {

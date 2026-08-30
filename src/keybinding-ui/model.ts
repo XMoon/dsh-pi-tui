@@ -100,6 +100,7 @@ const LABELS: Readonly<Partial<Record<AppKeybindingId, string>>> = {
   'app.transcript.toggleExpand': 'Expand or collapse recent output',
   'app.transcript.toggleThinking': 'Show or hide thinking blocks',
   'app.transcript.toggleFullscreen': 'Toggle fullscreen mode',
+  'app.transcript.jumpLatest': 'Jump to latest transcript output',
   'app.editor.external': 'Edit draft in external editor',
   'app.clipboard.pasteMedia': 'Paste media from clipboard',
   'app.permission.cycle': 'Cycle permission preset',
