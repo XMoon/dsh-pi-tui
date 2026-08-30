@@ -188,7 +188,6 @@ jobs:
     timeout-minutes: 10
     env:
       DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
-      DSH_SOURCE_ARTIFACT: ${{ runner.temp }}/dsh-source-pack
 
     steps:
       - name: Checkout
@@ -204,6 +203,9 @@ jobs:
           runtime: node@24
           cache: true
           install: false
+
+      - name: Set DSH source artifact path
+        run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
 
       - name: Download DSH source pack
         if: env.DSH_MODE == 'source'
@@ -295,7 +297,6 @@ jobs:
     timeout-minutes: 20
     env:
       DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
-      DSH_SOURCE_ARTIFACT: ${{ runner.temp }}/dsh-source-pack
 
     steps:
       - name: Checkout
@@ -309,6 +310,9 @@ jobs:
           runtime: node@24
           cache: true
           install: false
+
+      - name: Set DSH source artifact path
+        run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
 
       - name: Download DSH source pack
         if: env.DSH_MODE == 'source'
@@ -428,7 +432,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
-      DSH_SOURCE_ARTIFACT: ${{ runner.temp }}/dsh-source-pack
     timeout-minutes: 15
 
     strategy:
@@ -454,6 +457,9 @@ jobs:
 
       # Keep dev dependencies available because tarball-smoke optionally
       # uses tooling such as TypeScript from the workspace.
+      - name: Set DSH source artifact path
+        run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
+
       - name: Download DSH source pack
         if: env.DSH_MODE == 'source'
         uses: actions/download-artifact@v8
@@ -534,7 +540,6 @@ jobs:
     timeout-minutes: 15
     env:
       DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
-      DSH_SOURCE_ARTIFACT: ${{ runner.temp }}/dsh-source-pack
 
     steps:
       - name: Checkout
@@ -548,6 +553,9 @@ jobs:
           runtime: node@24
           cache: true
           install: false
+
+      - name: Set DSH source artifact path
+        run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
 
       - name: Download DSH source pack
         if: env.DSH_MODE == 'source'
@@ -651,7 +659,6 @@ jobs:
     timeout-minutes: 15
     env:
       DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
-      DSH_SOURCE_ARTIFACT: ${{ runner.temp }}/dsh-source-pack
 
     steps:
       - name: Checkout
@@ -665,6 +672,9 @@ jobs:
           runtime: node@24
           cache: true
           install: false
+
+      - name: Set DSH source artifact path
+        run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
 
       - name: Download DSH source pack
         if: env.DSH_MODE == 'source'
@@ -904,11 +914,6 @@ jobs:
 
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    env:
-      npm_config_registry: https://registry.npmjs.org/
-      NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      npm_config_userconfig: ${{ runner.temp }}/dsh-publish-npmrc
-      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/dsh-publish-npmrc
 
     permissions:
       contents: read
@@ -919,6 +924,12 @@ jobs:
         run: |
           set -euo pipefail
           printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-publish-npmrc"
+          {
+            echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+            echo 'npm_config_registry=https://registry.npmjs.org/'
+            echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-publish-npmrc"
+            echo "npm_config_userconfig=$RUNNER_TEMP/dsh-publish-npmrc"
+          } >> "$GITHUB_ENV"
 
       - name: Assert release uses npm DSH mode
         env:

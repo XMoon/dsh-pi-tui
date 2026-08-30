@@ -26,21 +26,29 @@ test('npm verification pins the public registry and isolated user config', () =>
 
 test('CI npm install branches pin the public registry and isolated config', () => {
   const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
-  assert.equal((workflow.match(/pnpm install --frozen-lockfile/gu) ?? []).length, 5)
-  assert.equal((workflow.match(/NPM_CONFIG_REGISTRY=https:\/\/registry\.npmjs\.org\//gu) ?? []).length, 10)
-  assert.equal((workflow.match(/NPM_CONFIG_USERCONFIG="\$RUNNER_TEMP\/dsh-npmrc"/gu) ?? []).length, 5)
-  assert.equal((workflow.match(/npm_config_userconfig="\$RUNNER_TEMP\/dsh-npmrc"/gu) ?? []).length, 5)
-  assert.equal((workflow.match(/echo 'NPM_CONFIG_REGISTRY=https:\/\/registry\.npmjs\.org\/'/gu) ?? []).length, 5)
-  assert.equal((workflow.match(/echo 'npm_config_registry=https:\/\/registry\.npmjs\.org\/'/gu) ?? []).length, 5)
+  const npmInstallBlocks = workflow.match(/printf 'registry=https:\/\/registry\.npmjs\.org\/\\n' > "\$RUNNER_TEMP\/dsh-npmrc"[\s\S]*?pnpm install --frozen-lockfile/gu) ?? []
+  assert.equal(npmInstallBlocks.length, 5)
+  for (const block of npmInstallBlocks) {
+    assert.match(block, /NPM_CONFIG_REGISTRY=https:\/\/registry\.npmjs\.org\/\s+\\/u)
+    assert.match(block, /npm_config_registry=https:\/\/registry\.npmjs\.org\/\s+\\/u)
+    assert.match(block, /NPM_CONFIG_USERCONFIG="\$RUNNER_TEMP\/dsh-npmrc"/u)
+    assert.match(block, /npm_config_userconfig="\$RUNNER_TEMP\/dsh-npmrc"/u)
+  }
+  assert.equal((workflow.match(/echo 'NPM_CONFIG_REGISTRY=https:\/\/registry\.npmjs\.org\/'/gu) ?? []).length, 6)
+  assert.equal((workflow.match(/echo 'npm_config_registry=https:\/\/registry\.npmjs\.org\/'/gu) ?? []).length, 6)
   assert.equal((workflow.match(/echo "NPM_CONFIG_USERCONFIG=\$RUNNER_TEMP\/dsh-npmrc"/gu) ?? []).length, 5)
   assert.equal((workflow.match(/echo "npm_config_userconfig=\$RUNNER_TEMP\/dsh-npmrc"/gu) ?? []).length, 5)
+  assert.equal((workflow.match(/DSH_SOURCE_ARTIFACT=\$RUNNER_TEMP\/dsh-source-pack/gu) ?? []).length, 5)
+  assert.doesNotMatch(workflow, /DSH_SOURCE_ARTIFACT: \$\{\{ runner\.temp \}\}\/dsh-source-pack/u)
 })
 
 test('CI source preparation and publication have explicit time and registry boundaries', () => {
   const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
   assert.match(workflow, /prepare-dsh-source:[\s\S]*?timeout-minutes: 135/u)
   assert.match(workflow, /npm publish [^\n]*--registry=https:\/\/registry\.npmjs\.org\//u)
-  assert.match(workflow, /NPM_CONFIG_USERCONFIG: \$\{\{ runner\.temp \}\}\/dsh-publish-npmrc/u)
+  assert.match(workflow, /echo "NPM_CONFIG_USERCONFIG=\$RUNNER_TEMP\/dsh-publish-npmrc"/u)
+  assert.match(workflow, /echo "npm_config_userconfig=\$RUNNER_TEMP\/dsh-publish-npmrc"/u)
+  assert.doesNotMatch(workflow, /NPM_CONFIG_(?:REGISTRY|USERCONFIG):/u)
   assert.ok(workflow.includes("printf 'registry=https://registry.npmjs.org/\\n' > \"$RUNNER_TEMP/dsh-publish-npmrc\""))
 })
 
