@@ -236,13 +236,24 @@ function roundedFrameBodies(pane) {
 }
 
 function roundedFrameBody(pane) {
-  const bodies = roundedFrameBodies(pane)
+  const text = stripTerminalControl(pane)
+  const lines = text.split(/\r?\n/u)
+  const bodies = roundedFrameBodies(text)
   // A later frame can be partially clipped while a settings frame remains
   // visible. Select the frame by its semantic hint instead of letting an
   // unrelated trailing border hide the command catalog.
-  return bodies.findLast(body => body.some(line => line.includes('Type to search')))
-    ?? bodies.at(-1)
-    ?? []
+  const semantic = bodies.findLast(body => body.some(line => line.includes('Type to search')))
+  if (semantic !== undefined) return semantic
+
+  // Some terminal captures clip a frame border at the viewport edge. The
+  // settings hint is still an unambiguous anchor, so retain the visible frame
+  // body up to that line rather than treating the catalog as absent.
+  const hint = lines.findLastIndex(line => line.includes('Type to search'))
+  if (hint >= 0) {
+    const start = lines.findLastIndex((line, index) => index < hint && line.includes('╭'))
+    return lines.slice(start >= 0 ? start + 1 : Math.max(0, hint - 20), hint + 1)
+  }
+  return bodies.at(-1) ?? []
 }
 
 function settingsSearchSnapshot(pane) {
@@ -285,6 +296,17 @@ function assertOfficialPresetMounted(presetId, tuiLog, tmux) {
   if (degradation !== undefined) {
     fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} degraded instead of mounting: ${degradation.trim()}`)
   }
+}
+
+function officialPresetCatalogDiagnostic(presetId, tuiLog, tmux) {
+  const pane = stripTerminalControl(tmux.capturePane())
+  return [
+    `official preset ${presetId} settings snapshot: ${JSON.stringify(settingsSearchSnapshot(pane))}`,
+    'tmux pane tail:',
+    redact(tail(pane, 24)),
+    'TUI log tail:',
+    redact(tail(readText(tuiLog), 24)),
+  ].join('\\n')
 }
 
 function assertOfficialPresetHeader(presetId, evidencePath) {
@@ -961,11 +983,16 @@ async function smokeOfficialPresetMounts(invocation, workDir, env) {
       tmux.sendLiteral('/help')
       await delay(350)
       tmux.sendKey('Enter')
-      await waitUntil(`official preset ${presetId} command catalog`, TIMEOUTS.command, () => {
-        if (!tmux.hasSession()) return false
-        const snapshot = settingsSearchSnapshot(tmux.capturePane())
-        return snapshot.searchVisible && snapshot.query === ''
-      }, 'COMPAT_BOOT_FAILURE')
+      try {
+        await waitUntil(`official preset ${presetId} command catalog`, TIMEOUTS.command, () => {
+          if (!tmux.hasSession()) return false
+          const snapshot = settingsSearchSnapshot(tmux.capturePane())
+          return snapshot.searchVisible && snapshot.query === ''
+        }, 'COMPAT_BOOT_FAILURE')
+      } catch (error) {
+        if (!(error instanceof CompatFailure)) throw error
+        fail(error.phase, `${error.message}\n${officialPresetCatalogDiagnostic(presetId, tuiLog, tmux)}`)
+      }
       tmux.sendLiteral('goal')
       const shouldHaveGoal = presetId !== 'minimal'
       await waitUntil(`official preset ${presetId} goal command isolation`, TIMEOUTS.command, () => {
