@@ -181,6 +181,34 @@ export const FOCUS_ANCHOR_TOP_PADDING = 1
  */
 export type FocusFullscreenViewportIntent = 'follow-end' | 'preserve' | 'anchor-turn'
 
+/** Which edge of the previous fullscreen viewport should stay in place when
+ * a virtual transcript window is replaced by its overlapping neighbor. */
+export type TranscriptViewportAnchorEdge = 'top' | 'bottom'
+
+/** One rendered transcript row used to restore a viewport after re-windowing.
+ * Object identity is preferred for overlapping folder projections; row kind and
+ * occurrence preserve the discriminator when a caller supplies fresh objects. */
+export interface TranscriptViewportAnchorPoint {
+  readonly turn: number
+  readonly rowKind: 'message' | 'activity'
+  /** The zero-based occurrence of this row kind within its turn. */
+  readonly occurrence: number
+  readonly message?: TranscriptMessage
+  readonly activity?: TurnActivity
+  /** The line inside the row that was at the selected viewport edge. */
+  readonly rowOffset: number
+  /** The line's offset from the viewport top (0 for the top edge). */
+  readonly viewportOffset: number
+}
+
+/** A two-edge viewport snapshot. Paging older prefers `top`; paging newer
+ * prefers `bottom`, while the other edge remains a safe overlap fallback. */
+export interface TranscriptViewportAnchor {
+  readonly scrollTop: number
+  readonly top?: TranscriptViewportAnchorPoint
+  readonly bottom?: TranscriptViewportAnchorPoint
+}
+
 /** Whether a message is a Focus SECONDARY disclosure: a foldable process
  * card inside an expanded Thought that has its own compact/full two-state
  * renderer (plan §10). Shared by the render rule and the click handler —
@@ -5041,6 +5069,107 @@ export class TuiApp {
       this.working.stop()
       this.working.setText('')
     }
+  }
+
+  /** Capture the rendered top and bottom transcript rows before replacing a
+   * virtual window. The row identity plus intra-row offset lets the caller
+   * preserve a real visual position even when neighboring messages have very
+   * different wrapped heights. */
+  captureTranscriptViewportAnchor(): TranscriptViewportAnchor | undefined {
+    const scroll = this.fullscreenScroll
+    if (scroll === undefined || scroll.viewportHeight <= 0) return undefined
+    this.refreshMessageRows()
+    const welcomeHeight = this.welcomeCard.render(this.terminal.columns).length
+    const pointAt = (line: number, viewportOffset: number): TranscriptViewportAnchorPoint | undefined => {
+      const occurrences = new Map<string, number>()
+      let rowTop = welcomeHeight
+      for (const entry of this.messageRows) {
+        const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.activity === undefined ? 'message' : 'activity'
+        const turn = entry.message !== undefined && 'turn' in entry.message
+          ? entry.message.turn
+          : entry.activity?.turn
+        const occurrenceKey = turn === undefined ? undefined : `${rowKind}:${turn}`
+        const occurrence = occurrenceKey === undefined ? 0 : (occurrences.get(occurrenceKey) ?? 0)
+        if (occurrenceKey !== undefined) occurrences.set(occurrenceKey, occurrence + 1)
+        if (line >= rowTop && line < rowTop + entry.height && entry.height > 0) {
+          if (turn === undefined) return undefined
+          return {
+            turn,
+            rowKind,
+            occurrence,
+            ...(entry.message === undefined ? {} : { message: entry.message }),
+            ...(entry.activity === undefined ? {} : { activity: entry.activity }),
+            rowOffset: line - rowTop,
+            viewportOffset,
+          }
+        }
+        rowTop += entry.height
+      }
+      return undefined
+    }
+    const viewportHeight = scroll.viewportHeight
+    return {
+      scrollTop: scroll.scrollTop,
+      top: pointAt(scroll.scrollTop, 0),
+      bottom: pointAt(scroll.scrollTop + viewportHeight - 1, viewportHeight - 1),
+    }
+  }
+
+  /** Restore a previously captured visual position after the transcript
+   * projection changes. Paging toward older turns keeps the old top edge;
+   * paging toward newer turns keeps the old bottom edge. If the preferred
+   * overlap row is absent, the opposite edge or the old scrollTop is used. */
+  restoreTranscriptViewportAnchor(
+    anchor: TranscriptViewportAnchor,
+    edge: TranscriptViewportAnchorEdge = 'top',
+  ): boolean {
+    const scroll = this.fullscreenScroll
+    if (scroll === undefined) return false
+    this.refreshMessageRows()
+    const width = this.terminal.columns
+    const contentHeight = this.messagesView.render(width).length
+    const viewportHeight = scroll.viewportHeight
+    scroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
+    const welcomeHeight = this.welcomeCard.render(width).length
+    type LocatedRow = { top: number; height: number }
+    const rowFor = (point: TranscriptViewportAnchorPoint): LocatedRow | undefined => {
+      const occurrences = new Map<string, number>()
+      let rowTop = welcomeHeight
+      for (const entry of this.messageRows) {
+        const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.activity === undefined ? 'message' : 'activity'
+        const turn = entry.message !== undefined && 'turn' in entry.message
+          ? entry.message.turn
+          : entry.activity?.turn
+        const occurrenceKey = turn === undefined ? undefined : `${rowKind}:${turn}`
+        const occurrence = occurrenceKey === undefined ? 0 : (occurrences.get(occurrenceKey) ?? 0)
+        if (occurrenceKey !== undefined) occurrences.set(occurrenceKey, occurrence + 1)
+        if (entry.height <= 0) {
+          rowTop += entry.height
+          continue
+        }
+        const located = { top: rowTop, height: entry.height }
+        const exact = point.rowKind === rowKind && (
+          point.message !== undefined
+            ? entry.message === point.message
+            : point.activity !== undefined && entry.activity === point.activity
+        )
+        if (exact) return located
+        if (turn === point.turn && rowKind === point.rowKind && occurrence === point.occurrence) return located
+        rowTop += entry.height
+      }
+      return undefined
+    }
+    const points = edge === 'top' ? [anchor.top, anchor.bottom] : [anchor.bottom, anchor.top]
+    for (const point of points) {
+      if (point === undefined) continue
+      const row = rowFor(point)
+      if (row === undefined) continue
+      const rowOffset = Math.max(0, Math.min(row.height - 1, point.rowOffset))
+      scroll.scrollTo(row.top + rowOffset - point.viewportOffset, { disableFollow: true })
+      return true
+    }
+    scroll.scrollTo(anchor.scrollTop, { disableFollow: true })
+    return false
   }
 
   /**

@@ -10,7 +10,8 @@ import test from 'node:test'
 import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { foldTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
+import { foldTranscript, searchTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
+import { TranscriptWindowController } from '../src/transcript-window.ts'
 
 /** Build a minimal event envelope for tests. */
 function event<K extends SessionEvent['type']>(
@@ -541,6 +542,39 @@ test('non-monotonic windows derive metadata from the full fallback projection', 
     hasNewer: bounded.hasNewer,
   }, { firstTurn: 3, lastTurn: 3, hasOlder: true, hasNewer: false })
   assert.deepEqual(kinds(bounded.messages), ['summary', 'assistant'])
+})
+
+test('non-monotonic raw turn indexes retain every turn for search navigation', () => {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (const turn of [1, 3, 2]) {
+    events.push(event('turn/start', { turn }, seq++))
+    events.push(event('assistant/message', {
+      turn,
+      step: 0,
+      message: {
+        id: MessageId(`non-monotonic-search-${turn}`),
+        role: 'assistant',
+        content: [{ type: 'text', text: `turn ${turn}` }],
+        source: { kind: 'model', provider: 'test', model: 'test' },
+      },
+    }, seq++))
+  }
+  folder.apply(events)
+
+  assert.deepEqual(folder.turns(), [1, 3, 2], 'the raw index must retain a lower turn discovered after monotonicity breaks')
+  assert.deepEqual(folder.groupedTurns(), [1, 2, 3])
+  const match = searchTranscript(folder, 'turn 2')
+  assert.equal(match.length, 1)
+  const matchMessage = match[0]
+  assert.ok(matchMessage !== undefined && 'turn' in matchMessage)
+  const controller = new TranscriptWindowController({ windowTurns: 1, stepTurns: 1, turns: folder.turns() })
+  assert.equal(controller.anchorAt(matchMessage.turn), true, 'search must anchor a retained non-monotonic turn')
+  assert.equal(controller.endTurn(), 2)
+  const anchored = folder.window({ maxTurns: 1, endTurn: controller.endTurn() })
+  assert.equal(anchored.lastTurn, 2)
+  assert.ok(anchored.messages.some(message => 'turn' in message && message.turn === 2))
 })
 
 test('unknown window anchors preserve latest summary semantics', () => {

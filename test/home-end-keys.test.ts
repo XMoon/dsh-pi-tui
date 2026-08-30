@@ -156,6 +156,65 @@ test('registered older-boundary callback preserves history follow state', async 
   app.stop()
 })
 
+test('history window paging preserves the overlap row across uneven heights', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const longMarkdown = ['turn-82', ...Array.from({ length: 80 }, (_, index) => `markdown row ${index + 1}`)].join('\n')
+  const allMessages = Array.from({ length: 101 }, (_, turn) => ({
+    kind: 'assistant' as const,
+    turn,
+    text: turn === 82 ? longMarkdown : `turn-${turn}`,
+  }))
+  const windowAt = (first: number, last: number) => allMessages.slice(first, last + 1)
+  let app!: TuiApp
+  const moveOlder = (): boolean => {
+    const anchor = app.captureTranscriptViewportAnchor()
+    app.setTranscript(windowAt(71, 90))
+    return anchor !== undefined && app.restoreTranscriptViewportAnchor(anchor, 'top')
+  }
+  const moveNewer = (): boolean => {
+    const anchor = app.captureTranscriptViewportAnchor()
+    app.setTranscript(windowAt(81, 100))
+    return anchor !== undefined && app.restoreTranscriptViewportAnchor(anchor, 'bottom')
+  }
+  app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onTranscriptMoveOlder: moveOlder,
+    onTranscriptMoveNewer: moveNewer,
+  })
+  app.start()
+  try {
+    app.setTranscript(windowAt(81, 100))
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    app.scrollToTop({ disableFollow: true })
+    await vt.waitForRender()
+    assert.ok(viewportHasLine(vt, 'turn-81'), 'the initial top edge must show turn 81')
+
+    assert.equal(moveOlder(), true, 'older paging must restore a captured anchor')
+    await vt.waitForRender()
+    const older = app.fullscreenScrollForTest()
+    assert.ok(older !== undefined)
+    assert.ok(older.scrollTop < older.maxScrollTop, 'older paging must not jump to the new window bottom')
+    assert.ok(viewportHasLine(vt, 'turn-81'), 'older paging must keep the old top overlap row visible')
+    assert.ok(!viewportHasLine(vt, 'turn-90'), 'the long turn 82 must not let bottom anchoring hide the old top')
+
+    app.scrollToBottom({ disableFollow: true })
+    await vt.waitForRender()
+    assert.ok(viewportHasLine(vt, 'turn-90'), 'the older window bottom must show its bottom overlap row')
+    assert.equal(moveNewer(), true, 'newer paging must restore a captured anchor')
+    await vt.waitForRender()
+    const newer = app.fullscreenScrollForTest()
+    assert.ok(newer !== undefined)
+    assert.ok(newer.scrollTop > 0, 'newer paging must not jump to the new window top')
+    assert.ok(newer.scrollTop < newer.maxScrollTop, 'newer paging must preserve the overlap instead of following the end')
+    assert.ok(viewportHasLine(vt, 'turn-90'), 'newer paging must keep the old bottom overlap row visible')
+    assert.ok(!viewportHasLine(vt, 'turn-100'), 'newer paging must not skip past the preserved bottom overlap')
+  } finally {
+    app.stop()
+  }
+})
+
 test('viewport mode: Home scrolls to the top, End to the bottom', async () => {
   resetKeybindings()
   applyHomeEndKeyMode('viewport')
