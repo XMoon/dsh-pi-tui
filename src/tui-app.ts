@@ -1855,8 +1855,10 @@ export class TuiApp {
   /** Transient error line shown under the transcript; cleared by the next
    * repaint or after {@link TuiApp.NOTIFY_DURATION_MS}, whichever comes first. */
   private notifyText = ''
-   /** Lightweight, persistent transcript-window hint; empty in latest mode. */
-   private transcriptWindowHint = ''
+  /** Lightweight, persistent transcript-window hint; empty in latest mode. */
+  private transcriptWindowHint = ''
+  /** The latest window metadata, retained so remapped key hints stay live. */
+  private transcriptWindow: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
   /** Styling of the current notify line: info (default) is dim with a ℹ,
    * errors are red with a ✗. */
   private notifyKind: 'error' | 'info' = 'info'
@@ -2194,7 +2196,10 @@ export class TuiApp {
       // finding). Guarded: the initial manager build runs before
       // messagesView exists.
       onInvalidate: () => {
-        if (this.messagesView !== undefined) this.rebuildMessages()
+        if (this.messagesView !== undefined) {
+          this.refreshTranscriptWindowHint()
+          this.rebuildMessages()
+        }
         this.requestRender()
       },
       onLeaderStateChange: () => this.renderFooter(),
@@ -3890,11 +3895,27 @@ export class TuiApp {
       // expanded individually, exactly like a web disclosure row.
       const alt = new TuiAltScreen(this.terminal, undefined, undefined, {
         onCellClick: (x, y) => this.handleFullscreenClick(x, y),
-         onBeforeViewportInput: (data) => this.keybindings.matches(data, 'app.transcript.jumpLatest')
-           && this.events.onTranscriptJumpLatest?.() === true,
-         onScrollBoundary: (direction, source) => direction < 0
-           ? this.events.onTranscriptMoveOlder?.(source) === true
-           : this.events.onTranscriptMoveNewer?.(source) === true,
+        // Host transcript actions must win before the fork's own viewport
+        // key handling. In particular, the fork's Ctrl+Shift+F search only
+        // sees rendered lines, while the host search queries the full fold.
+        // Suppress the fork search key even after the host action is remapped
+        // so an old default never silently re-enables rendered-line search.
+        onBeforeViewportInput: (data) => {
+          if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
+            return this.events.onTranscriptJumpLatest?.() === true
+          }
+          if (this.keybindings.matches(data, 'app.transcript.search')) {
+            if (this.searchOverlay !== undefined) {
+              this.closeTranscriptSearch()
+              return true
+            }
+            return this.dispatchResolvedAction('app.transcript.search', data)
+          }
+          return getKeybindings().matches(data, 'tui.altScreen.search')
+        },
+        onScrollBoundary: (direction, source) => direction < 0
+          ? this.events.onTranscriptMoveOlder?.(source) === true
+          : this.events.onTranscriptMoveNewer?.(source) === true,
         // Issue #7: the host clipboard policy (tmux-aware, platform
         // helpers, OSC 52 last) replaces the vendor's raw OSC 52 write —
         // the alt screen never needs to understand tmux/SSH/Wayland/X11.
@@ -3998,9 +4019,9 @@ export class TuiApp {
   }
 
   /**
-   * Open the transcript-search overlay (Ctrl+Shift+F) and focus its input.
-   * The search itself runs in the host against the folded transcript; this
-   * surface only collects the query and reports navigation keys.
+   * Open the transcript-search overlay for the configured search action and
+   * focus its input. The search itself runs in the host against the folded
+   * transcript; this surface only collects the query and reports navigation keys.
    */
   startTranscriptSearch(): void {
     if (this.disposed) return
@@ -4098,6 +4119,15 @@ export class TuiApp {
     return this.searchOverlay !== undefined
   }
 
+  /** Rebuild the history hint from the current effective keymap. */
+  private refreshTranscriptWindowHint(): void {
+    const window = this.transcriptWindow
+    const latestHint = this.keybindings.keyHint('app.transcript.jumpLatest')
+    this.transcriptWindowHint = window?.mode === 'history' && window.firstTurn !== undefined && window.lastTurn !== undefined
+      ? `History · turn ${window.firstTurn}–${window.lastTurn}${latestHint === '' ? '' : ` · ${latestHint} latest`}`
+      : ''
+  }
+
   /**
    * Replace the transcript and rebuild the message components. Collapsible
    * entries (tool, system cards) render folded unless the Ctrl+O master
@@ -4118,9 +4148,8 @@ export class TuiApp {
    ): void {
     this.messages = messages
     if (activities !== undefined) this.turnActivities = activities
-     this.transcriptWindowHint = window?.mode === 'history' && window.firstTurn !== undefined && window.lastTurn !== undefined
-       ? `History · turn ${window.firstTurn}–${window.lastTurn} · Ctrl+End latest`
-       : ''
+    this.transcriptWindow = window
+    this.refreshTranscriptWindowHint()
     // Repaints do NOT clear the transient notify line: an active session
     // repaints every frame (streaming chunks, tool cards), and clearing on
     // each repaint would make every notice — including error blocks like

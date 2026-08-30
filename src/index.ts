@@ -82,7 +82,7 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from './present.ts'
-import { childOwnEvents, textOf, TranscriptFolder } from './transcript.ts'
+import { childOwnEvents, searchTranscript, textOf, TranscriptFolder } from './transcript.ts'
 import type { TranscriptMessage, TranscriptWindow } from './transcript.ts'
 import { TranscriptWindowController } from './transcript-window.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
@@ -4573,7 +4573,7 @@ export function apply(ctx: Context, config: Config): void {
           })
         }
       },
-      // Transcript search (Ctrl+Shift+F): matches run over the FULL folded
+      // Transcript search: matches run over the FULL folded
       // transcript; each jump re-windows the view so the matched turn is
       // visible (older turns collapse above it into the summary entry).
       onSearchOpen: () => {
@@ -4581,11 +4581,7 @@ export function apply(ctx: Context, config: Config): void {
         searchOrigin = { controller, state: controller.state() }
       },
       onSearchQuery: (query) => {
-        const needle = query.trim().toLowerCase()
-        const searchable = (message: TranscriptMessage): string =>
-          message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}` : message.text
-        const full = activeFolder().messages()
-        searchMatches = needle === '' ? [] : full.filter(message => searchable(message).toLowerCase().includes(needle))
+        searchMatches = searchTranscript(activeFolder(), query)
         searchCurrent = searchMatches.length > 0 ? 0 : -1
         app.setSearchResult(searchCurrent + 1, searchMatches.length)
         if (searchCurrent >= 0) jumpToSearchMatch()

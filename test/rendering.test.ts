@@ -7,15 +7,19 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { MessageId } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
 import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../src/present.ts'
+import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
 import { iconFor } from '../src/icons.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent } from '../src/tui-app.ts'
 import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
-import type { TurnActivity } from '../src/transcript.ts'
+import { searchTranscript, TranscriptFolder, type TurnActivity } from '../src/transcript.ts'
+import { TranscriptWindowController } from '../src/transcript-window.ts'
 import { Text, visibleWidth, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -1339,6 +1343,137 @@ test('ctrl+f opens and closes the transcript search (no fullscreen toggle)', asy
   vt.sendInput('\x06') // ctrl+f again closes the overlay
   view = await viewport(vt)
   assert.ok(!view.includes('Find transcript'), `search bar still open:\n${view}`)
+})
+
+test('fullscreen Ctrl+F and Ctrl+Shift+F search the full folder and re-window to an old match', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply(Array.from({ length: 100 }, (_, turn) => ({
+    type: 'assistant/message',
+    seq: turn,
+    time: 1_700_000_000_000 + turn,
+    data: {
+      turn,
+      step: 0,
+      message: {
+        id: MessageId(`history-${turn}`),
+        role: 'assistant',
+        content: [{ type: 'text', text: turn === 5 ? 'history-only needle' : `visible turn ${turn}` }],
+        source: { kind: 'model', provider: 'test', model: 'test' },
+      },
+    },
+  } as SessionEvent)))
+  const controller = new TranscriptWindowController({
+    windowTurns: 20,
+    stepTurns: 10,
+    turns: folder.groupedTurns(),
+  })
+  const renderWindow = (): void => {
+    const projection = folder.window({
+      maxTurns: controller.windowTurns,
+      ...(controller.endTurn() === undefined ? {} : { endTurn: controller.endTurn() }),
+    })
+    app.setTranscript(projection.messages, folder.turnActivities(), {
+      ...controller.snapshot(),
+      firstTurn: projection.firstTurn,
+      lastTurn: projection.lastTurn,
+      hasNewer: projection.hasNewer,
+    })
+  }
+  const hostMatches: number[] = []
+  let app!: TuiApp
+  const vt = new VirtualTerminal(100, 24)
+  app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSearchQuery: (query) => {
+      const matches = searchTranscript(folder, query)
+      if (matches.length === 0) return
+      const match = matches[0]
+      if (match === undefined || !('turn' in match)) return
+      const turn = match.turn
+      controller.anchorAt(turn)
+      hostMatches.push(turn)
+      renderWindow()
+    },
+    onSearchClose: () => {
+      controller.latest()
+      renderWindow()
+    },
+  })
+  app.start()
+  try {
+    renderWindow()
+    app.setFullscreen(true)
+    await viewport(vt)
+    assert.ok(!vt.getViewport().some(line => line.includes('history-only needle')), 'the old match must start outside the visible window')
+    for (const key of ['\x06', '\x1b[102;6u']) {
+      vt.sendInput(key)
+      await viewport(vt)
+      vt.sendInput('history-only')
+      const view = await viewport(vt)
+      assert.equal(controller.endTurn(), 5, `host search ${JSON.stringify(key)} must anchor the matched turn`)
+      assert.ok(view.includes('history-only needle'), `host search ${JSON.stringify(key)} must reveal the old match`)
+      assert.equal(hostMatches.at(-1), 5, `host search ${JSON.stringify(key)} must use the full folder`)
+      vt.sendInput('\x1b')
+      await viewport(vt)
+      assert.equal(controller.isLatest(), true, 'closing search must restore the latest window')
+    }
+  } finally {
+    app.stop()
+  }
+})
+
+test('fullscreen suppresses the stale fork search key after host search is remapped', async () => {
+  const hostQueries: string[] = []
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSearchQuery: (query) => hostQueries.push(query),
+  })
+  app.start()
+  try {
+    app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.search': 'ctrl+x' }))
+    app.setTranscript([{ kind: 'user', turn: 0, text: 'visible window' }])
+    app.setFullscreen(true)
+    await viewport(vt)
+
+    vt.sendInput('\x1b[102;6u') // old fork Ctrl+Shift+F must not open rendered-line search
+    await viewport(vt)
+    assert.ok(!vt.getViewport().some(line => line.includes('Find transcript')),
+      'the fork search must stay disabled when the host search is remapped')
+    vt.sendInput('ignored')
+    await viewport(vt)
+    assert.deepEqual(hostQueries, [], 'the stale fork key must not reach host search after a remap')
+
+    vt.sendInput('\x18') // remapped host Ctrl+X
+    await viewport(vt)
+    assert.ok(vt.getViewport().some(line => line.includes('Find transcript')), 'the remapped host search must open')
+    vt.sendInput('query')
+    await viewport(vt)
+    assert.deepEqual(hostQueries.at(-1), 'query')
+  } finally {
+    app.stop()
+  }
+})
+
+test('history hint uses the effective latest-jump keybinding', async () => {
+  const { vt, app } = startApp(100, 24)
+  app.setTranscript([{ kind: 'user', turn: 40, text: 'history row' }], undefined, {
+    mode: 'history',
+    endTurn: 40,
+    firstTurn: 31,
+    lastTurn: 40,
+  })
+  app.setFullscreen(true)
+  let view = await viewport(vt)
+  assert.ok(view.includes('Ctrl+End latest'), `default history hint missing:\n${view}`)
+
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.jumpLatest': 'ctrl+l' }))
+  view = await viewport(vt)
+  assert.ok(view.includes('Ctrl+L latest'), `remapped history hint missing:\n${view}`)
+  assert.ok(!view.includes('Ctrl+End latest'), `stale history hint remains:\n${view}`)
+  app.stop()
 })
 
 test('welcome card wraps long facts inside a full-width box', async () => {
