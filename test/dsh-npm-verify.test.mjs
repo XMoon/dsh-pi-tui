@@ -38,7 +38,7 @@ test('CI npm install branches pin the public registry and isolated config', () =
   assert.equal((workflow.match(/echo 'npm_config_registry=https:\/\/registry\.npmjs\.org\/'/gu) ?? []).length, 6)
   assert.equal((workflow.match(/echo "NPM_CONFIG_USERCONFIG=\$RUNNER_TEMP\/dsh-npmrc"/gu) ?? []).length, 5)
   assert.equal((workflow.match(/echo "npm_config_userconfig=\$RUNNER_TEMP\/dsh-npmrc"/gu) ?? []).length, 5)
-  assert.equal((workflow.match(/DSH_SOURCE_ARTIFACT=\$RUNNER_TEMP\/dsh-source-pack/gu) ?? []).length, 5)
+  assert.equal((workflow.match(/DSH_SOURCE_ARTIFACT=\$RUNNER_TEMP\/dsh-source-pack/gu) ?? []).length, 4)
   assert.doesNotMatch(workflow, /DSH_SOURCE_ARTIFACT: \$\{\{ runner\.temp \}\}\/dsh-source-pack/u)
 })
 
@@ -50,6 +50,25 @@ test('CI source preparation and publication have explicit time and registry boun
   assert.match(workflow, /echo "npm_config_userconfig=\$RUNNER_TEMP\/dsh-publish-npmrc"/u)
   assert.doesNotMatch(workflow, /NPM_CONFIG_(?:REGISTRY|USERCONFIG):/u)
   assert.ok(workflow.includes("printf 'registry=https://registry.npmjs.org/\\n' > \"$RUNNER_TEMP/dsh-publish-npmrc\""))
+})
+
+test('Source Mode matrix uses a clean distribution-aware fresh install and skips pi2dsh', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  const compatStart = workflow.indexOf('  compat-smoke:')
+  const ecosystemStart = workflow.indexOf('  ecosystem-compat:', compatStart)
+  assert.ok(compatStart >= 0 && ecosystemStart > compatStart, 'workflow job boundaries must exist')
+  const compat = workflow.slice(compatStart, ecosystemStart)
+  assert.match(compat, /Download DSH source pack/u)
+  assert.match(compat, /--dsh-distribution "\$DSH_SOURCE_ARTIFACT"/u)
+  assert.doesNotMatch(compat, /TARBALL_SMOKE_SKIP_INSTALL=1/u)
+  assert.doesNotMatch(compat, /Prepare DSH dependency environment/u)
+
+  const officialStart = workflow.indexOf('  official-preset-assembly:')
+  const ecosystem = workflow.slice(ecosystemStart, officialStart)
+  assert.match(ecosystem, /needs\.dsh-context\.outputs\.mode == 'npm'/u)
+  assert.doesNotMatch(ecosystem, /Download DSH source pack/u)
+  assert.doesNotMatch(ecosystem, /Source mode ecosystem status/u)
+  assert.match(ecosystem, /Run pi2dsh compatibility smoke/u)
 })
 
 test('npm verification rejects a symlinked candidate tarball', () => {

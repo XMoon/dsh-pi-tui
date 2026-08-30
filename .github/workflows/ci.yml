@@ -418,8 +418,9 @@ jobs:
   #   24.0.0  = minimum Node 24 covered by >=24
   #   26      = current/newer supported major
   #
-  # Node 24 used during pack already runs every postpack smoke.
-  # This matrix therefore only needs the broad tarball acceptance smoke.
+  # Node 24 used during pack already runs every postpack smoke. The matrix
+  # additionally performs a clean fresh install; Source Mode injects the
+  # validated local DSH tarball closure into that probe.
   # ---------------------------------------------------------------------------
   compat-smoke:
     name: Tarball smoke / Node ${{ matrix.node }}
@@ -455,8 +456,9 @@ jobs:
           cache: true
           install: false
 
-      # Keep dev dependencies available because tarball-smoke optionally
-      # uses tooling such as TypeScript from the workspace.
+      # The source probe is intentionally independent of this checkout's
+      # node_modules, lockfile, and workspace metadata. npm mode retains the
+      # existing workspace install for its registry-backed lane.
       - name: Set DSH source artifact path
         run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
 
@@ -467,36 +469,24 @@ jobs:
           name: dsh-source-pack
           path: ${{ runner.temp }}/dsh-source-pack
 
-      - name: Prepare DSH dependency environment
-        env:
-          DSH_SOURCE_CONFIG: test/compat/dsh-source.json
+      - name: Prepare npm dependency environment
+        if: env.DSH_MODE == 'npm'
         run: |
           set -euo pipefail
-          if [ "$DSH_MODE" = source ]; then
-            node scripts/prepare-dsh-test-environment.mjs \
-              --mode source \
-              --distribution "$DSH_SOURCE_ARTIFACT" \
-              --workspace "$GITHUB_WORKSPACE" \
-              --config "$DSH_SOURCE_CONFIG"
-            echo 'PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false' >> "$GITHUB_ENV"
-            echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false' >> "$GITHUB_ENV"
-            echo 'TARBALL_SMOKE_SKIP_INSTALL=1' >> "$GITHUB_ENV"
-          else
-            printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
-             NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
-               npm_config_registry=https://registry.npmjs.org/ \
-               NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
-               npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
-               PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
-               PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
-               pnpm install --frozen-lockfile
-             {
-               echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
-               echo 'npm_config_registry=https://registry.npmjs.org/'
-               echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
-               echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
-             } >> "$GITHUB_ENV"
-          fi
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+          NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+            npm_config_registry=https://registry.npmjs.org/ \
+            NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+            npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+            PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+          {
+            echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+            echo 'npm_config_registry=https://registry.npmjs.org/'
+            echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+            echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+          } >> "$GITHUB_ENV"
 
       - name: Download release tarball
         uses: actions/download-artifact@v8
@@ -522,12 +512,18 @@ jobs:
             exit 1
           fi
 
-          node scripts/tarball-smoke.mjs "${TARBALLS[0]}"
+          if [ "$DSH_MODE" = source ]; then
+            node scripts/tarball-smoke.mjs "${TARBALLS[0]}" --dsh-distribution "$DSH_SOURCE_ARTIFACT"
+          else
+            node scripts/tarball-smoke.mjs "${TARBALLS[0]}"
+          fi
 
   # ---------------------------------------------------------------------------
   # Test the EXACT packed artifact against the published pi2dsh bridge and a
   # real Pi component in a real pseudo-terminal. This is intentionally outside
-  # postpack: local packing stays offline and non-interactive.
+  # postpack: local packing stays offline and non-interactive. The published
+  # ecosystem is evaluated only in npm mode; Source Mode skips this whole job
+  # before runner setup because it does not claim published compatibility.
   # ---------------------------------------------------------------------------
   ecosystem-compat:
     name: External compatibility / pi2dsh
@@ -535,7 +531,7 @@ jobs:
       - dsh-context
       - prepare-dsh-source
       - build-and-pack
-    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -554,46 +550,23 @@ jobs:
           cache: true
           install: false
 
-      - name: Set DSH source artifact path
-        run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
-
-      - name: Download DSH source pack
-        if: env.DSH_MODE == 'source'
-        uses: actions/download-artifact@v8
-        with:
-          name: dsh-source-pack
-          path: ${{ runner.temp }}/dsh-source-pack
-
-      - name: Prepare DSH dependency environment
-        env:
-          DSH_SOURCE_CONFIG: test/compat/dsh-source.json
+      - name: Prepare npm dependency environment
         run: |
           set -euo pipefail
-          if [ "$DSH_MODE" = source ]; then
-            node scripts/prepare-dsh-test-environment.mjs \
-              --mode source \
-              --distribution "$DSH_SOURCE_ARTIFACT" \
-              --workspace "$GITHUB_WORKSPACE" \
-              --config "$DSH_SOURCE_CONFIG"
-            echo 'PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false' >> "$GITHUB_ENV"
-            echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false' >> "$GITHUB_ENV"
-            echo 'TARBALL_SMOKE_SKIP_INSTALL=1' >> "$GITHUB_ENV"
-          else
-            printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
-             NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
-               npm_config_registry=https://registry.npmjs.org/ \
-               NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
-               npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
-               PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
-               PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
-               pnpm install --frozen-lockfile
-             {
-               echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
-               echo 'npm_config_registry=https://registry.npmjs.org/'
-               echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
-               echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
-             } >> "$GITHUB_ENV"
-          fi
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+          NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+            npm_config_registry=https://registry.npmjs.org/ \
+            NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+            npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+            PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+          {
+            echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+            echo 'npm_config_registry=https://registry.npmjs.org/'
+            echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+            echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+          } >> "$GITHUB_ENV"
 
       - name: Download release tarball
         uses: actions/download-artifact@v8
@@ -605,11 +578,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y tmux
-
-      - name: Source mode ecosystem status
-        if: env.DSH_MODE == 'source'
-        run: |
-          echo 'SKIPPED: requires published compatible DSH/pi2dsh combination (source mode)'
 
       - name: Run pi2dsh compatibility smoke
         if: env.DSH_MODE == 'npm'
