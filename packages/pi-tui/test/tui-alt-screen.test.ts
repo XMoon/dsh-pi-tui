@@ -292,6 +292,33 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("notifies the host when dragging the primary scrollbar to an edge", async () => {
+		const terminal = new RecordingTerminal(10, 5);
+		const boundaries: Array<[-1 | 1, "wheel" | "page" | "scrollbar"]> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onScrollBoundary: (direction, source) => {
+				boundaries.push([direction, source]);
+				return true;
+			},
+		});
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "auto" },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+
+		// A wheel event reveals the scrollbar and leaves its thumb at the top.
+		terminal.sendInput("\x1b[<65;10;1M");
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;10;1M");
+		terminal.sendInput("\x1b[<32;10;5M");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(boundaries, [[1, "scrollbar"]]);
+		tui.stop();
+	});
+
 	it("keeps the scrollbar column selectable while the thumb is hidden", async () => {
 		const terminal = new RecordingTerminal(10, 2);
 		const tui = new TuiAltScreen(terminal);
@@ -337,6 +364,31 @@ describe("TuiAltScreen", () => {
 		await terminal.waitForRender();
 		assert.strictEqual(inner.scrollTop, 4);
 		assert.strictEqual(outer.scrollTop, 2);
+		tui.stop();
+	});
+
+	it("notifies the host when PageUp and wheel reach viewport boundaries", async () => {
+		const terminal = new VirtualTerminal(20, 8);
+		const boundaries: Array<[-1 | 1, "wheel" | "page"]> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onScrollBoundary: (direction, source) => {
+				boundaries.push([direction, source]);
+				return true;
+			},
+		});
+		tui.addChild(new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		for (let press = 0; press < 4; press += 1) {
+			terminal.sendInput("\x1b[57421u");
+			await terminal.waitForRender();
+		}
+		assert.deepStrictEqual(boundaries, [[-1, "page"]]);
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(boundaries, [[-1, "page"], [-1, "wheel"]]);
 		tui.stop();
 	});
 
@@ -476,6 +528,33 @@ describe("TuiAltScreen", () => {
 		assert.ok(!terminal.getViewport().some((line) => line.includes("Find transcript")));
 		assert.deepStrictEqual(editorInputs, ["x"]);
 
+		tui.stop();
+	});
+
+	it("host semantic viewport actions can clear built-in transcript search", async () => {
+		const terminal = new RecordingTerminal(60, 8);
+		let claimed = false;
+		let tui!: TuiAltScreen;
+		tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onBeforeViewportInput: (data) => {
+				if (data !== "\x1b[1;5F") return false;
+				claimed = tui.clearSearch();
+				return claimed;
+			},
+		});
+		tui.addChild(new Text("needle in the transcript", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[102;6u");
+		terminal.sendInput("needle");
+		await terminal.waitForRender();
+		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript")));
+
+		terminal.sendInput("\x1b[1;5F");
+		await terminal.waitForRender();
+		assert.strictEqual(claimed, true);
+		assert.ok(!terminal.getViewport().some((line) => line.includes("Find transcript")));
 		tui.stop();
 	});
 

@@ -76,6 +76,32 @@ test('homeEndKeysModeOf falls back to input for invalid values', () => {
 
 // ── fullscreen behavior ─────────────────────────────────────────────────
 
+test('fullscreen Ctrl+End remains a Host semantic action in both presets', async () => {
+  for (const mode of ['viewport', 'input'] as const) {
+    resetKeybindings()
+    applyHomeEndKeyMode(mode)
+    const vt = new VirtualTerminal(80, 24)
+    let jumps = 0
+    const app = new TuiApp(vt, {
+      onSubmit: () => {},
+      onExit: () => {},
+      onTranscriptJumpLatest: () => {
+        jumps += 1
+        return true
+      },
+    })
+    app.start()
+    app.setTranscript([], undefined, { mode: 'history', endTurn: 1, firstTurn: 1, lastTurn: 1 })
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    vt.sendInput('\x1b[1;5F') // Ctrl+End
+    await vt.waitForRender()
+    assert.equal(jumps, 1, `Ctrl+End must dispatch to the Host in ${mode} mode`)
+    app.stop()
+  }
+  resetKeybindings()
+})
+
 function startFullscreenApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -89,6 +115,46 @@ function startFullscreenApp(): { vt: VirtualTerminal; app: TuiApp } {
   app.setFullscreen(true)
   return { vt, app }
 }
+
+test('registered older-boundary callback preserves history follow state', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const transcript = (lines: number) => [{
+    kind: 'assistant' as const,
+    turn: 0,
+    text: Array.from({ length: lines }, (_, index) => `line ${index + 1}`).join('\n'),
+  }]
+  let app!: TuiApp
+  let loadCount = 0
+  const loadOlder = () => {
+    loadCount += 1
+    app.setTranscript(transcript(120), undefined, { mode: 'history', endTurn: 0, firstTurn: 0, lastTurn: 0 })
+    app.scrollToBottom({ disableFollow: true })
+    return true
+  }
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onTranscriptMoveOlder: loadOlder })
+  app.start()
+  app.setTranscript(transcript(80))
+  app.setFullscreen(true)
+  await vt.waitForRender()
+
+  app.scrollToTop({ disableFollow: true })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[57421u') // PageUp at the top invokes the registered older-boundary callback.
+  await vt.waitForRender()
+  assert.equal(loadCount, 1)
+  const history = app.fullscreenScrollForTest()
+  assert.ok(history !== undefined)
+  assert.equal(history.isFollowingEnd, false, 'history positioning must suppress follow-end')
+  const before = history.scrollTop
+
+  app.setTranscript(transcript(160), undefined, { mode: 'history', endTurn: 0, firstTurn: 0, lastTurn: 0 })
+  await vt.waitForRender()
+  const after = app.fullscreenScrollForTest()
+  assert.ok(after !== undefined)
+  assert.equal(after.scrollTop, before, 'new history content must preserve the current viewport')
+  assert.ok(after.scrollTop < after.maxScrollTop, 'new history content must not jump back to its end')
+  app.stop()
+})
 
 test('viewport mode: Home scrolls to the top, End to the bottom', async () => {
   resetKeybindings()
@@ -189,6 +255,26 @@ test('regular mode: Home/End keep their editor behavior under both presets', asy
       `[${mode}] Ctrl+End must move the editor cursor to the line end in regular mode (${JSON.stringify(ctrlHome)} → ${JSON.stringify(ctrlEnd)})`)
     app.stop()
   }
+})
+
+test('regular mode Ctrl+End declines the semantic latest action', async () => {
+  resetKeybindings()
+  let jumps = 0
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onTranscriptJumpLatest: () => {
+      jumps += 1
+      return true
+    },
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[1;5F')
+  await vt.waitForRender()
+  assert.equal(jumps, 0, 'regular Ctrl+End must not invoke the transcript latest action')
+  app.stop()
 })
 
 // ── the /settings row ────────────────────────────────────────────────────
