@@ -14,7 +14,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -29,14 +29,6 @@ import {
   assertNoSourceLeak,
 } from './lib/dsh-distribution.mjs'
 import { pnpmExecutable, runBounded } from './lib/process.mjs'
-import {
-  closeDirectoryHandle,
-  claimProducedDirectory,
-  openDirectoryHandle,
-  removeEmptyClaimedDirectory,
-  renameClaimedDirectory,
-} from './dsh-source-pack.mjs'
-
 const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const SOURCE_PACK_SCRIPT = fileURLToPath(new URL('./dsh-source-pack.mjs', import.meta.url))
@@ -136,65 +128,25 @@ function sourcePackOutput(values) {
   return resolve(values.out ?? join(tmpdir(), `dsh-source-pack-${process.pid}`))
 }
 
-function preciseBirthtime(path) {
-  const info = lstatSync(path, { bigint: true })
-  return String(info.birthtimeNs ?? info.birthtimeMs)
-}
-
-function sameNode(info, expected, birthtime) {
-  return info.dev === expected.dev
-    && info.ino === expected.ino
-    && (expected.birthtime === undefined || birthtime === expected.birthtime)
-}
-
-function directoryAncestors(path) {
-  const ancestors = []
-  let current = path
-  while (true) {
-    const info = lstatSync(current)
-    if (!info.isDirectory() || info.isSymbolicLink()) fail(`source distribution ancestor must be a real directory: ${current}`)
-    ancestors.push({ path: current, dev: info.dev, ino: info.ino, birthtime: preciseBirthtime(current) })
-    const parent = dirname(current)
-    if (parent === current) break
-    current = parent
-  }
-  return ancestors
-}
-
-/** Require the inode proof emitted by the source pack before cleanup. */
-function generatedDistributionOwner(directory, manifest) {
-  const identity = manifest?.outputIdentity
-  if (typeof identity?.dev !== 'string' || typeof identity.ino !== 'string') {
-    fail(`generated source distribution has no output ownership proof: ${directory}`)
-  }
+function directoryOwner(directory, label) {
+  let info
+  let parentInfo
   const parentPath = dirname(directory)
-  const ancestors = directoryAncestors(parentPath)
-  const parent = lstatSync(parentPath)
-  const info = lstatSync(directory)
-  if (!info.isDirectory() || info.isSymbolicLink() || String(info.dev) !== identity.dev || String(info.ino) !== identity.ino) {
-    fail(`generated source distribution ownership changed: ${directory}`)
+  try {
+    info = lstatSync(directory)
+    parentInfo = lstatSync(parentPath)
+  } catch (error) {
+    fail(`${label} is missing: ${directory}`)
   }
-  return {
-    path: directory,
-    parentPath,
-    ancestors,
-    parentDev: parent.dev,
-    parentIno: parent.ino,
-    parentBirthtime: preciseBirthtime(parentPath),
-    dev: info.dev,
-    ino: info.ino,
-    birthtime: preciseBirthtime(directory),
-  }
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`${label} is not a real directory: ${directory}`)
+  if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) fail(`${label} parent is not a real directory: ${parentPath}`)
+  return { path: directory, dev: info.dev, ino: info.ino, parentPath, parentDev: parentInfo.dev, parentIno: parentInfo.ino }
 }
 
-function generatedOwnerState(owner) {
+function parentState(owner) {
   try {
-    for (const ancestor of owner.ancestors) {
-      const info = lstatSync(ancestor.path)
-      if (!info.isDirectory() || info.isSymbolicLink() || !sameNode(info, ancestor, preciseBirthtime(ancestor.path))) return false
-    }
-    const info = lstatSync(owner.path)
-    if (!info.isDirectory() || info.isSymbolicLink() || !sameNode(info, owner, preciseBirthtime(owner.path))) return false
+    const info = lstatSync(owner.parentPath)
+    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.parentDev || info.ino !== owner.parentIno) return false
     return true
   } catch (error) {
     if (error?.code === 'ENOENT') return undefined
@@ -202,83 +154,76 @@ function generatedOwnerState(owner) {
   }
 }
 
-/** Quarantine and remove a generated distribution only while its proved inode is intact. */
+function ownerState(owner) {
+  try {
+    const info = lstatSync(owner.path)
+    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+    return true
+  } catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+function removeOwnedDirectory(owner, hooks = undefined) {
+  const state = ownerState(owner)
+  if (state === undefined) return true
+  if (!state) return false
+  if (parentState(owner) !== true) return false
+  hooks?.beforeQuarantineRename?.()
+  if (parentState(owner) !== true) return false
+  hooks?.afterParentValidation?.()
+
+  // Keep the quarantine on the owner's filesystem and make it inaccessible to
+  // other users. A second identity check immediately before removal prevents
+  // a replacement in the quarantine from becoming a recursive-delete target.
+  const quarantineRoot = join(dirname(owner.path), `.dsh-source-verify-cleanup-${process.pid}-${randomUUID()}`)
+  const quarantine = join(quarantineRoot, 'claimed')
+  mkdirSync(quarantineRoot, { mode: 0o700 })
+  let moved = false
+  let completed = false
+  try {
+    renameSync(owner.path, quarantine)
+    moved = true
+    const movedInfo = lstatSync(quarantine)
+    if (!movedInfo.isDirectory() || movedInfo.isSymbolicLink() || movedInfo.dev !== owner.dev || movedInfo.ino !== owner.ino) return false
+    if (parentState(owner) !== true) return false
+    hooks?.afterQuarantineValidation?.(quarantine, quarantineRoot)
+    if (parentState(owner) !== true) return false
+    const confirmed = lstatSync(quarantine)
+    if (!confirmed.isDirectory() || confirmed.isSymbolicLink() || confirmed.dev !== owner.dev || confirmed.ino !== owner.ino) return false
+    rmSync(quarantine, { recursive: true, force: false })
+    rmdirSync(quarantineRoot)
+    completed = true
+    return true
+  } catch (error) {
+    if (error?.code === 'ENOENT' && !moved) return parentState(owner) === true
+    return false
+  } finally {
+    if (!completed && !moved) {
+      try {
+        rmdirSync(quarantineRoot)
+      } catch {
+        // A failed empty-root cleanup is harmless and must not remove anything recursively.
+      }
+    }
+  }
+}
+
+function generatedDistributionOwner(directory) {
+  return directoryOwner(directory, 'generated source distribution')
+}
+
 function removeGeneratedDistribution(owner) {
-  if (process.platform === 'win32') return false
-  const state = generatedOwnerState(owner)
-  if (state === undefined) return true
-  if (!state) return false
-  // Quarantine in a private directory so a raced source path can never turn
-  // the caller-controlled parent into the recursive-delete target. The shared
-  // helper binds both parent directories through held descriptors.
-  const quarantineRoot = mkdtempSync(join(tmpdir(), `dsh-source-verify-cleanup-${process.pid}-`))
-  const quarantineOwner = claimProducedDirectory(quarantineRoot)
-  if (!renameClaimedDirectory(owner, quarantineOwner)) return false
-  const quarantineHandle = openDirectoryHandle(quarantineRoot)
-  try {
-    const quarantine = join(quarantineHandle.path, 'claimed')
-    const moved = lstatSync(quarantine)
-    if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== owner.dev || moved.ino !== owner.ino) return false
-    rmSync(quarantine, { recursive: true, force: true })
-  } finally {
-    closeDirectoryHandle(quarantineHandle)
-  }
-  return removeEmptyClaimedDirectory(quarantineOwner)
+  return removeOwnedDirectory(owner)
 }
 
-/** Claim the private verifier workspace so cleanup cannot remove a replacement. */
 export function temporaryWorkspaceOwner(directory) {
-  const parentPath = dirname(directory)
-  const ancestors = directoryAncestors(parentPath)
-  const parent = lstatSync(parentPath)
-  const info = lstatSync(directory)
-  if (!info.isDirectory() || info.isSymbolicLink()) fail(`temporary source verification workspace is not a real directory: ${directory}`)
-  return {
-    path: directory,
-    parentPath,
-    ancestors,
-    parentDev: parent.dev,
-    parentIno: parent.ino,
-    parentBirthtime: preciseBirthtime(parentPath),
-    dev: info.dev,
-    ino: info.ino,
-    birthtime: preciseBirthtime(directory),
-  }
+  return directoryOwner(directory, 'temporary source verification workspace')
 }
 
-function temporaryWorkspaceState(owner) {
-  try {
-    for (const ancestor of owner.ancestors) {
-      const info = lstatSync(ancestor.path)
-      if (!info.isDirectory() || info.isSymbolicLink() || !sameNode(info, ancestor, preciseBirthtime(ancestor.path))) return false
-    }
-    const info = lstatSync(owner.path)
-    if (!info.isDirectory() || info.isSymbolicLink() || !sameNode(info, owner, preciseBirthtime(owner.path))) return false
-    return true
-  } catch (error) {
-    if (error?.code === 'ENOENT') return undefined
-    throw error
-  }
-}
-
-export function removeTemporaryWorkspace(owner) {
-  if (process.platform === 'win32') return false
-  const state = temporaryWorkspaceState(owner)
-  if (state === undefined) return true
-  if (!state) return false
-  const quarantineRoot = mkdtempSync(join(tmpdir(), `dsh-source-verify-workspace-${process.pid}-`))
-  const quarantineOwner = claimProducedDirectory(quarantineRoot)
-  if (!renameClaimedDirectory(owner, quarantineOwner)) return false
-  const quarantineHandle = openDirectoryHandle(quarantineRoot)
-  try {
-    const quarantine = join(quarantineHandle.path, 'claimed')
-    const moved = lstatSync(quarantine)
-    if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== owner.dev || moved.ino !== owner.ino) return false
-    rmSync(quarantine, { recursive: true, force: true })
-  } finally {
-    closeDirectoryHandle(quarantineHandle)
-  }
-  return removeEmptyClaimedDirectory(quarantineOwner)
+export function removeTemporaryWorkspace(owner, hooks = undefined) {
+  return removeOwnedDirectory(owner, hooks)
 }
 
 async function runSourcePack(values, config) {
@@ -316,11 +261,15 @@ async function main() {
   let rootOwner
   let generatedOwner
   try {
-    if (generatedDistribution) await runSourcePack(values, effective)
+    if (generatedDistribution) {
+      await runSourcePack(values, effective)
+      // Capture the generated directory before reading its manifest so cleanup
+      // cannot later claim a replacement that appeared after the child exited.
+      generatedOwner = generatedDistributionOwner(distributionDir)
+    }
     const distribution = loadDshDistributionManifest(distributionDir, {
       packageJson: join(PACKAGE_ROOT, 'package.json'),
     })
-    if (generatedDistribution) generatedOwner = generatedDistributionOwner(distributionDir, distribution.manifest)
     if (distribution.repository !== effective.repository || distribution.sourceSha !== effective.ref || distribution.version !== effective.expectedVersion) {
       fail('packed DSH distribution does not match the effective source pin')
     }
@@ -354,6 +303,7 @@ async function main() {
     assertNoSourceLeak(candidate, {
       sourcePaths: values['dsh-dir'] === undefined ? [] : [resolve(values['dsh-dir'])],
       distributionPaths: [distributionDir],
+      scanArchive: false,
     })
     // pack:release keeps the postpack smoke offline, but Source Mode's
     // compatibility driver must also prove the packed candidate can be

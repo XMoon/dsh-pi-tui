@@ -51,6 +51,23 @@ test('source leak gate covers peer metadata and concrete CI/source roots', () =>
   }
 })
 
+test('source leak CLI gates dependency metadata without scanning archive payloads', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-source-leak-metadata-'))
+  try {
+    const candidate = tarCandidate(directory, 'payload.tgz', {
+      name: '@xmoon76/dsh-pi-tui',
+      version: '0.4.0-alpha.1',
+    }, {
+      'dist/index.mjs': 'const generatedPath = "/home/runner/work/project/source"\n',
+    })
+    const script = fileURLToPath(new URL('../scripts/dsh-source-leak-gate.mjs', import.meta.url))
+    const result = spawnSync(process.execPath, [script, candidate], { encoding: 'utf8' })
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test('source leak CLI rejects a symlinked candidate tarball', () => {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-source-leak-link-'))
   try {

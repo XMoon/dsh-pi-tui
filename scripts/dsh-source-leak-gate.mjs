@@ -33,6 +33,7 @@ function main() {
   assertNoSourceLeak(candidate, {
     sourcePaths: source === undefined ? [] : [source],
     distributionPaths: distribution === undefined ? [] : [distribution],
+    scanArchive: false,
   })
   console.log(`source leak gate passed — ${candidate}`)
 }
