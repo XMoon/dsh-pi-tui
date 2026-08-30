@@ -1,12 +1,12 @@
 # Pre-push gate:
-#   - non-next tag pushes (refs/tags/* except refs/tags/next*): run the FULL
+#   - branch pushes: skipped; CI is authoritative.
+#   - release tags (refs/tags/v* and refs/tags/next-v*): run the FULL
 #     CI-equivalent verification (source checks + audit + pack with every
 #     postpack smoke). A failed CI round-trip costs ~5 minutes, and some
 #     failures are only visible in the PACKED artifact (the declaration-leak
 #     gate, tarball smokes) — the settleCompactionSurface leak was exactly
 #     this class, see AGENTS.md "Traps hit".
-#   - branch pushes, including main and next, and next tags: skip the gate;
-#     CI is the verification boundary for those pushes.
+#   - other tags: skipped.
 # When the pushed range does NOT touch packages/pi-tui/ (the vendored fork),
 # the fork's own typecheck/tests are skipped (~15 s saved) — the fork suite
 # only guards fork changes, and CI still runs it regardless.
@@ -32,18 +32,16 @@
 
 set -eu
 
-FULL=0
 RUN_GATE=0
-# Aggregate across ALL pushed refs: any non-next tag demands the full gate.
-# Branch pushes, including next, never enter the verification path below.
-# When the gate does run, an unknown remote base or a fork-touching range
-# selects the strict fork-aware chain and can never be downgraded by a later
-# clean ref in the same multi-ref push.
+# Aggregate across ALL pushed refs: any release tag demands the full gate.
+# Branches and arbitrary tags never enter the verification path below. When
+# the gate does run, an unknown remote base or a fork-touching range selects
+# the strict fork-aware chain and can never be downgraded by a later clean ref
+# in the same multi-ref push.
 FORK_CHANGED=0
 while read -r local_ref local_sha remote_ref remote_sha; do
   case "$remote_ref" in
-    refs/tags/next*) ;;
-    refs/tags/*) RUN_GATE=1; FULL=1 ;;
+    refs/tags/v* | refs/tags/next-v*) RUN_GATE=1 ;;
   esac
   # The remote base may be unknown (new tag: zero sha, or a shallow clone):
   # fall back to the safe "fork changed" default.
@@ -57,22 +55,14 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 done
 
 if [ "$RUN_GATE" -eq 0 ]; then
-  echo "✓ pre-push verification skipped (only non-next tag pushes run the gate)"
+  echo "✓ pre-push verification skipped (only v* and next-v* tags run the gate)"
   exit 0
 fi
 
-if [ "$FULL" -eq 1 ]; then
-  if [ "$FORK_CHANGED" -eq 1 ]; then
-    VERIFY="verify:prepush"
-  else
-    VERIFY="verify:prepush:nofork"
-  fi
+if [ "$FORK_CHANGED" -eq 1 ]; then
+  VERIFY="verify:prepush"
 else
-  if [ "$FORK_CHANGED" -eq 1 ]; then
-    VERIFY="typecheck"
-  else
-    VERIFY="typecheck:bundle"
-  fi
+  VERIFY="verify:prepush:nofork"
 fi
 
 # Single source of truth: derive the ordered stage list from the selected

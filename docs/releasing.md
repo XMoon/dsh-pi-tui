@@ -191,8 +191,8 @@ git push origin main vX.Y.Z
 git push origin next next-vX.Y.Z-alpha.N
 ```
 
-The push invokes the Husky pre-push gate for the branch and tag. The tag starts
-`.github/workflows/ci.yml`:
+The push skips the Husky gate for the branch and runs the full gate for the
+release tag. The tag starts `.github/workflows/ci.yml`:
 
 1. the parser selects `latest`/`main` for `v...`, or `next`/`next` for
    `next-v...`, and the ancestry gate checks the tag's required branch;

@@ -460,24 +460,24 @@ release range does not touch `packages/pi-tui/`, and the full
 `prepare` script on `pnpm install`; runtime shims in `.husky/_` are
 gitignored):
 
-- **`main` and `v*` release tags** → `pnpm run verify:prepush`, the
+- **`v*` and `next-v*` release tags** → `pnpm run verify:prepush`, the
   CI-equivalent full chain: fork typecheck + fork tests + docs tests +
   naming gate + `pnpm audit --prod --audit-level high` + `pnpm pack:release`
   (prepack build/typecheck/tests + every postpack smoke, including the
   declaration-leak gate). Measured ≈2 min. Some failures are ONLY visible
   in the packed artifact (the settleCompactionSurface declaration leak was
-  exactly this class) — do not skip this for a CI round-trip. When the
+  exactly this class) — do not skip this for a release-tag push. When the
   pushed range does NOT touch `packages/pi-tui/`, the fork's own
   typecheck/tests are skipped (`verify:prepush:nofork`, ≈1:45; the fork
   suite only guards fork changes and CI runs it regardless).
-- **any other branch** → `pnpm typecheck` only (≈15 s), so WIP pushes stay
-  cheap; fork untouched → `pnpm typecheck:bundle` (≈10 s).
-- Output never goes silent: every stage prints a timestamped progress
-  line (`start` / `ok` + elapsed / `FAIL` + elapsed) as it runs, so a long
-  push always shows WHICH stage is live (the ≈2 min full chain, the
-  ≈1:45 nofork chain, or the ≈10–15 s typecheck). The stage list is NOT
-  hard-coded: the hook derives it from the selected package.json script
-  via `scripts/pre-push-stages.mjs` (top-level `&&` split, quote- and
+- **all branch pushes (including main and next) and other tags** → skip the
+  local gate; CI is the verification boundary for those refs.
+- Output never goes silent when a release-tag gate runs: every stage prints a
+  timestamped progress line (`start` / `ok` + elapsed / `FAIL` + elapsed) as
+  it runs, so a long push always shows WHICH stage is live (the ≈2 min full
+  chain or the ≈1:45 nofork chain). The stage list is NOT hard-coded: the
+  hook derives it from the selected package.json script via
+  `scripts/pre-push-stages.mjs` (top-level `&&` split, quote- and
   escape-aware; rejects unterminated quotes and dangling `&&`), so
   `verify:prepush` / `verify:prepush:nofork` remain the single source of
   truth — adding, removing or reordering a stage in those scripts is
