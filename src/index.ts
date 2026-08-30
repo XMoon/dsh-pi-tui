@@ -3108,17 +3108,13 @@ export function apply(ctx: Context, config: Config): void {
         clearTimeout(repaintTimer)
         repaintTimer = undefined
       }
-      const controller = activeWindow()
-       repaint(app, activeFolder(), controller)
-       if (controller.isLatest()) app.scrollToBottom()
+      repaint(app, activeFolder(), activeWindow())
     }
     const schedulePaint = (): void => {
       if (repaintTimer !== undefined) return
       repaintTimer = setTimeout(() => {
         repaintTimer = undefined
-        const controller = activeWindow()
-       repaint(app, activeFolder(), controller)
-       if (controller.isLatest()) app.scrollToBottom()
+        repaint(app, activeFolder(), activeWindow())
       }, REPAINT_FLUSH_MS)
     }
     // Tool-call arguments by callId, for the approval-preview dialog.
