@@ -161,14 +161,17 @@ export function requiredDshPackages(packageJson = readJson(join(PACKAGE_ROOT, 'p
 }
 
 /**
- * Return the reachable DSH package closure that should be seeded as temporary
- * local dependencies. Direct local specs are needed for pnpm peer resolution;
- * regular dependency edges are also traversed so their peer closure is local.
+ * Return the reachable DSH package closure and its required non-DSH peers.
+ * Direct local specs are needed for pnpm peer resolution; regular dependency
+ * edges are also traversed so their peer closure is local. Non-DSH peers stay
+ * registry-backed, but must be materialized explicitly when auto-install-peers
+ * is disabled for source mode.
  */
-export function sourceInstallPackages(distribution, packageJson) {
-  if (distribution?.kind !== 'source-pack') return []
+function sourceInstallPlan(distribution, packageJson) {
+  if (distribution?.kind !== 'source-pack') return { localPackages: [], externalPeers: {} }
   const pending = requiredDshPackages(packageJson)
   const seen = new Set()
+  const externalPeers = new Map()
   while (pending.length > 0) {
     const name = pending.pop()
     if (name === undefined || seen.has(name)) continue
@@ -185,8 +188,29 @@ export function sourceInstallPackages(distribution, packageJson) {
         pending.push(dependencyName)
       }
     }
+    for (const [peerName, peerRange] of Object.entries(objectValue(metadata.peerDependencies ?? {}, `${name} peerDependencies`))) {
+      if (isDshFamilyPackage(peerName) || metadata.peerDependenciesMeta?.[peerName]?.optional === true) continue
+      const normalizedRange = stringValue(peerRange, `${name} peerDependencies.${peerName}`)
+      const priorRange = externalPeers.get(peerName)
+      if (priorRange !== undefined && priorRange !== normalizedRange) {
+        fail(`DSH source packages require conflicting registry peer ranges for ${peerName}: ${priorRange} and ${normalizedRange}`)
+      }
+      externalPeers.set(peerName, normalizedRange)
+    }
   }
-  return [...seen].sort()
+  return {
+    localPackages: [...seen].sort(),
+    externalPeers: Object.fromEntries([...externalPeers].sort(([left], [right]) => left.localeCompare(right))),
+  }
+}
+
+export function sourceInstallPackages(distribution, packageJson) {
+  return sourceInstallPlan(distribution, packageJson).localPackages
+}
+
+/** Return non-DSH peer dependencies needed by the reachable source closure. */
+export function sourceExternalPeerDependencies(distribution, packageJson) {
+  return sourceInstallPlan(distribution, packageJson).externalPeers
 }
 
 function commandText(result) {
@@ -508,12 +532,22 @@ export function prepareDshInstall(distribution, targetDir, options = {}) {
       if (options.stripPackageManager === true) delete next.packageManager
       if (materializeSourceDependencies) {
         const devDependencies = objectValue(pkg.devDependencies ?? {}, 'temporary install devDependencies')
-        const localPackages = sourceInstallPackages(distribution, pkg)
-        const externalPeers = Object.fromEntries(Object.entries(pkg.peerDependencies ?? {})
+        const installPlan = sourceInstallPlan(distribution, pkg)
+        const localPackages = installPlan.localPackages
+        const declaredExternalPeers = Object.fromEntries(Object.entries(pkg.peerDependencies ?? {})
           .filter(([name]) => !localPackages.includes(name) && pkg.peerDependenciesMeta?.[name]?.optional !== true))
+        const declaredNames = new Set([
+          ...Object.keys(pkg.dependencies ?? {}),
+          ...Object.keys(pkg.optionalDependencies ?? {}),
+          ...Object.keys(devDependencies),
+          ...Object.keys(declaredExternalPeers),
+        ])
+        const discoveredExternalPeers = Object.fromEntries(Object.entries(installPlan.externalPeers)
+          .filter(([name]) => !declaredNames.has(name)))
         next.devDependencies = {
           ...devDependencies,
-          ...externalPeers,
+          ...discoveredExternalPeers,
+          ...declaredExternalPeers,
           ...Object.fromEntries(localPackages.map(name => [name, `file:${resolve(distribution.packages.get(name).path)}`])),
         }
       }

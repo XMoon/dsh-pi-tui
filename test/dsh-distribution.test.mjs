@@ -26,6 +26,7 @@ import {
   prepareDshInstall,
   requiredDshPackages,
   restoreDshInstall,
+  sourceExternalPeerDependencies,
   sourceInstallPackages,
   validateSourceDistribution,
   writeDshWorkspaceOverrides,
@@ -71,12 +72,12 @@ function packageJsonFor(required = [DSH_CLI_PACKAGE]) {
   }
 }
 
-function makeDistribution({ required = [DSH_CLI_PACKAGE], include = required, fileNames = {} } = {}) {
+function makeDistribution({ required = [DSH_CLI_PACKAGE], include = required, fileNames = {}, metadata = {} } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-distribution-test-'))
   const packages = {}
   for (const [index, name] of include.entries()) {
     const fileName = fileNames[name] ?? `misleading-artifact-${index}.tgz`
-    tarPackage(directory, fileName, { name, version: VERSION })
+    tarPackage(directory, fileName, { name, version: VERSION, ...(metadata[name] ?? {}) })
     packages[name] = fileName
   }
   const manifest = {
@@ -393,6 +394,35 @@ test('workspace restoration proceeds when package restoration fails', () => {
     assert.throws(() => restoreDshInstall(prepared), /EISDIR|directory/u)
     assert.equal(readFileSync(workspacePath, 'utf8'), originalWorkspace)
   } finally {
+    rmSync(fixture.directory, { recursive: true, force: true })
+    rmSync(workspace, { recursive: true, force: true })
+  }
+})
+
+test('source installs materialize required non-DSH peers when peer auto-install is disabled', () => {
+  const fixture = makeDistribution({
+    metadata: {
+      [DSH_CLI_PACKAGE]: {
+        peerDependencies: {
+          '@deepseek-ai/cordis-plugin-group': '^1.0.1',
+        },
+      },
+    },
+  })
+  const workspace = mkdtempSync(join(tmpdir(), 'dsh-external-peer-test-'))
+  let prepared
+  try {
+    const distribution = loadDshDistributionManifest(fixture.directory, { packageJson: fixture.packageJson })
+    assert.deepEqual(sourceExternalPeerDependencies(distribution, fixture.packageJson), {
+      '@deepseek-ai/cordis-plugin-group': '^1.0.1',
+    })
+    writeFileSync(join(workspace, 'package.json'), JSON.stringify({ name: 'external-peer-harness', dependencies: {} }))
+    prepared = prepareDshInstall(distribution, workspace, { materializeSourceDependencies: true })
+    const generated = JSON.parse(readFileSync(join(workspace, 'package.json'), 'utf8'))
+    assert.equal(generated.devDependencies['@deepseek-ai/cordis-plugin-group'], '^1.0.1')
+    assert.match(generated.devDependencies[DSH_CLI_PACKAGE], /^file:/u)
+  } finally {
+    restoreDshInstall(prepared)
     rmSync(fixture.directory, { recursive: true, force: true })
     rmSync(workspace, { recursive: true, force: true })
   }
