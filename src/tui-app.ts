@@ -5080,9 +5080,12 @@ export class TuiApp {
     if (scroll === undefined || scroll.viewportHeight <= 0) return undefined
     this.refreshMessageRows()
     const welcomeHeight = this.welcomeCard.render(this.terminal.columns).length
-    const pointAt = (line: number, viewportOffset: number): TranscriptViewportAnchorPoint | undefined => {
+    const pointAt = (fromTop: boolean): TranscriptViewportAnchorPoint | undefined => {
       const occurrences = new Map<string, number>()
+      const viewportTop = scroll.scrollTop
+      const viewportBottom = viewportTop + scroll.viewportHeight - 1
       let rowTop = welcomeHeight
+      let candidate: TranscriptViewportAnchorPoint | undefined
       for (const entry of this.messageRows) {
         const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.activity === undefined ? 'message' : 'activity'
         const turn = entry.message !== undefined && 'turn' in entry.message
@@ -5091,27 +5094,33 @@ export class TuiApp {
         const occurrenceKey = turn === undefined ? undefined : `${rowKind}:${turn}`
         const occurrence = occurrenceKey === undefined ? 0 : (occurrences.get(occurrenceKey) ?? 0)
         if (occurrenceKey !== undefined) occurrences.set(occurrenceKey, occurrence + 1)
-        if (line >= rowTop && line < rowTop + entry.height && entry.height > 0) {
-          if (turn === undefined) return undefined
-          return {
+        const visible = entry.height > 0
+          && rowTop + entry.height > viewportTop
+          && rowTop <= viewportBottom
+        if (visible && turn !== undefined) {
+          const line = fromTop
+            ? Math.max(viewportTop, rowTop)
+            : Math.min(viewportBottom, rowTop + entry.height - 1)
+          const point: TranscriptViewportAnchorPoint = {
             turn,
             rowKind,
             occurrence,
             ...(entry.message === undefined ? {} : { message: entry.message }),
             ...(entry.activity === undefined ? {} : { activity: entry.activity }),
             rowOffset: line - rowTop,
-            viewportOffset,
+            viewportOffset: line - viewportTop,
           }
+          if (fromTop) return point
+          candidate = point
         }
         rowTop += entry.height
       }
-      return undefined
+      return candidate
     }
-    const viewportHeight = scroll.viewportHeight
     return {
       scrollTop: scroll.scrollTop,
-      top: pointAt(scroll.scrollTop, 0),
-      bottom: pointAt(scroll.scrollTop + viewportHeight - 1, viewportHeight - 1),
+      top: pointAt(true),
+      bottom: pointAt(false),
     }
   }
 
