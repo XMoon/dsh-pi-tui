@@ -1888,6 +1888,16 @@ export class TranscriptFolder {
   }
 }
 
+/** Search the complete folded transcript, never a bounded presentation window. */
+export function searchTranscript(folder: TranscriptFolder, query: string): TranscriptMessage[] {
+  const needle = query.trim().toLowerCase()
+  if (needle === '') return []
+  return folder.messages().filter(message => {
+    const text = message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}` : message.text
+    return text.toLowerCase().includes(needle)
+  })
+}
+
 /**
  * Fold a session event log into the transcript messages, in log order.
  * `assistant/chunk` text deltas accumulate into the assistant message of
