@@ -919,10 +919,8 @@ async function smokeOfficialPresetMounts(invocation, workDir, env) {
       tmux.sendLiteral('/new')
       await delay(350)
       tmux.sendKey('Enter')
-      await waitUntil(`official preset ${presetId} session`, TIMEOUTS.command, () => {
-        if (!tmux.hasSession()) return false
-        return tmux.capturePane().includes('started a fresh session')
-      }, 'COMPAT_BOOT_FAILURE')
+      // The command result is a transient UI line; the durable probe below is
+      // the canonical evidence that /new created the requested session.
       await waitUntil(`official preset ${presetId} durable header`, TIMEOUTS.command, () => {
         const evidence = readOptionalJson(env.PI2DSH_COMPAT_HEADER_EVIDENCE)
         if (evidence?.error !== undefined) {
