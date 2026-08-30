@@ -324,12 +324,12 @@ test('source pack rejects staged directory and file replacement races', t => {
     const destination = join(staging.path, 'copy.tgz')
     writeFileSync(source, 'original')
     linkSync(source, hardlink)
-    const hardlinkInfo = lstatSync(hardlink)
-    assert.ok(hardlinkInfo.nlink > 1)
+    const hardlinkInfo = lstatSync(hardlink, { bigint: true })
+    assert.ok(hardlinkInfo.nlink > 1n)
     assert.throws(() => copyOwnedFile(hardlink, destination, hardlinkInfo), /hardlinked/u)
     assert.equal(existsSync(destination), false)
     rmSync(hardlink)
-    const expected = lstatSync(source)
+    const expected = lstatSync(source, { bigint: true })
     rmSync(source)
     writeFileSync(source, 'replacement')
     assert.throws(() => copyOwnedFile(source, destination, expected), /hardlinked|before copy/u)
@@ -356,7 +356,7 @@ test('source pack copies through the claimed output descriptor after path replac
     writeFileSync(source, 'source')
     owner = claimSourcePackOutput(join(container, 'output'))
     handle = openDirectoryHandle(owner.path)
-    const expected = lstatSync(source)
+    const expected = lstatSync(source, { bigint: true })
     const movedOutput = join(container, 'moved-output')
     renameSync(owner.path, movedOutput)
     mkdirSync(owner.path)
@@ -404,7 +404,19 @@ test('dirty source is a warning locally but a CI failure', () => {
     const head = git(directory, 'rev-parse', 'HEAD')
     writeFileSync(join(directory, 'local-build.log'), 'dirty')
     assert.throws(() => validateSourceIdentity(directory, config(head), { ci: true }), error => error instanceof DshDistributionError && /dirty/u.test(error.message))
-    const local = validateSourceIdentity(directory, config(head), { ci: false })
+    const previousCi = process.env.CI
+    const previousActions = process.env.GITHUB_ACTIONS
+    delete process.env.CI
+    delete process.env.GITHUB_ACTIONS
+    let local
+    try {
+      local = validateSourceIdentity(directory, config(head), { ci: false })
+    } finally {
+      if (previousCi === undefined) delete process.env.CI
+      else process.env.CI = previousCi
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS
+      else process.env.GITHUB_ACTIONS = previousActions
+    }
     assert.equal(local.dirty, true)
     assert.equal(local.reproducible, false)
   } finally {

@@ -136,13 +136,24 @@ function sourcePackOutput(values) {
   return resolve(values.out ?? join(tmpdir(), `dsh-source-pack-${process.pid}`))
 }
 
+function preciseBirthtime(path) {
+  const info = lstatSync(path, { bigint: true })
+  return String(info.birthtimeNs ?? info.birthtimeMs)
+}
+
+function sameNode(info, expected, birthtime) {
+  return info.dev === expected.dev
+    && info.ino === expected.ino
+    && (expected.birthtime === undefined || birthtime === expected.birthtime)
+}
+
 function directoryAncestors(path) {
   const ancestors = []
   let current = path
   while (true) {
     const info = lstatSync(current)
     if (!info.isDirectory() || info.isSymbolicLink()) fail(`source distribution ancestor must be a real directory: ${current}`)
-    ancestors.push({ path: current, dev: info.dev, ino: info.ino })
+    ancestors.push({ path: current, dev: info.dev, ino: info.ino, birthtime: preciseBirthtime(current) })
     const parent = dirname(current)
     if (parent === current) break
     current = parent
@@ -163,17 +174,27 @@ function generatedDistributionOwner(directory, manifest) {
   if (!info.isDirectory() || info.isSymbolicLink() || String(info.dev) !== identity.dev || String(info.ino) !== identity.ino) {
     fail(`generated source distribution ownership changed: ${directory}`)
   }
-  return { path: directory, parentPath, ancestors, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
+  return {
+    path: directory,
+    parentPath,
+    ancestors,
+    parentDev: parent.dev,
+    parentIno: parent.ino,
+    parentBirthtime: preciseBirthtime(parentPath),
+    dev: info.dev,
+    ino: info.ino,
+    birthtime: preciseBirthtime(directory),
+  }
 }
 
 function generatedOwnerState(owner) {
   try {
     for (const ancestor of owner.ancestors) {
       const info = lstatSync(ancestor.path)
-      if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== ancestor.dev || info.ino !== ancestor.ino) return false
+      if (!info.isDirectory() || info.isSymbolicLink() || !sameNode(info, ancestor, preciseBirthtime(ancestor.path))) return false
     }
     const info = lstatSync(owner.path)
-    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+    if (!info.isDirectory() || info.isSymbolicLink() || !sameNode(info, owner, preciseBirthtime(owner.path))) return false
     return true
   } catch (error) {
     if (error?.code === 'ENOENT') return undefined
@@ -212,17 +233,27 @@ export function temporaryWorkspaceOwner(directory) {
   const parent = lstatSync(parentPath)
   const info = lstatSync(directory)
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`temporary source verification workspace is not a real directory: ${directory}`)
-  return { path: directory, parentPath, ancestors, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
+  return {
+    path: directory,
+    parentPath,
+    ancestors,
+    parentDev: parent.dev,
+    parentIno: parent.ino,
+    parentBirthtime: preciseBirthtime(parentPath),
+    dev: info.dev,
+    ino: info.ino,
+    birthtime: preciseBirthtime(directory),
+  }
 }
 
 function temporaryWorkspaceState(owner) {
   try {
     for (const ancestor of owner.ancestors) {
       const info = lstatSync(ancestor.path)
-      if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== ancestor.dev || info.ino !== ancestor.ino) return false
+      if (!info.isDirectory() || info.isSymbolicLink() || !sameNode(info, ancestor, preciseBirthtime(ancestor.path))) return false
     }
     const info = lstatSync(owner.path)
-    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+    if (!info.isDirectory() || info.isSymbolicLink() || !sameNode(info, owner, preciseBirthtime(owner.path))) return false
     return true
   } catch (error) {
     if (error?.code === 'ENOENT') return undefined

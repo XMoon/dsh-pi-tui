@@ -83,6 +83,19 @@ function canonicalPath(path) {
   return missing.reduce((parent, entry) => join(parent, entry), realpathSync(current))
 }
 
+function preciseBirthtime(pathOrFd, descriptor = false) {
+  const info = descriptor
+    ? fstatSync(pathOrFd, { bigint: true })
+    : lstatSync(pathOrFd, { bigint: true })
+  return String(info.birthtimeNs ?? info.birthtimeMs)
+}
+
+function sameNode(info, expected, birthtime) {
+  return info.dev === expected.dev
+    && info.ino === expected.ino
+    && (expected.birthtime === undefined || birthtime === expected.birthtime)
+}
+
 /** Record every existing canonical directory ancestor from the deepest anchor. */
 function directoryAncestors(anchor) {
   const ancestors = []
@@ -90,7 +103,7 @@ function directoryAncestors(anchor) {
   while (true) {
     const info = lstatSync(current)
     if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output ancestor must be a real directory: ${current}`)
-    ancestors.push({ path: current, dev: info.dev, ino: info.ino })
+    ancestors.push({ path: current, dev: info.dev, ino: info.ino, birthtime: preciseBirthtime(current) })
     const parent = dirname(current)
     if (parent === current) break
     current = parent
@@ -160,7 +173,7 @@ function verifyAncestors(ancestors, action) {
       if (error?.code === 'ENOENT') fail(`source pack output ancestor disappeared during ${action}: ${ancestor.path}`)
       throw error
     }
-    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== ancestor.dev || info.ino !== ancestor.ino) {
+    if (!info.isDirectory() || info.isSymbolicLink() || !sameNode(info, ancestor, preciseBirthtime(ancestor.path))) {
       fail(`source pack output ancestor changed during ${action}: ${ancestor.path}`)
     }
   }
@@ -179,7 +192,17 @@ export function claimSourcePackOutput(output, validation = undefined) {
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack output claim is not a real directory: ${output}`)
   const ancestors = directoryAncestors(parentPath)
   verifyAncestors(expectedAncestors, 'claim')
-  return { path: output, parentPath, ancestors, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
+  return {
+    path: output,
+    parentPath,
+    ancestors,
+    parentDev: parent.dev,
+    parentIno: parent.ino,
+    parentBirthtime: preciseBirthtime(parentPath),
+    dev: info.dev,
+    ino: info.ino,
+    birthtime: preciseBirthtime(output),
+  }
 }
 
 /** Create a private root that the official packer can freely replace below. */
@@ -190,17 +213,27 @@ export function claimSourcePackStaging() {
   const parent = lstatSync(parentPath)
   const info = lstatSync(path)
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack staging root is not a real directory: ${path}`)
-  return { path, parentPath, ancestors, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
+  return {
+    path,
+    parentPath,
+    ancestors,
+    parentDev: parent.dev,
+    parentIno: parent.ino,
+    parentBirthtime: preciseBirthtime(parentPath),
+    dev: info.dev,
+    ino: info.ino,
+    birthtime: preciseBirthtime(path),
+  }
 }
 
 function ownerState(owner) {
   try {
     for (const ancestor of owner.ancestors) {
       const info = lstatSync(ancestor.path)
-      if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== ancestor.dev || info.ino !== ancestor.ino) return false
+      if (!info.isDirectory() || info.isSymbolicLink() || !sameNode(info, ancestor, preciseBirthtime(ancestor.path))) return false
     }
     const info = lstatSync(owner.path)
-    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
+    if (!info.isDirectory() || info.isSymbolicLink() || !sameNode(info, owner, preciseBirthtime(owner.path))) return false
     return true
   } catch (error) {
     if (error?.code === 'ENOENT') return undefined
@@ -215,7 +248,17 @@ export function claimProducedDirectory(path) {
   const parent = lstatSync(parentPath)
   const info = lstatSync(path)
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`source pack produced an invalid output directory: ${path}`)
-  return { path, parentPath, ancestors, parentDev: parent.dev, parentIno: parent.ino, dev: info.dev, ino: info.ino }
+  return {
+    path,
+    parentPath,
+    ancestors,
+    parentDev: parent.dev,
+    parentIno: parent.ino,
+    parentBirthtime: preciseBirthtime(parentPath),
+    dev: info.dev,
+    ino: info.ino,
+    birthtime: preciseBirthtime(path),
+  }
 }
 
 /** Open a directory through a stable descriptor where the platform exposes one. */
@@ -243,11 +286,13 @@ export function renameClaimedDirectory(owner, destinationOwner, destinationName 
   try {
     if (sourceParent.fd === undefined || destinationParent.fd === undefined) return false
     const parent = fstatSync(sourceParent.fd)
-    if (parent.dev !== owner.parentDev || parent.ino !== owner.parentIno) return false
+    if (parent.dev !== owner.parentDev || parent.ino !== owner.parentIno
+      || (owner.parentBirthtime !== undefined && preciseBirthtime(sourceParent.fd, true) !== owner.parentBirthtime)) return false
     if (ownerState(owner) !== true || ownerState(destinationOwner) !== true) return false
     hooks?.beforeRename?.()
     const currentParent = fstatSync(sourceParent.fd)
-    if (currentParent.dev !== owner.parentDev || currentParent.ino !== owner.parentIno) return false
+    if (currentParent.dev !== owner.parentDev || currentParent.ino !== owner.parentIno
+      || (owner.parentBirthtime !== undefined && preciseBirthtime(sourceParent.fd, true) !== owner.parentBirthtime)) return false
     if (ownerState(owner) !== true || ownerState(destinationOwner) !== true) return false
     renameSync(
       join(sourceParent.path, basename(owner.path)),
@@ -268,7 +313,9 @@ export function removeEmptyClaimedDirectory(owner) {
   try {
     if (parentHandle.fd === undefined) return false
     const parent = fstatSync(parentHandle.fd)
-    if (parent.dev !== owner.parentDev || parent.ino !== owner.parentIno || ownerState(owner) !== true) return false
+    if (parent.dev !== owner.parentDev || parent.ino !== owner.parentIno
+      || (owner.parentBirthtime !== undefined && preciseBirthtime(parentHandle.fd, true) !== owner.parentBirthtime)
+      || ownerState(owner) !== true) return false
     try {
       rmdirSync(join(parentHandle.path, basename(owner.path)))
     } catch (error) {
@@ -289,13 +336,31 @@ function writeAll(fd, buffer) {
   }
 }
 
+function exactlyOneLink(info) {
+  return info.nlink === 1 || info.nlink === 1n
+}
+
+function expectedBirthtime(expected) {
+  if (typeof expected.birthtime === 'string') return expected.birthtime
+  if (expected.birthtimeNs !== undefined) return String(expected.birthtimeNs)
+  return undefined
+}
+
+function matchesExpectedFile(info, expected, birthtime) {
+  const expectedTime = expectedBirthtime(expected)
+  return String(info.dev) === String(expected.dev)
+    && String(info.ino) === String(expected.ino)
+    && exactlyOneLink(info)
+    && (expectedTime === undefined || birthtime === expectedTime)
+}
+
 /** Copy a regular source file through an opened source descriptor. */
 export function copyOwnedFile(source, destination, expected) {
   const sourceFd = openSync(source, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
   let destinationFd
   try {
     const opened = fstatSync(sourceFd)
-    if (!opened.isFile() || opened.isSymbolicLink() || opened.nlink !== 1 || opened.dev !== expected.dev || opened.ino !== expected.ino) {
+    if (!opened.isFile() || opened.isSymbolicLink() || !matchesExpectedFile(opened, expected, preciseBirthtime(sourceFd, true))) {
       fail(`source pack staged file changed or is hardlinked before copy: ${source}`)
     }
     destinationFd = openSync(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o644)
@@ -306,7 +371,7 @@ export function copyOwnedFile(source, destination, expected) {
       if (bytes > 0) writeAll(destinationFd, buffer.subarray(0, bytes))
     } while (bytes > 0)
     const after = fstatSync(sourceFd)
-    if (after.dev !== expected.dev || after.ino !== expected.ino || after.nlink !== 1 || after.size !== opened.size) {
+    if (!matchesExpectedFile(after, expected, preciseBirthtime(sourceFd, true)) || after.size !== opened.size) {
       fail(`source pack staged file changed or is hardlinked during copy: ${source}`)
     }
   } finally {
@@ -499,7 +564,8 @@ async function main() {
       const source = join(stageHandle.path, entry)
       const info = lstatSync(source)
       if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) fail(`source pack staged tarball is not a regular file with exactly one link: ${source}`)
-      copyOwnedFile(source, join(outputHandle.path, entry), info)
+      const expected = lstatSync(source, { bigint: true })
+      copyOwnedFile(source, join(outputHandle.path, entry), expected)
       assertClaimedSourcePackOutput(outputOwner, `final copy ${entry}`)
       assertStageOwnership(staging, stageOutputOwner, `staged unlink ${entry}`)
       unlinkSync(source)
