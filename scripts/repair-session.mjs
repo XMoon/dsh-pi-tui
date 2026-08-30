@@ -37,7 +37,7 @@ import { randomUUID } from 'node:crypto'
 import { copyFileSync, existsSync, openSync, fsyncSync, closeSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
@@ -461,8 +461,20 @@ function main(args) {
   console.log(`  verify: valid frame layout, contiguous, ${verifyEvents.events.length} event(s)`)
 }
 
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
-if (isMain) {
+function invokedAsMainModule() {
+  const entry = process.argv[1]
+  if (entry === undefined) return false
+  try {
+    // pnpm exposes package files through symlinks. Node resolves
+    // import.meta.url to the real file while argv[1] retains the symlink, so
+    // compare canonical paths instead of treating a symlinked CLI as an import.
+    return realpathSync(entry) === fileURLToPath(import.meta.url)
+  } catch {
+    return import.meta.url === pathToFileURL(entry).href
+  }
+}
+
+if (invokedAsMainModule()) {
   try {
     main(process.argv.slice(2))
   } catch (error) {

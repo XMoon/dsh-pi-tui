@@ -24,7 +24,7 @@ import {
   scanZstdLayout,
 } from '../scripts/repair-core.mjs'
 import { writeArtifact, verifyArtifactFile, parseArgs } from '../scripts/repair-session.mjs'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -415,6 +415,19 @@ test('CLI --help still prints usage and exits 0', () => {
   const result = runCli(['--help', '--dsh-dir', 'ignored'])
   assert.equal(result.status, 0)
   assert.match(result.stdout, /usage:/)
+})
+
+test('CLI --help executes through a package-manager symlink', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-repair-link-'))
+  const link = join(dir, 'repair-session.mjs')
+  try {
+    symlinkSync(REPAIR_SCRIPT, link)
+    const result = spawnSync(process.execPath, [link, '--help'], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /usage:/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('CLI --scan reports a torn tail with byte accounting, never healthy', () => {
