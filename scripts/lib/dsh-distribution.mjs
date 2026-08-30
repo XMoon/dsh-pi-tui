@@ -27,6 +27,7 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 export const PACKAGE_ROOT = resolve(SCRIPT_DIR, '../..')
 export const DEFAULT_SOURCE_CONFIG = join(PACKAGE_ROOT, 'test', 'compat', 'dsh-source.json')
 export const SOURCE_MANIFEST_NAME = 'dsh-source-distribution.json'
+export const DSH_ROOT_PACKAGE = '@deepseek-ai/dsh-root'
 export const DSH_CLI_PACKAGE = '@deepseek-ai/dsh'
 export const DSH_REPOSITORY = 'deepseek-ai/deepseek-harness'
 const FULL_SHA = /^[0-9a-f]{40}$/iu
@@ -91,6 +92,20 @@ function runGit(dshDir, args) {
   return (result.stdout ?? '').trim()
 }
 
+/** Normalize the GitHub remote spellings accepted for the pinned source. */
+export function normalizeDshRepositoryRemote(remote) {
+  return stringValue(remote, 'DSH source repository remote').trim()
+    .replace(/^git@github\.com:/u, 'https://github.com/')
+    .replace(/^ssh:\/\/git@github\.com\//u, 'https://github.com/')
+    .replace(/\/+$/u, '')
+    .replace(/\.git$/u, '')
+    .replace(/\/+$/u, '')
+}
+
+export function expectedDshRepositoryRemote(repository) {
+  return `https://github.com/${stringValue(repository, 'DSH source repository')}`
+}
+
 /**
  * Verify that a checkout is the exact configured DSH source identity. CI is
  * strict about a clean tree; local verification may continue with a visible
@@ -99,11 +114,18 @@ function runGit(dshDir, args) {
 export function validateSourceIdentity(dshDir, config, options = {}) {
   const directory = resolve(dshDir)
   if (!existsSync(directory) || !statSync(directory).isDirectory()) fail(`DSH source checkout is missing: ${directory}`)
+  const expectedRepository = stringValue(config.repository, 'DSH source repository')
+  if (expectedRepository !== DSH_REPOSITORY) fail(`DSH source repository must be ${DSH_REPOSITORY}`)
+  const origin = normalizeDshRepositoryRemote(runGit(directory, ['remote', 'get-url', 'origin']))
+  if (origin !== expectedDshRepositoryRemote(expectedRepository)) {
+    fail(`DSH source repository remote mismatch: expected ${expectedDshRepositoryRemote(expectedRepository)}, got ${origin}`)
+  }
   const expectedRef = assertSha(stringValue(config.ref, 'DSH source ref'), 'DSH source ref')
   const expectedVersion = assertVersion(stringValue(config.expectedVersion, 'DSH expected version'), 'DSH expected version')
   const head = assertSha(runGit(directory, ['rev-parse', 'HEAD']), 'DSH checkout HEAD')
   if (head !== expectedRef) fail(`DSH source SHA mismatch: configured ${expectedRef}, checkout ${head}`)
   const root = readJson(join(directory, 'package.json'), 'DSH root package.json')
+  if (root.name !== DSH_ROOT_PACKAGE) fail(`DSH root package name mismatch: expected ${DSH_ROOT_PACKAGE}, got ${root.name ?? '(missing)'}`)
   if (root.version !== expectedVersion) fail(`DSH root version mismatch: expected ${expectedVersion}, got ${root.version ?? '(missing)'}`)
   const cli = readJson(join(directory, 'apps', 'cli', 'package.json'), 'DSH CLI package.json')
   if (cli.name !== DSH_CLI_PACKAGE) fail(`DSH CLI package name mismatch: expected ${DSH_CLI_PACKAGE}, got ${cli.name ?? '(missing)'}`)
@@ -286,13 +308,13 @@ function safeDistributionFile(directory, fileName) {
   return canonical
 }
 
-export function packageMapFromTarballs(directory, expectedVersion) {
+export function packageMapFromTarballs(directory, expectedVersion, options = {}) {
   const tarballs = tgzFiles(directory)
   if (tarballs.length === 0) fail(`DSH release pack produced no .tgz artifacts in ${directory}`)
   const packages = new Map()
   const usedFiles = new Set()
   for (const tarball of tarballs) {
-    const metadata = readPackedPackageJson(tarball)
+    const metadata = assertNoSourceLeak(tarball, options)
     const name = stringValue(metadata.name, `${tarball} package.name`)
     const version = assertVersion(stringValue(metadata.version, `${tarball} package.version`), `${tarball} package.version`)
     if (!isDshFamilyPackage(name)) fail(`DSH release pack contains non-DSH package ${name} in ${tarball}`)
@@ -307,7 +329,7 @@ export function packageMapFromTarballs(directory, expectedVersion) {
   return packages
 }
 
-function normalisePackageEntries(manifest, directory) {
+function normalisePackageEntries(manifest, directory, options = {}) {
   const packageEntries = objectValue(manifest.packages, 'DSH distribution packages')
   const packages = new Map()
   const seenFiles = new Set()
@@ -316,7 +338,7 @@ function normalisePackageEntries(manifest, directory) {
     const path = safeDistributionFile(directory, fileName)
     if (seenFiles.has(path)) fail(`DSH distribution maps more than one package to ${path}`)
     seenFiles.add(path)
-    const metadata = readPackedPackageJson(path)
+    const metadata = assertNoSourceLeak(path, options)
     if (metadata.name !== name) fail(`DSH distribution name mismatch: manifest ${name}, tarball ${metadata.name}`)
     if (metadata.version !== manifest.version) fail(`${name} has version ${metadata.version}; expected ${manifest.version}`)
     packages.set(name, { fileName, path, version: metadata.version })
@@ -364,7 +386,20 @@ export function validateSourceDistribution(input, options = {}) {
   if (options.expectedVersion !== undefined && version !== assertVersion(options.expectedVersion, 'expected DSH version')) {
     fail(`DSH distribution version mismatch: expected ${options.expectedVersion}, got ${version}`)
   }
-  const packages = normalisePackageEntries({ ...manifest, version }, directory)
+  if (typeof manifest.dirty !== 'boolean' || typeof manifest.reproducible !== 'boolean') {
+    fail('DSH distribution must positively attest dirty and reproducible booleans')
+  }
+  if (manifest.dirty !== false || manifest.reproducible !== true) {
+    // Dirty distributions are valid only as explicitly provided local debug
+    // inputs; callers must opt out of the shared SHA cache separately.
+    if (options.allowDirty !== true) fail('DSH distribution is dirty or non-reproducible')
+  }
+  const packages = normalisePackageEntries({ ...manifest, version }, directory, {
+    ...options,
+    // Distribution validation checks dependency metadata; the dedicated leak
+    // gate opts into archive-byte scanning for the final TUI artifact.
+    scanArchive: options.scanArchive ?? false,
+  })
   const listedPaths = new Set([...packages.values()].map(entry => resolve(entry.path)))
   const unlistedTarballs = tgzFiles(directory).filter(path => !listedPaths.has(resolve(path)))
   if (unlistedTarballs.length > 0) fail(`DSH distribution contains unlisted tarball(s): ${unlistedTarballs.join(', ')}`)
@@ -415,10 +450,27 @@ export function npmDshDistribution(version) {
 }
 
 /** Resolve a mode/configuration into one shared distribution representation. */
-export function loadDshDistribution({ mode = process.env.DSH_MODE ?? 'npm', manifest, version, packageJson, sourceConfig } = {}) {
+export function loadDshDistribution({
+  mode = process.env.DSH_MODE ?? 'npm',
+  manifest,
+  version,
+  packageJson,
+  sourceConfig,
+  allowDirty = false,
+  sourcePaths,
+  tempRoots,
+  distributionPaths,
+} = {}) {
   if (mode === 'source') {
     if (manifest === undefined) fail('source mode requires a DSH distribution manifest')
-    const distribution = loadDshDistributionManifest(manifest, { packageJson, sourceConfig })
+    const distribution = loadDshDistributionManifest(manifest, {
+      packageJson,
+      sourceConfig,
+      allowDirty,
+      sourcePaths,
+      tempRoots,
+      distributionPaths,
+    })
     if (sourceConfig !== undefined) {
       const config = typeof sourceConfig === 'string' ? loadDshSourceConfig(sourceConfig) : sourceConfig
       if (distribution.repository !== config.repository || distribution.sourceSha !== config.ref || distribution.version !== config.expectedVersion) {
@@ -609,26 +661,42 @@ function packageInstallPath(root, name) {
   return join(root, 'node_modules', ...name.split('/'))
 }
 
+function pathWithin(root, target) {
+  const path = relative(root, target)
+  return path === '' || (!path.startsWith(`..${sep}`) && path !== '..' && !isAbsolute(path))
+}
+
+/** Verify one DSH package resolves through pnpm's local file store. */
+export function assertSourcePackageResolution(targetDir, distribution, name) {
+  if (distribution?.kind !== 'source-pack') return
+  const root = resolve(targetDir)
+  const entry = distribution.packages.get(name)
+  if (entry === undefined) fail(`source resolution check has no distribution entry for ${name}`)
+  const installed = packageInstallPath(root, name)
+  if (!existsSync(installed)) fail(`source resolution is missing installed package ${name}`)
+  const installedInfo = lstatSync(installed)
+  if (!installedInfo.isSymbolicLink()) fail(`source resolution for ${name} is not a pnpm package link`)
+  const metadata = readJson(join(installed, 'package.json'), `${name} installed package.json`)
+  if (metadata.name !== name || metadata.version !== distribution.version) {
+    fail(`source resolution metadata mismatch for ${name}: ${metadata.name ?? '(missing)'}@${metadata.version ?? '(missing)'}`)
+  }
+  const actual = realpathSync(installed)
+  const virtualStore = join(root, 'node_modules', '.pnpm')
+  if (!existsSync(virtualStore) || !pathWithin(realpathSync(virtualStore), actual)) {
+    fail(`source resolution for ${name} is outside pnpm's virtual store: ${actual}`)
+  }
+  const actualRelative = relative(realpathSync(virtualStore), actual).replaceAll('\\', '/').toLowerCase()
+  const packageSuffix = `/node_modules/${name.toLowerCase()}`
+  if (!actualRelative.endsWith(packageSuffix) || !actualRelative.includes('@file+')) {
+    fail(`source resolution for ${name} did not come from a local file package: ${actual}`)
+  }
+  return { actual }
+}
+
 /** Verify every DSH package resolves to a local packed tarball after install. */
 export function assertSourceResolution(targetDir, distribution, required = [...distribution.packages.keys()]) {
   if (distribution?.kind !== 'source-pack') return
-  const root = resolve(targetDir)
-  for (const name of required) {
-    const entry = distribution.packages.get(name)
-    if (entry === undefined) fail(`source resolution check has no distribution entry for ${name}`)
-    const installed = packageInstallPath(root, name)
-    if (!existsSync(installed)) fail(`source resolution is missing installed package ${name}`)
-    const metadata = readJson(join(installed, 'package.json'), `${name} installed package.json`)
-    if (metadata.name !== name || metadata.version !== distribution.version) {
-      fail(`source resolution metadata mismatch for ${name}: ${metadata.name ?? '(missing)'}@${metadata.version ?? '(missing)'}`)
-    }
-    const actual = realpathSync(installed)
-    const expectedFile = entry.fileName.replaceAll('\\', '/')
-    const actualLower = actual.toLowerCase()
-    if (!actualLower.includes('file+') && !actualLower.includes(expectedFile.toLowerCase())) {
-      fail(`source resolution for ${name} did not come from a local tgz: ${actual}`)
-    }
-  }
+  for (const name of required) assertSourcePackageResolution(targetDir, distribution, name)
   printDshProvenance(distribution)
 }
 
@@ -696,9 +764,13 @@ export function assertNoSourceLeak(tarball, options = {}) {
     pnpm: metadata.pnpm,
   }, `${tarball} package.json`, forbidden)
 
+  if (options.scanArchive === false) return metadata
+
   const allEntries = runTar(['-tzf', tarball]).split(/\r?\n/u).filter(Boolean)
+  // Explicit source roots are used to reject dependency specs, not ordinary
+  // prose embedded in a package's documentation. Archive bytes still reject
+  // concrete temporary/build-root tokens below.
   const textForbidden = [
-    ...sourceTokens(options),
     '/tmp/dsh-',
     '\\tmp\\dsh-',
   ]
@@ -736,7 +808,17 @@ export function assertNoSourceLeak(tarball, options = {}) {
       fail(`source leak in ${tarball}: unsafe archive link target ${target}`)
     }
   }
-  const entries = allEntries.filter(entry => entry.startsWith('package/') && !entry.endsWith('/'))
+  // Documentation may legitimately mention an absolute path as prose. Scan
+  // executable and metadata payloads for leaked build roots, while leaving
+  // README/license text to the dependency and archive-path checks above.
+  const entries = allEntries.filter(entry => {
+    if (!entry.startsWith('package/') || entry.endsWith('/')) return false
+    // README and license files are documentation, not executable payloads;
+    // extensionless files under lib/dist are still commonly loaders/scripts.
+    if (/(?:^|\/)(?:README|LICENSE)(?:\.[^/]*)?$/iu.test(entry)) return false
+    return /\.(?:[cm]?js|[cm]?ts|json|map|ya?ml|sh|ps1|css|html)$/iu.test(entry)
+      || /(?:^|\/)(?:lib|dist)\/[^/]+$/u.test(entry)
+  })
   for (const entry of entries) {
     const bytes = runTarBuffer(['-xOf', tarball, entry])
     const byteMatch = textForbidden.find(token => bytes.includes(Buffer.from(token)))

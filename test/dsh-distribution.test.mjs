@@ -87,6 +87,8 @@ function makeDistribution({ required = [DSH_CLI_PACKAGE], include = required, fi
     sourceRef: SHA,
     sourceSha: SHA,
     version: VERSION,
+    dirty: false,
+    reproducible: true,
     packages,
   }
   writeFileSync(join(directory, 'dsh-source-distribution.json'), `${JSON.stringify(manifest)}\n`)

@@ -70,6 +70,30 @@ function pathInside(child, parent) {
   return relativePath === '' || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`))
 }
 
+const ALLOWED_AUXILIARY_OUTPUT = new Set(['publish-order.txt'])
+
+/** Remove the official packer's disposable metadata, rejecting unknown files. */
+function cleanPackOutput(path) {
+  if (!existsSync(path)) fail(`official DSH pack output is missing: ${path}`)
+  const info = lstatSync(path)
+  if (!info.isDirectory() || info.isSymbolicLink()) fail(`official DSH pack output must be a directory: ${path}`)
+  for (const entry of readdirSync(path)) {
+    if (entry.endsWith('.tgz')) continue
+    if (!ALLOWED_AUXILIARY_OUTPUT.has(entry)) fail(`official DSH pack output contains unknown entry: ${entry}`)
+    const auxiliaryPath = join(path, entry)
+    const auxiliaryInfo = lstatSync(auxiliaryPath)
+    if (!auxiliaryInfo.isFile() || auxiliaryInfo.isSymbolicLink() || auxiliaryInfo.nlink !== 1) {
+      fail(`official DSH auxiliary output must be a regular file: ${auxiliaryPath}`)
+    }
+    rmSync(auxiliaryPath)
+  }
+}
+
+/** Create a disposable build directory beside the final output. */
+function sourcePackStaging(parent) {
+  return mkdtempSync(join(parent, `.dsh-source-pack-${process.pid}-`))
+}
+
 /** Resolve existing path components so symlinked parents cannot bypass roots. */
 function canonicalPath(path) {
   const missing = []
@@ -119,8 +143,15 @@ function directoryAncestors(anchor) {
 export function validateSourcePackOutputInfo(outputPath, dshDir) {
   const requested = resolve(outputPath)
   const source = resolve(dshDir)
-  const requestedInfo = existsSync(requested) ? lstatSync(requested) : undefined
-  if (requestedInfo?.isSymbolicLink()) fail(`source pack output must not be a symlink: ${requested}`)
+  let requestedInfo
+  try {
+    // lstatSync observes dangling symlinks; existsSync alone incorrectly
+    // treats them as absent and would allow an unsafe output claim.
+    requestedInfo = lstatSync(requested)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+  if (requestedInfo?.isSymbolicLink()) fail(`source pack output already exists and must not be a symlink: ${requested}`)
   const canonicalOutput = canonicalPath(requested)
   const outputExists = existsSync(canonicalOutput)
   const parent = dirname(canonicalOutput)
@@ -438,6 +469,7 @@ function parseCli() {
       'dsh-dir': { type: 'string' },
       ref: { type: 'string' },
       'expected-version': { type: 'string' },
+      'allow-dirty': { type: 'boolean' },
       out: { type: 'string' },
       config: { type: 'string' },
     },
@@ -451,8 +483,19 @@ export function officialCommandEnvironment(base = process.env) {
     ...base,
     CI: base.CI ?? 'true',
     PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false',
+    pnpm_config_verify_deps_before_run: 'false',
     PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
+    pnpm_config_manage_package_manager_versions: 'false',
   }
+}
+
+/** Ensure the official build did not alter the pinned source identity. */
+export function assertSourceIdentityUnchanged(before, after) {
+  if (before.directory !== after.directory || before.head !== after.head || before.expectedVersion !== after.expectedVersion
+    || before.dirty !== after.dirty || before.reproducible !== after.reproducible) {
+    fail('DSH source identity changed during official build; refusing to publish the source pack')
+  }
+  return after
 }
 
 async function runOfficial(dshDir, args, timeoutMs) {
@@ -482,8 +525,10 @@ async function main() {
   if (typeof dshDir !== 'string' || dshDir.trim() === '') {
     fail('--dsh-dir is required (or set DSH_DIR)')
   }
+  const allowDirty = values['allow-dirty'] === true
   const identity = validateSourceIdentity(dshDir, effective, {
     ci: process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true',
+    allowDirty,
   })
   if (identity.dirty) console.error('WARNING: DIRTY DSH SOURCE TREE (reproducible = false)')
 
@@ -505,6 +550,11 @@ async function main() {
     await runOfficial(identity.directory, ['clean'], OFFICIAL_TIMEOUTS.clean)
     await runOfficial(identity.directory, ['build:official'], OFFICIAL_TIMEOUTS.build)
     await runOfficial(identity.directory, ['release:pack', '--family', 'dsh', '--out', stageOutput], OFFICIAL_TIMEOUTS.pack)
+    const afterIdentity = validateSourceIdentity(identity.directory, effective, {
+      ci: process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true',
+      allowDirty: values['allow-dirty'] === true,
+    })
+    assertSourceIdentityUnchanged(identity, afterIdentity)
     assertClaimedSourcePackOutput(staging, 'official release pack')
     stageOutputOwner = claimProducedDirectory(stageOutput)
     assertStageOwnership(staging, stageOutputOwner, 'official release pack')
@@ -513,11 +563,12 @@ async function main() {
 
     // The official packer writes publish-order.txt for registry publishing. Source
     // mode only needs immutable tarballs plus its generated distribution manifest;
-    // discard every other top-level output before the artifact is uploaded.
+    // discard the known auxiliary output and reject anything unexpected.
     const packedEntries = readdirSync(stageHandle.path)
     assertStageOwnership(staging, stageOutputOwner, 'listing packed output')
     for (const entry of packedEntries) {
       if (entry.endsWith('.tgz')) continue
+      if (!ALLOWED_AUXILIARY_OUTPUT.has(entry)) fail(`official DSH pack output contains unknown entry: ${entry}`)
       assertStageOwnership(staging, stageOutputOwner, `filtering ${entry}`)
       const path = join(stageHandle.path, entry)
       const info = lstatSync(path)
@@ -527,7 +578,13 @@ async function main() {
     }
     assertStageOwnership(staging, stageOutputOwner, 'post-pack filtering')
 
-    const packageEntries = packageMapFromTarballs(stageOutput, effective.expectedVersion)
+    const leakScanOptions = {
+      sourcePaths: [identity.directory],
+      tempRoots: [staging.path],
+      distributionPaths: [stageOutput],
+      scanArchive: false,
+    }
+    const packageEntries = packageMapFromTarballs(stageOutput, effective.expectedVersion, leakScanOptions)
     assertStageOwnership(staging, stageOutputOwner, 'package map validation')
     const manifestFor = owner => ({
       schemaVersion: 1,
@@ -547,7 +604,10 @@ async function main() {
     assertStageOwnership(staging, stageOutputOwner, 'staged manifest write')
     writeExclusiveFile(join(stageHandle.path, SOURCE_MANIFEST_NAME), `${JSON.stringify(stageManifest, null, 2)}\n`)
     assertStageOwnership(staging, stageOutputOwner, 'staged distribution validation')
-    validateSourceDistribution({ manifest: stageManifest, directory: stageOutput })
+    validateSourceDistribution({ manifest: stageManifest, directory: stageOutput }, {
+      allowDirty,
+      ...leakScanOptions,
+    })
     assertStageOwnership(staging, stageOutputOwner, 'staged final validation')
 
     // Reserve the caller's final path only after the complete source pack is
@@ -575,7 +635,12 @@ async function main() {
     assertClaimedSourcePackOutput(outputOwner, 'final manifest write')
     writeExclusiveFile(join(outputHandle.path, SOURCE_MANIFEST_NAME), `${JSON.stringify(finalManifest, null, 2)}\n`)
     assertClaimedSourcePackOutput(outputOwner, 'distribution validation')
-    const distribution = validateSourceDistribution({ manifest: finalManifest, directory: output })
+    const distribution = validateSourceDistribution({ manifest: finalManifest, directory: output }, {
+      allowDirty,
+      sourcePaths: [identity.directory],
+      tempRoots: [staging.path],
+      distributionPaths: [output],
+    })
     assertClaimedSourcePackOutput(outputOwner, 'final distribution validation')
     closeDirectoryHandle(outputHandle)
     outputHandle = undefined
@@ -613,6 +678,11 @@ async function main() {
     if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors], `failed to clean incomplete source pack ${output}`)
     throw error
   }
+}
+
+export const _test = {
+  cleanPackOutput,
+  sourcePackStaging,
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -89,6 +89,8 @@ function makeFixture({ includePresets = true, candidatePeers = { [DSH_CLI]: `>=$
     sourceRef: SHA,
     sourceSha: SHA,
     version: VERSION,
+    dirty: false,
+    reproducible: true,
     packages,
   })}\n`)
 

@@ -53,6 +53,7 @@ function sourceCheckout() {
   git(directory, 'config', 'user.name', 'Test')
   git(directory, 'add', '.')
   git(directory, 'commit', '-qm', 'fixture')
+  git(directory, 'remote', 'add', 'origin', 'https://github.com/deepseek-ai/deepseek-harness.git')
   return directory
 }
 

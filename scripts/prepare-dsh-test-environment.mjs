@@ -54,31 +54,42 @@ function parseCli() {
       ref: { type: 'string' },
       'expected-version': { type: 'string' },
       config: { type: 'string' },
+      'allow-dirty': { type: 'boolean' },
     },
     allowPositionals: false,
   })
   return values
 }
 
-export function installEnvironment(mode, base = process.env) {
-  return {
+export function installEnvironment(mode, base = process.env, root = undefined) {
+  const environment = {
     ...base,
+    ...(root === undefined ? {} : { DSH_DEV_ROOT: resolve(root) }),
+    DSH_DEV_MODE: mode,
     npm_config_minimum_release_age: '0',
     pnpm_config_minimum_release_age: '0',
-    ...(mode === 'source'
-      ? {
-        PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false',
-        PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
-      }
-      : {}),
   }
+  if (mode === 'source') {
+    environment.PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN = 'false'
+    environment.pnpm_config_verify_deps_before_run = 'false'
+    environment.PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS = 'false'
+    return environment
+  }
+  delete environment.DSH_MODE
+  delete environment.DSH_SOURCE_CONFIG
+  delete environment.DSH_SOURCE_DISTRIBUTION
+  delete environment.DSH_DEV_EPHEMERAL
+  delete environment.PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN
+  delete environment.pnpm_config_verify_deps_before_run
+  delete environment.TARBALL_SMOKE_SKIP_INSTALL
+  return environment
 }
 
 export async function runInstall(workspace, args, { timeoutMs } = {}) {
   const mode = args.includes('--frozen-lockfile') ? 'npm' : 'source'
   const result = await runBounded(PNPM_COMMAND, args, {
     cwd: workspace,
-    env: installEnvironment(mode),
+    env: installEnvironment(mode, process.env, workspace),
     timeoutMs: timeoutMs ?? (mode === 'source' ? 20 * 60_000 : 10 * 60_000),
     label: `DSH ${mode} dependency install`,
   })
@@ -95,6 +106,7 @@ export async function prepareDshTestEnvironment({
   config = DEFAULT_SOURCE_CONFIG,
   ref,
   expectedVersion,
+  allowDirty = false,
 } = {}) {
   const target = resolve(workspace)
   if (!existsSync(join(target, 'package.json'))) fail(`TUI workspace package.json is missing: ${target}`)
@@ -105,7 +117,13 @@ export async function prepareDshTestEnvironment({
     expectedVersion: expectedVersion ?? trackedSourceConfig.expectedVersion,
   }, trackedSourceConfig.path)
   const selected = mode === 'source'
-    ? loadDshDistribution({ mode, manifest: distribution, packageJson: join(target, 'package.json'), sourceConfig })
+    ? loadDshDistribution({
+      mode,
+      manifest: distribution,
+      packageJson: join(target, 'package.json'),
+      sourceConfig,
+      allowDirty,
+    })
     : npmDshDistribution(dshVersion)
   const prepared = prepareDshInstall(selected, target, {
     materializeSourceDependencies: selected.kind === 'source-pack',
@@ -137,6 +155,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
       config: values.config ?? DEFAULT_SOURCE_CONFIG,
       ref: values.ref,
       expectedVersion: values['expected-version'],
+      allowDirty: values['allow-dirty'] === true,
     })
     console.log(`DSH test environment ready: ${values.mode}`)
   } catch (error) {

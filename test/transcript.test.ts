@@ -856,11 +856,11 @@ test('a failed read breaks the group; late settlement preserves reflow counts', 
   const folder3 = new TranscriptFolder()
   folder3.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{}' }, 1),
     readResult(2, 'r1', 'aaa'),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{}' }, 3),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{}' }, 3),
     readResult(4, 'r2', 'bbb'),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r3'), name: 'read', arguments: '{}' }, 5),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r3'), name: 'read', arguments: '{}' }, 5),
     event('turn/start', { turn: 1 }, 6),
     event('user/message', {
       id: MessageId('late-reflow-user'),

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { ProcessTerminal } from '@xmoon76/pi-tui'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -14,6 +15,7 @@ import { StatsFolder } from '../src/stats.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -163,12 +165,54 @@ async function disposeContext(ctx: Context): Promise<void> {
   }
 }
 
+/** Route production ProcessTerminal instances into a deterministic xterm. */
+function installVirtualProcessTerminal(vt: VirtualTerminal): () => void {
+  const prototype = ProcessTerminal.prototype as object
+  const names = [
+    'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
+    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
+    'columns', 'rows', 'kittyProtocolActive', 'modifyOtherKeysActive',
+  ]
+  const originals = new Map<string, PropertyDescriptor | undefined>()
+  const virtual = vt as unknown as Record<string, unknown>
+  const methods = new Set([
+    'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
+    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
+  ])
+  for (const name of names) {
+    originals.set(name, Object.getOwnPropertyDescriptor(prototype, name))
+    if (methods.has(name)) {
+      Object.defineProperty(prototype, name, {
+        configurable: true,
+        value: (...args: unknown[]) => {
+          const method = virtual[name]
+          if (typeof method !== 'function') throw new Error(`virtual terminal method missing: ${name}`)
+          return (method as (...args: unknown[]) => unknown).apply(vt, args)
+        },
+      })
+    } else {
+      Object.defineProperty(prototype, name, {
+        configurable: true,
+        get: () => name === 'modifyOtherKeysActive' ? false : virtual[name],
+      })
+    }
+  }
+  return () => {
+    for (const name of names) {
+      const descriptor = originals.get(name)
+      if (descriptor === undefined) delete (prototype as Record<string, unknown>)[name]
+      else Object.defineProperty(prototype, name, descriptor)
+    }
+  }
+}
+
 interface RunnerProbe {
   transcriptApplyCount: number
   statsApplyCount: number
   transcriptHydrateCount: number
   statsHydrateCount: number
   capturedMessages: readonly { kind: string; text?: string }[] | undefined
+  scrollToBottomCount: number
   apps: TuiApp[]
   restore: () => void
 }
@@ -181,6 +225,7 @@ function installProbe(): RunnerProbe {
     transcriptHydrateCount: 0,
     statsHydrateCount: 0,
     capturedMessages: undefined,
+    scrollToBottomCount: 0,
     apps: [],
     restore: () => {},
   }
@@ -190,6 +235,7 @@ function installProbe(): RunnerProbe {
   const originalStatsHydrate = StatsFolder.prototype.hydrate
   const originalSetTranscript = TuiApp.prototype.setTranscript
   const originalStart = TuiApp.prototype.start
+  const originalScrollToBottom = TuiApp.prototype.scrollToBottom
   TranscriptFolder.prototype.apply = function (events) {
     probe.transcriptApplyCount += 1
     return originalTranscriptApply.call(this, events)
@@ -214,6 +260,10 @@ function installProbe(): RunnerProbe {
     probe.apps.push(this)
     return originalStart.call(this)
   }
+  TuiApp.prototype.scrollToBottom = function (options: { disableFollow?: boolean } = {}) {
+    probe.scrollToBottomCount += 1
+    return originalScrollToBottom.call(this, options)
+  }
   probe.restore = () => {
     TranscriptFolder.prototype.apply = originalTranscriptApply
     StatsFolder.prototype.apply = originalStatsApply
@@ -221,6 +271,7 @@ function installProbe(): RunnerProbe {
     StatsFolder.prototype.hydrate = originalStatsHydrate
     TuiApp.prototype.setTranscript = originalSetTranscript
     TuiApp.prototype.start = originalStart
+    TuiApp.prototype.scrollToBottom = originalScrollToBottom
   }
   return probe
 }
@@ -307,6 +358,81 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
     if (resumeContext !== undefined) await disposeContext(resumeContext)
     if (deferredContext !== undefined) await disposeContext(deferredContext)
     probe.restore()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('live repaint preserves manual scrolling in the latest window', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-live-follow-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const vt = new VirtualTerminal(80, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  const probe = installProbe()
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  try {
+    const initialText = Array.from({ length: 80 }, (_, index) => `initial line ${index}`).join('\n')
+    const resumed: FakeSession = {
+      id: 'live-follow-session',
+      header: { id: 'live-follow-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+      events: sessionEvents(initialText),
+    }
+    const harness = makeHarness(home, resumed)
+    context = new Context()
+    fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+    const app = probe.apps.at(-1)
+    assert.ok(app, 'the production runner must create a TuiApp')
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    const readScroll = () => {
+      const current = app.fullscreenScrollForTest()
+      assert.ok(current !== undefined, 'fullscreen scrolling must remain available')
+      return current
+    }
+    assert.ok(readScroll().maxScrollTop > 0, 'the live transcript must be scrollable')
+
+    app.scrollToBottom()
+    assert.equal(readScroll().isFollowingEnd, true, 'the bottom position must follow live output')
+    app.scrollToTop({ disableFollow: true })
+    assert.equal(readScroll().isFollowingEnd, false, 'manual scrolling must disable follow-end')
+    probe.scrollToBottomCount = 0
+
+    context.emit('session/event', resumed as never, event('turn/start', { turn: 1 }, 10))
+    context.emit('session/event', resumed as never, event('assistant/chunk', {
+      turn: 1,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: 'streaming while scrolled up' },
+    }, 11))
+    context.emit('session/event', resumed as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 12))
+    await vt.waitForRender()
+    assert.equal(probe.scrollToBottomCount, 0, 'live repaint must not force the latest window to its bottom')
+    assert.equal(readScroll().isFollowingEnd, false, 'live repaint must preserve the manually disabled follow-end state')
+    assert.ok(readScroll().scrollTop < readScroll().maxScrollTop, 'live repaint must leave the viewport away from the bottom')
+
+    app.scrollToBottom()
+    await vt.waitForRender()
+    assert.equal(readScroll().isFollowingEnd, true, 'an explicit bottom jump must re-enable follow-end')
+    probe.scrollToBottomCount = 0
+    context.emit('session/event', resumed as never, event('turn/start', { turn: 2 }, 13))
+    context.emit('session/event', resumed as never, event('assistant/chunk', {
+      turn: 2,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: 'streaming while following' },
+    }, 14))
+    context.emit('session/event', resumed as never, event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 15))
+    await vt.waitForRender()
+    assert.equal(probe.scrollToBottomCount, 0, 'ScrollView follow-end must handle live output without an imperative jump')
+    assert.equal(readScroll().isFollowingEnd, true, 'a viewport following the end must remain attached to live output')
+    const following = readScroll()
+    assert.equal(following.scrollTop, following.maxScrollTop, JSON.stringify(following))
+  } finally {
+    if (fiber !== undefined) await fiber.dispose()
+    if (context !== undefined) await disposeContext(context)
+    probe.restore()
+    restoreTerminal()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     rmSync(home, { recursive: true, force: true })

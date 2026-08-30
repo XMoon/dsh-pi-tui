@@ -16,3 +16,8 @@ temp/
 
 # Real-machine acceptance smoke home (never committed)
 .smoke-home/
+
+# Local DSH development environment state and shell exports
+.dsh-dev-state.json
+.dsh-dev-env
+.envrc

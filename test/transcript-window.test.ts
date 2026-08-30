@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
@@ -58,7 +58,7 @@ test('indexed windows expose latest and anchored turn bounds', () => {
 test('controller pages by grouped-output turns across a cross-turn read card', () => {
   const folder = new TranscriptFolder()
   const pair = (turn: number, call: string, seq: number): SessionEvent[] => {
-    const callId = CallId(call)
+    const callId = ToolCallId(call)
     return [
       {
         type: 'tool/call',

@@ -560,6 +560,54 @@ The rules below must never be broken; the full contracts live in `docs/`.
 - **Never repair a log as one whole zstd frame** — dsh readers reject it (`corrupt Zstandard session log: first frame is not exactly one header line`). `scripts/repair-session.mjs` (`--scan` read-only; `--yes` applies with backup + verify) preserves the frame layout, refuses ambiguous duplicate-`seq` references, and writes 0600. Full contract: `docs/repair-session.md`.
 - **Zero-event catalog probes — REMOVED, do not reintroduce.** Composition probes were deleted along with their tests: `session/created` observers in this deployment write durable knob events, so any probe both fails a zero-event gate and materializes an artifact. Cold catalog discovery goes through the standing scope only (`standingKeyFor` + `snapshot`); never call `agents.create()` for a catalog. Full contract: `docs/surface-catalog.md`.
 
+## DSH development environment
+
+The repository uses two fixed local worktrees:
+
+- `~/project/dsh-pi-tui` — main, registry-backed DSH (npm mode).
+- `~/project/dsh-pi-tui-next` — next, the exact source distribution pinned by
+  `test/compat/dsh-source.json`.
+
+The main branch intentionally has no source-pin file, so its default remains
+registry/npm. The pin is maintained on the next branch; merging main into next
+must preserve next's existing `test/compat/dsh-source.json` rather than adding
+that policy to main.
+
+When entering either worktree, run `pnpm dev:doctor`. If it reports
+`STALE`, `MISSING`, or `BROKEN`, run `pnpm dev:bootstrap`. The doctor is
+read-only and bootstrap is idempotent; neither workflow repairs source mode by
+removing `node_modules` or the tracked lockfile. In source mode, a correct
+materialization is `READY` even when the current process has not loaded the
+source shell variables; the doctor prints a warning and `pnpm dev:shell` is
+required only for commands that need those variables.
+
+The root `pnpm-workspace.yaml` uses `verifyDepsBeforeRun: warn`. Pnpm may
+report stale dependencies before running a command, but it must not
+automatically repair the workspace; all dependency repair belongs to the
+explicit `dev:bootstrap` command. Source-mode development overrides this
+setting to `false`, because its materialized DSH distribution intentionally
+differs from the tracked registry dependency metadata. A missing source
+shell is only a doctor warning; use `pnpm dev:shell` when source variables are
+required.
+
+Source packs are cached outside the worktree by repository plus exact commit
+SHA. The source cache uses a shared bare Harness object repository and an
+independent checkout per SHA under `harness-worktrees/<sha>`; source-pack locks
+protect the corresponding SHA while the object-repository lock only protects
+Git metadata operations. Worktrees may share the pnpm store and a validated
+source pack, but each worktree must own an independent `node_modules`, `dist`,
+and `.dsh-dev-state.json`. Do not copy or symlink one worktree's
+`node_modules` into another. Do not use branch names or package versions as
+source-pack identity, and do not modify the real `pi-tui` profile while
+developing.
+
+A provided `DSH_DIR` is an ephemeral debug input only: its pack is kept under
+the OS temporary directory, marked ephemeral in local state, and must never be
+treated as a durable `READY` cache. The source-mode shell can be entered with
+`pnpm dev:shell` when direnv is not available. The source distribution helper
+under `scripts/` is shared by local bootstrap and CI; do not create a second
+source-build implementation.
+
 ## Docs
 
 - README.md — 简体中文 install and run instructions for humans (the npm

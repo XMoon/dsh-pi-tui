@@ -39,8 +39,13 @@ function leakTarball(leakText) {
 }
 
 function runSmoke(tarball) {
+  const env = { ...process.env, TARBALL_SMOKE_SKIP_INSTALL: '1' }
+  // These tests exercise the standalone offline smoke path. Do not let a
+  // caller's source-mode shell redirect the child into DSH distribution
+  // validation before the tarball leak checks run.
+  delete env.DSH_SOURCE_DISTRIBUTION
   return spawnSync(process.execPath, [SMOKE, tarball], {
-    env: { ...process.env, TARBALL_SMOKE_SKIP_INSTALL: '1' },
+    env,
     encoding: 'utf8',
   })
 }
