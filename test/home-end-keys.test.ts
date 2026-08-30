@@ -18,6 +18,7 @@ import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from
 import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
+import { TranscriptWindowController } from '../src/transcript-window.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
@@ -210,6 +211,77 @@ test('history window paging preserves the overlap row across uneven heights', as
     assert.ok(newer.scrollTop < newer.maxScrollTop, 'newer paging must preserve the overlap instead of following the end')
     assert.ok(viewportHasLine(vt, 'turn-90'), 'newer paging must keep the old bottom overlap row visible')
     assert.ok(!viewportHasLine(vt, 'turn-100'), 'newer paging must not skip past the preserved bottom overlap')
+  } finally {
+    app.stop()
+  }
+})
+
+test('folder window summaries do not discard the older-page top anchor', async () => {
+  const vt = new VirtualTerminal(100, 50)
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  for (let turn = 0; turn <= 100; turn += 1) {
+    events.push({
+      type: 'assistant/message',
+      seq: turn,
+      time: 1_700_000_000_000 + turn,
+      data: {
+        turn,
+        step: 0,
+        message: {
+          id: MessageId(`summary-anchor-${turn}`),
+          role: 'assistant',
+          content: [{ type: 'text', text: [`turn-${turn}`, `detail-${turn}-one`, `detail-${turn}-two`, `detail-${turn}-three`].join('\n') }],
+        },
+      },
+    } as SessionEvent)
+  }
+  folder.apply(events)
+  const controller = new TranscriptWindowController({
+    windowTurns: 20,
+    stepTurns: 10,
+    turns: folder.groupedTurns(),
+  })
+  let app!: TuiApp
+  const renderProjection = (): void => {
+    const endTurn = controller.endTurn()
+    const projection = folder.window({
+      maxTurns: controller.windowTurns,
+      ...(endTurn === undefined ? {} : { endTurn }),
+    })
+    app.setTranscript(projection.messages, undefined, {
+      ...controller.state(),
+      firstTurn: projection.firstTurn,
+      lastTurn: projection.lastTurn,
+      hasNewer: projection.hasNewer,
+    })
+  }
+  const moveOlder = (): boolean => {
+    const anchor = app.captureTranscriptViewportAnchor()
+    if (!controller.moveOlder()) return false
+    renderProjection()
+    return anchor !== undefined && app.restoreTranscriptViewportAnchor(anchor, 'top')
+  }
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onTranscriptMoveOlder: moveOlder })
+  app.start()
+  try {
+    renderProjection()
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    assert.equal(folder.window({ maxTurns: 20 }).messages[0]?.kind, 'summary')
+    app.scrollToTop({ disableFollow: true })
+    await vt.waitForRender()
+    const viewportRow = (text: string): number => vt.getViewport().findIndex(line => line.trim().endsWith(text))
+    const beforeAnchor = app.captureTranscriptViewportAnchor()
+    assert.equal(beforeAnchor?.top?.turn, 81, 'the top anchor must skip the leading presentation-only summary')
+    const beforeRow = viewportRow('turn-81')
+    assert.ok(beforeRow >= 0, 'the latest window must show turn 81 below its summary')
+
+    assert.equal(moveOlder(), true, 'older paging must restore the summary-skipping anchor')
+    await vt.waitForRender()
+    assert.equal(folder.window({ maxTurns: 20, endTurn: 90 }).messages[0]?.kind, 'summary')
+    const afterRow = viewportRow('turn-81')
+    assert.equal(afterRow, beforeRow, 'the overlap row must stay at the same viewport row after the summary-bearing window swap')
   } finally {
     app.stop()
   }
