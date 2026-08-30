@@ -10,7 +10,8 @@ import test from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { foldTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
+import { foldTranscript, searchTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
+import { TranscriptWindowController } from '../src/transcript-window.ts'
 
 /** Build a minimal event envelope for tests. */
 function event<K extends SessionEvent['type']>(
@@ -497,11 +498,105 @@ test('a cross-turn read group keeps the fast window consistent with the full sca
   folder.apply(events)
   const fast = folder.messages({ maxTurns: 1 })
   const full = windowMessages(folder.messages(), 1)
+  const bounded = folder.window({ maxTurns: 1 })
+  assert.equal(JSON.stringify(bounded.messages), JSON.stringify(full),
+    `the indexed window must match the full scan:\n${JSON.stringify(bounded.messages)}\nvs\n${JSON.stringify(full)}`)
+  assert.deepEqual({ firstTurn: bounded.firstTurn, lastTurn: bounded.lastTurn, hasOlder: bounded.hasOlder, hasNewer: bounded.hasNewer }, {
+    firstTurn: 3, lastTurn: 3, hasOlder: true, hasNewer: false,
+  })
   assert.equal(JSON.stringify(fast), JSON.stringify(full),
     `the fast window must match the full scan:\n${JSON.stringify(fast)}\nvs\n${JSON.stringify(full)}`)
+  const anchored = folder.window({ maxTurns: 1, endTurn: 2 })
+  const anchoredFull = windowMessages(folder.messages(), 1, 2)
+  assert.equal(JSON.stringify(anchored.messages), JSON.stringify(anchoredFull),
+    `anchored indexed window must match the full scan:\n${JSON.stringify(anchored.messages)}\nvs\n${JSON.stringify(anchoredFull)}`)
   const summary = fast[0]
   assert.ok(summary !== undefined && summary.kind === 'summary')
   assert.ok(summary.text.includes('1 earlier turn'), `summary text:\n${summary.text}`)
+})
+
+test('non-monotonic windows derive metadata from the full fallback projection', () => {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (const turn of [1, 3, 2]) {
+    events.push(event('turn/start', { turn }, seq++))
+    events.push(event('assistant/message', {
+      turn,
+      step: 0,
+      message: {
+        id: MessageId(`non-monotonic-${turn}`),
+        role: 'assistant',
+        content: [{ type: 'text', text: `turn ${turn}` }],
+        source: { kind: 'model', provider: 'test', model: 'test' },
+      },
+    }, seq++))
+  }
+  folder.apply(events)
+
+  const bounded = folder.window({ maxTurns: 1 })
+  assert.deepEqual({
+    firstTurn: bounded.firstTurn,
+    lastTurn: bounded.lastTurn,
+    hasOlder: bounded.hasOlder,
+    hasNewer: bounded.hasNewer,
+  }, { firstTurn: 3, lastTurn: 3, hasOlder: true, hasNewer: false })
+  assert.deepEqual(kinds(bounded.messages), ['summary', 'assistant'])
+})
+
+test('non-monotonic raw turn indexes retain every turn for search navigation', () => {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (const turn of [1, 3, 2]) {
+    events.push(event('turn/start', { turn }, seq++))
+    events.push(event('assistant/message', {
+      turn,
+      step: 0,
+      message: {
+        id: MessageId(`non-monotonic-search-${turn}`),
+        role: 'assistant',
+        content: [{ type: 'text', text: `turn ${turn}` }],
+        source: { kind: 'model', provider: 'test', model: 'test' },
+      },
+    }, seq++))
+  }
+  folder.apply(events)
+
+  assert.deepEqual(folder.turns(), [1, 3, 2], 'the raw index must retain a lower turn discovered after monotonicity breaks')
+  assert.deepEqual(folder.groupedTurns(), [1, 2, 3])
+  const match = searchTranscript(folder, 'turn 2')
+  assert.equal(match.length, 1)
+  const matchMessage = match[0]
+  assert.ok(matchMessage !== undefined && 'turn' in matchMessage)
+  const controller = new TranscriptWindowController({ windowTurns: 1, stepTurns: 1, turns: folder.turns() })
+  assert.equal(controller.anchorAt(matchMessage.turn), true, 'search must anchor a retained non-monotonic turn')
+  assert.equal(controller.endTurn(), 2)
+  const anchored = folder.window({ maxTurns: 1, endTurn: controller.endTurn() })
+  assert.equal(anchored.lastTurn, 2)
+  assert.ok(anchored.messages.some(message => 'turn' in message && message.turn === 2))
+})
+
+test('unknown window anchors preserve latest summary semantics', () => {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 0; turn < 25; turn += 1) {
+    events.push(event('assistant/message', {
+      turn,
+      step: 0,
+      message: {
+        id: MessageId(`unknown-anchor-${turn}`),
+        role: 'assistant',
+        content: [{ type: 'text', text: `turn ${turn}` }],
+        source: { kind: 'model', provider: 'test', model: 'test' },
+      },
+    }, seq++))
+  }
+  folder.apply(events)
+  const indexed = folder.window({ maxTurns: 20, endTurn: 999 })
+  const full = windowMessages(folder.messages(), 20, 999)
+  assert.deepEqual(indexed.messages, full)
 })
 
 test('the fast window matches the full scan across mixed grouping shapes', () => {
@@ -547,7 +642,10 @@ test('the fast window matches the full scan across mixed grouping shapes', () =>
   folder.apply(events)
   for (let maxTurns = 1; maxTurns <= 6; maxTurns += 1) {
     const fast = folder.messages({ maxTurns })
+     const bounded = folder.window({ maxTurns })
     const full = windowMessages(folder.messages(), maxTurns)
+     assert.equal(JSON.stringify(bounded.messages), JSON.stringify(full),
+       `indexed window must match the full scan at maxTurns=${maxTurns}:\n${JSON.stringify(bounded.messages)}\nvs\n${JSON.stringify(full)}`)
     assert.equal(JSON.stringify(fast), JSON.stringify(full),
       `fast window must match the full scan at maxTurns=${maxTurns}:\n${JSON.stringify(fast)}\nvs\n${JSON.stringify(full)}`)
   }
@@ -704,7 +802,7 @@ test('consecutive read grouping spans turn boundaries (incremental projection pa
   assert.ok((tools[0]?.result ?? '').includes('aaa') && (tools[0]?.result ?? '').includes('bbb'))
 })
 
-test('a failed read breaks the group; a read settling late re-groups into the run', () => {
+test('a failed read breaks the group; late settlement preserves reflow counts', () => {
   const readResult = (seq: number, callId: string, text: string, isError = false): SessionEvent => event('tool/result', {
     turn: 0,
     step: 0,
@@ -752,6 +850,31 @@ test('a failed read breaks the group; a read settling late re-groups into the ru
   const tail = folder2.messages().filter(message => message.kind === 'tool')
   assert.equal(tail.length, 1, 'a late result merges the tail read into the group')
   assert.equal(tail[0]?.args, '2 files')
+
+  // A non-tail settlement after an existing group rebuilds the adjacent run;
+  // the bounded summary must still count one emitted tool card for that run.
+  const folder3 = new TranscriptFolder()
+  folder3.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{}' }, 1),
+    readResult(2, 'r1', 'aaa'),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{}' }, 3),
+    readResult(4, 'r2', 'bbb'),
+    event('tool/call', { turn: 0, step: 0, callId: CallId('r3'), name: 'read', arguments: '{}' }, 5),
+    event('turn/start', { turn: 1 }, 6),
+    event('user/message', {
+      id: MessageId('late-reflow-user'),
+      role: 'user',
+      content: [{ type: 'text', text: 'later turn' }],
+      source: { kind: 'user' },
+    }, 7),
+  ])
+  folder3.apply([readResult(8, 'r3', 'ccc')])
+  const reflowed = folder3.messages({ maxTurns: 1 })
+  assert.deepEqual(reflowed, windowMessages(folder3.messages(), 1), 'non-tail reflow must preserve bounded/full projection parity')
+  const reflowSummary = reflowed[0]
+  assert.ok(reflowSummary !== undefined && reflowSummary.kind === 'summary')
+  assert.ok(reflowSummary.text.includes('1 tool call'), `reflow summary must count output cards: ${reflowSummary.text}`)
 })
 
 test('cold hydrate defers adjacent-read reflow and preserves apply semantics', () => {

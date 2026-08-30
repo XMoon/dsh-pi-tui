@@ -119,6 +119,7 @@ import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
 import { recentTurnThreshold, textWithImageMarkers, type TranscriptMessage, type TurnActivity } from './transcript.ts'
+import type { TranscriptWindowState } from './transcript-window.ts'
 import { FocusActivityComponent, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
 import { WorkingIndicator, workingFramesFor } from './working.ts'
 import { iconFor, iconLead, iconPrefix, type IconStyle } from './icons.ts'
@@ -179,6 +180,34 @@ export const FOCUS_ANCHOR_TOP_PADDING = 1
  * - `undefined`: the caller owns the viewport (search jumps).
  */
 export type FocusFullscreenViewportIntent = 'follow-end' | 'preserve' | 'anchor-turn'
+
+/** Which edge of the previous fullscreen viewport should stay in place when
+ * a virtual transcript window is replaced by its overlapping neighbor. */
+export type TranscriptViewportAnchorEdge = 'top' | 'bottom'
+
+/** One rendered transcript row used to restore a viewport after re-windowing.
+ * Object identity is preferred for overlapping folder projections; row kind and
+ * occurrence preserve the discriminator when a caller supplies fresh objects. */
+export interface TranscriptViewportAnchorPoint {
+  readonly turn: number
+  readonly rowKind: 'message' | 'activity'
+  /** The zero-based occurrence of this row kind within its turn. */
+  readonly occurrence: number
+  readonly message?: TranscriptMessage
+  readonly activity?: TurnActivity
+  /** The line inside the row that was at the selected viewport edge. */
+  readonly rowOffset: number
+  /** The line's offset from the viewport top (0 for the top edge). */
+  readonly viewportOffset: number
+}
+
+/** A two-edge viewport snapshot. Paging older prefers `top`; paging newer
+ * prefers `bottom`, while the other edge remains a safe overlap fallback. */
+export interface TranscriptViewportAnchor {
+  readonly scrollTop: number
+  readonly top?: TranscriptViewportAnchorPoint
+  readonly bottom?: TranscriptViewportAnchorPoint
+}
 
 /** Whether a message is a Focus SECONDARY disclosure: a foldable process
  * card inside an expanded Thought that has its own compact/full two-state
@@ -1000,6 +1029,9 @@ export interface TuiAppEventsBase {
    * write — the toggle action has no default key; Ctrl+F is transcript
    * search). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
+   /** The transcript search overlay opened; the host may capture its window
+    * origin before a match moves the presentation into history. */
+   onSearchOpen?: () => void
   /** The transcript-search query changed (the search action opened it;
    * the search keys are fixed overlay contracts). Optional. */
   onSearchQuery?: (query: string) => void
@@ -1009,6 +1041,17 @@ export interface TuiAppEventsBase {
   onSearchPrev?: () => void
   /** The search was closed (its close key, fixed). Optional. */
   onSearchClose?: () => void
+  /**
+   * A fullscreen viewport reached the older edge. Returning true means the
+   * host replaced the transcript window and consumed the boundary gesture;
+   * false leaves the viewport at the edge. Regular mode has no viewport and
+   * never invokes this seam.
+   */
+  onTranscriptMoveOlder?: (source: 'wheel' | 'page' | 'scrollbar') => boolean
+  /** A fullscreen viewport reached the newer edge. */
+  onTranscriptMoveNewer?: (source: 'wheel' | 'page' | 'scrollbar') => boolean
+  /** Reset the active transcript window to the live tail. */
+  onTranscriptJumpLatest?: () => boolean
   /**
    * The FIRST press of the interrupt key (default: Esc) with no overlay
    * up. The host may consume it (return true) to exit a runner-owned mode
@@ -1840,6 +1883,10 @@ export class TuiApp {
   /** Transient error line shown under the transcript; cleared by the next
    * repaint or after {@link TuiApp.NOTIFY_DURATION_MS}, whichever comes first. */
   private notifyText = ''
+  /** Lightweight, persistent transcript-window hint; empty in latest mode. */
+  private transcriptWindowHint = ''
+  /** The latest window metadata, retained so remapped key hints stay live. */
+  private transcriptWindow: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
   /** Styling of the current notify line: info (default) is dim with a ℹ,
    * errors are red with a ✗. */
   private notifyKind: 'error' | 'info' = 'info'
@@ -2177,7 +2224,10 @@ export class TuiApp {
       // finding). Guarded: the initial manager build runs before
       // messagesView exists.
       onInvalidate: () => {
-        if (this.messagesView !== undefined) this.rebuildMessages()
+        if (this.messagesView !== undefined) {
+          this.refreshTranscriptWindowHint()
+          this.rebuildMessages()
+        }
         this.requestRender()
       },
       onLeaderStateChange: () => this.renderFooter(),
@@ -2839,6 +2889,10 @@ export class TuiApp {
     //   session or exit the TUI from inside the child view.
     if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries) {
       const viewer = this.viewerMode
+      if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
+        const consumed = this.dispatchResolvedAction('app.transcript.jumpLatest', data)
+        if (consumed) return { consume: true }
+      }
       if (!isViewerAccessInteractive(resolveViewerAccess(viewer.mode, viewer.access))) {
         // The read-only viewer's EXIT is a FIXED lifecycle key — Esc is
         // the viewer's own close contract (like question.cancel /
@@ -2895,6 +2949,10 @@ export class TuiApp {
     // a remap of the toggle must work while the overlay is open too —
     // matching the EFFECTIVE keys (review finding).
     if (this.searchOverlay !== undefined) {
+      if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
+        const consumed = this.dispatchResolvedAction('app.transcript.jumpLatest', data)
+        if (consumed) return { consume: true }
+      }
       if (this.keybindings.matchesDefault(data, 'app.transcript.search.close')) {
         this.closeTranscriptSearch()
         return { consume: true }
@@ -3362,7 +3420,13 @@ export class TuiApp {
         this.startTranscriptSearch()
         return true
       },
-      closeTranscriptSearch: () => {
+      jumpLatest: () => {
+        // The semantic latest action belongs to the fullscreen transcript;
+        // regular mode must let the editor keep Ctrl+End.
+        if (!this.isFullscreen()) return false
+        return this.events.onTranscriptJumpLatest?.() === true
+      },
+       closeTranscriptSearch: () => {
         this.closeTranscriptSearch()
         return true
       },
@@ -3859,6 +3923,27 @@ export class TuiApp {
       // expanded individually, exactly like a web disclosure row.
       const alt = new TuiAltScreen(this.terminal, undefined, undefined, {
         onCellClick: (x, y) => this.handleFullscreenClick(x, y),
+        // Host transcript actions must win before the fork's own viewport
+        // key handling. In particular, the fork's Ctrl+Shift+F search only
+        // sees rendered lines, while the host search queries the full fold.
+        // Suppress the fork search key even after the host action is remapped
+        // so an old default never silently re-enables rendered-line search.
+        onBeforeViewportInput: (data) => {
+          if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
+            return this.events.onTranscriptJumpLatest?.() === true
+          }
+          if (this.keybindings.matches(data, 'app.transcript.search')) {
+            if (this.searchOverlay !== undefined) {
+              this.closeTranscriptSearch()
+              return true
+            }
+            return this.dispatchResolvedAction('app.transcript.search', data)
+          }
+          return getKeybindings().matches(data, 'tui.altScreen.search')
+        },
+        onScrollBoundary: (direction, source) => direction < 0
+          ? this.events.onTranscriptMoveOlder?.(source) === true
+          : this.events.onTranscriptMoveNewer?.(source) === true,
         // Issue #7: the host clipboard policy (tmux-aware, platform
         // helpers, OSC 52 last) replaces the vendor's raw OSC 52 write —
         // the alt screen never needs to understand tmux/SSH/Wayland/X11.
@@ -3962,9 +4047,9 @@ export class TuiApp {
   }
 
   /**
-   * Open the transcript-search overlay (Ctrl+Shift+F) and focus its input.
-   * The search itself runs in the host against the folded transcript; this
-   * surface only collects the query and reports navigation keys.
+   * Open the transcript-search overlay for the configured search action and
+   * focus its input. The search itself runs in the host against the folded
+   * transcript; this surface only collects the query and reports navigation keys.
    */
   startTranscriptSearch(): void {
     if (this.disposed) return
@@ -3972,6 +4057,7 @@ export class TuiApp {
       this.searchOverlay.focus()
       return
     }
+    this.events.onSearchOpen?.()
     const component = new TranscriptSearchComponent((query) => {
       this.events.onSearchQuery?.(query)
     })
@@ -3984,13 +4070,15 @@ export class TuiApp {
     })
   }
 
-  /** Close the transcript-search overlay and report the close. */
-  closeTranscriptSearch(): void {
-    if (this.searchOverlay === undefined) return
+  /** Close host/fullscreen transcript search and report whether either closed. */
+  closeTranscriptSearch(): boolean {
+    const closedFullscreen = this.fullscreen?.clearSearch() ?? false
+    if (this.searchOverlay === undefined) return closedFullscreen
     this.searchOverlay.hide()
     this.searchOverlay = undefined
     this.searchComponent = undefined
     this.events.onSearchClose?.()
+    return true
   }
 
   /**
@@ -4059,6 +4147,15 @@ export class TuiApp {
     return this.searchOverlay !== undefined
   }
 
+  /** Rebuild the history hint from the current effective keymap. */
+  private refreshTranscriptWindowHint(): void {
+    const window = this.transcriptWindow
+    const latestHint = this.keybindings.keyHint('app.transcript.jumpLatest')
+    this.transcriptWindowHint = window?.mode === 'history' && window.firstTurn !== undefined && window.lastTurn !== undefined
+      ? `History · turn ${window.firstTurn}–${window.lastTurn}${latestHint === '' ? '' : ` · ${latestHint} latest`}`
+      : ''
+  }
+
   /**
    * Replace the transcript and rebuild the message components. Collapsible
    * entries (tool, system cards) render folded unless the Ctrl+O master
@@ -4072,9 +4169,15 @@ export class TuiApp {
    *   (plan §19: messages and activities must come from ONE fold snapshot,
    *   so a repaint never shows a stale header against fresh rows).
    */
-  setTranscript(messages: readonly TranscriptMessage[], activities?: ReadonlyMap<number, TurnActivity>): void {
+  setTranscript(
+     messages: readonly TranscriptMessage[],
+     activities?: ReadonlyMap<number, TurnActivity>,
+     window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
+   ): void {
     this.messages = messages
     if (activities !== undefined) this.turnActivities = activities
+    this.transcriptWindow = window
+    this.refreshTranscriptWindowHint()
     // Repaints do NOT clear the transient notify line: an active session
     // repaints every frame (streaming chunks, tool cards), and clearing on
     // each repaint would make every notice — including error blocks like
@@ -4725,6 +4828,14 @@ export class TuiApp {
       })
       if (index < blocks.length - 1) this.messagesView.addChild(new Spacer())
     })
+    if (this.transcriptWindowHint !== '') {
+      // This is a presentation hint, not a transcript message: it is rebuilt
+      // with the bounded projection and never enters the full-history search
+      // corpus or Focus activity rows.
+      this.messagesView.addChild(new TranscriptGutterComponent(
+        new Text(color.textDim(this.transcriptWindowHint), 0, 0),
+      ))
+    }
     if (this.notifyText !== '') {
       // Errors flash red with a ✗; informational notices render dim with a ℹ
       // so a successful action never reads as a failure. The notify row is
@@ -4960,6 +5071,116 @@ export class TuiApp {
     }
   }
 
+  /** Capture the rendered top and bottom transcript rows before replacing a
+   * virtual window. The row identity plus intra-row offset lets the caller
+   * preserve a real visual position even when neighboring messages have very
+   * different wrapped heights. */
+  captureTranscriptViewportAnchor(): TranscriptViewportAnchor | undefined {
+    const scroll = this.fullscreenScroll
+    if (scroll === undefined || scroll.viewportHeight <= 0) return undefined
+    this.refreshMessageRows()
+    const welcomeHeight = this.welcomeCard.render(this.terminal.columns).length
+    const pointAt = (fromTop: boolean): TranscriptViewportAnchorPoint | undefined => {
+      const occurrences = new Map<string, number>()
+      const viewportTop = scroll.scrollTop
+      const viewportBottom = viewportTop + scroll.viewportHeight - 1
+      let rowTop = welcomeHeight
+      let candidate: TranscriptViewportAnchorPoint | undefined
+      for (const entry of this.messageRows) {
+        const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.activity === undefined ? 'message' : 'activity'
+        const turn = entry.message !== undefined && 'turn' in entry.message
+          ? entry.message.turn
+          : entry.activity?.turn
+        const occurrenceKey = turn === undefined ? undefined : `${rowKind}:${turn}`
+        const occurrence = occurrenceKey === undefined ? 0 : (occurrences.get(occurrenceKey) ?? 0)
+        if (occurrenceKey !== undefined) occurrences.set(occurrenceKey, occurrence + 1)
+        const visible = entry.height > 0
+          && rowTop + entry.height > viewportTop
+          && rowTop <= viewportBottom
+        if (visible && turn !== undefined) {
+          const line = fromTop
+            ? Math.max(viewportTop, rowTop)
+            : Math.min(viewportBottom, rowTop + entry.height - 1)
+          const point: TranscriptViewportAnchorPoint = {
+            turn,
+            rowKind,
+            occurrence,
+            ...(entry.message === undefined ? {} : { message: entry.message }),
+            ...(entry.activity === undefined ? {} : { activity: entry.activity }),
+            rowOffset: line - rowTop,
+            viewportOffset: line - viewportTop,
+          }
+          if (fromTop) return point
+          candidate = point
+        }
+        rowTop += entry.height
+      }
+      return candidate
+    }
+    return {
+      scrollTop: scroll.scrollTop,
+      top: pointAt(true),
+      bottom: pointAt(false),
+    }
+  }
+
+  /** Restore a previously captured visual position after the transcript
+   * projection changes. Paging toward older turns keeps the old top edge;
+   * paging toward newer turns keeps the old bottom edge. If the preferred
+   * overlap row is absent, the opposite edge or the old scrollTop is used. */
+  restoreTranscriptViewportAnchor(
+    anchor: TranscriptViewportAnchor,
+    edge: TranscriptViewportAnchorEdge = 'top',
+  ): boolean {
+    const scroll = this.fullscreenScroll
+    if (scroll === undefined) return false
+    this.refreshMessageRows()
+    const width = this.terminal.columns
+    const contentHeight = this.messagesView.render(width).length
+    const viewportHeight = scroll.viewportHeight
+    scroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
+    const welcomeHeight = this.welcomeCard.render(width).length
+    type LocatedRow = { top: number; height: number }
+    const rowFor = (point: TranscriptViewportAnchorPoint): LocatedRow | undefined => {
+      const occurrences = new Map<string, number>()
+      let rowTop = welcomeHeight
+      for (const entry of this.messageRows) {
+        const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.activity === undefined ? 'message' : 'activity'
+        const turn = entry.message !== undefined && 'turn' in entry.message
+          ? entry.message.turn
+          : entry.activity?.turn
+        const occurrenceKey = turn === undefined ? undefined : `${rowKind}:${turn}`
+        const occurrence = occurrenceKey === undefined ? 0 : (occurrences.get(occurrenceKey) ?? 0)
+        if (occurrenceKey !== undefined) occurrences.set(occurrenceKey, occurrence + 1)
+        if (entry.height <= 0) {
+          rowTop += entry.height
+          continue
+        }
+        const located = { top: rowTop, height: entry.height }
+        const exact = point.rowKind === rowKind && (
+          point.message !== undefined
+            ? entry.message === point.message
+            : point.activity !== undefined && entry.activity === point.activity
+        )
+        if (exact) return located
+        if (turn === point.turn && rowKind === point.rowKind && occurrence === point.occurrence) return located
+        rowTop += entry.height
+      }
+      return undefined
+    }
+    const points = edge === 'top' ? [anchor.top, anchor.bottom] : [anchor.bottom, anchor.top]
+    for (const point of points) {
+      if (point === undefined) continue
+      const row = rowFor(point)
+      if (row === undefined) continue
+      const rowOffset = Math.max(0, Math.min(row.height - 1, point.rowOffset))
+      scroll.scrollTo(row.top + rowOffset - point.viewportOffset, { disableFollow: true })
+      return true
+    }
+    scroll.scrollTo(anchor.scrollTop, { disableFollow: true })
+    return false
+  }
+
   /**
    * Anchor the transcript view to its END (the latest content). Fullscreen
    * scrolls its ScrollView; the regular surface has no scroll view (it draws
@@ -4967,9 +5188,15 @@ export class TuiApp {
    * row 0 and the main screen's viewport tracking lands on the bottom — the
    * same mechanism the fullscreen-toggle path uses to redraw cleanly.
    */
-  scrollToBottom(): void {
+  scrollToBottom(options: { disableFollow?: boolean } = {}): void {
     if (this.fullscreenScroll !== undefined) {
-      this.fullscreenScroll.scrollToEnd()
+      if (options.disableFollow === true) {
+        // ScrollView intentionally exposes this as scrollTo(...): its
+        // scrollToEnd() operation always re-arms follow-end.
+        this.fullscreenScroll.scrollTo(Number.MAX_SAFE_INTEGER, { disableFollow: true })
+      } else {
+        this.fullscreenScroll.scrollToEnd()
+      }
     } else {
       this.tui.requestRender(true)
     }
@@ -4977,9 +5204,13 @@ export class TuiApp {
 
   /** Scroll the fullscreen transcript to the top (the symmetric
    * counterpart of scrollToBottom). */
-  scrollToTop(): void {
+  scrollToTop(options: { disableFollow?: boolean } = {}): void {
     if (this.fullscreenScroll !== undefined) {
-      this.fullscreenScroll.scrollToStart()
+      if (options.disableFollow === true) {
+        this.fullscreenScroll.scrollTo(0, { disableFollow: true })
+      } else {
+        this.fullscreenScroll.scrollToStart()
+      }
     } else {
       this.tui.requestRender(true)
     }

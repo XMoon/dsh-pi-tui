@@ -50,6 +50,7 @@ export type AppKeybindingId =
   | 'app.exit.request'
   // Transcript
   | 'app.transcript.search'
+  | 'app.transcript.jumpLatest'
   | 'app.transcript.search.next'
   | 'app.transcript.search.previous'
   | 'app.transcript.search.close'

@@ -97,7 +97,8 @@ interface BindingRecord {
  * (Ctrl+C/D exit, Ctrl+S steer-all, Ctrl+F search, Ctrl+O expand, Ctrl+T
  * todo, Ctrl+G external editor, Ctrl+R history search, Ctrl+V clipboard,
  * Ctrl+Enter queue, Enter submit, Esc cancel, Shift+Tab permission,
- * Alt+Up dequeue, Alt+T thinking, Alt+K dismiss). When a NEW default
+ * Alt+Up dequeue, Alt+T thinking, Alt+K dismiss, Ctrl+End jump latest).
+ * When a NEW default
  * host lifecycle key lands, extend THIS list in the same commit so
  * plugins cannot claim it; the runtime reservation needs no change (it
  * follows the keymap).
@@ -127,6 +128,7 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 'up', ctrl: false, alt: true, shift: false, super: false },    // Alt+Up dequeue
   { key: 't', ctrl: false, alt: true, shift: false, super: false },     // Alt+T thinking detail toggle
   { key: 'k', ctrl: false, alt: true, shift: false, super: false },     // Alt+K dismiss settled local shell cards
+  { key: 'end', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+End jump latest
 ]
 
 /** Whether a key is reserved by the host lifecycle (the single check the

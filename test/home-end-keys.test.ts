@@ -18,6 +18,7 @@ import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from
 import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
+import { TranscriptWindowController } from '../src/transcript-window.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
@@ -76,6 +77,32 @@ test('homeEndKeysModeOf falls back to input for invalid values', () => {
 
 // ── fullscreen behavior ─────────────────────────────────────────────────
 
+test('fullscreen Ctrl+End remains a Host semantic action in both presets', async () => {
+  for (const mode of ['viewport', 'input'] as const) {
+    resetKeybindings()
+    applyHomeEndKeyMode(mode)
+    const vt = new VirtualTerminal(80, 24)
+    let jumps = 0
+    const app = new TuiApp(vt, {
+      onSubmit: () => {},
+      onExit: () => {},
+      onTranscriptJumpLatest: () => {
+        jumps += 1
+        return true
+      },
+    })
+    app.start()
+    app.setTranscript([], undefined, { mode: 'history', endTurn: 1, firstTurn: 1, lastTurn: 1 })
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    vt.sendInput('\x1b[1;5F') // Ctrl+End
+    await vt.waitForRender()
+    assert.equal(jumps, 1, `Ctrl+End must dispatch to the Host in ${mode} mode`)
+    app.stop()
+  }
+  resetKeybindings()
+})
+
 function startFullscreenApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -89,6 +116,176 @@ function startFullscreenApp(): { vt: VirtualTerminal; app: TuiApp } {
   app.setFullscreen(true)
   return { vt, app }
 }
+
+test('registered older-boundary callback preserves history follow state', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const transcript = (lines: number) => [{
+    kind: 'assistant' as const,
+    turn: 0,
+    text: Array.from({ length: lines }, (_, index) => `line ${index + 1}`).join('\n'),
+  }]
+  let app!: TuiApp
+  let loadCount = 0
+  const loadOlder = () => {
+    loadCount += 1
+    app.setTranscript(transcript(120), undefined, { mode: 'history', endTurn: 0, firstTurn: 0, lastTurn: 0 })
+    app.scrollToBottom({ disableFollow: true })
+    return true
+  }
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onTranscriptMoveOlder: loadOlder })
+  app.start()
+  app.setTranscript(transcript(80))
+  app.setFullscreen(true)
+  await vt.waitForRender()
+
+  app.scrollToTop({ disableFollow: true })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[57421u') // PageUp at the top invokes the registered older-boundary callback.
+  await vt.waitForRender()
+  assert.equal(loadCount, 1)
+  const history = app.fullscreenScrollForTest()
+  assert.ok(history !== undefined)
+  assert.equal(history.isFollowingEnd, false, 'history positioning must suppress follow-end')
+  const before = history.scrollTop
+
+  app.setTranscript(transcript(160), undefined, { mode: 'history', endTurn: 0, firstTurn: 0, lastTurn: 0 })
+  await vt.waitForRender()
+  const after = app.fullscreenScrollForTest()
+  assert.ok(after !== undefined)
+  assert.equal(after.scrollTop, before, 'new history content must preserve the current viewport')
+  assert.ok(after.scrollTop < after.maxScrollTop, 'new history content must not jump back to its end')
+  app.stop()
+})
+
+test('history window paging preserves the overlap row across uneven heights', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const longMarkdown = ['turn-82', ...Array.from({ length: 80 }, (_, index) => `markdown row ${index + 1}`)].join('\n')
+  const allMessages = Array.from({ length: 101 }, (_, turn) => ({
+    kind: 'assistant' as const,
+    turn,
+    text: turn === 82 ? longMarkdown : `turn-${turn}`,
+  }))
+  const windowAt = (first: number, last: number) => allMessages.slice(first, last + 1)
+  let app!: TuiApp
+  const moveOlder = (): boolean => {
+    const anchor = app.captureTranscriptViewportAnchor()
+    app.setTranscript(windowAt(71, 90))
+    return anchor !== undefined && app.restoreTranscriptViewportAnchor(anchor, 'top')
+  }
+  const moveNewer = (): boolean => {
+    const anchor = app.captureTranscriptViewportAnchor()
+    app.setTranscript(windowAt(81, 100))
+    return anchor !== undefined && app.restoreTranscriptViewportAnchor(anchor, 'bottom')
+  }
+  app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onTranscriptMoveOlder: moveOlder,
+    onTranscriptMoveNewer: moveNewer,
+  })
+  app.start()
+  try {
+    app.setTranscript(windowAt(81, 100))
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    app.scrollToTop({ disableFollow: true })
+    await vt.waitForRender()
+    assert.ok(viewportHasLine(vt, 'turn-81'), 'the initial top edge must show turn 81')
+
+    assert.equal(moveOlder(), true, 'older paging must restore a captured anchor')
+    await vt.waitForRender()
+    const older = app.fullscreenScrollForTest()
+    assert.ok(older !== undefined)
+    assert.ok(older.scrollTop < older.maxScrollTop, 'older paging must not jump to the new window bottom')
+    assert.ok(viewportHasLine(vt, 'turn-81'), 'older paging must keep the old top overlap row visible')
+    assert.ok(!viewportHasLine(vt, 'turn-90'), 'the long turn 82 must not let bottom anchoring hide the old top')
+
+    app.scrollToBottom({ disableFollow: true })
+    await vt.waitForRender()
+    assert.ok(viewportHasLine(vt, 'turn-90'), 'the older window bottom must show its bottom overlap row')
+    assert.equal(moveNewer(), true, 'newer paging must restore a captured anchor')
+    await vt.waitForRender()
+    const newer = app.fullscreenScrollForTest()
+    assert.ok(newer !== undefined)
+    assert.ok(newer.scrollTop > 0, 'newer paging must not jump to the new window top')
+    assert.ok(newer.scrollTop < newer.maxScrollTop, 'newer paging must preserve the overlap instead of following the end')
+    assert.ok(viewportHasLine(vt, 'turn-90'), 'newer paging must keep the old bottom overlap row visible')
+    assert.ok(!viewportHasLine(vt, 'turn-100'), 'newer paging must not skip past the preserved bottom overlap')
+  } finally {
+    app.stop()
+  }
+})
+
+test('folder window summaries do not discard the older-page top anchor', async () => {
+  const vt = new VirtualTerminal(100, 50)
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  for (let turn = 0; turn <= 100; turn += 1) {
+    events.push({
+      type: 'assistant/message',
+      seq: turn,
+      time: 1_700_000_000_000 + turn,
+      data: {
+        turn,
+        step: 0,
+        message: {
+          id: MessageId(`summary-anchor-${turn}`),
+          role: 'assistant',
+          content: [{ type: 'text', text: [`turn-${turn}`, `detail-${turn}-one`, `detail-${turn}-two`, `detail-${turn}-three`].join('\n') }],
+        },
+      },
+    } as SessionEvent)
+  }
+  folder.apply(events)
+  const controller = new TranscriptWindowController({
+    windowTurns: 20,
+    stepTurns: 10,
+    turns: folder.groupedTurns(),
+  })
+  let app!: TuiApp
+  const renderProjection = (): void => {
+    const endTurn = controller.endTurn()
+    const projection = folder.window({
+      maxTurns: controller.windowTurns,
+      ...(endTurn === undefined ? {} : { endTurn }),
+    })
+    app.setTranscript(projection.messages, undefined, {
+      ...controller.state(),
+      firstTurn: projection.firstTurn,
+      lastTurn: projection.lastTurn,
+      hasNewer: projection.hasNewer,
+    })
+  }
+  const moveOlder = (): boolean => {
+    const anchor = app.captureTranscriptViewportAnchor()
+    if (!controller.moveOlder()) return false
+    renderProjection()
+    return anchor !== undefined && app.restoreTranscriptViewportAnchor(anchor, 'top')
+  }
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onTranscriptMoveOlder: moveOlder })
+  app.start()
+  try {
+    renderProjection()
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    assert.equal(folder.window({ maxTurns: 20 }).messages[0]?.kind, 'summary')
+    app.scrollToTop({ disableFollow: true })
+    await vt.waitForRender()
+    const viewportRow = (text: string): number => vt.getViewport().findIndex(line => line.trim().endsWith(text))
+    const beforeAnchor = app.captureTranscriptViewportAnchor()
+    assert.equal(beforeAnchor?.top?.turn, 81, 'the top anchor must skip the leading presentation-only summary')
+    const beforeRow = viewportRow('turn-81')
+    assert.ok(beforeRow >= 0, 'the latest window must show turn 81 below its summary')
+
+    assert.equal(moveOlder(), true, 'older paging must restore the summary-skipping anchor')
+    await vt.waitForRender()
+    assert.equal(folder.window({ maxTurns: 20, endTurn: 90 }).messages[0]?.kind, 'summary')
+    const afterRow = viewportRow('turn-81')
+    assert.equal(afterRow, beforeRow, 'the overlap row must stay at the same viewport row after the summary-bearing window swap')
+  } finally {
+    app.stop()
+  }
+})
 
 test('viewport mode: Home scrolls to the top, End to the bottom', async () => {
   resetKeybindings()
@@ -189,6 +386,26 @@ test('regular mode: Home/End keep their editor behavior under both presets', asy
       `[${mode}] Ctrl+End must move the editor cursor to the line end in regular mode (${JSON.stringify(ctrlHome)} → ${JSON.stringify(ctrlEnd)})`)
     app.stop()
   }
+})
+
+test('regular mode Ctrl+End declines the semantic latest action', async () => {
+  resetKeybindings()
+  let jumps = 0
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onTranscriptJumpLatest: () => {
+      jumps += 1
+      return true
+    },
+  })
+  app.start()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[1;5F')
+  await vt.waitForRender()
+  assert.equal(jumps, 0, 'regular Ctrl+End must not invoke the transcript latest action')
+  app.stop()
 })
 
 // ── the /settings row ────────────────────────────────────────────────────

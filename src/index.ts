@@ -83,8 +83,10 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from './present.ts'
-import { childOwnEvents, textOf, TranscriptFolder } from './transcript.ts'
-import type { TranscriptMessage } from './transcript.ts'
+import { childOwnEvents, searchTranscript, textOf, TranscriptFolder } from './transcript.ts'
+import type { TranscriptMessage, TranscriptWindow } from './transcript.ts'
+import { TranscriptWindowController } from './transcript-window.ts'
+import type { TranscriptWindowState } from './transcript-window.ts'
 import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
@@ -228,8 +230,10 @@ interface AppExit {
   (code: number): void
 }
 
-/** Display window in turns; older turns collapse into a summary entry. */
-const WINDOW_TURNS = 15
+/** Number of turns materialized by the transcript presentation window. */
+const TRANSCRIPT_WINDOW_TURNS = 20
+/** Overlapping turn step used when browsing older/newer history. */
+const TRANSCRIPT_WINDOW_STEP = 10
 /** Coalesced repaint interval for streaming events, in ms. */
 const REPAINT_FLUSH_MS = 50
 /** Throttle for re-chaining a RUNNING local shell card's result to the
@@ -870,15 +874,28 @@ function bundleVersion(): string {
 }
 
 /**
- * Repaint the transcript from a folder's windowed message list.
- * @param app - the TUI surface.
- * @param folder - the incremental fold state for the live session.
+ * Repaint the transcript from the active folder's bounded window. Messages,
+ * navigation facts, and turn activities come from one fold snapshot so a
+ * repaint can never show a stale Thought header against fresh rows.
  */
-function repaint(app: TuiApp, folder: TranscriptFolder): void {
-  // Messages AND the turn activities come from the SAME fold state: a
-  // repaint must never show a stale Thought header against fresh rows
-  // (plan §19).
-  app.setTranscript(folder.messages({ maxTurns: WINDOW_TURNS }), folder.turnActivities())
+function repaint(
+  app: TuiApp,
+  folder: TranscriptFolder,
+  windowController: TranscriptWindowController,
+): TranscriptWindow {
+  windowController.setTurns(folder.groupedTurns())
+  const endTurn = windowController.endTurn()
+  const projection = folder.window({
+    maxTurns: windowController.windowTurns,
+    ...(endTurn === undefined ? {} : { endTurn }),
+  })
+  app.setTranscript(projection.messages, folder.turnActivities(), {
+    ...windowController.state(),
+     firstTurn: projection.firstTurn,
+     lastTurn: projection.lastTurn,
+    hasNewer: projection.hasNewer,
+  })
+  return projection
 }
 
 /** Current git branch from the nearest .git/HEAD, or empty outside a checkout. */
@@ -2015,6 +2032,11 @@ export function apply(ctx: Context, config: Config): void {
     // resumed session is hydrated only by initLiveSession below, so startup
     // wiring never pre-folds the same event log a second time.
     let folder = new TranscriptFolder()
+    let windowController = new TranscriptWindowController({
+      windowTurns: TRANSCRIPT_WINDOW_TURNS,
+      stepTurns: TRANSCRIPT_WINDOW_STEP,
+      turns: folder.groupedTurns(),
+    })
     let statsFolder = new StatsFolder()
     let goalText: string | undefined
 
@@ -3062,6 +3084,8 @@ export function apply(ctx: Context, config: Config): void {
     let viewing: {
       id: SessionId
       folder: TranscriptFolder
+      /** Independent presentation state while browsing the child. */
+      window: TranscriptWindowController
       /** The child's OWN event stats (turns/steps/tokens) for the footer. */
       stats: StatsFolder
       parentSessionId: SessionId
@@ -3083,18 +3107,23 @@ export function apply(ctx: Context, config: Config): void {
     // transcript (see enterView). Consumed on the matching tool/result.
     const viewCallToChild = new Map<string, SessionId>()
     const activeFolder = (): TranscriptFolder => viewing?.folder ?? folder
+     const activeWindow = (): TranscriptWindowController => viewing?.window ?? windowController
     const paintNow = (): void => {
       if (repaintTimer !== undefined) {
         clearTimeout(repaintTimer)
         repaintTimer = undefined
       }
-      repaint(app, activeFolder())
+      const controller = activeWindow()
+       repaint(app, activeFolder(), controller)
+       if (controller.isLatest()) app.scrollToBottom()
     }
     const schedulePaint = (): void => {
       if (repaintTimer !== undefined) return
       repaintTimer = setTimeout(() => {
         repaintTimer = undefined
-        repaint(app, activeFolder())
+        const controller = activeWindow()
+       repaint(app, activeFolder(), controller)
+       if (controller.isLatest()) app.scrollToBottom()
       }, REPAINT_FLUSH_MS)
     }
     // Tool-call arguments by callId, for the approval-preview dialog.
@@ -3105,6 +3134,7 @@ export function apply(ctx: Context, config: Config): void {
     // Transcript-search state (see the onSearch* events below).
     let searchMatches: TranscriptMessage[] = []
     let searchCurrent = -1
+     let searchOrigin: { controller: TranscriptWindowController; state: TranscriptWindowState } | undefined
     // Monotonic session generation: bumped on EVERY session swap (switch,
     // resume, deferred creation). Late async work (the skill command
     // catalog refresh, model-menu info, title folds) captures the
@@ -3125,6 +3155,9 @@ export function apply(ctx: Context, config: Config): void {
       viewCallToChild.clear()
       searchMatches = []
       searchCurrent = -1
+      searchOrigin = undefined
+      windowController.latest()
+      windowController.setTurns(folder.groupedTurns())
       app.setSearchResult(0, 0)
       app.clearSessionOverrides()
       // A new session owns the surface: close the task browser opened for
@@ -3167,8 +3200,8 @@ export function apply(ctx: Context, config: Config): void {
         // keeps the teardown's intent explicit and ordering-safe). The
         // Esc path uses exitFocusViewerScope instead (restore).
         app.discardFocusViewerScope()
-        repaint(app, folder)
-        app.scrollToBottom()
+        repaint(app, folder, windowController)
+        windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
         refreshStatus()
       })
       return sessionGeneration
@@ -3181,10 +3214,11 @@ export function apply(ctx: Context, config: Config): void {
       // come from the same folder call (plan §19 — a jump must never
       // combine a fresh window with stale activity data).
       const folder = activeFolder()
-      app.setTranscript(folder.messages({
-        maxTurns: WINDOW_TURNS,
-        ...turn === undefined ? {} : { endTurn: turn },
-      }), folder.turnActivities())
+      const controller = activeWindow()
+       if (turn !== undefined) controller.anchorAt(turn)
+       repaint(app, folder, controller)
+       app.scrollToBottom({ disableFollow: !controller.isLatest() })
+
       // Focus Mode: the search hits the FULL transcript (hidden process
       // rows included — plan §23), so a jump into a collapsed turn must
       // open its Thought for the hit to be visible — and a hit inside a
@@ -3253,6 +3287,11 @@ export function apply(ctx: Context, config: Config): void {
         : mode === 'one-shot' ? 'readonly-one-shot' : 'interactive-direct-child'
       const request = viewerOpen.open()
       const childFolder = new TranscriptFolder()
+      const childWindow = new TranscriptWindowController({
+        windowTurns: TRANSCRIPT_WINDOW_TURNS,
+        stepTurns: TRANSCRIPT_WINDOW_STEP,
+        turns: childFolder.groupedTurns(),
+      })
       const childStats = new StatsFolder()
       let childCwd = ''
       // Only the child's OWN events enter the viewer: a fork provider seeds
@@ -3302,6 +3341,7 @@ export function apply(ctx: Context, config: Config): void {
       viewing = {
         id: childId,
         folder: childFolder,
+         window: childWindow,
         stats: childStats,
         parentSessionId,
         label: label ?? childId,
@@ -3313,7 +3353,7 @@ export function apply(ctx: Context, config: Config): void {
       // The child's turn numbers are its OWN namespace: the parent's Focus
       // disclosures must not leak into the child transcript (plan §26).
       app.enterFocusViewerScope()
-      repaint(app, childFolder)
+      repaint(app, childFolder, childWindow)
       // The viewer bar covers the editor (a read-only placeholder for
       // one-shot, the child's own draft for continuable) and the header
       // badges the mode — the transient notify is no longer the only "you
@@ -3343,11 +3383,11 @@ export function apply(ctx: Context, config: Config): void {
       // Restore the parent's Focus disclosures BEFORE the repaint so the
       // projection uses them (plan §26).
       app.exitFocusViewerScope()
-      repaint(app, folder)
+      repaint(app, folder, windowController)
       // The main transcript may have grown while the viewer covered it (the
-      // child's result, the parent's streaming): anchor the view to the end
-      // so the pop lands on the latest content, not a stale scroll position.
-      app.scrollToBottom()
+      // child's result, the parent's streaming): restore the parent's semantic latest/history position
+      // so the pop never loses an intentional history anchor.
+      windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
       refreshStatus()
       return true
     }
@@ -4485,9 +4525,47 @@ export function apply(ctx: Context, config: Config): void {
           rmSync(file, { force: true })
         }
       },
-      // Persist the Ctrl+F toggle (the settings panel writes the same field
-      // itself); `tuiSettings` is declared later, so the closure reads it
-      // lazily at toggle time. A failed write is user-recoverable.
+      // Virtual history boundaries preserve the rendered overlap anchor;
+      // paging changes only the presentation window, never the fold.
+      onTranscriptMoveOlder: () => {
+        const anchor = app.captureTranscriptViewportAnchor()
+        const controller = activeWindow()
+        if (!controller.moveOlder()) return false
+        repaint(app, activeFolder(), controller)
+        // Preserve the old top edge at the same rendered row in the overlap.
+        if (anchor === undefined) app.scrollToBottom({ disableFollow: true })
+        else app.restoreTranscriptViewportAnchor(anchor, 'top')
+        return true
+      },
+      onTranscriptMoveNewer: () => {
+        const anchor = app.captureTranscriptViewportAnchor()
+        const controller = activeWindow()
+        if (!controller.moveNewer()) return false
+        repaint(app, activeFolder(), controller)
+        if (controller.isLatest()) app.scrollToBottom()
+        else if (anchor === undefined) app.scrollToTop({ disableFollow: true })
+        else app.restoreTranscriptViewportAnchor(anchor, 'bottom')
+        return true
+      },
+      onTranscriptJumpLatest: () => {
+        // Ctrl+End is a fullscreen transcript action. In regular mode it must
+        // fall through so the editor retains its own Ctrl+End behavior.
+        if (!app.isFullscreen()) return false
+        // Ctrl+End is a semantic reset, not merely a viewport scroll. Clear
+        // the search origin before closing the overlay so its close callback
+        // cannot restore the historical anchor we are explicitly leaving.
+        searchOrigin = undefined
+        searchMatches = []
+        searchCurrent = -1
+        const closedSearch = app.closeTranscriptSearch()
+        const controller = activeWindow()
+        const changed = controller.latest()
+        if (!changed && !closedSearch && !app.isFullscreen()) return false
+        repaint(app, activeFolder(), controller)
+        app.scrollToBottom()
+        app.setSearchResult(0, 0)
+        return true
+      },
       onFullscreenChange: (fullscreen) => {
         const settings = tuiSettings
         if (settings !== undefined) {
@@ -4501,15 +4579,15 @@ export function apply(ctx: Context, config: Config): void {
           })
         }
       },
-      // Transcript search (Ctrl+Shift+F): matches run over the FULL folded
+      // Transcript search: matches run over the FULL folded
       // transcript; each jump re-windows the view so the matched turn is
       // visible (older turns collapse above it into the summary entry).
+      onSearchOpen: () => {
+        const controller = activeWindow()
+        searchOrigin = { controller, state: controller.state() }
+      },
       onSearchQuery: (query) => {
-        const needle = query.trim().toLowerCase()
-        const searchable = (message: TranscriptMessage): string =>
-          message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}` : message.text
-        const full = folder.messages()
-        searchMatches = needle === '' ? [] : full.filter(message => searchable(message).toLowerCase().includes(needle))
+        searchMatches = searchTranscript(activeFolder(), query)
         searchCurrent = searchMatches.length > 0 ? 0 : -1
         app.setSearchResult(searchCurrent + 1, searchMatches.length)
         if (searchCurrent >= 0) jumpToSearchMatch()
@@ -4527,7 +4605,17 @@ export function apply(ctx: Context, config: Config): void {
       onSearchClose: () => {
         searchMatches = []
         searchCurrent = -1
-        repaint(app, activeFolder())
+        const origin = searchOrigin
+        searchOrigin = undefined
+        const controller = activeWindow()
+        if (origin?.controller === controller && origin.state.mode === 'history' && origin.state.endTurn !== undefined) {
+          controller.anchorAt(origin.state.endTurn)
+        } else {
+          controller.latest()
+        }
+        repaint(app, activeFolder(), controller)
+        if (controller.isLatest()) app.scrollToBottom()
+        else app.scrollToTop({ disableFollow: true })
       },
       // P7d: a single Esc with no overlay up exits the subagent viewer
       // instead of arming the double-Esc cancel.
@@ -5661,6 +5749,7 @@ export function apply(ctx: Context, config: Config): void {
       // first usable frame.
       const hydrated = hydrateSessionUi(events)
       folder = hydrated.folder
+       windowController.setTurns(folder.groupedTurns())
       statsFolder = hydrated.statsFolder
       diag.debug('session bootstrap scan', {
         scan: 'transcript',
@@ -5706,7 +5795,7 @@ export function apply(ctx: Context, config: Config): void {
       // The subagent-notice notify guard is per-session: a new session's
       // settlements must notify again.
       notifiedSubagentNotices.clear()
-      repaint(app, folder)
+      repaint(app, folder, windowController)
       refreshStatus()
       refreshQueue()
       // Repaint both background channels: the dock/badge are owner-fenced,
