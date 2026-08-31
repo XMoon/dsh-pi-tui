@@ -5505,11 +5505,12 @@ export function apply(ctx: Context, config: Config): void {
           // layout IS visible, but the authorization follows the USER's
           // CURRENT mode: only a USER who opted into command mode
           // (userMode === 'command') may fall back per their own
-          // footerFallbackMode; a USER whose current mode is
-          // default/compact authorizes NOTHING — a PROJECT forcing the
-          // merged command mode can never turn stale fallback metadata
-          // (a leftover footerFallbackMode: custom) into execution
-          // authorization.
+          // footerFallbackMode (the fallback property itself is fully
+          // gated — empty for any other mode); a USER whose current mode
+          // is custom authorizes per their current layout, and a
+          // default/compact USER authorizes NOTHING — a PROJECT forcing
+          // the merged command mode can never turn stale fallback
+          // metadata into execution authorization.
           const authorizedIds = userMode === 'command'
             ? trust.userCommandItemFallbackActivationIds
             : trust.userCommandItemActivationIds

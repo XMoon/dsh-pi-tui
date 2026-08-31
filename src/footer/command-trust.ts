@@ -184,16 +184,25 @@ export function resolveUserCommandItemActivationIds(
 
 /**
  * The ids authorized for the native FALLBACK surface (a merged
- * `footer: command` the USER layer does not own): the USER's OWN
- * footerFallbackMode decides — `custom` + a valid USER layout → its refs,
- * otherwise empty. A project can force the merged command mode, but the
- * fallback can only ever execute what the user's own fallback declaration
- * authorizes.
+ * `footer: command` the USER layer does not own). The FULL semantic is
+ * encoded HERE so no caller can forget the outer mode gate:
+ *
+ *   USER footer === 'command'
+ *     && USER footerFallbackMode === 'custom'
+ *     && valid USER footerLayout
+ *   → the layout's refs
+ *   otherwise → empty
+ *
+ * A USER who never opted into command mode (footer: default/compact)
+ * authorizes NOTHING even with stale fallback metadata; a PROJECT
+ * forcing the merged command mode can never turn it into execution
+ * authorization.
  */
 export function resolveUserCommandItemFallbackActivationIds(
   descriptors: readonly SettingsDescriptorLike[] | undefined,
   namespace: string,
 ): ReadonlySet<string> {
+  if (resolveUserLayerFooterMode(descriptors, namespace) !== 'command') return EMPTY_IDS
   if (resolveUserLayerFooterFallbackMode(descriptors, namespace) !== 'custom') return EMPTY_IDS
   const layout = resolveUserLayerFooterLayout(descriptors, namespace)
   return layout === undefined ? EMPTY_IDS : layoutRefIds(layout)
