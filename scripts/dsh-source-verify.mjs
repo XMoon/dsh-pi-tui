@@ -32,6 +32,7 @@ import { pnpmExecutable, runBounded } from './lib/process.mjs'
 const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const SOURCE_PACK_SCRIPT = fileURLToPath(new URL('./dsh-source-pack.mjs', import.meta.url))
+const DEV_STATE_FILE = '.dsh-dev-state.json'
 const VERIFY_TIMEOUTS = {
   sourcePack: 50 * 60 * 1000,
   preparation: 20 * 60 * 1000,
@@ -284,6 +285,31 @@ async function runSourcePack(values, config) {
   return output
 }
 
+/**
+ * Non-blocking hint: when the current worktree already has a ready
+ * pinned-DSH Source development environment (matching local state, non-
+ * ephemeral, materialized distribution on disk), remind the caller that
+ * routine TUI validation should reuse it instead of this full verifier.
+ * This is a warning only: it never exits, never changes the verifier
+ * semantics, and never reuses the development environment to weaken the
+ * full CI-equivalent verification.
+ */
+function noteReadySourceDevelopmentEnvironment(effective) {
+  try {
+    const statePath = join(PACKAGE_ROOT, DEV_STATE_FILE)
+    if (!existsSync(statePath)) return
+    const state = JSON.parse(readFileSync(statePath, 'utf8'))
+    if (state.mode !== 'source' || state.ephemeral === true) return
+    if (state.repository !== effective.repository || state.ref !== effective.ref) return
+    if (typeof state.distribution !== 'string' || !existsSync(state.distribution)) return
+    console.log('NOTE: A ready pinned-DSH Source development environment already exists.')
+    console.log('For routine TUI validation, reuse it and run normal project checks.')
+    console.log('This command performs the full CI-equivalent Source compatibility verification.')
+  } catch {
+    // The hint must never fail or alter the verifier.
+  }
+}
+
 async function main() {
   const values = resolveSourceVerifyPaths(parseCli())
   const configPath = values.config
@@ -293,6 +319,7 @@ async function main() {
     ref: values.ref ?? tracked.ref,
     expectedVersion: values['expected-version'] ?? tracked.expectedVersion,
   }, tracked.path)
+  noteReadySourceDevelopmentEnvironment(effective)
   if (values.distribution === undefined && (typeof values['dsh-dir'] !== 'string' || values['dsh-dir'].trim() === '')) {
     fail('--dsh-dir is required when --distribution is not provided')
   }
