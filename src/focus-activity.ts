@@ -6,7 +6,8 @@
  *
  * The collapsed card shows: a status header (whale disclosure icon +
  * duration + per-turn token + responsive tool stats) and the three compact
- * process slots — Think / Message / Tool — plus the Error line, all muted,
+ * process slots — Think / Tool / Message (Message shows the latest up to
+ * three visual rows) — plus the Error line, all muted,
  * never competing with the final assistant. The expanded card renders ONLY
  * the header: the hidden process rows render below as ordinary transcript
  * messages (plan §15 — no second renderer family), and inside an open
@@ -20,7 +21,7 @@
  * @module @xmoon76/dsh-pi-tui/focus-activity
  */
 
-import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { color } from './theme.ts'
 import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
@@ -146,6 +147,12 @@ export function formatFocusHeaderLine(
  * (plan §25, aligned by visible width). */
 const FOCUS_SLOT_LABEL_WIDTH = 9
 
+/** The max visual rows the collapsed Message slot renders: the LATEST
+ * tail rows of the bounded message text (plan: Message is the third
+ * process slot and shows up to three terminal rows, always the newest
+ * tail — streaming appends naturally roll toward it). */
+const FOCUS_MESSAGE_MAX_ROWS = 3
+
 /** Collapse arbitrary slot text to ONE physical terminal row: CR/LF
  * sequences (LF, CRLF, lone CR) are normalized to the FIRST line. This is
  * the final boundary the fullscreen compositor depends on — every
@@ -173,11 +180,39 @@ function previewLine(label: string, text: string, width: number): string {
   return truncateToWidth(`${lead}${body}`, Math.max(1, width), '…')
 }
 
+/**
+ * The collapsed Message slot: the bounded message tail wrapped to the
+ * CURRENT width and cut to its LAST `maxRows` visual rows (plan: Message
+ * is the third process slot, up to three rows, always the newest tail).
+ * The wrap happens per render — a resize re-wraps, and streaming appends
+ * roll the tail forward with no scroll index to maintain. Every returned
+ * element is exactly one PHYSICAL framebuffer row: the first carries the
+ * label lead (`Message: `), continuation rows carry a same-width blank
+ * indent, and each row is hard-truncated to the width as the last resort
+ * (the fullscreen row hit-map depends on one row per element).
+ */
+function previewTailLines(label: string, text: string, width: number, maxRows: number): string[] {
+  const lead = `${label}${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth(label)))}`
+  const bodyBudget = Math.max(1, width - visibleWidth(lead))
+  // ANSI / Unicode-aware wrap (the fork's wrapTextWithAnsi): a single
+  // logical line may wrap into several visual rows, so the tail cut
+  // happens AFTER wrapping — never `text.split('\n').slice(-3)`.
+  const wrapped = wrapTextWithAnsi(text, bodyBudget)
+  const tail = wrapped.slice(-maxRows)
+  const indent = ' '.repeat(visibleWidth(lead))
+  return tail.map((row, index) => {
+    const line = index === 0 ? `${lead}${row}` : `${indent}${row}`
+    return truncateToWidth(line, Math.max(1, width), '…')
+  })
+}
+
 /** The collapsed card body: the three process slots in FIXED order —
- * Think, Message, Tool — then the error reason (plan §24). Each slot is
- * at most ONE visual row; only existing slots render. The Tool line's
- * status prefix follows plan §10: none while running, ✓ settled ok,
- * ✗ settled error. */
+ * Think, Tool, Message — then the error reason (plan §24). Think and
+ * Tool are at most ONE visual row; Message is the third process slot and
+ * shows the latest up to {@link FOCUS_MESSAGE_MAX_ROWS} visual rows of
+ * its bounded tail. Only existing slots render. The Tool line's status
+ * prefix follows plan §10: none while running, ✓ settled ok, ✗ settled
+ * error. */
 export function focusCollapsedBody(
   activity: TurnActivity,
   width: number,
@@ -187,12 +222,12 @@ export function focusCollapsedBody(
   if (activity.think !== undefined) {
     lines.push(previewLine('Think:', activity.think.text, width))
   }
-  if (activity.message !== undefined) {
-    lines.push(previewLine('Message:', activity.message.text, width))
-  }
   if (activity.tool !== undefined && toolDisplay !== undefined) {
     const prefix = activity.tool.status === 'ok' ? '✓ ' : activity.tool.status === 'error' ? '✗ ' : ''
     lines.push(previewLine('Tool:', `${prefix}${toolDisplay}`, width))
+  }
+  if (activity.message !== undefined) {
+    lines.push(...previewTailLines('Message:', activity.message.text, width, FOCUS_MESSAGE_MAX_ROWS))
   }
   const reason = activity.reason
   if (reason?.kind === 'error' && reason.error !== undefined) {
@@ -324,12 +359,6 @@ export function projectFocus(
     index += 1
     const activity = activities.get(turn)
     const expanded = expandedTurns.has(turn)
-    // 1. The user's own messages stay visible (steers included).
-    for (const member of group) {
-      if (member.kind === 'user') out.push({ kind: 'message', message: member })
-    }
-    // 2. The Thought disclosure follows the user rows.
-    if (activity !== undefined) out.push({ kind: 'activity', activity })
     // The final assistant is decided ONCE from the exact last assistant
     // row (shared by the expanded and collapsed branches — one semantic,
     // never two drifting copies).
@@ -340,19 +369,39 @@ export function projectFocus(
       // the final assistant held back and appended LAST (a max-tokens
       // turn's `max tokens reached` system row must never land after the
       // final: the settled order is User → Thought → process → final).
-      // Every revealed process row carries the owner-turn collapse mark:
-      // the user's rows and the FINAL assistant stay unmarked (clicking
-      // them must not collapse the Thought — review P2).
-      for (const member of group) {
-        if (member.kind === 'user') continue
-        if (final !== undefined && member === final.message) continue
-        out.push({ kind: 'message', message: member, collapseFocusOwnerOnClick: turn })
+      // The LEADING user prefix (the initial prompt; multiple consecutive
+      // initial users all stay) precedes the Thought; every later
+      // user/steer returns to its chronological position in the process
+      // (plan: expanded chronology — the projection reorders, never the
+      // session events). Every revealed process row carries the
+      // owner-turn collapse mark; the user's rows and the FINAL assistant
+      // stay unmarked (clicking them must not collapse the Thought —
+      // review P2).
+      const leadingUserCount = countLeadingUsers(group)
+      for (const member of group.slice(0, leadingUserCount)) {
+        out.push({ kind: 'message', message: member })
+      }
+      if (activity !== undefined) out.push({ kind: 'activity', activity })
+      for (const member of group.slice(leadingUserCount)) {
+        if (member.kind === 'user') {
+          out.push({ kind: 'message', message: member })
+        } else {
+          if (final !== undefined && member === final.message) continue
+          out.push({ kind: 'message', message: member, collapseFocusOwnerOnClick: turn })
+        }
       }
       if (final !== undefined) {
         out.push(final.truncated ? { kind: 'message', message: final.message, truncated: true } : { kind: 'message', message: final.message })
       }
       continue
     }
+    // Collapsed: the user's own messages stay visible (steers included)
+    // and ALL of them precede the Thought (summary semantics unchanged).
+    for (const member of group) {
+      if (member.kind === 'user') out.push({ kind: 'message', message: member })
+    }
+    // The Thought disclosure follows the user rows.
+    if (activity !== undefined) out.push({ kind: 'activity', activity })
     // Compaction cards keep their existing lifecycle in the collapsed
     // view (plan §12.3 v1 — never hidden into the Thought).
     for (const member of group) {
@@ -377,6 +426,19 @@ function lastAssistant(
     if (member?.kind === 'assistant') return member
   }
   return undefined
+}
+
+/** The number of CONSECUTIVE user rows at the START of a turn group: the
+ * initial prompt (multiple consecutive initial users all stay before the
+ * Thought in the expanded view). Every user row AFTER this prefix is a
+ * steer and returns to its chronological position. */
+function countLeadingUsers(group: readonly TranscriptMessage[]): number {
+  let count = 0
+  for (const member of group) {
+    if (member.kind !== 'user') break
+    count += 1
+  }
+  return count
 }
 
 /** Whether one assistant message truly renders visible rows. The flat

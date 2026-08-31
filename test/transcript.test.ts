@@ -1610,5 +1610,95 @@ test('a replacement assistant/message does not mutate Focus activity', () => {
   assert.equal(assistant.text, 'first answer', 'append-origin assistant text must survive')
 })
 
+// ── Focus Message slot: bounded multiline tail (plan: the fold keeps
+// the tail's line structure; the renderer wraps and shows the last rows) ──
+
+test('the Message slot keeps a MULTILINE candidate tail (never flattened to one line)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'line one\nline two\nline three' } }, 1),
+  ])
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.message?.text, 'line one\nline two\nline three',
+    'syncMessage must preserve the multiline tail for the renderer')
+})
+
+test('a confirmed intermediate message keeps its bounded LATEST tail (multiline)', () => {
+  const folder = new TranscriptFolder()
+  const long = 'head\n' + 'x'.repeat(600) + '\ntail marker'
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: long } }, 1),
+    // A tool call confirms the candidate as an intermediate message.
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 2),
+  ])
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  const message = activity.message
+  const length = message?.text.length ?? 0
+  assert.ok(message?.text.endsWith('tail marker'), 'the confirmed slot keeps the newest content')
+  assert.ok(message !== undefined && length <= 400,
+    `the confirmed slot stays bounded to MESSAGE_TAIL_CAP (${length})`)
+  assert.ok(message?.text.includes('\n'), 'the confirmed multiline structure survives')
+})
+
+test('a later authoritative message updates the correct step in place (multiline tail)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'streamed\nfragment' } }, 1),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'settled\nmultiline\nanswer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 2),
+  ])
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.message?.text, 'settled\nmultiline\nanswer',
+    'the authoritative text replaces the streamed tail in place')
+})
+
+test('a stale older step never resurrects the Message slot', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'step zero text' } }, 1),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a0'), role: 'assistant', content: [{ type: 'text', text: 'step zero settled' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 2),
+    event('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: 'step one text' } }, 3),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'step one settled' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 4),
+  ])
+  const before = folder.turnActivity(0)
+  assert.ok(before !== undefined)
+  assert.equal(before.message?.text, 'step one settled', 'the LATEST intermediate wins')
+  // A late replay for the OLDER step must not roll the slot back.
+  folder.apply([event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'stale replay' } }, 5)])
+  const after = folder.turnActivity(0)
+  assert.equal(after?.message?.text, 'step one settled', 'a stale older-step delta never resurrects the slot')
+})
+
+test('the final answer never enters the Message slot (multiline final included)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'final\nanswer\nlines' } }, 1),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'final\nanswer\nlines' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.message, undefined, 'a completed turn whose candidate IS the final leaves the slot empty')
+})
+
 
 

@@ -986,7 +986,13 @@ test('a long confirmed intermediate message previews its TAIL, never the stale h
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 6),
   ])
   const activity = folder.turnActivity(0)!
-  assert.equal(activity.message?.text, 'THE END MARKER', 'the preview must come from the message TAIL')
+  // The slot keeps the bounded MULTILINE tail (never a single-line
+  // flatten): the renderer wraps it to the current width and shows the
+  // last three visual rows, so the fold must preserve the tail's line
+  // structure and its newest content.
+  assert.ok(activity.message?.text.endsWith('THE END MARKER'), 'the preview must come from the message TAIL')
+  assert.ok(activity.message !== undefined && activity.message.text.length <= 400, 'the slot stays bounded to MESSAGE_TAIL_CAP')
+  assert.ok(activity.message?.text.includes('\n'), 'the multiline tail structure must survive the fold')
 })
 
 test('a settled message without any prior candidate is still the final when the turn ends (no phantom slot)', () => {
@@ -1315,7 +1321,7 @@ test('the header never wraps: every candidate fits its width', () => {
   }
 })
 
-test('the collapsed body renders the three slots in fixed order, one line each (plan §24/§25/§47)', () => {
+test('the collapsed body renders the three slots in fixed order — Think, Tool, Message (plan §24/§25/§47)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
@@ -1327,9 +1333,9 @@ test('the collapsed body renders the three slots in fixed order, one line each (
   const body = focusCollapsedBody(activity, 60, focusToolDisplay(activity.tool!, {}))
   assert.equal(body.length, 3, `exactly the three slots:\n${body.join('\n')}`)
   assert.ok(body[0]!.startsWith('Think:   '), body[0])
-  assert.ok(body[1]!.startsWith('Message: '), body[1])
-  assert.ok(body[2]!.startsWith('Tool:    '), body[2])
-  assert.ok(body[2]!.includes('Read src/present.ts'), body[2])
+  assert.ok(body[1]!.startsWith('Tool:    '), body[1])
+  assert.ok(body[1]!.includes('Read src/present.ts'), body[1])
+  assert.ok(body[2]!.startsWith('Message: '), body[2])
   // The labels align at the same column (visible width 9).
   for (const line of body) {
     const lead = line.slice(0, 9)
@@ -1339,6 +1345,134 @@ test('the collapsed body renders the three slots in fixed order, one line each (
   for (const line of body) {
     assert.ok(visibleWidth(line) <= 60, `line exceeds width: ${JSON.stringify(line)}`)
   }
+})
+
+// ── Message slot: the third process slot, latest up to 3 visual rows ────
+
+/** A running activity whose Message candidate streams the given text. */
+function messageActivity(text: string): ReturnType<TranscriptFolder['turnActivity']> {
+  return activityOf(0, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text } }, 1001, 1),
+  ])
+}
+
+test('the Message slot is the THIRD process slot: Think, Tool, Message', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'message body' } }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'read', arguments: '{}' }, 1003, 3),
+  ])
+  const activity = folder.turnActivity(0)!
+  const body = focusCollapsedBody(activity, 60, focusToolDisplay(activity.tool!, {}))
+  assert.ok(body[0]!.startsWith('Think:   '), body[0])
+  assert.ok(body[1]!.startsWith('Tool:    '), body[1])
+  assert.ok(body[2]!.startsWith('Message: '), body[2])
+})
+
+test('the Message slot renders 1, 2 and 3 visual rows; more than 3 keeps only the last 3', () => {
+  // One short line → one row.
+  const one = focusCollapsedBody(messageActivity('short message')!, 60)
+  assert.equal(one.length, 1)
+  assert.ok(one[0]!.startsWith('Message: '), one[0])
+  // Two logical lines → two rows.
+  const two = focusCollapsedBody(messageActivity('first line\nsecond line')!, 60)
+  assert.equal(two.length, 2, two.join('|'))
+  assert.ok(two[0]!.startsWith('Message: '), two[0])
+  assert.ok(two[1]!.startsWith('         '), `continuation rows carry the blank indent: ${two[1]}`)
+  // Three logical lines → three rows.
+  const three = focusCollapsedBody(messageActivity('a\nb\nc')!, 60)
+  assert.equal(three.length, 3, three.join('|'))
+  // Four logical lines → only the LAST three rows.
+  const four = focusCollapsedBody(messageActivity('a\nb\nc\nd')!, 60)
+  assert.equal(four.length, 3, four.join('|'))
+  assert.ok(four[0]!.includes('b'), `the oldest row drops: ${four.join('|')}`)
+  assert.ok(four[2]!.includes('d'), `the newest row stays: ${four.join('|')}`)
+})
+
+test('a single over-long logical line wraps and the LAST three visual rows survive', () => {
+  const long = 'word '.repeat(40) // 200 chars, wraps at width 60
+  const body = focusCollapsedBody(messageActivity(long)!, 60)
+  assert.equal(body.length, 3, `wrapped tail must be 3 rows:\n${body.join('\n')}`)
+  // The tail rows are the NEWEST content: the last row ends with the
+  // text's own tail (the wrap never invents content).
+  const last = body[2]!
+  assert.ok(last.endsWith('word'), `the newest row carries the text tail: ${last}`)
+  for (const line of body) {
+    assert.ok(visibleWidth(line) <= 60, `row exceeds width: ${JSON.stringify(line)}`)
+  }
+})
+
+test('multiline + wrapped mix: the tail cut happens AFTER wrapping', () => {
+  const text = 'head\n' + 'word '.repeat(30) + 'tail'
+  const body = focusCollapsedBody(messageActivity(text)!, 40)
+  assert.equal(body.length, 3, `mixed wrap must still cap at 3 rows:\n${body.join('\n')}`)
+  assert.ok(body[2]!.includes('tail'), `the newest content survives: ${body[2]}`)
+  for (const line of body) {
+    assert.ok(visibleWidth(line) <= 40, `row exceeds width: ${JSON.stringify(line)}`)
+  }
+})
+
+test('the Message slot handles ANSI, CJK and emoji/ZWJ by CELL width', () => {
+  const ansi = focusCollapsedBody(messageActivity('\x1b[31mred line\x1b[0m\nplain')!, 60)
+  assert.equal(ansi.length, 2, ansi.join('|'))
+  for (const line of ansi) {
+    assert.ok(visibleWidth(line) <= 60, `ANSI row exceeds width: ${JSON.stringify(line)}`)
+  }
+  const cjk = focusCollapsedBody(messageActivity('中文第一行\n中文第二行\n中文第三行\n中文第四行')!, 40)
+  assert.equal(cjk.length, 3, cjk.join('|'))
+  assert.ok(cjk[2]!.includes('第四行'), `CJK newest row: ${cjk[2]}`)
+  for (const line of cjk) {
+    assert.ok(visibleWidth(line) <= 40, `CJK row exceeds width: ${JSON.stringify(line)}`)
+  }
+  const emoji = focusCollapsedBody(messageActivity('👨‍👩‍👧‍👦 family\n👍 done')!, 30)
+  assert.equal(emoji.length, 2, emoji.join('|'))
+  for (const line of emoji) {
+    assert.ok(visibleWidth(line) <= 30, `emoji row exceeds width: ${JSON.stringify(line)}`)
+  }
+})
+
+test('a very narrow width never produces a negative budget or an over-wide row', () => {
+  for (const width of [1, 2, 3, 4, 8]) {
+    const body = focusCollapsedBody(messageActivity('a\nb\nc\nd')!, width)
+    assert.ok(body.length >= 1 && body.length <= 3, `width ${width}: ${body.length} rows`)
+    for (const line of body) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)} (${visibleWidth(line)})`)
+    }
+  }
+})
+
+test('resize re-wraps: the same text yields different row counts at different widths', () => {
+  const text = 'word '.repeat(30)
+  const wide = focusCollapsedBody(messageActivity(text)!, 120)
+  const narrow = focusCollapsedBody(messageActivity(text)!, 30)
+  // At 120 cols the text fits in fewer rows than at 30 cols; both cap at 3.
+  assert.equal(wide.length, 2, `wide wrap: ${wide.join('|')}`)
+  assert.equal(narrow.length, 3, `narrow wrap: ${narrow.join('|')}`)
+  // The narrow wrap keeps LESS content per row: its last row is shorter
+  // than the wide wrap's last row (the wide row holds more of the tail).
+  const wideLast = wide[wide.length - 1]!
+  const narrowLast = narrow[narrow.length - 1]!
+  assert.ok(visibleWidth(wideLast) > visibleWidth(narrowLast),
+    `a wider terminal must hold more of the tail per row (wide ${visibleWidth(wideLast)} vs narrow ${visibleWidth(narrowLast)})`)
+})
+
+test('streaming appends roll the Message tail forward (no scroll index)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'first\nsecond\nthird\nfourth' } }, 1001, 1),
+  ])
+  const before = focusCollapsedBody(folder.turnActivity(0)!, 60)
+  assert.ok(before[2]!.includes('fourth'), `before append: ${before.join('|')}`)
+  folder.apply([
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '\nfifth' } }, 1002, 2),
+  ])
+  const after = focusCollapsedBody(folder.turnActivity(0)!, 60)
+  assert.ok(after[2]!.includes('fifth'), `after append the newest row updates: ${after.join('|')}`)
+  assert.ok(!after[0]!.includes('first'), `the oldest row rolls out: ${after.join('|')}`)
 })
 
 test('the Tool slot line carries the status prefix: none running, ✓ ok, ✗ error (plan §10)', () => {
@@ -1887,6 +2021,143 @@ test('window summaries (turn-less entries) pass through the projection', () => {
   const windowed = [{ kind: 'summary', text: '… 3 earlier turns' }, ...folder.messages()] as TranscriptMessage[]
   const blocks = projectFocus(windowed, folder.turnActivities(), new Set(), true)
   assert.equal(blocks[0]?.kind === 'message' ? blocks[0].message.kind : '', 'summary')
+})
+
+// ── expanded chronology (plan: steer rows return to their position) ─────
+
+/** A turn with an initial user, thinking, a tool, a MID-TURN steer, and a
+ * final answer: user → thinking → tool → user(steer) → assistant → end. */
+function steeredTurn(turn: number, baseSeq: number, startTime: number): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn }, startTime, baseSeq),
+    eventAt('user/message', {
+      id: MessageId(`msg-u-${turn}`), role: 'user',
+      content: [{ type: 'text', text: `initial prompt ${turn}` }],
+      source: { kind: 'user' },
+    }, startTime + 1, baseSeq + 1),
+    eventAt('assistant/chunk', { turn, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, startTime + 2, baseSeq + 2),
+    eventAt('tool/call', { turn, step: 0, callId: ToolCallId(`c-${turn}-1`), name: 'read', arguments: '{}' }, startTime + 3, baseSeq + 3),
+    eventAt('tool/result', {
+      turn, step: 0,
+      message: {
+        id: MessageId(`r-${turn}`), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId(`c-${turn}-1`), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId(`c-${turn}-1`) },
+      },
+    }, startTime + 4, baseSeq + 4),
+    eventAt('user/message', {
+      id: MessageId(`msg-s-${turn}`), role: 'user',
+      content: [{ type: 'text', text: `steer ${turn}` }],
+      source: { kind: 'user' },
+    }, startTime + 5, baseSeq + 5),
+    eventAt('assistant/message', {
+      turn, step: 1,
+      message: {
+        id: MessageId(`msg-a-${turn}`), role: 'assistant',
+        content: [{ type: 'text', text: `final answer ${turn}` }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, startTime + 6, baseSeq + 6),
+    eventAt('turn/end', { turn, reason: { kind: 'completed' } }, startTime + 6000, baseSeq + 7),
+  ]
+}
+
+test('expanded: the initial user stays before the Thought; a mid-turn steer returns to its chronological position', () => {
+  const folder = new TranscriptFolder()
+  folder.apply(steeredTurn(0, 0, 1000))
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const kinds = blockKinds(blocks)
+  // user(initial) → activity → thinking → tool → user(steer) → assistant(final)
+  assert.deepEqual(kinds, ['user', 'activity', 'thinking', 'tool', 'user', 'assistant'],
+    `expanded chronology broken: ${kinds.join(',')}`)
+  const userTexts = blocks.flatMap(b => b.kind === 'message' && b.message.kind === 'user' ? [b.message.text] : [])
+  assert.deepEqual(userTexts, ['initial prompt 0', 'steer 0'],
+    'the initial user precedes the Thought; the steer follows the tool that preceded it')
+})
+
+test('expanded: multiple steers keep their relative chronology', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ...steeredTurn(0, 0, 1000).slice(0, -1),
+    eventAt('user/message', {
+      id: MessageId('msg-s2'), role: 'user',
+      content: [{ type: 'text', text: 'second steer' }],
+      source: { kind: 'user' },
+    }, 2000, 50),
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('a2'), role: 'assistant', content: [{ type: 'text', text: 'final after second steer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 2001, 51),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2002, 52),
+  ])
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const userTexts = blocks.flatMap(b => b.kind === 'message' && b.message.kind === 'user' ? [b.message.text] : [])
+  assert.deepEqual(userTexts, ['initial prompt 0', 'steer 0', 'second steer'], 'steers keep their order')
+  const kinds = blockKinds(blocks)
+  const userIndexes = kinds.map((kind, index) => kind === 'user' ? index : -1).filter(index => index >= 0)
+  // The initial user stays at 0 (before the Thought); both steers land
+  // AFTER the tool (index 3) in their original order — the second steer
+  // follows the first assistant that preceded it (index 6).
+  assert.deepEqual(userIndexes, [0, 4, 6],
+    `steer chronology broken: ${kinds.join(',')}`)
+})
+
+test('expanded: user rows never carry the owner collapse mark; process rows always do', () => {
+  const folder = new TranscriptFolder()
+  folder.apply(steeredTurn(0, 0, 1000))
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  for (const block of blocks) {
+    if (block.kind !== 'message') continue
+    if (block.message.kind === 'user') {
+      assert.equal(block.collapseFocusOwnerOnClick, undefined,
+        `a user row must never collapse the owner Thought: ${block.message.text}`)
+    } else if (block.message.kind === 'assistant') {
+      assert.equal(block.collapseFocusOwnerOnClick, undefined, 'the final assistant never carries the owner mark')
+    } else {
+      assert.equal(block.collapseFocusOwnerOnClick, 0,
+        `a process row must carry the owner-turn collapse mark: ${block.message.kind}`)
+    }
+  }
+})
+
+test('expanded: a turn with NO initial user starts with the Thought (chronology intact)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1001, 1),
+    eventAt('user/message', {
+      id: MessageId('late'), role: 'user',
+      content: [{ type: 'text', text: 'late steer' }],
+      source: { kind: 'user' },
+    }, 1002, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1003, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
+  ])
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  assert.deepEqual(blockKinds(blocks), ['activity', 'thinking', 'user', 'assistant'],
+    'no initial user → the Thought leads and the steer stays chronological')
+})
+
+test('fold → expand → fold projection is reversible (same collapsed output)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply(steeredTurn(0, 0, 1000))
+  const collapsed = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const refolded = projectFocus(
+    expanded.map(block => block.kind === 'message' ? block.message : null).filter((m): m is TranscriptMessage => m !== null),
+    folder.turnActivities(),
+    new Set(),
+    true,
+  )
+  // The collapsed projection of the expanded output equals the original
+  // collapsed projection: user rows first, then the Thought, then the final.
+  assert.deepEqual(blockKinds(refolded), blockKinds(collapsed), 'refold must reproduce the collapsed summary')
+  const collapsedUsers = collapsed.flatMap(b => b.kind === 'message' && b.message.kind === 'user' ? [b.message.text] : [])
+  const refoldedUsers = refolded.flatMap(b => b.kind === 'message' && b.message.kind === 'user' ? [b.message.text] : [])
+  assert.deepEqual(refoldedUsers, collapsedUsers, 'the collapsed user-first summary is stable')
 })
 
 // ── system prompt (plan §55) ────────────────────────────────────────────
