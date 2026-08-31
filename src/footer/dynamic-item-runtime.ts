@@ -159,13 +159,17 @@ export class FooterDynamicItemRuntime {
 
   /** Dispose every runner and release every cache. The app is going away:
    * no child, timer or abort listener may survive (plan §7.2 — app
-   * dispose / HMR remount). */
+   * dispose / HMR remount). The cached values are cleared through the
+   * same onValue sink the sync-removal path uses, so a disposal that
+   * happens while the surface is still alive (HMR remount, lifecycle
+   * reuse) never leaves stale values behind. */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
     for (const [id, entry] of this.active) {
       this.active.delete(id)
       entry.runner.dispose()
+      this.options.onValue(id, undefined)
     }
   }
 }
