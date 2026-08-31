@@ -130,18 +130,58 @@ test('every builtin item has an explicit density decision (responsive or intenti
   }
 })
 
-test('responsive items: compact is never wider than preferred (default refs)', () => {
+test('responsive items: compact is never wider than preferred (every declared format)', () => {
   const snap = richSnapshot()
   for (const id of RESPONSIVE_COMPACT_ITEMS) {
-    const preferred = renderDensity(id, snap, { id }, 'preferred')
-    const compact = renderDensity(id, snap, { id }, 'compact')
-    assert.ok(preferred !== '', `${id} must render in the fixture`)
-    assert.ok(compact !== '', `${id} compact must render in the fixture`)
-    assert.ok(
-      visibleWidth(compact) <= visibleWidth(preferred),
-      `${id}: compact (${compact}) must never be wider than preferred (${preferred})`,
-    )
+    const def = registry.get(id)!
+    for (const format of def.formats) {
+      const ref: FooterItemRef = { id, format }
+      const preferred = renderDensity(id, snap, ref, 'preferred')
+      const compact = renderDensity(id, snap, ref, 'compact')
+      assert.ok(preferred !== '', `${id}/${format} must render in the fixture`)
+      assert.ok(compact !== '', `${id}/${format} compact must render in the fixture`)
+      assert.ok(
+        visibleWidth(compact) <= visibleWidth(preferred),
+        `${id}/${format}: compact (${compact}) must never be wider than preferred (${preferred})`,
+      )
+    }
   }
+})
+
+test('performance compact never exceeds a shorter persisted style (speed/latency)', () => {
+  const snap = richSnapshot()
+  // The latency style is already minimal: the compact both-facts form
+  // (`138.8s 659t/s`) is WIDER, so the item must fall back to the
+  // preferred form — a legitimate no-op, never a wider compact.
+  const latencyRef: FooterItemRef = { id: 'performance', format: 'latency' }
+  assert.equal(renderDensity('performance', snap, latencyRef, 'preferred'), '2.6s')
+  assert.equal(renderDensity('performance', snap, latencyRef, 'compact'),
+    renderDensity('performance', snap, latencyRef, 'preferred'),
+    'latency compact must be a no-op (the style is already shorter)')
+  // Same for the speed style.
+  const speedRef: FooterItemRef = { id: 'performance', format: 'speed' }
+  assert.equal(renderDensity('performance', snap, speedRef, 'preferred'), '659 tok/s')
+  assert.equal(renderDensity('performance', snap, speedRef, 'compact'),
+    renderDensity('performance', snap, speedRef, 'preferred'),
+    'speed compact must be a no-op (the style is already shorter)')
+  // The full style still gets the strictly shorter both-facts compact.
+  assert.equal(renderDensity('performance', snap, { id: 'performance', format: 'full' }, 'compact'), '138.8s 659t/s')
+})
+
+test('token-usage compact never exceeds a shorter persisted io style (cache-heavy)', () => {
+  const snap = snapshotWith(s => {
+    s.usage.tokens = { input: 1, output: 1, cacheRead: 1_500_000, cacheWrite: 0 }
+  })
+  // A tiny io pair beside a huge cache total: the io form (`1/1`) is
+  // already shorter than the aggregate compact (`1.5M`) — the item must
+  // fall back to the preferred form, never emit a wider compact.
+  const ioRef: FooterItemRef = { id: 'token-usage', format: 'io' }
+  assert.equal(renderDensity('token-usage', snap, ioRef, 'preferred'), '1/1')
+  assert.equal(renderDensity('token-usage', snap, ioRef, 'compact'),
+    renderDensity('token-usage', snap, ioRef, 'preferred'),
+    'io compact must be a no-op (the style is already shorter)')
+  // The total style still gets the strictly shorter compact aggregate.
+  assert.equal(renderDensity('token-usage', snap, { id: 'token-usage', format: 'total' }, 'compact'), '1.5M')
 })
 
 test('responsive items: compact is STRICTLY shorter under the canonical fixture', () => {
