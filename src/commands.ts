@@ -241,6 +241,13 @@ export interface CommandRegistryLike {
   list(agent?: unknown): readonly CommandDescriptor[]
 }
 
+/** One default-intent operation's ownership record: the id is the settle
+ *  authority (an older operation settling must never clear or restore a
+ *  newer operation's pending intent), the selection is the intent value. */
+export interface DefaultIntentRecord {
+  readonly id: number
+  readonly selection: ModelSelection
+}
 
 /** Everything the TUI-owned commands read from the runner. */
 export interface TuiCommandRunner {
@@ -255,8 +262,37 @@ export interface TuiCommandRunner {
   readonly liveAgent: Agent | undefined
   /** Create the first session lazily when none exists (deferred start). */
   ensureSession(): Promise<void>
-  /** The process-wide mutable model selection (footer + /model). */
+  /**
+   * TUI-facing live selection facade (footer + /model). It follows the
+   * current Agent; with deferred start it holds only the sessionless
+   * optimistic choice and never gets installed into an Agent context.
+   */
   readonly selected: ModelSelectionRef
+  /** The default selection a NEW Session should observe: the latest explicit
+   * default intent (a /model commit this run), falling back to the persisted
+   * global default. Distinct from {@link selected}: a fresh Session observes
+   * the default, never the current Session's local choice. */
+  defaultSelection(): ModelSelection | undefined
+  /** The latest explicit default intent, or undefined when no /model commit
+   * happened this run (a fresh Session then observes the persisted default
+   * dynamically instead of being seeded). */
+  readonly defaultIntent: ModelSelection | undefined
+  /** The current default-intent OWNERSHIP record (id + selection), or
+   * undefined when no intent is active. The id is the operation's settle
+   * authority: an older /model operation settling must never clear or
+   * restore a NEWER operation's pending intent. */
+  readonly defaultIntentRecord: DefaultIntentRecord | undefined
+  /** Record a NEW default-intent operation (allocates a fresh ownership id
+   * and links the previous operation as ancestry). The Session selection is
+   * NEVER written through this seam: the catalog port commits it after the
+   * durable append succeeds. */
+  setDefaultIntent(selection: ModelSelection | undefined): void
+  /** Report one operation's save outcome to the intent state machine. The
+   * machine decides whether the intent clears (committed), walks the
+   * ancestry back to the nearest still-pending operation (failed), or stays
+   * with a newer operation — the caller never restores or settles the
+   * intent itself. */
+  settleIntent(id: number, outcome: 'committed' | 'failed'): void
   /** The TUI settings document, when the settings service is present. */
   readonly tuiSettings: TuiSettingsLike | undefined
   /** The session lifecycle port (migration M1.5): /new and /fork create
@@ -370,6 +406,10 @@ export interface TuiCommandRunner {
     /** Whether the target is a FRESH session: the target lock must settle
      * as acquired, or the transaction aborts before the create. */
     fresh?: boolean
+    /** An explicit model choice the fresh target must inherit: recorded
+     * durably on the created Agent so its first request never falls back
+     * to a stale global default (the /new seeding path). */
+    inheritSelection?: ModelSelection
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
@@ -2528,29 +2568,79 @@ export function registerTuiCommands(
       const models = runner.catalog.models
       if (!models.available()) return { kind: 'error', text: 'model service unavailable' }
       const providers = models.listProviders()
-      const current = models.currentSelection() ?? { provider: '', model: '' }
+      const current = selected.current ?? models.defaultSelection() ?? { provider: '', model: '' }
       /** Commit a selection (model, optional effort) and refresh the footer. */
       const apply = (next: ModelSelection): void => {
-        // Persist and reflect with LATEST-WINS semantics: saves run
-        // concurrently, so a failure must only roll back when the current
-        // selection is still the one THIS save was for — an older failed
-        // save must never overwrite a newer successful selection (out-of-
-        // order completion must not regress the persistent state either;
-        // the UI at least never lies about what is current).
-        const previous = selected.current
-        runDetached('model selection save', () => models.saveSelection(next), {
-          diag: runner.diag,
-          notify: (message) => {
-            if (selected.current === next) {
-              selected.current = previous
+        const liveSessionId = runner.liveAgent?.session.id
+        if (liveSessionId === undefined) {
+          // Before a Session exists, `/model` is an optimistic sessionless
+          // choice. It must not create a Session, but it becomes the dynamic
+          // creation fallback and is persisted as the global default. The
+          // intent is TRANSIENT: a settled save clears it (the next /new
+          // reads the persisted default dynamically), a failed save walks
+          // the operation ancestry back to the nearest still-pending
+          // operation.
+          runner.setDefaultIntent(next)
+          const intentId = runner.defaultIntentRecord?.id
+          runOwned('model default save', () => models.saveDefaultSelection(next), {
+            diag: runner.diag,
+            onResult: () => {
+              // The global default committed: report the settle to the
+              // intent state machine (it clears the intent only when THIS
+              // operation still owns it; a newer operation is never cleared
+              // by an older completion).
+              if (intentId !== undefined) runner.settleIntent(intentId, 'committed')
+            },
+            onError: (error) => {
+              // The default save failed: report the settle to the intent
+              // state machine (it walks the ancestry back to the nearest
+              // still-pending operation, or clears). The footer must
+              // re-project the resulting intent — the optimistic choice was
+              // already painted.
+              if (intentId !== undefined) runner.settleIntent(intentId, 'failed')
               runner.refreshStatus()
-            }
-            app.notify(message, 'error')
-          },
-          recoverable: () => true,
-        })
-        selected.current = next
+              runner.updateWelcomeCard()
+              app.notify(`model default save: ${safeErrorMessage(error)}`, 'error')
+            },
+          })
+        } else {
+          // A live Session owns the durable intent. The port appends
+          // model/selection FIRST and only then makes the choice
+          // authoritative, so a failed append can never be observed by a
+          // request. The Session commit and the global-default commit are
+          // settled SEPARATELY: a durable Session choice stands even when
+          // the default write fails, while the transient default intent is
+          // settled by the state machine.
+          runner.setDefaultIntent(next)
+          const intentId = runner.defaultIntentRecord?.id
+          runOwned('model selection save', () => models.selectSessionModel(liveSessionId, next), {
+            diag: runner.diag,
+            onResult: () => {
+              // Both commits succeeded: report the settle to the intent
+              // state machine (it clears the intent only when THIS operation
+              // still owns it).
+              if (intentId !== undefined) runner.settleIntent(intentId, 'committed')
+            },
+            onError: (error) => {
+              // The Session side needs no restore: the port commits the
+              // Agent-local selection only after the durable append, so a
+              // failed append leaves it untouched and a successful append
+              // keeps the choice. Only the transient default intent is
+              // settled by the state machine.
+              if (intentId !== undefined) runner.settleIntent(intentId, 'failed')
+              app.notify(`model selection save: ${safeErrorMessage(error)}`, 'error')
+            },
+          })
+        }
+        // The Session commit (durable append + Agent-local selection) is
+        // synchronous inside the owned task factory, so the surface can
+        // project the new authoritative selection immediately; the owned
+        // task's onResult/onError settle the transient default intent and
+        // notify. The Welcome card is refreshed from the SAME authoritative
+        // selection — a global-default persistence failure never reverts or
+        // stales it.
         runner.refreshStatus()
+        runner.updateWelcomeCard()
       }
       // The model and effort levels render INSIDE the provider list's
       // submenu slot (ModelSubmenu/EffortSubmenu): selecting applies
@@ -2608,17 +2698,26 @@ export function registerTuiCommands(
       // lifecycle from this id — the command surface only ever sees the
       // identity (migration M1.11).
       const resolved = await runner.catalog.presets.resolve(runner.effectivePresetId)
+      // Read the DEFAULT selection intent at transition time: a fresh
+      // Session observes the global default (official blank-session
+      // semantics), never the old Session's local choice. After `/model`
+      // the intent carries the latest explicit choice.
+      const creationSelection = runner.defaultSelection()
       const newOptions = {
-        provider: runner.liveAgent?.options.provider ?? runner.selected.current?.provider,
-        model: runner.liveAgent?.options.model ?? runner.selected.current?.model,
+        provider: creationSelection?.provider,
+        model: creationSelection?.model,
       }
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd } },
         fresh: true,
+        // Seed only an explicit default intent: without one the fresh
+        // Session observes the persisted default dynamically instead of
+        // freezing it into a durable choice.
+        ...(runner.defaultIntent === undefined ? {} : { inheritSelection: runner.defaultIntent }),
         create: () => runner.agents.create({
           sessionId: String(sessionId),
           meta: metaOf(cwd, resolved.id),
-          // Before the first session the process-wide selection stands in.
+          // Before the first session the sessionless/default selection stands in.
           provider: newOptions.provider,
           model: newOptions.model,
           agentPreset: resolved.id,

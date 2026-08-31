@@ -10,7 +10,7 @@
 
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
-M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.11 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default) and host-file (`@`-mention discovery + send-time canonicalization); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/transition/barrier) untouched; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
+M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
 M2  NOT STARTED   (experimental Remote backend against an existing DSH Host)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
@@ -32,6 +32,17 @@ directly (`ctx.get(...)` — see `docs/client-server-coupling.md` for the
 inventory). Session ownership (owner.lock, lease/cooling, PINNED,
 transition gate, operation barrier) is Direct-mode machinery and stays
 authoritative until M8.
+
+### Model-selection ownership
+
+The Direct model catalog exposes the global `agentDefaultModel` only as a
+fallback for Sessions without a local choice. Each live Agent owns its own
+selection reference, reconstructed from durable `model/selection` intent and
+the latest `request/header`; the TUI facade follows whichever Agent is live.
+The semantic catalog names these operations explicitly as
+`defaultSelection`/`saveDefaultSelection` and `sessionSelection`/
+`selectSessionModel`, so a future Remote adapter can map them without moving
+Agent, Session, or Context objects across the boundary.
 
 ## Target
 
