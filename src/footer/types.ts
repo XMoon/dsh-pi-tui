@@ -101,11 +101,17 @@ export interface FooterItemDefinition {
 /** The footer's physical-line budget (plan 2026-08-31 §6.1): the host
  * surface owns how many TERMINAL physical lines the footer may occupy;
  * the persisted 1..2 LAYOUT-ROW schema (FooterLayoutV1) is independent of
- * it — a future Add-Row surface raises `total`, never the row renderer. */
+ * it — a future Add-Row surface raises `total`, never the row renderer.
+ * Both values normalize defensively: non-finite values fall back to the
+ * composer defaults, finite junk floors at 1, absurd values clamp to the
+ * hard capability (perRow ≤ 2, total ≤ 4). A surface granting ZERO lines
+ * (its pinned chrome alone fills the viewport) renders nothing at all —
+ * not even the Host instruction. */
 export interface FooterPhysicalLineBudget {
-  /** The max physical lines ONE logical row may occupy (1..N). */
+  /** The max physical lines ONE logical row may occupy (1..2). */
   readonly perRow: number
-  /** The max physical lines the whole footer surface may occupy. */
+  /** The max physical lines the whole footer surface may occupy
+   * (0..4; 0 = render nothing). */
   readonly total: number
 }
 

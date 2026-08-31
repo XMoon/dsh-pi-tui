@@ -254,16 +254,33 @@ test('invalid perRow/total budgets normalize inside the hard capability', () => 
     assertNormalized({ perRow: nonFinite }, { perRow: 2, total: 4 }, `perRow ${nonFinite}`)
     assertNormalized({ total: nonFinite }, { perRow: 2, total: 4 }, `total ${nonFinite}`)
   }
-  // Finite junk floors at 1 (0/-1/1.9 → 1 line per row / 1 line total)…
+  // Finite junk floors at 1 (0/-1/1.9 → 1 line per row)…
   assertNormalized({ perRow: 0 }, { perRow: 1, total: 4 }, 'perRow 0')
   assertNormalized({ perRow: -1 }, { perRow: 1, total: 4 }, 'perRow -1')
   assertNormalized({ perRow: 1.9 }, { perRow: 1, total: 4 }, 'perRow 1.9')
-  assertNormalized({ total: 0 }, { perRow: 2, total: 1 }, 'total 0')
-  assertNormalized({ total: -1 }, { perRow: 2, total: 1 }, 'total -1')
   assertNormalized({ total: 3.9 }, { perRow: 2, total: 3 }, 'total 3.9')
   // …and absurd values clamp to the hard capability (perRow ≤ 2, total ≤ 4).
   assertNormalized({ perRow: 999 }, { perRow: 2, total: 4 }, 'perRow 999')
   assertNormalized({ total: 999 }, { perRow: 2, total: 4 }, 'total 999')
+})
+
+test('a surface that grants ZERO lines renders nothing at all', () => {
+  // total ≤ 0 is a surface DECISION (its pinned chrome alone fills the
+  // viewport): the composer renders NOTHING — not even the Host
+  // instruction — so it never exceeds the granted budget and never
+  // disagrees with its Text component (zero rows).
+  const snap = busySnapshot()
+  for (const total of [0, -1]) {
+    const text = composer.render({
+      snapshot: snap,
+      layout: DEFAULT_FOOTER_LAYOUT,
+      width: 40,
+      context: CONTEXT,
+      instruction: INSTRUCTION,
+      physicalLineBudget: { perRow: 2, total },
+    })
+    assert.equal(text, '', `total ${total} must render nothing`)
+  }
 })
 
 test('an instruction that renders NOTHING reserves no line and paints nothing', () => {

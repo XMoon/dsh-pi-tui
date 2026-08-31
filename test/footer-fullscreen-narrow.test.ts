@@ -235,3 +235,68 @@ test('the armed Ctrl+C instruction on a chrome-heavy 20x10 viewport is NEVER cli
     app.stop()
   }
 })
+
+test('a surface with ZERO available footer slots renders nothing at all', async () => {
+  // The pinned chrome alone fills the terminal (header + editor = every
+  // row): the surface grants total = 0 and the composer renders NOTHING —
+  // even the armed Host instruction stays unpainted, because no footer
+  // line could avoid the clip and painting one would exceed the granted
+  // budget (the composer agrees with its Text component: zero rows).
+  const vt = new VirtualTerminal(80, 4)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setStatus(RICH_STATUS)
+  await vt.waitForRender()
+  vt.sendInput('\x03')
+  await vt.waitForRender()
+  try {
+    const footerLines = [...app.footerRenderRowsForTest()]
+    assert.equal(footerLines.length, 0, `a zero-slot surface must render no footer rows:\n${footerLines.join('\n')}`)
+  } finally {
+    app.stop()
+  }
+})
+
+test('a terminal HEIGHT resize recomposes the footer at the fresh surface budget', async () => {
+  // PR #57 review P1: the footer's physical-line budget derives from the
+  // terminal geometry. A resize (height AND width) must recompose the
+  // footer BEFORE the frame paints — shrinking a chrome-heavy fullscreen
+  // from 20x24 to 20x10 must not keep the old 4-row footer text (its
+  // bottom rows — the appended instruction FIRST — would clip), and
+  // growing it back must restore the fuller footer.
+  const { vt, app } = await startFullscreenApp(40, 24)
+  try {
+    vt.sendInput('\x03') // arm the exit hint: it must survive every resize
+    await vt.waitForRender()
+    const before = [...app.footerRenderRowsForTest()]
+    assert.ok(before.length >= 3, `roomy viewport renders the fuller footer, saw ${before.length}`)
+
+    // Shrink 40x24 → 20x10: budget collapses to the surface capacity.
+    vt.resize(20, 10)
+    await vt.waitForRender()
+    const shrunk = [...app.footerRenderRowsForTest()]
+    assert.ok(shrunk.length <= 2, `the shrunken viewport must cap the footer at its 2 available slots, saw ${shrunk.length}\n${shrunk.join('\n')}`)
+    assert.ok(
+      shrunk[shrunk.length - 1]!.includes('Press Ctrl+C again'),
+      `the hint must survive the height shrink:\n${shrunk.join('\n')}`,
+    )
+    let view = vt.getViewport().join('\n')
+    assert.ok(
+      view.split('\n').some(line => line.includes('Press Ctrl+C again')),
+      `the hint must be visible in the VIEWPORT after the shrink:\n${view}`,
+    )
+
+    // Grow back: the full capacity is available again.
+    vt.resize(40, 24)
+    await vt.waitForRender()
+    const grown = [...app.footerRenderRowsForTest()]
+    assert.ok(grown.length >= shrunk.length, `growing must not keep the shrunken footer:\n${grown.join('\n')}`)
+    view = vt.getViewport().join('\n')
+    assert.ok(
+      view.split('\n').some(line => line.includes('Press Ctrl+C again to exit')),
+      `the hint must be uncapped again after the growth:\n${view}`,
+    )
+  } finally {
+    app.stop()
+  }
+})
