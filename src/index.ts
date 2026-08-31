@@ -96,7 +96,7 @@ import { deriveRunnerPermission } from './status/derive-permission.ts'
 import { StatusStore } from './status/store.ts'
 import { initialStatusSnapshot } from './status/snapshot.ts'
 import { deriveAccessStatus } from './status/derive-access.ts'
-import { derivePlanStatus, foldPlanMode } from './status/derive-plan.ts'
+import { derivePlanStatus, projectedPlanActive, type PlanProjectionLike } from './status/derive-plan.ts'
 import { usageFromStats } from './status/derive-usage.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
@@ -2432,7 +2432,7 @@ export function apply(ctx: Context, config: Config): void {
           )
         : {}
       const collaboration = viewing === undefined
-        ? { plan: derivePlanStatus(ctx.get('planMode'), liveAgent, events, foldPlanMode) }
+        ? { plan: derivePlanStatus(ctx.get('planMode'), liveAgent, ctx.get('sessionProjections'), liveAgent?.session) }
         : { plan: { effective: false } }
       const workspace = deriveWorkspaceStatus(displayCwd)
       const usage = usageFromStats(viewing?.stats.snapshot() ?? stats, viewing === undefined ? contextTokens : undefined)
@@ -3582,7 +3582,7 @@ export function apply(ctx: Context, config: Config): void {
           // instead of re-entering (the official command needs `/plan off`).
           const parsed = parseCommand(text)
           const toggled = parsed?.name === 'plan' && parsed.rawInput.trim() === ''
-            && foldPlanMode(agent.session.events ?? [])
+            && projectedPlanActive(ctx.get('sessionProjections') as PlanProjectionLike | undefined, agent.session) === true
             ? '/plan off'
             : text
           // The command execution is itself an owned workflow: its outcome
@@ -5847,7 +5847,7 @@ export function apply(ctx: Context, config: Config): void {
       })
       goalText = timedBootstrapScan(diag, 'goal', events.length, () => foldGoal(events))
       const working = timedBootstrapScan(diag, 'working', events.length, () => workingFromLog(events))
-      const planMode = timedBootstrapScan(diag, 'plan', events.length, () => foldPlanMode(events))
+      const planMode = timedBootstrapScan(diag, 'plan', events.length, () => projectedPlanActive(ctx.get('sessionProjections') as PlanProjectionLike | undefined, agent.session) ?? false)
       const title = timedBootstrapScan(diag, 'title', events.length, () => foldSessionTitle(events)?.title)
       app.setPlanMode(planMode)
       app.setWorking(working)

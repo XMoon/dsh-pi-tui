@@ -114,24 +114,40 @@ test('access: unknown sandbox modes are omitted, never guessed', () => {
 // ── Plan ──────────────────────────────────────────────────────────────────
 
 test('plan: off / on / pending on / pending off via the official service', () => {
-  const fold = (): boolean => false
-  assert.deepEqual(derivePlanStatus({ get: () => ({ active: false }) }, {}, [], fold), { effective: false })
-  assert.deepEqual(derivePlanStatus({ get: () => ({ active: true }) }, {}, [], fold), { effective: true })
-  assert.deepEqual(derivePlanStatus({ get: () => ({ active: false, pending: true }) }, {}, [], fold),
+  assert.deepEqual(derivePlanStatus({ get: () => ({ active: false }) }, {}, undefined, undefined), { effective: false })
+  assert.deepEqual(derivePlanStatus({ get: () => ({ active: true }) }, {}, undefined, undefined), { effective: true })
+  assert.deepEqual(derivePlanStatus({ get: () => ({ active: false, pending: true }) }, {}, undefined, undefined),
     { effective: false, pending: true })
-  assert.deepEqual(derivePlanStatus({ get: () => ({ active: true, pending: false }) }, {}, [], fold),
+  assert.deepEqual(derivePlanStatus({ get: () => ({ active: true, pending: false }) }, {}, undefined, undefined),
     { effective: true, pending: false })
 })
 
-test('plan: fold fallback when the service is absent (pending undefined)', () => {
-  const fold = (): boolean => true
-  assert.deepEqual(derivePlanStatus(undefined, {}, [], fold), { effective: true })
+test('plan: projection fallback when the service is absent (pending from the wire view)', () => {
+  const projections = {
+    stateOf: () => ({ active: true, wanted: null, running: null }),
+  }
+  assert.deepEqual(derivePlanStatus(undefined, {}, projections, {}), { effective: true })
+  const pending = {
+    stateOf: () => ({ active: false, wanted: true, running: null }),
+  }
+  assert.deepEqual(derivePlanStatus(undefined, {}, pending, {}), { effective: false, pending: true })
+  const running = {
+    stateOf: () => ({ active: false, wanted: null, running: { wanted: true } }),
+  }
+  assert.deepEqual(derivePlanStatus(undefined, {}, running, {}), { effective: false, pending: true })
 })
 
-test('plan: throwing service falls back to the fold', () => {
-  const fold = (): boolean => false
+test('plan: absent service and projection degrade to the neutral fact', () => {
+  assert.deepEqual(derivePlanStatus(undefined, {}, undefined, undefined), { effective: false })
+  assert.deepEqual(derivePlanStatus(undefined, {}, { stateOf: () => undefined }, {}), { effective: false })
+})
+
+test('plan: throwing service falls back to the projection', () => {
+  const projections = {
+    stateOf: () => ({ active: false, wanted: null, running: null }),
+  }
   assert.deepEqual(
-    derivePlanStatus({ get: () => { throw new Error('boom') } }, {}, [], fold),
+    derivePlanStatus({ get: () => { throw new Error('boom') } }, {}, projections, {}),
     { effective: false },
   )
 })
