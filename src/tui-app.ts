@@ -9482,8 +9482,11 @@ export class TuiApp {
     let text: string
     if (this.commandRows !== undefined) {
       // M5: the command surface owns the Status Surface; the Host
-      // instruction still merges on top (never user-hideable).
-      text = mergeCommandSurface(this.commandRows, instruction, width)
+      // instruction still merges on top (never user-hideable). The
+      // SURFACE budget applies here too (PR #57 review): the instruction
+      // reserves its line first, so a chrome-heavy short viewport can
+      // never clip the hint behind command rows.
+      text = mergeCommandSurface(this.commandRows, instruction, width, this.footerPhysicalLineBudget())
     } else {
       const snapshot = this.statusStore.snapshot()
       // The SURFACE decides how many of the composer's hard-capacity
@@ -9521,10 +9524,14 @@ export class TuiApp {
    * - measuring via each component's own `render(width)` is the SAME
    *   pattern the mouse hit-map uses, so the measurement always matches
    *   what the layout actually paints;
-   * - widget zones are measured ONLY on the regular surface (the
-   *   fullscreen root does not mount them — subtracting inactive chrome
-   *   would wrongly shrink, up to zeroing, the fullscreen budget for
-   *   chrome that is not on screen);
+   * - widget zones are fullscreen-inactive and the REGULAR surface is a
+   *   flowing document (overflow enters the terminal scrollback; the
+   *   footer is never viewport-clipped there) — so the regular surface
+   *   always grants the FULL capacity, and only fullscreen's pinned
+   *   chrome rows are measured;
+   * - the command surface consumes the same effective total through
+   *   mergeCommandSurface (instruction reserves first, trusted rows keep
+   *   the remaining slots in order).
    *
    * Floored at 0: when the pinned chrome alone already exceeds the
    * viewport nothing can keep the footer unclipped, and the composer
@@ -9533,17 +9540,24 @@ export class TuiApp {
   private footerPhysicalLineBudget(): FooterPhysicalLineBudget {
     const width = Math.max(1, this.terminal.columns)
     const height = Math.max(1, this.terminal.rows)
-    // Widget zones exist ONLY on the regular surface (the fullscreen root
-    // does not mount them): subtracting them in fullscreen would shrink
-    // the footer budget for chrome that is not on screen — populated
-    // widgets could wrongly zero the budget on a short terminal. Only
-    // ACTIVE chrome is measured.
-    const fullscreen = this.fullscreen !== undefined
-    const chromeRows: Array<{ render(columns: number): string[] }> = fullscreen
-      ? [this.header, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat]
-      : [this.header, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat, this.widgetsAbove, this.widgetsBelow]
+    // ONLY the fullscreen surface is a fixed-height VStack with pinned
+    // (shrink: 0) chrome rows around a shrinkable ScrollView — that is
+    // the layout that can clip the footer's own bottom rows, so only it
+    // gets a dynamically shrunk budget: terminal height minus every
+    // pinned chrome row ABOVE the footer. The widget zones exist ONLY on
+    // the regular surface (the fullscreen root does not mount them) and
+    // are never measured here.
+    //
+    // The REGULAR surface is a flowing document (sequential Container):
+    // overflow pushes into the terminal scrollback and the footer stays
+    // visible at the bottom — it is never viewport-clipped, so shrinking
+    // its budget would only destroy information. It always receives the
+    // full hard capacity.
+    if (this.fullscreen === undefined) {
+      return { perRow: FOOTER_MAX_PHYSICAL_LINES_PER_ROW, total: FOOTER_MAX_PHYSICAL_LINES }
+    }
     let used = 0
-    for (const chrome of chromeRows) {
+    for (const chrome of [this.header, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat]) {
       used += chrome.render(width).length
     }
     return {

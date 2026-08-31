@@ -141,8 +141,12 @@ export class FooterComposer {
     // footer line can avoid the clip, and painting one would exceed the
     // granted budget; the composer must agree with its Text component
     // (zero rows). The surface owns this decision (TuiApp computes
-    // total = min(capacity, available rows), which floors at 0).
-    if (Number.isFinite(budget.total) && budget.total <= 0) return ''
+    // total = min(capacity, available rows), which floors at 0) — and it
+    // is signaled by EXACTLY 0. Negative totals are INVALID caller input
+    // (arithmetic underflow, a buggy caller): they must not silently
+    // hide the Host instruction, so they flow through the regular
+    // normalization like every other finite junk value (floor 1).
+    if (budget.total === 0) return ''
     const total = Math.min(FOOTER_MAX_PHYSICAL_LINES,
       normalizePositiveInt(budget.total, FOOTER_MAX_PHYSICAL_LINES))
     const perRow = Math.min(total, FOOTER_MAX_PHYSICAL_LINES_PER_ROW,
@@ -430,17 +434,42 @@ function renderInstructionLine(rendered: string, width: number): string {
 }
 
 /** M5: merge the Host instruction onto a COMMAND surface (the command owns
- * the Status Surface; the instruction still occupies the last row slot —
- * it replaces the second command row when present, appends otherwise, and
- * is never user-hideable). */
+ * the Status Surface; the instruction is never user-hideable).
+ *
+ * Without a budget the LEGACY command contract applies: the instruction
+ * replaces the second command row when present, appends otherwise.
+ *
+ * WITH a surface budget (PR #57 review) the command surface consumes the
+ * same effective total as the native composer: the instruction reserves
+ * ONE physical line first, the trusted command rows keep the FIRST
+ * remaining slots in order (they carry no importance metadata — layout
+ * order is the priority), and a zero-grant surface renders nothing at
+ * all — the hint is never the row that gets viewport-clipped. */
 export function mergeCommandSurface(
   rows: readonly string[],
   instruction: FooterInstructionLike | undefined,
   width: number,
+  budget?: Pick<FooterPhysicalLineBudget, 'total'>,
 ): string {
-  if (instruction === undefined) return rows.join('\n')
+  if (instruction === undefined) {
+    if (budget !== undefined && Number.isFinite(budget.total)) {
+      const cap = Math.min(FOOTER_MAX_PHYSICAL_LINES, Math.max(0, Math.floor(budget.total)))
+      return rows.slice(0, cap).join('\n')
+    }
+    return rows.join('\n')
+  }
   const wrapped = wrapTextWithAnsi(renderInstruction(instruction), width)
   const instructionRow = wrapped.length > 1 ? capRowWithEllipsis(wrapped[0]!, width) : wrapped[0]!
+  if (budget !== undefined && Number.isFinite(budget.total)) {
+    // The instruction reserves 1 first; a zero-grant surface renders
+    // nothing (same semantics as the native composer). Kept rows are
+    // ANSI-safely truncated to the width — a wrapped row would silently
+    // spend a second slot and push the hint out of the budget.
+    const total = Math.min(FOOTER_MAX_PHYSICAL_LINES, Math.max(0, Math.floor(budget.total)))
+    if (total <= 0) return ''
+    const kept = rows.slice(0, total - 1).map(row => truncateToWidth(row, width, '…'))
+    return [...kept, instructionRow].join('\n')
+  }
   const merged = rows.length > 1 ? [...rows.slice(0, -1), instructionRow] : [...rows, instructionRow]
   return merged.join('\n')
 }
