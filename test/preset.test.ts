@@ -11,7 +11,7 @@ import test from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { composeAgent, recordedPreset, recomposeBlank } from '../src/index.ts'
 import { presetDisplayText } from '../src/commands.ts'
-import { sessionPresetOf } from '../src/runtime/direct/session-preset-direct.ts'
+import { sessionPresetOf, type SessionObservationLike } from '../src/runtime/direct/session-preset-direct.ts'
 import {
   normalizePersistedSessionPresetId,
   resolvePersistedSessionPresetId,
@@ -70,13 +70,33 @@ const agentPresetProjection = {
   },
 }
 
-function projectedCtx(persistence?: unknown, presets?: unknown): Context {
+function projectedCtx(persistence?: unknown, presets?: unknown, query?: unknown): Context {
   return ctxWith(name => {
     if (name === 'sessionProjections') return agentPresetProjection
     if (name === 'sessionPersistence') return persistence
     if (name === 'agentPresets') return presets
+    if (name === 'sessionQuery') return query
     return undefined
   })
+}
+
+/** One fake observation lease over the official `observeSession` seam. */
+function observation(agentPreset: string | null | undefined): SessionObservationLike {
+  return {
+    source: 'prepared',
+    header: sessionHeader('s1'),
+    ...(agentPreset === undefined ? {} : { projections: { values: { agentPreset } } }),
+    [Symbol.dispose]: () => {},
+  }
+}
+
+/** A fake `sessionQuery` whose observation seam serves one value per id. */
+function queryObserving(
+  observe: (id: string) => SessionObservationLike | Promise<SessionObservationLike>,
+): { observeSession: (id: SessionId) => Promise<SessionObservationLike> } {
+  return {
+    observeSession: async (id: SessionId) => observe(String(id)),
+  }
 }
 
 const rosterWithoutCode = {
@@ -186,106 +206,58 @@ test('composeAgent propagates an unknown-preset rejection', async () => {
   await assert.rejects(composeAgent(ctx, selection(), 'nope'), /not found/)
 })
 
-test('recordedPreset returns undefined without persistence', async () => {
+test('recordedPreset returns undefined without the observation seam', async () => {
   const ctx = ctxWith(() => undefined)
   assert.equal(await recordedPreset(ctx, 's1'), undefined)
 })
 
 test('recordedPreset drops persisted code when the roster service is absent', async () => {
-  const persistence = {
-    list: async () => [sessionHeader('s1', 'code')],
-    inspect: async () => ({ meta: sessionHeader('s1', 'code'), events: [] }),
-  }
-  assert.equal(await recordedPreset(projectedCtx(persistence), 's1'), undefined)
-})
-
-test('recordedPreset returns undefined for an unknown session', async () => {
-  const persistence = {
-    list: async () => [sessionHeader('other')],
-    inspect: async () => { throw new Error('not found') },
-  }
-  const ctx = projectedCtx(persistence)
+  const ctx = projectedCtx(undefined, undefined, queryObserving(() => observation('code')))
   assert.equal(await recordedPreset(ctx, 's1'), undefined)
 })
 
+test('recordedPreset propagates an unknown-session observation rejection', async () => {
+  const ctx = projectedCtx(undefined, undefined, queryObserving(() => {
+    throw new Error('session "s1" not found')
+  }))
+  await assert.rejects(recordedPreset(ctx, 's1'), /not found/)
+})
+
 test('recordedPreset preserves an unreadable session error instead of falling back to its header', async () => {
-  const persistence = {
-    list: async () => [sessionHeader('s1', 'standard')],
-    inspect: async () => { throw new Error('log unreadable') },
-  }
-  const ctx = projectedCtx(persistence)
+  const ctx = projectedCtx(undefined, undefined, queryObserving(() => {
+    throw new Error('log unreadable')
+  }))
   await assert.rejects(recordedPreset(ctx, 's1'), /log unreadable/)
 })
 
 test('recordedPreset uses the projection: the newest selection wins over the header', async () => {
-  const persistence = {
-    list: async () => [sessionHeader('s1', 'standard')],
-    inspect: async () => ({
-      meta: sessionHeader('s1', 'standard'),
-      events: [
-        { type: 'agent-preset/selected', seq: 0, time: 2, data: { agentPreset: 'minimal' } } as SessionEvent,
-      ],
-    }),
-  }
-  const ctx = projectedCtx(persistence)
+  const ctx = projectedCtx(undefined, undefined, queryObserving(() => observation('minimal')))
   assert.equal(await recordedPreset(ctx, 's1'), 'minimal')
 })
 
 test('recordedPreset normalizes a legacy code selection to canonical ptc', async () => {
-  const persistence = {
-    list: async () => [sessionHeader('s1', 'standard')],
-    inspect: async () => ({
-      meta: sessionHeader('s1', 'standard'),
-      events: [
-        { type: 'agent-preset/selected', seq: 0, time: 2, data: { agentPreset: 'code' } } as SessionEvent,
-      ],
-    }),
-  }
-  const ctx = projectedCtx(persistence, rosterWithoutCode)
+  const ctx = projectedCtx(undefined, rosterWithoutCode, queryObserving(() => observation('code')))
   assert.equal(await recordedPreset(ctx, 's1'), 'ptc')
 })
 
 test('recordedPreset normalizes a legacy code header to canonical ptc', async () => {
-  const persistence = {
-    list: async () => [sessionHeader('s1', 'code')],
-    inspect: async () => ({
-      meta: sessionHeader('s1', 'code'),
-      events: [],
-    }),
-  }
-  const ctx = projectedCtx(persistence, rosterWithoutCode)
+  const ctx = projectedCtx(undefined, rosterWithoutCode, queryObserving(() => observation('code')))
   assert.equal(await recordedPreset(ctx, 's1'), 'ptc')
 })
 
 test('recordedPreset preserves code when the current roster has a custom code preset', async () => {
-  const persistence = {
-    list: async () => [sessionHeader('s1', 'standard')],
-    inspect: async () => ({
-      meta: sessionHeader('s1', 'standard'),
-      events: [
-        { type: 'agent-preset/selected', seq: 0, time: 2, data: { agentPreset: 'code' } } as SessionEvent,
-      ],
-    }),
-  }
   const fake = roster()
   const ctx = ctxWith(name => {
     if (name === 'sessionProjections') return agentPresetProjection
-    if (name === 'sessionPersistence') return persistence
     if (name === 'agentPresets') return fake.service
+    if (name === 'sessionQuery') return queryObserving(() => observation('code'))
     return undefined
   })
   assert.equal(await recordedPreset(ctx, 's1'), 'code')
 })
 
 test('recordedPreset returns undefined for a pre-roster session log', async () => {
-  const persistence = {
-    list: async () => [sessionHeader('s1')],
-    inspect: async () => ({
-      meta: sessionHeader('s1'),
-      events: [],
-    }),
-  }
-  const ctx = projectedCtx(persistence)
+  const ctx = projectedCtx(undefined, undefined, queryObserving(() => observation(null)))
   assert.equal(await recordedPreset(ctx, 's1'), undefined)
 })
 

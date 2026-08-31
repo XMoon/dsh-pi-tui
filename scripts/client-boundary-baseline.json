@@ -64,7 +64,7 @@
   "agentPresets",
   "import:dsh-agent",
   "import:dsh-session",
-  "sessionPersistence"
+  "sessionQuery"
  ],
  "runtime/direct/session-lifecycle-direct.ts": [
   "agents",

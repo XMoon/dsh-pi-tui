@@ -29,12 +29,24 @@ function persistence(headers: Array<{ id: string; createdAt: number; version: nu
 function query(
   records: Array<{ header: ReturnType<typeof header>; live: boolean }>,
   filterEvents?: NonNullable<SessionQueryLike['filterEvents']>,
+  observeSession?: (id: SessionId, options?: { signal?: AbortSignal }) => unknown,
 ): SessionQueryLike {
   return {
     listSessions: async () => records as unknown as SessionQueryLike['listSessions'] extends Promise<infer T> ? T : never,
     readTitleSnapshots: async (ids) =>
       ids.map(id => ({ sessionId: String(id), status: 'fulfilled' as const, value: { title: { title: `title-of-${id}` } } })),
     ...(filterEvents === undefined ? {} : { filterEvents }),
+    ...(observeSession === undefined ? {} : { observeSession }),
+  }
+}
+
+/** One fake observation lease over the official `observeSession` seam. */
+function observation(agentPreset: string | null | undefined) {
+  return {
+    source: 'prepared' as const,
+    header: { id: 'session-x', createdAt: 0, version: 0 },
+    ...(agentPreset === undefined ? {} : { projections: { values: { agentPreset } } }),
+    [Symbol.dispose]: () => {},
   }
 }
 
@@ -80,19 +92,23 @@ test('list uses the semantic query roster without requiring raw persistence', as
   assert.equal(rows[0].live, true)
 })
 
-test('list is lightweight and presetBatch uses the projection for effective state', async () => {
+test('list is lightweight and presetBatch uses the observation seam for effective state', async () => {
   const persistedHeader = header('session-selected', 100, { agentPreset: 'standard' })
-  let inspected = 0
+  let observed = 0
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: persistedHeader, live: false }]),
+    sessionQuery: query(
+      [{ header: persistedHeader, live: false }],
+      undefined,
+      async () => {
+        observed += 1
+        return observation('ptc')
+      },
+    ),
     sessionProjections: { stateOf: () => 'ptc' },
     sessionPersistence: {
       list: async () => [persistedHeader],
       readRaw: async () => undefined,
-      inspect: async () => {
-        inspected += 1
-        return { meta: persistedHeader as never, events: [] }
-      },
+      inspect: async () => { throw new Error('the observation seam must replace direct inspection') },
     },
   }))
   const rows = await reader.list(undefined)
@@ -100,13 +116,13 @@ test('list is lightweight and presetBatch uses the projection for effective stat
   assert.equal(rows[0]?.preset, undefined, 'initial rows do not wait for projection replay')
   const presets = await reader.presetBatch!(rows)
   assert.equal(presets.get('session-selected'), 'ptc')
-  assert.equal(inspected, 1)
+  assert.equal(observed, 1)
 })
 
 test('presetBatch preserves a projected custom code preset when the roster contains code', async () => {
   const persistedHeader = header('session-custom-code', 100, { agentPreset: 'standard' })
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: persistedHeader, live: false }]),
+    sessionQuery: query([{ header: persistedHeader, live: false }], undefined, () => observation('code')),
     sessionProjections: { stateOf: () => 'code' },
     sessionPersistence: {
       list: async () => [persistedHeader],
@@ -125,7 +141,7 @@ test('presetBatch preserves a projected custom code preset when the roster conta
 test('presetBatch omits legacy code when the roster has neither code nor ptc', async () => {
   const persistedHeader = header('session-empty-roster', 100, { agentPreset: 'code' })
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: persistedHeader, live: false }]),
+    sessionQuery: query([{ header: persistedHeader, live: false }], undefined, () => observation('code')),
     sessionProjections: { stateOf: () => 'code' },
     sessionPersistence: {
       list: async () => [persistedHeader],
@@ -141,33 +157,39 @@ test('presetBatch omits legacy code when the roster has neither code nor ptc', a
   assert.deepEqual(await reader.presetBatch!(rows!), new Map())
 })
 
-test('list does not treat a persisted header as effective preset without the projection service', async () => {
-  let inspected = 0
+test('list does not treat a persisted header as effective preset without the observation seam', async () => {
   const persistedHeader = header('session-unprojected', 100, { agentPreset: 'standard' })
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: persistedHeader, live: false }]),
     sessionPersistence: {
       list: async () => [persistedHeader],
       readRaw: async () => undefined,
-      inspect: async () => {
-        inspected += 1
-        throw new Error('projectionless listing must not inspect durable events')
-      },
+      inspect: async () => { throw new Error('projectionless listing must not inspect durable events') },
     },
   }))
   const rows = await reader.list(undefined)
   assert.ok(rows !== undefined)
   assert.equal(rows[0]?.preset, undefined)
-  assert.equal(inspected, 0)
+  assert.deepEqual(await reader.presetBatch!(rows!), new Map(), 'no observation seam means no cold preset enrichment')
 })
 
-test('list bounds cold-session projection inspections', async () => {
+test('list bounds cold-session preset observations', async () => {
   let active = 0
   let maximum = 0
   let persistenceLists = 0
   const headers = Array.from({ length: SESSION_PRESET_READ_CONCURRENCY * 3 }, (_, index) => header(`session-cold-${index}`, index))
   const reader = new DirectSessionReader(host({
-    sessionQuery: query(headers.map(item => ({ header: item, live: false }))),
+    sessionQuery: query(
+      headers.map(item => ({ header: item, live: false })),
+      undefined,
+      async () => {
+        active += 1
+        maximum = Math.max(maximum, active)
+        await new Promise(resolve => setTimeout(resolve, 5))
+        active -= 1
+        return observation('standard')
+      },
+    ),
     sessionProjections: { stateOf: () => 'standard' },
     sessionPersistence: {
       list: async () => {
@@ -175,67 +197,159 @@ test('list bounds cold-session projection inspections', async () => {
         return headers
       },
       readRaw: async () => undefined,
-      inspect: async (sessionId: SessionId) => {
-        active += 1
-        maximum = Math.max(maximum, active)
-        await new Promise(resolve => setTimeout(resolve, 5))
-        active -= 1
-        const meta = headers.find(item => String(item.id) === String(sessionId))
-        return { meta: meta as never, events: [] }
-      },
+      inspect: async () => { throw new Error('the observation seam must replace direct inspection') },
     },
   }))
   const rows = await reader.list(undefined)
   assert.equal(rows?.length, headers.length)
   await reader.presetBatch!(rows!)
   assert.ok(maximum <= SESSION_PRESET_READ_CONCURRENCY,
-    `cold-session inspections exceeded the bound: ${maximum}`)
-  assert.equal(persistenceLists, 0, 'query-backed enrichment must use the semantic query roster and never list persistence')
+    `cold-session observations exceeded the bound: ${maximum}`)
+  assert.equal(persistenceLists, 0, 'enrichment must use the list() header snapshot and never list persistence again')
 })
 
-test('presetBatch fails closed when a cold projection inspection rejects', async () => {
+test('presetBatch fails closed when a cold observation rejects', async () => {
   const refusal = new Error('projection replay failed')
   const persistedHeader = header('session-broken', 100)
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: persistedHeader, live: false }]),
+    sessionQuery: query([{ header: persistedHeader, live: false }], undefined, () => { throw refusal }),
     sessionProjections: { stateOf: () => 'standard' },
     sessionPersistence: {
       list: async () => [persistedHeader],
       readRaw: async () => undefined,
-      inspect: async () => { throw refusal },
+      inspect: async () => { throw new Error('the observation seam must replace direct inspection') },
     },
   }))
   const rows = await reader.list(undefined)
   assert.deepEqual(await reader.presetBatch!(rows!), new Map(), 'a failed log never falls back to header metadata')
 })
 
-test('list cancellation stops new cold inspections and forwards the signal', async () => {
+test('list cancellation stops new cold observations and forwards the signal', async () => {
   const controller = new AbortController()
   const refusal = new Error('listing cancelled')
   const headers = Array.from({ length: SESSION_PRESET_READ_CONCURRENCY * 2 }, (_, index) =>
     header(`session-cancel-${index}`, index))
-  let inspections = 0
+  let observations = 0
   let receivedSignal: AbortSignal | undefined
   const reader = new DirectSessionReader(host({
-    sessionQuery: query(headers.map(item => ({ header: item, live: false }))),
+    sessionQuery: query(
+      headers.map(item => ({ header: item, live: false })),
+      undefined,
+      async (_id, options) => {
+        receivedSignal = options?.signal
+        observations += 1
+        if (observations === 1) controller.abort(refusal)
+        options?.signal?.throwIfAborted()
+        return observation('standard')
+      },
+    ),
     sessionProjections: { stateOf: () => 'standard' },
     sessionPersistence: {
       list: async () => headers,
       readRaw: async () => undefined,
-      inspect: async (sessionId: SessionId, signal?: AbortSignal) => {
-        receivedSignal = signal
-        inspections += 1
-        if (inspections === 1) controller.abort(refusal)
-        signal?.throwIfAborted()
-        const meta = headers.find(item => String(item.id) === String(sessionId))
-        return { meta: meta as never, events: [] }
-      },
+      inspect: async () => ({ events: [] }),
     },
   }))
   const rows = await reader.list(undefined, controller.signal)
   await assert.rejects(reader.presetBatch!(rows!, controller.signal), error => error === refusal)
   assert.equal(receivedSignal, controller.signal)
-  assert.equal(inspections, 1, 'no cold inspection may start after cancellation')
+  assert.equal(observations, 1, 'no cold observation may start after cancellation')
+})
+
+test('presetBatch serves a cached agentPreset without any observation', async () => {
+  const persistedHeader = header('session-cached', 100, { agentPreset: 'standard' })
+  let observed = 0
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query(
+      [{ header: persistedHeader, live: false }],
+      undefined,
+      async () => {
+        observed += 1
+        return observation('ptc')
+      },
+    ),
+    sessionProjectionCache: {
+      cachedSnapshot: (meta: { id: unknown }) => {
+        assert.equal(String(meta.id), 'session-cached')
+        return { asOfSeq: 3, values: { agentPreset: 'ptc' } }
+      },
+    },
+    agentPresets: {
+      list: async () => [{ id: 'ptc' }],
+      resolve: async (id?: string) => ({ id: id ?? 'ptc' }),
+    },
+  }))
+  const rows = await reader.list(undefined)
+  const presets = await reader.presetBatch!(rows!)
+  assert.equal(presets.get('session-cached'), 'ptc')
+  assert.equal(observed, 0, 'a cache hit must not observe the session')
+})
+
+test('presetBatch normalizes a cached legacy code through the roster', async () => {
+  const persistedHeader = header('session-cached-code', 100)
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query(
+      [{ header: persistedHeader, live: false }],
+      undefined,
+      async () => { throw new Error('a cache hit must not observe the session') },
+    ),
+    sessionProjectionCache: {
+      cachedSnapshot: () => ({ asOfSeq: 1, values: { agentPreset: 'code' } }),
+    },
+    agentPresets: {
+      list: async () => [{ id: 'ptc' }],
+      resolve: async (id?: string) => ({ id: id ?? 'ptc' }),
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.equal((await reader.presetBatch!(rows!)).get('session-cached-code'), 'ptc')
+})
+
+test('presetBatch treats a null cached agentPreset as a miss and observes', async () => {
+  const persistedHeader = header('session-cached-null', 100)
+  let observed = 0
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query(
+      [{ header: persistedHeader, live: false }],
+      undefined,
+      async () => {
+        observed += 1
+        return observation('minimal')
+      },
+    ),
+    sessionProjectionCache: {
+      cachedSnapshot: () => ({ asOfSeq: 1, values: { agentPreset: null } }),
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.equal((await reader.presetBatch!(rows!)).get('session-cached-null'), 'minimal')
+  assert.equal(observed, 1, 'a null cached value is not a usable preset identity')
+})
+
+test('presetBatch observes only cache misses', async () => {
+  const cachedHeader = header('session-cached', 100)
+  const missHeader = header('session-miss', 90)
+  const observed: string[] = []
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query(
+      [{ header: cachedHeader, live: false }, { header: missHeader, live: false }],
+      undefined,
+      async (id) => {
+        observed.push(String(id))
+        return observation('ptc')
+      },
+    ),
+    sessionProjectionCache: {
+      cachedSnapshot: (meta: { id: unknown }) => String(meta.id) === 'session-cached'
+        ? { asOfSeq: 1, values: { agentPreset: 'ptc' } }
+        : undefined,
+    },
+  }))
+  const rows = await reader.list(undefined)
+  const presets = await reader.presetBatch!(rows!)
+  assert.equal(presets.get('session-cached'), 'ptc')
+  assert.equal(presets.get('session-miss'), 'ptc')
+  assert.deepEqual(observed, ['session-miss'], 'only the cache miss is observed')
 })
 
 test('list returns undefined when persistence is unavailable', async () => {
