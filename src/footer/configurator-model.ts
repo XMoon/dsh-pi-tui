@@ -1108,14 +1108,17 @@ export class FooterConfiguratorModel {
         }
         this.customError = ''
         this.mode = 'create-refresh'
-        this.pickerIndex = 0
+        // The picker opens on the DEFAULT refresh (5s), not the first
+        // choice — an unchanged Enter creates the documented default.
+        this.pickerIndex = Math.max(0, CUSTOM_COMMAND_REFRESH_CHOICES_MS.indexOf(DEFAULT_CUSTOM_COMMAND_REFRESH_MS))
         return
       case 'create-refresh': {
         const choice = CUSTOM_COMMAND_REFRESH_CHOICES_MS[Math.min(this.pickerIndex, CUSTOM_COMMAND_REFRESH_CHOICES_MS.length - 1)]
         if (choice === undefined) return
         this.customRefresh = choice
         this.mode = 'create-timeout'
-        this.pickerIndex = 0
+        // The picker opens on the DEFAULT timeout (300ms).
+        this.pickerIndex = Math.max(0, CUSTOM_COMMAND_TIMEOUT_CHOICES_MS.indexOf(DEFAULT_COMMAND_TIMEOUT_MS))
         return
       }
       case 'create-timeout': {

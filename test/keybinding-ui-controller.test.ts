@@ -89,7 +89,7 @@ test('mutation performs one get, one replace, preserves unrelated fields, then p
 test('keybinding writes project merged footer items back from the USER raw projection', async () => {
   const userRaw = [
     { schemaVersion: 1, id: 'user:mine', kind: 'text', text: 'USER', tone: 'default' },
-    { schemaVersion: 1, id: 'user:future', kind: 'command', command: 'future command', futureField: { version: 2 } },
+    { schemaVersion: 1, id: 'user:future', kind: 'future-kind', command: 'future command', futureField: { version: 2 } },
   ]
   const projectRaw = [
     { schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT', tone: 'warning' },

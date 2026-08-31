@@ -7,6 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { FooterComposer } from '../src/footer/composer.ts'
 import {
@@ -514,4 +515,37 @@ test('PR D: a command definition with no cache renders unavailable in the live f
   })
   assert.ok(!plain(composed).includes('[command]'), 'the live footer must not show the draft placeholder')
   assert.ok(!plain(composed).includes('date'), 'the live footer must not show the command string')
+})
+
+test('PR D: command items participate in the ordinary composer layout (rows, budget, host instruction)', () => {
+  const catalog = new FooterCustomItemCatalog([
+    VALID_CLOCK,
+    { schemaVersion: 1, id: 'user:environment', kind: 'text', text: 'PROD' },
+  ])
+  catalog.setCommandValueSource({ value: () => ({ kind: 'value', text: '14:30' }) })
+  const registry = new FooterItemRegistry(createBuiltinFooterRegistry())
+  registry.setCustomSource(catalog)
+  const composer = new FooterComposer(registry)
+  const layout = {
+    schemaVersion: 1 as const,
+    rows: [
+      { left: [{ id: 'model' }, { id: 'user:clock' }], right: [] },
+      { left: [{ id: 'user:environment' }, { id: 'user:clock' }], right: [] },
+    ],
+  }
+  const rendered = composer.render({
+    snapshot: emptyStatusSnapshot(),
+    layout,
+    width: 80,
+    context: { taskBrowserAvailable: false, extensionFooterText: '' },
+    instruction: { id: 'exit', text: [{ text: 'Ctrl+C exit' }], priority: 100 },
+  })
+  const lines = rendered.split('\n').filter(line => line !== '')
+  assert.ok(plain(rendered).includes('14:30'), 'the command value must render like any item')
+  assert.ok(plain(rendered).includes('PROD'), 'the custom text item must render alongside')
+  assert.ok(lines.length <= 4, `the whole footer must stay within the 4-line budget (got ${lines.length})`)
+  assert.ok(lines.every(line => visibleWidth(line) <= 80), 'no line may overflow the width')
+  // Beyond the composer's own SGR and the \n line separators, no control
+  // character may leak (a command value is sanitized by the runner).
+  assert.ok(!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(plain(rendered)), 'no control characters may leak')
 })

@@ -114,7 +114,7 @@ test('the Direct config-port trust read resolves the same USER-layer facts', asy
 test('the Direct custom-item read separates USER raw storage from the safe runtime projection', async () => {
   const userRaw: unknown[] = [
     { schemaVersion: 1, id: 'user:user-owned', kind: 'text', text: 'USER' },
-    { schemaVersion: 1, id: 'user:future-command', kind: 'command', command: 'date', payload: { nested: ['preserve'] } },
+    { schemaVersion: 1, id: 'user:future-command', kind: 'future-kind', command: 'date', payload: { nested: ['preserve'] } },
   ]
   const projectRaw: unknown[] = [{ schemaVersion: 1, id: 'user:project-owned', kind: 'text', text: 'PROJECT' }]
   const port = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
