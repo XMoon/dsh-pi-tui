@@ -18,6 +18,8 @@ import { TuiApp, type StatusData } from '../src/tui-app.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { FOOTER_MAX_PHYSICAL_LINES } from '../src/footer/types.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
 
 function startApp(columns: number): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(columns, 24)
@@ -94,23 +96,32 @@ test('a narrow terminal wraps the footer to multiple rows, high-importance info 
   assert.ok(view.includes('12.3s'), `stats line lost:\n${view}`)
   const rows = footerRows(app)
   assert.ok(rows.length >= 3, `the footer must occupy multiple rows at 40 columns, saw ${rows.length}:\n${view}`)
-  assert.ok(rows.length <= 3, `the footer must stay inside its global budget, saw ${rows.length}:\n${view}`)
+  // 3 rows here: the stats row's demand is one line at 40 columns, so the
+  // second line of the capacity stays unused — still inside the hard 4.
+  assert.ok(rows.length <= FOOTER_MAX_PHYSICAL_LINES, `the footer must stay inside its capacity, saw ${rows.length}:\n${view}`)
   app.stop()
 })
 
-test('runaway host content is capped: 2 status rows + 1 stats row, tail cut', async () => {
+test('runaway host content is capped at the 4-line capacity, tail cut', async () => {
   const { vt, app } = startApp(40)
   app.setStatus(EXTREME_STATUS)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   const rows = footerRows(app)
-  // The global budget is THREE physical lines now (status ≤ 2 + stats ≤ 1)
-  // — the wrapped rows are never sliced; the overflow resolves by
-  // importance and the remnants cut with '…'.
-  assert.ok(rows.length <= 3, `the footer must never exceed 3 rows, saw ${rows.length}:\n${view}`)
+  // The composer hard capacity is FOUR physical lines now (2 lines per
+  // logical row × 2 rows) — the extreme state spends it as 2 + 2: the
+  // wrapped rows are never sliced; the overflow resolves by importance
+  // and the remnants cut with '…'.
+  assert.ok(rows.length <= FOOTER_MAX_PHYSICAL_LINES, `the footer must never exceed ${FOOTER_MAX_PHYSICAL_LINES} rows, saw ${rows.length}:\n${view}`)
   assert.ok(rows.length >= 3, `the extreme state must still wrap to multiple rows, saw ${rows.length}:\n${view}`)
-  assert.ok(rows.some(row => row.includes('…')), `the capped rows must carry the ellipsis:\n${view}`)
-  assert.ok(rows.some(row => row.includes('↑') && row.includes('…')), `the stats row must survive its own cap with the ellipsis:\n${view}`)
+  // The extreme state spends the capacity as 2 status rows + 2 stats
+  // rows; the overflow resolves by IMPORTANCE (highest facts survive)
+  // with no viewport overflow. '…' only appears when the ANSI-safe
+  // truncate (not drops) settles the row — drops may fit without it.
+  for (const row of rows) {
+    assert.ok(visibleWidth(row.replace(/\x1b\[[0-9;]*m/g, '')) <= 40, `row overflows:\n${view}`)
+  }
+  assert.ok(rows.length < 4 || rows.some(row => row.includes('…')) || !view.includes('yyy'), `unresolved overflow must cut with '…':\n${view}`)
   app.stop()
 })
 

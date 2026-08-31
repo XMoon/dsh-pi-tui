@@ -4,11 +4,14 @@
  *
  * - layout rows are POSITION-AGNOSTIC logical rows: every non-empty row
  *   goes through the SAME fitting contract of 1..FOOTER_MAX_PHYSICAL_LINES_PER_ROW
- *   physical lines inside the surface's global budget of
- *   FOOTER_MAX_PHYSICAL_LINES physical lines. Past a row's cap the
- *   overflow resolves SEMANTICALLY (compact → drop by importance →
- *   ANSI-safe truncate) — never by slicing the wrapped lines and never by
- *   index-role inference (no "first row = status / last row = stats");
+ *   physical lines inside the CALLER's global budget (the composer's hard
+ *   capacity — FOOTER_MAX_PHYSICAL_LINES ≤ 4 — is a ceiling; the surface
+ *   decides how many lines it actually grants, so short viewports render
+ *   fewer and the Host instruction is never viewport-clipped). Past a
+ *   row's cap the overflow resolves SEMANTICALLY (compact → drop by
+ *   importance → ANSI-safe truncate) — never by slicing the wrapped
+ *   lines and never by index-role inference (no "first row = status /
+ *   last row = stats");
  * - a left-only row joins in layout order and wraps into 1..2 physical
  *   lines; a row with a right zone keeps its single-line fitZone contract
  *   (the right zone reserves first, the left fits the remainder);
@@ -64,11 +67,23 @@ export interface FooterComposerOptions {
   readonly physicalLineBudget?: FooterPhysicalLineBudget
 }
 
-/** The default surface policy (plan §6.1): two physical lines per logical
- * row, three for the whole footer. */
+/** The DEFAULT surface policy (plan §6.1, PR #57 revision): two physical
+ * lines per logical row, hard capacity four for the whole footer. The
+ * production path (TuiApp) always passes the EFFECTIVE surface budget —
+ * min(capacity, current available rows) — so this default only backs
+ * direct composer callers. */
 const DEFAULT_PHYSICAL_LINE_BUDGET: FooterPhysicalLineBudget = {
   perRow: FOOTER_MAX_PHYSICAL_LINES_PER_ROW,
   total: FOOTER_MAX_PHYSICAL_LINES,
+}
+
+/** Normalize one positive-integer budget input (plan PR #57 review §十):
+ * NaN/±Infinity/out-of-range inputs fall back instead of propagating —
+ * `wrapped.length <= NaN` is always false, which would hang
+ * wrapFitRow's shrink loop forever. */
+function normalizePositiveInt(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback
+  return Math.max(1, Math.floor(value))
 }
 
 /** One logical row, resolved ONCE per render: the rendered zones, the
@@ -114,9 +129,16 @@ export class FooterComposer {
     // a direct caller handing 0/-1/NaN/Infinity gets the width-1 surface,
     // never an ill-fitted one.
     const width = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width)) : 1
+    // The budget normalizes with the same defense AND is pinned to the
+    // composer's hard capability ceiling — even a caller override
+    // (physicalLineBudget) can never exceed perRow ≤ 2 / total ≤ 4
+    // (plan 2026-08-31 §6.1): the surface decides how many of the 4
+    // available lines it grants, not how many exist.
     const budget = options.physicalLineBudget ?? DEFAULT_PHYSICAL_LINE_BUDGET
-    const perRow = Math.max(1, Math.min(budget.perRow, budget.total))
-    const total = Math.max(1, budget.total)
+    const total = Math.min(FOOTER_MAX_PHYSICAL_LINES,
+      normalizePositiveInt(budget.total, FOOTER_MAX_PHYSICAL_LINES))
+    const perRow = Math.min(total, FOOTER_MAX_PHYSICAL_LINES_PER_ROW,
+      normalizePositiveInt(budget.perRow, FOOTER_MAX_PHYSICAL_LINES_PER_ROW))
     // The instruction's rendered text resolves ONCE: an instruction that
     // renders nothing VISIBLE (empty spans, whitespace/blank SGR-only
     // text) is indistinguishable from an ABSENT one — it reserves no
@@ -235,8 +257,9 @@ export class FooterComposer {
    * MULTI-LINE CELL budget — never a slice of the wrapped lines (a slice
    * would discard content by string position instead of semantic
    * importance). Word-boundary wrap waste may need the cell budget to
-   * shrink a few times; the floor (budget 1) always wraps to exactly one
-   * line, which guarantees termination. */
+   * shrink a few times; the EXPLICIT floor below (cells 1) turns any
+   * residual overflow into a single ANSI-safe '…' row, so termination
+   * never depends on fitZone/wrap internals staying well-behaved. */
   private wrapFitRow(items: ZoneItem[], separator: string, width: number, maxPhysicalLines: number): string[] {
     const preferred = wrapTextWithAnsi(items.map(item => item.text).join(separator), width)
     if (preferred.length <= maxPhysicalLines) return preferred
@@ -244,6 +267,12 @@ export class FooterComposer {
     for (;;) {
       const wrapped = wrapTextWithAnsi(this.fitZone(items, separator, cells), width)
       if (wrapped.length <= maxPhysicalLines) return wrapped
+      if (cells <= 1) {
+        // Finite lower bound: one cell can only ever wrap to one line, so
+        // this branch is the loop's guaranteed exit — belt and braces for
+        // the termination argument even if future wrap/fit behavior drifts.
+        return [capRowWithEllipsis(wrapped[0] ?? '', width)]
+      }
       cells = Math.max(1, cells - Math.max(1, wrapped.length - maxPhysicalLines))
     }
   }

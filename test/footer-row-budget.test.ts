@@ -79,16 +79,17 @@ test('every logical row of the default layout stays inside the 1..2-line row con
   for (const width of [200, 120, 80, 60, 40, 30, 20, 10, 1]) {
     const lines = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, width)
     assert.ok(lines.length >= 1, `no rows at ${width}`)
-    assert.ok(lines.length <= 3, `the global budget at ${width}: ${JSON.stringify(lines)}`)
+    assert.ok(lines.length <= 4, `the hard capacity at ${width}: ${JSON.stringify(lines)}`)
     for (const line of lines) {
       assert.ok(visibleWidth(line) <= Math.max(1, width), `row overflows at ${width}: ${JSON.stringify(line)}`)
       const truncatedSgr = line.match(/\x1b\[(?:[0-9;]*[^0-9;m]|[0-9;]*$)/)
       assert.equal(truncatedSgr, null, `truncated ANSI at ${width}: ${JSON.stringify(line)}`)
     }
-    // The default two-row layout: the stats row keeps exactly one line —
-    // the status row's leftover hunger eats the spare line first. (At
+    // The stats row keeps at least one visible line within its allowance —
+    // with the hard capacity of 4 it may even wrap INTO two when the
+    // surface has the room (its demand is lower in layout order). At
     // degenerate widths the truncated stats line may no longer carry its
-    // 'LLM' text, only its leading '↑' counter.)
+    // 'LLM' text, only its leading '↑' counter.
     if (width > 4) {
       const stats = lines.find(line => line.includes('LLM') || line.includes('↑'))
       assert.ok(stats !== undefined && visibleWidth(stats) <= Math.max(1, width), `stats row lost at ${width}:\n${JSON.stringify(lines)}`)
@@ -103,44 +104,45 @@ test('invalid widths normalize to the width-1 surface', () => {
   const snap = busySnapshot()
   for (const width of [0, -1, -80, Number.NaN, Number.POSITIVE_INFINITY]) {
     const lines = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, width)
-    assert.ok(lines.length >= 1 && lines.length <= 3, `normalized budget at ${width}: ${JSON.stringify(lines)}`)
+    assert.ok(lines.length >= 1 && lines.length <= 4, `normalized budget at ${width}: ${JSON.stringify(lines)}`)
     for (const line of lines) {
       assert.ok(line.length > 0 && visibleWidth(line) <= 1, `row outside the width-1 surface at ${width}: ${JSON.stringify(line)}`)
     }
   }
 })
 
-test('a manual 3-row layout renders position-agnostically (no stats-role inference)', () => {
-  // With a budget that fits three rows, EVERY row renders; no row is
-  // forced to one line for being "the last one" (plan §13.4).
+test('a caller budget is CLAMPED to the hard capability (perRow ≤ 2, total ≤ 4)', () => {
+  // { perRow: 2, total: 6 } must not raise the composer's ceiling: the
+  // effective total clamps to 4. Three rows then share 4 lines with the
+  // sequential allocator — every row keeps the SAME 1..2 contract, no
+  // stats-role inference (plan §13.4).
   const snap = busySnapshot()
   const budget: FooterPhysicalLineBudget = { perRow: 2, total: 6 }
   const lines = plainPhysical(snap, THREE_ROW_LAYOUT, 20, { budget })
-  // Row 1: permission + plan fit in one line; rows 2 and 3 wrap into two
-  // physical lines each — all inside perRow. Crucially the LAST row is
-  // allowed the same 1..2 contract as any other row.
-  assert.equal(lines.length, 5, `rows must share the budget by demand, saw:\n${JSON.stringify(lines)}`)
+  assert.equal(lines.length, 4, `the clamped budget must allow 3 baseline rows + one second line, saw:\n${JSON.stringify(lines)}`)
   for (const line of lines) assert.ok(visibleWidth(line) <= 20, `overflow:\n${JSON.stringify(lines)}`)
 })
 
-test('a manual 3-row layout never overflows the DEFAULT global budget', () => {
-  // The default surface policy: 3 physical lines total. Three non-empty
-  // rows share it: a baseline line each while it lasts, tail rows drop as
-  // a budget decision — and the width/ANSI contracts hold throughout.
+test('a manual 3-row layout never overflows the DEFAULT capacity', () => {
+  // The hard capacity: 4 physical lines total. Three non-empty rows share
+  // it: a baseline line each while it lasts, the leftover buys a second
+  // line for the hungriest row — and the width/ANSI contracts hold
+  // throughout. No overflow, no crash, no role inference.
   const snap = busySnapshot()
   const lines = plainPhysical(snap, THREE_ROW_LAYOUT, 20)
-  assert.ok(lines.length <= 3, `the default budget at 20 columns: ${JSON.stringify(lines)}`)
+  assert.ok(lines.length <= 4, `the default capacity at 20 columns: ${JSON.stringify(lines)}`)
   for (const line of lines) assert.ok(visibleWidth(line) <= 20, `overflow:\n${JSON.stringify(lines)}`)
 })
 
 test('the Host instruction never deletes a user row when the budget fits', () => {
-  // Instruction + 3 rows with an explicit budget: ALL rows render and the
-  // instruction appends — the legacy "replace the last row slot" swap is
+  // Instruction + 3 rows with a caller budget ABOVE the ceiling: the
+  // effective budget clamps to 4, which still fits 3 baseline rows + the
+  // appended instruction — the legacy "replace the last row slot" swap is
   // gone (plan §7/§13.4).
   const snap = busySnapshot()
   const budget: FooterPhysicalLineBudget = { perRow: 2, total: 6 }
   const lines = plainPhysical(snap, THREE_ROW_LAYOUT, 20, { budget, instruction: INSTRUCTION })
-  assert.equal(lines.length, 6, `the instruction must APPEND, not replace:\n${JSON.stringify(lines)}`)
+  assert.equal(lines.length, 4, `the instruction must APPEND, not replace:\n${JSON.stringify(lines)}`)
   // At 20 columns the hint itself is tail-capped ('…') — its own 1-line
   // contract.
   assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again'), `the instruction must be last:\n${JSON.stringify(lines)}`)
@@ -148,30 +150,120 @@ test('the Host instruction never deletes a user row when the budget fits', () =>
   assert.ok(lines.some(line => line.includes('deepseek')), `row 2 must survive:\n${JSON.stringify(lines)}`)
 })
 
-test('the Host instruction reserves its line and both default rows survive it', () => {
-  // Instruction + default 2-row layout at a narrow width: the instruction
-  // reserves 1 line first; the layout rows share the remaining 2 (a
-  // baseline line each). Nothing is replaced, nothing overflows.
+test('the Host instruction reserves its line; capacity 4 gives status 2 + stats 1 + hint', () => {
+  // Instruction + default 2-row layout at 40 columns with the effective
+  // total of 4 (the plan §7 example): the hint reserves 1, the two rows
+  // share the remaining 3 — a baseline each, the leftover buys the status
+  // row its second line. 2 + 1 + 1 = 4; nothing replaced, nothing
+  // overflows.
   const snap = busySnapshot()
   const lines = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, 40, { instruction: INSTRUCTION })
-  assert.ok(lines.length <= 3, `total must stay inside the global budget:\n${JSON.stringify(lines)}`)
+  assert.equal(lines.length, 4, `2 + 1 + hint inside the capacity of 4:\n${JSON.stringify(lines)}`)
   assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again to exit'), `the hint must be its own line:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('[yolo]')), `the status row must survive:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('LLM')), `the stats row must survive (not be replaced):\n${JSON.stringify(lines)}`)
 })
 
-test('a 3-row layout under the DEFAULT budget drops its TAIL rows, never the instruction', () => {
-  // Instruction + 3 rows + the DEFAULT 3-line budget: the instruction
-  // reserves 1, two rows share the remaining 2, and row 3 DROPS as a
-  // global-budget decision — never via a "replace the last row slot"
-  // swap, and the instruction always survives (plan §7/§8).
+test('a 3-row layout under the DEFAULT budget fits beside the instruction', () => {
+  // Instruction + 3 rows + the DEFAULT capacity of 4: the instruction
+  // reserves 1, the three rows share the remaining 3 (one baseline line
+  // each) — nothing is replaced, the instruction always survives, and no
+  // row is rendered wider than the terminal (plan §7/§8).
   const snap = busySnapshot()
   const lines = plainPhysical(snap, THREE_ROW_LAYOUT, 20, { instruction: INSTRUCTION })
-  assert.equal(lines.length, 3, `exactly the default budget, hint included:\n${JSON.stringify(lines)}`)
+  assert.equal(lines.length, 4, `3 rows + hint inside the capacity of 4:\n${JSON.stringify(lines)}`)
   assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again'), `the hint must be last:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('[yolo]')), `row 1 must survive:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('deepseek')), `row 2 must survive:\n${JSON.stringify(lines)}`)
-  assert.ok(!lines.some(line => line.includes('t12/s38')), `row 3 must drop as a budget decision:\n${JSON.stringify(lines)}`)
+  // Width 20 truncates the row to 'feat/footer-customi…' — its PREFIX
+  // survives, which is the point (the row renders; its tail is cut by the
+  // ANSI-safe truncate, never by viewport clip).
+  assert.ok(lines.some(line => line.includes('feat/footer-customi')), `row 3 must survive:\n${JSON.stringify(lines)}`)
+})
+
+test('a DYNAMIC total of 2 still keeps the instruction and drops the stats tail', () => {
+  // The surface may hand the composer fewer lines than the capacity
+  // (20x10 chrome-heavy fullscreen): with total 2 + an active hint the
+  // layout rows share 1 line — the highest-importance row survives, the
+  // LOWEST-priority row drops as a global-height decision, and the
+  // instruction is never viewport-clipped (plan §7/§8; the composer-level
+  // half of the 20x10 regression).
+  const snap = busySnapshot()
+  const budget: FooterPhysicalLineBudget = { perRow: 2, total: 2 }
+  const lines = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, 40, { budget, instruction: INSTRUCTION })
+  assert.equal(lines.length, 2, `exactly the surface budget, hint included:\n${JSON.stringify(lines)}`)
+  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again to exit'), `the hint must be last:\n${JSON.stringify(lines)}`)
+  assert.ok(lines.some(line => line.includes('[yolo]')), `the highest-importance row must survive:\n${JSON.stringify(lines)}`)
+  assert.ok(!lines.some(line => line.includes('LLM')), `the stats tail must drop under height pressure:\n${JSON.stringify(lines)}`)
+})
+
+test('a capacity of 4 lets BOTH rows wrap (2 + 2) when no instruction competes', () => {
+  // Two logical rows that each need two physical lines at 40 columns, no
+  // instruction: the capacity of 4 lets each row take its full 1..2
+  // contract — 2 + 2 = 4. The old hard total of 3 would have cut the
+  // second row to one line for no reason.
+  const snap = busySnapshot()
+  const layout: FooterLayoutV1 = {
+    schemaVersion: 1,
+    rows: [
+      { left: [{ id: 'model' }, { id: 'git-branch' }], right: [] },
+      { left: [{ id: 'git-branch' }, { id: 'context' }], right: [] },
+    ],
+  }
+  const lines = plainPhysical(snap, layout, 40)
+  assert.equal(lines.length, 4, `both rows may wrap to two inside the capacity, saw:\n${JSON.stringify(lines)}`)
+  for (const line of lines) assert.ok(visibleWidth(line) <= 40, `overflow:\n${JSON.stringify(lines)}`)
+})
+
+test('a capacity of 4 with an active hint splits it as 2 + 1 + hint', () => {
+  // The same two hungry rows + the active hint: the hint reserves 1
+  // first, the rows share 3 — baseline 2 + one second line for the FIRST
+  // row in layout order. 2 + 1 + hint = 4, exactly the plan's
+  // "space-sufficient" example.
+  const snap = busySnapshot()
+  const layout: FooterLayoutV1 = {
+    schemaVersion: 1,
+    rows: [
+      { left: [{ id: 'model' }, { id: 'git-branch' }], right: [] },
+      { left: [{ id: 'git-branch' }, { id: 'context' }], right: [] },
+    ],
+  }
+  const lines = plainPhysical(snap, layout, 40, { instruction: INSTRUCTION })
+  assert.equal(lines.length, 4, `2 + 1 + hint inside the capacity, saw:\n${JSON.stringify(lines)}`)
+  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again to exit'), `the hint must be last:\n${JSON.stringify(lines)}`)
+  assert.ok(lines[0]!.includes('deepseek'), `the first row must keep its second line:\n${JSON.stringify(lines)}`)
+})
+
+test('invalid perRow/total budgets normalize inside the hard capability', () => {
+  // NaN, ±Infinity, zero/negative/fractional/absurd values must never
+  // hang the fit loops (e.g. `wrapped.length <= NaN` is always false) —
+  // each normalizes to the SAME canonical output as the equivalent valid
+  // budget, never past perRow ≤ 2 / total ≤ 4.
+  const snap = busySnapshot()
+  const assertNormalized = (raw: { perRow?: number; total?: number }, equivalent: FooterPhysicalLineBudget, label: string): void => {
+    const lines = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, 30, {
+      budget: { perRow: raw.perRow ?? 2, total: raw.total ?? 4 },
+    })
+    const canonical = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, 30, { budget: equivalent })
+    assert.deepEqual(lines, canonical, `${label} must normalize to the equivalent render:\n${JSON.stringify(lines)}\nvs\n${JSON.stringify(canonical)}`)
+    assert.ok(lines.length <= 4, `${label} stays inside the hard capacity:\n${JSON.stringify(lines)}`)
+    for (const line of lines) assert.ok(visibleWidth(line) <= 30, `${label} overflow:\n${JSON.stringify(lines)}`)
+  }
+  // Non-finite values fall back to the DEFAULT budget.
+  for (const nonFinite of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assertNormalized({ perRow: nonFinite }, { perRow: 2, total: 4 }, `perRow ${nonFinite}`)
+    assertNormalized({ total: nonFinite }, { perRow: 2, total: 4 }, `total ${nonFinite}`)
+  }
+  // Finite junk floors at 1 (0/-1/1.9 → 1 line per row / 1 line total)…
+  assertNormalized({ perRow: 0 }, { perRow: 1, total: 4 }, 'perRow 0')
+  assertNormalized({ perRow: -1 }, { perRow: 1, total: 4 }, 'perRow -1')
+  assertNormalized({ perRow: 1.9 }, { perRow: 1, total: 4 }, 'perRow 1.9')
+  assertNormalized({ total: 0 }, { perRow: 2, total: 1 }, 'total 0')
+  assertNormalized({ total: -1 }, { perRow: 2, total: 1 }, 'total -1')
+  assertNormalized({ total: 3.9 }, { perRow: 2, total: 3 }, 'total 3.9')
+  // …and absurd values clamp to the hard capability (perRow ≤ 2, total ≤ 4).
+  assertNormalized({ perRow: 999 }, { perRow: 2, total: 4 }, 'perRow 999')
+  assertNormalized({ total: 999 }, { perRow: 2, total: 4 }, 'total 999')
 })
 
 test('an instruction that renders NOTHING reserves no line and paints nothing', () => {
@@ -206,7 +298,7 @@ test('a right-zone row keeps its single-line contract while left-only siblings w
   }
   for (const width of [80, 40, 20, 10]) {
     const lines = plainPhysical(snap, layout, width)
-    assert.ok(lines.length <= 3, `budget at ${width}: ${JSON.stringify(lines)}`)
+    assert.ok(lines.length <= 4, `budget at ${width}: ${JSON.stringify(lines)}`)
     // The right-zone row is always exactly one line with the pinned focus
     // item at its tail.
     const rightLine = lines[lines.length - 1]!
