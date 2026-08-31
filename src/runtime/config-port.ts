@@ -131,9 +131,12 @@ export interface FooterCommandTrust {
    * dormant USER command. */
   readonly userCommandItemActivationIds: ReadonlySet<string>
   /** The ids authorized for the native FALLBACK surface (a merged
-   * `footer: command` the USER layer does not own): the USER's own
-   * footerFallbackMode decides — `custom` + a valid USER layout → its
-   * refs, otherwise empty. */
+   * `footer: command` the USER layer does not own). The FULL semantic is
+   * encoded here — no caller can forget the outer mode gate:
+   * `USER footer === 'command'` AND `USER footerFallbackMode === 'custom'`
+   * AND a valid USER layout → its refs, otherwise empty. A USER who never
+   * opted into command mode authorizes nothing even with stale fallback
+   * metadata. */
   readonly userCommandItemFallbackActivationIds: ReadonlySet<string>
 }
 

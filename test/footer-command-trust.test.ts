@@ -292,4 +292,18 @@ test('the USER-layer activation ids are mode-gated (PR D activation trust)', asy
     }] }),
   } as never, undefined, () => undefined)
   assert.equal(defaultFallbackPort.footerCommandTrust.userCommandItemFallbackActivationIds.size, 0)
+
+  // The fallback property encodes the FULL semantic itself: a USER who
+  // never opted into command mode (footer: default) authorizes NOTHING
+  // even with stale footerFallbackMode: custom + a stale layout — no
+  // caller can forget the outer mode gate.
+  const staleFallbackPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'command', footerFallbackMode: 'custom', footerLayout: userLayout },
+      user: { footer: 'default', footerFallbackMode: 'custom', footerLayout: userLayout },
+    }] }),
+  } as never, undefined, () => undefined)
+  assert.equal(staleFallbackPort.footerCommandTrust.userCommandItemFallbackActivationIds.size, 0,
+    'stale fallback metadata under footer: default must authorize nothing')
 })
