@@ -199,7 +199,10 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   ctx.provide('commands', commands.service as never)
   const customItems = [{ schemaVersion: 1 as const, id: 'user:environment', kind: 'text' as const, text: 'PROD', tone: 'warning' as const }]
   const futureCustomItem = { schemaVersion: 1, id: 'user:future', kind: 'future-kind', command: 'echo future' }
-  const persistedCustomItems = [...customItems, futureCustomItem]
+  // A KNOWN kind carrying a future field is forward-compatible raw data
+  // too: an unrelated save must never normalize it away (PR D review).
+  const futureFieldCommand = { schemaVersion: 1, id: 'user:future-command', kind: 'command', command: 'echo future', futureField: { version: 2 } }
+  const persistedCustomItems = [...customItems, futureCustomItem, futureFieldCommand]
   app.setFooterCustomItems(customItems)
   const settings = fakeSettings({ footer: 'default', footerCustomItems: persistedCustomItems })
   ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: persistedCustomItems } }] } as never)
