@@ -17,6 +17,8 @@ import {
   resolveTarball,
   retryDiagnostic,
   RESIZE_FAILURE_PHASE,
+  classifyConsumerMetadata,
+  failConsumerMetadata,
   validateCandidatePackageData,
   validateConsumerMetadata,
   validateFixturePackageData,
@@ -106,8 +108,8 @@ test('pi2dsh metadata preflight blocks an unsupported consumer contract', () => 
   }
   assert.doesNotThrow(() => validateConsumerMetadata(supported, manifest, candidate))
 
+  // A DSH peer mismatch and a missing dsh-peer set stay BLOCKING.
   for (const consumerPackage of [
-    { ...supported, peerDependencies: { ...supported.peerDependencies, '@xmoon76/dsh-pi-tui': '^0.3.3' } },
     { ...supported, peerDependencies: { ...supported.peerDependencies, '@deepseek-ai/dsh-agent': '^0.1.1' } },
     { ...supported, peerDependencies: { '@xmoon76/dsh-pi-tui': '^0.4.0-alpha.1' } },
   ]) {
@@ -119,6 +121,36 @@ test('pi2dsh metadata preflight blocks an unsupported consumer contract', () => 
         && error.message.includes('@xmoon76/dsh-pi-tui 0.4.0-alpha.1'),
     )
   }
+})
+
+test('pi2dsh metadata preflight classifies a TUI-peer-only mismatch as stale, not blocking', () => {
+  const manifest = { dshVersion: '0.1.2-alpha.1' }
+  const candidate = { name: '@xmoon76/dsh-pi-tui', version: '0.4.0-alpha.1' }
+  const supported = {
+    name: 'pi2dsh',
+    version: '0.24.0',
+    peerDependencies: {
+      '@xmoon76/dsh-pi-tui': '^0.3.3',
+      '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1',
+      '@deepseek-ai/dsh-commands': '>=0.1.2-alpha.1',
+    },
+  }
+  // DSH peers cover the target; ONLY the TUI peer is stale → classified, not thrown.
+  const classification = validateConsumerMetadata(supported, manifest, candidate)
+  assert.equal(classification.kind, 'stale-tui-peer')
+  assert.equal(classification.tuiRange, '^0.3.3')
+  // The narrow allowance is required: without it the preflight still blocks.
+  assert.throws(
+    () => failConsumerMetadata(supported, manifest, candidate, [`  @xmoon76/dsh-pi-tui: ${classification.tuiRange}`]),
+    error => error?.name === 'CompatFailure' && error?.phase === 'ECOSYSTEM_CONTRACT_BLOCKER',
+  )
+  // A DSH peer mismatch is never classified as stale.
+  const dshMismatch = classifyConsumerMetadata(
+    { ...supported, peerDependencies: { ...supported.peerDependencies, '@deepseek-ai/dsh-agent': '^0.1.1' } },
+    manifest,
+    candidate,
+  )
+  assert.equal(dshMismatch.kind, 'block')
 })
 
 test('pi2dsh preset checks inspect the filtered /help frame rather than stale pane text', () => {

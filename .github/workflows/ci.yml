@@ -601,7 +601,11 @@ jobs:
             exit 1
           fi
 
-          node scripts/pi2dsh-compat-smoke.mjs "${TARBALLS[0]}"
+          # The NARROW stale-peer allowance: only a TUI-peer-only metadata
+          # mismatch proceeds to the targeted real runtime smoke (whose
+          # result decides). DSH peer mismatches, missing dsh peers, and
+          # runtime/fixture failures stay blocking.
+          node scripts/pi2dsh-compat-smoke.mjs "${TARBALLS[0]}" --allow-stale-tui-peer
 
       - name: Upload pi2dsh compatibility diagnostics
         if: failure()
