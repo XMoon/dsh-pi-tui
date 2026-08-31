@@ -354,6 +354,18 @@ function candidateArgument(args) {
   return args[0] === '--' ? args[1] : args[0]
 }
 
+/**
+ * Whether the metadata preflight is bypassed. `--force-peers` runs the REAL
+ * runtime smoke even when the published pi2dsh peer declaration does not
+ * cover the candidate: a stale peer range can under-declare genuine runtime
+ * compatibility, and the forced run answers that question with evidence.
+ * The result is INVESTIGATIVE — it never replaces the blocking preflight in
+ * the release gate, and the console explicitly marks the bypass.
+ */
+function forcePeersArgument(args) {
+  return args.includes('--force-peers') || process.env.PI2DSH_COMPAT_FORCE_PEERS === '1'
+}
+
 function distributionArgument(args) {
   const index = args.indexOf('--distribution')
   if (index < 0) return undefined
@@ -1231,7 +1243,11 @@ async function main() {
 
     const env = isolatedEnvironment(workDir, home, dshHome, evidencePath)
     context.consumerPackage = publishedPackageMetadata(CONSUMER_PACKAGE_NAME, context.manifest.pi2dshVersion, env)
-    validateConsumerMetadata(context.consumerPackage, context.manifest, context.candidatePackage)
+    if (forcePeersArgument(smokeArgs)) {
+      console.log('PEER PREFLIGHT BYPASSED (--force-peers): the published peer declaration does not cover the candidate; running the runtime smoke anyway — the result is INVESTIGATIVE and never stands in for the blocking preflight')
+    } else {
+      validateConsumerMetadata(context.consumerPackage, context.manifest, context.candidatePackage)
+    }
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
       name: 'dsh-pi2dsh-compat-harness',
       private: true,

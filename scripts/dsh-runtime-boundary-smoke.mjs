@@ -25,10 +25,12 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 // The minimum-supported boundary: every DSH below the 0.4 floor must be
-// rejected. 0.1.1-rc.2 is the obviously-old runtime; 0.1.2-alpha.1 is the
-// previous floor and pins the exact minimum-boundary regression (the
-// startup gate rejects < 0.1.2-alpha.2).
-const OLD_DSH_VERSIONS = ['0.1.1-rc.2', '0.1.2-alpha.1']
+// rejected. Only PUBLISHED versions can be installed here, and
+// 0.1.2-alpha.1 was never published to npm (the alpha channel jumped from
+// 0.1.1-rc.2 to 0.1.2-alpha.2), so the real-install rejection case is
+// 0.1.1-rc.2. The exact alpha.1 floor regression (alpha.1 reject /
+// alpha.2 accept) is pinned by the startup-gate unit tests instead.
+const OLD_DSH_VERSION = '0.1.1-rc.2'
 const TARGET_DSH_VERSION = '0.1.2-alpha.2'
 const OLD_TUI_LINE = '0.3'
 const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
@@ -124,7 +126,7 @@ function installCandidate(invocation, tarball, harnessDir, env) {
   if (result.status !== 0) throw new Error(`candidate plugin install failed:\n${outputOf(result)}`)
 }
 
-function assertBoundary(output, status, oldVersion) {
+function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION) {
   if (status === 0) throw new Error(`0.4 candidate unexpectedly started on DSH ${oldVersion}`)
   const friendly = output.includes(`running dsh ${oldVersion}`)
     && output.includes(`DeepSeek Harness ${TARGET_DSH_VERSION} or later`)
@@ -164,27 +166,25 @@ function main() {
   writeFileSync(join(workDir, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
   const env = isolatedEnvironment(workDir, home, dshHome)
   try {
-    // Every DSH below the 0.4 floor must reject the candidate: the
-    // obviously-old runtime AND the previous alpha.1 floor (the exact
-    // minimum-boundary regression).
-    for (const oldVersion of OLD_DSH_VERSIONS) {
-      writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
-        name: 'dsh-runtime-boundary-harness',
-        private: true,
-        type: 'module',
-        dependencies: { '@deepseek-ai/dsh': oldVersion },
-      }, null, 2) + '\n', 'utf8')
-      installDsh(harnessDir, env)
-      const dsh = dshInvocation(harnessDir)
-      const version = runDsh(dsh, ['--version'], harnessDir, env)
-      if (version.status !== 0 || !outputOf(version).includes(oldVersion)) {
-        throw new Error(`installed DSH version check failed:\n${outputOf(version)}`)
-      }
-      installCandidate(dsh, tarball, harnessDir, env)
-      const started = runDsh(dsh, ['--profile', 'pi-tui', '--session', 'boundary-check'], harnessDir, env)
-      assertBoundary(outputOf(started), started.status, oldVersion)
-      console.log(`runtime boundary smoke passed — ${basename(tarball)} × DSH ${oldVersion} (rejected)`)
+    // One published below-floor runtime rejects the candidate for real
+    // (0.1.1-rc.2). The previous alpha.1 floor was never published to npm,
+    // so its exact rejection is covered by the startup-gate unit tests.
+    writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
+      name: 'dsh-runtime-boundary-harness',
+      private: true,
+      type: 'module',
+      dependencies: { '@deepseek-ai/dsh': OLD_DSH_VERSION },
+    }, null, 2) + '\n', 'utf8')
+    installDsh(harnessDir, env)
+    const dsh = dshInvocation(harnessDir)
+    const version = runDsh(dsh, ['--version'], harnessDir, env)
+    if (version.status !== 0 || !outputOf(version).includes(OLD_DSH_VERSION)) {
+      throw new Error(`installed DSH version check failed:\n${outputOf(version)}`)
     }
+    installCandidate(dsh, tarball, harnessDir, env)
+    const started = runDsh(dsh, ['--profile', 'pi-tui', '--session', 'boundary-check'], harnessDir, env)
+    assertBoundary(outputOf(started), started.status)
+    console.log(`runtime boundary smoke passed — ${basename(tarball)} × DSH ${OLD_DSH_VERSION} (rejected)`)
   } finally {
     if (process.env.DSH_BOUNDARY_KEEP !== '1') rmSync(workDir, { recursive: true, force: true })
     else console.error(`preserved boundary environment: ${workDir}`)
