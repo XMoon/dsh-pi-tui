@@ -296,6 +296,12 @@ test('mergeCommandSurface keeps its contract under the new capacity (smoke)', ()
     const expected = [`cmd row one`, legacyRow].join('\n')
     assert.equal(actual, expected, `omitted-budget legacy behavior at width ${edgeWidth}:\n${actual}`)
   }
+  // An INVISIBLE instruction is absent on the command surface too: it
+  // neither paints a line nor consumes a budget slot (native parity).
+  for (const text of ['  ', '\u001b[38;2;0;0;0m\u001b[39m  ']) {
+    const withBlank = mergeCommandSurface(['cmd'], { id: 'b', text: [{ text }], priority: 100 }, 20, { total: 2 })
+    assert.equal(withBlank.replace(/\x1b\[[0-9;]*m/g, ''), 'cmd', `a blank instruction must be treated as absent:\n${withBlank}`)
+  }
   // Non-finite totals are SUPPLIED budgets: they fall back to the hard
   // capacity instead of bypassing the budget (the legacy path is only
   // for an OMITTED budget).
