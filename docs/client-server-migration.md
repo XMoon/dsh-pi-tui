@@ -185,6 +185,95 @@ not reimplementation.
   only. It owns none of: history authority, transport cursor, gap repair
   protocol, projection fold, durability, or reconnect generation.
 
+## Alpha.3 official seam mapping (DSH 0.1.2-alpha.3)
+
+The M2/M3 Remote backend should additionally map to the alpha.3 seams below.
+The Direct backend keeps its current implementation; these are recorded as
+the official Remote opportunities, not as Direct-mode changes.
+
+### Deep-history navigation
+
+For jumping to an old turn, the future Remote backend should use the official
+pair:
+
+```text
+turnOutline projection
++
+Session.loadThrough(seq)
+```
+
+Design relationship:
+
+```text
+Host
+  turnOutline:
+    turn
+    seq
+    prompt
+    response
+Client
+  select old turn
+    ↓
+  lookup turnOutline seq
+    ↓
+  Session.loadThrough(seq)
+    ↓
+  official Session client loads required history
+    ↓
+  TUI transcript-window anchors presentation
+```
+
+`turnOutline` is the official whole-log turn index (`@deepseek-ai/dsh-session-turn-outline`):
+each entry carries the `turn/start` seq as the load-through target, so a window
+paged back through that seq contains the whole turn. `Session.loadThrough(seq)`
+is the official jump loader: it pages backwards until the window covers the
+requested seq, with a shared low-water target for retargeting callers and a
+no-progress guard.
+
+`transcript-window` remains only Client presentation/window state. It owns
+none of: history authority, paging cursor, reconnect, gap repair, or session
+projection folding.
+
+### Remote image submission
+
+A future Remote Adapter should submit images through the alpha.3 official
+`PromptContentPart[]` path:
+
+```text
+PromptContentPart[]
+→ Session.prompt(...)
+→ Host-side image admission
+```
+
+The Client owns temporary/staged image bytes only. The Host owns:
+
+- attachment admission (`admitPromptContent` promotes image parts to durable
+  `ImageAttachmentRef`s before any message is created),
+- durable attachment refs,
+- the final `UserMessage`.
+
+Do not treat a Direct-mode generated DSH `UserMessage` as the future
+cross-process protocol: the wire caller must never cite an attachment it did
+not upload.
+
+### Connection lifecycle
+
+M2/M3 must not implement their own:
+
+- heartbeat failure policy,
+- slow Host ready timeout,
+- reconnect-on-slow policy.
+
+These belong to the official DSH Connection. alpha.3 already improved it:
+
+- heartbeat allows a short missed pong (a socket is terminated only after
+  `MAX_MISSED_HEARTBEATS` consecutive misses, not on the first),
+- a slow Host ready only warns (`[connection] generation is still not ready
+  after …ms`) instead of immediately aborting the generation.
+
+The TUI Remote Adapter must not stack a second transport watchdog on top of
+the official Connection.
+
 ## Known blockers
 
 | Blocker | Level | Mitigation |
