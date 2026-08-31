@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
 import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
-import { decodeStorageRecord } from '@deepseek-ai/dsh-session'
+import { KNOWN_SESSION_EVENT_TYPES, Session, SessionId, decodeStorageRecord, isSurfaceEligibleType } from '@deepseek-ai/dsh-session'
 import {
   compressLog,
   decompressFrames,
@@ -857,4 +857,153 @@ test('CLI --duplicate-reference=segment refuses a same-frame conflict and report
   assert.match(result.stdout, /no write was performed/)
   assert.deepEqual(readFileSync(path), before, 'a same-frame conflict must never be rewritten')
   assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup for a refused repair')
+})
+
+// --- SessionEvent.ignorable alpha.2 round-trip (plan T10/T11/T12) ---
+//
+// alpha.2 restored the `SessionEvent.ignorable?: true` envelope marker: an
+// unknown event type MAY be skipped by a reader when the marker is present,
+// and MUST refuse reconstruction when it is absent. The repair layer must
+// carry the marker through every repair shape (healthy no-op, duplicate-seq
+// renumber, re-frame, torn-tail salvage) without touching `data` and without
+// inventing a `surfaceOp` (unknown ignorable events are NOT surface events).
+
+/** An unknown-but-ignorable third-party event (alpha.2 envelope marker). */
+function ignorableEvent(seq, time, data = { foo: 'bar' }) {
+  return { type: 'third-party/custom-info', seq, time, ignorable: true, data }
+}
+
+/** Assert the alpha.2 envelope contract of one repaired ignorable event. */
+function assertIgnorableIntact(event, expectedSeq) {
+  assert.equal(event.type, 'third-party/custom-info')
+  assert.equal(event.seq, expectedSeq)
+  assert.equal(event.ignorable, true, 'the ignorable marker must survive repair')
+  assert.deepEqual(event.data, { foo: 'bar' }, 'the event data must survive repair verbatim')
+  assert.equal(event.surfaceOp, undefined, 'an unknown ignorable event is not surface-eligible and must never carry surfaceOp')
+}
+
+test('ignorable event: healthy scan and no-op repair preserve the marker, data, and no surfaceOp', () => {
+  const events = [...buildEvents([0, 1, 2]), ignorableEvent(3, 1003)]
+  const text = encodeLog(HEADER, events)
+  const { events: scanned, issue } = scanEvents(text, decodeStorageRecord)
+  assert.equal(issue, undefined)
+  const plan = repairEvents(scanned, issue)
+  assert.equal(plan.action, 'none')
+  const again = scanEvents(encodeLog(HEADER, plan.events), decodeStorageRecord)
+  assert.equal(again.issue, undefined)
+  assertIgnorableIntact(again.events[3], 3)
+})
+
+test('ignorable event: duplicate-seq renumber preserves the marker and corrects its seq', () => {
+  const events = [...buildEvents([0, 1, 2, 2]), ignorableEvent(3, 1004)]
+  const text = encodeLog(HEADER, events)
+  const { issue } = scanEvents(text, decodeStorageRecord)
+  assert.equal(issue.kind, 'duplicate')
+  const plan = repairEvents(events, issue)
+  assert.equal(plan.action, 'renumber')
+  const again = scanEvents(encodeLog(HEADER, plan.events), decodeStorageRecord)
+  assert.equal(again.issue, undefined)
+  assertIgnorableIntact(again.events[4], 4)
+})
+
+test('ignorable event: CLI re-frame keeps the marker and the repaired artifact re-scans clean', () => {
+  const stub = makeDshStub()
+  const events = [...buildEvents([0, 1]), ignorableEvent(2, 1002)]
+  // Whole-log single frame: structurally valid zstd, rejected by the dsh
+  // layout (first frame must be exactly one header line) — the repair
+  // re-frames it into the dsh layout.
+  const singleFrame = zstdCompressSync(Buffer.from(encodeLog(HEADER, events), 'utf8'))
+  const home = makeFakeHome(singleFrame)
+  const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
+  const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stdout, /re-frame/)
+  const read = readLikeHarness(path)
+  assert.equal(read.events.length, 3)
+  assertIgnorableIntact(read.events[2], 2)
+})
+
+test('ignorable event: CLI torn-tail repair keeps the marker on the salvaged prefix', () => {
+  const stub = makeDshStub()
+  const events = [...buildEvents([0, 1]), ignorableEvent(2, 1002), ...buildEvents([3, 4])]
+  const text = encodeLog(HEADER, events)
+  const lines = text.trimEnd().split('\n')
+  // Frame 0: header alone (dsh layout); frame 1: events 0..2; frame 2:
+  // events 3..4 truncated mid-frame (magic + descriptor only).
+  const buffer = Buffer.concat([
+    zstdCompressSync(Buffer.from(`${lines[0]}\n`, 'utf8')),
+    zstdCompressSync(Buffer.from(`${lines.slice(1, 4).join('\n')}\n`, 'utf8')),
+    zstdCompressSync(Buffer.from(`${lines.slice(4).join('\n')}\n`, 'utf8')).subarray(0, 5),
+  ])
+  const layout = scanFrameLayout(buffer, zstdDecompressSync)
+  assert.equal(layout.status, 'torn-tail')
+  const home = makeFakeHome(buffer)
+  const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
+  const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stdout, /torn tail/)
+  const read = readLikeHarness(path)
+  assert.equal(read.events.length, 3, 'the torn tail is dropped, the complete prefix is kept')
+  assertIgnorableIntact(read.events[2], 2)
+})
+
+test('ignorable event: the repaired log passes the alpha.2 Session envelope read', () => {
+  // alpha.2's envelope validation accepts the `ignorable` key (alpha.1
+  // rejected it as an invalid envelope field), so a successful
+  // Session.fromRestore is the alpha.2-specific reread gate. The events are
+  // non-surface (permission/preset + turn/start) so no surfaceOp is required.
+  const events = [
+    { type: 'permission/preset', seq: 0, time: 1000, data: { preset: 'workspace-write' } },
+    { type: 'turn/start', seq: 1, time: 1001, data: {} },
+    ignorableEvent(2, 1002),
+  ]
+  const { events: scanned } = scanEvents(encodeLog(HEADER, events), decodeStorageRecord)
+  const session = Session.fromRestore(SessionId('session-test'), scanned, JSON.parse(HEADER))
+  assertIgnorableIntact(session.events[2], 2)
+})
+
+test('required unknown event: repair never auto-marks, deletes, or header-falls-back (fail closed)', () => {
+  // An unknown event WITHOUT the ignorable marker is a REQUIRED event: the
+  // DSH read path refuses the log. The repair layer must not "fix" it —
+  // no auto-added ignorable:true, no deletion, no header-only fallback —
+  // so the durable compatibility refusal survives the round-trip.
+  const unknown = { type: 'third-party/custom-info', seq: 2, time: 1002, data: { foo: 'bar' } }
+  const events = [...buildEvents([0, 1]), unknown]
+  const text = encodeLog(HEADER, events)
+  const { events: scanned, issue } = scanEvents(text, decodeStorageRecord)
+  assert.equal(issue, undefined, 'the repair scanner does not know the vocabulary')
+  const plan = repairEvents(scanned, issue)
+  assert.equal(plan.action, 'none')
+  const again = scanEvents(encodeLog(HEADER, plan.events), decodeStorageRecord)
+  assert.equal(again.issue, undefined)
+  const kept = again.events[2]
+  assert.equal(kept.type, 'third-party/custom-info')
+  assert.equal(kept.ignorable, undefined, 'repair must never auto-add the ignorable marker')
+  assert.deepEqual(kept.data, { foo: 'bar' })
+  assert.equal(kept.surfaceOp, undefined)
+  // The DSH read path's vocabulary gate: the type is unknown to this build
+  // and the event is unmarked, so the log must be refused (fail closed).
+  assert.equal(KNOWN_SESSION_EVENT_TYPES.has(kept.type), false)
+  assert.equal(kept.ignorable === true, false)
+})
+
+test('surface fixture contract: only the three message types are surface-eligible', () => {
+  // DSH 0.1.2 surface rule: user/message, assistant/message, tool/result are
+  // the ONLY surface-eligible types. Everything else — including unknown
+  // ignorable events — must never carry surfaceOp in a fixture.
+  for (const type of ['user/message', 'assistant/message', 'tool/result']) {
+    assert.equal(isSurfaceEligibleType(type), true, `${type} must be surface-eligible`)
+  }
+  for (const type of ['assistant/chunk', 'turn/start', 'step/start', 'step/end', 'turn/end', 'third-party/custom-info']) {
+    assert.equal(isSurfaceEligibleType(type), false, `${type} must not be surface-eligible`)
+  }
+  // The repair fixtures honor the contract: the ignorable event carries no
+  // surfaceOp, and a surface-eligible fixture event carries its marker.
+  const events = [
+    { type: 'user/message', seq: 0, time: 1000, surfaceOp: 'append', data: { message: { id: 'm1', role: 'user', source: { kind: 'input' }, content: [] } } },
+    ignorableEvent(1, 1001),
+  ]
+  const { events: scanned } = scanEvents(encodeLog(HEADER, events), decodeStorageRecord)
+  assert.equal(scanned[0].surfaceOp, 'append')
+  assert.equal(scanned[1].surfaceOp, undefined)
 })
