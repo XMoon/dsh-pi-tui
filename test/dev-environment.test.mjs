@@ -440,7 +440,9 @@ test('doctor checks the reachable source package set, not every packed package',
 
 test('installed npm DSH versions must satisfy declared ranges', () => {
   const root = fixture()
-  const context = resolveDshDevContext({ root })
+  // Isolated environment: a CI source-mode job exports DSH_MODE=source, which
+  // must never leak into this npm-mode fixture's context resolution.
+  const context = resolveDshDevContext({ root, environment: {} })
   for (const name of ['dsh-agent', 'dsh-tools']) fakeNpmPackage(root, `@deepseek-ai/${name}`, '9.9.9')
   const result = inspectNpmResolution(context)
   assert.equal(result.problems.length, 2)
@@ -456,7 +458,7 @@ test('npm resolution rejects a package symlink outside pnpm virtual store', () =
   mkdirSync(packageRoot, { recursive: true })
   symlinkSync(outside, join(packageRoot, 'dsh-agent'), 'dir')
   fakeNpmPackage(root, '@deepseek-ai/dsh-tools', VERSION)
-  const result = inspectNpmResolution(resolveDshDevContext({ root }))
+  const result = inspectNpmResolution(resolveDshDevContext({ root, environment: {} }))
   assert.ok(result.problems.some(item => /pnpm virtual-store/u.test(item.message)))
 })
 
