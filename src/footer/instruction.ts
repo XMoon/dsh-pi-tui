@@ -1,8 +1,11 @@
 /**
  * The Host Instruction Surface (plan §2.4/§19): Host-owned temporary
  * prompts that the user can NEVER hide through footer configuration —
- * the Ctrl+C exit hint first, more later. The instruction occupies the
- * footer's last row slot and always survives the height budget.
+ * the Ctrl+C exit hint first, more later. Since the 2026-08-31 footer
+ * rework the instruction is an INDEPENDENT surface: it reserves its own
+ * physical line from the footer's global budget and appends AFTER the
+ * layout rows — it never replaces (or shares a "line-2 slot" with) a
+ * user row, and it always survives the height budget.
  * @module @xmoon76/dsh-pi-tui/footer/instruction
  */
 
@@ -23,9 +26,11 @@ export interface FooterInstructionHostState {
    * there — Ctrl+C is inert inside the viewer). */
   readonly viewing: boolean
   /** The M6 which-key hint for a PENDING leader sequence, already
-   * formatted by the caller. It shares the line-2 slot with the exit
-   * hint (an explicit interaction temporarily covers the stats), and the
-   * armed exit hint outranks it. Suppressed while viewing, like the
+   * formatted by the caller. It resolves BESIDE the exit hint (an
+   * explicit interaction temporarily covers spare layout lines; the
+   * armed exit hint outranks it), and whichever wins APPENDS as the
+   * independent reserved physical line — never a line-2 slot
+   * replacement of a user row. Suppressed while viewing, like the
    * exit hint. */
   readonly leaderHint?: string
 }

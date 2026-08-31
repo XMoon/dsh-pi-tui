@@ -1,15 +1,23 @@
 /**
- * The footer composer (plan §9/§13.7): renders a FooterLayoutV1 against the
- * StatusSnapshot into the final footer text. Row rules:
+ * The footer composer (plan 2026-08-31 §6): renders a FooterLayoutV1 against
+ * the StatusSnapshot into the final footer text. Row rules:
  *
- * - the FIRST layout row is the status row (wraps with the host row
- *   budget), any SECOND row (the stats row) caps to one physical row, and
- *   the total never exceeds FOOTER_MAX_LINES (the legacy footerRows
- *   contract);
- * - a row with a right zone reserves the right zone first; the left zone
- *   fits the remaining width by compact → drop → truncate (plan §9.1);
- * - the Host instruction (plan §19) replaces the last row slot when active
- *   and is never user-hideable;
+ * - layout rows are POSITION-AGNOSTIC logical rows: every non-empty row
+ *   goes through the SAME fitting contract of 1..FOOTER_MAX_PHYSICAL_LINES_PER_ROW
+ *   physical lines inside the surface's global budget of
+ *   FOOTER_MAX_PHYSICAL_LINES physical lines. Past a row's cap the
+ *   overflow resolves SEMANTICALLY (compact → drop by importance →
+ *   ANSI-safe truncate) — never by slicing the wrapped lines and never by
+ *   index-role inference (no "first row = status / last row = stats");
+ * - a left-only row joins in layout order and wraps into 1..2 physical
+ *   lines; a row with a right zone keeps its single-line fitZone contract
+ *   (the right zone reserves first, the left fits the remainder);
+ * - the Host instruction (plan §19) is an INDEPENDENT surface: it reserves
+ *   its own physical line from the global budget and never replaces a
+ *   user row. Allocation is sequential (plan §8): every renderable row
+ *   earns a baseline line first, the leftover buys second lines for rows
+ *   that demand them, in layout order — a layout wider than the budget
+ *   drops its tail rows as a global-budget decision;
  * - every physical row is dimmed (the legacy footer's final pass).
  *
  * The composer consumes ONLY the StatusSnapshot + the host-owned surface
@@ -26,13 +34,14 @@ import type {
   FooterDensity,
   FooterItemRef,
   FooterLayoutV1,
+  FooterPhysicalLineBudget,
   FooterRenderContext,
   FooterRowLayout,
   FooterSegment,
   FooterSpan,
   FooterTone,
 } from './types.ts'
-import { FOOTER_MAX_LINES } from './types.ts'
+import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW } from './types.ts'
 
 /** The Host instruction surface's render contract (plan §19). */
 export interface FooterInstructionLike {
@@ -47,8 +56,34 @@ export interface FooterComposerOptions {
   readonly layout: FooterLayoutV1
   readonly width: number
   readonly context: FooterRenderContext
-  /** The active Host instruction; replaces the last row slot. */
+  /** The active Host instruction; an independent reserved line (plan §7),
+   * never the replacement of a user row. */
   readonly instruction?: FooterInstructionLike
+  /** The host-owned physical-line budget; defaults to the built-in
+   * surface policy (plan §6.1). */
+  readonly physicalLineBudget?: FooterPhysicalLineBudget
+}
+
+/** The default surface policy (plan §6.1): two physical lines per logical
+ * row, three for the whole footer. */
+const DEFAULT_PHYSICAL_LINE_BUDGET: FooterPhysicalLineBudget = {
+  perRow: FOOTER_MAX_PHYSICAL_LINES_PER_ROW,
+  total: FOOTER_MAX_PHYSICAL_LINES,
+}
+
+/** One logical row, resolved ONCE per render: the rendered zones, the
+ * preferred form and its physical-line demand (plan §6.2). */
+interface ResolvedRow {
+  readonly left: ZoneItem[]
+  readonly right: ZoneItem[]
+  readonly separator: string
+  /** A right-zone row's already-fitted single physical line (its fitting
+   * contract never wraps); absent for a left-only row. */
+  readonly rightLine: string | undefined
+  /** How many physical lines the preferred form needs (a right-zone row
+   * demands exactly 1). */
+  readonly demand: number
+  readonly isEmpty: boolean
 }
 
 /** One resolved zone item (rendered at the preferred density). */
@@ -73,62 +108,80 @@ export class FooterComposer {
 
   /** Render the layout + instruction into the final footer text. */
   render(options: FooterComposerOptions): string {
-    const { snapshot, layout, width, context, instruction } = options
-    // The instruction occupies the LAST row slot: it replaces the stats
-    // row when the layout has one, and appends a row otherwise (the legacy
-    // line-2 swap — the exit hint always survives, even in compact).
-    const statusRows = instruction === undefined
-      ? layout.rows
-      : layout.rows.length > 1 ? layout.rows.slice(0, -1) : layout.rows
-    const lines: string[] = []
-    // The tail row's ROLE decides its cap: the stats/instruction line is
-    // always one physical row (the legacy line-2 contract) — even when an
-    // empty sibling row makes it the ONLY logical line, it must never wrap
-    // past the footer budget. A STATUS row (compact preset, or an empty
-    // stats row) keeps the budgeted wrap. The role travels WITH each
-    // emitted line — a layout whose stats row renders empty must not
-    // misclassify the status row as the capped tail.
-    const rowRoles: Array<'status' | 'stats' | 'instruction'> = []
-    statusRows.forEach((row, index) => {
-      const line = this.renderRow(row, snapshot, context, width)
-      if (line !== '') {
-        rowRoles.push(index === statusRows.length - 1 && statusRows.length > 1 ? 'stats' : 'status')
-        lines.push(line)
-      }
-    })
-    if (instruction !== undefined) {
-      lines.push(renderInstruction(instruction))
-      rowRoles.push('instruction')
+    const { snapshot, layout, context, instruction } = options
+    // The width normalizes ONCE to a finite integer ≥ 1: the app caller
+    // clamps the terminal width already, but the composer is exported —
+    // a direct caller handing 0/-1/NaN/Infinity gets the width-1 surface,
+    // never an ill-fitted one.
+    const width = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width)) : 1
+    const budget = options.physicalLineBudget ?? DEFAULT_PHYSICAL_LINE_BUDGET
+    const perRow = Math.max(1, Math.min(budget.perRow, budget.total))
+    const total = Math.max(1, budget.total)
+    // The instruction's rendered text resolves ONCE: an instruction that
+    // renders nothing VISIBLE (empty spans, whitespace/blank SGR-only
+    // text) is indistinguishable from an ABSENT one — it reserves no
+    // budget line and paints none (the Text component renders such
+    // content as zero rows; the composer must agree with its component).
+    const instructionText = instruction === undefined ? undefined : renderInstruction(instruction)
+    const hasInstruction = instructionText !== undefined
+      && stripSgr(instructionText).trim() !== ''
+    // 1. Resolve every LOGICAL row once (rendered zones + preferred form
+    // + demand). An EMPTY row (every item unavailable) never enters the
+    // budget at all.
+    const resolved = layout.rows.map(row => this.resolveRow(row, snapshot, context, width))
+    const renderable = resolved.filter(row => !row.isEmpty)
+    // 2. The Host instruction reserves ONE physical line up front (plan
+    // §7): it is an independent surface — never the replacement of a user
+    // row — and always survives.
+    const rowsBudget = Math.max(0, hasInstruction ? total - 1 : total)
+    // 3. Sequential allocation (plan §8): every renderable row earns its
+    // BASELINE physical line first (while the budget lasts); the leftover
+    // then buys a second line for rows that demand one, in layout order,
+    // capped at perRow. A layout wider than the budget drops its tail
+    // rows — a global-budget decision, never an instruction row-swap — so
+    // any future N-row layout flows through the same rule.
+    const allowances: number[] = []
+    let remaining = rowsBudget
+    for (let index = 0; index < renderable.length; index += 1) {
+      const baseline = Math.min(1, remaining)
+      allowances.push(baseline)
+      remaining -= baseline
     }
+    for (let index = 0; index < renderable.length && remaining > 0; index += 1) {
+      const demand = renderable[index]!.demand
+      if (demand <= 1) continue
+      const extra = Math.min(demand - 1, perRow - 1, remaining)
+      allowances[index]! += extra
+      remaining -= extra
+    }
+    // 4. Render every row within its allowance, in layout order.
     const physical: string[] = []
-    lines.forEach((line, index) => {
-      const isTail = index === lines.length - 1
-      const role = rowRoles[index]
-      if (isTail && role !== undefined && role !== 'status') {
-        const wrapped = wrapTextWithAnsi(line, width)
-        physical.push(wrapped.length > 1 ? capRowWithEllipsis(wrapped[0]!, width) : wrapped[0]!)
-        return
+    let renderIndex = 0
+    for (const row of resolved) {
+      if (row.isEmpty) continue
+      const allowance = allowances[renderIndex]!
+      renderIndex += 1
+      for (const physicalLine of this.fitLogicalRow(row, width, allowance)) {
+        if (physicalLine !== '') physical.push(physicalLine)
       }
-      const budget = FOOTER_MAX_LINES - (lines.length - index - 1)
-      const wrapped = wrapTextWithAnsi(line, width)
-      for (let rowIndex = 0; rowIndex < Math.min(wrapped.length, budget); rowIndex += 1) {
-        const row = wrapped[rowIndex]!
-        physical.push(rowIndex === budget - 1 && wrapped.length > budget
-          ? capRowWithEllipsis(row, width)
-          : row)
-      }
-    })
+    }
+    // 5. The instruction: its own line, capped to one physical row. An
+    // instruction with no VISIBLE content paints nothing (and reserved
+    // nothing).
+    if (hasInstruction) physical.push(renderInstructionLine(instructionText!, width))
     // The legacy footer's final pass: every physical row is dimmed.
     return physical.map(row => color.textDim(row)).join('\n')
   }
 
-  /** Render one layout row: left zone + flexible gap + right zone. */
-  private renderRow(
+  /** Resolve one LOGICAL row (plan §6.2/§6.3): render its zones exactly
+   * once, classify it (empty / right-zone single-line / left-only wrap
+   * candidate) and measure its preferred physical-line demand. */
+  private resolveRow(
     row: FooterRowLayout,
     snapshot: StatusSnapshot,
     context: FooterRenderContext,
     width: number,
-  ): string {
+  ): ResolvedRow {
     const left = this.renderZone(row.left, snapshot, context)
     const right = this.renderZone(row.right, snapshot, context)
     // The separator's semantic tone applies to its text (the plan §8
@@ -136,26 +189,77 @@ export class FooterComposer {
     const separator = row.separator === undefined
       ? '  '
       : styleTone(row.separator.text, row.separator.tone)
-    if (left.length === 0 && right.length === 0) return ''
+    if (left.length === 0 && right.length === 0) {
+      return { left, right, separator, rightLine: undefined, demand: 0, isEmpty: true }
+    }
     // NO right zone: the left zone joins in LAYOUT ORDER — never fitted
-    // to the width (the legacy contract: an over-wide status row WRAPS
-    // within the footer budget; fitZone would truncate it to one line).
-    if (right.length === 0) return left.map(item => item.text).join(separator)
+    // to the width up front (the legacy contract: an over-wide row WRAPS
+    // within its physical-line budget; an early fitZone would truncate it
+    // to one line).
+    if (right.length === 0) {
+      const leftOnly = left.map(item => item.text).join(separator)
+      return {
+        left,
+        right,
+        separator,
+        rightLine: undefined,
+        demand: wrapTextWithAnsi(leftOnly, width).length,
+        isEmpty: false,
+      }
+    }
+    // With a right zone: the row keeps its single-line fitZone contract
+    // (plan §6.4) — its demand is always exactly 1.
+    return {
+      left,
+      right,
+      separator,
+      rightLine: this.renderRightRow(left, right, separator, width),
+      demand: 1,
+      isEmpty: false,
+    }
+  }
+
+  /** Fit one logical row into a physical-line allowance (plan §6.2): 0 →
+   * the row drops (the global budget is exhausted); a right-zone row stays
+   * its single fitted line; a left-only row wraps into 1..maxPhysicalLines
+   * through the compact → drop → truncate discipline. */
+  private fitLogicalRow(row: ResolvedRow, width: number, maxPhysicalLines: number): string[] {
+    if (row.isEmpty || maxPhysicalLines < 1) return []
+    if (row.rightLine !== undefined) return [row.rightLine]
+    return this.wrapFitRow(row.left, row.separator, width, maxPhysicalLines)
+  }
+
+  /** A left-only row wraps into 1..maxPhysicalLines physical lines (plan
+   * §6.2): the preferred form first; when it wraps past the cap the zone
+   * goes through fitZone's compact → drop → truncate discipline against a
+   * MULTI-LINE CELL budget — never a slice of the wrapped lines (a slice
+   * would discard content by string position instead of semantic
+   * importance). Word-boundary wrap waste may need the cell budget to
+   * shrink a few times; the floor (budget 1) always wraps to exactly one
+   * line, which guarantees termination. */
+  private wrapFitRow(items: ZoneItem[], separator: string, width: number, maxPhysicalLines: number): string[] {
+    const preferred = wrapTextWithAnsi(items.map(item => item.text).join(separator), width)
+    if (preferred.length <= maxPhysicalLines) return preferred
+    let cells = width * maxPhysicalLines
+    for (;;) {
+      const wrapped = wrapTextWithAnsi(this.fitZone(items, separator, cells), width)
+      if (wrapped.length <= maxPhysicalLines) return wrapped
+      cells = Math.max(1, cells - Math.max(1, wrapped.length - maxPhysicalLines))
+    }
+  }
+
+  /** The right-zone row's single-line contract (plan §6.4 — unchanged):
+   * the right zone reserves its IDEAL width first; the left zone fits the
+   * remaining width; the right zone re-fits the leftover room and drops
+   * entirely when even one cell is left (never a negative gap, never
+   * across the terminal width). An unavailable left zone must not drag
+   * right items to the left edge — a right zone stays flush right. */
+  private renderRightRow(left: ZoneItem[], right: ZoneItem[], separator: string, width: number): string {
     if (left.length === 0) {
-      // The right zone ALONE still owns its alignment: a RIGHT zone is
-      // flush to the right edge even with nothing on the left — an
-      // unavailable left zone must not drag right items to the left edge
-      // (the review's P2: the old code joined them at the left).
       const fitted = this.fitZone(right, separator, width)
       const gap = ' '.repeat(Math.max(0, width - visibleWidth(fitted)))
       return `${gap}${fitted}`
     }
-    // Right zone first (plan §9.1): reserve its IDEAL width, then the
-    // left zone fits the remaining width by compact → drop → truncate.
-    // The right zone is NOT absolutely undeletable: when the left zone
-    // alone fills the width, the right zone fits the leftover room — and
-    // drops entirely when even one cell is left (plan §9.4: the right
-    // zone never crosses the terminal width, never a negative gap).
     const rightFull = right.map(item => item.text).join(separator)
     const rightWidth = visibleWidth(rightFull)
     const minGap = 1
@@ -278,6 +382,16 @@ function renderInstruction(instruction: FooterInstructionLike): string {
   return renderSpans(instruction.text)
 }
 
+/** Render the Host instruction as its own INDEPENDENT physical line (plan
+ * 2026-08-31 §7): reserved from the global budget up front, wrapped to the
+ * width and capped to one physical row (its own line contract). The
+ * caller passes the ALREADY-RENDERED instruction text (empty text never
+ * reaches this point). */
+function renderInstructionLine(rendered: string, width: number): string {
+  const wrapped = wrapTextWithAnsi(rendered, width)
+  return wrapped.length > 1 ? capRowWithEllipsis(wrapped[0]!, width) : wrapped[0]!
+}
+
 /** M5: merge the Host instruction onto a COMMAND surface (the command owns
  * the Status Surface; the instruction still occupies the last row slot —
  * it replaces the second command row when present, appends otherwise, and
@@ -292,6 +406,13 @@ export function mergeCommandSurface(
   const instructionRow = wrapped.length > 1 ? capRowWithEllipsis(wrapped[0]!, width) : wrapped[0]!
   const merged = rows.length > 1 ? [...rows.slice(0, -1), instructionRow] : [...rows, instructionRow]
   return merged.join('\n')
+}
+
+/** Strip SGR sequences — params may be `;`- or colon-separated (e.g.
+ * `38:2::R:G:B`); the composer only ever emits SGR — used to test whether
+ * an instruction carries visible content. */
+function stripSgr(text: string): string {
+  return text.replace(/\x1b\[[0-9;:]*m/g, '')
 }
 
 /** Force a visible `…` on a wrapped row that still has hidden content

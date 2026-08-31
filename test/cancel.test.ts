@@ -189,11 +189,12 @@ test('the exit hint renders in the FOOTER, never the transcript notify', async (
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
   const lines = surface.vt.getViewport()
-  // The 100x24 layout: header (0), editor (1-3), footer line1 (4), footer
-  // line2 (5). The hint must be the footer's second line — the transcript
-  // area (rows 0-3) must NOT carry it.
-  assert.ok(lines[5]!.includes('Press Ctrl+C again to exit'),
-    `the hint must sit in the footer line 2:\n${lines.join('\n')}`)
+  // The 100x24 layout: header (0), editor (1-3), then the footer rows. The
+  // instruction is an INDEPENDENT surface (plan 2026-08-31 §7): it APPENDS
+  // after the status + stats rows instead of replacing the stats line-2
+  // slot, so the hint is the footer's LAST line.
+  assert.ok(lines[6]!.includes('Press Ctrl+C again to exit'),
+    `the hint must sit in the footer's last line:\n${lines.join('\n')}`)
   assert.ok(!lines.slice(0, 4).join('\n').includes('Press Ctrl+C again to exit'),
     `the hint must never enter the transcript notify area:\n${lines.join('\n')}`)
 })

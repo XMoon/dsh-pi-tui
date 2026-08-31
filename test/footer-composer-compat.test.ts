@@ -1,9 +1,11 @@
 /**
- * M1 parity gate (plan §10.1/§13.9): the composer's default/compact output
- * is EQUIVALENT to the legacy renderFooter for the same state — same
- * parts, same order, same separators, same wrap/cap/dim behavior. The
- * legacy algorithm is re-implemented here as the reference (the host's
- * copy was deleted in M1).
+ * Composer contract tests: the composer's default/compact output matches
+ * the REFERENCE layout for the same state — same parts, same order, same
+ * separators, same wrap/cap/dim behavior. The reference is re-implemented
+ * here as the string-level oracle (plan 2026-08-31 §6.2: each logical row
+ * occupies 1..2 physical lines; the tail line truncates ANSI-safely to its
+ * one row; the Host instruction APPENDS as an independent line and never
+ * replaces a user row — the legacy replace-last-row swap is gone).
  * @module @xmoon76/dsh-pi-tui/footer-composer-compat.test
  */
 
@@ -14,6 +16,7 @@ import { color } from '../src/theme.ts'
 import { FooterComposer } from '../src/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { FOOTER_MAX_PHYSICAL_LINES_PER_ROW } from '../src/footer/types.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
 
 const composer = new FooterComposer(createBuiltinFooterRegistry())
@@ -93,21 +96,21 @@ function legacyStatsLine(snap: StatusSnapshot): string {
   return `${piParts.join(' ')} | LLM ${sec(p.llmMs)} · TTFB ${sec(p.firstTokenMs)} · ${p.tokensPerSec} tok/s`
 }
 
-/** The LEGACY footerRows (wrap + cap + dim). */
-function legacyFooter(line1: string[], line2: string, width: number): string {
-  const hostBudget = 4 - (line2 === '' ? 0 : 1)
+/** The REFERENCE footer rows (plan 2026-08-31 §6.2): the first row wraps
+ * into 1..2 physical lines (its cap boundary cut with '…'); the tail line
+ * is its own row, truncated ANSI-safely to the full width. The composer's
+ * item-level fitting can only DROP more than this reference (semantic
+ * importance), never render wider or taller. */
+function referenceFooter(line1: string[], line2: string, width: number): string {
   const line1Rows = wrapTextWithAnsi(line1.join('  '), width)
   const rows: string[] = []
-  for (let index = 0; index < Math.min(line1Rows.length, hostBudget); index += 1) {
+  for (let index = 0; index < Math.min(line1Rows.length, FOOTER_MAX_PHYSICAL_LINES_PER_ROW); index += 1) {
     const row = line1Rows[index]!
-    rows.push(index === hostBudget - 1 && line1Rows.length > hostBudget
+    rows.push(index === FOOTER_MAX_PHYSICAL_LINES_PER_ROW - 1 && line1Rows.length > FOOTER_MAX_PHYSICAL_LINES_PER_ROW
       ? `${truncateToWidth(row, Math.max(1, width - 1), '')}…`
       : row)
   }
-  if (line2 !== '') {
-    const statsRows = wrapTextWithAnsi(line2, width)
-    rows.push(statsRows.length > 1 ? `${truncateToWidth(statsRows[0]!, Math.max(1, width - 1), '')}…` : statsRows[0]!)
-  }
+  if (line2 !== '') rows.push(truncateToWidth(line2, width, '…'))
   return rows.map(row => color.textDim(row)).join('\n')
 }
 
@@ -131,30 +134,36 @@ function mainSnapshot(): StatusSnapshot {
 
 const CONTEXT = { taskBrowserAvailable: true, extensionFooterText: '' }
 
-test('default preset output is byte-equivalent to the legacy footer (wide)', () => {
+test('default preset output is byte-equivalent to the reference footer (wide)', () => {
   const snap = mainSnapshot()
-  const expected = legacyFooter(legacyLine1(snap, true, ''), legacyStatsLine(snap), 100)
+  const expected = referenceFooter(legacyLine1(snap, true, ''), legacyStatsLine(snap), 100)
   const actual = composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
   assert.equal(actual, expected)
 })
 
-test('default preset output is byte-equivalent to the legacy footer (narrow, wrapped)', () => {
+test('default preset output is byte-equivalent to the reference footer (narrow, wrapped)', () => {
   const snap = mainSnapshot()
-  const expected = legacyFooter(legacyLine1(snap, true, ''), legacyStatsLine(snap), 40)
+  const expected = referenceFooter(legacyLine1(snap, true, ''), legacyStatsLine(snap), 40)
   const actual = composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 40, context: CONTEXT })
   assert.equal(actual, expected)
 })
 
-test('compact preset output is byte-equivalent to the legacy compact footer', () => {
+test('compact preset output is byte-equivalent to the reference compact footer', () => {
   const snap = mainSnapshot()
-  const expected = legacyFooter(legacyLine1(snap, true, ''), '', 100)
+  const expected = referenceFooter(legacyLine1(snap, true, ''), '', 100)
   const actual = composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
   assert.equal(actual, expected)
 })
 
-test('the Ctrl+C instruction replaces the stats row exactly like the legacy hint', () => {
+test('the Ctrl+C instruction appends as an INDEPENDENT line (the stats row survives)', () => {
+  // plan 2026-08-31 §7: the instruction is no longer a Row-2 REPLACER —
+  // it reserves its own line from the global budget; the user layout rows
+  // render beside it, position-independent.
   const snap = mainSnapshot()
-  const expected = legacyFooter(legacyLine1(snap, true, ''), 'Press Ctrl+C again to exit', 100)
+  const expected = [
+    referenceFooter(legacyLine1(snap, true, ''), legacyStatsLine(snap), 100),
+    color.textDim('Press Ctrl+C again to exit'),
+  ].join('\n')
   const actual = composer.render({
     snapshot: snap,
     layout: DEFAULT_FOOTER_LAYOUT,
@@ -174,15 +183,15 @@ test('permission/plan/task variants stay byte-equivalent', () => {
       collaboration: { plan: { effective: true } },
       activity: { ...snap.activity, taskCount: 1, childAgentCount: 2 },
     }
-    const expected = legacyFooter(legacyLine1(variant, true, ''), legacyStatsLine(variant), 100)
+    const expected = referenceFooter(legacyLine1(variant, true, ''), legacyStatsLine(variant), 100)
     const actual = composer.render({ snapshot: variant, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
     assert.equal(actual, expected, `permission ${permission}`)
   }
 })
 
-test('extension segments merge at the legacy position', () => {
+test('extension segments merge at the reference position', () => {
   const snap = mainSnapshot()
-  const expected = legacyFooter(legacyLine1(snap, true, '[EXT-SEG]'), legacyStatsLine(snap), 100)
+  const expected = referenceFooter(legacyLine1(snap, true, '[EXT-SEG]'), legacyStatsLine(snap), 100)
   const actual = composer.render({
     snapshot: snap,
     layout: DEFAULT_FOOTER_LAYOUT,
@@ -240,7 +249,7 @@ type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
 
 test('independent golden vectors lock the composed output (wide/narrow/compact)', () => {
   const snap = mainSnapshot()
-  // Hand-verified fixed vectors (independent of the legacyFooter oracle).
+  // Hand-verified fixed vectors (independent of the referenceFooter oracle).
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
@@ -249,12 +258,20 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 40, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
-    '[workspace-write]  [deepseek/flash]\nx/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k | LLM 8.1s · TTFB 0s · 0…',
+    // 40 columns: the status row fills its 2-line allowance exactly (75
+    // cells → 2 rows) and the stats row keeps its own 1-line allowance,
+    // ANSI-safely cut at the FULL width.
+    '[workspace-write]  [deepseek/flash]\nx/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k | LLM 8.1s · TTFB 0s · 0 to…',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 20, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
-    '[workspace-write]\n[deepseek/flash]\nx/proj  main…\n↑1.2k ↓3.4k | LLM…',
+    // 20 columns: the status row's preferred form (75 cells) exceeds the
+    // 2×20-cell row budget — importance fitting drops cwd(80)/branch(70)/
+    // context(100) BEFORE model(100)/permission(110) and truncates the
+    // rest; never a slice of the wrapped lines (plan §6.2). The stats row
+    // keeps its own allowance, cut at the full width.
+    '[workspace-write]\n[deepseek/flash]\n↑1.2k ↓3.4k | LLM 8…',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
@@ -266,10 +283,12 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
   assert.equal(ansi, '\x1b[38;2;136;136;136m\x1b[38;2;224;224;224m[workspace-write]\x1b[39m\x1b[38;2;136;136;136m  [deepseek/flash]  x/proj  main  \x1b[38;2;79;168;255m[███░░░░░░░░░]\x1b[39m\x1b[38;2;136;136;136m 25%  t2/s5\x1b[39m')
 })
 
-test('a stats row that becomes the ONLY logical line still caps to one physical row', () => {
+test('a row that becomes the ONLY logical line follows the SAME 1..2-line contract', () => {
   // A 2-row layout whose FIRST row renders empty (every item unavailable,
-  // e.g. an unloaded extension item): the stats row must not wrap past
-  // one physical row (the legacy line-2 contract).
+  // e.g. an unloaded extension item): the survivor is an ordinary row, NOT
+  // a role-assigned tail — it keeps the uniform per-row contract (at most
+  // TWO physical lines within the global budget), with no position-based
+  // single-line cap (plan 2026-08-31 §6.2/Step 4).
   const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
   snap.usage = {
     tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
@@ -291,14 +310,17 @@ test('a stats row that becomes the ONLY logical line still caps to one physical 
   })
   const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
   const lines = plain.split('\n')
-  assert.equal(lines.length, 1, `the stats row must cap to one physical row:\n${plain}`)
-  assert.ok(plain.includes('↑1.2k'), `the stats content must survive:\n${plain}`)
-  assert.ok(plain.includes('…'), `an overlong stats row must carry the cap marker:\n${plain}`)
+  assert.ok(lines.length >= 1 && lines.length <= 2, `the lone row must respect the uniform per-row contract:\n${plain}`)
+  assert.ok(plain.includes('↑1.2k'), `the row content must survive:\n${plain}`)
+  for (const line of lines) {
+    assert.ok(line.length <= 30, `every physical row stays inside the width:\n${plain}`)
+  }
 })
 
 test('the instruction as the ONLY logical line caps to one physical row', () => {
   // A 1-row layout whose status row renders empty + the Ctrl+C
-  // instruction: the instruction (the tail role) caps to one row.
+  // instruction: the instruction's own INDEPENDENT surface contract caps
+  // it to one physical row (plan 2026-08-31 §7).
   const snap = emptyStatusSnapshot()
   const text = composer.render({
     snapshot: snap,
