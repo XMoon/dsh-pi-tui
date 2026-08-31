@@ -1114,19 +1114,19 @@ test('/footer save failures notify exactly once (validation and write failures)'
 test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Keep Editing, Discard)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pi-tui-noexec-'))
   const marker = join(dir, 'pwn')
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  // The REAL runtime, wired exactly like the production applyFooterSettings
+  // syncs it: it can only ever see definitions a successful save commits.
+  const runtime = wireRuntimeApply(app)
   try {
-    const ctx = new Context()
-    const vt = new VirtualTerminal(100, 30)
-    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-    app.start()
     const commands = fakeCommands()
     ctx.provide('commands', commands.service as never)
     const settings = fakeSettings({ footer: 'default' })
     ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
     const applied: Array<{ footer: string }> = []
-    // The REAL runtime, wired exactly like the production applyFooterSettings
-    // syncs it: it can only ever see definitions a successful save commits.
-    const runtime = wireRuntimeApply(app)
     const runner: TuiCommandRunner = {
       ctx, app, diag: {} as never,
       get liveAgent() { return undefined },
@@ -1213,9 +1213,9 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
     await spin(300)
     assert.equal(existsSync(marker), false, 'an unsaved draft command must never execute')
     assert.equal(applied.length, 0, 'no save may have happened')
+  } finally {
     runtime.dispose()
     app.stop()
-  } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -1223,11 +1223,13 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
 test('PR D: a FAILED save never executes the new command (draft preserved, marker absent)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pi-tui-noexec-fail-'))
   const marker = join(dir, 'pwn')
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  // The REAL runtime: a failed save must never reach it.
+  const runtime = wireRuntimeApply(app)
   try {
-    const ctx = new Context()
-    const vt = new VirtualTerminal(100, 30)
-    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-    app.start()
     const commands = fakeCommands()
     ctx.provide('commands', commands.service as never)
     ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
@@ -1237,8 +1239,6 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
       replace: () => { throw new Error('write failed') },
     }
     const applied: Array<{ footer: string }> = []
-    // The REAL runtime: a failed save must never reach it.
-    const runtime = wireRuntimeApply(app)
     const runner: TuiCommandRunner = {
       ctx, app, diag: {} as never,
       get liveAgent() { return undefined },
@@ -1313,9 +1313,9 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
     assert.equal(applied.length, 0, 'a failed write must not apply')
     await spin(300)
     assert.equal(existsSync(marker), false, 'a failed save must never execute the new command')
+  } finally {
     runtime.dispose()
     app.stop()
-  } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -1323,20 +1323,20 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
 test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears only after save)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pi-tui-noexec-ok-'))
   const marker = join(dir, 'pwn')
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  // The REAL runtime, synced exactly like the production
+  // applyFooterSettings: only a successful save's validated definitions
+  // can reach it.
+  const runtime = wireRuntimeApply(app)
   try {
-    const ctx = new Context()
-    const vt = new VirtualTerminal(100, 30)
-    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-    app.start()
     const commands = fakeCommands()
     ctx.provide('commands', commands.service as never)
     const settings = fakeSettings({ footer: 'default' })
     ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
     const applied: Array<{ footer: string; footerCustomItems?: unknown }> = []
-    // The REAL runtime, synced exactly like the production
-    // applyFooterSettings: only a successful save's validated definitions
-    // can reach it.
-    const runtime = wireRuntimeApply(app)
     const runner: TuiCommandRunner = {
       ctx, app, diag: {} as never,
       get liveAgent() { return undefined },
@@ -1418,9 +1418,9 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
     const deadline = Date.now() + 8000
     while (!existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
     assert.equal(existsSync(marker), true, 'the command may execute ONLY after a successful save')
+  } finally {
     runtime.dispose()
     app.stop()
-  } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })

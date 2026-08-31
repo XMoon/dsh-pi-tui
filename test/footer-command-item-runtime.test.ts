@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FooterDynamicItemRuntime, activeFooterItemIds, customCommandConfigOf } from '../src/footer/dynamic-item-runtime.ts'
 import { DEFAULT_CUSTOM_COMMAND_REFRESH_MS, type FooterCustomCommandItemSettings } from '../src/footer/custom-items.ts'
+import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import type { FooterLayoutV1 } from '../src/footer/types.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
 
@@ -228,12 +229,13 @@ test('whole-footer command mode suspends every per-item runner; switching back r
   }
 })
 
-test('dispose stops every runner: no value may commit after disposal', async () => {
+test('dispose stops every runner and clears the cached values', async () => {
   const { runtime, values, calls } = harness()
   const clock = item('user:clock', 'setTimeout(() => process.stdout.write("late\\n"), 500)')
   runtime.sync([clock], new Set(['user:clock']))
   await spin(100)
   runtime.dispose()
+  assert.equal(values.get('user:clock'), undefined, 'dispose must clear the cached value (the onValue sink)')
   const settled = calls.length
   await spin(800)
   assert.equal(calls.length, settled, 'a disposed runtime must never commit a late result')
@@ -293,15 +295,27 @@ test('a trusted definition NOT referenced by the layout never spawns', async () 
   }
 })
 
-test('a project-only command definition never spawns (the trust gate)', async () => {
+test('a project-only command definition never spawns (the trust gate, plan §11.2 attack shape)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pi-tui-trust-'))
   const marker = join(dir, 'pwn')
   try {
+    // The ATTACK SHAPE: the USER layer has no user:clock command; the
+    // PROJECT layer supplies one; the merged layout references user:clock.
+    const projectCommand = item('user:clock', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
+    const port = new DirectConfigPort({
+      get: () => ({ describe: () => [{
+        ns: 'dsh-pi-tui',
+        value: { footerCustomItems: [projectCommand] },
+        user: { footerCustomItems: [] },
+      }] }),
+    } as never, undefined, () => undefined)
+    // The runtime receives ONLY the USER-layer trusted projection — the
+    // project command can never reach a spawn, and the item stays
+    // unavailable even though the layout references the id.
+    const trusted = port.footerCustomItems.get().items
+    assert.equal(trusted.length, 0, 'the USER-layer projection must exclude the project command')
     const { runtime, values } = harness()
-    // The layout references user:clock, but the runtime receives ONLY the
-    // USER-layer trusted set — the project-supplied definition is not in
-    // it, so nothing may run and the item stays unavailable.
-    runtime.sync([], new Set(['user:clock']))
+    runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), new Set(['user:clock']))
     await spin(300)
     assert.equal(existsSync(marker), false, 'the project command must never run')
     assert.equal(values.get('user:clock'), undefined, 'the item must stay unavailable')
