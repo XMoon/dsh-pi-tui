@@ -407,7 +407,7 @@ test('legacy history cleanup preserves the raw USER custom-item field', () => {
   // entry this version intentionally cannot parse.
   const userRaw = [
     { schemaVersion: 1, id: 'user:known', kind: 'text', text: 'USER' },
-    { schemaVersion: 1, id: 'user:future', kind: 'command', command: 'date' },
+    { schemaVersion: 1, id: 'user:future', kind: 'future-kind', command: 'date' },
   ]
   const merged = { footerCustomItems: [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }], history: { '/ws': ['old'] } }
   const projected: { footerCustomItems: unknown; history?: unknown } = { ...merged, footerCustomItems: userRaw }

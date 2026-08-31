@@ -815,7 +815,7 @@ test('/settings theme pick persists the BUILTIN choice too (review P1: the trans
   ctx.provide('commands', services.commands as never)
   const userFooterCustomItems: unknown[] = [
     { schemaVersion: 1, id: 'user:prod', kind: 'text', text: 'PROD' },
-    { schemaVersion: 1, id: 'user:clock', kind: 'command', command: 'date' },
+    { schemaVersion: 1, id: 'user:clock', kind: 'future-kind', command: 'date' },
   ]
   const projectFooterCustomItems: unknown[] = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
   ctx.provide('settings', {
