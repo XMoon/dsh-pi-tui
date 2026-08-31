@@ -35,6 +35,10 @@ export interface FooterCommandRunnerOptions {
   readonly onOutput: (rows: string[] | undefined) => void
   /** One-shot diagnostics (the first failure of an error generation). */
   readonly onNotifyOnce?: (message: string) => void
+  /** The one-shot failure diagnostic text (PR D: a per-item runner's
+   * failure only makes THAT item unavailable — the whole-footer wording
+   * names the native fallback). Defaults to the whole-footer wording. */
+  readonly failureMessage?: string
   readonly signal: AbortSignal
 }
 
@@ -287,7 +291,7 @@ export class FooterCommandRunner {
     } else {
       this.errorGeneration += 1
       if (this.errorGeneration === 1) {
-        this.options.onNotifyOnce?.('footer command failed — using the native layout')
+        this.options.onNotifyOnce?.(this.options.failureMessage ?? 'footer command failed — using the native layout')
       }
     }
     this.options.onOutput(rows)
