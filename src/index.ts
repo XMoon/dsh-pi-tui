@@ -1957,6 +1957,13 @@ export function apply(ctx: Context, config: Config): void {
           // adapter composes this EXACT id, never a re-resolved default.
           agentPreset: launchComposition.agentPreset,
         })
+        // Suspend the pre-mount status before ANY ordinary log output
+        // (uniform rule): the status owns the current terminal line, and
+        // a logger/diag write on a TTY shares the cursor — the status
+        // must be cleared first so the log line is clean and the later
+        // clear can never erase the wrong line. The 'Preparing
+        // conversation…' stage re-arms it.
+        startupStatus.clear()
         diag.info('resume ok', {
           session: sessionId,
           seq: (handle.direct!.agent as Agent).session.events.length,
@@ -1969,16 +1976,24 @@ export function apply(ctx: Context, config: Config): void {
             const outcome = await recomposeBlank(ctx, handle.direct!.agent as Agent, launchPreset)
             if (outcome.kind === 'locked') {
               const message = `session ${sessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`
+              startupStatus.clear()
               ctx.logger.warn(`tui-runner: ${message}`)
               diag.warn('preset ignored on resume', { session: sessionId, preset: launchPreset })
             }
           } catch (error) {
             const message = `--preset ${launchPreset} not applied on resume: ${safeErrorMessage(error)}`
+            startupStatus.clear()
             ctx.logger.warn(`tui-runner: ${message}`)
             diag.warn('preset not applied on resume', { session: sessionId, preset: launchPreset, error: message })
           }
         }
       } catch (error) {
+        // Suspend the pre-mount status BEFORE the failure logs: the
+        // status owns the current terminal line, and the logger/diag
+        // writes below share the TTY cursor — without this clear the
+        // warning would interleave with the status and the later
+        // mount-time clear would erase the wrong line.
+        startupStatus.clear()
         // A lock refusal is NOT recoverable: the user asked for a specific
         // held session. Re-throw so the runner exits with the refusal as
         // the message.
@@ -2015,6 +2030,12 @@ export function apply(ctx: Context, config: Config): void {
       // second status stage replaces the first in place.
       startupStatus.show('Preparing conversation…')
       await liveAgent.whenIdle()
+      // The whenIdle wait is over: suspend the status BEFORE the catalog
+      // resolution (uniform rule — no ordinary log output while the
+      // status owns the terminal line; the catalog block's failure warns
+      // must land on a clean line). The mount-time clear below is then a
+      // no-op.
+      startupStatus.clear()
     }
     // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
     // a resumed agent prefetches its effective catalog (a live read emits no

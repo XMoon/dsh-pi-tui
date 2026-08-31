@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Focus compact Message is the third process slot and shows the latest up to three visual rows.** The slot order is Think → Tool → Message; the Message body is re-wrapped to the current width on every render and cut to the newest three rows, so streaming appends roll toward the latest tail and a resize re-wraps.
 - **The fullscreen mouse-wheel step is configurable.** `/settings` gains a `Mouse wheel lines` row (1/2/3/5/8, default 1) applied through the existing `TuiAltScreenOptions.wheelScrollLines`; a change while fullscreen is active takes effect on the next fullscreen re-entry.
 - **The todo panel skips a redundant full state when five or fewer items exist.** The state machine becomes a two-state summary ↔ list (the second click closes the panel); with more than five items the three-state summary → compact(5) → full(N) → summary stays, and a >5 → ≤5 shrink automatically clears a ghost `todoExpanded`.
+- **Rapid todo clicks coalesce into one gesture.** The dock summary and the panel rows are ONE semantic target: consecutive clicks within 500ms (including the same-coordinate second click after the layout switches from dock to panel) no longer trigger a second state transition — fixing the todo "flashes and vanishes" on a fast double-click; a click on any other target resets the window.
 
 #### Fixed
 

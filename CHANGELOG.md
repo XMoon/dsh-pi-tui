@@ -54,6 +54,7 @@
 - **Focus 折叠 Message 成为第三个 process slot 并显示最新最多 3 个 visual rows。** 槽位顺序为 Think → Tool → Message；Message 每次 render 按当前宽度重新 wrap 并取最新尾部 3 行，流式追加自然滚向最新，resize 后重新 wrap。
 - **全屏鼠标滚轮步长可配置。** `/settings` 新增 `Mouse wheel lines`（1/2/3/5/8，默认 1），通过现有 `TuiAltScreenOptions.wheelScrollLines` 生效；fullscreen 已激活时修改在下次重新进入 fullscreen 后生效。
 - **Todo 面板 ≤5 条时去掉冗余 full 状态。** 状态机变为 summary ↔ list 两态（第二次点击即关闭）；>5 条保留 summary → compact(5) → full(N) → summary 三态；列表从 >5 缩到 ≤5 时自动清除 ghost `todoExpanded`。
+- **Todo 快速连点合并为一次手势。** dock summary 与 panel 行属于同一语义目标，500ms 内的连续点击（含布局切换导致的同坐标第二击）不再触发第二次状态切换——修复“快速双击让 Todo 一闪就消失”；点击其它区域后重置。
 
 #### 修复
 

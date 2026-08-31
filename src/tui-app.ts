@@ -236,6 +236,16 @@ const COMPACTION_PROGRESS_FRAMES = indeterminateProgressFrames()
  * full lists are visually identical, so the state machine skips the
  * redundant full state entirely (summary ↔ list only). */
 export const TODO_COMPACT_LIMIT = 5
+/** The todo click-coalescing window: rapid clicks on the todo SEMANTIC
+ * target (dock summary + panel rows) within this window are treated as
+ * ONE gesture. The fullscreen layout MUTATES between the clicks — the
+ * first click on the dock summary opens the panel, the dock vanishes and
+ * the panel takes its rows — so Pi's word-based double-click detection
+ * (same row + same word range) cannot see the pair: the second click at
+ * the same coordinate lands on a panel row and immediately undoes the
+ * first (the todo "flashes and vanishes"). Matches Pi's
+ * DOUBLE_CLICK_INTERVAL_MS. */
+const TODO_CLICK_COALESCE_MS = 500
 /** Folded preview lines for tool results; mirrors pi's RESULT_PREVIEW_LINES. */
 export const RESULT_PREVIEW_LINES = 3
 /** Diff-body cap for default-view tool cards; mirrors kimi COMMAND_PREVIEW_LINES. */
@@ -1738,6 +1748,10 @@ export class TuiApp {
   /** Fullscreen click on the todo panel (or the panel's own expand verb):
    * whether the panel shows the FULL list or the compact five rows. */
   private todoExpanded = false
+  /** Until this timestamp, todo-target clicks are coalesced into the
+   * previous gesture (see {@link TODO_CLICK_COALESCE_MS}); a click on
+   * any OTHER target resets it. */
+  private todoClickCoalesceUntil = 0
   /** The todo panel Text; empty when hidden. */
   private readonly todoPanel: Text
   /**
@@ -5402,17 +5416,30 @@ export class TuiApp {
     // is hidden while the panel is open, so the dock renders zero rows and
     // this branch is inert — the two regions never fight.
     const dockHeight = this.dock.render(width).length
-    if (dockHeight > 0 && y >= todoTop - dockHeight && y < todoTop) {
-      this.toggleTodoPanel()
+    const inDock = dockHeight > 0 && y >= todoTop - dockHeight && y < todoTop
+    // A click on the todo panel's own rows runs the state loop (compact →
+    // full list → back to the summary row), so the mouse opens AND closes
+    // the panel without the todo-toggle action.
+    const inPanel = todoTop < todoBottom && y >= todoTop && y < todoBottom
+    if (inDock || inPanel) {
+      // The dock and the panel are ONE semantic target, and the first
+      // click MUTATES the layout (the dock vanishes, the panel takes its
+      // rows): a rapid second click at the same coordinate would land on
+      // the panel and immediately undo the first — the todo "flashes and
+      // vanishes". Pi's double-click detection cannot see the pair (the
+      // word range under the coordinate changed), so coalesce the whole
+      // target here: a second todo click inside the window is one gesture.
+      const now = Date.now()
+      if (now < this.todoClickCoalesceUntil) return
+      this.todoClickCoalesceUntil = now + TODO_CLICK_COALESCE_MS
+      if (inDock) this.toggleTodoPanel()
+      else this.handleTodoPanelClick()
       return
     }
-    // A click on the todo panel's own rows runs the three-state loop
-    // (compact → full list → back to the summary row), so the mouse opens
-    // AND closes the panel without the todo-toggle action.
-    if (todoTop < todoBottom && y >= todoTop && y < todoBottom) {
-      this.handleTodoPanelClick()
-      return
-    }
+    // Any other click is a DIFFERENT gesture: the next todo click starts
+    // a fresh coalescing window (a deliberate open after a transcript
+    // click must never be swallowed).
+    this.todoClickCoalesceUntil = 0
     // Fullscreen layout: header row(s), then the transcript scroll pane.
     const scroll = this.fullscreenScroll
     if (scroll === undefined) return
