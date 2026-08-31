@@ -608,6 +608,135 @@ treated as a durable `READY` cache. The source-mode shell can be entered with
 under `scripts/` is shared by local bootstrap and CI; do not create a second
 source-build implementation.
 
+### Source development environment vs full Source compatibility
+
+The `next` worktree has two distinct Source Mode concepts. Do not conflate
+them.
+
+**A. Materialized Source development environment** — the default daily
+environment for `next` local development. Its entry points are:
+
+```bash
+pnpm dev:doctor
+pnpm dev:bootstrap
+pnpm dev:shell
+```
+
+Its job: confirm the pinned SHA, prepare or reuse the cached source pack,
+materialize the DSH dependencies, and generate the source development
+environment. Once `pnpm dev:doctor` reports `READY`, the Source development
+environment is available. Ordinary development must NOT automatically re-run
+the full compatibility verifier just because the current mode is Source Mode.
+
+**B. Full Source compatibility verification** — the heavy verification run by:
+
+```bash
+pnpm compat:dsh:source -- --dsh-dir ...
+```
+
+Its semantics: re-prove the exact upstream DSH source → official build/pack →
+the full DSH family → TUI build/type/test → candidate/fresh install →
+runtime/preset compatibility. It is not a substitute for the ordinary
+`pnpm test`.
+
+### Hard rules (do not expand the verification scope)
+
+Local Source Mode and Full Source Compatibility are different operations.
+
+The `next` worktree normally uses the materialized pinned-DSH Source
+development environment prepared by `dev:bootstrap`.
+
+If `pnpm dev:doctor` reports READY, reuse that environment.
+
+Do NOT run `pnpm compat:dsh:source` as a routine validation step after
+ordinary TUI changes.
+
+For ordinary development, run the smallest relevant project checks inside
+the existing Source environment, such as targeted tests, `pnpm typecheck`,
+`pnpm test`, `pnpm build`, or `pnpm pack:release` when packaging behavior
+changed.
+
+Full `compat:dsh:source` is a CI-equivalent compatibility proof and should
+only be run locally when the change materially affects the DSH source
+distribution boundary or when explicitly requested.
+
+Pull requests targeting `next` continue to run the full Source compatibility
+lane in GitHub CI; that CI is authoritative for routine PR compatibility.
+
+### When to run the full Source verifier
+
+Only consider running `compat:dsh:source` locally when one of the following
+applies:
+
+1. **The source pin changed** — `ref`, `expectedVersion`, or `repository` in
+   `test/compat/dsh-source.json` was modified.
+2. **DSH distribution infrastructure changed** — e.g. edits to
+   `scripts/dsh-source-pack.mjs`, `scripts/dsh-source-verify.mjs`,
+   `scripts/prepare-dsh-test-environment.mjs`,
+   `scripts/lib/dsh-distribution.mjs`, `scripts/dsh-source-leak-gate.mjs`,
+   or the corresponding compatibility manifest / distribution contract.
+3. **Source/npm behavior discrepancy** — Source Mode PASS/FAIL differs from
+   npm Mode, a package resolution discrepancy, a source-pack artifact
+   discrepancy, or a DSH public export discrepancy.
+4. **Debugging an unpublished DSH commit** — the DSH upstream is not yet
+   published to npm and an exact SHA must be verified.
+5. **Explicitly requested** — the user or task asks for a full source
+   compatibility run, a CI Source Mode reproduction, or verification of a
+   new DSH source SHA.
+
+### When NOT to run the full Source verifier
+
+Ordinary changes must not default to the full verifier:
+
+```text
+TUI rendering
+editor
+footer
+keybindings
+autocomplete
+session picker UI
+transcript rendering/window
+commands
+settings UI
+local presentation logic
+tests only
+docs only
+```
+
+Run the checks matching the change scope instead:
+
+```text
+targeted test
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+Add `pnpm pack:release` when pack/public artifacts are involved. Do not
+mechanically append `pnpm compat:dsh:source`.
+
+### Three-layer development model
+
+```text
+Layer 1 — Source environment        dev:doctor / dev:bootstrap / dev:shell
+                                    keeps next local development on the pinned
+                                    DSH environment long-term.
+
+Layer 2 — Daily TUI validation      targeted tests / typecheck / test / build
+                                    / pack when needed
+                                    quickly validates the current TUI change.
+
+Layer 3 — Full Source compatibility compat:dsh:source
+                                    re-proves full compatibility with the
+                                    exact DSH source distribution; PR CI owns
+                                    this layer by default.
+```
+
+The three layers are distinct; do not conflate them. `dev:bootstrap` is
+environment preparation, not a full compatibility run: it already reuses a
+valid per-SHA source pack, and only a missing or invalid cache, a changed
+pin, or a stale environment triggers a rebuild.
+
 ## Docs
 
 - README.md — 简体中文 install and run instructions for humans (the npm

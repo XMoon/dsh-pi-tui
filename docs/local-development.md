@@ -136,6 +136,58 @@ owning worktree root. Generated environment variables are honored only by that
 root, so manually sourcing one worktree's environment cannot select a different
 worktree's DSH mode.
 
+## Daily local loop
+
+The next worktree stays on the pinned Source development environment. The
+daily loop is:
+
+```bash
+cd ~/project/dsh-pi-tui-next
+pnpm dev:doctor
+```
+
+- `READY` → reuse the current environment and run the normal project checks
+  (`pnpm typecheck`, `pnpm test`, targeted tests, `pnpm build`).
+- `STALE` / `MISSING` / `BROKEN` → run `pnpm dev:bootstrap`, then
+  `pnpm dev:doctor` again, then run the normal project checks.
+
+`dev:bootstrap` is environment preparation only, not a full compatibility
+run. It reuses a valid per-SHA source pack from:
+
+```text
+~/.cache/dsh-pi-tui/source-packs/<exact-sha>/
+```
+
+DSH is rebuilt only when the cache is missing or invalid, the pin changed,
+or the environment is stale.
+
+When the source environment must actually be loaded (commands that need the
+source-distribution variables), enter it with:
+
+```bash
+pnpm dev:shell
+```
+
+then continue with the ordinary development commands.
+
+## Full Source compatibility
+
+```bash
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+```
+
+This is the CI-equivalent full Source compatibility proof: exact upstream DSH
+source → official build/pack → full DSH family → TUI build/type/test →
+candidate/fresh install → runtime/preset compatibility.
+
+It is NOT part of the routine daily loop. Ordinary TUI changes are validated
+with the normal project checks inside the existing Source environment. Run
+the full verifier only when the change affects the DSH source distribution
+boundary (source pin, distribution infrastructure, source/npm discrepancy,
+unpublished DSH commit) or when explicitly requested. Pull requests targeting
+`next` run this lane in GitHub CI, which is authoritative for routine PR
+compatibility.
+
 ## Safety rules
 
 - Do not run an ordinary `pnpm install` in the source-mode worktree as a repair.
