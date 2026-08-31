@@ -14,7 +14,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -128,6 +128,39 @@ function sourcePackOutput(values) {
   return resolve(values.out ?? join(tmpdir(), `dsh-source-pack-${process.pid}`))
 }
 
+// Inode numbers alone do not prove identity: filesystems such as ext4 reuse a
+// freed inode for a directory recreated at the same path moments later, and a
+// coarse clock can stamp that recreation with the very same birthtime. An
+// owner therefore claims its directory with an in-directory random token that
+// a same-path replacement can neither know nor reproduce; the recorded
+// birthtime remains as a cheap additional signal.
+function preciseBirthtime(path) {
+  const info = lstatSync(path, { bigint: true })
+  return String(info.birthtimeNs ?? info.birthtimeMs)
+}
+
+const OWNER_MARKER_PREFIX = '.dsh-source-verify-owner-'
+
+function ownerMarkerPath(owner, directoryPath) {
+  return join(directoryPath, `${OWNER_MARKER_PREFIX}${owner.markerToken}`)
+}
+
+/**
+ * Owners without a token (such as the generated distribution, which is proven
+ * by node identity and the pack output layout) keep pure stat checks.
+ */
+function ownerMarkerMatches(owner, directoryPath) {
+  if (owner.markerToken === undefined) return true
+  try {
+    const info = lstatSync(ownerMarkerPath(owner, directoryPath))
+    if (!info.isFile() || info.isSymbolicLink()) return false
+    return readFileSync(ownerMarkerPath(owner, directoryPath), 'utf8') === owner.markerToken
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false
+    throw error
+  }
+}
+
 function directoryOwner(directory, label) {
   let info
   let parentInfo
@@ -140,13 +173,22 @@ function directoryOwner(directory, label) {
   }
   if (!info.isDirectory() || info.isSymbolicLink()) fail(`${label} is not a real directory: ${directory}`)
   if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) fail(`${label} parent is not a real directory: ${parentPath}`)
-  return { path: directory, dev: info.dev, ino: info.ino, parentPath, parentDev: parentInfo.dev, parentIno: parentInfo.ino }
+  return {
+    path: directory,
+    dev: info.dev,
+    ino: info.ino,
+    birthtime: preciseBirthtime(directory),
+    parentPath,
+    parentDev: parentInfo.dev,
+    parentIno: parentInfo.ino,
+    parentBirthtime: preciseBirthtime(parentPath),
+  }
 }
 
 function parentState(owner) {
   try {
     const info = lstatSync(owner.parentPath)
-    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.parentDev || info.ino !== owner.parentIno) return false
+    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.parentDev || info.ino !== owner.parentIno || preciseBirthtime(owner.parentPath) !== owner.parentBirthtime) return false
     return true
   } catch (error) {
     if (error?.code === 'ENOENT') return undefined
@@ -157,8 +199,8 @@ function parentState(owner) {
 function ownerState(owner) {
   try {
     const info = lstatSync(owner.path)
-    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino) return false
-    return true
+    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== owner.dev || info.ino !== owner.ino || preciseBirthtime(owner.path) !== owner.birthtime) return false
+    return ownerMarkerMatches(owner, owner.path)
   } catch (error) {
     if (error?.code === 'ENOENT') return undefined
     throw error
@@ -186,12 +228,12 @@ function removeOwnedDirectory(owner, hooks = undefined) {
     renameSync(owner.path, quarantine)
     moved = true
     const movedInfo = lstatSync(quarantine)
-    if (!movedInfo.isDirectory() || movedInfo.isSymbolicLink() || movedInfo.dev !== owner.dev || movedInfo.ino !== owner.ino) return false
+    if (!movedInfo.isDirectory() || movedInfo.isSymbolicLink() || movedInfo.dev !== owner.dev || movedInfo.ino !== owner.ino || preciseBirthtime(quarantine) !== owner.birthtime || !ownerMarkerMatches(owner, quarantine)) return false
     if (parentState(owner) !== true) return false
     hooks?.afterQuarantineValidation?.(quarantine, quarantineRoot)
     if (parentState(owner) !== true) return false
     const confirmed = lstatSync(quarantine)
-    if (!confirmed.isDirectory() || confirmed.isSymbolicLink() || confirmed.dev !== owner.dev || confirmed.ino !== owner.ino) return false
+    if (!confirmed.isDirectory() || confirmed.isSymbolicLink() || confirmed.dev !== owner.dev || confirmed.ino !== owner.ino || preciseBirthtime(quarantine) !== owner.birthtime || !ownerMarkerMatches(owner, quarantine)) return false
     rmSync(quarantine, { recursive: true, force: false })
     rmdirSync(quarantineRoot)
     completed = true
@@ -219,7 +261,13 @@ function removeGeneratedDistribution(owner) {
 }
 
 export function temporaryWorkspaceOwner(directory) {
-  return directoryOwner(directory, 'temporary source verification workspace')
+  const owner = directoryOwner(directory, 'temporary source verification workspace')
+  // Claim the workspace from the inside: a replacement at the same path keeps
+  // neither this file nor its token, so cleanup can never mistake it for the
+  // original even on filesystems that reuse inode numbers.
+  const markerToken = randomUUID()
+  writeFileSync(join(directory, `${OWNER_MARKER_PREFIX}${markerToken}`), markerToken, { mode: 0o600 })
+  return { ...owner, markerToken }
 }
 
 export function removeTemporaryWorkspace(owner, hooks = undefined) {
