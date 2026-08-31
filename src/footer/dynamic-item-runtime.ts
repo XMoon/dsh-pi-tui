@@ -68,18 +68,31 @@ function sameConfig(a: FooterCommandConfig, b: FooterCommandConfig): boolean {
     && a.maxRows === b.maxRows
 }
 
-/** The PR D activation layout: the layout whose refs may arm custom
- * command items. A /footer save passes the just-committed validated
- * layout as the trusted activation; every other path uses the USER
- * layer's declared layout. A PROJECT merged layout can reference user:*
- * ids for RENDERING, but it can never activate a dormant USER command —
- * the same activation-trust principle the whole-footer command mode gate
- * applies (plan §11: definition trust AND activation trust). */
-export function trustedActivationLayout(
-  savedLayout: FooterLayoutV1 | undefined,
-  userLayerLayout: FooterLayoutV1 | undefined,
-): FooterLayoutV1 | undefined {
-  return savedLayout ?? userLayerLayout
+/** The EXECUTABLE command item ids (PR D activation trust, final
+ * formula):
+ *
+ *   executable = USER trusted definitions ∩ USER-authorized ids ∩
+ *                currently rendered layout ids
+ *
+ * The trusted definitions come from the USER-layer semantic read; the
+ * authorized ids come from the ConfigPort's mode-gated projection (a
+ * stale leftover USER layout under footer: default/compact authorizes
+ * nothing); the rendered layout is what the composer actually shows — a
+ * command hidden by the merged layout must not keep running in the
+ * background. A /footer save is the special case where the just-committed
+ * validated layout is both authorized and rendered. */
+export function executableCommandItemIds(
+  trustedCommands: readonly FooterCustomCommandItemSettings[],
+  authorizedIds: ReadonlySet<string>,
+  renderedLayout: FooterLayoutV1 | undefined,
+): Set<string> {
+  const trustedIds = new Set(trustedCommands.map(item => item.id))
+  const renderedIds = activeFooterItemIds(renderedLayout)
+  const executable = new Set<string>()
+  for (const id of renderedIds) {
+    if (trustedIds.has(id) && authorizedIds.has(id)) executable.add(id)
+  }
+  return executable
 }
 
 /** The custom command item runtime. */

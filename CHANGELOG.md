@@ -28,11 +28,13 @@
   Command/Refresh/Timeout/Default tone/Rename/Delete。
 - **命令只从 USER-layer trusted 来源激活（definition trust + activation trust）。**
   `ConfigPort.footerCustomItems.get()` 或 `/footer` 保存成功后的 validated 结果才是
-  可执行定义来源；可执行 id = USER trusted 定义 ∩ USER trusted active layout
-  （`ConfigPort.footerCommandTrust.userFooterLayout`，或 `/footer` 保存的
-  validated layout）。project/merged 配置既不能提供命令字符串，也不能通过
-  merged layout 激活用户 dormant 的 command item（未保存 draft 与保存失败的
-  新命令同样永不执行）。
+  可执行定义来源；可执行 id = USER trusted 定义 ∩ USER 授权激活 id ∩ 当前 rendered
+  layout id。USER 授权由 `ConfigPort.footerCommandTrust.userCommandItemActivationIds`
+  按 USER 自己的 mode 计算（仅 `footer: custom` 时 USER layout 才授权；`/settings`
+  切回 default/compact 后残留的 stale layout 授权为空；whole-footer command 的
+  native fallback 按 USER 自己的 `footerFallbackMode` 决定）。project/merged 配置
+  既不能提供命令字符串，也不能通过 merged layout 激活 dormant 或隐藏的 command
+  item（未保存 draft 与保存失败的新命令同样永不执行）。
 - **新增 client-local `FooterDynamicItemRuntime`。** 只为 active layout 引用的
   command item 建 runner（复用 whole-footer `FooterCommandRunner` 的
   spawn/shell/stdin/timeout/refresh/generation/sanitize/process-tree-kill），

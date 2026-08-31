@@ -112,8 +112,9 @@ export function serializeTuiSettingsMutation<T>(
  * AND a trusted command. The adapter owns the settings descriptor access
  * (a Remote adapter replays the same facts from the wire) — the runner
  * never touches the raw settings service for the trust gate. PR D extends
- * the same read with the USER-layer layout: the ONLY layout whose refs
- * may activate custom command items. */
+ * the same read with the SEMANTIC activation projection: the ids the USER
+ * layer authorizes for custom command item execution, derived from the
+ * USER's OWN mode declarations (never the merged value). */
 export interface FooterCommandTrust {
   /** The user layer's declared footer mode ('command' when the user opted
    * in), undefined when the user layer has no opinion. */
@@ -121,12 +122,19 @@ export interface FooterCommandTrust {
   /** The trusted command config (the user layer's footerCommand, bounds
    * validated), undefined when untrusted/absent. */
   readonly command: FooterCommandConfig | undefined
-  /** The user layer's declared custom layout (validated), undefined when
-   * absent/invalid — the ONLY layout whose refs may arm custom command
-   * items (PR D activation trust: a project merged layout can reference
-   * user:* ids for rendering, but can never activate a dormant USER
-   * command). */
-  readonly userFooterLayout: import('../footer/types.ts').FooterLayoutV1 | undefined
+  /** The ids the USER layer AUTHORIZES to execute custom command items:
+   * the USER custom layout's refs, but ONLY while the USER layer itself
+   * declares `footer: custom`. A stale leftover layout under
+   * `footer: default/compact` authorizes nothing, and `footer: command`
+   * authorizes nothing while the whole-footer surface runs — a project
+   * merged layout can render user:* ids, but it can never activate a
+   * dormant USER command. */
+  readonly userCommandItemActivationIds: ReadonlySet<string>
+  /** The ids authorized for the native FALLBACK surface (a merged
+   * `footer: command` the USER layer does not own): the USER's own
+   * footerFallbackMode decides — `custom` + a valid USER layout → its
+   * refs, otherwise empty. */
+  readonly userCommandItemFallbackActivationIds: ReadonlySet<string>
 }
 
 /** The USER-layer Custom Text/Command definition read (PR C + PR D). The
