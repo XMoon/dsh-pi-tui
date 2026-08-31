@@ -132,8 +132,8 @@ function safeDiag(diag: ExitDiagLike, level: 'info' | 'error', message: string, 
 
 /**
  * The ONE exit orchestration shared by every exit entry (Ctrl+C, Ctrl+D,
- * `/exit`, `/quit`): invalidate nothing here (the guard token is the runner's
- * concern) — flush with a hard timeout → record → cleanup → warn on a
+ * `/exit`, `/quit`): invalidate nothing here (runner-owned state is the
+ * runner's concern) — flush with a hard timeout → record → cleanup → warn on a
  * failed/timed-out flush → print the resume hint → exit. Idempotent: later
  * requests while one is in flight (or after it finished) are no-ops, so
  * double Ctrl+C or a command plus a key cannot double-flush or double-exit.

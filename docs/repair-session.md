@@ -2,8 +2,8 @@
 
 ## When to use
 
-A session no longer loads, the guard reports an unreadable committed prefix,
-or the web surface's session list breaks. The script is standalone and
+A session no longer loads (dsh's persistence refuses a corrupt committed
+prefix), or the web surface's session list breaks. The script is standalone and
 resolves `decodeStorageRecord` from the dsh install — it does not need the
 bundle.
 

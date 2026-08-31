@@ -1,26 +1,18 @@
 /**
- * Headless tests for the steer-all orchestration (Ctrl+S): the guard
- * TOCTOU races — queue splices and session switches while the async
- * divergence guard reads the file — must abort `stale` with nothing lost
- * and nothing written to a session the guard never checked.
+ * Headless tests for the steer-all orchestration (Ctrl+S). The send core
+ * is SYNCHRONOUS one-pass (snapshot → re-validate → deliver, no await in
+ * between) since the divergence-guard removal, so the only reachable
+ * stale triggers are the identity re-validation (modeled here with
+ * deps whose second read returns a switched surface) and the transition
+ * fence. The delivery gates (empty payload, onlyDraft, writer seam) and
+ * the draft-restore merge semantics are pinned here too.
  * @module @xmoon76/dsh-pi-tui/steer.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mergeDraft, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerAgentLike, type SteerDeps, type SteerGuard } from '../src/steer.ts'
-
-type GuardVerdict = { kind: 'ok' | 'forced' } | { kind: 'blocked'; reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed' }
-
-/** A deferred guard the test resolves manually, to stage in-flight races. */
-function deferredGuard(): {
-  promise: Promise<GuardVerdict>
-  resolve: (v: GuardVerdict) => void
-} {
-  let resolve!: (v: GuardVerdict) => void
-  const promise = new Promise<GuardVerdict>(res => { resolve = res })
-  return { promise, resolve }
-}
+import { mergeDraft, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerAgentLike, type SteerDeps } from '../src/steer.ts'
+import { TransitionInProgressError, type SessionOperationBarrier } from '../src/session-operation-barrier.ts'
 
 interface FakeAgent extends SteerAgentLike {
   status: 'idle' | 'running'
@@ -30,13 +22,13 @@ interface FakeAgent extends SteerAgentLike {
   followed: { id: string; text: string }[]
 }
 
-/** A mutable fake agent whose queue can be spliced mid-flight. */
-function fakeAgent(ids: string[]): FakeAgent {
+/** A mutable fake agent whose queue can be mutated. */
+function fakeAgent(ids: string[], sessionId = 'session-steer'): FakeAgent {
   const steered: { id: string; text: string }[] = []
   const followed: { id: string; text: string }[] = []
   const state = { nextTurn: ids.map(id => ({ id })), nextStep: [] as { id: string }[] }
   return {
-    session: { id: 'session-steer' },
+    session: { id: sessionId },
     inbox: {
       get nextTurn() { return state.nextTurn },
       get nextStep() { return state.nextStep },
@@ -54,22 +46,51 @@ function fakeAgent(ids: string[]): FakeAgent {
   } as FakeAgent
 }
 
+/**
+ * A dep whose identity getters return DIFFERENT values on the re-read:
+ * the deterministic model of a session switch between the snapshot and
+ * the re-validation (the TOCTOU surface the stale checks exist for).
+ * Reads 1-2 (the wrapper's sessionId probe + the core's capture) return
+ * `first`; reads 3+ (the re-validation) return `second`.
+ */
+function switchingIdentities(options: {
+  first: FakeAgent
+  second: FakeAgent
+  firstGeneration?: number
+  secondGeneration?: number
+}): () => SteerDeps {
+  let agentReads = 0
+  let generation = options.firstGeneration ?? 1
+  return () => ({
+    currentAgent: () => {
+      agentReads += 1
+      return agentReads <= 2 ? options.first : options.second
+    },
+    currentGeneration: () => {
+      const result = generation
+      generation = options.secondGeneration ?? generation
+      return result
+    },
+    notify: (message, kind) => { void message; void kind },
+    restoreDraft: () => true,
+    createDraft: (text) => ({ id: `draft:${text}`, text }),
+    staleNotice: () => 'changed while sending',
+    mergedNotice: () => 'draft merged',
+  })
+}
+
 function makeDeps(options: {
   agent: () => SteerAgentLike | undefined
   generation?: () => number
-  guard: Promise<GuardVerdict>
   notices?: string[]
   restored?: string[]
 }): SteerDeps {
   return {
     currentAgent: options.agent,
     currentGeneration: options.generation ?? (() => 1),
-    guard: { run: async () => options.guard },
     notify: (message, kind) => options.notices?.push(`${kind}: ${message}`),
     restoreDraft: (text) => { options.restored?.push(text); return true },
     createDraft: (text) => ({ id: `draft:${text}`, text }),
-    blockedNotice: (reason) => `blocked-${reason}`,
-    forcedNotice: () => 'forced',
     staleNotice: () => 'changed while sending',
     mergedNotice: () => 'draft merged',
   }
@@ -77,18 +98,16 @@ function makeDeps(options: {
 
 /** Runner-shaped deps: the EXACT restore wiring index.ts uses — mergeDraft
  * over the live editor string; verbatim only when the merged result IS the
- * draft (that is what decides whether the notice may promise a force).
- * `restored` records every restore call, to prove each operation restores
- * exactly once. */
+ * draft. `restored` records every restore call, to prove each operation
+ * restores exactly once. */
 function editorRestoreDeps(options: {
   agent: () => SteerAgentLike | undefined
   generation?: () => number
-  guard: Promise<GuardVerdict>
   editor: () => string
   setEditor: (text: string) => void
   restored?: string[]
 }): SteerDeps {
-  const deps = makeDeps({ agent: options.agent, generation: options.generation, guard: options.guard })
+  const deps = makeDeps({ agent: options.agent, generation: options.generation, restored: options.restored })
   deps.restoreDraft = (draft) => {
     options.restored?.push(draft)
     const merged = mergeDraft(options.editor(), draft)
@@ -98,115 +117,55 @@ function editorRestoreDeps(options: {
   return deps
 }
 
-test('a queue splice while the guard is in flight aborts stale, restores the draft, loses nothing', async () => {
-  const agent = fakeAgent(['a'])
-  const guard = deferredGuard()
-  const notices: string[] = []
+// ── re-validation mechanism (stale aborts) ─────────────────────────────────
+
+test('a session switch between the snapshot and the delivery aborts stale and restores the draft', async () => {
+  const oldAgent = fakeAgent(['a'])
+  const newAgent = fakeAgent(['z'])
+  const depsFactory = switchingIdentities({ first: oldAgent, second: newAgent })
   const restored: string[] = []
-  const pending = steerAll(makeDeps({ agent: () => agent, guard: guard.promise, notices, restored }), 'draft')
-  // While the guard reads the file, another surface splices B into the queue.
-  agent.state.nextTurn = [...agent.state.nextTurn, { id: 'b' }]
-  guard.resolve({ kind: 'ok' })
-  assert.equal(await pending, 'stale')
-  assert.deepEqual(agent.state.nextTurn.map(m => m.id), ['a', 'b'], 'nothing may be removed while stale')
-  assert.deepEqual(agent.steered, [], 'no message may be steered')
-  assert.deepEqual(restored, ['draft'], 'the stale send must restore the editor draft (it was cleared before onSteer)')
+  const notices: string[] = []
+  const deps = { ...depsFactory(), restoreDraft: (text: string) => { restored.push(text); return true }, notify: (message: string, kind: 'info' | 'error') => notices.push(`${kind}: ${message}`) }
+  assert.equal(await steerAll(deps, 'x'), 'stale')
+  assert.deepEqual(oldAgent.steered, [], 'the OLD session must not receive the payload')
+  assert.deepEqual(newAgent.steered, [], 'the NEW session must not receive a stale payload')
+  assert.deepEqual(restored, ['x'], 'the stale send must restore the editor draft')
   assert.ok(notices.some(note => note.includes('changed while sending')), notices.join(' | '))
 })
 
-test('a queue edit while the guard is in flight aborts stale and restores the draft', async () => {
-  const agent = fakeAgent(['a', 'b'])
-  const guard = deferredGuard()
-  const restored: string[] = []
-  const pending = steerAll(makeDeps({ agent: () => agent, guard: guard.promise, restored }), 'draft')
-  // The user edits A away (delete) while the guard runs.
-  agent.state.nextTurn = [{ id: 'b' }]
-  guard.resolve({ kind: 'ok' })
-  assert.equal(await pending, 'stale')
-  assert.deepEqual(agent.state.nextTurn.map(m => m.id), ['b'], 'the edited queue survives untouched')
-  assert.deepEqual(agent.steered, [], 'the stale snapshot must not be force-sent')
-  assert.deepEqual(restored, ['draft'], 'the stale send must restore the editor draft')
-})
-
-test('a session switch while the guard is in flight aborts stale and restores the draft', async () => {
-  let current: FakeAgent | undefined = fakeAgent(['a'])
-  const guard = deferredGuard()
-  const steeredFirst = current.steered
-  const restored: string[] = []
-  const pending = steerAll(makeDeps({ agent: () => current, guard: guard.promise, restored }), 'x')
-  current = fakeAgent(['z']) // session switch mid-guard
-  guard.resolve({ kind: 'ok' })
-  assert.equal(await pending, 'stale')
-  assert.deepEqual(steeredFirst, [], 'the OLD session must not receive the payload')
-  assert.deepEqual(current.steered, [], 'the NEW session must not receive an unguarded payload')
-  assert.deepEqual(restored, ['x'], 'the stale send must restore the editor draft')
-})
-
-test('a generation bump while the guard is in flight aborts stale and restores the draft', async () => {
-  let generation = 1
+test('a generation bump between the snapshot and the delivery aborts stale and restores the draft', async () => {
   const agent = fakeAgent(['a'])
-  const guard = deferredGuard()
+  const depsFactory = switchingIdentities({ first: agent, second: agent, firstGeneration: 1, secondGeneration: 2 })
   const restored: string[] = []
-  const pending = steerAll(makeDeps({ agent: () => agent, generation: () => generation, guard: guard.promise, restored }), 'x')
-  generation = 2 // session switch (generation bump)
-  guard.resolve({ kind: 'ok' })
-  assert.equal(await pending, 'stale')
+  const deps = { ...depsFactory(), restoreDraft: (text: string) => { restored.push(text); return true } }
+  assert.equal(await steerAll(deps, 'x'), 'stale')
   assert.deepEqual(agent.steered, [])
   assert.deepEqual(restored, ['x'], 'the stale send must restore the editor draft')
 })
 
-test('a clean guard steers exactly the confirmed messages and removes only them', async () => {
+// ── delivery semantics ──────────────────────────────────────────────────────
+
+test('an unchanged state steers exactly the confirmed messages and removes only them', async () => {
   const agent = fakeAgent(['a', 'b'])
-  const guard = deferredGuard()
   const notices: string[] = []
-  const pending = steerAll(makeDeps({ agent: () => agent, guard: guard.promise, notices }), 'draft')
-  guard.resolve({ kind: 'ok' })
-  assert.equal(await pending, 'ok')
+  const outcome = await steerAll(makeDeps({ agent: () => agent, notices }), 'draft')
+  assert.equal(outcome, 'ok')
   assert.deepEqual(agent.state.nextTurn, [], 'confirmed messages are removed')
   assert.equal(agent.steered.length, 3, 'two queued messages + the draft')
   assert.deepEqual(agent.steered.map(m => m.id), ['a', 'b', 'draft:draft'])
   assert.ok(notices.some(note => note.includes('steering 3 messages')), notices.join(' | '))
 })
 
-test('a blocked guard restores the draft and reports the divergence kind', async () => {
-  const agent = fakeAgent(['a'])
-  const guard = deferredGuard()
-  const notices: string[] = []
-  const restored: string[] = []
-  const pending = steerAll(makeDeps({ agent: () => agent, guard: guard.promise, notices, restored }), 'draft')
-  guard.resolve({ kind: 'blocked', reason: 'tail-mismatch' })
-  assert.equal(await pending, 'blocked')
-  assert.deepEqual(restored, ['draft'], 'the draft must be restored for a retry')
-  assert.ok(notices.some(note => note.includes('blocked-tail-mismatch')), notices.join(' | '))
-  assert.deepEqual(agent.steered, [])
-})
-
-test('a clean guard with an empty queue falls back to the classic single-draft steer', async () => {
+test('an empty queue falls back to the classic single-draft steer', async () => {
   const agent = fakeAgent([])
   agent.status = 'idle'
-  const guard = deferredGuard()
-  const pending = steerAll(makeDeps({ agent: () => agent, guard: guard.promise }), 'hello')
-  guard.resolve({ kind: 'ok' })
+  const pending = steerAll(makeDeps({ agent: () => agent }), 'hello')
   assert.equal(await pending, 'ok')
   assert.deepEqual(agent.followed.map(m => m.id), ['draft:hello'], 'an idle agent takes a followup')
   agent.status = 'running'
-  const guard2 = deferredGuard()
-  const pending2 = steerAll(makeDeps({ agent: () => agent, guard: guard2.promise }), 'hello')
-  guard2.resolve({ kind: 'ok' })
+  const pending2 = steerAll(makeDeps({ agent: () => agent }), 'hello')
   assert.equal(await pending2, 'ok')
   assert.deepEqual(agent.steered.map(m => m.id), ['draft:hello'], 'a running agent takes a steer')
-})
-
-test('a forced guard skips the info notice and still sends', async () => {
-  const agent = fakeAgent(['a'])
-  const guard = deferredGuard()
-  const notices: string[] = []
-  const pending = steerAll(makeDeps({ agent: () => agent, guard: guard.promise, notices }), '')
-  guard.resolve({ kind: 'forced' })
-  assert.equal(await pending, 'ok')
-  assert.deepEqual(agent.steered.map(m => m.id), ['a'])
-  assert.ok(notices.some(note => note === 'error: forced'), notices.join(' | '))
-  assert.ok(!notices.some(note => note.includes('steering')), 'no info notice when forced')
 })
 
 test('onlyDraft steers the draft alone: explicitly queued messages stay queued', async () => {
@@ -216,11 +175,7 @@ test('onlyDraft steers the draft alone: explicitly queued messages stay queued',
   // back.
   const agent = fakeAgent(['queued'])
   agent.status = 'running'
-  const outcome = await steerAll(
-    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) }),
-    'draft text',
-    { onlyDraft: true },
-  )
+  const outcome = await steerAll(makeDeps({ agent: () => agent }), 'draft text', { onlyDraft: true })
   assert.equal(outcome, 'ok')
   assert.deepEqual(agent.steered.map(m => m.text), ['draft text'], 'the draft must be steered')
   assert.deepEqual(agent.state.nextTurn.map(m => m.id), ['queued'], 'the queued message must stay queued')
@@ -230,11 +185,7 @@ test('onlyDraft steers the draft alone: explicitly queued messages stay queued',
 test('onlyDraft while idle falls back to a followup', async () => {
   const agent = fakeAgent([])
   agent.status = 'idle'
-  const outcome = await steerAll(
-    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) }),
-    'draft text',
-    { onlyDraft: true },
-  )
+  const outcome = await steerAll(makeDeps({ agent: () => agent }), 'draft text', { onlyDraft: true })
   assert.equal(outcome, 'ok')
   assert.deepEqual(agent.followed.map(m => m.text), ['draft text'], 'an idle agent takes a followup')
   assert.deepEqual(agent.steered, [], 'nothing steered')
@@ -247,7 +198,7 @@ test('P0: empty draft + empty queue is a NO-OP (draftHasPayload=false) — never
   agent.status = 'idle'
   const notices: string[] = []
   const outcome = await steerAll(
-    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }), notices }),
+    makeDeps({ agent: () => agent, notices }),
     '',
     { draftHasPayload: false },
   )
@@ -260,11 +211,7 @@ test('P0: empty draft + empty queue is a NO-OP (draftHasPayload=false) — never
 test('P0: empty draft + empty queue with onlyDraft is a NO-OP too (busy-Enter steer)', async () => {
   const agent = fakeAgent([])
   agent.status = 'running'
-  const outcome = await steerAll(
-    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) }),
-    '',
-    { onlyDraft: true, draftHasPayload: false },
-  )
+  const outcome = await steerAll(makeDeps({ agent: () => agent }), '', { onlyDraft: true, draftHasPayload: false })
   assert.equal(outcome, 'ok')
   assert.deepEqual(agent.steered, [], 'onlyDraft + empty payload must never steer')
 })
@@ -272,11 +219,7 @@ test('P0: empty draft + empty queue with onlyDraft is a NO-OP too (busy-Enter st
 test('P0: empty QUEUE + non-empty draft still steers (the classic single-draft path)', async () => {
   const agent = fakeAgent([])
   agent.status = 'running'
-  const outcome = await steerAll(
-    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) }),
-    'hello',
-    { draftHasPayload: true },
-  )
+  const outcome = await steerAll(makeDeps({ agent: () => agent }), 'hello', { draftHasPayload: true })
   assert.equal(outcome, 'ok')
   assert.deepEqual(agent.steered.map(m => m.text), ['hello'])
 })
@@ -285,11 +228,7 @@ test('P0: empty draft + NON-empty queue steers the queue exactly as before (queu
   for (const status of ['idle', 'running'] as const) {
     const agent = fakeAgent(['A', 'B'])
     agent.status = status
-    const outcome = await steerAll(
-      makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) }),
-      '',
-      { draftHasPayload: false },
-    )
+    const outcome = await steerAll(makeDeps({ agent: () => agent }), '', { draftHasPayload: false })
     assert.equal(outcome, 'ok')
     assert.deepEqual(agent.steered.map(m => m.id), ['A', 'B'], `${status}: both queued messages steered in order`)
     assert.deepEqual(agent.followed, [], `${status}: a queue batch never follows up`)
@@ -300,23 +239,9 @@ test('P0: empty draft + NON-empty queue steers the queue exactly as before (queu
 test('P0: empty draft + queue [A,B] + draft C keeps A,B,C order (queue + draft)', async () => {
   const agent = fakeAgent(['A', 'B'])
   agent.status = 'running'
-  const outcome = await steerAll(
-    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) }),
-    'C',
-    { draftHasPayload: true },
-  )
+  const outcome = await steerAll(makeDeps({ agent: () => agent }), 'C', { draftHasPayload: true })
   assert.equal(outcome, 'ok')
   assert.deepEqual(agent.steered.map(m => m.id), ['A', 'B', 'draft:C'])
-})
-
-test('P0: the empty-payload gate runs BEFORE the guard — a no-op never touches guard state', async () => {
-  let guardRuns = 0
-  const agent = fakeAgent([])
-  const deps = makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) })
-  deps.guard = { run: async () => { guardRuns += 1; return { kind: 'ok' } } }
-  const outcome = await steerAll(deps, '', { draftHasPayload: false })
-  assert.equal(outcome, 'ok')
-  assert.equal(guardRuns, 0, 'nothing to send must not even run the divergence guard')
 })
 
 // ── runner Gate A (steerHasPayload): the empty-Ctrl+S gate, headless-pinned ───────────────
@@ -359,14 +284,10 @@ test('P0: the includeDraft verdict honors an EXPLICIT payload claim over text.tr
   // the draft (inconsistent with queue=[] which creates it).
   const agent = fakeAgent(['A', 'B'])
   agent.status = 'running'
-  const outcome = await steerAll(
-    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) }),
-    '',
-    { draftHasPayload: true },
-  )
+  const outcome = await steerAll(makeDeps({ agent: () => agent }), '', { draftHasPayload: true })
   assert.equal(outcome, 'ok')
   assert.deepEqual(agent.steered.map(m => m.id), ['A', 'B', 'draft:'],
-    'payload=true + text=\"\" must include the empty-text draft as a payload message')
+    'payload=true + text="" must include the empty-text draft as a payload message')
 })
 
 test('P0: draftHasPayload=false + text non-empty + queue non-empty drops the draft (verdict wins)', async () => {
@@ -375,11 +296,7 @@ test('P0: draftHasPayload=false + text non-empty + queue non-empty drops the dra
   // elsewhere). queue keeps steering.
   const agent = fakeAgent(['A', 'B'])
   agent.status = 'running'
-  const outcome = await steerAll(
-    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) }),
-    '   ',
-    { draftHasPayload: false },
-  )
+  const outcome = await steerAll(makeDeps({ agent: () => agent }), '   ', { draftHasPayload: false })
   assert.equal(outcome, 'ok')
   assert.deepEqual(agent.steered.map(m => m.id), ['A', 'B'],
     'verdict=false never rides the draft even when text is non-empty')
@@ -389,41 +306,9 @@ test('P0: draftHasPayload undefined keeps the historical semantics (the text IS 
   const agent = fakeAgent(['a'])
   agent.status = 'running'
   // No explicit payload verdict: the empty text used to steer the queue.
-  const outcome = await steerAll(makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) }), '')
+  const outcome = await steerAll(makeDeps({ agent: () => agent }), '')
   assert.equal(outcome, 'ok')
   assert.deepEqual(agent.steered.map(m => m.id), ['a'], 'historical behavior preserved when the verdict is absent')
-})
-
-test('onlyDraft survives queue splices during the guard (the queue is irrelevant)', async () => {
-  const agent = fakeAgent(['a'])
-  agent.status = 'running'
-  const guard = deferredGuard()
-  const pending = steerAll(
-    makeDeps({ agent: () => agent, guard: guard.promise }),
-    'draft',
-    { onlyDraft: true },
-  )
-  // A queue splice while the guard reads the file: onlyDraft must NOT abort
-  // stale — it never claimed the queue, so the queue changing is fine.
-  agent.state.nextTurn = [...agent.state.nextTurn, { id: 'b' }]
-  guard.resolve({ kind: 'ok' })
-  assert.equal(await pending, 'ok')
-  assert.deepEqual(agent.steered.map(m => m.text), ['draft'], 'the draft is steered')
-  assert.deepEqual(agent.state.nextTurn.map(m => m.id), ['a', 'b'], 'the queue is untouched')
-})
-
-test('onlyDraft with a forced guard still reports the force', async () => {
-  const agent = fakeAgent([])
-  agent.status = 'running'
-  const notices: string[] = []
-  const outcome = await steerAll(
-    makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'forced' }), notices }),
-    'draft',
-    { onlyDraft: true },
-  )
-  assert.equal(outcome, 'ok')
-  assert.deepEqual(agent.steered.map(m => m.text), ['draft'])
-  assert.ok(notices.some(note => note === 'error: forced'), notices.join(' | '))
 })
 
 test('sessionUnchanged requires the same agent object and generation', () => {
@@ -442,29 +327,29 @@ test('mergeDraft preserves BOTH texts when the editor changed mid-send', () => {
   // operation's restore or the user's re-typed input (the review's minimal
   // counterexample), so it must never short-circuit.
   assert.equal(mergeDraft('old submitted', 'old submitted'), 'old submitted\n\nold submitted')
-  // The user typed something new while the guard ran: the newer text
-  // stays on top AND the unsent submission is preserved beneath it —
+  // The user typed something new while the send was in flight: the newer
+  // text stays on top AND the unsent submission is preserved beneath it —
   // nothing may vanish silently.
-  const merged = mergeDraft('new draft typed while guard runs', 'old submitted')
-  assert.ok(merged.includes('new draft typed while guard runs'), merged)
+  const merged = mergeDraft('new draft typed during the send', 'old submitted')
+  assert.ok(merged.includes('new draft typed during the send'), merged)
   assert.ok(merged.includes('old submitted'), `the unsent submission must survive:\n${merged}`)
-  assert.equal(merged.indexOf('new draft typed while guard runs'), 0, 'the newer text leads')
+  assert.equal(merged.indexOf('new draft typed during the send'), 0, 'the newer text leads')
 })
 
-test('a MERGED draft gets the merged notice, never a force promise', async () => {
-  const agent = fakeAgent(['a'])
-  const guard = deferredGuard()
+test('a MERGED draft gets the merged notice, never the verbatim-retry notice', async () => {
+  const agentA = fakeAgent(['a'])
+  const agentB = fakeAgent(['z'])
   const notices: string[] = []
-  // The restore returns FALSE: the draft was merged with newer input, so
-  // the token fingerprint no longer matches — the next press cannot force.
-  const deps = makeDeps({ agent: () => agent, guard: guard.promise, notices })
+  const depsFactory = switchingIdentities({ first: agentA, second: agentB })
+  const deps = depsFactory()
+  deps.notify = (message, kind) => notices.push(`${kind}: ${message}`)
+  // The restore returns FALSE: the draft was merged with newer input, so a
+  // verbatim retry is not what happens next.
   const original = deps.restoreDraft
   deps.restoreDraft = () => { original('x'); return false }
-  const pending = steerAll(deps, 'draft')
-  guard.resolve({ kind: 'blocked', reason: 'diverged' })
-  assert.equal(await pending, 'blocked')
+  assert.equal(await steerAll(deps, 'draft'), 'stale')
   assert.ok(notices.some(note => note.includes('draft merged')), notices.join(' | '))
-  assert.ok(!notices.some(note => note.includes('blocked-diverged')), 'the force-promise notice must not be shown for a merged draft')
+  assert.ok(!notices.some(note => note.includes('changed while sending')), 'the verbatim-retry notice must not be shown for a merged draft')
 })
 
 test('mergeDraft handles empty submissions and whitespace input', () => {
@@ -517,102 +402,86 @@ test('mergeDraft keeps the user\'s NEW third draft AND both same-text submission
   assert.equal(afterSecond.match(/same/g)?.length, 2, `both unsent submissions must survive:\n${afterSecond}`)
 })
 
-test('two INDEPENDENT same-text operations on an EMPTY editor: both BLOCKED restores keep both copies', async () => {
+test('two INDEPENDENT same-text operations aborted stale: both restores keep both copies', async () => {
   // The review's minimal counterexample at the orchestration level: A and B
   // both submit `same` via Ctrl+S (the editor was cleared before each
-  // onSteer fired, tui-app.ts), both guards block, A restores first, B
+  // onSteer fired, tui-app.ts), both sends go stale, A restores first, B
   // second. Each operation hits exactly one terminal branch and restores
   // EXACTLY once — the second restore must append, never dedup.
-  const agent = fakeAgent(['a'])
-  const guardA = deferredGuard()
-  const guardB = deferredGuard()
   let editor = ''
   const restored: string[] = []
-  const depsA = editorRestoreDeps({ agent: () => agent, guard: guardA.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored })
-  const depsB = editorRestoreDeps({ agent: () => agent, guard: guardB.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored })
-  const pendingA = steerAll(depsA, 'same')
-  const pendingB = steerAll(depsB, 'same')
-  guardA.resolve({ kind: 'blocked', reason: 'diverged' })
-  guardB.resolve({ kind: 'blocked', reason: 'tail-mismatch' })
-  assert.equal(await pendingA, 'blocked')
-  assert.equal(await pendingB, 'blocked')
+  const agentA = fakeAgent(['a'])
+  const agentB = fakeAgent(['b'])
+  let agentReadsA = 0
+  // Op A: the surface switches away between A's snapshot and delivery.
+  const depsA = editorRestoreDeps({ agent: () => (agentReadsA += 1) <= 2 ? agentA : agentB, editor: () => editor, setEditor: (text) => { editor = text }, restored })
+  assert.equal(await steerAll(depsA, 'same'), 'stale')
+  // Op B runs against the settled surface; the generation bumps before
+  // its delivery (the same switch completes).
+  let generationReadsB = 0
+  const depsB = editorRestoreDeps({
+    agent: () => agentB,
+    generation: () => (generationReadsB += 1) === 1 ? 7 : 8,
+    editor: () => editor,
+    setEditor: (text) => { editor = text },
+    restored,
+  })
+  assert.equal(await steerAll(depsB, 'same'), 'stale')
   assert.deepEqual(restored, ['same', 'same'], 'each failed operation restores exactly once')
   assert.equal(editor.match(/same/g)?.length, 2, `both unsent submissions must survive:\n${editor}`)
 })
 
 test('two INDEPENDENT same-text operations plus a THIRD draft typed mid-flight: all three survive', async () => {
-  // While both guards are in flight the user types a third, different draft.
-  // The restores merge into it — nothing the user typed may be overwritten
-  // and neither unsent submission may be dropped.
-  const agent = fakeAgent(['a'])
-  const guardA = deferredGuard()
-  const guardB = deferredGuard()
-  let editor = ''
+  // Two sends go stale and BOTH restores merge into a third, different
+  // draft typed before them. All three contents survive — the user's
+  // newest text leads, neither unsent submission is dropped.
+  const agentA = fakeAgent(['a'])
+  const agentZ = fakeAgent(['z'])
+  let editor = 'third draft' // the user's own draft is what the user sees
   const restored: string[] = []
-  const pendingA = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardA.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
-  const pendingB = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardB.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
-  editor = 'third draft' // the user keeps typing while both guards read the file
-  guardA.resolve({ kind: 'blocked', reason: 'diverged' })
-  guardB.resolve({ kind: 'blocked', reason: 'diverged' })
-  assert.equal(await pendingA, 'blocked')
-  assert.equal(await pendingB, 'blocked')
+  let readsA = 0
+  const depsA = editorRestoreDeps({ agent: () => (readsA += 1) <= 2 ? agentA : agentZ, editor: () => editor, setEditor: (text) => { editor = text }, restored })
+  assert.equal(await steerAll(depsA, 'same'), 'stale')
+  let readsB = 0
+  const depsB = editorRestoreDeps({ agent: () => (readsB += 1) <= 2 ? agentZ : agentA, editor: () => editor, setEditor: (text) => { editor = text }, restored })
+  assert.equal(await steerAll(depsB, 'same'), 'stale')
   assert.equal(editor.match(/same/g)?.length, 2, `both unsent submissions must survive:\n${editor}`)
   assert.ok(editor.startsWith('third draft'), `the user's newest text leads:\n${editor}`)
-})
-
-test('two INDEPENDENT same-text operations aborted STALE (queue spliced mid-flight): both copies survive', async () => {
-  // Both guards pass but the queue changed while they read the file, so
-  // BOTH sends abort stale — and BOTH restore their own submission.
-  const agent = fakeAgent(['a'])
-  const guardA = deferredGuard()
-  const guardB = deferredGuard()
-  let editor = ''
-  const restored: string[] = []
-  const pendingA = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardA.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
-  const pendingB = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardB.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
-  agent.state.nextTurn = [...agent.state.nextTurn, { id: 'b' }] // splice while both guards run
-  guardA.resolve({ kind: 'ok' })
-  guardB.resolve({ kind: 'ok' })
-  assert.equal(await pendingA, 'stale')
-  assert.equal(await pendingB, 'stale')
-  assert.deepEqual(restored, ['same', 'same'], 'each stale send restores exactly once')
-  assert.equal(editor.match(/same/g)?.length, 2, `both unsent submissions must survive:\n${editor}`)
-})
-
-test('same-text operations across a SESSION SWITCH (one stale, one blocked): both copies survive', async () => {
-  // A's send is in flight when the user switches sessions (A aborts stale);
-  // B is submitted against the NEW session and blocks. Both restores merge
-  // into the same editor — text equality must not collapse them.
-  let current: FakeAgent | undefined = fakeAgent(['a'])
-  const guardA = deferredGuard()
-  const guardB = deferredGuard()
-  let editor = ''
-  const restored: string[] = []
-  const pendingA = steerAll(editorRestoreDeps({ agent: () => current as SteerAgentLike, guard: guardA.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
-  current = fakeAgent(['z']) // session switch while A's guard reads the file
-  const pendingB = steerAll(editorRestoreDeps({ agent: () => current as SteerAgentLike, guard: guardB.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'same')
-  guardA.resolve({ kind: 'ok' }) // re-validation fails → stale
-  guardB.resolve({ kind: 'blocked', reason: 'removed' })
-  assert.equal(await pendingA, 'stale')
-  assert.equal(await pendingB, 'blocked')
-  assert.deepEqual(restored, ['same', 'same'], 'each failed operation restores exactly once')
-  assert.equal(editor.match(/same/g)?.length, 2, `both unsent submissions must survive:\n${editor}`)
+  assert.equal(restored.length, 2, 'each failed operation restores exactly once')
 })
 
 test('two INDEPENDENT different-text operations failing in sequence: both survive', async () => {
-  const agent = fakeAgent(['a'])
-  const guardA = deferredGuard()
-  const guardB = deferredGuard()
+  const agentA = fakeAgent(['a'])
+  const agentB = fakeAgent(['b'])
+  const agentC = fakeAgent(['c'])
   let editor = ''
   const restored: string[] = []
-  const pendingA = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardA.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'alpha')
-  const pendingB = steerAll(editorRestoreDeps({ agent: () => agent, guard: guardB.promise, editor: () => editor, setEditor: (text) => { editor = text }, restored }), 'beta')
-  guardA.resolve({ kind: 'blocked', reason: 'diverged' })
-  guardB.resolve({ kind: 'blocked', reason: 'tail-mismatch' })
-  assert.equal(await pendingA, 'blocked')
-  assert.equal(await pendingB, 'blocked')
+  let readsA = 0
+  const depsA = editorRestoreDeps({ agent: () => (readsA += 1) <= 2 ? agentA : agentB, editor: () => editor, setEditor: (text) => { editor = text }, restored })
+  assert.equal(await steerAll(depsA, 'alpha'), 'stale')
+  let readsB = 0
+  const depsB = editorRestoreDeps({ agent: () => (readsB += 1) <= 2 ? agentB : agentC, editor: () => editor, setEditor: (text) => { editor = text }, restored })
+  assert.equal(await steerAll(depsB, 'beta'), 'stale')
   assert.deepEqual(restored, ['alpha', 'beta'], 'each failed operation restores exactly once')
   assert.ok(editor.includes('alpha') && editor.includes('beta'), `both submissions must survive:\n${editor}`)
+})
+
+test('same-text operations across a SESSION SWITCH: the stale copy survives untouched', async () => {
+  // A's send is captured against session S1, the user switches to B, and
+  // A's delivery hits the re-validation. A restores its submission into
+  // the editor; B's own submission was delivered normally before the
+  // switch's stale restore merged in.
+  const agentA = fakeAgent(['a'], 'session-a')
+  const agentB = fakeAgent(['z'], 'session-b')
+  let editor = ''
+  const restored: string[] = []
+  let reads = 0
+  const depsA = editorRestoreDeps({ agent: () => (reads += 1) <= 2 ? agentA : agentB, editor: () => editor, setEditor: (text) => { editor = text }, restored })
+  assert.equal(await steerAll(depsA, 'same'), 'stale')
+  // The NEW session (agentB) already received one queued message; the
+  // stale restore merged A's editor draft back.
+  assert.deepEqual(agentB.steered, [], 'the stale send must not deliver')
+  assert.equal(editor, 'same', 'the stale restore lands verbatim on the empty editor')
 })
 
 // ── review round 4: the session-transition write fence ─────────────────────
@@ -630,12 +499,28 @@ test('the transition fence refuses the write, restores the draft and never calls
   })
   const notices: string[] = []
   const restored: string[] = []
-  const deps = makeDeps({ agent: () => writespied as never, guard: Promise.resolve({ kind: 'ok' }), notices, restored })
+  const deps = makeDeps({ agent: () => writespied as never, notices, restored })
   deps.fence = () => true
   deps.fenceNotice = () => 'a session transition is in progress — try again in a moment'
   const outcome = await steerAll(deps, 'draft')
   assert.equal(outcome, 'stale')
   assert.deepEqual(writes, [], 'the fence must never let steer/followup reach the agent')
+  assert.deepEqual(restored, ['draft'], 'the draft comes back')
+  assert.deepEqual(notices, ['info: a session transition is in progress — try again in a moment'])
+})
+
+test('a TransitionInProgressError from the barrier refuses with the fence notice', async () => {
+  const agent = fakeAgent([])
+  const notices: string[] = []
+  const restored: string[] = []
+  const deps = makeDeps({ agent: () => agent, notices, restored })
+  deps.barrier = {
+    runWriter: async () => { throw new TransitionInProgressError() },
+  } as unknown as SessionOperationBarrier
+  deps.fenceNotice = () => 'a session transition is in progress — try again in a moment'
+  const outcome = await steerAll(deps, 'draft')
+  assert.equal(outcome, 'stale')
+  assert.deepEqual(agent.steered, [], 'no delivery during a transition')
   assert.deepEqual(restored, ['draft'], 'the draft comes back')
   assert.deepEqual(notices, ['info: a session transition is in progress — try again in a moment'])
 })
@@ -651,7 +536,7 @@ test('the fence is a no-op when no transition is in flight', async () => {
       return Reflect.get(target, prop, receiver)
     },
   })
-  const deps = makeDeps({ agent: () => spied as never, guard: Promise.resolve({ kind: 'ok' }) })
+  const deps = makeDeps({ agent: () => spied as never })
   deps.fence = () => false
   const outcome = await steerAll(deps, 'draft')
   assert.equal(outcome, 'ok')
@@ -683,7 +568,7 @@ test('P1: the empty-queue classic steer delivers through the SessionWriter, neve
     const agent = fakeAgent([])
     agent.status = status
     const writerCalls: string[] = []
-    const deps = makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) })
+    const deps = makeDeps({ agent: () => agent })
     deps.writer = {
       steer: (sessionId, messages) => { writerCalls.push(`steer:${sessionId}:${(messages[0] as { id: string }).id}`) },
       followup: (sessionId, message) => { writerCalls.push(`followup:${sessionId}:${(message as { id: string }).id}`) },

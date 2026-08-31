@@ -19,14 +19,13 @@ fields.
 | Concern | Lives in | State it owns |
 |---|---|---|
 | Layout, rendering, input routing, overlays | `src/tui-app.ts` (`TuiApp`) | messages, messageComponents render cache, themeRevision, expandedOverride, search overlay, status/todo/dock/queue state, working indicator |
-| Session divergence guard | `src/guard.ts` | GuardState cursor + one-time force token (pure, tested) |
 | Transcript folding / projection | `src/transcript.ts` | incremental read grouping, assistant/thinking entries, pending calls |
 | Exit contract | `src/exit.ts` | flushWithTimeout (pure, tested) |
 | Detached tasks | `src/detached.ts` | runDetached rejection classification (pure, tested) |
 | Diagnostics | `src/diag.ts` | file/stderr sinks |
 | Model menu | `src/model-menu.ts` | per-open disposed latch + AbortController |
 | Commands | `src/commands.ts` | command registry, skill disposers (generation-checked) |
-| The runner | `src/index.ts` (`apply`) | everything else: lifecycle controller + cleanup, session generation, guard token, callArgs, search state, local shell (`!` submits its command+output to the session via `shell-context.ts`; `!!` stays local), external editor, event firehose |
+| The runner | `src/index.ts` (`apply`) | everything else: lifecycle controller + cleanup, session generation, callArgs, search state, local shell (`!` submits its command+output to the session via `shell-context.ts`; `!!` stays local), external editor, event firehose |
 
 ## Target controllers (extraction order, one responsibility per commit)
 
@@ -37,9 +36,10 @@ fields.
    closure's lifecycle block into a class with an explicit dependency
    interface (`{ diag, app, signal }`).
 2. **SessionController** — create/resume/switch, `sessionGeneration` bump +
-   per-session teardown (callArgs, search, guard token, expansion overrides),
-   guard wiring, event subscription. Depends on `guard.ts` (already pure) and
-   the generation accessor (already on `TuiCommandRunner`).
+   per-session teardown (callArgs, search, expansion overrides),
+   write-fence wiring, event subscription. Depends on
+   `submit-ack.ts` / `submit-latency.ts` (already pure) and the generation
+   accessor (already on `TuiCommandRunner`).
 3. **InputDispatcher** — editor submit, shortcuts (Ctrl+S/Alt+↑/Esc), local
    shell routing (`!` context vs `!!` local lives in `shell-context.ts`,
    already pure). Depends on `bounded-output.ts` / `shell-words.ts` (already

@@ -10,7 +10,7 @@
 
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
-M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.11 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default) and host-file (`@`-mention discovery + send-time canonicalization); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
+M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.11 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default) and host-file (`@`-mention discovery + send-time canonicalization); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/transition/barrier) untouched; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
 M2  NOT STARTED   (experimental Remote backend against an existing DSH Host)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
@@ -29,8 +29,8 @@ Direct rollback:           available
 
 `dsh --profile pi-tui` runs in-process: the TUI consumes Host services
 directly (`ctx.get(...)` — see `docs/client-server-coupling.md` for the
-inventory). Session ownership (owner.lock, lease/cooling, PINNED, divergence
-guard, transition gate, operation barrier) is Direct-mode machinery and stays
+inventory). Session ownership (owner.lock, lease/cooling, PINNED,
+transition gate, operation barrier) is Direct-mode machinery and stays
 authoritative until M8.
 
 ## Target
@@ -82,13 +82,13 @@ complete raw transcript to the Client for recompression.
 |---|---|---|
 | M0 | Guardrails (AGENTS.md), this doc, coupling inventory, `scripts/client-boundary-gate.mjs` (baseline + no-new-debt) | Zero runtime behavior change; no new runtime dependency; all tests green |
 | M1 | Semantic ports + Direct adapters (subagent first, then session read/write/lifecycle, catalog/config, interaction); narrow `TuiCommandContext` | Per domain: old-behavior test + adapter contract test both green; backend stays `direct` |
-| M2 | Experimental Remote Adapter against an existing DSH Host: Semantic Port reads first, then writes, then approval/question via the DSH Connection | Shadow parity on read paths; no session lock/lease/guard in Remote mode |
+| M2 | Experimental Remote Adapter against an existing DSH Host: Semantic Port reads first, then writes, then approval/question via the DSH Connection | Shadow parity on read paths; no session lock/lease in Remote mode |
 | M3 | Experimental in-process wire: separate Host/Client Cordis contexts, DSH Connection over the Semantic Port, no TCP | Wire parity on the transcript parity suite; Host composition stays experimental |
 | M4 | Local Host process / IPC split; crash semantics (TUI↔Host, Ctrl+C/D, SIGTERM, HMR, parent/child death) | IPC integration lane green; ordinary local mode: TUI owns ephemeral Host lifecycle |
 | M5 | `dsh-pi-tui attach <url>`; localhost + SSH tunnel only; remote `!` disabled until a Host-side shell seam; remote external editor unsupported | Security review; fail-closed locality checks |
 | M6 | Production dual stack: `--backend wire-local` opt-in, direct default; extension CI matrix (direct × wire-local) | One stable observation cycle; no perceptible regression |
 | M7 | Default flip to wire-local; `--backend direct` rollback kept for ≥ 1 release | Rollback verified on the release train |
-| M8 | Direct ownership retirement (lock/lease/PINNED/guard/transition/barrier) | Proof: all TUI writes Host-owned, cross-client concurrency safe (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) |
+| M8 | Direct ownership retirement (lock/lease/PINNED/transition/barrier) | Proof: all TUI writes Host-owned, cross-client concurrency safe (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) |
 
 The former in-process client wording is obsolete upstream architecture, not an
 implementation target. Redesign the adapter around the DSH Connection, official

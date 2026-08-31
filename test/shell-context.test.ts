@@ -1,8 +1,8 @@
 /**
  * Headless tests for the `!` shell context submission (kimi parity): the
- * mode classification, the model-facing submit text, and the guard/TOCTOU
- * races — a blocked write keeps the card, a session switch during the
- * guard aborts `stale`, and only an accepted send clears the card.
+ * mode classification, the model-facing submit text, and the TOCTOU
+ * races — a session switch mid-send aborts `stale`, the transition fence
+ * refuses the write, and only an accepted send clears the card.
  * @module @xmoon76/dsh-pi-tui/shell-context.test
  */
 
@@ -16,10 +16,8 @@ import {
   submitShellResult,
   type ShellSubmitAgentLike,
   type ShellSubmitDeps,
-  type ShellSubmitGuard,
 } from '../src/shell-context.ts'
-
-type GuardVerdict = { kind: 'ok' | 'forced' } | { kind: 'blocked'; reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed' }
+import { TransitionInProgressError, type SessionOperationBarrier } from '../src/session-operation-barrier.ts'
 
 interface FakeAgent extends ShellSubmitAgentLike {
   followed: { id: string; text: string }[]
@@ -37,7 +35,6 @@ function fakeAgent(id = 'session-shell'): FakeAgent {
 function makeDeps(options: {
   agent: () => ShellSubmitAgentLike | undefined
   generation?: () => number
-  guard: Promise<GuardVerdict>
 }): {
   deps: ShellSubmitDeps
   notices: { message: string; kind: 'info' | 'error' }[]
@@ -49,15 +46,23 @@ function makeDeps(options: {
   const deps: ShellSubmitDeps = {
     currentAgent: options.agent,
     currentGeneration: options.generation ?? (() => 1),
-    guard: { run: () => options.guard },
     notify: (message, kind) => { notices.push({ message, kind }) },
-    blockedNotice: (reason) => `blocked:${reason}`,
-    forcedNotice: () => 'forced',
     staleNotice: () => 'stale',
     createMessage: (text) => ({ id: `msg-${text.length}`, text }),
     onSubmitted: () => { cleared.count += 1 },
   }
   return { deps, notices, cleared }
+}
+
+/** A fake barrier whose runWriter waits on a manual resolve: the write is
+ * IN FLIGHT (draining) until the test releases it. */
+function stallingBarrier(): { barrier: SessionOperationBarrier; release: () => void } {
+  let resolve!: () => void
+  const promise = new Promise<void>(res => { resolve = res })
+  const barrier = {
+    runWriter: (_sessionId: string, task: () => unknown) => promise.then(task),
+  } as unknown as SessionOperationBarrier
+  return { barrier, release: () => resolve() }
 }
 
 // --- classification ---
@@ -87,9 +92,9 @@ test('formatShellSubmitText echoes the command $ -style above the result', () =>
 
 // --- submitShellResult: happy path ---
 
-test('submitShellResult: ok guard follows up and clears the card', async () => {
+test('submitShellResult: accepted send follows up and clears the card', async () => {
   const agent = fakeAgent()
-  const { deps, cleared } = makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) })
+  const { deps, cleared } = makeDeps({ agent: () => agent })
   const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
   assert.equal(outcome, 'ok')
   assert.equal(agent.followed.length, 1)
@@ -97,61 +102,29 @@ test('submitShellResult: ok guard follows up and clears the card', async () => {
   assert.equal(cleared.count, 1, 'the settled card is cleared once the send is accepted')
 })
 
-test('submitShellResult: forced guard still follows up and notifies', async () => {
-  const agent = fakeAgent()
-  const { deps, notices, cleared } = makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'forced' }) })
-  const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
-  assert.equal(outcome, 'ok')
-  assert.equal(agent.followed.length, 1)
-  assert.equal(cleared.count, 1)
-  assert.equal(notices.some(n => n.message === 'forced' && n.kind === 'error'), true)
-})
-
 test('submitShellResult: no agent is a no-op (no card to clear)', async () => {
-  const { deps, cleared } = makeDeps({ agent: () => undefined, guard: Promise.resolve({ kind: 'ok' }) })
+  const { deps, cleared } = makeDeps({ agent: () => undefined })
   const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
   assert.equal(outcome, 'ok')
   assert.equal(cleared.count, 0)
 })
 
-// --- submitShellResult: blocked keeps the card ---
-
-for (const reason of ['diverged', 'tail-mismatch', 'unreadable', 'removed'] as const) {
-  test(`submitShellResult: ${reason} block notifies, never follows up, keeps the card`, async () => {
-    const agent = fakeAgent()
-    const { deps, notices, cleared } = makeDeps({
-      agent: () => agent,
-      guard: Promise.resolve({ kind: 'blocked', reason }),
-    })
-    const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
-    assert.equal(outcome, 'blocked')
-    assert.equal(agent.followed.length, 0, 'a blocked send must not reach the agent')
-    assert.equal(cleared.count, 0, 'the card stays visible for review')
-    assert.equal(notices.length, 1)
-    assert.equal(notices[0]!.message, `blocked:${reason}`)
-    assert.equal(notices[0]!.kind, 'error')
-  })
-}
-
 // --- submitShellResult: TOCTOU session switch ---
 
-test('submitShellResult: a session switch during the guard aborts stale', async () => {
+test('submitShellResult: a session switch mid-send aborts stale', async () => {
   const agentA = fakeAgent('session-a')
   const agentB = fakeAgent('session-b')
-  let live: ShellSubmitAgentLike = agentA
-  let generation = 1
+  // The send reads the surface three times: the wrapper's sessionId probe
+  // and the core's capture (both see session-a), then the re-validation
+  // (session-b) — the deterministic model of a session switch in between.
+  // The identity check must refuse.
+  let reads = 0
   const { deps, notices, cleared } = makeDeps({
-    agent: () => live,
-    generation: () => generation,
-    guard: Promise.resolve({ kind: 'ok' }),
+    agent: () => (reads += 1) <= 2 ? agentA : agentB,
   })
-  const pending = submitShellResult(deps, '$ ls\n[exit 0]')
-  // The guard read is in flight; the user switched sessions.
-  live = agentB
-  generation = 2
-  const outcome = await pending
+  const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
   assert.equal(outcome, 'stale')
-  assert.equal(agentA.followed.length, 0, 'nothing is written to the session the guard checked')
+  assert.equal(agentA.followed.length, 0, 'nothing is written to the session the identity checked')
   assert.equal(agentB.followed.length, 0, 'nothing is written to the new session either')
   assert.equal(cleared.count, 0, 'the card stays: the output was not submitted')
   assert.equal(notices.some(n => n.message === 'stale'), true)
@@ -171,7 +144,7 @@ test('localShellSandboxPreferenceOf defaults to bypass and honors only sandbox',
 
 test('the transition fence refuses the shell followup (output stays on the card)', async () => {
   const agent = fakeAgent()
-  const { deps, notices, cleared } = makeDeps({ agent: () => agent, guard: Promise.resolve({ kind: 'ok' }) })
+  const { deps, notices, cleared } = makeDeps({ agent: () => agent })
   deps.fence = () => true
   deps.fenceNotice = () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles'
   const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
@@ -180,4 +153,34 @@ test('the transition fence refuses the shell followup (output stays on the card)
   assert.equal(cleared.count, 0, 'the card stays (the output is not lost)')
   assert.equal(notices.at(-1)?.kind, 'info')
   assert.ok(notices.at(-1)!.message.includes('transition is in progress'))
+})
+
+// ── convergence phase 3: the write itself runs inside the barrier ──────────
+
+test('submitShellResult: TransitionInProgressError from the barrier refuses with the fence notice', async () => {
+  const agent = fakeAgent()
+  const { deps, notices, cleared } = makeDeps({ agent: () => agent })
+  deps.barrier = {
+    runWriter: async () => { throw new TransitionInProgressError() },
+  } as unknown as SessionOperationBarrier
+  deps.fenceNotice = () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles'
+  const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
+  assert.equal(outcome, 'stale')
+  assert.equal(agent.followed.length, 0, 'no followup during a transition')
+  assert.equal(cleared.count, 0, 'the card stays (the output is not lost)')
+  assert.equal(notices.at(-1)?.kind, 'info')
+  assert.ok(notices.at(-1)!.message.includes('transition is in progress'))
+})
+
+test('submitShellResult delivers normally after the barrier drains', async () => {
+  const agent = fakeAgent()
+  const { deps, cleared } = makeDeps({ agent: () => agent })
+  const { barrier, release } = stallingBarrier()
+  deps.barrier = barrier
+  const pending = submitShellResult(deps, '$ ls\n[exit 0]')
+  release()
+  const outcome = await pending
+  assert.equal(outcome, 'ok')
+  assert.equal(agent.followed.length, 1)
+  assert.equal(cleared.count, 1)
 })

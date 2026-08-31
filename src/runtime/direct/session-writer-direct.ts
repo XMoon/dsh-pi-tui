@@ -8,7 +8,7 @@
  * session-write path that touches `ctx`; a Remote adapter will implement
  * the same interface over the wire.
  *
- * Steer ORCHESTRATION (guard / fence / barrier — steerAll in src/steer.ts)
+ * Steer ORCHESTRATION (fence / barrier — steerAll in src/steer.ts)
  * stays in the runner; the FINAL steer delivery goes through this port.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.

@@ -7,8 +7,8 @@
  * adapter resolves the agent internally; a Remote adapter maps the
  * session id to the official DSH API.
  *
- * The STEER ORCHESTRATION stays in the Direct runner (divergence guard,
- * transition fence, operation barrier — the steerAll seam in
+ * The STEER ORCHESTRATION stays in the Direct runner (transition
+ * fence, operation barrier — the steerAll seam in
  * src/steer.ts); its FINAL delivery (steer batch / followup / queue
  * removal) goes through THIS port, so Direct and Remote share the same
  * delivery semantics.
@@ -26,9 +26,9 @@ export interface SessionWriter {
   /** Deliver a prepared user message to the session's agent. */
   followup(sessionId: string, message: PreparedMessage): void
   /** Steer the queued messages + draft into the session's next step (the
-   * FINAL delivery of a steer — the Direct guard/fence/barrier
-   * orchestration lives in the runner's steerAll, which calls this for
-   * the actual delivery). */
+   * FINAL delivery of a steer — the Direct fence/barrier orchestration
+   * lives in the runner's steerAll, which calls this for the actual
+   * delivery). */
   steer(sessionId: string, messages: readonly PreparedMessage[]): void
   /** Remove one queued message (pull-back; by id, never a clear). */
   dequeue(sessionId: string, messageId: string): void

@@ -12,7 +12,7 @@
  * resolved through the user-orchestrable keymap; the single source of truth
  * for default keys is src/keybindings/definitions.ts and the effective map
  * is inspectable at runtime with `/keybindings`. User-FACING strings derive
- * key labels through the keymap's keyHint() (e.g. the guard notices); key
+ * key labels through the keymap's keyHint(); key
  * names in comments are shorthand for the default binding and must never be
  * relied on as the live binding.
  * @module @xmoon76/dsh-pi-tui
@@ -21,7 +21,7 @@
 import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -106,7 +106,7 @@ import { FooterCommandRunner } from './footer/command-runner.ts'
 import { color, type ColorPalette } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
-import type { AppKeybindingId } from './keybindings/types.ts'
+
 import { normalizedKeyToKeyId } from './keybindings/manager.ts'
 import { Text } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
@@ -176,18 +176,7 @@ import {
   type HumanSkillCatalog,
   type SkillCatalogContext,
 } from './skill-catalog.ts'
-import {
-  checkDivergence,
-  draftFingerprint,
-  forceTokenAllows,
-  freshGuardState,
-  mintForceToken,
-  type GuardAction,
-  type GuardForceToken,
-  type GuardPersistenceLike,
-  type GuardSessionLike,
-  type GuardState,
-} from './guard.ts'
+
 import {
   acquireSessionLock,
   type SessionLockInfo,
@@ -201,6 +190,8 @@ import {
   type RewindLiveIdentity,
 } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
+import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from './submit-ack.ts'
+import { SubmitLatencyTracker } from './submit-latency.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
 import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
 import { OpenLockHolder } from './open-locks.ts'
@@ -927,17 +918,6 @@ const DANGER_PATTERNS: readonly RegExp[] = [
   /\bcurl\b[^\n|]*\|\s*(ba)?sh\b/,
 ]
 
-/** Divergence-guard notices (user-facing, English like the rest of the TUI).
- * The key labels are the EFFECTIVE keymap hints (defaults: Enter for
- * submit, Ctrl+S for steer) — a user remap updates the notice. */
-const GUARD_BLOCKED_NOTIFY = (action: GuardAction, submitKey: string, steerKey: string): string =>
-  `This session may be open in another dsh process (TUI/web); send blocked. Press ${action === 'submit' ? submitKey : steerKey} again to force (may corrupt the session log)`
-const GUARD_TAIL_MISMATCH_NOTIFY = (action: GuardAction, submitKey: string, steerKey: string): string =>
-  `This session file was rewritten by another process (same event count, different content); send blocked. Press ${action === 'submit' ? submitKey : steerKey} again to force (may corrupt the session log)`
-const GUARD_FORCED_NOTIFY = 'Forced send — the session may be written by another process; the log may be damaged'
-const GUARD_REMOVED_NOTIFY = (action: GuardAction, submitKey: string, steerKey: string): string =>
-  `This session's log was removed externally — it can no longer be persisted. Press ${action === 'submit' ? submitKey : steerKey} again to continue without persistence (restart to recover)`
-
 /** Hard cap for the /exit session flush: a hung provider must not trap the
  * user; after this the TUI exits and warns that the tail may be lost. */
 const EXIT_FLUSH_TIMEOUT_MS = 10_000
@@ -1447,7 +1427,7 @@ export function apply(ctx: Context, config: Config): void {
   // aborted by user exit, by the ctx.effect cleanup (loader hot-reload
   // unloads the row), and by startup failure. Every long-running load shares
   // its signal; per-action cancellation rides child controllers (the local
-  // shell) or generation checks (guard tokens, menu latches).
+  // shell) or generation checks (menu latches).
   const lifecycleController = new AbortController()
 
   void (async () => { // allowlist: startup lifecycle root — see AGENTS.md
@@ -1626,8 +1606,8 @@ export function apply(ctx: Context, config: Config): void {
       session: sessionId ?? '(deferred)',
       preset: launchPreset ?? 'default',
       // Host capability check (plan stage K): the services the TUI surface
-      // consumes. Each one degrades locally when absent (divergence guard →
-      // unavailable, presets → default composition, commands → plain
+      // consumes. Each one degrades locally when absent (presets → default
+      // composition, commands → plain
       // messages, shell → spawn fallback), so this line is diagnostic, not
       // a mount gate — the TUI never fails to mount without explanation.
       services: [
@@ -1655,7 +1635,8 @@ export function apply(ctx: Context, config: Config): void {
     // the verified cooling release, and a clean exit leaves touched locks
     // as stale records for the next opener's takeover).
     // `undefined` means either no session yet (deferred start) or no lock
-    // (deployment cannot lock — the guard still protects the write path).
+    // (deployment cannot lock — the fail-closed resume/refuse rules cover
+    // it for existing sessions).
     // The multi-slot open-lock registry: a transition may hold the OLD and
     // the TARGET lock at once (the old lock is never released before the
     // target is acquired — releasing first opened a vacuum window where
@@ -1665,8 +1646,8 @@ export function apply(ctx: Context, config: Config): void {
     // The /proc probe for stale-lock takeover, created once per mount.
     const lockProc = createProcProbe()
     /** One open-lock acquisition's settled result. `unavailable` and
-     * `refused` are DISTINCT: an existing session may proceed without a
-     * lock (the divergence guard is the backstop), but a FRESH session's
+     * `refused` are DISTINCT: an existing session may proceed sessionless
+     * itself (nothing is written without a session), but a FRESH session's
      * target-lock-before-create transaction must see `acquired` — anything
      * else means the child would be published without its lock (review
      * round 7: the old `string | undefined` return conflated "locked" with
@@ -1798,9 +1779,9 @@ export function apply(ctx: Context, config: Config): void {
         // Refuse to resume a session another live dsh process holds: the
         // second open makes persistence synthesize interrupted-turn closers
         // into the shared log while the first process keeps appending from
-        // its own in-memory seq — the classic seq-collision corruption the
-        // write-path guard cannot catch (the second opener's memory matches
-        // the file). Refusing here avoids the collision entirely.
+        // its own in-memory seq — the classic seq-collision corruption (the
+        // second opener's memory matches the file, so no post-open check
+        // would see it). Refusing here avoids the collision entirely.
         const lock = acquireOpenLock(sessionId, lockHeader)
         if (lock.kind === 'refused') {
           throw new SessionLockRefusedError(lock.message)
@@ -1808,8 +1789,7 @@ export function apply(ctx: Context, config: Config): void {
         // Fail-closed (convergence plan phase 2): a writable existing
         // session REQUIRES its physical owner lock — an unavailable lock
         // means this deployment cannot guarantee single-owner writes, so
-        // the resume is refused instead of proceeding with only the
-        // divergence guard as a stand-in.
+        // the resume is refused instead of proceeding unowned.
         if (lock.kind === 'unavailable') {
           throw new SessionLockRefusedError(`cannot lock session ${sessionId} (${lock.reason}); refusing to resume without an owner lock`)
         }
@@ -1924,95 +1904,7 @@ export function apply(ctx: Context, config: Config): void {
       initialSkills = resolution.skills
       surfaceNotice = resolution.notice
     }
-    // Cross-process divergence guard state for the live session; reset on
-    // every session switch (the cursor is per-session).
-    let guardState: GuardState = freshGuardState()
-    // One-time force-override token (replaces the never-reliable boolean):
-    // a blocked submission mints it binding session/revision/action/draft;
-    // the second identical operation consumes it and forces through. Cleared
-    // by every event that could invalidate it: a clean guard read (new file
-    // revision), session switch, turn boundaries, cancel, and TUI exit.
-    let guardToken: GuardForceToken | undefined
-    /** The guard verdict for one submission: proceed (ok/unavailable), force
-     * through (forced), or refuse with the specific divergence kind. */
-    type GuardVerdict =
-      | { kind: 'ok' }
-      | { kind: 'forced' }
-      | { kind: 'unavailable' }
-      | { kind: 'blocked'; reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed' }
-    /**
-     * Run the divergence guard before a session-writing submission. Returns
-     * 'ok' to proceed, 'blocked' to refuse (the caller restores the draft),
-     * 'forced' when the user overrode a still-bad state, and 'unavailable'
-     * when the deployment cannot guard (proceed). `action` distinguishes
-     * Enter submit from Ctrl+S save; `draft` feeds the fingerprint so an
-     * edited draft can never ride an old token.
-     */
-    const guardSend = async (action: GuardAction, draft: string): Promise<GuardVerdict> => {
-      if (liveAgent === undefined) return { kind: 'ok' }
-      const session: GuardSessionLike = {
-        id: liveAgent.session.id,
-        header: liveAgent.session.header,
-        events: liveAgent.session.events,
-      }
-      const persistence = ctx.get('sessionPersistence') as GuardPersistenceLike | undefined
-      const outcome = await checkDivergence(persistence, session, (path) => statSync(path), guardState)
-      const candidate = {
-        sessionId: session.id,
-        revision: outcome.revision,
-        action,
-        draftFingerprint: draftFingerprint(draft),
-      }
-      const forceOrBlock = (reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed'): GuardVerdict => {
-        const token = guardToken
-        if (forceTokenAllows(token, candidate)) {
-          const fromRevision = token.revision
-          guardToken = undefined
-          diag.info('guard forced', { session: session.id, action, fromRevision, toRevision: outcome.revision })
-          return { kind: 'forced' }
-        }
-        guardToken = mintForceToken(candidate)
-        return { kind: 'blocked', reason }
-      }
-      switch (outcome.kind) {
-        case 'ok':
-          // A clean read observed a (possibly new) file revision: any older
-          // token is stale by construction.
-          guardToken = undefined
-          diag.debug('guard ok', { session: session.id, fileEvents: outcome.fileEvents ?? 0, memoryEvents: session.events.length })
-          return { kind: 'ok' }
-        case 'diverged':
-          diag.warn('guard diverged', {
-            session: session.id,
-            fileEvents: outcome.fileEvents,
-            memoryEvents: outcome.memoryEvents,
-          })
-          return forceOrBlock('diverged')
-        case 'tail-mismatch':
-          diag.warn('guard tail mismatch', {
-            session: session.id,
-            fileEvents: outcome.fileEvents,
-            memoryEvents: outcome.memoryEvents,
-            fileTail: outcome.fileTail,
-            memoryTail: outcome.memoryTail,
-          })
-          return forceOrBlock('tail-mismatch')
-        case 'removed':
-          // The log was deleted externally while this process held it: the
-          // next append would ENOENT. Block with a dedicated notice; the
-          // second identical Enter can still force (may lose persistence).
-          diag.warn('guard removed', { session: session.id, revision: outcome.revision })
-          return forceOrBlock('removed')
-        case 'unreadable':
-          diag.error('guard unreadable', { session: session.id, error: outcome.error })
-          return forceOrBlock('unreadable')
-        case 'unavailable':
-          guardToken = undefined
-          return { kind: 'unavailable' }
-      }
-    }
-    /** The preset the live agent runs on. Prefer DSH's composed roster
-     * identity so a legal custom `code` cannot be confused with old data. */
+    /** The preset the live agent runs on, when the deployment composes one. */
     const currentPreset = (): string | undefined => {
       if (liveAgent === undefined) return undefined
       const presets = ctx.get('agentPresets') as {
@@ -2106,8 +1998,8 @@ export function apply(ctx: Context, config: Config): void {
      *      be interpreted as "the child never happened" (`dispose()` stops
      *      an agent but never deletes a persisted session; dsh has no
      *      durable rollback);
-     *   4. COMMIT — a synchronous critical section (guard reset,
-     *      generation bump, live handle/agent replacement — the target
+     *   4. COMMIT — a synchronous critical section (generation bump, live
+     *      handle/agent replacement — the target
      *      lock was acquired in phase 2 and stays held; NO lock changes
      *      happen here, review round 10) with no awaits between its
      *      steps;
@@ -2150,8 +2042,11 @@ export function apply(ctx: Context, config: Config): void {
         releaseUntouchedTarget: (sessionId) => leaseManager.releaseUntouched(sessionId),
         markTargetTouched: (sessionId) => leaseManager.markTouched(sessionId),
         commit: (next) => {
-          guardState = freshGuardState()
-          guardToken = undefined
+          // A new session owns the surface: the OLD session's pending
+          // submit ack must never leak into it, and its latency timeline
+          // is meaningless now.
+          settleLocalSubmitAck('session switched')
+          submitLatencyTracker.reset()
           // A new session owns the surface: bump the generation so late
           // async work from the old session cannot commit, and clear
           // old-session state.
@@ -2708,8 +2603,6 @@ export function apply(ctx: Context, config: Config): void {
     const cleanup = (): void => {
       if (cleanedUp) return
       cleanedUp = true
-      // A pending force token is stale once the process tears down.
-      guardToken = undefined
       // The touched-session physical locks are DELIBERATELY NOT released
       // here (convergence plan phase 7): a clean TUI exit is not a proof
       // that the DSH persistence tree is quiet, so releasing an active /
@@ -2793,17 +2686,27 @@ export function apply(ctx: Context, config: Config): void {
     /**
      * Run a `!` shell command. `!` (context mode) runs the command and then
      * submits the completed command+output to the session as an ordinary
-     * guarded user message (kimi parity: the model sees both on the next
+     * user message (kimi parity: the model sees both on the next
      * turn; the result wakes a turn but is never steered into a running
      * one); `!!` (local mode) runs purely off-session — the card is the
      * only record (pi's excluded-from-context escape hatch).
      */
-    const runLocalShell = (text: string): void => {
+    const runLocalShell = (text: string, ackToken: number | undefined): void => {
       const includeInContext = shellModeOf(text) === 'context'
       const command = shellCommandOf(text)
       if (command === '') return
+      // NOTE: the context-mode submit ack is armed AT THE GESTURE in
+      // dispatchUserInput (before ensureSession) — NEVER here, or the T0
+      // baseline would rebase after the session create. `ackToken` scopes
+      // every terminal settle below to THIS gesture: a newer submission
+      // (bumped epoch) makes them no-ops.
+      const shellTerminalAck = (reason: string): void => {
+        if (ackToken === undefined) return
+        settleLocalSubmitAck(reason, { token: ackToken, terminal: true })
+      }
       // The generation the run STARTED under: a session switch while the
       // command runs must not post the output into the new session (the
+      // switch already cleared the card; the notify explains what happened).
       // switch already cleared the card; the notify explains what happened).
       const generationAtRun = sessionGeneration
       localShellController?.abort()
@@ -2827,45 +2730,33 @@ export function apply(ctx: Context, config: Config): void {
         if (localShellController?.signal === localSignal) localShellController = undefined
       }
       /**
-       * Submit the completed run to the session (context mode only): guard
-       * → re-validate → followup. Blocked keeps the card (the output stays
-       * visible; the identical `!` re-run forces through its one-time guard
-       * token); accepted clears the settled card — the transcript's user
-       * row becomes the record. An owned workflow: the outcome drives the
-       * notify and the card — runOwned (AGENTS.md), never a bare void.
+       * Submit the completed run to the session (context mode only):
+       * re-validate → followup. Accepted clears the settled card — the
+       * transcript's user row becomes the record. An owned workflow: the
+       * outcome drives the notify and the card — runOwned (AGENTS.md),
+       * never a bare void.
        */
       const submitResult = (result: string): void => {
         // A session switch while the command ran: the output must not be
         // posted into a session the user has left (the switch already
-        // cleared the card; the notify explains what happened). The
-        // guard-window switch (between the guard read and the followup) is
-        // caught by submitShellResult's own re-validation.
+        // cleared the card; the notify explains what happened). A session
+        // switch between the check and the followup is caught by
+        // submitShellResult's own re-validation. The ack row (armed at the
+        // gesture) is TERMINAL here: nothing will be written for the old
+        // session.
         if (sessionGeneration !== generationAtRun) {
+          shellTerminalAck('shell submit skipped after a session switch')
           app.notify('the session changed while the command ran — the output was not submitted', 'error')
           return
         }
         const submitted = formatShellSubmitText(command, result)
+        // T1 BEFORE the dispatch: same ordering rule as the Enter path —
+        // the ack row keeps waiting for the authoritative event (plan D).
+        submitLatencyTracker.mark(liveAgent?.session.id, 'dispatch')
         runOwned('shell submit', () => submitShellResult({
           currentAgent: () => liveAgent as unknown as ShellSubmitAgentLike | undefined,
           currentGeneration: () => sessionGeneration,
-          guard: {
-            run: async (identity) => {
-              const verdict = await guardSend('submit', identity)
-              if (verdict.kind === 'blocked') {
-                return { kind: 'blocked', reason: verdict.reason }
-              }
-              return { kind: verdict.kind === 'forced' ? 'forced' : 'ok' }
-            },
-          },
           notify: (message, kind) => app.notify(message, kind),
-          blockedNotice: (reason) => reason === 'removed'
-            ? `This session's log was removed externally — the command output was not submitted (it stays on the card). Run the same ! command again to force`
-            : reason === 'tail-mismatch'
-              ? 'This session file was rewritten by another process (same event count, different content) — the command output was not submitted (it stays on the card). Run the same ! command again to force (may corrupt the session log)'
-              : reason === 'unreadable'
-                ? "This session's log could not be read (locked or corrupt) — the command output was not submitted (it stays on the card). Run the same ! command again to force (may corrupt the session log)"
-                : 'This session may be open in another dsh process (TUI/web) — the command output was not submitted (it stays on the card). Run the same ! command again to force (may corrupt the session log)',
-          forcedNotice: () => GUARD_FORCED_NOTIFY,
           staleNotice: () => 'the session changed while the submission was being checked — the output was not submitted',
           // The session-transition write fence (review round 4): while a
           // transition is in flight the followup would target a session
@@ -2877,13 +2768,34 @@ export function apply(ctx: Context, config: Config): void {
             content: [{ type: 'text', text }],
             source: { kind: 'user' },
           }),
-          onSubmitted: () => app.clearSettledLocalMessages(),
+          onSubmitted: () => {
+            app.clearSettledLocalMessages()
+            // The write was accepted. The ACK ROW STAYS until the first
+            // authoritative event (the inbox insert) settles it — never
+            // cleared at delivery time (plan D lifecycle: an event or a
+            // failure ends the wait, not the send).
+          },
         }, submitted), {
           diag,
           sessionId: () => liveAgent?.session.id,
+          // A stalled shell submit (stale identity / transition fence /
+          // no agent) wrote nothing: terminal — the pending row must not
+          // outlive the submission (plan D exit enumeration).
+          onResult: (outcome) => {
+            if (outcome !== 'ok') shellTerminalAck(`shell submit ${outcome}`)
+            else if (liveAgent === undefined) shellTerminalAck('shell submit without an agent')
+          },
+          // runOwned routes cancellations EXCLUSIVELY here: a
+          // cancellation-shaped rejection from the write bypasses
+          // onResult/onError, so the ack row armed at the gesture must
+          // end terminally (the caller's card keeps the output).
+          onCancel: () => {
+            shellTerminalAck('shell submit cancelled')
+          },
           onError: (error) => {
-            // The submission failed before the guard ran: keep the card
+            // The submission failed before the write ran: keep the card
             // (the output is not lost) and surface the reason.
+            shellTerminalAck('shell submit failure')
             app.notify(`shell submit failed: ${safeErrorMessage(error)}`, 'error')
           },
         })
@@ -2904,7 +2816,23 @@ export function apply(ctx: Context, config: Config): void {
           status,
         })
         // Context mode submits every settled outcome except an abort (the
-        // run was cancelled; the partial output is noise).
+        // run was cancelled; the partial output is noise). An aborted run
+        // is also TERMINAL for the submit acknowledgement (plan D exit
+        // enumeration): the aborted gate suppresses submitResult, so the
+        // pending row would otherwise outlive the gesture forever.
+        //
+        // EVERY settle caller funnels through HERE — including the
+        // synchronous `shell.resolve`/`spawn` catches and the child
+        // `error` handler — so no additional ack settle is needed at
+        // those sites: a non-abort failure continues into submitResult →
+        // submitShellResult, whose onResult/onError/onCancel sinks end
+        // the ack (or the authoritative event does), and an abort ends
+        // it through the gate below. Adding token settles at the catch
+        // sites instead would pre-clear the row and break the "ack
+        // survives until the authoritative event" contract.
+        if (includeInContext && localSignal.aborted) {
+          shellTerminalAck('shell run aborted')
+        }
         if (includeInContext && !localSignal.aborted) submitResult(result)
       }
       const sandboxPreference = localShellSandboxPreferenceOf(tuiSettings?.get())
@@ -2922,7 +2850,17 @@ export function apply(ctx: Context, config: Config): void {
         // The default ('bypass') runs user-typed commands through the plain
         // spawn path below — pi/kimi parity: the sandbox guards the model's
         // autonomous commands, not commands the user typed and chose to run.
-        const spec = shell.resolve({ command, workdir: sessionCwd(), signal: localSignal })
+        // A synchronous resolve throw must not escape with the ack row
+        // armed: settle the card (and the terminal ack) exactly like a
+        // failed run (plan D exit enumeration).
+        let spec: ReturnType<typeof shell.resolve>
+        try {
+          spec = shell.resolve({ command, workdir: sessionCwd(), signal: localSignal })
+        } catch (error) {
+          releaseController()
+          settle(`failed: ${safeErrorMessage(error)}`, 'error')
+          return
+        }
         // An owned workflow: the RESULT settles the UI card, so the settle
         // logic stays in onResult and the cancellation/failure semantics
         // stay per-task (runOwned — AGENTS.md); the classification
@@ -2944,21 +2882,47 @@ export function apply(ctx: Context, config: Config): void {
             const exit = result.exitCode !== null ? `exit ${result.exitCode}` : `signal ${result.signal ?? '?'}`
             settle(output === '' ? exit : `${output}\n[${exit}]`, result.exitCode === 0 ? 'ok' : 'error')
           },
-          onCancel: () => {
+          onCancel: (error) => {
             // An abort-triggered rejection is a cancellation: settle the
-            // card as aborted like the resolved path does.
+            // card as aborted like the resolved path does. runOwned routes
+            // cancellations EXCLUSIVELY here — a cancellation-shaped
+            // rejection WITHOUT the signal aborted skips the aborted gate
+            // inside settle(), so the ack row must be settled terminally
+            // HERE too (idempotent with it).
             releaseController()
             settle('aborted', 'error')
+            if (includeInContext && !localSignal.aborted) {
+              shellTerminalAck('shell run cancelled')
+            }
+            void error
           },
           onError: (error) => {
             releaseController()
             const message = safeErrorMessage(error)
             settle(`failed: ${message}`, 'error')
+            // A sandbox execution failure does NOT run submitResult (only
+            // onResult does), so this exit is terminal for the ack row:
+            // nothing will be written — the pending row must end here
+            // (plan D exit enumeration). An abort settles through the
+            // unified aborted gate above instead.
+            if (includeInContext && !localSignal.aborted) {
+              shellTerminalAck('shell sandbox run failed')
+            }
           },
         })
         return
       }
-      const child = spawn(command, { cwd: sessionCwd(), stdio: ['ignore', 'pipe', 'pipe'], shell: true })
+      // A synchronous spawn throw must not escape with the ack row armed:
+      // settle the card (and the terminal ack) exactly like a failed run
+      // (plan D exit enumeration).
+      let child: ReturnType<typeof spawn>
+      try {
+        child = spawn(command, { cwd: sessionCwd(), stdio: ['ignore', 'pipe', 'pipe'], shell: true })
+      } catch (error) {
+        releaseController()
+        settle(`failed: ${safeErrorMessage(error)}`, 'error')
+        return
+      }
       // Bounded capture: the card keeps only the TAIL (byte- and line-
       // capped, unterminated output included); the FULL output is streamed
       // to a 0600 temp file (disk-capped) so a truncated run still leaves
@@ -3008,8 +2972,8 @@ export function apply(ctx: Context, config: Config): void {
         full.append(chunk)
         scheduleTailFlush()
       }
-      child.stdout.on('data', (chunk) => onData(stdoutDecoder, chunk))
-      child.stderr.on('data', (chunk) => onData(stderrDecoder, chunk))
+      child.stdout?.on('data', (chunk) => onData(stdoutDecoder, chunk))
+      child.stderr?.on('data', (chunk) => onData(stderrDecoder, chunk))
       localSignal.addEventListener('abort', () => child.kill(), { once: true })
       child.on('error', (error) => {
         releaseController()
@@ -3424,6 +3388,60 @@ export function apply(ctx: Context, config: Config): void {
     const restoreSubmissionDraft = (draft: string): void => {
       app.setEditorText(mergeDraft(app.getDraft(), draft))
     }
+    // ── Local submit acknowledgement + latency timeline (submit-ack.ts /
+    // submit-latency.ts) ── the immediate "Submitting…" / "Queued…" row
+    // between the editor clearing and the FIRST authoritative DSH event,
+    // and the T0-T5 phase timings for the diag channel. The window is real
+    // even without any per-submit persistence check: session create, image
+    // admission
+    // and the host pre-step all delay `user/message`.
+    const localSubmitAck: SubmitAckState = freshSubmitAckState()
+    const submitLatencyTracker = new SubmitLatencyTracker({ sink: diag })
+    /**
+     * Accept one submission: show the pending row NOW (Submit/Queued by
+     * the agent's live status) and start the latency timeline. Returns
+     * the gesture's EPOCH TOKEN: the enclosing workflow's terminal exits
+     * (failure / stale / fence / cancel / command routing) must settle
+     * with THIS token — the settle is ignored once a newer gesture has
+     * superseded it, so an older submission dying late can never clear
+     * the newer row (or reset its latency timeline).
+     */
+    const acceptLocalSubmitAck = (): number => {
+      const detail: SubmitPendingDetail = liveAgent?.status === 'running' ? 'queued' : 'submit'
+      const token = acceptSubmitAck(localSubmitAck, { detail, now: Date.now() })
+      submitLatencyTracker.accept(liveAgent?.session.id)
+      app.setSubmitPending(detail)
+      return token
+     }
+    /**
+     * Settle the pending row: clears it when something is pending and
+     * records the wait duration at debug level. Called from the
+     * authoritative event branches, the failure sinks and the refusal
+     * paths — idempotent everywhere.
+     *
+     * - TOKEN settles (`{ token }`): a submission's OWN terminal exit
+     *   (failure / stale / fence / cancel / no-agent / command routing).
+     *   Ignored when a newer gesture superseded the token — an older
+     *   submission dying late must never clear the newer row nor reset
+     *   its latency timeline.
+     * - TOKENLESS settles: authoritative session events (coalescing) and
+     *   the session-switch commit (the old row dies unconditionally).
+     *
+     * `terminal: true` additionally RESETS the latency timeline: a dead
+     * submission's baseline must not be populated by unrelated later
+     * events; the next real submission arms a fresh T0.
+     */
+    const settleLocalSubmitAck = (reason: string, options: { token?: number; terminal?: boolean } = {}): void => {
+      if (options.token !== undefined && options.token !== localSubmitAck.epoch) {
+        diag.debug('submit ack terminal settle superseded', { reason, token: options.token, current: localSubmitAck.epoch })
+        return
+      }
+      const elapsed = settleSubmitAck(localSubmitAck, { now: Date.now() })
+      if (options.terminal === true) submitLatencyTracker.reset()
+      if (elapsed === undefined) return
+      diag.debug('submit ack settled', { reason, elapsed: `${elapsed}ms` })
+      app.setSubmitPending(undefined)
+    }
     /**
      * Notify one submission failure WITHOUT restoring (the task's catch
      * already restored; restoring twice would re-merge the draft). Image
@@ -3433,6 +3451,9 @@ export function apply(ctx: Context, config: Config): void {
      * Diagnostics are owned by runOwned.
      */
     const notifySubmissionFailure = (error: unknown): void => {
+      // NOTE: the pending submit ack is settled by the CALLER with its own
+      // gesture token (an untokenized settle here would let one
+      // workflow's failure clear a newer gesture's row).
       const message = safeErrorMessage(error)
       if (error instanceof ImageInputError) {
         app.notify(message, 'error')
@@ -3474,9 +3495,15 @@ export function apply(ctx: Context, config: Config): void {
       },
     }
     /** The session-backed dispatch: create the session lazily (the first
-     * user input is the deferred trigger), guard against cross-process
-     * divergence, then execute a registered slash command or follow up. */
+     * user input is the deferred trigger), then execute a registered slash
+     * command or follow up. */
     const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void): void => {
+      // Local submit acknowledgement (plan D): the row appears NOW —
+      // before any session create / admission / command work — because
+      // this gesture owns no user-visible feedback until the first
+      // authoritative event lands. The TOKEN arms every terminal exit of
+      // THIS workflow: a newer gesture supersedes them.
+      const submitAckToken = acceptLocalSubmitAck()
       // Capture the advertised claim BEFORE any session creation: the
       // boolean must reflect the completion generation at submit time, never
       // a re-query after ensureSession (a refresh may have already revoked
@@ -3490,7 +3517,7 @@ export function apply(ctx: Context, config: Config): void {
       // Assigned inside the runOwned factory (invocation-time capture).
       let commandHealthRef: { slot: string; id: string; owner: string } | undefined
       // The health ref is NOT captured here: the submit-time identity can
-      // be stale after the async ensureSession/guard phase below (an HMR
+      // be stale after the async ensureSession phase below (an HMR
       // reload in between means the REAL invocation runs the NEW owner's
       // command). It is re-captured inside the runOwned factory,
       // immediately before execute() — see below (the review's P2).
@@ -3507,8 +3534,7 @@ export function apply(ctx: Context, config: Config): void {
       // run → failure-restore-before-release → release), shared with the
       // integration tests — never hand-rolled per path.
       runOwned('submit', () => runReservedSubmit({
-        reserve: (t) => draftImages.pinReferenced(t),
-        run: async () => {
+        reserve: (t) => draftImages.pinReferenced(t),        run: async () => {
           // The deferred-start gate (history-persist.ts): the history row
           // is written AFTER the session exists, with the FINAL session
           // id — the first prompt of a deferred start creates the session
@@ -3526,45 +3552,33 @@ export function apply(ctx: Context, config: Config): void {
             persistHistory,
           )
           const agent = liveAgent
-          if (agent === undefined) return
-        // The guard checks THIS agent's session; capture the identity so
-        // the write below can never target a session the guard did not see
-        // (a session switch while the file read is in flight).
+          if (agent === undefined) {
+            // Nothing can be written (degraded resolve after a successful
+            // creation): the wait ends here with NO write — the pending
+            // row must not outlive the submission.
+            settleLocalSubmitAck('submit resolved without an agent', { token: submitAckToken, terminal: true })
+            return
+          }
+        // Capture THIS agent's session identity so the write below can
+        // never target a session a switch already left behind (the async
+        // admission below yields).
         const generation = sessionGeneration
-        // Divergence guard: another dsh process may be writing this session.
-        // Blocked submissions restore the draft so a second identical Enter
-        // forces through (the user's explicit override, logged and warned).
-        const verdict = await guardSend('submit', text)
-        if (verdict.kind === 'blocked') {
-          const merged = mergeDraft(app.getDraft(), text)
-          app.setEditorText(merged)
-          app.notify(merged === text
-            ? (verdict.reason === 'removed'
-              ? GUARD_REMOVED_NOTIFY('submit', keyHint('app.input.submit'), keyHint('app.input.steer'))
-              : verdict.reason === 'tail-mismatch'
-                ? GUARD_TAIL_MISMATCH_NOTIFY('submit', keyHint('app.input.submit'), keyHint('app.input.steer'))
-                : GUARD_BLOCKED_NOTIFY('submit', keyHint('app.input.submit'), keyHint('app.input.steer')))
-            : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
-          return
-        }
-        // TOCTOU re-validation: the session must be the exact one the
-        // guard checked, or the submission is aborted for a retry against
-        // the new session (which needs its own guard).
+        // TOCTOU re-validation: the session must still be the exact one the
+        // identity was captured from, or the submission is aborted for a
+        // retry against the new session.
         if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
+          settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
           app.notify(merged === text
             ? 'the session changed while sending — try again'
             : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
           return
         }
-        if (verdict.kind === 'forced') {
-          app.notify(GUARD_FORCED_NOTIFY, 'error')
-        }
         // From here on the CAPTURED agent is used — never the mutable
-        // liveAgent: the guard verified THIS agent's session, and writing
-        // through a re-read closure variable could target a session the
-        // guard never saw (a switch between the check and the write).
+        // liveAgent: writing through a re-read closure variable could
+        // target a session the identity check did not see (a switch
+        // between the check and the write).
         const commands = ctx.get('commands')
         if (commands !== undefined) {
           // Bare `/plan` toggles: when plan mode is already active it exits
@@ -3583,14 +3597,15 @@ export function apply(ctx: Context, config: Config): void {
           // prunable for the whole command run. Acquire it HERE, transfer
           // it to the nested fallback, and release it on every other exit.
           const fallbackPin = draftImages.pinReferenced(text)
-          // The session-transition write fence: the guard checks above are
-          // async and can yield across a concurrent /new, /fork, rewind or
+          // The session-transition write fence: the identity check above
+          // can yield across a concurrent /new, /fork, rewind or
           // switch — once a transition is in flight, executing the command
           // would write an agent whose lock is about to be released (review
           // round 27). Refuse and restore the draft instead.
           if (transitionGate.busy) {
             fallbackPin()
             refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
+            settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
             return
           }
           runOwned('command execution', () => {
@@ -3614,6 +3629,13 @@ export function apply(ctx: Context, config: Config): void {
               if (commandHealthRef !== undefined && execution !== undefined) {
                 extensionService?._clearRegistryError(commandHealthRef)
               }
+              // A command that RAN owns its own feedback (cards, working
+              // surface): the submit-ack row stands down here — never
+              // before execute() resolved, so the fallback followup (a
+              // plain prompt: execute → undefined) keeps its pending row.
+              if (execution !== undefined) {
+                settleLocalSubmitAck('submit consumed by a command', { token: submitAckToken, terminal: true })
+              }
               // A command the surface advertised (e.g. from the startup
               // probe) but the real session's catalog lacks: consume the
               // slash input with an explicit error — never a plain model
@@ -3622,6 +3644,7 @@ export function apply(ctx: Context, config: Config): void {
               // retry could ride the unadvertised fallback).
               if (shouldConsumeAdvertisedMiss(execution, wasAdvertised)) {
                 app.notify(`/${parsedAtSubmit?.name ?? '?'} is not available in the created session`, 'error')
+                settleLocalSubmitAck('submit consumed by an unadvertised command', { token: submitAckToken, terminal: true })
                 fallbackPin()
                 return
               }
@@ -3661,11 +3684,14 @@ export function apply(ctx: Context, config: Config): void {
                           if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
                             const merged = mergeDraft(app.getDraft(), text)
                             app.setEditorText(merged)
+                            settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
                             app.notify(merged === text
                               ? 'the session changed while sending — try again'
                               : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
                             return
                           }
+                          // T1 BEFORE the write (see the direct path above).
+                          submitLatencyTracker.mark(agent.session.id, 'dispatch')
                           backend.sessionWriter.followup(agent.session.id, message)
                           // Consume ONLY the referenced drafts — a concurrent
                           // intake's newer image survives (round-5 finding 1).
@@ -3675,6 +3701,7 @@ export function apply(ctx: Context, config: Config): void {
                         if (error instanceof TransitionInProgressError) {
                           fallbackPin()
                           refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
+                          settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
                           return
                         }
                         throw error
@@ -3684,14 +3711,25 @@ export function apply(ctx: Context, config: Config): void {
                   }, text), {
                     diag,
                     sessionId: () => agent.session.id,
-                    // The flow restored the editor; this sink only
-                    // notifies.
-                    onError: notifySubmissionFailure,
+                    // The flow restored the editor; this sink settles the
+                    // gesture's ack (token-scoped) and only notifies.
+                    onError: (error) => {
+                      settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
+                      notifySubmissionFailure(error)
+                    },
+                    // Cancellations route EXCLUSIVELY here (never
+                    // onError): a cancelled fallback write must end the
+                    // ack row the gesture armed (plan D exit enumeration;
+                    // the flow already restored the draft).
+                    onCancel: () => {
+                      settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
+                    },
                   })
                 } else {
                   fallbackPin()
                   const merged = mergeDraft(app.getDraft(), text)
                   app.setEditorText(merged)
+                  settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
                   app.notify(merged === text
                     ? 'the session changed while sending — try again'
                     : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
@@ -3704,6 +3742,7 @@ export function apply(ctx: Context, config: Config): void {
             },
             onError: (error) => {
               fallbackPin()
+              settleLocalSubmitAck('command execution failed', { token: submitAckToken, terminal: true })
               if (commandHealthRef !== undefined) extensionService?._recordRegistryError(commandHealthRef, error)
               const message = safeErrorMessage(error)
               try {
@@ -3712,6 +3751,14 @@ export function apply(ctx: Context, config: Config): void {
                 // The cordis logger must not block the user notice.
               }
               app.notify(message, 'error')
+            },
+            // A cancelled command runs NO other sink (runOwned routes
+            // cancellations to onCancel only): without this the ack row
+            // armed at the gesture would pend forever and the handoff pin
+            // would leak (plan D exit enumeration).
+            onCancel: () => {
+              fallbackPin()
+              settleLocalSubmitAck('command execution cancelled', { token: submitAckToken, terminal: true })
             },
           })
           return
@@ -3731,11 +3778,15 @@ export function apply(ctx: Context, config: Config): void {
             if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
               const merged = mergeDraft(app.getDraft(), text)
               app.setEditorText(merged)
+              settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
               app.notify(merged === text
                 ? 'the session changed while sending — try again'
                 : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
               return
             }
+            // T1 BEFORE the write call: a synchronously-emitted inbox/turn
+            // event (Direct in-process) must never log ahead of dispatch.
+            submitLatencyTracker.mark(agent.session.id, 'dispatch')
             backend.sessionWriter.followup(agent.session.id, message)
             // Consume ONLY the referenced drafts — a concurrent intake's
             // newer image survives (round-5 finding 1).
@@ -3743,6 +3794,7 @@ export function apply(ctx: Context, config: Config): void {
           })
         } catch (error) {
           if (error instanceof TransitionInProgressError) {
+            settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
             refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
             return
           }
@@ -3753,8 +3805,20 @@ export function apply(ctx: Context, config: Config): void {
       }, text), {
         diag,
         sessionId: () => liveAgent?.session.id,
-        // The flow restored the editor; this sink only notifies.
-        onError: notifySubmissionFailure,
+        // The flow restored the editor; this sink settles the gesture's
+        // ack (token-scoped) and only notifies.
+        onError: (error) => {
+          settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
+          notifySubmissionFailure(error)
+        },
+        // runOwned routes cancellations EXCLUSIVELY to onCancel: a
+        // cancelled deferred create / image admission / barrier write
+        // bypasses onError, so the ack row armed at the gesture must be
+        // terminated HERE (the flow already restored the draft — plan D
+        // exit enumeration).
+        onCancel: () => {
+          settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
+        },
       })
     }
     /**
@@ -3831,7 +3895,7 @@ export function apply(ctx: Context, config: Config): void {
       })
     }
     /**
-     * Steer into the running turn with guard re-validation. Shared by
+     * Steer into the running turn with re-validation. Shared by
      * Ctrl+S (the whole queue plus a non-empty draft) and the busy-Enter
      * preference — Enter while the agent is running with busyEnter=steer
      * steers the DRAFT ONLY (web busyEnter parity): explicitly queued
@@ -3847,10 +3911,6 @@ export function apply(ctx: Context, config: Config): void {
      * `Current session` scope. Absent, the steer persists nothing.
      */
     const steerNow = (text: string, onlyDraft = false, persistHistory?: (sessionId: string | undefined) => void): void => {
-      // The guard action is deliberately the Ctrl+S 'save' action (not
-      // 'submit'): the busy-Enter steer writes the session like Ctrl+S,
-      // and the one-time force token embeds the payload identity, so an
-      // Enter-steer token can never cross-match a followup's token.
       // The subagent viewer is read-only: steering would send to the
       // PARENT session. Refuse with a notice and restore the draft.
       if (viewing !== undefined) {
@@ -3884,6 +3944,11 @@ export function apply(ctx: Context, config: Config): void {
         queuedCount: liveAgent === undefined ? 0 : liveAgent.inbox.nextTurn.length + liveAgent.inbox.nextStep.length,
         liveAgent: liveAgent !== undefined,
       })) return
+      // Local submit acknowledgement (plan D): the row appears NOW, before
+      // the awaited prepare/admission work, so an accepted Ctrl+S is never
+      // a silent editor clear. The TOKEN arms every terminal exit of THIS
+      // workflow.
+      const steerAckToken = acceptLocalSubmitAck()
       // An owned workflow: the send's outcome drives the draft restore and
       // the notices — runOwned (AGENTS.md), never a bare void. Reserve the
       // referenced drafts SYNCHRONOUSLY (same call stack that left the
@@ -3908,29 +3973,28 @@ export function apply(ctx: Context, config: Config): void {
           },
           (sessionId) => persistHistory?.(sessionId),
         )
-        if (liveAgent === undefined) return
-        // The draft message is prepared BEFORE the guard: admission is
-        // async I/O, and the guard's identity is the draft text (which
-        // carries the placeholders), so a guard run after admission
-        // covers everything the send will write (§13).
+        if (liveAgent === undefined) {
+          // Nothing can be sent (degraded resolve after a successful
+          // creation): the ack row must not outlive the submission.
+          settleLocalSubmitAck('steer resolved without an agent', { token: steerAckToken, terminal: true })
+          return
+        }
+        // The draft message is prepared BEFORE the send: admission is
+        // async I/O, and the prepared message is exactly what the send
+        // delivers (§13).
         const prepared = await prepareUserMessage(text, draftImages, submitDeps)
-        // The whole send (snapshot → guard → re-validate → confirm-and-
-        // send) lives in steer.ts so the races are testable: a queue
-        // splice or session switch while the guard reads the file aborts
-        // with a retry notice instead of losing messages or writing to a
-        // session the guard never checked.
+        // T1 BEFORE the dispatch: the steer is being invoked, and any
+        // synchronously-emitted event from the delivery must never log
+        // ahead of it. The ACK ROW keeps waiting for the authoritative
+        // event (plan D).
+        submitLatencyTracker.mark(liveAgent.session.id, 'dispatch')
+        // The whole send (snapshot → re-validate → confirm-and-send) lives
+        // in steer.ts so the races are testable: a queue splice or session
+        // switch while the delivery is in flight aborts with a retry notice
+        // instead of losing messages.
         const outcome = await steerAll({
           currentAgent: () => liveAgent as unknown as SteerAgentLike,
           currentGeneration: () => sessionGeneration,
-          guard: {
-            run: async (identity) => {
-              const verdict = await guardSend('save', identity)
-              if (verdict.kind === 'blocked') {
-                return { kind: 'blocked', reason: verdict.reason }
-              }
-              return { kind: verdict.kind === 'forced' ? 'forced' : 'ok' }
-            },
-          },
           notify: (message, kind) => app.notify(message, kind),
           restoreDraft: (draft) => {
             const merged = mergeDraft(app.getDraft(), draft)
@@ -3945,17 +4009,11 @@ export function apply(ctx: Context, config: Config): void {
           barrier: operationBarrier,
           fenceNotice: () => 'a session transition is in progress — try again in a moment',
           createDraft: () => prepared,
-          blockedNotice: (reason) => reason === 'removed'
-            ? GUARD_REMOVED_NOTIFY('save', keyHint('app.input.submit'), keyHint('app.input.steer'))
-            : reason === 'tail-mismatch'
-              ? GUARD_TAIL_MISMATCH_NOTIFY('save', keyHint('app.input.submit'), keyHint('app.input.steer'))
-              : GUARD_BLOCKED_NOTIFY('save', keyHint('app.input.submit'), keyHint('app.input.steer')),
-          forcedNotice: () => GUARD_FORCED_NOTIFY,
           staleNotice: () => 'the queue or session changed while sending — try again',
           mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
           // The FINAL delivery goes through the session WRITE port: the
-          // Direct guard/fence/barrier orchestration above stays in the
-          // runner, the port only delivers (steer/followup/dequeue).
+          // Direct fence/barrier orchestration above stays in the runner,
+          // the port only delivers (steer/followup/dequeue).
           writer: backend.sessionWriter,
         },
         text,
@@ -3966,14 +4024,36 @@ export function apply(ctx: Context, config: Config): void {
         // would orphan the placeholders (§14). The consumption is
         // per-reference, so a concurrent intake's newer draft survives
         // (round-5 finding 1).
-        if (outcome === 'ok') consumeDraftImages(text, draftImages)
+        if (outcome === 'ok') {
+          consumeDraftImages(text, draftImages)
+          // The write landed; T1 was stamped BEFORE the dispatch call. The
+          // ACK ROW keeps waiting for the authoritative event (plan D).
+        }
+        // Only a NON-delivered steer settles the ack row here: 'ok' waits
+        // for the authoritative inbox event (plan D — an event, a failure
+        // or a session switch ends the wait, never the delivery itself);
+        // 'stale' wrote nothing and restored the draft, so the row must
+        // not linger (a retry re-accepts).
+        if (outcome !== 'ok') settleLocalSubmitAck(`steer ${outcome}`, { token: steerAckToken, terminal: true })
         },
         restore: (t) => restoreSubmissionDraft(t),
       }, text), {
         diag,
         sessionId: () => liveAgent?.session.id,
-        // The flow restored the editor; this sink only notifies.
-        onError: notifySubmissionFailure,
+        // The flow restored the editor; this sink settles the gesture's
+        // ack (token-scoped) and only notifies.
+        onError: (error) => {
+          settleLocalSubmitAck('failure', { token: steerAckToken, terminal: true })
+          notifySubmissionFailure(error)
+        },
+        // runOwned routes cancellations EXCLUSIVELY to onCancel: a
+        // cancelled deferred create / image admission / barrier write
+        // bypasses onError, so the ack row armed at the gesture must be
+        // terminated HERE (the flow already restored the draft — plan D
+        // exit enumeration).
+        onCancel: () => {
+          settleLocalSubmitAck('steer cancelled', { token: steerAckToken, terminal: true })
+        },
       })
     }
     /**
@@ -4125,8 +4205,16 @@ export function apply(ctx: Context, config: Config): void {
           // excluded-from-context escape hatch) — the row is sessionless
           // (Current directory / All directories, never Current session).
           persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id))
-          runLocalShell(text)
+          runLocalShell(text, undefined)
         } else if (shellCommandOf(text) !== '') {
+          // Local submit acknowledgement (plan D), armed AT THE GESTURE —
+          // BEFORE ensureSession: a deferred/slow session create is part
+          // of the no-feedback window this row exists to cover. The
+          // runLocalShell-side accept was moved here so the T0 baseline
+          // is never rebased by the shell wiring. The TOKEN rides into
+          // the shell flow: its terminal exits settle only while THIS
+          // gesture is still the newest one.
+          const shellAckToken = acceptLocalSubmitAck()
           // An owned workflow: the session creation failure restores the
           // draft (failSubmission) — runOwned (AGENTS.md), never a bare
           // void. The history row is written AFTER the session exists
@@ -4134,11 +4222,25 @@ export function apply(ctx: Context, config: Config): void {
           // session carries its id.
           runOwned('contextual shell', () => ensureSession().then(() => {
             persistHistory(historySessionIdFor('agent-facing', liveAgent?.session.id))
-            runLocalShell(text)
+            runLocalShell(text, shellAckToken)
           }), {
             diag,
             sessionId: () => liveAgent?.session.id,
-            onError: failSubmission(text),
+            onError: (error) => {
+              // The session create failed: nothing will be written — the
+              // ack row armed at the gesture is TERMINAL here (plan D).
+              settleLocalSubmitAck('session creation failed', { token: shellAckToken, terminal: true })
+              failSubmission(text)(error)
+            },
+            onCancel: () => {
+              // NOT wrapped in runReservedSubmit: nothing restores the
+              // draft here, so a cancelled ensureSession would silently
+              // lose the submitted text — merge it back first (no error
+              // notice: a cancellation is not a failure), then end the
+              // ack row terminally.
+              app.setEditorText(mergeDraft(app.getDraft(), text))
+              settleLocalSubmitAck('contextual shell cancelled', { token: shellAckToken, terminal: true })
+            },
           })
         } else {
           // A bare `!` (no command) is a no-op — sessionless.
@@ -4348,10 +4450,7 @@ export function apply(ctx: Context, config: Config): void {
         // Esc cancel: abort a running `!` shell command, then interrupt the
         // live agent (busy: one Esc fires this directly; idle: double-Esc).
         // interruptAgent PRESERVES the pending queue (web Stop parity) — an
-        // interrupt stops the current thinking, never the queued input. The
-        // cancel also invalidates any pending force token (the guard state
-        // may change while the turn is being torn down).
-        guardToken = undefined
+        // interrupt stops the current thinking, never the queued input.
         localShellController?.abort()
         interruptAgent(liveAgent, backend.sessionWriter)
       },
@@ -4400,7 +4499,6 @@ export function apply(ctx: Context, config: Config): void {
             break
           }
           case 'cancel-activity': {
-            guardToken = undefined
             localShellController?.abort()
             interruptAgent(liveAgent, backend.sessionWriter)
             break
@@ -4846,13 +4944,6 @@ export function apply(ctx: Context, config: Config): void {
     // overrides, and the plugin contributions — all fail-soft (a bad entry
     // is a diagnostic, never a startup failure; plan §16/§17).
     const keybindings = app.keybindingsManager()
-    /** The EFFECTIVE key label for user-facing notices (guard messages):
-     * a remap updates the notice; a disabled action falls back to a
-     * neutral phrase instead of a stale default. */
-    const keyHint = (id: AppKeybindingId): string => {
-      const hint = keybindings.keyHint(id)
-      return hint === '' ? 'the action key' : hint
-    }
     if (process.env.DSH_PI_TUI_SAFE_KEYBINDINGS === '1') {
       keybindings.setSafeMode(true)
       diag.info('keybindings', { safeMode: true })
@@ -6429,12 +6520,24 @@ export function apply(ctx: Context, config: Config): void {
       // an agent/inbox/spliced event. The upstream Inbox commits the event
       // BEFORE its live projection mutates (synchronous observers see the
       // pre-splice lists), so the pane must read the inbox on the next
-      // microtask — after the splice has actually landed. A splice also
-      // invalidates any pending save force token: the token binds the queue
-      // payload at block time, and a changed queue must re-block.
+      // microtask — after the splice has actually landed. This is also the
+      // FIRST authoritative signal a submission reached the session: the
+      // local ack row and the latency timeline settle here.
       if (event.type === 'agent/inbox/spliced') {
-        guardToken = undefined
+        settleLocalSubmitAck('inbox inserted')
+        submitLatencyTracker.mark(liveAgent.session.id, 'inbox.inserted')
         queueMicrotask(refreshQueue)
+      }
+      // The user message committing to the session is the ack row's
+      // AUTHORITATIVE clear (the host pre-step can delay it well past the
+      // inbox insert); the first assistant chunk stamps the provider's
+      // first-token latency once per turn.
+      if (event.type === 'user/message') {
+        settleLocalSubmitAck('user message')
+        submitLatencyTracker.mark(liveAgent.session.id, 'user.message')
+      }
+      if (event.type === 'assistant/chunk') {
+        submitLatencyTracker.mark(liveAgent.session.id, 'assistant.first')
       }
       // Compaction lifecycle (dsh-compaction is not a peer — the event
       // data is read structurally): the working row advertises the
@@ -6467,15 +6570,21 @@ export function apply(ctx: Context, config: Config): void {
       // The busy indicator follows turn boundaries: on from the moment a
       // turn starts (model wait + tool calls), off when it ends.
       if (event.type === 'turn/start') {
-        // Turn boundaries invalidate any pending force token: the guard
-        // state must reflect the file at the NEXT submission, not the one
-        // blocked before the turn ran.
-        guardToken = undefined
+        // The turn is live: the Working row takes over the feedback surface
+        // and the submit timeline stamps the turn boundary.
+        settleLocalSubmitAck('turn started')
+        submitLatencyTracker.mark(liveAgent.session.id, 'turn.start')
         app.setWorking(true)
         app.setBusy(true)
       } else if (event.type === 'turn/end') {
-        guardToken = undefined
         app.setWorking(false)
+        // NOTE: the submit-latency timeline is deliberately NOT reset on
+        // turn/end — a submission accepted while this turn was running
+        // (busy/queue) is processed by the NEXT turn, and resetting here
+        // would erase exactly the T1→T4/T4→T5 journey Phase E exists to
+        // measure. The baseline ends only on: the next accept (rebase),
+        // the assistant.first auto-complete, a terminal non-delivery exit
+        // (token-scoped settle) or a session switch.
         // A turn end must not clear the busy flag while a compaction is
         // still in flight (an interrupted turn can close before its
         // compaction settles) — the single-Esc cancel stays armed.

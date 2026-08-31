@@ -1,19 +1,17 @@
 /**
  * `!` shell context submission (kimi parity): a completed local shell run
- * is submitted to the session as an ordinary guarded user message, so the
+ * is submitted to the session as an ordinary user message, so the
  * model sees the command AND its output on the next turn. `!!` runs stay
  * purely local — no session write, no model visibility (pi's
  * excluded-from-context semantics). Extracted from the runner so the
- * guard/TOCTOU races are testable headless, exactly like steer.ts:
+ * TOCTOU races are testable headless, exactly like steer.ts:
  *
- * - The agent/generation identity is captured BEFORE the guard runs.
- * - AFTER the guard returns, the identity is re-validated: same agent
- *   object, same session generation. A switch while the guard read the
- *   file aborts (`stale`) — the output is never written to a session the
- *   guard did not check.
- * - A blocked write keeps the caller's card visible (the output is not
- *   lost) and the identical `!` re-run can force through its one-time
- *   guard token.
+ * - The agent/generation identity is captured BEFORE the awaited write
+ *   window.
+ * - Before the followup, the identity is re-validated: same agent
+ *   object, same session generation. A switch mid-send aborts
+ *   (`stale`) — the output is never written to a session the identity
+ *   did not verify.
  * @module @xmoon76/dsh-pi-tui/shell-context
  */
 
@@ -26,16 +24,7 @@ export interface ShellSubmitAgentLike {
   followup(message: unknown): void
 }
 
-/** The guard surface: run the divergence check for one write action. */
-export interface ShellSubmitGuard {
-  /** Run the divergence guard; `blocked` carries the divergence kind. */
-  run(identity: string): Promise<
-    | { kind: 'ok' | 'forced' }
-    | { kind: 'blocked'; reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed' }
-  >
-}
-
-export type ShellSubmitOutcome = 'ok' | 'blocked' | 'stale'
+export type ShellSubmitOutcome = 'ok' | 'stale'
 
 /** Injectable dependencies of {@link submitShellResult}. */
 export interface ShellSubmitDeps {
@@ -43,13 +32,8 @@ export interface ShellSubmitDeps {
   currentAgent(): ShellSubmitAgentLike | undefined
   /** Current session generation, re-read (session switch detection). */
   currentGeneration(): number
-  guard: ShellSubmitGuard
   notify(message: string, kind: 'info' | 'error'): void
-  /** Divergence notice for one block reason ('submit' action wording). */
-  blockedNotice(reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed'): string
-  /** Notice for a forced (token-bypassed) write. */
-  forcedNotice(): string
-  /** Notice for a session switch detected after the guard. */
+  /** Notice for a session switch detected mid-send. */
   staleNotice(): string
   /**
    * The session-transition write fence: returns true while a session
@@ -75,23 +59,39 @@ export interface ShellSubmitDeps {
 
 /**
  * Submit a completed `!` shell run's command+output to the session:
- * capture identity → guard → re-validate → followup. No-op without an
- * agent. `blocked` keeps the caller's card (the output stays visible; the
- * identical `!` re-run can force through its one-time token); `stale`
- * aborts for a retry against the new session.
+ * barrier → capture identity → re-validate → followup. No-op without an
+ * agent. `stale` aborts for a retry against the new session (the
+ * caller's card keeps the output visible either way).
  */
 export async function submitShellResult(deps: ShellSubmitDeps, text: string): Promise<ShellSubmitOutcome> {
+  // The WHOLE shell write runs inside the operation barrier (convergence
+  // plan phase 3), mirroring steerAll: a transition that starts while this
+  // write awaits drains it first — the `fence` quick-refusal below only
+  // covers writers that START during a transition, not writers already in
+  // flight.
+  const barrier = deps.barrier
+  const sessionId = deps.currentAgent()?.session.id
+  if (barrier !== undefined && sessionId !== undefined) {
+    try {
+      return await barrier.runWriter(sessionId, async () => submitShellResultCore(deps, text))
+    } catch (error) {
+      if (error instanceof TransitionInProgressError) {
+        deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
+        return 'stale'
+      }
+      throw error
+    }
+  }
+  return submitShellResultCore(deps, text)
+}
+
+function submitShellResultCore(deps: ShellSubmitDeps, text: string): ShellSubmitOutcome {
   const agent = deps.currentAgent()
   if (agent === undefined) return 'ok'
   const generation = deps.currentGeneration()
-  const verdict = await deps.guard.run(text)
-  if (verdict.kind === 'blocked') {
-    deps.notify(deps.blockedNotice(verdict.reason), 'error')
-    return 'blocked'
-  }
-  // TOCTOU re-validation: the session must be the exact one the guard
-  // checked, or the submission is aborted for a retry against the new
-  // session (which needs its own guard).
+  // TOCTOU re-validation: the session must still be the exact one the
+  // identity was captured from, or the submission is aborted for a retry
+  // against the new session.
   if (!sessionUnchanged({ agent, generation }, deps.currentAgent(), deps.currentGeneration())) {
     deps.notify(deps.staleNotice(), 'error')
     return 'stale'
@@ -105,7 +105,6 @@ export async function submitShellResult(deps: ShellSubmitDeps, text: string): Pr
     deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
     return 'stale'
   }
-  if (verdict.kind === 'forced') deps.notify(deps.forcedNotice(), 'error')
   agent.followup(deps.createMessage(text))
   deps.onSubmitted()
   return 'ok'
