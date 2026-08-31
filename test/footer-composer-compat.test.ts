@@ -264,6 +264,26 @@ test('mergeCommandSurface keeps its contract under the new capacity (smoke)', ()
     .replace(/\x1b\[[0-9;]*m/g, ''),
     'cmd row one\nPress Ctrl+C again to exit')
   assert.equal(mergeCommandSurface(['only'], undefined, 100), 'only')
+  // Budget normalization mirrors the native composer: exactly 0 grants
+  // nothing; negative totals are invalid input and floor at 1 (the hint
+  // can never be silently hidden by an underflow); absurd values clamp to
+  // the hard capacity; degenerate widths still bound every row.
+  const instr = { id: 'ctrl-c-exit', text: [{ text: 'Press Ctrl+C again to exit' }], priority: 100 }
+  assert.equal(mergeCommandSurface(['cmd'], instr, 20, { total: 0 }), '')
+  assert.equal(
+    mergeCommandSurface(['cmd'], instr, 20, { total: -1 }).replace(/\x1b\[[0-9;]*m/g, ''),
+    'Press Ctrl+C again…',
+  )
+  assert.equal(
+    mergeCommandSurface(['cmd'], instr, 20, { total: 999 }).replace(/\x1b\[[0-9;]*m/g, ''),
+    'cmd\nPress Ctrl+C again…',
+  )
+  // A degenerate width normalizes to the width-1 surface: every row
+  // collapses to its 1-cell ellipsis form.
+  assert.equal(
+    mergeCommandSurface(['cmd'], instr, Number.NaN, { total: 4 }).replace(/\x1b\[[0-9;]*m/g, ''),
+    '…\n…',
+  )
 })
 
 /** Deep-mutable build shape (the snapshot is deeply readonly). */
