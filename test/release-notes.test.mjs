@@ -71,7 +71,7 @@ test('current 0.4 prerelease guidance remains under Unreleased', () => {
   assert.doesNotMatch(changelogs[0], /^## \[0\.4\.0-alpha\.1\]/mu)
   assert.doesNotMatch(changelogs[1], /^## \[0\.4\.0-alpha\.1\]/mu)
   for (const command of [
-    '@deepseek-ai/dsh@0.1.2-alpha.1',
+    '@deepseek-ai/dsh@0.1.2-alpha.2',
     '@xmoon76/dsh-pi-tui@next',
     '@xmoon76/dsh-pi-tui@0.3',
   ]) {
@@ -93,7 +93,7 @@ test('current 0.4 prerelease guidance remains under Unreleased', () => {
 })
 
 test('0.4 release guidance follows the stable or next tag channel', () => {
-  const prereleaseGuidance = '\n- @deepseek-ai/dsh@0.1.2-alpha.1\n- @xmoon76/dsh-pi-tui@next\n- @xmoon76/dsh-pi-tui@0.3'
+  const prereleaseGuidance = '\n- @deepseek-ai/dsh@0.1.2-alpha.2\n- @xmoon76/dsh-pi-tui@next\n- @xmoon76/dsh-pi-tui@0.3'
   const stableWithPrereleaseGuidance = createFixture({ version: '0.4.0', guidance: prereleaseGuidance })
   try {
     const result = run(stableWithPrereleaseGuidance, 'v0.4.0')
@@ -121,7 +121,7 @@ test('release-notes guidance matching rejects near-miss package versions', () =>
   try {
     const result = run(fixture, 'next-v0.4.0-alpha.1')
     assert.notEqual(result.status, 0)
-    assert.match(result.stderr, /must document @deepseek-ai\/dsh@0\.1\.2-alpha\.1/u)
+    assert.match(result.stderr, /must document @deepseek-ai\/dsh@0\.1\.2-alpha\.2/u)
   } finally {
     cleanup(fixture)
   }
