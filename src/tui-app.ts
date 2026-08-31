@@ -6854,11 +6854,16 @@ export class TuiApp {
   /** Phase 2: the last geometry the ADVANCED overlays were recompiled at
    * (the resize latch — recompile only on an actual geometry change). */
   private lastAdvancedGeometry: { width: number; height: number } = { width: -1, height: -1 }
-  /** PR #57 review: the last terminal geometry the footer composed at. The
-   * footer's physical-line budget derives from the terminal geometry, so a
-   * resize must recompose the footer before the frame paints — the latch
-   * keeps the recompose resize-only. */
-  private lastFooterGeometry: { width: number; height: number } = { width: -1, height: -1 }
+  /** PR #57 review: the last terminal geometry + surface the footer
+   * composed at. The footer's physical-line budget derives from the
+   * terminal geometry AND the active surface (the fullscreen root does
+   * not mount the widget zones), so a resize OR a fullscreen toggle must
+   * recompose the footer before the frame paints — the latch keeps the
+   * recompose change-only (the MEASURED effective total is part of the
+   * key, so a widget-zone bake re-composes too). */
+  private lastFooterGeometry: { surface: 'main' | 'alt'; width: number; height: number; total: number } = {
+    surface: 'main', width: -1, height: -1, total: -1,
+  }
   /** The last terminal width the transcript components were built at (the
    * right-gutter resize latch): a width change rebuilds the width-baked
    * folds, so a stale truncation never wraps at the new paint width. */
@@ -8531,18 +8536,20 @@ export class TuiApp {
         this.recompileAdvancedOverlays()
       }
       // PR #57 review (P1): the footer's physical-line budget derives from
-      // the terminal GEOMETRY — a resize (height AND width) must recompose
-      // the footer at the fresh surface budget before the frame paints. A
-      // freshly shrunk viewport would otherwise keep the old (taller)
-      // footer text and clip its own bottom rows — the appended Host
-      // instruction FIRST ("the instruction always survives" would break).
-      if (width !== this.lastFooterGeometry.width || height !== this.lastFooterGeometry.height) {
-        this.lastFooterGeometry = { width, height }
-        this.renderFooter()
-      }
+      // the terminal GEOMETRY, the ACTIVE SURFACE and the MEASURED chrome
+      // heights — a resize (height AND width), a fullscreen toggle or a
+      // widget-zone change must recompose the footer at the fresh surface
+      // budget before the frame paints. A freshly shrunk viewport would
+      // otherwise keep the old (taller) footer text and clip its own
+      // bottom rows — the appended Host instruction FIRST ("the
+      // instruction always survives" would break); a regular ->
+      // fullscreen switch at unchanged geometry would keep a budget
+      // measured against chrome the fullscreen root doesn't mount. The
+      // recompose runs AFTER the extension-host refresh below (widget
+      // rows bake there), keyed on the MEASURED effective total.
       const host = this.extensionHost
-      if (host === undefined) return
-      const current = host.state().surface
+      if (host !== undefined) {
+        const current = host.state().surface
       // focusedSeat derives from the actual focus state (follow-up P1): the
       // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
       // question/approval/fullscreen entry; the requestRender mirror only
@@ -8550,18 +8557,32 @@ export class TuiApp {
       // focusSeat (not the microtask-published copy) is authoritative — a
       // publish that changed nothing must still mirror the real seat.
       this.publishFocusSeat()
-      const focusedSeat = this.focusSeat
-      if (current.width !== width || current.height !== height || current.focusedSeat !== focusedSeat) {
-        host.updateSurface({ width, height, focusedSeat })
-        if (current.width !== width) {
-          // The outlet budgets are baked from the snapshot width: re-bake
-          // the width-budgeted outlets (dock + footer) and re-merge the
-          // chrome rows NOW, so the new width takes effect immediately —
-          // waiting for the next extension invalidation would keep the old
-          // low/high segment set baked at the stale width (follow-up P1).
-          host.refreshOutlets()
-          this.refreshChrome()
+        const focusedSeat = this.focusSeat
+        if (current.width !== width || current.height !== height || current.focusedSeat !== focusedSeat) {
+          host.updateSurface({ width, height, focusedSeat })
+          if (current.width !== width) {
+            // The outlet budgets are baked from the snapshot width: re-bake
+            // the width-budgeted outlets (dock + footer) and re-merge the
+            // chrome rows NOW, so the new width takes effect immediately —
+            // waiting for the next extension invalidation would keep the old
+            // low/high segment set baked at the stale width (follow-up P1).
+            host.refreshOutlets()
+            this.refreshChrome()
+          }
         }
+      }
+      // The footer recompose runs LAST: the budget is keyed on the
+      // MEASURED effective total (surface + geometry + actual chrome
+      // heights), so a widget-zone bake, a resize or a mode switch all
+      // land here before the frame paints.
+      const surface: 'main' | 'alt' = this.fullscreen !== undefined ? 'alt' : 'main'
+      const available = this.footerPhysicalLineBudget().total
+      if (surface !== this.lastFooterGeometry.surface
+        || width !== this.lastFooterGeometry.width
+        || height !== this.lastFooterGeometry.height
+        || available !== this.lastFooterGeometry.total) {
+        this.lastFooterGeometry = { surface, width, height, total: available }
+        this.renderFooter()
       }
     } finally {
       this.syncingSurfaceGeometry = false
@@ -9500,11 +9521,10 @@ export class TuiApp {
    * - measuring via each component's own `render(width)` is the SAME
    *   pattern the mouse hit-map uses, so the measurement always matches
    *   what the layout actually paints;
-   * - widget zones are measured on BOTH screens: the fullscreen root
-   *   does not mount them, so their rows read 0 there; on the regular
-   *   screen they sit directly above the footer. Over-measuring is the
-   *   SAFE direction (the footer gets fewer lines than could fit — it
-   *   never clips); under-measuring is what would clip it.
+   * - widget zones are measured ONLY on the regular surface (the
+   *   fullscreen root does not mount them — subtracting inactive chrome
+   *   would wrongly shrink, up to zeroing, the fullscreen budget for
+   *   chrome that is not on screen);
    *
    * Floored at 0: when the pinned chrome alone already exceeds the
    * viewport nothing can keep the footer unclipped, and the composer
@@ -9513,8 +9533,17 @@ export class TuiApp {
   private footerPhysicalLineBudget(): FooterPhysicalLineBudget {
     const width = Math.max(1, this.terminal.columns)
     const height = Math.max(1, this.terminal.rows)
+    // Widget zones exist ONLY on the regular surface (the fullscreen root
+    // does not mount them): subtracting them in fullscreen would shrink
+    // the footer budget for chrome that is not on screen — populated
+    // widgets could wrongly zero the budget on a short terminal. Only
+    // ACTIVE chrome is measured.
+    const fullscreen = this.fullscreen !== undefined
+    const chromeRows: Array<{ render(columns: number): string[] }> = fullscreen
+      ? [this.header, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat]
+      : [this.header, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat, this.widgetsAbove, this.widgetsBelow]
     let used = 0
-    for (const chrome of [this.header, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat, this.widgetsAbove, this.widgetsBelow]) {
+    for (const chrome of chromeRows) {
       used += chrome.render(width).length
     }
     return {
