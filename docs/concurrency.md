@@ -1,25 +1,25 @@
-# Cross-process safety: the divergence guard and the open-time lock
+# Cross-process safety: the open-time lock and the lease model
 
-## Why the guard exists
+## Why the open-time lock exists
 
 dsh has **no cross-process session coordination** — an upstream limitation,
 not a bug we can fix. Two dsh processes (TUI + web, or two TUIs) holding one
 session each number events from their own in-memory log length, so both can
 mint the same `seq` and corrupt the log at the `session/end-seed` resume
-marker. The TUI cannot prevent the corruption, so it detects it and blocks
-the write; the README documents the human rule ("one surface per session"),
-`src/guard.ts` enforces it as far as the TUI can.
+marker. The TUI cannot prevent the corruption upstream, so it refuses the
+OPEN instead: the README documents the human rule ("one surface per
+session"), and the owner lock (`src/session-lock.ts`) + process lease +
+cooling verifier enforce it.
 
 Why not file locking? Because dsh's persistence `open(path, "a")` → write →
 **close** on every flush, so NO process ever holds the session file open —
-an fd-based lock or `lsof` check has nothing to detect. Comparing committed
-event counts against the live log is the only reliable external-writer
-signal.
+an fd-based lock or `lsof` check has nothing to detect. A small `owner.lock`
+file next to the log, verified against the live owner before any takeover,
+is the only reliable single-writer mechanism.
 
-## The open-time lock (why the guard alone is not enough)
+## Why the lock is required (the field-observed worst shape)
 
-The guard protects the WRITE path, but the guard alone cannot prevent the
-worst corruption shape, observed in the field:
+Without the open-time refusal, the worst corruption shape unfolds silently:
 
 1. Process A resumes session S and is mid-turn (an open `step/start` is the
    last event, A's in-memory seq is `n+1`).
@@ -27,11 +27,16 @@ worst corruption shape, observed in the field:
    **synthesizes interrupted-turn closers into the shared log** (`step/end`,
    `turn/end interrupted`, then the constructor's `session/end-seed`), all
    appended to the file at seqs `n+1…n+3`.
-3. B's in-memory log is now `n+4` — which MATCHES the file, so B's guard
-   checks pass. A, meanwhile, still holds seq `n+1` in memory and keeps
-   appending `assistant/chunk` at seq `n+1` — colliding with B's synthesized
-   events and corrupting the log. A's guard then reports `unreadable`
-   (the file is damaged) while B sails through.
+3. B's in-memory log is now `n+4` — it MATCHES the file, so B proceeds. A,
+   meanwhile, still holds seq `n+1` in memory and keeps appending
+   `assistant/chunk` at seq `n+1` — colliding with B's synthesized events
+   and corrupting the log. No post-open check can catch this: B's memory
+   equals the file from its very first write.
+
+The open-time lock closes the OPEN path so the scenario never starts:
+whoever opens a session first records a tiny lock file next to the log; a
+second opener verifies the owner is still a live dsh process and REFUSES
+the open.
 
 ### The ownership model (convergence plan — final)
 
@@ -48,11 +53,12 @@ by the cooling verifier after quiet + durable parity + stable samples
 (or kept forever on any uncertainty). TUI writers serialize against
 transitions through the SessionOperationBarrier.
 
-The write-path guard cannot fix this: the document's first write, B's memory equals
-the file. The open-time lock (`src/session-lock.ts`) closes the OPEN path so
-the scenario never starts: whoever opens a session first records a tiny lock
-file next to the log; a second opener verifies the owner is still a live dsh
-process and REFUSES the open.
+No submit-time detection can fix the scenario above: B's memory equals the
+file from its first write, so there is nothing to compare. The open-time
+lock (`src/session-lock.ts`) is the mechanism — and because it is the ONLY
+mechanism, it is fail-closed: a writable existing session REQUIRES its
+`acquired` lock; `unavailable` (no lock dir, no write access) refuses the
+open rather than proceeding unowned.
 
 ## How the lock works (the decision)
 
@@ -127,9 +133,9 @@ Two orderings are load-bearing and were both bug-fixed in review:
   the directory, so a failed fresh transition leaves no residue. The
   acquire result is structured (`acquired | unavailable | refused`): a
   EVERY writable target's transition requires `acquired` — fresh AND
-  existing — `unavailable` fails closed (the convergence plan phase 2:
-  the divergence guard is no longer a stand-in for the lock; it remains
-  a second line of defense only).
+  existing — `unavailable` fails closed (convergence plan phase 2: the
+  lock is the ONLY single-writer mechanism, so an unowned open is never
+  acceptable).
   With the multi-slot order a failed switch never drops the old lock in
   the first place (the OLD single-slot design released old-first and its
   failed re-take then left the current session live WITHOUT its lock —
@@ -138,57 +144,31 @@ Two orderings are load-bearing and were both bug-fixed in review:
   refuse (the acquire is a non-blocking refusal, never a wait) and keep
   their own locks.
 
-## How the guard works (the decision)
+## The submit path is guard-free (the decision)
 
-Before each session-writing submission the guard runs a two-step check:
-
-1. **Cheap gate** — `locate()` + `fs.stat` on the session file.
-2. **Committed read** — `readFrom(id, 0)` (a full committed read), comparing
-   the file's committed event count against the live `session.events.length`.
-
-File ahead of memory ⇒ an external writer ⇒ **block**.
-
-### Force-through: the one-time token
-
-The same operation (same session, same observed file revision, same action —
-`submit` vs `save` — and the same draft) executed a second time binds a
-ONE-TIME token that forces the write through. Any of *edited draft, swapped
-key, new file revision, session switch* invalidates it. So "press Enter
-again" forces, but a changed draft can never silently clobber the other
-writer.
-
-### tail-mismatch
-
-A same-count but different-tail rewrite (same `seq`/`type`/content-hash
-comparison) reports `tail-mismatch` and blocks too: the file was rewritten,
-not appended.
-
-Guard state is per-session and resets on switch. `readFrom` throws on a
-corrupt committed prefix — that is the unreadable case: the file is damaged
-and the guard refuses rather than guessing. (Repair is a separate,
-deliberate act — see `repair-session.md`.)
-
-## Guard vs lock: the division of labor
-
-- The **lease/lock** prevents TUI-vs-TUI double opens — the common
-  corruption source. It is REQUIRED (fail-closed): every writable target
-  must settle `acquired` before any DSH call; unavailable deployments
-  cannot safely open sessions.
-- The **guard** remains the second line of defense for everything the
-  lock cannot see: the web surface, older TUIs that know nothing about
-  the lock, a force-open after the refusal, or a lock file lost to
-  manual deletion.
+A per-submit cross-process consistency check (stat + a full committed read
+comparing the file against memory) USED to run before every Enter/Ctrl+S
+send. It was removed: its cost grew with the session history
+(`readFrom(id, 0)` parses the whole artifact), long submissions sat for
+seconds on a silent no-feedback UI, and its one-time force-through token
+invited exactly the double-write it existed to prevent. With the old guard
+gone, the single-writer boundary is ONLY the open-time owner lock + lease
++ cooling verifier, and the submit hot path performs ZERO persistence work
+(a runner-level test pins this: `test/submit-hot-path.test.ts`). The web
+surface and pre-lock TUIs are out of scope by design — they are not part
+of this project's ownership model.
 
 ## Counting events in a session file (trap)
 
 File rows are the **storage format**, not events. Packed `*-chunks` rows
 (`seq0` + `dt`) expand via `decodeStorageRecord` into individual events with
-real `seq` values. Any code that counts "events in the file" must expand rows
-first — the guard's `readFrom` does; naive line-counting does not.
+real `seq` values. Any code that counts "events in the file" must expand
+rows through the persistence read path (`readFrom`), which expands them;
+naive line-counting does not.
 
 ## In-process session transitions: the single-writer gate
 
-The lock and the guard protect the session FILE from cross-process writers.
+The lock protects the session FILE from cross-process writers.
 A separate hazard is IN-PROCESS interleaving between the TUI's own
 transition paths — `/new`, `/fork`, `/rewind`, `/sessions` switch/resume
 and the first-session creation. Before the gate, two such workflows could
@@ -247,7 +227,7 @@ is the whole point:
    interpreted as "the child never happened": `dispose()` stops an agent
    but never deletes a persisted session, and dsh has no durable
    rollback API;
-4. COMMIT — a synchronous critical section (guard reset, generation
+4. COMMIT — a synchronous critical section (generation
    bump, live handle/agent replacement — the target lock was acquired in
    phase 2 and stays held; NO lock changes happen here, review round 10)
    with no awaits between its steps;
@@ -280,8 +260,8 @@ whose lock is about to be released. The transition gate therefore
 doubles as a WRITE FENCE: while a transition is in flight
 (`SessionTransitionGate.busy`), every agent-write entry point — plain
 submit, busy-Enter steer, Ctrl+S steer, the command fallback followup,
-DIRECT slash-command execution (a bare `commands.execute` after the
-async guard checks could write an agent whose lock a concurrent
+DIRECT slash-command execution (a bare `commands.execute` that landed
+across a transition could write an agent whose lock a concurrent
 transition is about to release — review round 27), the `!` shell
 submit, and the per-skill slash invocations — refuses the write,
 restores/keeps the draft or the invocation line (or keeps the shell

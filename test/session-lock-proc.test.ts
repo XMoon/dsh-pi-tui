@@ -86,6 +86,22 @@ test('probe: a zombie state is stale (injected stat read)', () => {
   assert.equal(outcome.kind, 'stale')
 })
 
+test('probe: a SIGSTOP-paused owner is still alive (no heartbeat, never takeover)', () => {
+  // A STOPPED ('T' state) process is alive — a TUI suspended with SIGSTOP
+  // keeps its session lock: inactivity is never a staleness signal (the
+  // takeover criteria are liveness + starttime + dsh identity ONLY).
+  const probe = createProcProbe({
+    readFile: (path) => {
+      // Field layout after comm: index 0 = state (field 3), index 19 =
+      // starttime (field 22) — SIGSTOP's 'T' must NOT read as dead.
+      if (path.endsWith('/stat')) return '1 (dsh) T 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 5 21 22'
+      return '/usr/bin/node /home/x/.local/bin/dsh --profile pi-tui'
+    },
+  })
+  const outcome = probe.probe({ pid: 9999, starttime: 5, startedAt: 0 }, selfOwner())
+  assert.equal(outcome.kind, 'alive', 'a SIGSTOP-paused dsh owner must stay alive')
+})
+
 test('probe: a cmdline read failure is unknown, never a stale takeover', () => {
   // The stat proves the process is alive and is the same one; an unreadable
   // cmdline (hidepid, transient race) must not classify the owner as stale —

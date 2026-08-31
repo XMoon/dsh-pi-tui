@@ -1,21 +1,20 @@
 /**
- * The Ctrl+S steer-all orchestration with guard re-validation. Extracted
+ * The Ctrl+S steer-all orchestration with re-validation. Extracted
  * from the runner so the TOCTOU races — a queue splice or a session switch
- * while the async divergence guard reads the file — are testable headless:
+ * while the send is in flight — are testable headless:
  *
  * - The queue snapshot and the agent/generation identity are captured
- *   BEFORE the guard runs.
- * - AFTER the guard returns, everything is re-validated: same agent object,
+ *   BEFORE the awaited write window.
+ * - Before the delivery, everything is re-validated: same agent object,
  *   same session generation, same queue (same ids, same order). Anything
  *   changed aborts the send (`stale`) — the user retries against the new
- *   state, so a message spliced in during the guard is never lost and a
- *   payload can never be written to a session the guard did not check.
+ *   state, so a message spliced in while the send was in flight is never
+ *   lost.
  * - Only the CONFIRMED message ids are removed (never `clear()`), so
- *   messages that arrived while the guard was in flight survive.
+ *   messages that arrived mid-send survive.
  * @module @xmoon76/dsh-pi-tui/steer
  */
 
-import { savePayloadIdentity } from './guard.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
 
 /** The minimal agent surface the steer needs (the runner's live agent). */
@@ -31,16 +30,7 @@ export interface SteerAgentLike {
   followup(message: unknown): void
 }
 
-/** The guard surface: run the divergence check for one write action. */
-export interface SteerGuard {
-  /** Run the divergence guard; `blocked` carries the divergence kind. */
-  run(identity: string): Promise<
-    | { kind: 'ok' | 'forced' }
-    | { kind: 'blocked'; reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed' }
-  >
-}
-
-export type SteerOutcome = 'ok' | 'blocked' | 'stale'
+export type SteerOutcome = 'ok' | 'stale'
 
 /** Injectable dependencies of {@link steerAll}. */
 export interface SteerDeps {
@@ -48,25 +38,19 @@ export interface SteerDeps {
   currentAgent(): SteerAgentLike | undefined
   /** Current session generation, re-read (session switch detection). */
   currentGeneration(): number
-  guard: SteerGuard
   notify(message: string, kind: 'info' | 'error'): void
   /**
-   * Restore the draft after a block (the editor keeps the text). Returns
-   * true when the draft came back VERBATIM (a second identical submit can
-   * force); false when it was MERGED with newer input — then the notice
-   * must not promise that the next press forces.
+   * Restore the draft after an abort (the editor keeps the text). Returns
+   * true when the draft came back VERBATIM; false when it was MERGED with
+   * newer input — then the notice must not promise a plain retry.
    */
   restoreDraft(text: string): boolean
   /** Build the draft message (runner-side creation, keeps this module dsh-free). */
   createDraft(text: string): unknown
-  /** The block notice text for a divergence kind. */
-  blockedNotice(reason: 'diverged' | 'tail-mismatch' | 'unreadable' | 'removed'): string
-  /** The forced-through notice text. */
-  forcedNotice(): string
   /** The stale-state (retry) notice text. */
   staleNotice(): string
   /** The notice when the draft had to be MERGED with newer input: the
-   * submission changed, so no force promise can be made. */
+   * submission changed, so no verbatim-retry promise can be made. */
   mergedNotice(): string
   /**
    * The session-transition write fence: returns true while a session
@@ -159,8 +143,8 @@ export function mergeDraft(current: string, submitted: string): string {
 /**
  * Whether a session identity captured before an async operation is still
  * current: the SAME agent object and the SAME generation. Used by the
- * Enter-submit path too, so every guard-then-write flow re-checks what the
- * guard actually verified.
+ * Enter-submit path too, so every capture-then-write flow re-checks what
+ * the captured identity actually verified.
  */
 export function sessionUnchanged(
   locked: { agent: object; generation: number },
@@ -216,9 +200,9 @@ export function steerHasPayload(
 }
 
 /**
- * Run one Ctrl+S send end to end: snapshot → guard → re-validate →
+ * Run one Ctrl+S send end to end: snapshot → re-validate →
  * confirm-and-send. The send itself removes ONLY the confirmed message ids
- * (a queue splice during the guard survives) and steers them with the
+ * (a queue splice mid-send survives) and steers them with the
  * draft. Any state change — agent switch, generation bump, queue change —
  * aborts with `stale` and a retry notice; nothing is written and nothing
  * is lost. With `onlyDraft` the queue is neither read nor removed: the
@@ -227,7 +211,7 @@ export function steerHasPayload(
 export async function steerAll(deps: SteerDeps, text: string, options: SteerAllOptions = {}): Promise<SteerOutcome> {
   // The WHOLE steer write runs inside the operation barrier (convergence
   // plan phase 3): a transition that starts while this steer awaits
-  // (guard, identity checks) drains it before quiescing the old agent —
+  // (identity checks) drains it before quiescing the old agent —
   // the `fence` quick-refusal below only covers writers that START during
   // a transition, not writers already in flight.
   const barrier = deps.barrier
@@ -250,9 +234,9 @@ export async function steerAll(deps: SteerDeps, text: string, options: SteerAllO
 
 /** Deliver one message through the writer seam when present, else directly
  * on the agent (the historical Direct delivery). Runs inside steerAllCore
- * AFTER the guard confirmed the session — the writer resolves the live
- * agent by session id, so a switch that could not have happened (guarded)
- * still resolves to the same agent. */
+ * AFTER the identity check confirmed the session — the writer resolves the
+ * live agent by session id, so a switch that could not have happened
+ * (checked) still resolves to the same agent. */
 const deliverSteer = (deps: SteerDeps, message: unknown): void => {
   const writer = deps.writer
   const agent = deps.currentAgent()
@@ -281,26 +265,18 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   if (agent === undefined) return 'ok'
   const generation = deps.currentGeneration()
   const snapshot = onlyDraft ? [] : [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
-  // Gate B (empty-payload no-op): when the caller told us the draft
-  // carries NO payload, nothing to send is a clean no-op — for BOTH the
-  // onlyDraft branch (busy-Enter steer of an empty draft) and the full
-  // Ctrl+S branch (empty draft + empty queue). The queue is checked
-  // BEFORE the guard so no session-identity work is ever wasted and no
-  // empty followup/steer can be produced. `draftHasPayload: undefined`
-  // keeps the historical semantics (the text is a payload).
+   // Gate B (empty-payload no-op): when the caller told us the draft
+   // carries NO payload, nothing to send is a clean no-op — for BOTH the
+   // onlyDraft branch (busy-Enter steer of an empty draft) and the full
+   // Ctrl+S branch (empty draft + empty queue). The queue is checked
+   // BEFORE any identity work so no session-side work is ever wasted and
+   // no empty followup/steer can be produced. `draftHasPayload: undefined`
+   // keeps the historical semantics (the text is a payload).
   if (options.draftHasPayload === false && snapshot.length === 0) return 'ok'
-  const verdict = await deps.guard.run(savePayloadIdentity(snapshot, text))
-  if (verdict.kind === 'blocked') {
-    const verbatim = deps.restoreDraft(text)
-    // A merged draft is no longer the token's fingerprint: the next press
-    // would NOT force. Say so instead of promising a force.
-    deps.notify(verbatim ? deps.blockedNotice(verdict.reason) : deps.mergedNotice(), 'error')
-    return 'blocked'
-  }
-  // Re-validate AFTER the guard: the agent object, the session generation
-  // and the queue must all still be exactly what the guard checked. A stale
-  // send restores the draft — the editor already cleared it before onSteer
-  // fired, so the user must not lose their text.
+  // Re-validate BEFORE the delivery: the agent object, the session
+  // generation and the queue must all still be exactly what was
+  // snapshotted. A stale send restores the draft — the editor already
+  // cleared it before onSteer fired, so the user must not lose their text.
   const now = deps.currentAgent()
   if (now === undefined || !sessionUnchanged({ agent, generation }, now, deps.currentGeneration())) {
     const verbatim = deps.restoreDraft(text)
@@ -322,7 +298,6 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
     // Ctrl+Enter or notices) is never swept along; steered input cannot be
     // pulled back, so a queued message must not be dragged into the turn
     // behind the user's back.
-    if (verdict.kind === 'forced') deps.notify(deps.forcedNotice(), 'error')
     const message = deps.createDraft(text)
     if (now.status === 'running') deliverSteer(deps, message)
     else deliverFollowup(deps, message)
@@ -336,8 +311,6 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
     deps.notify(verbatim ? deps.staleNotice() : deps.mergedNotice(), 'error')
     return 'stale'
   }
-  const forced = verdict.kind === 'forced'
-  if (forced) deps.notify(deps.forcedNotice(), 'error')
   if (current.length === 0) {
     // Classic single-draft steer: a running turn takes it now; an idle
     // agent starts a regular turn with it. The delivery goes through the
@@ -357,20 +330,18 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   const messages = [
     ...current,
     // The draft message is built from the ORIGINAL text (never the trim):
-    // the runner prepares one message whose content must match the guarded
-    // payload identity exactly (round-4 finding 2). The verdict only
+    // the runner prepares one message whose content matches the payload it
+    // vetted before calling steerAll. The flag only
     // decides whether the draft rides along.
     ...(includeDraft ? [deps.createDraft(text)] : []),
   ]
   // Remove ONLY the confirmed messages — never clear() — so anything
-  // spliced in DURING the guard survives untouched.
+  // spliced in mid-send survives untouched.
   for (const message of current) {
     if (deps.writer !== undefined) deps.writer.dequeue(now.session.id, message.id)
     else now.inbox.remove(message.id)
   }
   for (const message of messages) deliverSteer(deps, message)
-  if (!forced) {
-    deps.notify(messages.length === 1 ? 'steering 1 message' : `steering ${messages.length} messages`, 'info')
-  }
+  deps.notify(messages.length === 1 ? 'steering 1 message' : `steering ${messages.length} messages`, 'info')
   return 'ok'
 }

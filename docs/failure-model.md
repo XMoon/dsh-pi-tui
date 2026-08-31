@@ -24,7 +24,7 @@ FACTORY that is invoked SYNCHRONOUSLY before the helper returns:
 - `runOwned(label, () => task, { isCancellation?, onResult, onCancel, onError })`
   — result-consuming main flows: submit/steer dispatch, command execution,
   local commands, local-shell card settle, the `!` shell-context submit
-  (guard → re-validate → followup; a block keeps the card, an unexpected
+  (re-validate → followup; a refused write keeps the card, an unexpected
   error notifies), session switch, question flows, model-menu loads,
   external editor.
 
@@ -100,7 +100,8 @@ text-level dedup silently dropped one of TWO INDEPENDENT operations that
 happen to carry the same text: two separate Ctrl+S submits of the same
 string that both fail/stale must both restore their drafts, because each
 corresponds to exactly one user operation. Content-based dedup is only safe
-for idempotence of the SAME operation retried — identify operations by
-submission/operation identity (draft fingerprint + observed revision), never
-by text equality. Test with a second identical draft plus a third different
-draft typed mid-failure.
+for idempotence of the SAME operation retried — identify operations by the
+capture-then-write identity the runner actually checks (the CAPTURED agent
+object plus the session generation via `sessionUnchanged`; a full steer also
+re-validates the queue snapshot), never by text equality. Test with a second
+identical draft plus a third different draft typed mid-failure.

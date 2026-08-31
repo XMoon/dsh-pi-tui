@@ -154,7 +154,7 @@ same document as `busyEnter`).
     path. It already has everything: bounded tail capture, 0600 full-output
     temp file, abort via `localShellController`, per-stream `StringDecoder`.
   - `sandbox`: keep the current `ctx.shell` resolve/run path unchanged.
-  - The `!` context submission (guard → re-validate → followup) is
+  - The `!` context submission (re-validate → followup) is
     **untouched** — only the execution backend changes.
 
 **Why a setting instead of unconditional bypass**: the dsh shell executor
@@ -771,7 +771,7 @@ rounds (codex / gpt-5.6-luna):
 - **PR review round 5** (human, replacement-editor rejection path): P1 —
   a SYNCHRONOUS rejection restore is clobbered by the fallback tail. The
   fork clears the host editor BEFORE `onSubmit`; a synchronous rejection
-  (the runner's divergence-guard shape: `onSubmit` calls
+  (the runner's synchronous-rejection shape: `onSubmit` calls
   `setEditorText(text)` and returns) rewrites the VISIBLE plugin seat
   while the fallback dispatch is still on the stack — and the fallback
   tail then unconditionally synced the hidden host's post-submit EMPTY
@@ -837,7 +837,9 @@ round) over the three commits plus the round-1 fixes:
   (subcommand table only; file arguments already covered by fd).
 - Regular (non-fullscreen) mouse support — the main screen has no
   `onCellClick` by design (terminal scrollback).
-- Any change to the `!` context-submission guard/followup flow.
+- Any change to the `!` context-submission followup flow (its submit-time
+  divergence guard was later REMOVED — docs/concurrency.md — but the
+  followup contract itself still holds).
 - Expanded-body beautification of JSON-result tools — the web shows the
   result verbatim; the TUI aligns. (agent-team folded previews excluded:
   experimental, name collisions.)
