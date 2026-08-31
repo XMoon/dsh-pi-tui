@@ -36,7 +36,7 @@ import {
 } from '../../provider-catalog.ts'
 import { cancellationError } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import { resolveTrustedFooterCommand, resolveUserLayerFooterMode } from '../../footer/command-trust.ts'
+import { resolveTrustedFooterCommand, resolveUserLayerFooterLayout, resolveUserLayerFooterMode } from '../../footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../footer/custom-items.ts'
 import type {
   AuthorizationConfig,
@@ -150,6 +150,16 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
     return resolveTrustedFooterCommand([descriptor], 'dsh-pi-tui')
+  }
+
+  /** The USER layer's declared custom layout (PR D activation trust): the
+   * only layout whose refs may arm custom command items. A project merged
+   * layout can render user:* ids, but it can never activate a dormant USER
+   * command. */
+  get userFooterLayout() {
+    const descriptor = this.readDescriptor()
+    if (descriptor === undefined) return undefined
+    return resolveUserLayerFooterLayout([descriptor], 'dsh-pi-tui')
   }
 
   /** One describe() read per synchronous evaluation: the two getters are

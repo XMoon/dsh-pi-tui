@@ -14,6 +14,8 @@ import {
   MIN_COMMAND_REFRESH_MS,
   type FooterCommandConfig,
 } from './command-runner.ts'
+import { isFooterLayout, parseFooterLayout } from './layout.ts'
+import type { FooterLayoutV1 } from './types.ts'
 
 /** The settings descriptor's shape the gate reads (structural). */
 export interface SettingsDescriptorLike {
@@ -103,4 +105,27 @@ export function resolveUserLayerFooterMode(
   if (typeof user !== 'object' || user === null) return undefined
   const mode = (user as Record<string, unknown>).footer
   return typeof mode === 'string' ? mode : undefined
+}
+
+/**
+ * Resolve the USER layer's declared custom layout (PR D activation trust):
+ * the ONLY layout whose refs may arm custom command items. A project can
+ * supply a MERGED `footerLayout` for rendering, but it can never activate
+ * a dormant USER command — the same principle as the command-mode gate
+ * above: the user layer must own the layout that decides what executes.
+ * @returns the validated USER-layer layout, or undefined when absent or
+ * invalid (an invalid user layout activates nothing — fail-safe).
+ */
+export function resolveUserLayerFooterLayout(
+  descriptors: readonly SettingsDescriptorLike[] | undefined,
+  namespace: string,
+): FooterLayoutV1 | undefined {
+  if (descriptors === undefined) return undefined
+  const descriptor = descriptors.find(entry => entry.ns === namespace)
+  if (descriptor === undefined) return undefined
+  const user = descriptor.user
+  if (typeof user !== 'object' || user === null) return undefined
+  const layout = (user as Record<string, unknown>).footerLayout
+  const parsed = parseFooterLayout(layout)
+  return isFooterLayout(parsed) ? parsed : undefined
 }

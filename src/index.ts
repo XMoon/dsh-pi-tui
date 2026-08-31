@@ -106,7 +106,7 @@ import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { parseFooterLayout, isFooterLayout, resolveCommandFooterFallback } from './footer/layout.ts'
 import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from './footer/custom-items.ts'
 import { FooterCommandRunner } from './footer/command-runner.ts'
-import { FooterDynamicItemRuntime, activeFooterItemIds } from './footer/dynamic-item-runtime.ts'
+import { FooterDynamicItemRuntime, activeFooterItemIds, trustedActivationLayout } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
@@ -5558,11 +5558,18 @@ export function apply(ctx: Context, config: Config): void {
         customFooterWarningShown = true
         app.notify(`${customResult.invalidCount} custom footer item${customResult.invalidCount === 1 ? '' : 's'} invalid — skipped`, 'error')
       }
-      // PR D: arm the per-item command runners for the ACTIVE layout. The
-      // runtime receives ONLY the USER-layer trusted definitions (never the
-      // merged/project value) and only the layout's referenced ids — a
-      // project-supplied command definition can never reach a spawn. The
-      // one-shot diagnostic covers the §11.2 attack shape: a layout
+      // The USER-layer footer trust read (mode + command + layout): the
+      // adapter owns the settings descriptor access — a Remote adapter
+      // replays the same facts from the wire.
+      const trust = backend.config.footerCommandTrust
+      // PR D: arm the per-item command runners for the TRUSTED ACTIVE
+      // layout. The runtime receives ONLY the USER-layer trusted
+      // definitions (never the merged/project value) AND only the ids of
+      // a USER-trusted layout — a project-supplied command definition can
+      // never reach a spawn, and a project merged layout can never
+      // activate a dormant USER command (activation trust, the same
+      // principle as the whole-footer command-mode gate). The one-shot
+      // diagnostic covers the §11.2 attack shape: a RENDERED layout
       // reference to a command definition that only exists in a non-USER
       // layer renders unavailable, with ONE bounded notice.
       const syncDynamicCommandItems = (activeIds: Set<string>): void => {
@@ -5583,7 +5590,12 @@ export function apply(ctx: Context, config: Config): void {
           const mergedCommands = parseFooterCustomItems(doc.footerCustomItems).items
             .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
           const trustedIds = new Set(trustedCommands.map(item => item.id))
-          const untrustedReferenced = mergedCommands.some(item => activeIds.has(item.id) && !trustedIds.has(item.id))
+          // The diagnostic watches the RENDERED layout (what the user
+          // sees), not the activation layout: a rendered ref to a command
+          // definition that only exists in a non-USER layer is unavailable
+          // and reported once.
+          const renderedIds = activeFooterItemIds(app.getEffectiveFooterLayout())
+          const untrustedReferenced = mergedCommands.some(item => renderedIds.has(item.id) && !trustedIds.has(item.id))
           if (untrustedReferenced) {
             footerCommandItemWarningShown = true
             app.notify('a custom command item is not user-configured — not running it', 'error')
@@ -5617,7 +5629,6 @@ export function apply(ctx: Context, config: Config): void {
         // command (plan §17.4). The trust read goes through the CONFIG
         // PORT (the adapter owns the settings descriptor access — a
         // Remote adapter replays the same facts from the wire).
-        const trust = backend.config.footerCommandTrust
         const config = trust.command
         const userMode = trust.userFooterMode
         if (config === undefined || userMode !== 'command') {
@@ -5630,8 +5641,10 @@ export function apply(ctx: Context, config: Config): void {
           // never reset it — the command surface overrides the composer
           // only while commandRows is set, and the M5 fallback contract
           // restores the LAST native layout on failure. The fallback
-          // layout IS visible, so the per-item command runners arm for it.
-          syncDynamicCommandItems(activeFooterItemIds(app.getEffectiveFooterLayout()))
+          // layout IS visible, but only the USER layer's own layout may
+          // activate custom command items (a merged fallback layout can
+          // render user:* ids, never arm them).
+          syncDynamicCommandItems(activeFooterItemIds(trustedActivationLayout(undefined, trust.userFooterLayout)))
           return
         }
         if (footerCommandRunner === undefined) {
@@ -5675,12 +5688,22 @@ export function apply(ctx: Context, config: Config): void {
           }
           app.setFooterPreset('full')
           app.setFooterLayout(undefined)
-          syncDynamicCommandItems(activeFooterItemIds(app.getEffectiveFooterLayout()))
+          // The merged custom layout is invalid: the rendered footer is
+          // the builtin default, and only the USER layer's own layout may
+          // activate custom command items.
+          syncDynamicCommandItems(activeFooterItemIds(trustedActivationLayout(undefined, trust.userFooterLayout)))
           return
         }
         app.setFooterPreset('full')
         app.setFooterLayout(parsed)
-        syncDynamicCommandItems(activeFooterItemIds(app.getEffectiveFooterLayout()))
+        // PR D activation trust: a /footer save's validated layout is the
+        // trusted activation; every other path uses the USER layer's
+        // declared layout — a PROJECT merged layout can render user:*
+        // ids, but it can never activate a dormant USER command.
+        syncDynamicCommandItems(activeFooterItemIds(trustedActivationLayout(
+          savedCustomItems !== undefined ? parsed : undefined,
+          trust.userFooterLayout,
+        )))
         return
       }
       // 'full' | 'default' | unknown → the builtin default layout.

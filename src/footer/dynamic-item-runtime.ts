@@ -24,8 +24,7 @@
  */
 
 import { FooterCommandRunner, type FooterCommandConfig } from './command-runner.ts'
-import { parseFooterCommandConfig } from './command-trust.ts'
-import { DEFAULT_CUSTOM_COMMAND_REFRESH_MS, type FooterCustomCommandItemSettings } from './custom-items.ts'
+import { customCommandConfigOf, type FooterCustomCommandItemSettings } from './custom-items.ts'
 import type { FooterLayoutV1 } from './types.ts'
 import type { StatusSnapshot } from '../status/types.ts'
 
@@ -50,9 +49,11 @@ interface ActiveCommandItem {
   readonly runner: FooterCommandRunner
 }
 
-/** Every item id the layout references (the runtime's active set). */
-export function activeFooterItemIds(layout: FooterLayoutV1): Set<string> {
+/** Every item id the layout references (the runtime's active set). An
+ * absent layout (no USER-trusted activation) activates nothing. */
+export function activeFooterItemIds(layout: FooterLayoutV1 | undefined): Set<string> {
   const ids = new Set<string>()
+  if (layout === undefined) return ids
   for (const row of layout.rows) {
     for (const ref of row.left) ids.add(ref.id)
     for (const ref of row.right) ids.add(ref.id)
@@ -67,23 +68,18 @@ function sameConfig(a: FooterCommandConfig, b: FooterCommandConfig): boolean {
     && a.maxRows === b.maxRows
 }
 
-/** The validated runner config for one command definition (maxRows is
- * always 1 — a custom command item is exactly one line; the composer owns
- * width/truncation). The custom-item DEFAULT refresh is 5s (several items
- * can coexist — the whole-footer 1s default would spawn a process per
- * item per second), so an ABSENT refreshIntervalMs is projected to the
- * custom default BEFORE the shared parser runs: an absent default and an
- * explicit 5s must produce the SAME cadence (the dirty comparator already
- * treats them as the same fact). The parser already validated the
- * definition, so this is defensive. */
-export function customCommandConfigOf(item: FooterCustomCommandItemSettings): FooterCommandConfig | undefined {
-  return parseFooterCommandConfig({
-    schemaVersion: 1,
-    command: item.command,
-    timeoutMs: item.timeoutMs,
-    refreshIntervalMs: item.refreshIntervalMs ?? DEFAULT_CUSTOM_COMMAND_REFRESH_MS,
-    maxRows: 1,
-  })
+/** The PR D activation layout: the layout whose refs may arm custom
+ * command items. A /footer save passes the just-committed validated
+ * layout as the trusted activation; every other path uses the USER
+ * layer's declared layout. A PROJECT merged layout can reference user:*
+ * ids for RENDERING, but it can never activate a dormant USER command —
+ * the same activation-trust principle the whole-footer command mode gate
+ * applies (plan §11: definition trust AND activation trust). */
+export function trustedActivationLayout(
+  savedLayout: FooterLayoutV1 | undefined,
+  userLayerLayout: FooterLayoutV1 | undefined,
+): FooterLayoutV1 | undefined {
+  return savedLayout ?? userLayerLayout
 }
 
 /** The custom command item runtime. */

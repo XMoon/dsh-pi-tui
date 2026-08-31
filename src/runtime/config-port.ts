@@ -111,7 +111,9 @@ export function serializeTuiSettingsMutation<T>(
  * USER layer of the settings document declares the footer command mode
  * AND a trusted command. The adapter owns the settings descriptor access
  * (a Remote adapter replays the same facts from the wire) — the runner
- * never touches the raw settings service for the trust gate. */
+ * never touches the raw settings service for the trust gate. PR D extends
+ * the same read with the USER-layer layout: the ONLY layout whose refs
+ * may activate custom command items. */
 export interface FooterCommandTrust {
   /** The user layer's declared footer mode ('command' when the user opted
    * in), undefined when the user layer has no opinion. */
@@ -119,6 +121,12 @@ export interface FooterCommandTrust {
   /** The trusted command config (the user layer's footerCommand, bounds
    * validated), undefined when untrusted/absent. */
   readonly command: FooterCommandConfig | undefined
+  /** The user layer's declared custom layout (validated), undefined when
+   * absent/invalid — the ONLY layout whose refs may arm custom command
+   * items (PR D activation trust: a project merged layout can reference
+   * user:* ids for rendering, but can never activate a dormant USER
+   * command). */
+  readonly userFooterLayout: import('../footer/types.ts').FooterLayoutV1 | undefined
 }
 
 /** The USER-layer Custom Text/Command definition read (PR C + PR D). The

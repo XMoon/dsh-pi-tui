@@ -13,7 +13,7 @@
  * @module @xmoon76/dsh-pi-tui/footer/custom-items
  */
 
-import { DEFAULT_COMMAND_TIMEOUT_MS } from './command-runner.ts'
+import { DEFAULT_COMMAND_TIMEOUT_MS, type FooterCommandConfig } from './command-runner.ts'
 import { parseFooterCommandConfig } from './command-trust.ts'
 import type { FooterItemExternalSource } from './item-registry.ts'
 import type { FooterItemDefinition, FooterTone } from './types.ts'
@@ -82,17 +82,42 @@ export interface FooterCustomCommandItemSettings {
   readonly tone?: FooterTone | 'auto'
 }
 
+/** The validated runner config for one command definition (maxRows is
+ * always 1 — a custom command item is exactly one line; the composer owns
+ * width/truncation). The custom-item DEFAULT refresh is 5s (several items
+ * can coexist — the whole-footer 1s default would spawn a process per
+ * item per second), so an ABSENT refreshIntervalMs is projected to the
+ * custom default BEFORE the shared parser runs: an absent default and an
+ * explicit 5s must produce the SAME cadence. The parser already validated
+ * the definition, so this is defensive. This is the ONE projection both
+ * the runtime and the effective-value helpers consume, so the UI, the
+ * dirty comparator and the real execution can never drift apart. */
+export function customCommandConfigOf(item: FooterCustomCommandItemSettings): FooterCommandConfig | undefined {
+  return parseFooterCommandConfig({
+    schemaVersion: 1,
+    command: item.command,
+    timeoutMs: item.timeoutMs,
+    refreshIntervalMs: item.refreshIntervalMs ?? DEFAULT_CUSTOM_COMMAND_REFRESH_MS,
+    maxRows: 1,
+  })
+}
+
 /** The effective refresh interval of a command definition (absent = the
  * 5s default). Dirty comparison and the runtime use the EFFECTIVE value so
- * an absent default and an explicit default are the same fact. */
+ * an absent default and an explicit default are the same fact. The value
+ * is the SAME normalized value the runner executes (the shared parser
+ * clamps refresh to >= 1s): a hand-edited out-of-range raw value is
+ * preserved in storage for forward compatibility, but the UI and the
+ * dirty comparator never lie about the real cadence. */
 export function effectiveCustomCommandRefreshMs(item: FooterCustomCommandItemSettings): number {
-  return item.refreshIntervalMs ?? DEFAULT_CUSTOM_COMMAND_REFRESH_MS
+  return customCommandConfigOf(item)?.refreshIntervalMs ?? DEFAULT_CUSTOM_COMMAND_REFRESH_MS
 }
 
 /** The effective timeout of a command definition (absent = the whole-footer
- * 300ms default). */
+ * 300ms default; the shared parser clamps to 1..1000ms — the UI reports
+ * the same value the runner enforces). */
 export function effectiveCustomCommandTimeoutMs(item: FooterCustomCommandItemSettings): number {
-  return item.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS
+  return customCommandConfigOf(item)?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS
 }
 
 /** A parser result that also lets the caller report invalid entries once
