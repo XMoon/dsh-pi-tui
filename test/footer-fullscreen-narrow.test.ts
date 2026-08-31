@@ -236,6 +236,61 @@ test('the armed Ctrl+C instruction on a chrome-heavy 20x10 viewport is NEVER cli
   }
 })
 
+test('a regular -> fullscreen switch recomposes the budget (widgets are fullscreen-inactive)', async () => {
+  // PR #57 review R3 P1: the widget zones mount ONLY on the regular
+  // surface. With populated widgets on a short terminal the REGULAR
+  // budget is squeezed (widgets + header + editor), while the FULLSCREEN
+  // root does not mount the widgets at all — the same geometry must
+  // grant the fullscreen footer its full effective budget, which proves
+  // BOTH the conditional accounting and the mode-switch recomposition.
+  const { ExtensionLedger } = await import('../src/extension/internal/ledger.ts')
+  const { SurfaceHost } = await import('../src/extension/internal/surface-host.ts')
+  const { Text } = await import('@xmoon76/pi-tui')
+  const ledger = new ExtensionLedger(() => {})
+  const vt = new VirtualTerminal(80, 8)
+  let app!: TuiApp
+  const host = new SurfaceHost(ledger, () => app.requestRender())
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
+  app.start()
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: host.surfaceId,
+    generation: 1,
+    width: 80,
+    height: 8,
+    fullscreen: false,
+    focusedSeat: 'editor',
+    themeId: 'dark',
+    themeRevision: 0,
+  })
+  app.setStatus(RICH_STATUS)
+  ledger.register('input.widget.below', { id: 'b1', order: 1 }, {
+    view: { kind: 'rows', rows: [
+      { kind: 'text', spans: [{ text: 'widget-row-1' }] },
+      { kind: 'text', spans: [{ text: 'widget-row-2' }] },
+      { kind: 'text', spans: [{ text: 'widget-row-3' }] },
+    ] },
+    importance: 0,
+  }, 'p1')
+  host.refreshOutlets()
+  await vt.waitForRender()
+  // REGULAR at 80x8: the baked widget zone (the outlet grants 2 of the 3
+  // rows) + header + editor consume 6 of 8 rows — the footer gets the
+  // rest, squeezed.
+  const regularRows = [...app.footerRenderRowsForTest()]
+  assert.ok(regularRows.length <= 2, `the regular budget must account for the widgets, saw ${regularRows.length}:\n${regularRows.join('\n')}`)
+  // FULLSCREEN at unchanged geometry: the widgets are NOT mounted, so the
+  // budget must recompose upward (header 1 + editor 3 → 4 free slots,
+  // capacity-capped; the demand-limited footer grows back).
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const fullscreenRows = [...app.footerRenderRowsForTest()]
+  assert.ok(fullscreenRows.length > regularRows.length, `the fullscreen budget must ignore unmounted widgets (regular ${regularRows.length} -> fullscreen ${fullscreenRows.length}):\n${fullscreenRows.join('\n')}`)
+  for (const line of vt.getViewport()) {
+    assert.ok(!line.includes('widget-row'), `an unmounted widget must not paint in fullscreen:\n${line}`)
+  }
+  app.stop()
+})
+
 test('a surface with ZERO available footer slots renders nothing at all', async () => {
   // The pinned chrome alone fills the terminal (header + editor = every
   // row): the surface grants total = 0 and the composer renders NOTHING —
