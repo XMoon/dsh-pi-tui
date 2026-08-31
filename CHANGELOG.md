@@ -46,6 +46,19 @@
 - **`FooterLayoutV1`、perRow=2 / hard total=4、Host Instruction 与 public
   extension ABI 均不变。**
 
+### UX 优化
+
+#### 变更
+
+- **Focus 展开视图恢复 steer 时间线。** 展开的 Thought 中，initial user 仍在 Thought 前，后续 steer/user 回到其实际发生的位置（tool 后、thinking 后等），final assistant 仍为最后一条 settled answer；折叠摘要语义不变。
+- **Focus 折叠 Message 成为第三个 process slot 并显示最新最多 3 个 visual rows。** 槽位顺序为 Think → Tool → Message；Message 每次 render 按当前宽度重新 wrap 并取最新尾部 3 行，流式追加自然滚向最新，resize 后重新 wrap。
+- **全屏鼠标滚轮步长可配置。** `/settings` 新增 `Mouse wheel lines`（1/2/3/5/8，默认 1），通过现有 `TuiAltScreenOptions.wheelScrollLines` 生效；fullscreen 已激活时修改在下次重新进入 fullscreen 后生效。
+- **Todo 面板 ≤5 条时去掉冗余 full 状态。** 状态机变为 summary ↔ list 两态（第二次点击即关闭）；>5 条保留 summary → compact(5) → full(N) → summary 三态；列表从 >5 缩到 ≤5 时自动清除 ghost `todoExpanded`。
+
+#### 修复
+
+- **显式 cold resume 在 TUI mount 前显示启动进度。** `dsh --profile <p> --session <id>` 冷启动时先显示单行 `Resuming session…`（必要时 `Preparing conversation…`），mount 前完全清除，不再让空白终端看起来像卡死；fresh start 不输出任何状态，非 TTY 静默。
+
 ### 迁移说明
 
 - **0.4.0-alpha.1 切换到 DeepSeek Harness 0.1.2。** 声明支持范围为
