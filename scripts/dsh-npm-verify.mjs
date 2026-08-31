@@ -4,11 +4,12 @@
  * in an isolated copy, keeping the tracked lockfile frozen and exercising the
  * same TUI candidate packaging path used by releases.
  *
- * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.2-alpha.1]
+ * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.2-alpha.2]
  *
  * @module dsh-npm-verify
  */
 
+import { execFileSync } from 'node:child_process'
 import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
@@ -92,6 +93,22 @@ function copyRepository(destination) {
   })
 }
 
+/** Point the temporary workspace at the real repository's git metadata so
+ * git-dependent tests (the pre-push hook gate) behave identically to the
+ * source verification workspace. Best-effort: a checkout without git
+ * metadata can still run the other gates. */
+function attachGitMetadata(workspace) {
+  try {
+    const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], {
+      cwd: PACKAGE_ROOT,
+      encoding: 'utf8',
+    }).trim()
+    if (gitDir !== '') writeFileSync(join(workspace, '.git'), `gitdir: ${gitDir}\n`, 'utf8')
+  } catch {
+    // A source checkout without Git metadata can still run the other gates.
+  }
+}
+
 export function candidateTarball(workspace) {
   const candidates = readdirSync(workspace)
     .filter(name => /^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(name))
@@ -115,6 +132,7 @@ async function main() {
   try {
     writeFileSync(npmConfigPath, `registry=${PUBLIC_NPM_REGISTRY}\n`, 'utf8')
     copyRepository(workspace)
+    attachGitMetadata(workspace)
     const prepared = prepareDshInstall(distribution, workspace, { stripPackageManager: true })
     try {
       await run(PNPM_COMMAND, [...prepared.installArgs, '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only'], workspace, 'frozen npm dependency install', npmEnvironment, NPM_VERIFY_TIMEOUTS.install)
@@ -124,6 +142,10 @@ async function main() {
     for (const [label, args] of [
       ['vendored pi-tui typecheck', ['typecheck:fork']],
       ['vendored pi-tui tests', ['test:fork']],
+      // The bundle tests import the built fork and bundle dist, so build
+      // before the unit suite (the install runs with --ignore-scripts and
+      // dist is not committed).
+      ['TUI build', ['build']],
       ['TUI unit tests', ['test:bundle']],
       ['documentation tests', ['test:docs']],
       ['Pi surface compatibility gate', ['gate:pi-surface-compat']],

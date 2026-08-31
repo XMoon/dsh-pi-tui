@@ -1204,7 +1204,7 @@ async function main() {
       fail('COMPAT_BOOT_FAILURE', `DSH distribution version mismatch: expected ${context.manifest.dshVersion}, got ${context.distribution.version}`)
     }
     if (context.distribution.kind === 'source-pack') {
-      console.log('SKIPPED: requires published compatible DSH/pi2dsh combination (source mode)')
+      console.log('SKIPPED: a source-pack distribution cannot validate the published pi2dsh ecosystem (run without --dsh-distribution)')
       return
     }
     validateFixturePackage()

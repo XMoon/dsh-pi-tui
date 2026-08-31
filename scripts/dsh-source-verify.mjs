@@ -373,7 +373,7 @@ async function main() {
       ], workspace, 'official DSH preset matrix', sourcePnpmEnv)
       await run(process.execPath, [join(workspace, 'scripts', 'dsh-runtime-boundary-smoke.mjs'), candidate], workspace, 'old DSH boundary', sourcePnpmEnv)
     }
-    console.log('SKIPPED: requires published compatible DSH/pi2dsh combination (source mode)')
+    console.log('pi2dsh Gate B runs in the ecosystem-compat CI job (both modes; published DSH + pi2dsh from the registry)')
     console.log(`DSH Source Compatibility: CODE COMPLETE candidate ${basename(candidate)}`)
   } finally {
     if (root !== undefined) {

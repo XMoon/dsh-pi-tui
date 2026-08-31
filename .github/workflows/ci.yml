@@ -522,8 +522,10 @@ jobs:
   # Test the EXACT packed artifact against the published pi2dsh bridge and a
   # real Pi component in a real pseudo-terminal. This is intentionally outside
   # postpack: local packing stays offline and non-interactive. The published
-  # ecosystem is evaluated only in npm mode; Source Mode skips this whole job
-  # before runner setup because it does not claim published compatibility.
+  # ecosystem is evaluated in BOTH modes: the smoke installs the published DSH
+  # and pi2dsh from the registry (pi2dsh@0.24.0 declares DSH 0.1.2-alpha.2
+  # support), so Source Mode no longer skips it. A failing pi2dsh peer
+  # declaration is an ECOSYSTEM_CONTRACT_BLOCKER, never a forced install.
   # ---------------------------------------------------------------------------
   ecosystem-compat:
     name: External compatibility / pi2dsh
@@ -531,7 +533,7 @@ jobs:
       - dsh-context
       - prepare-dsh-source
       - build-and-pack
-    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -580,7 +582,6 @@ jobs:
           sudo apt-get install -y tmux
 
       - name: Run pi2dsh compatibility smoke
-        if: env.DSH_MODE == 'npm'
         env:
           PI2DSH_COMPAT_DEBUG_DIR: pi2dsh-compat-debug
         shell: bash
