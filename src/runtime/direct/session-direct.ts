@@ -18,7 +18,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
 import { dshHome } from '../../diag.ts'
 import { isUnsupportedSessionFormatError, loadSessionTitleBatch, type SessionEventSearchDocumentLike, type SessionPickerPersistence, type SessionQueryLike, type TitleDiagLike } from '../../sessions.ts'
-import { recordedSessionPreset, sessionPresetOf } from './session-preset-direct.ts'
+import { recordedSessionPreset, resolveProjectedPresetId, sessionPresetOf, type SessionProjectionCacheLike, type SessionQueryObservationLike } from './session-preset-direct.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import type { ExportReadResult, SessionSearchHit, SessionReader, SessionSummary } from '../session-reader-port.ts'
 
@@ -101,6 +101,15 @@ export class DirectSessionReader implements SessionReader {
   private readonly ctx: HostContextLike
   private readonly agentFor: (sessionId: string) => unknown | undefined
   private readonly diag: TitleDiagLike | undefined
+  /**
+   * The most recent listing's complete `SessionHeader` values, keyed by
+   * session id. `presetBatch` reads the projection-cache hint from these
+   * instead of re-listing the corpus (the port rows stay lightweight
+   * `SessionSummary` DTOs — raw headers never leak into the presentation
+   * surface). Refreshed on every `list()`; a batch caller that never listed
+   * simply gets cache-miss enrichment.
+   */
+  private headerSnapshot = new Map<string, SessionHeader>()
 
   constructor(
     ctx: HostContextLike,
@@ -165,6 +174,7 @@ export class DirectSessionReader implements SessionReader {
       // picker frame without waiting on every historical session log.
       const records = await query.listSessions(signal)
       signal?.throwIfAborted()
+      this.headerSnapshot = new Map(records.map(record => [String(record.header.id), record.header]))
       rows = records.map(record => ({
         id: record.header.id,
         createdAt: record.header.createdAt,
@@ -177,6 +187,7 @@ export class DirectSessionReader implements SessionReader {
       if (persistence === undefined) return undefined
       const headers = await persistence.list(signal)
       signal?.throwIfAborted()
+      this.headerSnapshot = new Map(headers.map(header => [String(header.id), header as SessionHeader]))
       rows = headers.map(header => ({
         id: header.id,
         createdAt: header.createdAt,
@@ -192,29 +203,24 @@ export class DirectSessionReader implements SessionReader {
   }
 
   /**
-   * Enrich already-listed rows with effective preset ids. The source listing
-   * is repeated once to recover complete SessionHeader values for projection
-   * replay; it is never performed once per row. Cold inspection remains
-   * bounded/cancellable and corrupt or unsupported logs are omitted rather
-   * than being treated as a header-only effective preset.
+   * Enrich already-listed rows with effective preset ids. Live composed
+   * presets are authoritative; cold rows first consult the zero-I/O
+   * projection-cache hint (`sessionProjectionCache.cachedSnapshot`) using the
+   * header identity captured by the preceding `list()` — no second corpus
+   * listing — and only cache misses go through the bounded, cancellable
+   * `observeSession()` observation seam. Corrupt or unsupported logs are
+   * omitted rather than being treated as a header-only effective preset.
    */
   async presetBatch(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, string>> {
     const result = new Map<string, string>()
     if (rows.length === 0) return result
     signal?.throwIfAborted()
 
-    const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
-    const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
-    const projections = this.ctx.get('sessionProjections')
-    const records = query !== undefined
-      ? await query.listSessions(signal)
-      : persistence === undefined ? [] : await persistence.list(signal)
-    signal?.throwIfAborted()
-    const headers = new Map<string, SessionHeader>()
-    for (const record of records) {
-      const header = 'header' in record ? record.header : record
-      headers.set(String(header.id), header as SessionHeader)
-    }
+    const query = this.ctx.get('sessionQuery') as SessionQueryObservationLike | undefined
+    const cache = this.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
+    const presets = this.ctx.get('agentPresets') as
+      | { readonly defaultId?: string; resolve(id?: string): Promise<{ readonly id: string }> }
+      | undefined
 
     // A live composed preset is already authoritative and does not need cold
     // replay. The roster snapshot is shared by all historical rows so legacy
@@ -223,19 +229,31 @@ export class DirectSessionReader implements SessionReader {
       const live = this.livePreset(row.id)
       if (live !== undefined) result.set(row.id, live)
     }
-    if (projections === undefined || persistence === undefined) return result
-    const coldRows = rows.filter(row => !result.has(row.id) && headers.has(row.id))
+    if (query === undefined) return result
+    const coldRows = rows.filter(row => !result.has(row.id))
     if (coldRows.length === 0) return result
     const rosterIds = await this.presetRosterIds(signal)
-    const values = await mapConcurrent(coldRows, SESSION_PRESET_READ_CONCURRENCY, async row => {
+
+    // Zero-I/O cache hint first: a cached `agentPreset` row is possibly stale
+    // but never wrong, so a hit needs no observation. A `null` cached value is
+    // NOT a usable preset identity (a later selection may have landed after
+    // the checkpoint), so it stays a miss.
+    const misses: SessionSummary[] = []
+    for (const row of coldRows) {
+      const header = this.headerSnapshot.get(row.id)
+      const value = header === undefined ? undefined : cache?.cachedSnapshot(header, ['agentPreset'])?.values?.agentPreset
+      if (typeof value !== 'string') {
+        misses.push(row)
+        continue
+      }
+      const resolved = await resolveProjectedPresetId(value, rosterIds, presets)
+      if (resolved !== undefined) result.set(row.id, resolved)
+    }
+    if (misses.length === 0) return result
+
+    const values = await mapConcurrent(misses, SESSION_PRESET_READ_CONCURRENCY, async row => {
       try {
-        return await recordedSessionPreset(
-          this.ctx,
-          row.id,
-          headers.get(row.id),
-          signal,
-          rosterIds,
-        )
+        return await recordedSessionPreset(this.ctx, row.id, signal, rosterIds)
       } catch (error) {
         signal?.throwIfAborted()
         // Fail closed per row: a corrupt/unsupported log cannot claim its
@@ -245,9 +263,9 @@ export class DirectSessionReader implements SessionReader {
       }
     }, signal)
     signal?.throwIfAborted()
-    for (let index = 0; index < coldRows.length; index += 1) {
+    for (let index = 0; index < misses.length; index += 1) {
       const preset = values[index]
-      if (preset !== undefined) result.set(coldRows[index]!.id, preset)
+      if (preset !== undefined) result.set(misses[index]!.id, preset)
     }
     return result
   }
