@@ -1968,10 +1968,6 @@ export function apply(ctx: Context, config: Config): void {
     // transition started later can never interleave with a write already
     // awaiting a provider/IO (convergence plan phase 3).
     const operationBarrier = new SessionOperationBarrier()
-    // The writer/transition barrier: transitions freeze TUI writers and
-    // wait for in-flight ones to drain; writers run inside runWriter so a
-    // transition started later can never interleave with a write already
-    // awaiting a provider/IO (convergence plan phase 3).
 
     /**
      * The ONE session-transition transaction, shared by /new, /fork,

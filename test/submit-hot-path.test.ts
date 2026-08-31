@@ -35,8 +35,10 @@ function event<K extends SessionEvent['type']>(
   seq: number,
 ): SessionEvent {
   // DSH 0.1.2+ requires the top-level `surfaceOp` marker on surface-eligible
-  // (message-producing) events and forbids it on log-only events.
-  const surfaceOp = type === 'user/message' || type === 'assistant/message' || type === 'assistant/chunk'
+  // (message-producing) events — exactly user/message, assistant/message and
+  // tool/result — and REJECTS the marker on log-only events
+  // (packages/core/session/src/surface.ts). assistant/chunk is log-only.
+  const surfaceOp = type === 'user/message' || type === 'assistant/message' || type === 'tool/result'
     ? { surfaceOp: 'append' as const }
     : {}
   return { type, seq, time: 1_700_000_000_000 + seq * 1000, data, ...surfaceOp } as SessionEvent
@@ -359,6 +361,33 @@ async function waitForDelivery(host: FakeAgentHost, label: string): Promise<void
   assert.ok(host.followedUp.length > 0 || host.steered.length > 0,
     `${label}: the submission must reach the agent's inbox`)
 }
+
+/** The surface-eligible event types under DSH 0.1.2 (the exact set in
+ * packages/core/session/src/types.ts `SurfaceEventType`). */
+const SURFACE_ELIGIBLE_TYPES = ['user/message', 'assistant/message', 'tool/result'] as const
+
+test('event fixtures carry surfaceOp exactly on the surface-eligible types (review round 1)', () => {
+  // A seeded event the real Session.fromRestore validates must match DSH's
+  // surface rules: the marker is REQUIRED on surface-eligible types and
+  // FORBIDDEN on log-only ones (assistant/chunk included).
+  const surfaceType = event('user/message', {
+    id: MessageId('probe'),
+    role: 'user',
+    content: [{ type: 'text', text: 'q' }],
+    source: { kind: 'user' },
+  }, 0)
+  assert.equal((surfaceType as SessionEvent & { surfaceOp?: unknown }).surfaceOp, 'append')
+  const logOnlyType = event('assistant/chunk', {} as never, 1)
+  assert.equal((logOnlyType as SessionEvent & { surfaceOp?: unknown }).surfaceOp, undefined)
+  for (const type of SURFACE_ELIGIBLE_TYPES) {
+    const marked = event(type, {} as never, 2) as SessionEvent & { surfaceOp?: unknown }
+    assert.equal(marked.surfaceOp, 'append', `${type} must carry the marker`)
+  }
+  for (const type of ['turn/start', 'step/start', 'step/end', 'turn/end', 'assistant/chunk'] as const) {
+    const unmarked = event(type, {} as never, 3) as SessionEvent & { surfaceOp?: unknown }
+    assert.equal(unmarked.surfaceOp, undefined, `${type} must NOT carry the marker`)
+  }
+})
 
 test('Enter: a submit reaches followup with ZERO sessionPersistence work (steady state)', async () => {
   const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
