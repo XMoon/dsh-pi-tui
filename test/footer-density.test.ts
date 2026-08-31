@@ -184,6 +184,26 @@ test('token-usage compact never exceeds a shorter persisted io style (cache-heav
   assert.equal(renderDensity('token-usage', snap, { id: 'token-usage', format: 'total' }, 'compact'), '1.5M')
 })
 
+test('B-class compact presentations match the agreed golden strings', () => {
+  // The structural invariants prove compact is SHORTER; these goldens
+  // prove it is the AGREED string (a drift like `q3 → x3` or `td3 → t3`
+  // would still satisfy "shorter" but must fail here).
+  const snap = richSnapshot()
+  const cases: Array<[string, string]> = [
+    ['tasks', '[1t·2a·↓]'],
+    ['sandbox-mode', 'ww'],
+    ['run-state', 'w-approval'],
+    ['queue', 'q3'],
+    ['agents', 'a2'],
+    ['todo', 'td3'],
+    ['performance', '138.8s 659t/s'],
+    ['stats-line', '↑34k ↓8.1k · LLM 138.8s · 659t/s'],
+  ]
+  for (const [id, expected] of cases) {
+    assert.equal(renderDensity(id, snap, { id }, 'compact'), expected, `${id} compact golden`)
+  }
+})
+
 test('responsive items: compact is STRICTLY shorter under the canonical fixture', () => {
   const snap = richSnapshot()
   for (const id of RESPONSIVE_COMPACT_ITEMS) {
