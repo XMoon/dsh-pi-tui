@@ -2687,13 +2687,19 @@ export function apply(ctx: Context, config: Config): void {
      * one); `!!` (local mode) runs purely off-session — the card is the
      * only record (pi's excluded-from-context escape hatch).
      */
-    const runLocalShell = (text: string): void => {
+    const runLocalShell = (text: string, ackToken: number | undefined): void => {
       const includeInContext = shellModeOf(text) === 'context'
       const command = shellCommandOf(text)
       if (command === '') return
       // NOTE: the context-mode submit ack is armed AT THE GESTURE in
       // dispatchUserInput (before ensureSession) — NEVER here, or the T0
-      // baseline would rebase after the session create.
+      // baseline would rebase after the session create. `ackToken` scopes
+      // every terminal settle below to THIS gesture: a newer submission
+      // (bumped epoch) makes them no-ops.
+      const shellTerminalAck = (reason: string): void => {
+        if (ackToken === undefined) return
+        settleLocalSubmitAck(reason, { token: ackToken, terminal: true })
+      }
       // The generation the run STARTED under: a session switch while the
       // command runs must not post the output into the new session (the
       // switch already cleared the card; the notify explains what happened).
@@ -2735,7 +2741,7 @@ export function apply(ctx: Context, config: Config): void {
         // gesture) is TERMINAL here: nothing will be written for the old
         // session.
         if (sessionGeneration !== generationAtRun) {
-          settleLocalSubmitAck('shell submit skipped after a session switch', { terminal: true })
+          shellTerminalAck('shell submit skipped after a session switch')
           app.notify('the session changed while the command ran — the output was not submitted', 'error')
           return
         }
@@ -2772,20 +2778,20 @@ export function apply(ctx: Context, config: Config): void {
           // no agent) wrote nothing: terminal — the pending row must not
           // outlive the submission (plan D exit enumeration).
           onResult: (outcome) => {
-            if (outcome !== 'ok') settleLocalSubmitAck(`shell submit ${outcome}`, { terminal: true })
-            else if (liveAgent === undefined) settleLocalSubmitAck('shell submit without an agent', { terminal: true })
+            if (outcome !== 'ok') shellTerminalAck(`shell submit ${outcome}`)
+            else if (liveAgent === undefined) shellTerminalAck('shell submit without an agent')
           },
           // runOwned routes cancellations EXCLUSIVELY here: a
           // cancellation-shaped rejection from the write bypasses
           // onResult/onError, so the ack row armed at the gesture must
           // end terminally (the caller's card keeps the output).
           onCancel: () => {
-            settleLocalSubmitAck('shell submit cancelled', { terminal: true })
+            shellTerminalAck('shell submit cancelled')
           },
           onError: (error) => {
             // The submission failed before the write ran: keep the card
             // (the output is not lost) and surface the reason.
-            settleLocalSubmitAck('shell submit failure', { terminal: true })
+            shellTerminalAck('shell submit failure')
             app.notify(`shell submit failed: ${safeErrorMessage(error)}`, 'error')
           },
         })
@@ -2810,8 +2816,18 @@ export function apply(ctx: Context, config: Config): void {
         // is also TERMINAL for the submit acknowledgement (plan D exit
         // enumeration): the aborted gate suppresses submitResult, so the
         // pending row would otherwise outlive the gesture forever.
+        //
+        // EVERY settle caller funnels through HERE — including the
+        // synchronous `shell.resolve`/`spawn` catches and the child
+        // `error` handler — so no additional ack settle is needed at
+        // those sites: a non-abort failure continues into submitResult →
+        // submitShellResult, whose onResult/onError/onCancel sinks end
+        // the ack (or the authoritative event does), and an abort ends
+        // it through the gate below. Adding token settles at the catch
+        // sites instead would pre-clear the row and break the "ack
+        // survives until the authoritative event" contract.
         if (includeInContext && localSignal.aborted) {
-          settleLocalSubmitAck('shell run aborted', { terminal: true })
+          shellTerminalAck('shell run aborted')
         }
         if (includeInContext && !localSignal.aborted) submitResult(result)
       }
@@ -2872,7 +2888,7 @@ export function apply(ctx: Context, config: Config): void {
             releaseController()
             settle('aborted', 'error')
             if (includeInContext && !localSignal.aborted) {
-              settleLocalSubmitAck('shell run cancelled', { terminal: true })
+              shellTerminalAck('shell run cancelled')
             }
             void error
           },
@@ -2886,7 +2902,7 @@ export function apply(ctx: Context, config: Config): void {
             // (plan D exit enumeration). An abort settles through the
             // unified aborted gate above instead.
             if (includeInContext && !localSignal.aborted) {
-              settleLocalSubmitAck('shell sandbox run failed', { terminal: true })
+              shellTerminalAck('shell sandbox run failed')
             }
           },
         })
@@ -3379,27 +3395,44 @@ export function apply(ctx: Context, config: Config): void {
     const submitLatencyTracker = new SubmitLatencyTracker({ sink: diag })
     /**
      * Accept one submission: show the pending row NOW (Submit/Queued by
-     * the agent's live status) and start the latency timeline. The newest
-     * gesture wins; a settle on idle is a no-op.
+     * the agent's live status) and start the latency timeline. Returns
+     * the gesture's EPOCH TOKEN: the enclosing workflow's terminal exits
+     * (failure / stale / fence / cancel / command routing) must settle
+     * with THIS token — the settle is ignored once a newer gesture has
+     * superseded it, so an older submission dying late can never clear
+     * the newer row (or reset its latency timeline).
      */
-    const acceptLocalSubmitAck = (): void => {
+    const acceptLocalSubmitAck = (): number => {
       const detail: SubmitPendingDetail = liveAgent?.status === 'running' ? 'queued' : 'submit'
-      acceptSubmitAck(localSubmitAck, { detail, now: Date.now() })
+      const token = acceptSubmitAck(localSubmitAck, { detail, now: Date.now() })
       submitLatencyTracker.accept(liveAgent?.session.id)
       app.setSubmitPending(detail)
+      return token
      }
     /**
      * Settle the pending row: clears it when something is pending and
      * records the wait duration at debug level. Called from the
      * authoritative event branches, the failure sinks and the refusal
-     * paths — idempotent everywhere. Terminal NON-delivery exits
-     * (failure / stale / fence / no-agent / consumed-by-command) also
-     * RESET the latency timeline: a dead submission's baseline must not
-     * be populated by unrelated later events; the next real submission
-     * arms a fresh T0.
+     * paths — idempotent everywhere.
+     *
+     * - TOKEN settles (`{ token }`): a submission's OWN terminal exit
+     *   (failure / stale / fence / cancel / no-agent / command routing).
+     *   Ignored when a newer gesture superseded the token — an older
+     *   submission dying late must never clear the newer row nor reset
+     *   its latency timeline.
+     * - TOKENLESS settles: authoritative session events (coalescing) and
+     *   the session-switch commit (the old row dies unconditionally).
+     *
+     * `terminal: true` additionally RESETS the latency timeline: a dead
+     * submission's baseline must not be populated by unrelated later
+     * events; the next real submission arms a fresh T0.
      */
-    const settleLocalSubmitAck = (reason: string, options: { terminal?: boolean } = {}): void => {
-      const elapsed = settleSubmitAck(localSubmitAck, Date.now())
+    const settleLocalSubmitAck = (reason: string, options: { token?: number; terminal?: boolean } = {}): void => {
+      if (options.token !== undefined && options.token !== localSubmitAck.epoch) {
+        diag.debug('submit ack terminal settle superseded', { reason, token: options.token, current: localSubmitAck.epoch })
+        return
+      }
+      const elapsed = settleSubmitAck(localSubmitAck, { now: Date.now() })
       if (options.terminal === true) submitLatencyTracker.reset()
       if (elapsed === undefined) return
       diag.debug('submit ack settled', { reason, elapsed: `${elapsed}ms` })
@@ -3414,9 +3447,9 @@ export function apply(ctx: Context, config: Config): void {
      * Diagnostics are owned by runOwned.
      */
     const notifySubmissionFailure = (error: unknown): void => {
-      // The pending submit ack is stale on a failed submission: clear it
-      // (the runReservedSubmit flow already restored the draft).
-      settleLocalSubmitAck('failure', { terminal: true })
+      // NOTE: the pending submit ack is settled by the CALLER with its own
+      // gesture token (an untokenized settle here would let one
+      // workflow's failure clear a newer gesture's row).
       const message = safeErrorMessage(error)
       if (error instanceof ImageInputError) {
         app.notify(message, 'error')
@@ -3464,8 +3497,9 @@ export function apply(ctx: Context, config: Config): void {
       // Local submit acknowledgement (plan D): the row appears NOW —
       // before any session create / admission / command work — because
       // this gesture owns no user-visible feedback until the first
-      // authoritative event lands.
-      acceptLocalSubmitAck()
+      // authoritative event lands. The TOKEN arms every terminal exit of
+      // THIS workflow: a newer gesture supersedes them.
+      const submitAckToken = acceptLocalSubmitAck()
       // Capture the advertised claim BEFORE any session creation: the
       // boolean must reflect the completion generation at submit time, never
       // a re-query after ensureSession (a refresh may have already revoked
@@ -3518,7 +3552,7 @@ export function apply(ctx: Context, config: Config): void {
             // Nothing can be written (degraded resolve after a successful
             // creation): the wait ends here with NO write — the pending
             // row must not outlive the submission.
-            settleLocalSubmitAck('submit resolved without an agent', { terminal: true })
+            settleLocalSubmitAck('submit resolved without an agent', { token: submitAckToken, terminal: true })
             return
           }
         // Capture THIS agent's session identity so the write below can
@@ -3531,7 +3565,7 @@ export function apply(ctx: Context, config: Config): void {
         if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
-          settleLocalSubmitAck('submit stale', { terminal: true })
+          settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
           app.notify(merged === text
             ? 'the session changed while sending — try again'
             : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
@@ -3567,7 +3601,7 @@ export function apply(ctx: Context, config: Config): void {
           if (transitionGate.busy) {
             fallbackPin()
             refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
-            settleLocalSubmitAck('submit refused by transition fence', { terminal: true })
+            settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
             return
           }
           runOwned('command execution', () => {
@@ -3596,7 +3630,7 @@ export function apply(ctx: Context, config: Config): void {
               // before execute() resolved, so the fallback followup (a
               // plain prompt: execute → undefined) keeps its pending row.
               if (execution !== undefined) {
-                settleLocalSubmitAck('submit consumed by a command', { terminal: true })
+                settleLocalSubmitAck('submit consumed by a command', { token: submitAckToken, terminal: true })
               }
               // A command the surface advertised (e.g. from the startup
               // probe) but the real session's catalog lacks: consume the
@@ -3606,7 +3640,7 @@ export function apply(ctx: Context, config: Config): void {
               // retry could ride the unadvertised fallback).
               if (shouldConsumeAdvertisedMiss(execution, wasAdvertised)) {
                 app.notify(`/${parsedAtSubmit?.name ?? '?'} is not available in the created session`, 'error')
-                settleLocalSubmitAck('submit consumed by an unadvertised command', { terminal: true })
+                settleLocalSubmitAck('submit consumed by an unadvertised command', { token: submitAckToken, terminal: true })
                 fallbackPin()
                 return
               }
@@ -3646,7 +3680,7 @@ export function apply(ctx: Context, config: Config): void {
                           if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
                             const merged = mergeDraft(app.getDraft(), text)
                             app.setEditorText(merged)
-                            settleLocalSubmitAck('submit stale', { terminal: true })
+                            settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
                             app.notify(merged === text
                               ? 'the session changed while sending — try again'
                               : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
@@ -3663,7 +3697,7 @@ export function apply(ctx: Context, config: Config): void {
                         if (error instanceof TransitionInProgressError) {
                           fallbackPin()
                           refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
-                          settleLocalSubmitAck('submit refused by transition fence', { terminal: true })
+                          settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
                           return
                         }
                         throw error
@@ -3673,22 +3707,25 @@ export function apply(ctx: Context, config: Config): void {
                   }, text), {
                     diag,
                     sessionId: () => agent.session.id,
-                    // The flow restored the editor; this sink only
-                    // notifies.
-                    onError: notifySubmissionFailure,
+                    // The flow restored the editor; this sink settles the
+                    // gesture's ack (token-scoped) and only notifies.
+                    onError: (error) => {
+                      settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
+                      notifySubmissionFailure(error)
+                    },
                     // Cancellations route EXCLUSIVELY here (never
                     // onError): a cancelled fallback write must end the
                     // ack row the gesture armed (plan D exit enumeration;
                     // the flow already restored the draft).
                     onCancel: () => {
-                      settleLocalSubmitAck('submit cancelled', { terminal: true })
+                      settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
                     },
                   })
                 } else {
                   fallbackPin()
                   const merged = mergeDraft(app.getDraft(), text)
                   app.setEditorText(merged)
-                  settleLocalSubmitAck('submit stale', { terminal: true })
+                  settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
                   app.notify(merged === text
                     ? 'the session changed while sending — try again'
                     : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
@@ -3701,7 +3738,7 @@ export function apply(ctx: Context, config: Config): void {
             },
             onError: (error) => {
               fallbackPin()
-              settleLocalSubmitAck('command execution failed', { terminal: true })
+              settleLocalSubmitAck('command execution failed', { token: submitAckToken, terminal: true })
               if (commandHealthRef !== undefined) extensionService?._recordRegistryError(commandHealthRef, error)
               const message = safeErrorMessage(error)
               try {
@@ -3717,7 +3754,7 @@ export function apply(ctx: Context, config: Config): void {
             // would leak (plan D exit enumeration).
             onCancel: () => {
               fallbackPin()
-              settleLocalSubmitAck('command execution cancelled', { terminal: true })
+              settleLocalSubmitAck('command execution cancelled', { token: submitAckToken, terminal: true })
             },
           })
           return
@@ -3737,7 +3774,7 @@ export function apply(ctx: Context, config: Config): void {
             if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
               const merged = mergeDraft(app.getDraft(), text)
               app.setEditorText(merged)
-              settleLocalSubmitAck('submit stale', { terminal: true })
+              settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
               app.notify(merged === text
                 ? 'the session changed while sending — try again'
                 : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
@@ -3753,7 +3790,7 @@ export function apply(ctx: Context, config: Config): void {
           })
         } catch (error) {
           if (error instanceof TransitionInProgressError) {
-            settleLocalSubmitAck('submit refused by transition fence', { terminal: true })
+            settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
             refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
             return
           }
@@ -3764,15 +3801,19 @@ export function apply(ctx: Context, config: Config): void {
       }, text), {
         diag,
         sessionId: () => liveAgent?.session.id,
-        // The flow restored the editor; this sink only notifies.
-        onError: notifySubmissionFailure,
+        // The flow restored the editor; this sink settles the gesture's
+        // ack (token-scoped) and only notifies.
+        onError: (error) => {
+          settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
+          notifySubmissionFailure(error)
+        },
         // runOwned routes cancellations EXCLUSIVELY to onCancel: a
         // cancelled deferred create / image admission / barrier write
         // bypasses onError, so the ack row armed at the gesture must be
         // terminated HERE (the flow already restored the draft — plan D
         // exit enumeration).
         onCancel: () => {
-          settleLocalSubmitAck('submit cancelled', { terminal: true })
+          settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
         },
       })
     }
@@ -3901,8 +3942,9 @@ export function apply(ctx: Context, config: Config): void {
       })) return
       // Local submit acknowledgement (plan D): the row appears NOW, before
       // the awaited prepare/admission work, so an accepted Ctrl+S is never
-      // a silent editor clear.
-      acceptLocalSubmitAck()
+      // a silent editor clear. The TOKEN arms every terminal exit of THIS
+      // workflow.
+      const steerAckToken = acceptLocalSubmitAck()
       // An owned workflow: the send's outcome drives the draft restore and
       // the notices — runOwned (AGENTS.md), never a bare void. Reserve the
       // referenced drafts SYNCHRONOUSLY (same call stack that left the
@@ -3930,7 +3972,7 @@ export function apply(ctx: Context, config: Config): void {
         if (liveAgent === undefined) {
           // Nothing can be sent (degraded resolve after a successful
           // creation): the ack row must not outlive the submission.
-          settleLocalSubmitAck('steer resolved without an agent', { terminal: true })
+          settleLocalSubmitAck('steer resolved without an agent', { token: steerAckToken, terminal: true })
           return
         }
         // The draft message is prepared BEFORE the send: admission is
@@ -3988,21 +4030,25 @@ export function apply(ctx: Context, config: Config): void {
         // or a session switch ends the wait, never the delivery itself);
         // 'stale' wrote nothing and restored the draft, so the row must
         // not linger (a retry re-accepts).
-        if (outcome !== 'ok') settleLocalSubmitAck(`steer ${outcome}`, { terminal: true })
+        if (outcome !== 'ok') settleLocalSubmitAck(`steer ${outcome}`, { token: steerAckToken, terminal: true })
         },
         restore: (t) => restoreSubmissionDraft(t),
       }, text), {
         diag,
         sessionId: () => liveAgent?.session.id,
-        // The flow restored the editor; this sink only notifies.
-        onError: notifySubmissionFailure,
+        // The flow restored the editor; this sink settles the gesture's
+        // ack (token-scoped) and only notifies.
+        onError: (error) => {
+          settleLocalSubmitAck('failure', { token: steerAckToken, terminal: true })
+          notifySubmissionFailure(error)
+        },
         // runOwned routes cancellations EXCLUSIVELY to onCancel: a
         // cancelled deferred create / image admission / barrier write
         // bypasses onError, so the ack row armed at the gesture must be
         // terminated HERE (the flow already restored the draft — plan D
         // exit enumeration).
         onCancel: () => {
-          settleLocalSubmitAck('steer cancelled', { terminal: true })
+          settleLocalSubmitAck('steer cancelled', { token: steerAckToken, terminal: true })
         },
       })
     }
@@ -4155,14 +4201,16 @@ export function apply(ctx: Context, config: Config): void {
           // excluded-from-context escape hatch) — the row is sessionless
           // (Current directory / All directories, never Current session).
           persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id))
-          runLocalShell(text)
+          runLocalShell(text, undefined)
         } else if (shellCommandOf(text) !== '') {
           // Local submit acknowledgement (plan D), armed AT THE GESTURE —
           // BEFORE ensureSession: a deferred/slow session create is part
           // of the no-feedback window this row exists to cover. The
           // runLocalShell-side accept was moved here so the T0 baseline
-          // is never rebased by the shell wiring.
-          acceptLocalSubmitAck()
+          // is never rebased by the shell wiring. The TOKEN rides into
+          // the shell flow: its terminal exits settle only while THIS
+          // gesture is still the newest one.
+          const shellAckToken = acceptLocalSubmitAck()
           // An owned workflow: the session creation failure restores the
           // draft (failSubmission) — runOwned (AGENTS.md), never a bare
           // void. The history row is written AFTER the session exists
@@ -4170,14 +4218,14 @@ export function apply(ctx: Context, config: Config): void {
           // session carries its id.
           runOwned('contextual shell', () => ensureSession().then(() => {
             persistHistory(historySessionIdFor('agent-facing', liveAgent?.session.id))
-            runLocalShell(text)
+            runLocalShell(text, shellAckToken)
           }), {
             diag,
             sessionId: () => liveAgent?.session.id,
             onError: (error) => {
               // The session create failed: nothing will be written — the
               // ack row armed at the gesture is TERMINAL here (plan D).
-              settleLocalSubmitAck('session creation failed', { terminal: true })
+              settleLocalSubmitAck('session creation failed', { token: shellAckToken, terminal: true })
               failSubmission(text)(error)
             },
             onCancel: () => {
@@ -4187,7 +4235,7 @@ export function apply(ctx: Context, config: Config): void {
               // notice: a cancellation is not a failure), then end the
               // ack row terminally.
               app.setEditorText(mergeDraft(app.getDraft(), text))
-              settleLocalSubmitAck('contextual shell cancelled', { terminal: true })
+              settleLocalSubmitAck('contextual shell cancelled', { token: shellAckToken, terminal: true })
             },
           })
         } else {
@@ -6523,9 +6571,13 @@ export function apply(ctx: Context, config: Config): void {
         app.setBusy(true)
       } else if (event.type === 'turn/end') {
         app.setWorking(false)
-        // One submission's timeline is complete (or a cancel happened):
-        // later marks belong to the NEXT submission's baseline.
-        submitLatencyTracker.reset()
+        // NOTE: the submit-latency timeline is deliberately NOT reset on
+        // turn/end — a submission accepted while this turn was running
+        // (busy/queue) is processed by the NEXT turn, and resetting here
+        // would erase exactly the T1→T4/T4→T5 journey Phase E exists to
+        // measure. The baseline ends only on: the next accept (rebase),
+        // the assistant.first auto-complete, a terminal non-delivery exit
+        // (token-scoped settle) or a session switch.
         // A turn end must not clear the busy flag while a compaction is
         // still in flight (an interrupted turn can close before its
         // compaction settles) — the single-Esc cancel stays armed.

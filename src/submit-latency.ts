@@ -11,25 +11,35 @@
  * inbox.inserted  T2 authoritative inbox event
  * turn.start T3 turn started
  * user.message    T4 user message committed to the session
- * assistant.first T5 first assistant chunk
+ * assistant.first T5 first assistant chunk — the timeline AUTO-COMPLETES
+ *                 here (a new accept starts the next one)
  * ```
  *
  * Diagnostic meaning: T0→T1 slow = TUI local submit path; T1→T4 slow =
  * DSH preStep / context / plugin work; T4→T5 slow = provider first-token
  * latency.
  *
+ * Timeline LIFECYCLE: `reset` is NOT tied to arbitrary `turn/end`s — a
+ * submission accepted while a previous turn is still running (busy/queue)
+ * must keep its baseline ACROSS that turn's end, or exactly the most
+ * diagnostic-rich `queued → next turn` journey would lose T1→T4/T4→T5.
+ * The baseline ends only on:
+ *
+ * - the next `accept` (every gesture rebases — newest wins),
+ * - an assistant.first mark (T5 collected — the timeline is complete),
+ * - `reset()` from the runner for TERMINAL non-delivery exits (failure /
+ *   stale / fence / cancel / no-agent / consumed-by-command) and session
+ *   switches.
+ *
  * One baseline per submission with DOCUMENTED COALESCING semantics: same-
  * session writes are serialized by the operation barrier (single writer),
  * so the NEWEST gesture owns the timeline and a slower in-flight
  * submission's marks coalesce into it — offsets are approximate for burst
- * submissions, exact for the common single-writer flow. `accept` starts
- * (or rebases to) the timeline; a timeline opened WITHOUT a session id
- * (deferred first submission) ADOPTS the first session that reports back;
- * the first `mark` per phase logs its offset once; `reset` drops the
- * baseline (turn end / session switch / a FAILED or refused submission —
- * the next submission starts a new baseline). Marks for other sessions or
- * without a baseline are ignored; the tracker never throws and a timing
- * failure can never affect the session.
+ * submissions, exact for the common single-writer flow. A timeline opened
+ * WITHOUT a session id (deferred first submission) ADOPTS the first
+ * session that reports back. Marks for other sessions or without a
+ * baseline are ignored; the tracker never throws and a timing failure can
+ * never affect the session.
  * @module @xmoon76/dsh-pi-tui/submit-latency
  */
 
@@ -67,41 +77,49 @@ export class SubmitLatencyTracker {
   }
 
   /**
-   * Start one submission's timeline (T0). Re-accepting restarts it.
-   * A DEFERRED first submission is accepted before its session exists:
-   * `accept(undefined)` still arms the baseline, and the first mark that
-   * names a session ADOPTS that id for the timeline — the deferred
-   * submission's T0-T5 stays measurable without a second accept.
+   * Start one submission's timeline (T0). EVERY gesture rebases — the
+   * newest submit wins (an older one still waiting for its first event is
+   * superseded). A deferred first submission is accepted BEFORE its
+   * session exists: `accept(undefined)` still arms the baseline here, and
+   * the first mark that names a session ADOPTS that id — the deferred
+   * submission keeps measurable T0-T5 without a second accept.
    */
   accept(sessionId: string | undefined): void {
-    // EVERY gesture opens a fresh timeline (the newest submit wins — an
-    // older one still waiting for its first event is superseded). A
-    // deferred first submission is accepted BEFORE its session exists:
-    // `accept(undefined)` still arms the baseline here, and the first
-    // mark that names a session ADOPTS that id — the deferred submission
-    // keeps measurable T0-T5 without a second accept.
     this.sessionId = sessionId
     this.baseline = this.now()
     this.logged.clear()
     this.emit('accept', 0, sessionId)
   }
 
-  /** Mark one phase (T1-T5); the first mark per phase logs its offset. */
-  mark(sessionId: string | undefined, phase: SubmitLatencyPhase): void {
-    if (this.baseline === undefined) return
-    if (sessionId === undefined) return
-    if (this.logged.has(phase)) return
+  /**
+   * Mark one phase (T1-T5); the first mark per phase logs its offset.
+   * Returns TRUE when the phase was logged by this call (false for
+   * duplicates / foreign sessions / no baseline). Logging
+   * `assistant.first` AUTO-COMPLETES the timeline: T5 is the last phase,
+   * so the baseline is dropped immediately instead of waiting for a
+   * turn/end that a queue-then-next-turn journey must not depend on.
+   */
+  mark(sessionId: string | undefined, phase: SubmitLatencyPhase): boolean {
+    if (this.baseline === undefined) return false
+    if (sessionId === undefined) return false
+    if (this.logged.has(phase)) return false
     // A timeline opened WITHOUT a session id (deferred first submission)
     // adopts the first session that reports back; a timeline bound to a
     // different session ignores foreign marks.
     if (this.sessionId === undefined) this.sessionId = sessionId
-    else if (this.sessionId !== sessionId) return
+    else if (this.sessionId !== sessionId) return false
     this.logged.add(phase)
     const elapsed = Math.max(0, this.now() - this.baseline)
     this.emit(phase, elapsed, sessionId)
+    if (phase === 'assistant.first') {
+      // T5 collected — the timeline is complete.
+      this.reset()
+    }
+    return true
   }
 
-  /** Drop the baseline (turn end / session switch): later marks are no-ops. */
+  /** Drop the baseline (terminal non-delivery exits / session switch):
+   * later marks are no-ops until the next accept. */
   reset(): void {
     this.baseline = undefined
     this.sessionId = undefined

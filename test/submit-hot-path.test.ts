@@ -715,6 +715,59 @@ test('a failed submit clears the pending row and surfaces the error', async () =
   }
 })
 
+test('the review repro: an older `!` run dying late NEVER clears the newer pending', async () => {
+  // A = `!sleep 0.4` (slow run, ack armed under token A); B = `!echo done`
+  // — starting B aborts A's controller, so A's killed child settles LATE
+  // with a TERMINAL ack settle carrying token A. That settle must be
+  // ignored: B's pending row survives until B's own authoritative event.
+  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  let context: Context | undefined
+  try {
+    const harness = makeHarness(home, { id: 'submit-session-h', events: sessionEvents('resumed answer') })
+    context = new Context()
+    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-h' })
+
+    mounted.app.setDraft('!sleep 0.4')
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    // B immediately: its runLocalShell aborts A's controller.
+    mounted.app.setDraft('!echo done')
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    await waitForDelivery(harness.host, 'the newer `!echo` submit')
+    assert.equal(harness.host.followedUp.length, 1, 'only B\'s output is submitted')
+    // A's child was killed and its late terminal settle (token A) fired or
+    // will fire — EITHER WAY the row must still be pending for B.
+    await waitForRenderView(vt)
+    for (let round = 0; round < 30; round += 1) {
+      for (let index = 0; index < 50; index += 1) await Promise.resolve()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    await waitForRenderView(vt)
+    const during = vt.getViewport().join('\n')
+    assert.ok(during.includes('Submitting…'),
+      `the NEWER submission's pending row must survive the older run dying:\n${during}`)
+
+    // B's authoritative inbox event settles the row.
+    context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+      target: 'next-turn',
+      start: 0,
+      inserted: [],
+    }, 100) as never)
+    await waitForRenderView(vt)
+    const settled = vt.getViewport().join('\n')
+    assert.ok(!settled.includes('Submitting…'), `the row must clear on B's event:\n${settled}`)
+  } finally {
+    if (context !== undefined) await disposeContext(context)
+    restoreTerminal()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('a CANCELLED submit ends the ack through the onCancel sink (never stuck, no error notice)', async () => {
   const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
   const previousHome = process.env.DSH_HOME

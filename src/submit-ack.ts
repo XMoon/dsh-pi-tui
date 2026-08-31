@@ -10,16 +10,32 @@
  *
  * ```text
  * idle
- *   ↓ submit accepted (Enter / Ctrl+S / `!` submit)
+ *   ↓ submit accepted (Enter / Ctrl+S / `!` submit) — epoch++
  * pending (detail: 'submit' → Submitting… / 'queued' → Queued…)
  *   ↓ authoritative event (inbox inserted / user message / turn start)
- *      or session switch or submission failure
+ *      or session switch or THIS gesture's failure/cancel
  * idle
  * ```
  *
+ * Two settle flavors, deliberately different:
+ *
+ * - **Gesture-bound (token) settles** — a submission's OWN terminal exits
+ *   (failure, stale, fence, cancel, command routing) carry the epoch
+ *   token returned by their `accept`. The settle only applies while that
+ *   token is still the CURRENT epoch: an older submission dying late must
+ *   never clear the newer gesture's pending row (`!slow` cancelled after
+ *   `!fast` was accepted is the canonical repro).
+ * - **Coalescing (tokenless) settles** — authoritative session events
+ *   settle whatever row is currently pending WITHOUT identity: same-
+ *   session writes are serialized by the operation barrier (single
+ *   writer), so any of them is a truthful "the write path is alive"
+ *   signal for the row the user is looking at. A session switch settles
+ *   tokenless too (the old session's row must die unconditionally).
+ *
  * A settle on idle is a no-op, so callers can settle unconditionally from
  * every exit path. Accepting overwrites any older pending state (the
- * newest gesture decides what the row says).
+ * newest gesture decides what the row says) and bumps the epoch, which
+ * invalidates every older token.
  * @module @xmoon76/dsh-pi-tui/submit-ack
  */
 
@@ -28,16 +44,20 @@
  * rides the inbox). */
 export type SubmitPendingDetail = 'submit' | 'queued'
 
-/** The mutable submit-ack state: what is pending and since when. */
+/** The mutable submit-ack state: what is pending, since when, and under
+ * which gesture epoch. */
 export interface SubmitAckState {
+  /** Monotonic gesture counter: bumped by EVERY accept; the accept
+   * returns the new value as the gesture's settle token. */
+  epoch: number
   detail: SubmitPendingDetail | undefined
   /** The accept timestamp (ms), for settlement elapsed. */
   acceptedAt: number | undefined
 }
 
-/** Fresh idle state. */
+/** Fresh idle state (epoch starts at 0; the first accept mints epoch 1). */
 export function freshSubmitAckState(): SubmitAckState {
-  return { detail: undefined, acceptedAt: undefined }
+  return { epoch: 0, detail: undefined, acceptedAt: undefined }
 }
 
 /** Whether a pending state is alive (the working row shows its label). */
@@ -48,34 +68,40 @@ export function submitAckPending(state: SubmitAckState): boolean {
 /**
  * Accept one submission: the pending state binds to this gesture (an
  * older pending state — a submission still waiting for its first event —
- * is superseded by the newest gesture, which the row reflects).
+ * is superseded by the newest gesture, which the row reflects). Returns
+ * the gesture's EPOCH TOKEN: the caller's terminal exits (failure /
+ * stale / fence / cancel) must settle with THIS token, and the settle is
+ * ignored once a newer gesture has superseded it.
  */
 export function acceptSubmitAck(state: SubmitAckState, options: {
   detail: SubmitPendingDetail
   now: number
-}): void {
+}): number {
+  state.epoch += 1
   state.detail = options.detail
   state.acceptedAt = options.now
+  return state.epoch
 }
 
 /**
  * Settle the pending state. Returns the accepted → settled elapsed (ms)
  * when a pending state was actually settled, otherwise undefined (already
- * idle — a double settle never double-notifies).
+ * idle, or a TOKEN settle superseded by a newer gesture — a stale token
+ * never clears the newer row and never double-notifies).
  *
- * COALESCING SEMANTICS (documented, deliberate): the pending state is a
- * SINGLE row (the working row is one line) and accepts OVERWRITE — the
- * newest gesture decides what it says. Any authoritative event settles
- * whatever row is currently pending WITHOUT identity correlation: same-
- * session writes are serialized by the operation barrier (single writer),
- * so a late event from an in-flight older submission is a truthful
- * "the write path is alive" signal for the row the user is looking at.
- * Per-submission latency timelines (submit-latency.ts) document their own
- * coalescing; bursts show approximate offsets, single submissions exact.
+ * @param token - the gesture epoch returned by {@link acceptSubmitAck}.
+ * When provided, the settle applies ONLY if that epoch is still current
+ * (gesture-bound terminal exit). When omitted, the settle is COALESCING:
+ * it applies to whatever row is pending (authoritative session events,
+ * session switch — see the module doc).
  */
-export function settleSubmitAck(state: SubmitAckState, now: number): number | undefined {
+export function settleSubmitAck(state: SubmitAckState, options: {
+  now: number
+  token?: number
+}): number | undefined {
+  if (options.token !== undefined && options.token !== state.epoch) return undefined
   if (state.detail === undefined) return undefined
-  const elapsed = state.acceptedAt === undefined ? undefined : Math.max(0, now - state.acceptedAt)
+  const elapsed = state.acceptedAt === undefined ? undefined : Math.max(0, options.now - state.acceptedAt)
   state.detail = undefined
   state.acceptedAt = undefined
   return elapsed
