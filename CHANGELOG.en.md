@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Fixed
 
-- **Explicit cold resume shows startup progress before the TUI mounts.** `dsh --profile <p> --session <id>` now prints a single-line `Resuming session…` (and `Preparing conversation…` when needed) before mount and clears it completely before the first frame, so the blank terminal no longer reads as a hang; fresh starts emit nothing and non-TTY output stays silent.
+- **Explicit cold resume shows startup progress before the TUI mounts.** `dsh --profile <p> --session <id>` now prints a single-line `Resuming session…` (and `Preparing conversation…` when needed); the `Preparing conversation…` stage stays on screen until the catalog ready barrier completes and is cleared completely before the first frame, so the blank terminal no longer reads as a hang; fresh starts emit nothing, non-TTY output stays silent, and any ordinary log output first suspends the status line (failure logs, preset warnings and catalog warnings all land on a clean line).
 
 ### Migration notes
 
