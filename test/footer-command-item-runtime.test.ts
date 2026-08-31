@@ -14,8 +14,8 @@ import test from 'node:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FooterDynamicItemRuntime, activeFooterItemIds } from '../src/footer/dynamic-item-runtime.ts'
-import type { FooterCustomCommandItemSettings } from '../src/footer/custom-items.ts'
+import { FooterDynamicItemRuntime, activeFooterItemIds, customCommandConfigOf } from '../src/footer/dynamic-item-runtime.ts'
+import { DEFAULT_CUSTOM_COMMAND_REFRESH_MS, type FooterCustomCommandItemSettings } from '../src/footer/custom-items.ts'
 import type { FooterLayoutV1 } from '../src/footer/types.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
 
@@ -62,12 +62,43 @@ async function waitFor(predicate: () => boolean, timeoutMs = 8000): Promise<void
   }
 }
 
+/** Bounded wall-clock spin (setImmediate turns, never a fixed setTimeout):
+ * used to wait PAST a child's deadline or a settle window before an
+ * assertion that must hold AFTER it. */
+async function spin(ms: number): Promise<void> {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
+}
+
 test('activeFooterItemIds collects every referenced id (left and right zones)', () => {
   const layout: FooterLayoutV1 = {
     schemaVersion: 1,
     rows: [{ left: [{ id: 'a' }, { id: 'b' }], right: [{ id: 'a' }] }],
   }
   assert.deepEqual([...activeFooterItemIds(layout)].sort(), ['a', 'b'])
+})
+
+test('an ABSENT refreshIntervalMs runs at the custom 5s default (same cadence as an explicit 5s)', () => {
+  const absent = customCommandConfigOf({ schemaVersion: 1, id: 'user:clock', kind: 'command', command: 'date' })
+  const explicit = customCommandConfigOf({ schemaVersion: 1, id: 'user:clock', kind: 'command', command: 'date', refreshIntervalMs: 5000 })
+  assert.equal(absent?.refreshIntervalMs, DEFAULT_CUSTOM_COMMAND_REFRESH_MS)
+  assert.equal(explicit?.refreshIntervalMs, DEFAULT_CUSTOM_COMMAND_REFRESH_MS)
+  // The timeout default stays the whole-footer 300ms.
+  assert.equal(absent?.timeoutMs, 300)
+  assert.equal(absent?.maxRows, 1)
+})
+
+test('duplicate trusted definitions are FIRST-wins (the catalog projection wins)', async () => {
+  const { runtime, values } = harness()
+  try {
+    const first = item('user:clock', 'process.stdout.write("first\\n")')
+    const second = item('user:clock', 'process.stdout.write("second\\n")')
+    runtime.sync([first, second], new Set(['user:clock']))
+    await waitFor(() => values.get('user:clock') === 'first')
+    assert.equal(values.get('user:clock'), 'first', 'the first definition must win, never the last')
+  } finally {
+    runtime.dispose()
+  }
 })
 
 test('a visible command item arms a runner and commits ONLY the first non-empty line', async () => {
@@ -91,7 +122,7 @@ test('an unchanged config keeps the runner, cache and cadence (no restart per re
     runtime.sync([clock], new Set(['user:clock']))
     assert.equal(values.get('user:clock'), 'tick', 'an unchanged config must not clear the cache')
     // No new run may start from the no-op sync (the runner coalesces).
-    await new Promise(resolve => setTimeout(resolve, 150))
+    await spin(150)
     assert.equal(calls.length, settled, 'a no-op sync must not restart the runner')
   } finally {
     runtime.dispose()
@@ -116,13 +147,13 @@ test('a config change kills the stale child and clears the cache immediately', a
     const slow = item('user:clock', 'setTimeout(() => process.stdout.write("old\\n"), 2000)')
     runtime.sync([slow], new Set(['user:clock']))
     // Let the slow child spawn, then switch the command.
-    await new Promise(resolve => setTimeout(resolve, 150))
+    await spin(150)
     const fast = item('user:clock', 'process.stdout.write("new\\n")')
     runtime.sync([fast], new Set(['user:clock']))
     await waitFor(() => values.get('user:clock') === 'new')
     // The stale generation must never commit, even after the old child's
     // deadline passes.
-    await new Promise(resolve => setTimeout(resolve, 2300))
+    await spin(2300)
     assert.equal(values.get('user:clock'), 'new', 'the stale generation must never commit')
   } finally {
     runtime.dispose()
@@ -134,12 +165,12 @@ test('a renamed id disposes the old runner; the old result cannot commit to the 
   try {
     const slow = item('user:clock', 'setTimeout(() => process.stdout.write("old\\n"), 2000)')
     runtime.sync([slow], new Set(['user:clock']))
-    await new Promise(resolve => setTimeout(resolve, 150))
+    await spin(150)
     const renamed = item('user:time', 'process.stdout.write("new\\n")')
     runtime.sync([renamed], new Set(['user:time']))
     await waitFor(() => values.get('user:time') === 'new')
     assert.equal(values.get('user:clock'), undefined, 'the old id cache must be cleared on rename')
-    await new Promise(resolve => setTimeout(resolve, 2300))
+    await spin(2300)
     assert.equal(values.get('user:time'), 'new', 'the old generation must never commit under the new id')
   } finally {
     runtime.dispose()
@@ -172,7 +203,7 @@ test('a deleted definition (or kind change) disposes the runner and clears the c
     // may run.
     runtime.sync([], new Set(['user:clock']))
     assert.equal(values.get('user:clock'), undefined)
-    await new Promise(resolve => setTimeout(resolve, 200))
+    await spin(200)
     assert.equal(values.get('user:clock'), undefined)
   } finally {
     runtime.dispose()
@@ -188,7 +219,7 @@ test('whole-footer command mode suspends every per-item runner; switching back r
     // footer === command: the whole-footer surface covers the native items.
     runtime.sync([], new Set())
     assert.equal(values.get('user:clock'), undefined, 'command mode must clear the per-item caches')
-    await new Promise(resolve => setTimeout(resolve, 200))
+    await spin(200)
     assert.equal(values.get('user:clock'), undefined, 'no per-item run may happen under command mode')
     runtime.sync([clock], new Set(['user:clock']))
     await waitFor(() => values.get('user:clock') === 'tick')
@@ -201,10 +232,10 @@ test('dispose stops every runner: no value may commit after disposal', async () 
   const { runtime, values, calls } = harness()
   const clock = item('user:clock', 'setTimeout(() => process.stdout.write("late\\n"), 500)')
   runtime.sync([clock], new Set(['user:clock']))
-  await new Promise(resolve => setTimeout(resolve, 100))
+  await spin(100)
   runtime.dispose()
   const settled = calls.length
-  await new Promise(resolve => setTimeout(resolve, 800))
+  await spin(800)
   assert.equal(calls.length, settled, 'a disposed runtime must never commit a late result')
   assert.equal(values.get('user:clock'), undefined)
 })
@@ -254,7 +285,7 @@ test('a trusted definition NOT referenced by the layout never spawns', async () 
   try {
     const { runtime } = harness()
     runtime.sync([item('user:clock', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)], new Set())
-    await new Promise(resolve => setTimeout(resolve, 300))
+    await spin(300)
     assert.equal(existsSync(marker), false, 'an unreferenced definition must never spawn')
     runtime.dispose()
   } finally {
@@ -271,7 +302,7 @@ test('a project-only command definition never spawns (the trust gate)', async ()
     // USER-layer trusted set — the project-supplied definition is not in
     // it, so nothing may run and the item stays unavailable.
     runtime.sync([], new Set(['user:clock']))
-    await new Promise(resolve => setTimeout(resolve, 300))
+    await spin(300)
     assert.equal(existsSync(marker), false, 'the project command must never run')
     assert.equal(values.get('user:clock'), undefined, 'the item must stay unavailable')
     runtime.dispose()

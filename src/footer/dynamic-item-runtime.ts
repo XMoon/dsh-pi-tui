@@ -25,7 +25,7 @@
 
 import { FooterCommandRunner, type FooterCommandConfig } from './command-runner.ts'
 import { parseFooterCommandConfig } from './command-trust.ts'
-import type { FooterCustomCommandItemSettings } from './custom-items.ts'
+import { DEFAULT_CUSTOM_COMMAND_REFRESH_MS, type FooterCustomCommandItemSettings } from './custom-items.ts'
 import type { FooterLayoutV1 } from './types.ts'
 import type { StatusSnapshot } from '../status/types.ts'
 
@@ -67,6 +67,25 @@ function sameConfig(a: FooterCommandConfig, b: FooterCommandConfig): boolean {
     && a.maxRows === b.maxRows
 }
 
+/** The validated runner config for one command definition (maxRows is
+ * always 1 — a custom command item is exactly one line; the composer owns
+ * width/truncation). The custom-item DEFAULT refresh is 5s (several items
+ * can coexist — the whole-footer 1s default would spawn a process per
+ * item per second), so an ABSENT refreshIntervalMs is projected to the
+ * custom default BEFORE the shared parser runs: an absent default and an
+ * explicit 5s must produce the SAME cadence (the dirty comparator already
+ * treats them as the same fact). The parser already validated the
+ * definition, so this is defensive. */
+export function customCommandConfigOf(item: FooterCustomCommandItemSettings): FooterCommandConfig | undefined {
+  return parseFooterCommandConfig({
+    schemaVersion: 1,
+    command: item.command,
+    timeoutMs: item.timeoutMs,
+    refreshIntervalMs: item.refreshIntervalMs ?? DEFAULT_CUSTOM_COMMAND_REFRESH_MS,
+    maxRows: 1,
+  })
+}
+
 /** The custom command item runtime. */
 export class FooterDynamicItemRuntime {
   private readonly options: FooterDynamicItemRuntimeOptions
@@ -101,7 +120,10 @@ export class FooterDynamicItemRuntime {
     if (this.disposed) return
     const wanted = new Map<string, FooterCustomCommandItemSettings>()
     for (const item of trustedCommands) {
-      if (item.kind === 'command' && activeIds.has(item.id)) wanted.set(item.id, item)
+      // FIRST-wins, matching the catalog's parseFooterCustomItems contract:
+      // a duplicate id reaching the runtime must never execute a different
+      // command than the catalog projection.
+      if (item.kind === 'command' && activeIds.has(item.id) && !wanted.has(item.id)) wanted.set(item.id, item)
     }
     for (const [id, entry] of this.active) {
       if (wanted.has(id)) continue
@@ -110,7 +132,7 @@ export class FooterDynamicItemRuntime {
       this.options.onValue(id, undefined)
     }
     for (const [id, item] of wanted) {
-      const config = this.configOf(item)
+      const config = customCommandConfigOf(item)
       if (config === undefined) continue
       const existing = this.active.get(id)
       if (existing === undefined) {
@@ -145,18 +167,5 @@ export class FooterDynamicItemRuntime {
       this.active.delete(id)
       entry.runner.dispose()
     }
-  }
-
-  /** The validated runner config (maxRows is always 1 — a custom command
-   * item is exactly one line; the composer owns width/truncation). The
-   * parser already validated the definition, so this is defensive. */
-  private configOf(item: FooterCustomCommandItemSettings): FooterCommandConfig | undefined {
-    return parseFooterCommandConfig({
-      schemaVersion: 1,
-      command: item.command,
-      timeoutMs: item.timeoutMs,
-      refreshIntervalMs: item.refreshIntervalMs,
-      maxRows: 1,
-    })
   }
 }
