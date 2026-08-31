@@ -13,10 +13,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { wrapTextWithAnsi, truncateToWidth } from '@xmoon76/pi-tui'
 import { color } from '../src/theme.ts'
-import { FooterComposer } from '../src/footer/composer.ts'
+import { FooterComposer, mergeCommandSurface } from '../src/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
-import { FOOTER_MAX_PHYSICAL_LINES_PER_ROW } from '../src/footer/types.ts'
+import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW } from '../src/footer/types.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
 
 const composer = new FooterComposer(createBuiltinFooterRegistry())
@@ -98,7 +98,10 @@ function legacyStatsLine(snap: StatusSnapshot): string {
 
 /** The REFERENCE footer rows (plan 2026-08-31 §6.2): the first row wraps
  * into 1..2 physical lines (its cap boundary cut with '…'); the tail line
- * is its own row, truncated ANSI-safely to the full width. The composer's
+ * row's allowance is the LEFTOVER capacity (up to two lines at generous
+ * widths — a 42-cell stats line wraps into two FULL rows at 40 columns
+ * instead of truncating), ANSI-safely truncated to the allowance when it
+ * still overflows. The composer's
  * item-level fitting can only DROP more than this reference (semantic
  * importance), never render wider or taller. */
 function referenceFooter(line1: string[], line2: string, width: number): string {
@@ -110,7 +113,10 @@ function referenceFooter(line1: string[], line2: string, width: number): string 
       ? `${truncateToWidth(row, Math.max(1, width - 1), '')}…`
       : row)
   }
-  if (line2 !== '') rows.push(truncateToWidth(line2, width, '…'))
+  if (line2 !== '') {
+    const allowance = Math.min(FOOTER_MAX_PHYSICAL_LINES_PER_ROW, Math.max(1, FOOTER_MAX_PHYSICAL_LINES - rows.length))
+    rows.push(...wrapTextWithAnsi(truncateToWidth(line2, allowance * width, '…'), width).slice(0, allowance))
+  }
   return rows.map(row => color.textDim(row)).join('\n')
 }
 
@@ -244,6 +250,22 @@ test('a throwing item is isolated (omitted, never crashes the composer)', () => 
   assert.ok(!actual.includes('boom'), `the throwing item must be omitted:\n${actual}`)
 })
 
+test('mergeCommandSurface keeps its contract under the new capacity (smoke)', () => {
+  // The COMMAND footer surface is deliberately UNCHANGED by the capacity
+  // work: trusted command rows keep their row list, and the instruction
+  // still merges onto the last row slot of the COMMAND surface (its own
+  // contract, distinct from the native row allocator), tail-capped at
+  // narrow widths.
+  const instruction = { id: 'ctrl-c-exit', text: [{ text: 'Press Ctrl+C again to exit' }], priority: 100 }
+  assert.equal(mergeCommandSurface(['cmd row one', 'cmd row two'], instruction, 20)
+    .replace(/\x1b\[[0-9;]*m/g, ''),
+    'cmd row one\nPress Ctrl+C again…')
+  assert.equal(mergeCommandSurface(['cmd row one'], instruction, 100)
+    .replace(/\x1b\[[0-9;]*m/g, ''),
+    'cmd row one\nPress Ctrl+C again to exit')
+  assert.equal(mergeCommandSurface(['only'], undefined, 100), 'only')
+})
+
 /** Deep-mutable build shape (the snapshot is deeply readonly). */
 type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
 
@@ -260,8 +282,9 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
       .replace(/\x1b\[[0-9;]*m/g, ''),
     // 40 columns: the status row fills its 2-line allowance exactly (75
     // cells → 2 rows) and the stats row keeps its own 1-line allowance,
-    // ANSI-safely cut at the FULL width.
-    '[workspace-write]  [deepseek/flash]\nx/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k | LLM 8.1s · TTFB 0s · 0 to…',
+    // The capacity of 4 lets the stats row take the remaining
+    // allowance of 2 — it WRAPS into two full rows (42 ≤ 2×40 cells).
+    '[workspace-write]  [deepseek/flash]\nx/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k | LLM 8.1s · TTFB 0s · 0\ntok/s',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 20, context: CONTEXT })
@@ -271,7 +294,7 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
     // context(100) BEFORE model(100)/permission(110) and truncates the
     // rest; never a slice of the wrapped lines (plan §6.2). The stats row
     // keeps its own allowance, cut at the full width.
-    '[workspace-write]\n[deepseek/flash]\n↑1.2k ↓3.4k | LLM 8…',
+    '[workspace-write]\n[deepseek/flash]\n↑1.2k ↓3.4k | LLM\n8.1s · TTFB 0s · 0 …',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })

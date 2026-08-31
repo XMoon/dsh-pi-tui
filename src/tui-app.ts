@@ -78,7 +78,7 @@ import { FooterConfiguratorModel } from './footer/configurator-model.ts'
 import { FooterConfiguratorPanel } from './footer/configurator.ts'
 import { FooterCustomItemCatalog } from './footer/custom-items.ts'
 import type { FooterItemRegistry } from './footer/item-registry.ts'
-import type { FooterLayoutV1 } from './footer/types.ts'
+import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW, type FooterLayoutV1, type FooterPhysicalLineBudget } from './footer/types.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
 import { SelectedMarquee } from './marquee.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
@@ -9450,6 +9450,12 @@ export class TuiApp {
       text = mergeCommandSurface(this.commandRows, instruction, width)
     } else {
       const snapshot = this.statusStore.snapshot()
+      // The SURFACE decides how many of the composer's hard-capacity
+      // lines the current screen can actually give the footer (plan
+      // 2026-08-31 §6.1 / PR #57 review): without this, chrome-heavy
+      // short viewports (e.g. 20x10 with a wrapped todo panel) clipped
+      // the footer's own bottom rows — the appended Host instruction
+      // FIRST — violating "the instruction always survives".
       text = this.footerComposer.render({
         snapshot,
         layout: this.currentFooterLayout(),
@@ -9459,10 +9465,47 @@ export class TuiApp {
           extensionFooterText: this.extensionHost?.footerText() ?? '',
         },
         instruction,
+        physicalLineBudget: this.footerPhysicalLineBudget(),
       })
     }
     this.footer.setText(text)
     this.requestRender()
+  }
+
+  /** The SURFACE-owned footer physical-line budget (plan 2026-08-31 §6.1
+   * / PR #57 review — host-owned by design: the composer never knows
+   * about header/editor/dock/todo/working/widgets/fullscreen):
+   *
+   * - the composer's hard capacity is FOOTER_MAX_PHYSICAL_LINES (4);
+   * - the effective budget is min(capacity, currently-available footer
+   *   rows) — terminal height minus every pinned (`shrink: 0`) chrome row
+   *   the ACTIVE surface lays above the footer. The transcript /
+   *   ScrollView is the shrinkable region and is deliberately NOT
+   *   subtracted (it shrinks to zero first);
+   * - measuring via each component's own `render(width)` is the SAME
+   *   pattern the mouse hit-map uses, so the measurement always matches
+   *   what the layout actually paints;
+   * - widget zones are measured on BOTH screens: the fullscreen root
+   *   does not mount them, so their rows read 0 there; on the regular
+   *   screen they sit directly above the footer. Over-measuring is the
+   *   SAFE direction (the footer gets fewer lines than could fit — it
+   *   never clips); under-measuring is what would clip it.
+   *
+   * Floored at 0: when the pinned chrome alone already exceeds the
+   * viewport nothing can keep the footer unclipped, and the composer
+   * still spends the last available line on the Host instruction
+   * (instruction > user rows). */
+  private footerPhysicalLineBudget(): FooterPhysicalLineBudget {
+    const width = Math.max(1, this.terminal.columns)
+    const height = Math.max(1, this.terminal.rows)
+    let used = 0
+    for (const chrome of [this.header, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat, this.widgetsAbove, this.widgetsBelow]) {
+      used += chrome.render(width).length
+    }
+    return {
+      perRow: FOOTER_MAX_PHYSICAL_LINES_PER_ROW,
+      total: Math.min(FOOTER_MAX_PHYSICAL_LINES, Math.max(0, height - used)),
+    }
   }
 
   /** The M6 which-key hint: the pending leader sequence and its

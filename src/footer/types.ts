@@ -112,14 +112,19 @@ export interface FooterPhysicalLineBudget {
 /** The max physical lines one logical row wraps into at narrow widths
  * (plan 2026-08-31 §6.1/§6.2): past the cap the row resolves overflow
  * through the semantic compact → importance-drop → ANSI-safe truncate
- * discipline — never by slicing the wrapped lines. */
+ * discipline — never by slicing the wrapped lines. Composer HARD
+ * capability: callers may never raise this past 2. */
 export const FOOTER_MAX_PHYSICAL_LINES_PER_ROW = 2
 
-/** The max physical lines the footer status surface occupies (plan
- * 2026-08-31 §6.1): with the default two-logical-row layout this is
- * status ≤ 2 + stats ≤ 1 (and the Host instruction's reserved line
- * shrinks the LAYOUT budget, it never replaces a row). */
-export const FOOTER_MAX_PHYSICAL_LINES = 3
+/** The Composer's HARD capacity ceiling for the footer status surface
+ * (plan 2026-08-31 §6.1, revised 2026-08-31 PR #57 review): with the
+ * default two-logical-row layout the CAPACITY is status ≤ 2 + stats ≤ 2.
+ * This is a ceiling, NOT the everyday render height — the actual render
+ * budget is decided by the SURFACE (TuiApp passes
+ * `physicalLineBudget.total = min(4, currently-available footer rows)`,
+ * so short viewports render fewer lines and the Host instruction is
+ * never viewport-clipped). */
+export const FOOTER_MAX_PHYSICAL_LINES = 4
 
 /** The legacy physical-line cap name — physical lines, never logical
  * rows. Kept as an alias for external ABI; prefer the explicit names. */

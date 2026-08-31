@@ -8,9 +8,11 @@
  * the transcript is already at zero.
  *
  * The contract under test: a logical footer row occupies at most TWO
- * physical lines and the surface's global budget is THREE physical lines
- * (status ≤ 2 + stats ≤ 1), so the whole footer always fits beside the
- * other pinned chrome on short viewports (plan §6.1).
+ * physical lines, the composer's hard capacity is FOUR physical lines,
+ * and the SURFACE hands the composer the effective budget
+ * min(4, currently-available footer rows) — so the whole footer always
+ * fits beside the other pinned chrome on short viewports and the appended
+ * Host instruction is never viewport-clipped (plan §6.1, PR #57 task §一–§三).
  * @module @xmoon76/dsh-pi-tui/footer-fullscreen-narrow.test
  */
 
@@ -60,16 +62,18 @@ async function startFullscreenApp(columns: number, rows: number): Promise<{ vt: 
 }
 
 /** The fullscreen-pinned contract shared by every matrix cell. `expectStats`
- * marks the cells where the OTHER pinned chrome (header + todo + working +
- * editor) still leaves the full 3-line footer budget on screen — the
- * regression cells where the old 4-line budget clipped the stats row out
- * of the viewport. */
+ * / `expectModel` mark the cells that leave ENOUGH footer slots for the
+ * stats line / the model badge after the other pinned chrome (header +
+ * todo + working + editor) is laid out — under the surface budget even
+ * the model may drop at extreme cells (20x10 leaves 2 slots: the
+ * highest-importance permission line wins, plan §7/§8). */
 function assertPinnedChromeIntact(
   app: TuiApp,
   view: string,
   columns: number,
   viewportRows: number,
   expectStats: boolean,
+  expectModel = true,
 ): void {
   const lines = view.split('\n')
   // The editor frame must survive in full: both borders on screen near the
@@ -84,10 +88,12 @@ function assertPinnedChromeIntact(
   // (importance 110) is the contract's floor — the footer must never be
   // COMPLETELY gone.
   assert.ok(view.includes('workspace-write'), `permission badge lost at ${columns}x${viewportRows}:\n${view}`)
-  assert.ok(
-    view.includes('deepseek'),
-    `the model badge must survive at ${columns}x${viewportRows}:\n${view}`,
-  )
+  if (expectModel) {
+    assert.ok(
+      view.includes('deepseek'),
+      `the model badge must survive at ${columns}x${viewportRows}:\n${view}`,
+    )
+  }
   if (expectStats) {
     assert.ok(
       view.includes('12.3s'),
@@ -96,11 +102,19 @@ function assertPinnedChromeIntact(
   }
   // The footer's PHYSICAL-LINE contract (plan §6.1/§13.2), read from the
   // footer COMPONENT itself (footerRenderRowsForTest — the exact rows the
-  // layout paints; never a viewport reconstruction): at most THREE footer
-  // physical rows (in fullscreen it can only be SMALLER, when the other
-  // pinned chrome leaves less room).
+  // layout paints; never a viewport reconstruction): at most FOUR footer
+  // physical rows (the hard capacity — the effective surface budget can
+  // only be SMALLER when the other pinned chrome leaves less room) —
+  // and EVERY rendered row must actually be visible in the viewport,
+  // which is what fails when the budget exceeds the surface capacity.
   const footerLines = [...app.footerRenderRowsForTest()]
-  assert.ok(footerLines.length <= 3, `the footer exceeded its 3-line budget at ${columns}x${viewportRows}:\n${view}`)
+  assert.ok(footerLines.length <= 4, `the footer exceeded its 4-line capacity at ${columns}x${viewportRows}:\n${view}`)
+  const plainViewportLines = lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+  for (const row of footerLines) {
+    const text = row.replace(/\x1b\[[0-9;]*m/g, '').trimEnd()
+    assert.ok(text !== '' && plainViewportLines.some(line => line.includes(text)),
+      `a rendered footer row was clipped out of the viewport at ${columns}x${viewportRows}: ${JSON.stringify(text)}\n${view}`)
+  }
   // And every rendered line stays inside the terminal width.
   for (const line of lines) {
     assert.ok(
@@ -119,19 +133,20 @@ test('the footer never clips out of a narrow fullscreen viewport', async () => {
   // The plan's §13.2 matrix. 40x10 / 30x10 are the regression cells: the
   // old 4-line budget pushed the stats row below the screen while the
   // transcript was already at zero. 20x10 is the documented EXTREME cell:
-  // the 20-column todo panel wraps to 2 rows of chrome, so only 2 footer
-  // slots remain at this width — the composer still honors its 3-line
-  // budget (locked at composer level) and keeps the high-importance
-  // content visible, which is the plan's "footer must not disappear"
-  // assertion for that cell.
-  for (const [columns, viewportRows, expectStats] of [
-    [80, 24, true], [60, 16, true], [40, 12, true], [40, 10, true], [30, 10, true], [20, 10, false],
+  // the 20-column todo panel wraps the chrome, so only TWO footer slots
+  // remain — the surface hands the composer total=2, the footer renders
+  // status + stats (both one line, both visible) and DROPS the model
+  // (importance order), which the plan's "footer must not disappear +
+  // one high-importance status must survive" contract covers.
+  for (const [columns, viewportRows, expectStats, expectModel] of [
+    [80, 24, true, true], [60, 16, true, true], [40, 12, true, true],
+    [40, 10, true, true], [30, 10, true, true], [20, 10, true, false],
   ] as const) {
     const { vt, app } = await startFullscreenApp(columns, viewportRows)
     try {
       const view = vt.getViewport().join('\n')
       assert.ok(view.length > 0, `empty viewport at ${columns}x${viewportRows}`)
-      assertPinnedChromeIntact(app, view, columns, viewportRows, expectStats)
+      assertPinnedChromeIntact(app, view, columns, viewportRows, expectStats, expectModel)
     } finally {
       app.stop()
     }
@@ -154,8 +169,64 @@ test('the armed Ctrl+C instruction never pushes the footer out of a narrow fulls
     assert.ok(view.includes('workspace-write'), `the status row must survive beside the hint:\n${view}`)
     assert.ok(view.includes('LLM 12.3s'), `the stats row must survive beside the hint:\n${view}`)
     const footerLines = [...app.footerRenderRowsForTest()]
-    assert.equal(footerLines.length, 3, `the footer with its instruction must stay inside the 3-line budget:\n${view}`)
+    assert.equal(footerLines.length, 3, `the footer with its instruction must stay inside the effective budget:\n${view}`)
     assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+C again'), `the hint must be the footer's last line:\n${view}`)
+    const plainViewportLines = lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+    for (const row of footerLines) {
+      const text = row.replace(/\x1b\[[0-9;]*m/g, '').trimEnd()
+      assert.ok(text !== '' && plainViewportLines.some(line => line.includes(text)),
+        `a footer row was clipped out of the viewport: ${JSON.stringify(text)}\n${view}`)
+    }
+    for (const line of lines) {
+      const truncated = line.match(/\x1b\[(?:[0-9;]*[^0-9;m]|[0-9;]*$)/)
+      assert.equal(truncated, null, `truncated ANSI: ${JSON.stringify(line)}`)
+    }
+  } finally {
+    app.stop()
+  }
+})
+
+test('the armed Ctrl+C instruction on a chrome-heavy 20x10 viewport is NEVER clipped', async () => {
+  // THE P2 regression (PR #57 task §二/§七.1): at 20x10 the pinned chrome
+  // (header + wrapped todo + working + editor) leaves only TWO footer
+  // slots. Without the surface budget the composer still emitted
+  // status + stats + instruction (4 rows at this width) and — since the
+  // instruction is appended LAST — the exit hint was the row the viewport
+  // clipped. The surface must hand the composer
+  // total = min(4, availableRows) = 2, so the hint survives IN THE
+  // VIEWPORT at the cost of the lower-importance stats row.
+  const { vt, app } = await startFullscreenApp(20, 10)
+  try {
+    vt.sendInput('\x03') // arm the exit window
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    // The hint's viewport-visible form at 20 columns: the full text is
+    // 26 cells and the line is 20 — the ANSI-safe cap carries the prefix.
+    assert.ok(
+      lines.some(line => line.includes('Press Ctrl+C again')),
+      `the exit hint must be visible in the VIEWPORT (not only in the component):\n${view}`,
+    )
+    // One high-importance status fact survives beside it (importance
+    // order): the permission badge outranks everything else.
+    assert.ok(view.includes('workspace-write'), `the high-importance status must survive:\n${view}`)
+    const editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
+    assert.ok(editorTop !== -1, `editor top border missing:\n${view}`)
+    assert.ok(
+      lines.slice(editorTop + 1).some(line => line.includes('─'.repeat(10))),
+      `editor bottom border missing:\n${view}`,
+    )
+    // The footer renders exactly the surface budget: status + hint, hint
+    // last, and both rows painted.
+    const footerLines = [...app.footerRenderRowsForTest()]
+    assert.equal(footerLines.length, 2, `the surface budget must flow into the composer:\n${view}`)
+    assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+C again'), `the hint must be last:\n${view}`)
+    const plainViewportLines = lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+    for (const row of footerLines) {
+      const text = row.replace(/\x1b\[[0-9;]*m/g, '').trimEnd()
+      assert.ok(text !== '' && plainViewportLines.some(line => line.includes(text)),
+        `a footer row was clipped out of the viewport: ${JSON.stringify(text)}\n${view}`)
+    }
     for (const line of lines) {
       const truncated = line.match(/\x1b\[(?:[0-9;]*[^0-9;m]|[0-9;]*$)/)
       assert.equal(truncated, null, `truncated ANSI: ${JSON.stringify(line)}`)
