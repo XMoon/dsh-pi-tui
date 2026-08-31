@@ -18,11 +18,13 @@ published peer contract intentionally uses a lower bound only: later DSH
 versions remain eligible until a concrete compatibility failure is found.
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.1
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.2
 npm install -g @xmoon76/dsh-pi-tui@0.3
 ```
 
-The first command upgrades the Harness for 0.4. The second pins the compatible
+The first command upgrades the Harness for 0.4 (the concrete family validated
+by the current Source baseline is `0.1.2-alpha.2`; the peer contract stays
+lower-bound-only at `>=0.1.2-alpha.1`). The second pins the compatible
 TUI line when the installed Harness must remain on 0.1.1. Later DSH versions are
 eligible under the lower-bound-only peer contract; each release still runs its
 concrete runtime and preset gates. The startup notice only reports versions
