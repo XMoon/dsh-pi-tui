@@ -14,6 +14,7 @@
  */
 
 import type { StatusSnapshot } from '../status/types.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import {
   formatCacheHit,
   formatCacheHitCompact,
@@ -576,14 +577,18 @@ const tokenUsageItem: FooterItemDefinition = {
   defaultFormat: 'io',
   render(snapshot: StatusSnapshot, ref, density) {
     const tokens = snapshot.usage.tokens
-    // Density compact reuses the persisted 'compact' style (`6.7k`); the
-    // user's own format choice is never written back.
-    const format = density === 'compact' ? 'compact' : ref.format ?? 'io'
-    const text = format === 'total'
+    const preferred = ref.format === 'total'
       ? formatTokenUsageTotal(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite)
-      : format === 'compact'
+      : ref.format === 'compact'
         ? formatTokenUsageCompact(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite)
         : formatTokenUsageIo(tokens.input, tokens.output)
+    if (density !== 'compact') return { spans: [{ text: preferred, tone: 'success' }] }
+    // Density compact reuses the persisted 'compact' style (`6.7k`).
+    // When the user's persisted style is ALREADY shorter (a tiny io pair
+    // beside a huge cache total), the compact form is the preferred form
+    // itself — a legitimate no-op, never a wider compact.
+    const compact = formatTokenUsageCompact(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite)
+    const text = visibleWidth(compact) < visibleWidth(preferred) ? compact : preferred
     return { spans: [{ text, tone: 'success' }] }
   },
 }
@@ -600,16 +605,20 @@ const performanceItem: FooterItemDefinition = {
   defaultFormat: 'full',
   render(snapshot: StatusSnapshot, ref, density) {
     const performance = snapshot.usage.performance
+    const preferred = ref.format === 'speed'
+      ? formatPerformanceSpeed(performance.tokensPerSec)
+      : ref.format === 'latency'
+        ? formatPerformanceLatency(performance.firstTokenMs)
+        : formatPerformanceFull(performance.llmMs, performance.tokensPerSec)
+    if (density !== 'compact') return { spans: [{ text: preferred, tone: 'textMuted' }] }
     // Density compact keeps BOTH facts with the shortened unit
     // (`8.1s 40t/s`) — it never degrades to a speed-only or latency-only
     // style (that would shift the composite item's semantic center).
-    const text = density === 'compact'
-      ? formatPerformanceCompact(performance.llmMs, performance.tokensPerSec)
-      : ref.format === 'speed'
-        ? formatPerformanceSpeed(performance.tokensPerSec)
-        : ref.format === 'latency'
-          ? formatPerformanceLatency(performance.firstTokenMs)
-          : formatPerformanceFull(performance.llmMs, performance.tokensPerSec)
+    // When the user's persisted style is ALREADY shorter (speed/latency),
+    // the compact form is the preferred form itself — a legitimate no-op,
+    // never a wider compact.
+    const compact = formatPerformanceCompact(performance.llmMs, performance.tokensPerSec)
+    const text = visibleWidth(compact) < visibleWidth(preferred) ? compact : preferred
     return { spans: [{ text, tone: 'textMuted' }] }
   },
 }
