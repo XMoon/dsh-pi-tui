@@ -94,10 +94,11 @@ export class SubmitLatencyTracker {
   /**
    * Mark one phase (T1-T5); the first mark per phase logs its offset.
    * Returns TRUE when the phase was logged by this call (false for
-   * duplicates / foreign sessions / no baseline). Logging
-   * `assistant.first` AUTO-COMPLETES the timeline: T5 is the last phase,
-   * so the baseline is dropped immediately instead of waiting for a
-   * turn/end that a queue-then-next-turn journey must not depend on.
+   * duplicates / foreign sessions / no baseline / phase-prerequisite
+   * violations). Logging `assistant.first` AUTO-COMPLETES the timeline:
+   * T5 is the last phase, so the baseline is dropped immediately instead
+   * of waiting for a turn/end that a queue-then-next-turn journey must
+   * not depend on.
    */
   mark(sessionId: string | undefined, phase: SubmitLatencyPhase): boolean {
     if (this.baseline === undefined) return false
@@ -108,6 +109,13 @@ export class SubmitLatencyTracker {
     // different session ignores foreign marks.
     if (this.sessionId === undefined) this.sessionId = sessionId
     else if (this.sessionId !== sessionId) return false
+    // T5 PREREQUISITE: `assistant.first` is only meaningful AFTER this
+    // submission's `user.message` (T4) — a DSH submission always commits
+    // its user message before the model can chunk. Without this gate, a
+    // chunk from a STILL-STREAMING previous turn (a queued submission
+    // waiting in the inbox) would steal T5 and auto-complete the
+    // timeline before the real journey even started.
+    if (phase === 'assistant.first' && !this.logged.has('user.message')) return false
     this.logged.add(phase)
     const elapsed = Math.max(0, this.now() - this.baseline)
     this.emit(phase, elapsed, sessionId)

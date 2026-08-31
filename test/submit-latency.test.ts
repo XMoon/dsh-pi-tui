@@ -242,6 +242,37 @@ test('assistant.first AUTO-COMPLETES the timeline (a new accept starts the next)
   assert.equal(tracker.mark('s3', 'turn.start'), false, 'foreign session does not log')
 })
 
+test('T5 PREREQUISITE: a chunk from a STILL-STREAMING previous turn cannot steal assistant.first', () => {
+  // The review's queued scenario, completed: B is accepted and dispatched
+  // while turn 12 is still streaming its answer. A chunk arriving THEN is
+  // turn 12\'s, not B\'s first token — it must NOT log T5 (which would
+  // also auto-complete B\'s timeline before B was even processed).
+  const sink = recordingSink()
+  const time = clock()
+  const tracker = new SubmitLatencyTracker({ sink, now: time.now })
+  tracker.accept('s')
+  tracker.mark('s', 'dispatch')
+  tracker.mark('s', 'inbox.inserted')
+  time.advance(100)
+  // Turn 12 is still streaming: a chunk lands with no user.message yet.
+  assert.equal(tracker.mark('s', 'assistant.first'), false,
+    'T5 before T4 must be refused (the chunk belongs to the previous turn)')
+  assert.equal(sink.lines.filter(line => line.message === 'submit.assistant.first').length, 0,
+    'no T5 line, and the timeline is NOT auto-completed by a foreign chunk')
+  // Turn 12 ends; turn 13 processes B: the real journey completes.
+  time.advance(50)
+  tracker.mark('s', 'turn.start')
+  tracker.mark('s', 'user.message')
+  time.advance(2_500)
+  assert.equal(tracker.mark('s', 'assistant.first'), true,
+    'the REAL first chunk (after user.message) logs T5')
+  const t5 = sink.lines.filter(line => line.message === 'submit.assistant.first')
+  assert.equal(t5.length, 1)
+  assert.equal(t5[0]!.fields?.offset, '2650ms', 'T5 measures the true first-token latency')
+  // The timeline auto-completed after the real T5.
+  assert.equal(tracker.mark('s', 'user.message'), false, 'post-completion marks are no-ops')
+})
+
 test('a throwing sink never propagates (timing must not affect the session)', () => {
   const tracker = new SubmitLatencyTracker({ sink: { debug: () => { throw new Error('sink boom') } }, now: () => 1 })
   assert.doesNotThrow(() => tracker.accept('s'))
