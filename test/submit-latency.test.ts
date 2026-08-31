@@ -195,6 +195,53 @@ test('the default clock is monotonic (performance.now, never Date.now)', () => {
   assert.ok(tracker !== undefined)
 })
 
+test('the timeline SURVIVES a previous turn ending (queued submissions keep T1-T5)', () => {
+  // The review's queued scenario: B is accepted while turn 12 is still
+  // running, B waits in the inbox, turn 12 ENDS, and turn 13 processes B.
+  // No turn/end reset exists anymore, so B's full journey is measurable
+  // (this is exactly the queued → next-turn diagnostics Phase E exists
+  // for). Simulated at tracker level: accept mid-turn, then the next
+  // turn's events WITHOUT any reset call.
+  const sink = recordingSink()
+  const time = clock()
+  const tracker = new SubmitLatencyTracker({ sink, now: time.now })
+  tracker.accept('s') // B accepted while the previous turn runs
+  tracker.mark('s', 'dispatch')
+  tracker.mark('s', 'inbox.inserted')
+  time.advance(2_000) // ...the previous turn ends here (no tracker call)
+  tracker.mark('s', 'turn.start')
+  tracker.mark('s', 'user.message')
+  time.advance(3_000)
+  tracker.mark('s', 'assistant.first')
+  const offsets = sink.lines.filter(line => line.message !== 'submit.accept').map(line => line.fields?.offset)
+  assert.deepEqual(offsets, ['0ms', '0ms', '2000ms', '2000ms', '5000ms'],
+    'T1-T5 must survive the previous turn ending (2000ms = the previous turn\'s tail)')
+})
+
+test('assistant.first AUTO-COMPLETES the timeline (a new accept starts the next)', () => {
+  const sink = recordingSink()
+  const time = clock()
+  const tracker = new SubmitLatencyTracker({ sink, now: time.now })
+  tracker.accept('s')
+  tracker.mark('s', 'dispatch')
+  tracker.mark('s', 'inbox.inserted')
+  tracker.mark('s', 'turn.start')
+  tracker.mark('s', 'user.message')
+  tracker.mark('s', 'assistant.first')
+  time.advance(1_000)
+  // Stray late marks (a second chunk, another user/message) are no-ops.
+  tracker.mark('s', 'assistant.first')
+  tracker.mark('s', 'user.message')
+  const names = sink.lines.map(line => line.message)
+  assert.equal(names.filter(name => name === 'submit.assistant.first').length, 1)
+  assert.equal(names.filter(name => name === 'submit.user.message').length, 1)
+  // mark() reports whether THIS call logged the phase.
+  tracker.accept('s2')
+  assert.equal(tracker.mark('s2', 'turn.start'), true, 'first mark logs')
+  assert.equal(tracker.mark('s2', 'turn.start'), false, 'duplicate mark does not log')
+  assert.equal(tracker.mark('s3', 'turn.start'), false, 'foreign session does not log')
+})
+
 test('a throwing sink never propagates (timing must not affect the session)', () => {
   const tracker = new SubmitLatencyTracker({ sink: { debug: () => { throw new Error('sink boom') } }, now: () => 1 })
   assert.doesNotThrow(() => tracker.accept('s'))
