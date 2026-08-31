@@ -105,13 +105,15 @@ export interface FooterItemDefinition {
  * Both values normalize defensively: non-finite values fall back to the
  * composer defaults, finite junk floors at 1, absurd values clamp to the
  * hard capability (perRow ≤ 2, total ≤ 4). A surface granting ZERO lines
- * (its pinned chrome alone fills the viewport) renders nothing at all —
- * not even the Host instruction. */
+ * (its pinned chrome alone fills the viewport) signals exactly
+ * `total: 0` and the footer renders nothing at all — not even the Host
+ * instruction; negative totals are invalid input and normalize like
+ * every other finite junk value. */
 export interface FooterPhysicalLineBudget {
   /** The max physical lines ONE logical row may occupy (1..2). */
   readonly perRow: number
   /** The max physical lines the whole footer surface may occupy
-   * (0..4; 0 = render nothing). */
+   * (0..4; exactly 0 = render nothing). */
   readonly total: number
 }
 

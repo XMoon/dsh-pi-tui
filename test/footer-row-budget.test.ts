@@ -254,10 +254,12 @@ test('invalid perRow/total budgets normalize inside the hard capability', () => 
     assertNormalized({ perRow: nonFinite }, { perRow: 2, total: 4 }, `perRow ${nonFinite}`)
     assertNormalized({ total: nonFinite }, { perRow: 2, total: 4 }, `total ${nonFinite}`)
   }
-  // Finite junk floors at 1 (0/-1/1.9 → 1 line per row)…
+  // Finite junk floors at 1 (negative/0/fractional perRow → 1 line per
+  // row; negative total → 1 total line — never a silent empty footer)…
   assertNormalized({ perRow: 0 }, { perRow: 1, total: 4 }, 'perRow 0')
   assertNormalized({ perRow: -1 }, { perRow: 1, total: 4 }, 'perRow -1')
   assertNormalized({ perRow: 1.9 }, { perRow: 1, total: 4 }, 'perRow 1.9')
+  assertNormalized({ total: -1 }, { perRow: 2, total: 1 }, 'total -1')
   assertNormalized({ total: 3.9 }, { perRow: 2, total: 3 }, 'total 3.9')
   // …and absurd values clamp to the hard capability (perRow ≤ 2, total ≤ 4).
   assertNormalized({ perRow: 999 }, { perRow: 2, total: 4 }, 'perRow 999')
@@ -295,23 +297,33 @@ test('an oversized UN-droppable item resolves by ANSI-safe truncate with …', (
   for (const line of lines) assert.ok(visibleWidth(line) <= 40, `overflow:\n${JSON.stringify(lines)}`)
 })
 
-test('a surface that grants ZERO lines renders nothing at all', () => {
-  // total ≤ 0 is a surface DECISION (its pinned chrome alone fills the
+test('a surface that grants ZERO lines (exactly 0) renders nothing at all', () => {
+  // total === 0 is a surface DECISION (its pinned chrome alone fills the
   // viewport): the composer renders NOTHING — not even the Host
   // instruction — so it never exceeds the granted budget and never
-  // disagrees with its Text component (zero rows).
+  // disagrees with its Text component (zero rows). A NEGATIVE total is
+  // INVALID caller input, not a decision: it normalizes like other junk
+  // (floor 1) so the instruction can never be silently hidden by an
+  // arithmetic underflow.
   const snap = busySnapshot()
-  for (const total of [0, -1]) {
-    const text = composer.render({
-      snapshot: snap,
-      layout: DEFAULT_FOOTER_LAYOUT,
-      width: 40,
-      context: CONTEXT,
-      instruction: INSTRUCTION,
-      physicalLineBudget: { perRow: 2, total },
-    })
-    assert.equal(text, '', `total ${total} must render nothing`)
-  }
+  const text = composer.render({
+    snapshot: snap,
+    layout: DEFAULT_FOOTER_LAYOUT,
+    width: 40,
+    context: CONTEXT,
+    instruction: INSTRUCTION,
+    physicalLineBudget: { perRow: 2, total: 0 },
+  })
+  assert.equal(text, '', 'total 0 must render nothing')
+  const negative = composer.render({
+    snapshot: snap,
+    layout: DEFAULT_FOOTER_LAYOUT,
+    width: 40,
+    context: CONTEXT,
+    instruction: INSTRUCTION,
+    physicalLineBudget: { perRow: 2, total: -1 },
+  }).replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(negative.includes('Press Ctrl+C again'), `a negative total must NOT hide the instruction:\n${negative}`)
 })
 
 test('an instruction that renders NOTHING reserves no line and paints nothing', () => {

@@ -273,18 +273,28 @@ test('a regular -> fullscreen switch recomposes the budget (widgets are fullscre
   }, 'p1')
   host.refreshOutlets()
   await vt.waitForRender()
-  // REGULAR at 80x8: the baked widget zone (the outlet grants 2 of the 3
-  // rows) + header + editor consume 6 of 8 rows — the footer gets the
-  // rest, squeezed.
+  // REGULAR at 80x8: the regular surface is a FLOWING document — overflow
+  // enters the terminal scrollback and the footer is never
+  // viewport-clipped there, so it always receives the FULL capacity
+  // (demand-limited to 3 rows here) and populated widgets never squeeze
+  // it (PR #57 review P2: do not trade fullscreen clipping for regular
+  // information loss).
   const regularRows = [...app.footerRenderRowsForTest()]
-  assert.ok(regularRows.length <= 2, `the regular budget must account for the widgets, saw ${regularRows.length}:\n${regularRows.join('\n')}`)
-  // FULLSCREEN at unchanged geometry: the widgets are NOT mounted, so the
-  // budget must recompose upward (header 1 + editor 3 → 4 free slots,
-  // capacity-capped; the demand-limited footer grows back).
+  assert.equal(regularRows.length, 3, `the regular footer keeps its full demand inside the capacity, saw ${regularRows.length}:\n${regularRows.join('\n')}`)
+  // FULLSCREEN at unchanged geometry: the widgets are NOT mounted (and
+  // the widgets stay unrendered), but the pinned chrome IS — the budget
+  // recomposes to the surface capacity (8 - header 1 - editor 3 = 4 →
+  // capacity-capped; the demand-limited footer keeps its rows).
   app.setFullscreen(true)
   await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
   const fullscreenRows = [...app.footerRenderRowsForTest()]
-  assert.ok(fullscreenRows.length > regularRows.length, `the fullscreen budget must ignore unmounted widgets (regular ${regularRows.length} -> fullscreen ${fullscreenRows.length}):\n${fullscreenRows.join('\n')}`)
+  assert.ok(fullscreenRows.length >= 2, `the fullscreen footer must survive beside its pinned chrome:\n${fullscreenRows.join('\n')}`)
+  for (const row of fullscreenRows) {
+    const text = row.replace(/\x1b\[[0-9;]*m/g, '').trimEnd()
+    assert.ok(view.split('\n').some(line => line.includes(text)),
+      `a fullscreen footer row was clipped: ${JSON.stringify(text)}\n${view}`)
+  }
   for (const line of vt.getViewport()) {
     assert.ok(!line.includes('widget-row'), `an unmounted widget must not paint in fullscreen:\n${line}`)
   }
@@ -301,6 +311,8 @@ test('a surface with ZERO available footer slots renders nothing at all', async 
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   app.setStatus(RICH_STATUS)
+  await vt.waitForRender()
+  app.setFullscreen(true)
   await vt.waitForRender()
   vt.sendInput('\x03')
   await vt.waitForRender()
@@ -351,6 +363,66 @@ test('a terminal HEIGHT resize recomposes the footer at the fresh surface budget
       view.split('\n').some(line => line.includes('Press Ctrl+C again to exit')),
       `the hint must be uncapped again after the growth:\n${view}`,
     )
+  } finally {
+    app.stop()
+  }
+})
+
+test('the command footer consumes the surface budget: the hint is never clipped behind command rows', async () => {
+  // PR #57 review P2: the COMMAND footer surface previously bypassed the
+  // surface physical-line budget — on a chrome-heavy short fullscreen the
+  // command row + the appended instruction exceeded the granted slots and
+  // the hint (last) was the clipped row. The command surface now consumes
+  // the same effective total: instruction reserves 1 first, the trusted
+  // command rows keep the remaining slots in order.
+  const { vt, app } = await startFullscreenApp(20, 10)
+  try {
+    app.setFooterCommandRows(['cmd-status'])
+    await vt.waitForRender()
+    vt.sendInput('\x03') // arm the exit hint
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    // effective total at 20x10 = 2: 1 command row + 1 hint.
+    assert.ok(
+      lines.some(line => line.includes('Press Ctrl+C again')),
+      `the exit hint must be visible in the VIEWPORT:\n${view}`,
+    )
+    assert.ok(view.includes('cmd-status'), `the command row must keep the remaining slot:\n${view}`)
+    const footerLines = [...app.footerRenderRowsForTest()]
+    assert.equal(footerLines.length, 2, `1 command row + hint inside the effective budget:\n${view}`)
+    assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+C again'), `the hint must be last:\n${view}`)
+    const plainViewportLines = lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+    for (const row of footerLines) {
+      const text = row.replace(/\x1b\[[0-9;]*m/g, '').trimEnd()
+      assert.ok(text !== '' && plainViewportLines.some(line => line.includes(text)),
+        `a footer row was clipped out of the viewport: ${JSON.stringify(text)}\n${view}`)
+    }
+  } finally {
+    app.stop()
+  }
+})
+
+test('a ONE-slot command surface spends the slot on the instruction', async () => {
+  // 20x9 leaves a single footer slot: with the hint armed the command row
+  // drops and the instruction takes the only line — "宁可只显示
+  // instruction" (the task's allocation rule).
+  const { vt, app } = await startFullscreenApp(20, 9)
+  try {
+    app.setFooterCommandRows(['cmd-status'])
+    await vt.waitForRender()
+    vt.sendInput('\x03')
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    assert.ok(
+      lines.some(line => line.includes('Press Ctrl+C again')),
+      `the exit hint must own the only slot:\n${view}`,
+    )
+    const footerLines = [...app.footerRenderRowsForTest()]
+    assert.equal(footerLines.length, 1, `exactly the granted slot:\n${view}`)
+    assert.ok(footerLines[0]!.includes('Press Ctrl+C again'), `the slot must be the hint:\n${view}`)
+    assert.ok(!view.includes('cmd-status'), `the command row must drop under height pressure:\n${view}`)
   } finally {
     app.stop()
   }
