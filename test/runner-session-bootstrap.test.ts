@@ -378,7 +378,7 @@ async function mountRunner(
   ctx: Context,
   home: string,
   harness: RunnerHarness,
-  startup: { sessionId?: string },
+  startup: { sessionId?: string; presetId?: string },
   config: Config,
 ) {
   ctx.provide('appExit', () => {})
@@ -1204,6 +1204,48 @@ test('the Preparing status stays on screen through the catalog ready barrier', a
     // Let the post-mount wiring settle before the finally disposes the
     // context (the runner's startup IIFE is fire-and-forget).
     await new Promise(resolve => setTimeout(resolve, 200))
+  } finally {
+    if (fiber !== undefined) await fiber.dispose()
+    if (context !== undefined) await disposeContext(context)
+    probe.restore()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a fresh start with a FAILING preset resolution stays silent (no Preparing status)', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-fresh-preset-fail-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const probe = installProbe()
+  const orderedLog: string[] = []
+  const statusOutput = {
+    isTTY: true,
+    write: (text: string) => {
+      orderedLog.push(`stdout:${text}`)
+    },
+  }
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  try {
+    // Deferred start (no sessionId) with a BROKEN agentPresets roster:
+    // every compose throws (the launch-preset fallback AND the default
+    // fallback), so the catalog block's catch runs. The failure path
+    // must NOT re-arm the startup status — a fresh start never shows
+    // any status, on the happy path OR the failure path.
+    const harness = makeHarness(home)
+    context = new Context()
+    context.provide('agentPresets', {
+      defaultId: 'standard',
+      resolve: async () => { throw new Error('roster broken') },
+    } as never)
+    fiber = await mountRunner(context, home, harness, {}, { startupStatusOutput: statusOutput })
+    assert.ok(!orderedLog.some(write => write.includes('Resuming session') || write.includes('Preparing conversation')),
+      `a fresh start with a failing preset must not show any startup status: ${JSON.stringify(orderedLog)}`)
+    // The TUI still mounts (degraded — the failure is a one-shot warn).
+    const app = probe.apps.at(-1)
+    assert.ok(app, 'the production runner must still create a TuiApp')
   } finally {
     if (fiber !== undefined) await fiber.dispose()
     if (context !== undefined) await disposeContext(context)
