@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The `/sessions` picker consults the zero-I/O projection cache first.** Cold rows with a cached `agentPreset` (`sessionProjectionCache.cachedSnapshot`) are enriched without any observation; only cache misses go through bounded (concurrency 4) `observeSession()` reads. The header snapshot captured by `list()` removed the second full corpus listing, and the first picker frame still opens before any cold enrichment.
 - **`SessionEvent.ignorable` round-trip regression.** The alpha.2-restored `ignorable?: true` envelope marker is preserved through every repair shape (healthy no-op, duplicate-seq renumber, re-frame, torn-tail salvage) with `data` untouched and no `surfaceOp` invented; an unknown event without the marker still fails closed (never auto-marked, never deleted).
 
+### Footer custom command items (PR D)
+
+- **`footerCustomItems` becomes a `text | command` discriminated union.** Custom command items keep the `user:*` id namespace and the PR E save transaction: the `/footer` Add picker gains `+ Create Custom Command`, the create/edit flow covers Name → Command → Refresh (default 5s) → Timeout (default 300ms) → Tone, and the Item Editor offers Command/Refresh/Timeout/Default tone/Rename/Delete.
+- **Commands activate only from the USER-layer trusted source.** `ConfigPort.footerCustomItems.get()` or the validated result of a successful `/footer` save is the only executable source; project/merged configuration can never trigger a command (unsaved drafts and failed saves never execute either).
+- **New client-local `FooterDynamicItemRuntime`.** It arms one runner per command item the active layout references (reusing the whole-footer `FooterCommandRunner`'s spawn/shell/stdin/timeout/refresh/generation/sanitize/process-tree-kill), caching the first non-empty sanitized output line; `FooterItemDefinition.render()` reads the cache synchronously and the render path never spawns. Removing/hiding/renaming an item or entering whole-footer command mode disposes the runner and clears the cache immediately; multiple command items are isolated.
+- **`FooterLayoutV1`, perRow=2 / hard total=4, the Host Instruction and the public extension ABI are unchanged.**
+
 ### Migration notes
 
 - **0.4.0-alpha.1 moves to DeepSeek Harness 0.1.2.** The declared support range
