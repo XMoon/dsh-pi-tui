@@ -194,7 +194,7 @@ not reimplementation.
 below the 0.4 floor. Experimental Remote dependencies must never enter its
 static import graph — load the selected backend via dynamic import in a
 `runtime/backend-loader` module. The 0.4 Direct backend targets DSH
-`>=0.1.2-alpha.1`; it has no old/new runtime fallback or capability-detection
+`>=0.1.2-alpha.2`; it has no old/new runtime fallback or capability-detection
 branch. Future versions are not rejected without a confirmed break.
 
 ## How to update this file

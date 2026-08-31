@@ -199,8 +199,8 @@ export function formatStatsLine(usage: UsageStatus): string {
   return `${piParts.join(' ')} | ${ownParts.join(' · ')}`
 }
 
-/** Version formatters: `tui` → `v0.4.0-alpha.1`, `dsh` → `dsh-0.1.2-alpha.1`,
- * `both` → `dsh-0.1.2-alpha.1/tui-0.4.0-alpha.1`. */
+/** Version formatters: `tui` → `v0.4.0-alpha.1`, `dsh` → `dsh-0.1.2-alpha.2`,
+ * `both` → `dsh-0.1.2-alpha.2/tui-0.4.0-alpha.1`. */
 export function formatVersion(dshVersion: string | undefined, tuiVersion: string, format: string): string {
   switch (format) {
     case 'dsh':
