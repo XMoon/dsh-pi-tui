@@ -58,7 +58,7 @@
 
 #### 修复
 
-- **显式 cold resume 在 TUI mount 前显示启动进度。** `dsh --profile <p> --session <id>` 冷启动时先显示单行 `Resuming session…`（必要时 `Preparing conversation…`），mount 前完全清除，不再让空白终端看起来像卡死；fresh start 不输出任何状态，非 TTY 静默。
+- **显式 cold resume 在 TUI mount 前显示启动进度。** `dsh --profile <p> --session <id>` 冷启动时先显示单行 `Resuming session…`（必要时 `Preparing conversation…`），`Preparing conversation…` 一直保留到 catalog ready barrier 完成，mount 前完全清除，不再让空白终端看起来像卡死；fresh start 不输出任何状态，非 TTY 静默；任何普通日志输出前先 suspend 状态行（失败日志、preset warning、catalog warning 都落在干净行上）。
 
 ### 迁移说明
 

@@ -216,6 +216,16 @@ export const inject = ['agentDefaultModel', 'agents', 'sessions', TUI_STARTUP_SE
 export interface Config {
   /** Resumed session id; a fresh session is created when absent. */
   sessionId?: string
+  /** Test seam: the pre-mount status output (defaults to process.stdout,
+   * TTY-gated). Injectable so the runner tests capture the status writes
+   * without patching the global stdout (which would fight the test
+   * reporter's own writes). STRUCTURAL on purpose: the public Config type
+   * must not reference the internal startup-status module (the public
+   * .d.mts leak gate). */
+  startupStatusOutput?: {
+    readonly isTTY?: boolean
+    write(text: string): unknown
+  }
 }
 
 export const Config: z<Config> = z.object({
@@ -616,10 +626,15 @@ export interface ResolveInitialCatalogOptions {
   /** The context surface the collectors read services from. */
   readonly ctx: SurfaceCatalogContext
   readonly diag: Diag
+  /** Suspend the pre-mount startup status before an ordinary log write
+   * (the status owns the current terminal line; a TTY shares one cursor
+   * between stdout and stderr). Called right before every diag.warn this
+   * function may emit. */
+  readonly onLog?: () => void
 }
 
 export async function resolveInitialCatalog(options: ResolveInitialCatalogOptions): Promise<InitialCatalogResolution> {
-  const { liveAgent, presetId, signal, ctx, diag } = options
+  const { liveAgent, presetId, signal, ctx, diag, onLog } = options
   if (liveAgent !== undefined) {
     try {
       const snapshot = await readSurfaceCatalog(liveAgent, signal, ctx)
@@ -632,6 +647,7 @@ export async function resolveInitialCatalog(options: ResolveInitialCatalogOption
     } catch (error) {
       if (isCancellation(error)) return {}
       const message = safeErrorMessage(error)
+      onLog?.()
       diag.warn('surface catalog unavailable', { phase: 'resume', error: message })
       return { notice: `surface catalog unavailable: ${message}` }
     }
@@ -655,6 +671,7 @@ export async function resolveInitialCatalog(options: ResolveInitialCatalogOption
   } catch (error) {
     if (isCancellation(error)) return {}
     const message = safeErrorMessage(error)
+    onLog?.()
     diag.warn('skill catalog unavailable', { phase: 'cold', error: message })
     return { notice: `skill catalog unavailable: ${message}` }
   }
@@ -1883,7 +1900,7 @@ export function apply(ctx: Context, config: Config): void {
     // resume reject, abort/signal, HMR unload, startup exception) clears
     // it — the abort listener covers the teardown paths, the explicit
     // clear covers the success path.
-    const startupStatus = createStartupStatus({
+    const startupStatus = createStartupStatus(config.startupStatusOutput ?? {
       isTTY: process.stdout.isTTY === true,
       write: (text) => process.stdout.write(text),
     })
@@ -2026,16 +2043,12 @@ export function apply(ctx: Context, config: Config): void {
       // launch resume must not stay TOUCHED — review round 32).
       leaseManager.markActive(liveAgent.session.id)
       // The resume transaction succeeded; the remaining pre-mount wait is
-      // the conversation preparation (whenIdle + catalog barrier) — the
-      // second status stage replaces the first in place.
+      // the conversation preparation (whenIdle + the catalog ready
+      // barrier) — the second status stage replaces the first in place
+      // and STAYS until the barrier completes (the catalog prefetch can
+      // take seconds; a cleared line would read as a hang again).
       startupStatus.show('Preparing conversation…')
       await liveAgent.whenIdle()
-      // The whenIdle wait is over: suspend the status BEFORE the catalog
-      // resolution (uniform rule — no ordinary log output while the
-      // status owns the terminal line; the catalog block's failure warns
-      // must land on a clean line). The mount-time clear below is then a
-      // no-op.
-      startupStatus.clear()
     }
     // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
     // a resumed agent prefetches its effective catalog (a live read emits no
@@ -2061,7 +2074,11 @@ export function apply(ctx: Context, config: Config): void {
         if (launched.failure !== undefined) resumeFailure = launched.failure
         effectivePresetId = launched.composition.agentPreset
       } catch (error) {
+        // Suspend the status before the log, then re-arm it: the catalog
+        // barrier below is still part of the pre-mount wait.
+        startupStatus.clear()
         diag.warn('preset resolution failed at startup', { error: safeErrorMessage(error) })
+        startupStatus.show('Preparing conversation…')
       }
       const resolution = await resolveInitialCatalog({
         liveAgent,
@@ -2069,6 +2086,10 @@ export function apply(ctx: Context, config: Config): void {
         signal: lifecycleController.signal,
         ctx: ctx as unknown as SurfaceCatalogContext,
         diag,
+        // The catalog read may emit its own failure warn: suspend the
+        // status right before it (the barrier itself keeps the status
+        // on screen).
+        onLog: () => startupStatus.clear(),
       })
       initialSnapshot = resolution.snapshot
       initialSkills = resolution.skills

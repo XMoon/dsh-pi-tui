@@ -1015,24 +1015,19 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
   const probe = installProbe()
-  // Capture the runner's DIRECT stdout writes (the status seam) and the
-  // cordis logger messages into ONE ordered log: the TUI itself writes
-  // through the ProcessTerminal, so filtering for the status strings
-  // isolates exactly the pre-mount status lines, and the shared order
-  // lets the failure path assert that the status is suspended BEFORE the
-  // failure logs (a TTY shares one cursor between stdout and stderr).
+  // Capture the runner's status writes through the INJECTED output seam
+  // (never a global process.stdout patch — that would fight the test
+  // reporter's own writes) and the cordis logger messages into ONE
+  // ordered log: the shared order lets the failure path assert that the
+  // status is suspended BEFORE the failure logs (a TTY shares one cursor
+  // between stdout and stderr).
   const orderedLog: string[] = []
-  const originalWrite = process.stdout.write.bind(process.stdout)
-  process.stdout.write = ((text: unknown) => {
-    const line = String(text)
-    orderedLog.push(`stdout:${line}`)
-    return true
-  }) as typeof process.stdout.write
-  // The status seam is TTY-gated: force the test runner's piped stdout to
-  // look interactive so the wiring is exercised (the pure helper tests
-  // cover the non-TTY silence).
-  const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
-  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true })
+  const statusOutput = {
+    isTTY: true,
+    write: (text: string) => {
+      orderedLog.push(`stdout:${text}`)
+    },
+  }
   let resumeContext: Context | undefined
   let deferredContext: Context | undefined
   let failContext: Context | undefined
@@ -1047,7 +1042,7 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
     }
     const resumeHarness = makeHarness(home, resumed)
     resumeContext = new Context()
-    resumeFiber = await mountRunner(resumeContext, home, resumeHarness, { sessionId: resumed.id }, { sessionId: resumed.id })
+    resumeFiber = await mountRunner(resumeContext, home, resumeHarness, { sessionId: resumed.id }, { sessionId: resumed.id, startupStatusOutput: statusOutput })
     const statusWrites = orderedLog
       .filter(write => write.startsWith('stdout:') && (write.includes('Resuming session') || write.includes('Preparing conversation') || write === 'stdout:\r\x1b[2K'))
       .map(write => write.slice('stdout:'.length))
@@ -1079,7 +1074,7 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
     orderedLog.length = 0
     const deferredHarness = makeHarness(home)
     deferredContext = new Context()
-    deferredFiber = await mountRunner(deferredContext, home, deferredHarness, {}, {})
+    deferredFiber = await mountRunner(deferredContext, home, deferredHarness, {}, { startupStatusOutput: statusOutput })
     assert.ok(!orderedLog.some(write => write.includes('Resuming session')),
       `a fresh start must stay silent: ${JSON.stringify(orderedLog)}`)
 
@@ -1112,7 +1107,7 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
       })
     })
     await exporterFiber
-    failFiber = await mountRunner(failContext, home, failHarness, { sessionId: 'missing-session' }, { sessionId: 'missing-session' })
+    failFiber = await mountRunner(failContext, home, failHarness, { sessionId: 'missing-session' }, { sessionId: 'missing-session', startupStatusOutput: statusOutput })
     const failWrites = orderedLog.filter(write => write.includes('Resuming session') || write === 'stdout:\r\x1b[2K')
     assert.ok(failWrites.some(write => write.includes('Resuming session…')),
       `the failed resume still shows the status: ${JSON.stringify(failWrites)}`)
@@ -1130,9 +1125,89 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
     if (deferredContext !== undefined) await disposeContext(deferredContext)
     if (failContext !== undefined) await disposeContext(failContext)
     probe.restore()
-    process.stdout.write = originalWrite
-    if (originalIsTTY === undefined) delete (process.stdout as { isTTY?: boolean }).isTTY
-    else Object.defineProperty(process.stdout, 'isTTY', originalIsTTY)
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+
+test('the Preparing status stays on screen through the catalog ready barrier', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-catalog-barrier-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const probe = installProbe()
+  const orderedLog: string[] = []
+  const statusOutput = {
+    isTTY: true,
+    write: (text: string) => {
+      orderedLog.push(`stdout:${text}`)
+    },
+  }
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  try {
+    const resumed: FakeSession = {
+      id: 'slow-catalog-session',
+      header: { id: 'slow-catalog-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+      events: sessionEvents('resumed answer'),
+    }
+    const harness = makeHarness(home, resumed)
+    context = new Context()
+    // A SLOW skills service: the catalog ready barrier (resolveInitialCatalog
+    // → readSurfaceCatalog → readHumanSkillCatalog) takes ~300ms, so the
+    // test can observe the status while the barrier is still pending.
+    context.provide('skills', {
+      snapshot: async () => {
+        await new Promise(resolve => setTimeout(resolve, 300))
+        return { skills: [], complete: true }
+      },
+    } as never)
+    // Start the mount WITHOUT awaiting: the barrier is in flight while
+    // the assertions below run.
+    const mountPromise = mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id, startupStatusOutput: statusOutput })
+    const statusWrites = (): string[] => orderedLog
+      .filter(write => write.startsWith('stdout:') && (write.includes('Preparing conversation') || write === 'stdout:\r\x1b[2K'))
+      .map(write => write.slice('stdout:'.length))
+    // Wait until the Preparing stage is on screen — the barrier is still
+    // pending (its slow skills read has not settled yet).
+    const deadline = Date.now() + 5000
+    let observed = false
+    while (Date.now() < deadline) {
+      const writes = statusWrites()
+      if (writes.some(write => write.includes('Preparing conversation'))) {
+        const last = writes[writes.length - 1]!
+        assert.ok(last.includes('Preparing conversation'),
+          `the status must STAY on screen through the catalog barrier (last write: ${JSON.stringify(last)}): ${JSON.stringify(writes)}`)
+        observed = true
+        break
+      }
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    assert.ok(observed, 'the Preparing stage must appear while the barrier is pending')
+    fiber = await mountPromise
+    // The fiber load settles when applyRunner returns (the startup IIFE
+    // is fire-and-forget), so the mount promise resolves BEFORE the
+    // barrier completes: wait for the runner to actually reach the
+    // mount-time clear — the barrier resolved and the TUI is about to
+    // mount.
+    const deadline2 = Date.now() + 5000
+    while (Date.now() < deadline2) {
+      const writes = statusWrites()
+      if (writes[writes.length - 1] === '\r\x1b[2K') break
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    const writes = statusWrites()
+    const last = writes[writes.length - 1]!
+    assert.equal(last, '\r\x1b[2K',
+      `the status must be cleared before mount: ${JSON.stringify(writes)}`)
+    // Let the post-mount wiring settle before the finally disposes the
+    // context (the runner's startup IIFE is fire-and-forget).
+    await new Promise(resolve => setTimeout(resolve, 200))
+  } finally {
+    if (fiber !== undefined) await fiber.dispose()
+    if (context !== undefined) await disposeContext(context)
+    probe.restore()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     rmSync(home, { recursive: true, force: true })
