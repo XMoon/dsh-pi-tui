@@ -5236,6 +5236,21 @@ export class TuiApp {
     }
   }
 
+  /** Test hook: the footer Text's RENDERED physical rows — the EXACT
+   * component output both screens' root VStacks lay out with (the same
+   * `footer.render(width)` call the layout engine itself makes; never a
+   * viewport reconstruction). The footer's physical-line budget and
+   * per-row width contracts are asserted against this, so no other
+   * chrome (below-editor widget zones, todo, working) can be mistaken
+   * for footer lines and footer content cannot fake its own count (plan
+   * 2026-08-31 §6.1/§13.2). `render` is pure — the hook cannot perturb
+   * the frame. */
+  footerRenderRowsForTest(): readonly string[] {
+    // Defensive copy: Text may cache its rendered rows; a caller mutating
+    // the returned array must not be able to corrupt subsequent layout.
+    return [...this.footer.render(Math.max(1, this.terminal.columns))]
+  }
+
   /** Test hook: a COPY of the live Focus root disclosure set — the
    * fullscreen Ctrl+O bulk-toggle tests assert per-turn state; the
    * internal set is never handed out. */
@@ -9416,9 +9431,12 @@ export class TuiApp {
    * emptied-footer layout test). */
   private renderFooter(): void {
     const width = Math.max(1, this.terminal.columns)
-    // M6 keybindings: a pending leader sequence shows the which-key hint in
-    // the SAME line-2 slot as the Ctrl+C exit hint — both are Host-owned
-    // instructions (exit outranks the leader; the stats line comes last).
+    // M6 keybindings: a pending leader sequence shows the which-key hint as
+    // a Host-owned instruction beside the Ctrl+C exit hint (exit outranks
+    // the leader; resolveFooterInstruction picks ONE). The instruction is
+    // an INDEPENDENT surface (plan 2026-08-31 §7): it appends its own
+    // reserved physical line after the layout rows — never a "line-2 slot"
+    // replacement of the stats row.
     const leader = this.keybindings.leaderMachine()
     const instruction = resolveFooterInstruction({
       ctrlCExitArmed: this.ctrlCExitArmed,

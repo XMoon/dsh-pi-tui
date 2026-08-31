@@ -98,5 +98,29 @@ export interface FooterItemDefinition {
   ): FooterSegment | null
 }
 
-/** The hard cap on footer physical rows (plan §9.5). */
-export const FOOTER_MAX_LINES = 4
+/** The footer's physical-line budget (plan 2026-08-31 §6.1): the host
+ * surface owns how many TERMINAL physical lines the footer may occupy;
+ * the persisted 1..2 LAYOUT-ROW schema (FooterLayoutV1) is independent of
+ * it — a future Add-Row surface raises `total`, never the row renderer. */
+export interface FooterPhysicalLineBudget {
+  /** The max physical lines ONE logical row may occupy (1..N). */
+  readonly perRow: number
+  /** The max physical lines the whole footer surface may occupy. */
+  readonly total: number
+}
+
+/** The max physical lines one logical row wraps into at narrow widths
+ * (plan 2026-08-31 §6.1/§6.2): past the cap the row resolves overflow
+ * through the semantic compact → importance-drop → ANSI-safe truncate
+ * discipline — never by slicing the wrapped lines. */
+export const FOOTER_MAX_PHYSICAL_LINES_PER_ROW = 2
+
+/** The max physical lines the footer status surface occupies (plan
+ * 2026-08-31 §6.1): with the default two-logical-row layout this is
+ * status ≤ 2 + stats ≤ 1 (and the Host instruction's reserved line
+ * shrinks the LAYOUT budget, it never replaces a row). */
+export const FOOTER_MAX_PHYSICAL_LINES = 3
+
+/** The legacy physical-line cap name — physical lines, never logical
+ * rows. Kept as an alias for external ABI; prefer the explicit names. */
+export const FOOTER_MAX_LINES = FOOTER_MAX_PHYSICAL_LINES
