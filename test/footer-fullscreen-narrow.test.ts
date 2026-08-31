@@ -405,8 +405,8 @@ test('the command footer consumes the surface budget: the hint is never clipped 
 
 test('a ONE-slot command surface spends the slot on the instruction', async () => {
   // 20x9 leaves a single footer slot: with the hint armed the command row
-  // drops and the instruction takes the only line — "宁可只显示
-  // instruction" (the task's allocation rule).
+  // drops and the instruction takes the only line (the task's allocation
+  // rule: prefer the instruction on a one-slot surface).
   const { vt, app } = await startFullscreenApp(20, 9)
   try {
     app.setFooterCommandRows(['cmd-status'])
