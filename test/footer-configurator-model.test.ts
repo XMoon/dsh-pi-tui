@@ -842,3 +842,232 @@ test('PR E: create then delete of a NEW custom item returns to clean', () => {
   assert.equal(m.state().mode, 'row')
   assert.equal(m.isDirty(), false, 'create + delete of the new item restores the baseline exactly')
 })
+
+// ── PR D: custom command item model flows ────────────────────────────────
+
+const CLOCK = { schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }
+
+/** A model with one placed command definition. */
+function commandModel(catalog = new FooterCustomItemCatalog([CLOCK])): FooterConfiguratorModel {
+  return new FooterConfiguratorModel(
+    { schemaVersion: 1, rows: [{ left: [{ id: 'user:clock' }], right: [] }] },
+    registry,
+    catalog,
+  )
+}
+
+/** Create a command item through the Add picker's second create action. */
+function createCommand(m: FooterConfiguratorModel, name: string, command: string): void {
+  m.activate() // rows -> row
+  m.startAdd()
+  m.text('no-match')
+  m.moveDown() // the second trailing action: Create Custom Command
+  m.activate() // add -> create-name
+  m.text(name)
+  m.activate() // create-name -> create-command
+  m.text(command)
+  m.activate() // create-command -> create-refresh
+  m.activate() // create-refresh -> create-timeout (default 5s)
+  m.activate() // create-timeout -> create-tone (default 300ms)
+  m.activate() // create-tone -> row (Auto tone)
+}
+
+test('PR D: the Add picker exposes BOTH create actions and the command flow creates a command item', () => {
+  const m = model()
+  m.activate() // row
+  m.startAdd()
+  m.text('no-match')
+  assert.equal(m.addOptionCount(), 2, 'two trailing create actions')
+  assert.equal(m.createActionKind(), 'text', 'the first create action is Custom Text')
+  m.moveDown()
+  assert.equal(m.createActionKind(), 'command', 'the second create action is Custom Command')
+  m.activate() // create-name
+  assert.equal(m.state().customKind, 'command')
+  m.text('Clock')
+  m.activate() // create-command
+  assert.equal(m.state().mode, 'create-command')
+  m.text('date +%H:%M')
+  m.activate() // create-refresh
+  assert.equal(m.state().mode, 'create-refresh')
+  m.activate() // create-timeout (5s default)
+  assert.equal(m.state().mode, 'create-timeout')
+  m.activate() // create-tone (300ms default)
+  assert.equal(m.state().mode, 'create-tone')
+  m.activate() // create with Auto
+  assert.equal(m.state().mode, 'row')
+  const created = m.customItem('user:Clock')
+  assert.equal(created?.kind, 'command')
+  assert.equal(created?.kind === 'command' ? created.command : undefined, 'date +%H:%M')
+  assert.equal(created?.kind === 'command' ? created.refreshIntervalMs : undefined, 5000)
+  assert.equal(created?.kind === 'command' ? created.timeoutMs : undefined, 300)
+  assert.ok(m.state().layout.rows[0]!.left.some(ref => ref.id === 'user:Clock'))
+})
+
+test('PR D: the command create flow validates the command and cancels back to the picker', () => {
+  const m = model()
+  m.activate() // row
+  m.startAdd()
+  m.text('no-match')
+  m.moveDown()
+  m.activate() // create-name
+  m.text('Clock')
+  m.activate() // create-command
+  m.activate() // empty command -> error
+  assert.match(m.state().customError, /required/)
+  assert.equal(m.state().mode, 'create-command')
+  m.cancel() // Esc -> add picker
+  assert.equal(m.state().mode, 'add')
+  assert.equal(m.customItem('user:Clock'), undefined, 'cancelling the flow must not create anything')
+})
+
+test('PR D: the item editor edits command, refresh, timeout and definition tone', () => {
+  const m = commandModel()
+  m.activate() // row
+  m.activate() // item
+  // Menu: 0 Command, 1 Refresh, 2 Timeout, 3 Default tone, 4 Tone,
+  // 5 Advanced, 6 Rename, 7 Delete.
+  m.activate() // Command inline editor
+  assert.equal(m.state().mode, 'custom-command')
+  m.text('!') // append
+  m.activate() // commit
+  const edited = m.customItem('user:clock')
+  assert.equal(edited?.kind === 'command' ? edited.command : undefined, 'date +%H:%M!')
+
+  m.moveDown() // Refresh
+  m.activate()
+  assert.equal(m.state().mode, 'custom-refresh')
+  m.moveDown() // 10s
+  m.activate()
+  const refreshed = m.customItem('user:clock')
+  assert.equal(refreshed?.kind === 'command' ? refreshed.refreshIntervalMs : undefined, 10000)
+
+  m.moveDown() // Timeout
+  m.activate()
+  assert.equal(m.state().mode, 'custom-timeout')
+  m.moveDown() // 500ms
+  m.activate()
+  const timed = m.customItem('user:clock')
+  assert.equal(timed?.kind === 'command' ? timed.timeoutMs : undefined, 500)
+
+  m.moveDown() // Default tone
+  m.activate()
+  m.moveDown() // Primary (the picker opens on Auto)
+  m.activate()
+  assert.equal(m.customItem('user:clock')?.tone, 'primary')
+})
+
+test('PR D: rename and delete of a command definition update every layout reference', () => {
+  const m = commandModel()
+  m.activate() // row
+  m.activate() // item
+  // Rename: menu index 6.
+  for (let i = 0; i < 6; i += 1) m.moveDown()
+  m.activate()
+  for (let i = 0; i < 'clock'.length; i += 1) m.backspace()
+  m.text('time')
+  m.activate()
+  assert.equal(m.customItem('user:time')?.kind, 'command')
+  assert.equal(m.state().layout.rows[0]!.left[0]!.id, 'user:time')
+
+  // Delete: menu index 7 (the renamed item's menu is the same length).
+  m.moveDown()
+  m.activate()
+  assert.equal(m.state().mode, 'custom-delete')
+  m.activate()
+  assert.equal(m.state().mode, 'row')
+  assert.deepEqual(m.state().layout.rows[0]!.left, [])
+  assert.equal(m.customItem('user:time'), undefined)
+})
+
+test('PR D: command definition edits dirty and restore clean (command/refresh/timeout/tone)', () => {
+  const m = commandModel()
+  assert.equal(m.isDirty(), false)
+  m.activate() // row
+  m.activate() // item
+  m.activate() // Command
+  m.text('!')
+  m.activate()
+  assert.equal(m.isDirty(), true, 'a command change is dirty')
+  m.activate()
+  m.backspace()
+  m.activate()
+  assert.equal(m.isDirty(), false, 'restoring the command returns to clean')
+
+  m.moveDown() // Refresh
+  m.activate()
+  m.moveDown() // 10s
+  m.activate()
+  assert.equal(m.isDirty(), true, 'a refresh change is dirty')
+  m.moveDown() // Timeout
+  m.activate()
+  m.moveUp() // 300ms
+  m.activate()
+  assert.equal(m.isDirty(), true, 'a timeout change is dirty')
+  m.moveDown() // Default tone
+  m.activate()
+  m.moveDown() // Accent
+  m.activate()
+  assert.equal(m.isDirty(), true, 'a definition tone change is dirty')
+})
+
+test('PR D: an explicit default refresh/timeout is the same fact as absent (no false dirty)', () => {
+  const m = commandModel()
+  m.activate() // row
+  m.activate() // item
+  // Re-pick the CURRENT effective values explicitly: the draft stores
+  // refreshIntervalMs: 5000 / timeoutMs: 300, which must NOT read as dirty
+  // against the absent-default baseline.
+  m.moveDown() // Refresh
+  m.activate()
+  m.activate() // apply the current 5s
+  m.moveDown() // Timeout
+  m.activate()
+  m.activate() // apply the current 300ms
+  assert.equal(m.isDirty(), false, 'an explicit default must not read as dirty')
+  const item = m.customItem('user:clock')
+  assert.equal(item?.kind === 'command' ? item.refreshIntervalMs : undefined, 5000)
+  assert.equal(item?.kind === 'command' ? item.timeoutMs : undefined, 300)
+})
+
+test('PR D: mixed text + command dirty detection is independent per definition', () => {
+  const catalog = new FooterCustomItemCatalog([
+    CLOCK,
+    { schemaVersion: 1, id: 'user:env', kind: 'text', text: 'PROD' },
+  ])
+  const m = new FooterConfiguratorModel(
+    { schemaVersion: 1, rows: [{ left: [{ id: 'user:clock' }, { id: 'user:env' }], right: [] }] },
+    registry,
+    catalog,
+  )
+  assert.equal(m.isDirty(), false)
+  m.activate() // row
+  m.activate() // item (user:clock)
+  m.activate() // Command
+  m.text('!')
+  m.activate()
+  assert.equal(m.isDirty(), true)
+  m.activate()
+  m.backspace()
+  m.activate()
+  assert.equal(m.isDirty(), false, 'restoring the command restores clean')
+  // The text item's own edit still dirties independently.
+  m.moveDown() // Refresh
+  m.activate()
+  m.moveDown()
+  m.activate()
+  assert.equal(m.isDirty(), true)
+})
+
+test('PR D: create then delete of a NEW command item returns to clean', () => {
+  const m = model()
+  createCommand(m, 'Temp', 'date')
+  assert.equal(m.isDirty(), true)
+  m.activate() // item editor (the cursor landed on the new item)
+  // Menu: 0 Command, 1 Refresh, 2 Timeout, 3 Default tone, 4 Tone,
+  // 5 Advanced, 6 Rename, 7 Delete.
+  for (let i = 0; i < 7; i += 1) m.moveDown()
+  m.activate() // delete page
+  m.activate() // confirm
+  assert.equal(m.state().mode, 'row')
+  assert.equal(m.isDirty(), false, 'create + delete of the new command item restores the baseline')
+})

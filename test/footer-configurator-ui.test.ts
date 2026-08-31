@@ -11,7 +11,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
-import { FooterConfiguratorModel } from '../src/footer/configurator-model.ts'
+import { FooterComposer } from '../src/footer/composer.ts'
+import { FooterConfiguratorModel, sameFooterCustomItem } from '../src/footer/configurator-model.ts'
+import { FooterCustomItemCatalog } from '../src/footer/custom-items.ts'
+import { FooterItemRegistry } from '../src/footer/item-registry.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 import type { StatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -1378,5 +1381,131 @@ test('PR E: the Save row stays visible at 40x10 and Saving… survives a resize'
   await settle()
   await vt.waitForRender()
   assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the released save closes on success')
+  app.stop()
+})
+// ── PR D: custom command item UI ─────────────────────────────────────────
+
+/** Open the configurator with a draft catalog whose value source mirrors
+ * the real /footer wiring (commands.ts): the committed cache shows ONLY
+ * while the draft definition is unchanged, the dim [command] placeholder
+ * otherwise. */
+function openWithCommand(
+  app: TuiApp,
+  committed: readonly import('../src/footer/custom-items.ts').FooterCustomItemSettings[],
+  draft?: import('../src/footer/custom-items.ts').FooterCustomItemCatalog,
+): void {
+  const registry = new FooterItemRegistry(app.getFooterItemRegistry())
+  const customItems = draft ?? new FooterCustomItemCatalog(committed)
+  customItems.setCommandValueSource({
+    value: (id) => {
+      const d = customItems.get(id)
+      if (d === undefined || d.kind !== 'command') return undefined
+      const c = committed.find(item => item.id === id)
+      if (c === undefined || !sameFooterCustomItem(d, c)) return { kind: 'placeholder' }
+      const text = app.getFooterCommandItemValue(id)
+      return text === undefined ? { kind: 'placeholder' } : { kind: 'value', text }
+    },
+  })
+  registry.setCustomSource(customItems)
+  const model = new FooterConfiguratorModel(
+    { schemaVersion: 1, rows: [{ left: [{ id: 'user:clock' }], right: [] }] },
+    registry,
+    customItems,
+  )
+  app.openFooterConfigurator({
+    model,
+    registry,
+    composer: new FooterComposer(registry),
+    onSave: () => {},
+    onCancel: () => {},
+  })
+}
+
+test('PR D: the Add picker offers Create Custom Command and the flow creates + previews it', async () => {
+  const { vt, app } = startApp()
+  openWithCommand(app, [])
+  await vt.waitForRender()
+  vt.sendInput('\r') // row
+  vt.sendInput('a') // add
+  vt.sendInput('no-match')
+  await vt.waitForRender()
+  const addView = vt.getViewport().join('\n')
+  assert.ok(addView.includes('+ Create Custom Text'), `the text create action must stay:\n${addView}`)
+  assert.ok(addView.includes('+ Create Custom Command'), `the command create action must appear:\n${addView}`)
+  assert.ok(addView.includes('Create a user-defined static footer item.'))
+  vt.sendInput('\x1b[B') // down: Create Custom Command
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Create a user-defined command item.'))
+  vt.sendInput('\r') // create-name
+  vt.sendInput('Clock')
+  vt.sendInput('\r') // create-command
+  vt.sendInput('date +%H:%M')
+  vt.sendInput('\r') // create-refresh (opens on the 5s default)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Refresh'))
+  vt.sendInput('\r') // create-timeout (opens on the 300ms default)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Timeout'))
+  vt.sendInput('\r') // create-tone
+  vt.sendInput('\r') // create with Auto
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Clock'), `the created item must appear in the row:\n${view}`)
+  assert.ok(view.includes('[command]'), `the draft command preview must show the dim placeholder:\n${view}`)
+  app.stop()
+})
+
+test('PR D: the item editor exposes Command/Refresh/Timeout for a command item', async () => {
+  const { vt, app } = startApp()
+  openWithCommand(app, [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }])
+  await vt.waitForRender()
+  vt.sendInput('\r') // row
+  vt.sendInput('\r') // item
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Command'), `the command editor entry missing:\n${view}`)
+  assert.ok(view.includes('Refresh'), `the refresh entry missing:\n${view}`)
+  assert.ok(view.includes('Timeout'), `the timeout entry missing:\n${view}`)
+  assert.ok(view.includes('Default tone'), `the definition tone entry missing:\n${view}`)
+  assert.ok(view.includes('Rename definition'), `the rename entry missing:\n${view}`)
+  assert.ok(view.includes('Delete definition'), `the delete entry missing:\n${view}`)
+  app.stop()
+})
+
+test('PR D: the preview shows the dim [command] placeholder for a draft and the committed cache when unchanged', async () => {
+  const { vt, app } = startApp()
+  const committed = [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }]
+  openWithCommand(app, committed)
+  await vt.waitForRender()
+  // No committed cache yet: the row preview shows the placeholder.
+  assert.ok(vt.getViewport().join('\n').includes('[command]'), 'the draft preview must show the placeholder')
+  // The runtime commits a cache: the unchanged draft now shows the value.
+  app.setFooterCommandItemValue('user:clock', '14:30')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('14:30'), `the committed cache must preview:\n${view}`)
+  assert.ok(!view.includes('[command]'), 'the placeholder must disappear once the cache exists')
+  app.stop()
+})
+
+test('PR D: a modified draft command never shows the old committed cache', async () => {
+  const { vt, app } = startApp()
+  const committed = [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }]
+  const draft = new FooterCustomItemCatalog(committed)
+  openWithCommand(app, committed, draft)
+  app.setFooterCommandItemValue('user:clock', '14:30')
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('14:30'))
+  // Edit the command in the draft: the preview must fall back to the
+  // placeholder — never pretend the old cache is the new command's result.
+  vt.sendInput('\r') // row
+  vt.sendInput('\r') // item
+  vt.sendInput('\r') // Command editor
+  vt.sendInput('!')
+  vt.sendInput('\r') // commit
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[command]'), `a modified draft must show the placeholder:\n${view}`)
+  assert.ok(!view.includes('14:30'), 'the stale cache must not be shown for a modified draft')
   app.stop()
 })
