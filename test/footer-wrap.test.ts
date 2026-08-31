@@ -161,17 +161,29 @@ test('extension footer segments still merge into the wrapped footer', async () =
   } finally {
     wide.app.stop()
   }
-  // Narrower: the segment (importance 0) participates in the responsive
-  // layout — under pressure it drops FIRST (importance order), never
-  // overflowing or breaking the composed rows.
+  // Narrower: the responsive compact pass shortens the host items FIRST
+  // (ww/flash/proj/ctx 10%) — at 40 columns that frees enough room for
+  // the segment (importance 0) to SURVIVE; the compact-before-drop
+  // discipline only sacrifices it when compact alone cannot fit the row.
   const narrow = await startExtApp(40)
   try {
     const view = narrow.vt.getViewport().join('\n')
-    assert.ok(!view.includes('[EXT-SEG]'), `the low-importance segment must drop under pressure:\n${view}`)
-    assert.ok(view.includes('workspace-write'), `high-importance state must survive:\n${view}`)
+    assert.ok(view.includes('[EXT-SEG]'), `the segment must survive once compact frees the room:\n${view}`)
+    assert.ok(view.includes('workspace-write') || view.includes('ww'), `high-importance state must survive:\n${view}`)
     assert.ok(view.includes('12.3s'), `the stats row must survive:\n${view}`)
   } finally {
     narrow.app.stop()
+  }
+  // Extreme narrow: the segment (importance 0) drops FIRST (importance
+  // order), never overflowing or breaking the composed rows.
+  const extreme = await startExtApp(30)
+  try {
+    const view = extreme.vt.getViewport().join('\n')
+    assert.ok(!view.includes('[EXT-SEG]'), `the low-importance segment must drop under extreme pressure:\n${view}`)
+    assert.ok(view.includes('workspace-write') || view.includes('ww'), `high-importance state must survive:\n${view}`)
+    assert.ok(view.includes('12.3s'), `the stats row must survive:\n${view}`)
+  } finally {
+    extreme.app.stop()
   }
 })
 

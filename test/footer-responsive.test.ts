@@ -183,9 +183,11 @@ test('items drop by importance under pressure (the tail goes first)', () => {
   // A narrow width with a right zone: the left zone must compact/drop the
   // LOWEST-importance items (version 10, performance 40, token-usage 50,
   // cache-hit 55...) while keeping the highest (permission 110, plan 115).
+  // The responsive compact pass shortens the survivors first (yolo/plan
+  // lose their badge brackets), then drops by importance.
   const text = composer.render({ snapshot: snap, layout: RIGHT_ZONE_LAYOUT, width: 40, context: CONTEXT })
-  assert.ok(text.includes('[yolo]'), `the highest-importance item must survive:\n${text}`)
-  assert.ok(text.includes('[plan]'), `the plan badge must survive:\n${text}`)
+  assert.ok(text.includes('yolo'), `the highest-importance item must survive:\n${text}`)
+  assert.ok(text.includes('plan'), `the plan badge must survive:\n${text}`)
   assert.ok(text.includes('focus'), `the right zone must survive:\n${text}`)
   // The lowest-importance items drop first.
   assert.ok(!text.includes('v0.0.0'), `the version item (importance 10) must drop first:\n${text}`)

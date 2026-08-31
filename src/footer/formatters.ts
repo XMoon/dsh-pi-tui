@@ -156,6 +156,13 @@ export function formatPerformanceFull(llmMs: number, tokensPerSec: number): stri
   return `${formatSeconds(llmMs)} ${tokensPerSec} tok/s`
 }
 
+/** Performance, compact pressure form: `2.0s 40t/s` — the full form's
+ * `tok/s` unit shortened under width pressure (the composite item keeps
+ * BOTH facts; it never degrades to a speed-only or latency-only style). */
+export function formatPerformanceCompact(llmMs: number, tokensPerSec: number): string {
+  return `${formatSeconds(llmMs)} ${tokensPerSec}t/s`
+}
+
 /** Performance, speed-only form: `40 tok/s`. */
 export function formatPerformanceSpeed(tokensPerSec: number): string {
   return `${tokensPerSec} tok/s`
@@ -197,6 +204,49 @@ export function formatStatsLine(usage: UsageStatus): string {
     `${usage.performance.tokensPerSec} tok/s`,
   ]
   return `${piParts.join(' ')} | ${ownParts.join(' · ')}`
+}
+
+/** The pi-vocabulary stats line, compact pressure form:
+ * `↑34k ↓8.1k · LLM 138.8s · 659t/s` — input/output, ONE time indicator
+ * and the throughput survive; the cache (R/W/CH) and TTFB facts are
+ * omitted under width pressure. The structured UsageStatus is untouched
+ * and the legacy formatStatsLine contract is unchanged. */
+export function formatStatsLineCompact(usage: UsageStatus): string {
+  const piParts = [
+    `↑${formatTokens(usage.tokens.input)}`,
+    `↓${formatTokens(usage.tokens.output)}`,
+  ]
+  const ownParts = [
+    `LLM ${formatSeconds(usage.performance.llmMs)}`,
+    `${usage.performance.tokensPerSec}t/s`,
+  ]
+  return `${piParts.join(' ')} · ${ownParts.join(' · ')}`
+}
+
+/** The sandbox mode compact codes: `ro`, `ww`, `yolo`. An unknown future
+ * mode keeps its original value (fail-soft — never an invented
+ * abbreviation). */
+export function formatSandboxModeCompact(mode: string): string {
+  switch (mode) {
+    case 'read-only': return 'ro'
+    case 'workspace-write': return 'ww'
+    case 'danger-full-access': return 'yolo'
+    default: return mode
+  }
+}
+
+/** The run-phase compact codes for the CURRENT RunPhase union (idle is
+ * never rendered by the item). An unknown future phase keeps its original
+ * value (fail-soft — never an invented abbreviation). */
+export function formatRunPhaseCompact(phase: string): string {
+  switch (phase) {
+    case 'working': return 'work'
+    case 'waiting-approval': return 'w-approval'
+    case 'waiting-question': return 'w-question'
+    case 'compacting': return 'compact'
+    case 'applying-compaction': return 'apply-compact'
+    default: return phase
+  }
 }
 
 /** Version formatters: `tui` → `v0.4.0-alpha.1`, `dsh` → `dsh-0.1.2-alpha.2`,

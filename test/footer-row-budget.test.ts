@@ -115,11 +115,14 @@ test('a caller budget is CLAMPED to the hard capability (perRow ≤ 2, total ≤
   // { perRow: 2, total: 6 } must not raise the composer's ceiling: the
   // effective total clamps to 4. Three rows then share 4 lines with the
   // sequential allocator — every row keeps the SAME 1..2 contract, no
-  // stats-role inference (plan §13.4).
+  // stats-role inference (plan §13.4). The second line the allocator
+  // grants row 2 goes UNUSED here: the responsive compact pass resolves
+  // the row to one line (model id + branch drop), so the render is 3
+  // lines — compact before drop, never a slice of the wrapped lines.
   const snap = busySnapshot()
   const budget: FooterPhysicalLineBudget = { perRow: 2, total: 6 }
   const lines = plainPhysical(snap, THREE_ROW_LAYOUT, 20, { budget })
-  assert.equal(lines.length, 4, `the clamped budget must allow 3 baseline rows + one second line, saw:\n${JSON.stringify(lines)}`)
+  assert.equal(lines.length, 3, `the clamped budget renders 3 compact rows, saw:\n${JSON.stringify(lines)}`)
   for (const line of lines) assert.ok(visibleWidth(line) <= 20, `overflow:\n${JSON.stringify(lines)}`)
 })
 
@@ -160,7 +163,7 @@ test('the Host instruction reserves its line; capacity 4 gives status 2 + stats 
   const lines = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, 40, { instruction: INSTRUCTION })
   assert.equal(lines.length, 4, `2 + 1 + hint inside the capacity of 4:\n${JSON.stringify(lines)}`)
   assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again to exit'), `the hint must be its own line:\n${JSON.stringify(lines)}`)
-  assert.ok(lines.some(line => line.includes('[yolo]')), `the status row must survive:\n${JSON.stringify(lines)}`)
+  assert.ok(lines.some(line => line.includes('yolo')), `the status row must survive:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('LLM')), `the stats row must survive (not be replaced):\n${JSON.stringify(lines)}`)
 })
 
@@ -193,7 +196,7 @@ test('a DYNAMIC total of 2 still keeps the instruction and drops the stats tail'
   const lines = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, 40, { budget, instruction: INSTRUCTION })
   assert.equal(lines.length, 2, `exactly the surface budget, hint included:\n${JSON.stringify(lines)}`)
   assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again to exit'), `the hint must be last:\n${JSON.stringify(lines)}`)
-  assert.ok(lines.some(line => line.includes('[yolo]')), `the highest-importance row must survive:\n${JSON.stringify(lines)}`)
+  assert.ok(lines.some(line => line.includes('yolo')), `the highest-importance row must survive:\n${JSON.stringify(lines)}`)
   assert.ok(!lines.some(line => line.includes('LLM')), `the stats tail must drop under height pressure:\n${JSON.stringify(lines)}`)
 })
 
