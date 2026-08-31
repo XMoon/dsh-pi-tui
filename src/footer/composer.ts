@@ -452,21 +452,24 @@ export function mergeCommandSurface(
   width: number,
   budget?: Pick<FooterPhysicalLineBudget, 'total'>,
 ): string {
-  // The width normalizes like the composer's (finite integer >= 1): a
-  // degenerate width must not produce rows wider than the terminal.
-  const w = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1
-  // NO budget = the legacy command contract, untouched.
+  // NO budget = the legacy command contract, byte-identical: the
+  // caller's width passes through EXACTLY as before (no normalization —
+  // the legacy path predates the budget work and its edge-width
+  // behavior is pinned by tests).
   if (budget === undefined) {
     if (instruction === undefined) return rows.join('\n')
-    const legacyWrapped = wrapTextWithAnsi(renderInstruction(instruction), w)
-    const legacyRow = legacyWrapped.length > 1 ? capRowWithEllipsis(legacyWrapped[0]!, w) : legacyWrapped[0]!
+    const legacyWrapped = wrapTextWithAnsi(renderInstruction(instruction), width)
+    const legacyRow = legacyWrapped.length > 1 ? capRowWithEllipsis(legacyWrapped[0]!, width) : legacyWrapped[0]!
     const legacyMerged = rows.length > 1 ? [...rows.slice(0, -1), legacyRow] : [...rows, legacyRow]
     return legacyMerged.join('\n')
   }
-  // A SUPPLIED budget normalizes ALWAYS — even a non-finite total falls
-  // back to the hard capacity instead of bypassing the budget: exactly 0
-  // is the only zero-grant value, everything else normalizes (floor 1)
-  // and clamps to perRow/capability.
+  // A SUPPLIED budget normalizes its inputs ALWAYS — even a non-finite
+  // total falls back to the hard capacity instead of bypassing the
+  // budget: exactly 0 is the only zero-grant value, everything else
+  // normalizes (floor 1) and clamps to the capability; the width
+  // becomes a finite integer >= 1 so degenerate widths still bound
+  // every row.
+  const w = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1
   if (budget.total === 0) return ''
   const total = Math.min(FOOTER_MAX_PHYSICAL_LINES, normalizePositiveInt(budget.total, FOOTER_MAX_PHYSICAL_LINES))
   const truncate = (row: string): string => truncateToWidth(row, w, '…')
