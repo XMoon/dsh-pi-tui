@@ -183,7 +183,7 @@ test('DSH peer ranges keep the lower-bound compatibility contract', () => {
   }
   for (const [name, version] of Object.entries(packageJson.devDependencies ?? {})) {
     if (name.startsWith('@deepseek-ai/dsh')) {
-      assert.equal(version, '0.1.2-alpha.2', `${name} dev dependency must stay exact`)
+      assert.equal(version, '0.1.2-alpha.3', `${name} dev dependency must stay exact`)
     }
   }
 })
