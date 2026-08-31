@@ -25,6 +25,7 @@ import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
+import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from './wheel-scroll.ts'
 import { iconStyleOf } from './icons.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
 import { formatKeyId } from './keybindings/hints.ts'
@@ -1508,6 +1509,15 @@ export function registerTuiCommands(
             currentValue: app.isFullscreen() ? 'on' : 'off',
             values: ['off', 'on'],
           },
+          {
+            id: 'wheel-scroll-lines',
+            label: 'Mouse wheel lines',
+            description: 'Number of transcript lines moved per mouse-wheel event in fullscreen',
+            // The fallback applies HERE too: an invalid/missing persisted
+            // value must never render as a row outside the values list.
+            currentValue: String(wheelScrollLinesOf(settingsDoc?.wheelScrollLines)),
+            values: [...WHEEL_SCROLL_LINE_VALUES],
+          },
           // ── read-only session facts ─────────────────────────────
           {
             id: 'separator',
@@ -1821,6 +1831,22 @@ export function registerTuiCommands(
               app.setFullscreen(value === 'on')
               // setFullscreen reports through onFullscreenChange, which
               // persists the same field (this branch is the panel write).
+            }
+          } else if (id === 'wheel-scroll-lines') {
+            // v1 semantics: the fork's wheelScrollLines is a
+            // constructor-time alt-screen option, so the preference
+            // applies on the NEXT fullscreen mount (a change while
+            // fullscreen is active takes effect on re-entry — never a
+            // private-field hack on the live alt screen). Persist through
+            // the shared whole-document transaction.
+            const lines = wheelScrollLinesOf(value)
+            app.setWheelScrollLines(lines)
+            const settings = tuiSettings
+            if (settings !== undefined) {
+              detach('settings wheel scroll lines write', () => serializeTuiSettingsMutation(
+                settings,
+                () => settings.replace(withUserFooterCustomItems({ ...settings.get(), wheelScrollLines: String(lines) }, runner.config)),
+              ), { notify: true })
             }
           }
         },

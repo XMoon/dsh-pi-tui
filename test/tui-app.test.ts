@@ -642,7 +642,7 @@ test('a tiny terminal clamps the todo click geometry to the visible screen', asy
   app.start()
   await vt.waitForRender()
   const todos = Array.from({ length: 3 }, (_, i) => ({
-    id: `t-${i}`, content: `todo item ${i}`,
+    content: `todo item ${i}`,
     status: i === 0 ? ('in_progress' as const) : ('pending' as const),
   }))
   app.setTodoSummary(todos)
@@ -652,17 +652,163 @@ test('a tiny terminal clamps the todo click geometry to the visible screen', asy
   assert.ok(!app.isTodoPanelExpanded(), 'starts compact')
   // Row 0 (SGR y=1) sits inside the clamped region [0, todoBottom): with
   // the footer (2) + editor seat (3) on the 6-row terminal, todoBottom
-  // clamps to 1 — expand.
+  // clamps to 1. With 3 todos (≤5) the panel is a two-state summary ↔
+  // list — the click CLOSES it directly (no redundant full state).
   vt.sendInput('\x1b[<0;40;1M')
   vt.sendInput('\x1b[<0;40;1m')
   await vt.waitForRender()
-  assert.ok(app.isTodoPanelExpanded(), 'a click inside the clamped region must expand')
-  // Row 5 (SGR y=6) sits in the editor/footer rows below the region: ignored.
+  assert.ok(!app.isTodoPanelVisible(), 'a click inside the clamped region closes the ≤5 panel (list → summary)')
+  // Reopen, then row 5 (SGR y=6) sits in the editor/footer rows below the
+  // region: ignored.
+  app.toggleTodoPanel()
+  await vt.waitForRender()
   vt.sendInput('\x1b[<0;40;6M')
   vt.sendInput('\x1b[<0;40;6m')
   await vt.waitForRender()
-  assert.ok(app.isTodoPanelExpanded(), 'a click outside the clamped region must be ignored')
+  assert.ok(app.isTodoPanelVisible(), 'a click outside the clamped region must be ignored')
   app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: ≤5 items is a two-state summary ↔ list (no redundant full state)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 5 }, (_, i) => ({
+    content: `todo item ${i}`,
+    status: i === 0 ? ('in_progress' as const) : ('pending' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal; the closed panel renders
+  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
+  // row). Click it: summary → list.
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
+  assert.ok(!app.isTodoPanelExpanded(), 'opens compact (visually identical to full at ≤5)')
+  // With the panel open (border + title + 5 rows = rows 15..21) the same
+  // cell is a panel row: the click must close the panel DIRECTLY — the
+  // second click returns to the summary, no third click needed, and no
+  // intermediate todoExpanded state exists.
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'second click closes the panel (list → summary)')
+  assert.ok(!app.isTodoPanelExpanded(), 'no ghost expanded state at ≤5')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: 1 item also closes on the second click (boundary)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary([{ content: 'only todo', status: 'in_progress' }])
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'second click closes the 1-item panel')
+  assert.ok(!app.isTodoPanelExpanded(), 'no expanded state with 1 item')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: 0 items never shows an empty full state', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary([])
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'the empty panel can open (border + title only)')
+  assert.ok(!app.isTodoPanelExpanded(), 'no full state with 0 items')
+  // A panel-row click with 0 items closes the panel (no overflow → no
+  // expansion step).
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'a click on the empty panel closes it')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: >5 items keeps summary → compact → full → summary', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 6 }, (_, i) => ({
+    content: `todo item ${i}`,
+    status: i === 0 ? ('in_progress' as const) : ('pending' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('todo item 0'), `compact panel shows the first rows:\n${view}`)
+  assert.ok(!view.includes('todo item 5'), `compact panel hides the 6th row:\n${view}`)
+  assert.ok(!app.isTodoPanelExpanded(), 'starts compact')
+  // Compact panel (border + title + 5 rows = 7) occupies rows 15..21 —
+  // click row 18: compact → full.
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelExpanded(), 'click must expand (compact → full)')
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('todo item 5'), `expanded panel shows the full list:\n${view}`)
+  // Full panel (8 rows) occupies rows 14..21 — click a DIFFERENT row
+  // (17): full → summary.
+  vt.sendInput('\x1b[<0;30;18M')
+  vt.sendInput('\x1b[<0;30;18m')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'third click closes the panel (full → summary)')
+  assert.ok(!app.isTodoPanelExpanded(), 'closing resets the expansion')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: a >5 → ≤5 shrink clears the ghost expanded state', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const six = Array.from({ length: 6 }, (_, i) => ({
+    content: `todo item ${i}`,
+    status: i === 0 ? ('in_progress' as const) : ('pending' as const),
+  }))
+  app.setTodoSummary(six)
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand to full.
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelExpanded(), 'fixture: the 6-item panel is full')
+  // The host updates the list to 5: the ghost expansion must clear.
+  app.setTodoSummary(six.slice(0, 5))
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelExpanded(), 'a shrink to the compact cap clears todoExpanded')
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('todo item 0'), 'the panel still renders the list')
+  assert.ok(!view.includes('todo item 5'), 'the 6th item is gone')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: toggleTodoExpanded is fail-closed without overflow', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary([{ content: 'one', status: 'in_progress' }])
+  app.toggleTodoPanel()
+  await vt.waitForRender()
+  assert.equal(app.toggleTodoExpanded(), false, 'no overflow → the toggle refuses to expand')
+  assert.ok(!app.isTodoPanelExpanded(), 'no meaningless expanded state')
   app.stop()
 })
 

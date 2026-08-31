@@ -1630,7 +1630,7 @@ test('/settings theme pick persists the BUILTIN choice too (review P1: the trans
   const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
   const doc: Record<string, unknown> = {
     theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
-    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off',
+    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
     footerCustomItems: projectFooterCustomItems,
   }
   const persisted: Array<{ theme: unknown; footerCustomItems: unknown }> = []
@@ -1691,7 +1691,7 @@ test('/settings theme write aborts when USER custom storage is unavailable', asy
   const projectFooterCustomItems = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
   const doc: Record<string, unknown> = {
     theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
-    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off',
+    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
     footerCustomItems: projectFooterCustomItems,
   }
   const persisted: Record<string, unknown>[] = []

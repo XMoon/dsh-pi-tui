@@ -102,7 +102,7 @@ function fakeSettings(initial: { footer: string; footerLayout?: unknown; footerF
         busyEnter: 'queue',
         localShellSandbox: 'bypass',
         homeEndKeys: 'viewport',
-        focusMode: 'off',
+        focusMode: 'off', wheelScrollLines: '1',
       }),
       replace: (next: { footer: string; footerLayout?: unknown; footerFallbackMode?: string; footerCustomItems?: unknown }) => {
         doc.footer = next.footer
@@ -126,7 +126,7 @@ test('footer, focus, and fullscreen writes share one FIFO at the live commit poi
     busyEnter: 'queue',
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
-    focusMode: 'off',
+    focusMode: 'off', wheelScrollLines: '1',
   }
   const pending: Array<{ next: ReturnType<TuiSettingsLike['get']>; resolve: () => void }> = []
   const settings: TuiSettingsLike = {
@@ -170,7 +170,7 @@ test('a failed whole-document settings write does not block later queued writes'
     busyEnter: 'queue',
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
-    focusMode: 'off',
+    focusMode: 'off', wheelScrollLines: '1',
   }
   let calls = 0
   let rejectFirst: (error: Error) => void = () => {}
@@ -348,7 +348,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     busyEnter: 'queue',
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
-    focusMode: 'off',
+    focusMode: 'off', wheelScrollLines: '1',
     footerCustomItems: userRaw,
   }
   const pendingWrites: Array<{ next: ReturnType<TuiSettingsLike['get']>; resolve: () => void }> = []
@@ -766,7 +766,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   // A settings document whose replace REJECTS (the write fails).
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
+    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1' }),
     replace: () => { throw new Error('write failed') },
   }
   const applied: Array<{ footer: string }> = []
@@ -850,7 +850,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
+    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1' }),
     replace: () => { throw new Error('write failed') },
   }
   const applied: Array<{ footer: string }> = []
@@ -1023,7 +1023,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
     get: () => ({
       theme: 'auto', iconStyle: 'emoji', footer: 'default', fullscreen: 'on',
       busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport',
-      focusMode: 'off', footerCustomItems: [known],
+      focusMode: 'off', wheelScrollLines: '1', footerCustomItems: [known],
     }),
     replace: () => new Promise<void>((_resolve, reject) => { rejectReplace = reject }),
   }
@@ -1249,7 +1249,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
     ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
     const doc = { footer: 'default' as string, footerLayout: undefined as unknown, footerCustomItems: undefined as unknown }
     const failingSettings: TuiSettingsLike = {
-      get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
+      get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1' }),
       replace: () => { throw new Error('write failed') },
     }
     const applied: Array<{ footer: string }> = []
