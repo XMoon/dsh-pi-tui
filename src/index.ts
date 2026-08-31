@@ -2074,11 +2074,17 @@ export function apply(ctx: Context, config: Config): void {
         if (launched.failure !== undefined) resumeFailure = launched.failure
         effectivePresetId = launched.composition.agentPreset
       } catch (error) {
-        // Suspend the status before the log, then re-arm it: the catalog
-        // barrier below is still part of the pre-mount wait.
+        // Suspend the status before the log, then re-arm it ONLY for a
+        // live resumed session: the catalog barrier below is still part
+        // of the pre-mount wait for a resume, but a fresh/deferred start
+        // (or a failed resume) never shows any startup status — the
+        // "fresh start stays silent" contract must hold on this failure
+        // path too.
         startupStatus.clear()
         diag.warn('preset resolution failed at startup', { error: safeErrorMessage(error) })
-        startupStatus.show('Preparing conversation…')
+        if (liveAgent !== undefined) {
+          startupStatus.show('Preparing conversation…')
+        }
       }
       const resolution = await resolveInitialCatalog({
         liveAgent,
