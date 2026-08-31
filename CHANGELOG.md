@@ -19,6 +19,25 @@
 - **`/sessions` picker 先查 zero-I/O projection cache。** 有缓存 `agentPreset`（`sessionProjectionCache.cachedSnapshot`）的 cold row 不做任何 observation 即可富化；只有 cache miss 才走 bounded（并发 4）`observeSession()`。`list()` 捕获的 header snapshot 消除了第二次全量 list，第一帧仍在任何 cold enrichment 之前打开。
 - **`SessionEvent.ignorable` round-trip 回归。** alpha.2 恢复的 `ignorable?: true` envelope marker 在每种 repair 形态（healthy no-op、duplicate-seq renumber、re-frame、torn-tail salvage）下都原样保留，`data` 不变、不发明 `surfaceOp`；无 marker 的 unknown event 仍然 fail closed（不自动补 marker、不删除）。
 
+### Footer 自定义命令项（PR D）
+
+- **`footerCustomItems` 扩展为 `text | command` 判别联合。** 自定义命令项沿用
+  `user:*` id 与 PR E 保存事务：`/footer` 的 Add picker 新增
+  `+ Create Custom Command`，创建/编辑流程覆盖 Name → Command → Refresh
+  （默认 5s）→ Timeout（默认 300ms）→ Tone；Item Editor 提供
+  Command/Refresh/Timeout/Default tone/Rename/Delete。
+- **命令只从 USER-layer trusted 来源激活。** `ConfigPort.footerCustomItems.get()`
+  或 `/footer` 保存成功后的 validated 结果才是可执行来源；project/merged 配置
+  永远无法触发命令（未保存 draft 与保存失败的新命令同样永不执行）。
+- **新增 client-local `FooterDynamicItemRuntime`。** 只为 active layout 引用的
+  command item 建 runner（复用 whole-footer `FooterCommandRunner` 的
+  spawn/shell/stdin/timeout/refresh/generation/sanitize/process-tree-kill），
+  缓存第一条非空 sanitized 输出行；`FooterItemDefinition.render()` 只同步读
+  cache，render path 永不 spawn。删除/隐藏/改名/whole-footer command 模式都会
+  立即 dispose runner 并清缓存；多 command item 相互隔离。
+- **`FooterLayoutV1`、perRow=2 / hard total=4、Host Instruction 与 public
+  extension ABI 均不变。**
+
 ### 迁移说明
 
 - **0.4.0-alpha.1 切换到 DeepSeek Harness 0.1.2。** 声明支持范围为
