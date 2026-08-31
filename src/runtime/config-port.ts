@@ -121,13 +121,16 @@ export interface FooterCommandTrust {
   readonly command: FooterCommandConfig | undefined
 }
 
-/** The USER-layer Custom Text definition read (PR C). The adapter reads the
- * settings descriptor's user section. `get()` is the safe runtime projection;
- * `rawForPersistence()` is a detached exact USER-layer storage projection and
- * exists only for whole-document round-trips. Merged/project settings never
- * reach either surface. */
+/** The USER-layer Custom Text/Command definition read (PR C + PR D). The
+ * adapter reads the settings descriptor's user section. `get()` is the safe
+ * runtime projection; `rawForPersistence()` is a detached exact USER-layer
+ * storage projection and exists only for whole-document round-trips.
+ * Merged/project settings never reach either surface — a project-layer
+ * `kind:'command'` definition can therefore never reach the command item
+ * runtime (PR D §11: this read is the ONLY executable source). */
 export interface FooterCustomItemsConfig {
-  /** Valid Custom Text definitions plus a fail-soft invalid-entry count. */
+  /** Valid Custom Text/Command definitions plus a fail-soft invalid-entry
+   * count. */
   get(): FooterCustomItemsParseResult
   /** A detached raw value, or `unavailable` when it cannot be read safely. */
   rawForPersistence(): FooterCustomItemsRaw
