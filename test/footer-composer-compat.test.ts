@@ -284,6 +284,18 @@ test('mergeCommandSurface keeps its contract under the new capacity (smoke)', ()
     mergeCommandSurface(['cmd'], instr, Number.NaN, { total: 4 }).replace(/\x1b\[[0-9;]*m/g, ''),
     '…\n…',
   )
+  // OMITTED budget = the legacy contract BYTE-IDENTICAL — the caller's
+  // width passes through un-normalized (edge widths included).
+  for (const edgeWidth of [Number.NaN, 0, -5, 7.5]) {
+    const actual = mergeCommandSurface(['cmd row one', 'cmd row two'], instr, edgeWidth as number)
+    const legacyWrapped = wrapTextWithAnsi('Press Ctrl+C again to exit', edgeWidth as number)
+    const legacyRow = legacyWrapped.length > 1
+      ? `${truncateToWidth(legacyWrapped[0]!, Math.max(1, (edgeWidth as number) - 1), '')}…`
+      : legacyWrapped[0]!
+    // The command merge does NOT dim (the legacy command surface contract).
+    const expected = [`cmd row one`, legacyRow].join('\n')
+    assert.equal(actual, expected, `omitted-budget legacy behavior at width ${edgeWidth}:\n${actual}`)
+  }
   // Non-finite totals are SUPPLIED budgets: they fall back to the hard
   // capacity instead of bypassing the budget (the legacy path is only
   // for an OMITTED budget).
