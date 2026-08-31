@@ -366,6 +366,19 @@ function forcePeersArgument(args) {
   return args.includes('--force-peers') || process.env.PI2DSH_COMPAT_FORCE_PEERS === '1'
 }
 
+/**
+ * The NARROW stale-peer allowance: `--allow-stale-tui-peer` permits ONLY the
+ * `@xmoon76/dsh-pi-tui` peer range mismatch (classified as stale-tui-peer)
+ * to proceed to the targeted real runtime smoke, whose result decides.
+ * Every other preflight problem — a `@deepseek-ai/dsh-*` peer mismatch,
+ * missing dsh peers, package/version or API contract problems — stays
+ * blocking. Unlike the wide `--force-peers` (investigative only), this is
+ * the flag the release CI uses.
+ */
+function allowStaleTuiPeerArgument(args) {
+  return args.includes('--allow-stale-tui-peer') || process.env.PI2DSH_COMPAT_ALLOW_STALE_TUI_PEER === '1'
+}
+
 function distributionArgument(args) {
   const index = args.indexOf('--distribution')
   if (index < 0) return undefined
@@ -479,32 +492,61 @@ function rangeIncludesVersion(range, version) {
   }
 }
 
-function validateConsumerMetadata(consumerPackage, manifest, candidatePackage) {
-  const consumerName = typeof consumerPackage?.name === 'string' ? consumerPackage.name : 'pi2dsh'
-  const consumerVersion = typeof consumerPackage?.version === 'string' ? consumerPackage.version : '(unknown version)'
+/**
+ * Classify the published consumer's peer declaration against the target DSH
+ * and candidate TUI:
+ * - `{ kind: 'ok' }` — every declared peer covers the candidate;
+ * - `{ kind: 'stale-tui-peer', tuiRange }` — ONLY the
+ *   `@xmoon76/dsh-pi-tui` peer fails to cover the candidate while every
+ *   `@deepseek-ai/dsh-*` peer covers the target DSH. This is a stale
+ *   third-party declaration: the targeted real runtime smoke decides when
+ *   `--allow-stale-tui-peer` is given;
+ * - `{ kind: 'block', problems }` — a DSH peer mismatch, missing dsh peers,
+ *   or any other contract problem (always blocking).
+ */
+function classifyConsumerMetadata(consumerPackage, manifest, candidatePackage) {
   const peerDependencies = consumerPackage?.peerDependencies
   const tuiRange = peerDependencies?.[EXPECTED_PACKAGE_NAME]
   const dshPeers = relevantDshPeerEntries(consumerPackage)
   const unsupportedDshPeers = dshPeers.filter(([, range]) => !rangeIncludesVersion(range, manifest.dshVersion))
-  const problems = []
+  const tuiUncovered = !rangeIncludesVersion(tuiRange, candidatePackage.version)
 
-  if (!rangeIncludesVersion(tuiRange, candidatePackage.version)) {
-    problems.push(`  ${EXPECTED_PACKAGE_NAME}: ${typeof tuiRange === 'string' ? tuiRange : '(missing)'}`)
-  }
   if (dshPeers.length === 0) {
-    problems.push('  @deepseek-ai/dsh-* peers: (none declared)')
-  } else {
-    for (const [name, range] of unsupportedDshPeers) problems.push(`  ${name}: ${range}`)
+    return { kind: 'block', problems: ['  @deepseek-ai/dsh-* peers: (none declared)'] }
   }
-  if (problems.length > 0) {
-    fail('ECOSYSTEM_CONTRACT_BLOCKER', [
-      `${consumerName}@${consumerVersion} does not declare support for:`,
-      `  DSH ${manifest.dshVersion}`,
-      `  ${EXPECTED_PACKAGE_NAME} ${candidatePackage.version}`,
-      'Declared ranges that do not cover the candidate:',
-      ...problems,
-    ].join('\n'))
+  if (unsupportedDshPeers.length > 0) {
+    return { kind: 'block', problems: unsupportedDshPeers.map(([name, range]) => `  ${name}: ${range}`) }
   }
+  if (tuiUncovered) {
+    return { kind: 'stale-tui-peer', tuiRange: typeof tuiRange === 'string' ? tuiRange : '(missing)' }
+  }
+  return { kind: 'ok' }
+}
+
+function failConsumerMetadata(consumerPackage, manifest, candidatePackage, problems) {
+  const consumerName = typeof consumerPackage?.name === 'string' ? consumerPackage.name : 'pi2dsh'
+  const consumerVersion = typeof consumerPackage?.version === 'string' ? consumerPackage.version : '(unknown version)'
+  fail('ECOSYSTEM_CONTRACT_BLOCKER', [
+    `${consumerName}@${consumerVersion} does not declare support for:`,
+    `  DSH ${manifest.dshVersion}`,
+    `  ${EXPECTED_PACKAGE_NAME} ${candidatePackage.version}`,
+    'Declared ranges that do not cover the candidate:',
+    ...problems,
+  ].join('\n'))
+}
+
+/**
+ * The blocking metadata preflight. Throws `ECOSYSTEM_CONTRACT_BLOCKER` for a
+ * DSH peer mismatch, missing dsh peers, or any other contract problem; a
+ * stale-TUI-peer-only classification is returned (not thrown) so the caller
+ * can run the targeted runtime smoke under `--allow-stale-tui-peer`.
+ */
+function validateConsumerMetadata(consumerPackage, manifest, candidatePackage) {
+  const classification = classifyConsumerMetadata(consumerPackage, manifest, candidatePackage)
+  if (classification.kind === 'block') {
+    failConsumerMetadata(consumerPackage, manifest, candidatePackage, classification.problems)
+  }
+  return classification
 }
 
 const FORBIDDEN_FIXTURE_IMPORTS = [
@@ -1246,7 +1288,14 @@ async function main() {
     if (forcePeersArgument(smokeArgs)) {
       console.log('PEER PREFLIGHT BYPASSED (--force-peers): the published peer declaration does not cover the candidate; running the runtime smoke anyway — the result is INVESTIGATIVE and never stands in for the blocking preflight')
     } else {
-      validateConsumerMetadata(context.consumerPackage, context.manifest, context.candidatePackage)
+      const preflight = validateConsumerMetadata(context.consumerPackage, context.manifest, context.candidatePackage)
+      if (preflight.kind === 'stale-tui-peer') {
+        if (!allowStaleTuiPeerArgument(smokeArgs)) {
+          failConsumerMetadata(context.consumerPackage, context.manifest, context.candidatePackage, [`  ${EXPECTED_PACKAGE_NAME}: ${preflight.tuiRange}`])
+        }
+        context.staleTuiPeer = preflight.tuiRange
+        console.log(`STALE_EXTERNAL_PEER: ${CONSUMER_PACKAGE_NAME}@${context.consumerPackage.version} declares ${EXPECTED_PACKAGE_NAME} ${preflight.tuiRange}, which does not cover the candidate ${context.candidatePackage.version}; the DSH peers cover ${context.manifest.dshVersion}. Running the targeted real runtime smoke — its result decides (--allow-stale-tui-peer).`)
+      }
     }
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
       name: 'dsh-pi2dsh-compat-harness',
@@ -1374,6 +1423,9 @@ async function main() {
     await waitUntil('TUI shutdown', TIMEOUTS.dispose, () => !tmux.hasSession(), 'COMPAT_DISPOSE_FAILURE')
     assertNoCompatibilityFailures(tuiLog, tmux)
     console.log(`pi2dsh compatibility smoke passed — ${basename(context.tarball)} × pi2dsh@${context.manifest.pi2dshVersion}`)
+    if (context.staleTuiPeer !== undefined) {
+      console.log(`WARN: ${CONSUMER_PACKAGE_NAME}@${context.manifest.pi2dshVersion} still declares ${EXPECTED_PACKAGE_NAME} ${context.staleTuiPeer} (stale peer declaration — does not cover ${context.candidatePackage.version}); the targeted real runtime smoke PASSED, so the stale metadata is a warning, not a blocker. Ask the pi2dsh maintainers to widen the peer (e.g. ^0.3.3 || ^0.4.0-alpha.1).`)
+    }
   } catch (error) {
     context.error = error
     preserveDiagnostics(context)
@@ -1418,6 +1470,8 @@ export {
   settingsSearchSnapshot,
   validateCandidatePackageData,
   validateConsumerMetadata,
+  classifyConsumerMetadata,
+  failConsumerMetadata,
   hasFreshResizeWidth,
   isolatedEnvironment,
   isRetryableRegistryFailure,
