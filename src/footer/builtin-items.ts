@@ -21,12 +21,16 @@ import {
   formatContextPercent,
   formatGitBranch,
   formatModel,
+  formatPerformanceCompact,
   formatPerformanceFull,
   formatPerformanceLatency,
   formatPerformanceSpeed,
   formatPermissionPreset,
   formatPlanState,
+  formatRunPhaseCompact,
+  formatSandboxModeCompact,
   formatStatsLine,
+  formatStatsLineCompact,
   formatTokenUsageCompact,
   formatTokenUsageIo,
   formatTokenUsageTotal,
@@ -47,11 +51,14 @@ const permissionPresetItem: FooterItemDefinition = {
   defaultImportance: 110,
   formats: ['badge', 'plain', 'compact'],
   defaultFormat: 'badge',
-  render(snapshot: StatusSnapshot, ref) {
+  render(snapshot: StatusSnapshot, ref, density) {
     if (snapshot.view.subject.kind !== 'main') return null
     const preset = snapshot.access.permissionPreset
     if (preset === undefined) return null
-    const text = formatPermissionPreset(preset.id, ref.format ?? 'badge')
+    // Density compact reuses the persisted 'compact' style (ww/ro/yolo);
+    // the user's own format choice is never written back.
+    const format = density === 'compact' ? 'compact' : ref.format ?? 'badge'
+    const text = formatPermissionPreset(preset.id, format)
     if (text === undefined) return null
     const tone = preset.id === 'danger-full-access' || preset.id === 'custom'
       ? 'warning'
@@ -70,12 +77,15 @@ const planStateItem: FooterItemDefinition = {
   defaultImportance: 115,
   formats: ['badge', 'plain'],
   defaultFormat: 'badge',
-  render(snapshot: StatusSnapshot, ref) {
+  render(snapshot: StatusSnapshot, ref, density) {
     if (snapshot.view.subject.kind !== 'main') return null
+    // Density compact drops the badge brackets (the plan's A-class
+    // mapping); the user's own format choice is never written back.
+    const format = density === 'compact' ? 'plain' : ref.format ?? 'badge'
     const text = formatPlanState(
       snapshot.collaboration.plan.effective,
       snapshot.collaboration.plan.pending,
-      ref.format ?? 'badge',
+      format,
     )
     return text === undefined ? null : { spans: [{ text, tone: 'warning' }] }
   },
@@ -90,11 +100,14 @@ const modelItem: FooterItemDefinition = {
   defaultImportance: 100,
   formats: ['badge', 'plain', 'compact'],
   defaultFormat: 'badge',
-  render(snapshot: StatusSnapshot, ref) {
+  render(snapshot: StatusSnapshot, ref, density) {
     if (snapshot.view.subject.kind !== 'main') return null
     const model = snapshot.composition.model
     if (model === undefined) return null
-    return { spans: [{ text: formatModel(model.provider, model.id, model.reasoningEffort, ref.format ?? 'badge') }] }
+    // Density compact reuses the persisted 'compact' style (model id
+    // only); the user's own format choice is never written back.
+    const format = density === 'compact' ? 'compact' : ref.format ?? 'badge'
+    return { spans: [{ text: formatModel(model.provider, model.id, model.reasoningEffort, format) }] }
   },
 }
 
@@ -109,20 +122,29 @@ const tasksItem: FooterItemDefinition = {
   defaultImportance: 85,
   formats: ['badge'],
   defaultFormat: 'badge',
-  render(snapshot: StatusSnapshot, _ref, _density, context) {
+  render(snapshot: StatusSnapshot, _ref, density, context) {
     if (snapshot.view.subject.kind !== 'main') return null
-    const parts: string[] = []
     const tasks = snapshot.activity.taskCount
     const agents = snapshot.activity.childAgentCount
-    if (tasks > 0) parts.push(`${tasks} task${tasks === 1 ? '' : 's'} running`)
-    if (agents > 0) parts.push(`${agents} agent${agents === 1 ? '' : 's'}`)
-    if (parts.length === 0) return null
+    if (tasks <= 0 && agents <= 0) return null
     // The ↓ hint mirrors the ROUTING GATE exactly (a P2 regression once
     // shrunk it to "host editor empty" — a shell-mode empty body and a
     // plugin replacement editor with a draft then advertised a ↓ that
     // the gate refuses): the visible prompt-mode seat editor with no
     // overlays can actually open the browser.
     const hint = context.taskBrowserAvailable ? ' · ↓ view' : ''
+    if (density === 'compact') {
+      // The compact badge: `[1t·2a·↓]` — one-letter count codes, the ↓
+      // hint kept as a bare marker.
+      const parts: string[] = []
+      if (tasks > 0) parts.push(`${tasks}t`)
+      if (agents > 0) parts.push(`${agents}a`)
+      if (context.taskBrowserAvailable) parts.push('↓')
+      return { spans: [{ text: `[${parts.join('·')}]`, tone: 'primary' }] }
+    }
+    const parts: string[] = []
+    if (tasks > 0) parts.push(`${tasks} task${tasks === 1 ? '' : 's'} running`)
+    if (agents > 0) parts.push(`${agents} agent${agents === 1 ? '' : 's'}`)
     return { spans: [{ text: `[${parts.join(' · ')}${hint}]`, tone: 'primary' }] }
   },
 }
@@ -136,10 +158,13 @@ const cwdItem: FooterItemDefinition = {
   defaultImportance: 80,
   formats: ['short', 'basename', 'full'],
   defaultFormat: 'short',
-  render(snapshot: StatusSnapshot, ref) {
+  render(snapshot: StatusSnapshot, ref, density) {
     const cwd = snapshot.workspace.cwd
     if (cwd === '') return null
-    return { spans: [{ text: formatWorkingDirectory(cwd, ref.format ?? 'short') }] }
+    // Density compact reuses the persisted 'basename' style; the user's
+    // own format choice is never written back.
+    const format = density === 'compact' ? 'basename' : ref.format ?? 'short'
+    return { spans: [{ text: formatWorkingDirectory(cwd, format) }] }
   },
 }
 
@@ -152,11 +177,15 @@ const gitBranchItem: FooterItemDefinition = {
   defaultImportance: 70,
   formats: ['plain', 'label'],
   defaultFormat: 'plain',
-  render(snapshot: StatusSnapshot, ref) {
+  render(snapshot: StatusSnapshot, ref, density) {
     if (snapshot.view.subject.kind !== 'main') return null
     const branch = snapshot.workspace.branch
     if (branch === undefined || branch === '') return null
-    return { spans: [{ text: formatGitBranch(branch, ref.format ?? 'plain') }] }
+    // Density compact reuses the persisted 'plain' style (a 'label' ref
+    // loses its prefix under pressure); the user's own format choice is
+    // never written back.
+    const format = density === 'compact' ? 'plain' : ref.format ?? 'plain'
+    return { spans: [{ text: formatGitBranch(branch, format) }] }
   },
 }
 
@@ -170,14 +199,19 @@ const contextItem: FooterItemDefinition = {
   defaultImportance: 100,
   formats: ['bar', 'percent', 'full'],
   defaultFormat: 'bar',
-  render(snapshot: StatusSnapshot, ref) {
+  render(snapshot: StatusSnapshot, ref, density) {
     if (snapshot.view.subject.kind !== 'main') return null
     const context = snapshot.usage.context
     if (context === undefined || context.windowTokens === undefined || context.windowTokens <= 0) return null
     const used = context.usedTokens ?? 0
     const window = context.windowTokens
-    const format = ref.format ?? 'bar'
     const percent = context.percent ?? Math.min(100, Math.max(0, Math.ceil((used * 100) / window)))
+    // Density compact always prefers the percent form (`ctx 72%`) — the
+    // shortest context presentation — whatever the user's persisted style.
+    if (density === 'compact') {
+      return { spans: [{ text: formatContextPercent(percent), tone: 'primary' }] }
+    }
+    const format = ref.format ?? 'bar'
     if (format === 'full') {
       return { spans: [{ text: formatContextFull(used, window, percent), tone: 'primary' }] }
     }
@@ -224,8 +258,14 @@ const statsLineItem: FooterItemDefinition = {
   defaultImportance: 10,
   formats: ['pi'],
   defaultFormat: 'pi',
-  render(snapshot: StatusSnapshot) {
-    return { spans: [{ text: formatStatsLine(snapshot.usage) }] }
+  render(snapshot: StatusSnapshot, _ref, density) {
+    // Density compact renders the pressure form (input/output + one time
+    // indicator + throughput); the legacy full line stays the preferred
+    // form (its source-consistency contract is untouched).
+    const text = density === 'compact'
+      ? formatStatsLineCompact(snapshot.usage)
+      : formatStatsLine(snapshot.usage)
+    return { spans: [{ text }] }
   },
 }
 
@@ -312,11 +352,15 @@ const agentPresetItem: FooterItemDefinition = {
   defaultImportance: 90,
   formats: ['badge', 'compact'],
   defaultFormat: 'badge',
-  render(snapshot: StatusSnapshot, ref) {
+  render(snapshot: StatusSnapshot, ref, density) {
     if (snapshot.view.subject.kind !== 'main') return null
     const preset = snapshot.composition.agentPreset
     if (preset === undefined) return null
-    const text = ref.format === 'compact' && preset.shortLabel !== undefined
+    // Density compact reuses the persisted 'compact' style (the short
+    // label when the state layer provides one); the user's own format
+    // choice is never written back.
+    const compact = density === 'compact' || ref.format === 'compact'
+    const text = compact && preset.shortLabel !== undefined
       ? preset.shortLabel
       : preset.label
     return { spans: [{ text: `[${text}]`, tone: 'accent' }] }
@@ -349,12 +393,15 @@ const sandboxModeItem: FooterItemDefinition = {
   defaultImportance: 80,
   formats: ['plain'],
   defaultFormat: 'plain',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, _ref, density) {
     if (snapshot.view.subject.kind !== 'main') return null
     const mode = snapshot.access.sandbox?.mode
     if (mode === undefined) return null
     const tone = mode === 'danger-full-access' ? 'warning' : mode === 'read-only' ? 'textMuted' : 'text'
-    return { spans: [{ text: mode, tone }] }
+    // Density compact uses the known codes (ro/ww/yolo); an unknown
+    // future mode keeps its original value (fail-soft).
+    const text = density === 'compact' ? formatSandboxModeCompact(mode) : mode
+    return { spans: [{ text, tone }] }
   },
 }
 
@@ -430,12 +477,15 @@ const runStateItem: FooterItemDefinition = {
   defaultImportance: 95,
   formats: ['plain'],
   defaultFormat: 'plain',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, _ref, density) {
     if (snapshot.view.subject.kind !== 'main') return null
     const phase = snapshot.activity.phase
     if (phase === 'idle') return null
     const tone = phase === 'working' ? 'primary' : 'warning'
-    return { spans: [{ text: phase, tone }] }
+    // Density compact uses the phase codes (work/w-approval/…); an
+    // unknown future phase keeps its original value (fail-soft).
+    const text = density === 'compact' ? formatRunPhaseCompact(phase) : phase
+    return { spans: [{ text, tone }] }
   },
 }
 
@@ -448,11 +498,12 @@ const queueItem: FooterItemDefinition = {
   defaultImportance: 85,
   formats: ['plain'],
   defaultFormat: 'plain',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, _ref, density) {
     if (snapshot.view.subject.kind !== 'main') return null
     const count = snapshot.activity.queuedCount
     if (count <= 0) return null
-    return { spans: [{ text: `${count} queued`, tone: 'textDim' }] }
+    const text = density === 'compact' ? `q${count}` : `${count} queued`
+    return { spans: [{ text, tone: 'textDim' }] }
   },
 }
 
@@ -465,11 +516,12 @@ const agentsItem: FooterItemDefinition = {
   defaultImportance: 85,
   formats: ['plain'],
   defaultFormat: 'plain',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, _ref, density) {
     if (snapshot.view.subject.kind !== 'main') return null
     const count = snapshot.activity.childAgentCount
     if (count <= 0) return null
-    return { spans: [{ text: `${count} agents`, tone: 'textDim' }] }
+    const text = density === 'compact' ? `a${count}` : `${count} agents`
+    return { spans: [{ text, tone: 'textDim' }] }
   },
 }
 
@@ -482,11 +534,14 @@ const todoItem: FooterItemDefinition = {
   defaultImportance: 60,
   formats: ['plain'],
   defaultFormat: 'plain',
-  render(snapshot: StatusSnapshot) {
+  render(snapshot: StatusSnapshot, _ref, density) {
     if (snapshot.view.subject.kind !== 'main') return null
     const count = snapshot.activity.todoCount
     if (count <= 0) return null
-    return { spans: [{ text: `${count} todo`, tone: 'textDim' }] }
+    // `tdN` — deliberately NOT `tN`, which would collide with the
+    // turns-steps counters.
+    const text = density === 'compact' ? `td${count}` : `${count} todo`
+    return { spans: [{ text, tone: 'textDim' }] }
   },
 }
 
@@ -499,10 +554,13 @@ const cacheHitItem: FooterItemDefinition = {
   defaultImportance: 55,
   formats: ['full', 'compact'],
   defaultFormat: 'full',
-  render(snapshot: StatusSnapshot, ref) {
+  render(snapshot: StatusSnapshot, ref, density) {
     const pct = snapshot.usage.cacheHitPct
     if (pct === undefined) return null
-    const text = ref.format === 'compact' ? formatCacheHitCompact(pct) : formatCacheHit(pct)
+    // Density compact reuses the persisted 'compact' style (`91.9%`);
+    // the user's own format choice is never written back.
+    const compact = density === 'compact' || ref.format === 'compact'
+    const text = compact ? formatCacheHitCompact(pct) : formatCacheHit(pct)
     return { spans: [{ text, tone: 'success' }] }
   },
 }
@@ -516,9 +574,11 @@ const tokenUsageItem: FooterItemDefinition = {
   defaultImportance: 50,
   formats: ['io', 'total', 'compact'],
   defaultFormat: 'io',
-  render(snapshot: StatusSnapshot, ref) {
+  render(snapshot: StatusSnapshot, ref, density) {
     const tokens = snapshot.usage.tokens
-    const format = ref.format ?? 'io'
+    // Density compact reuses the persisted 'compact' style (`6.7k`); the
+    // user's own format choice is never written back.
+    const format = density === 'compact' ? 'compact' : ref.format ?? 'io'
     const text = format === 'total'
       ? formatTokenUsageTotal(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite)
       : format === 'compact'
@@ -538,13 +598,18 @@ const performanceItem: FooterItemDefinition = {
   defaultImportance: 40,
   formats: ['full', 'speed', 'latency'],
   defaultFormat: 'full',
-  render(snapshot: StatusSnapshot, ref) {
+  render(snapshot: StatusSnapshot, ref, density) {
     const performance = snapshot.usage.performance
-    const text = ref.format === 'speed'
-      ? formatPerformanceSpeed(performance.tokensPerSec)
-      : ref.format === 'latency'
-        ? formatPerformanceLatency(performance.firstTokenMs)
-        : formatPerformanceFull(performance.llmMs, performance.tokensPerSec)
+    // Density compact keeps BOTH facts with the shortened unit
+    // (`8.1s 40t/s`) — it never degrades to a speed-only or latency-only
+    // style (that would shift the composite item's semantic center).
+    const text = density === 'compact'
+      ? formatPerformanceCompact(performance.llmMs, performance.tokensPerSec)
+      : ref.format === 'speed'
+        ? formatPerformanceSpeed(performance.tokensPerSec)
+        : ref.format === 'latency'
+          ? formatPerformanceLatency(performance.firstTokenMs)
+          : formatPerformanceFull(performance.llmMs, performance.tokensPerSec)
     return { spans: [{ text, tone: 'textMuted' }] }
   },
 }
@@ -571,3 +636,44 @@ export function createBuiltinFooterRegistry(): FooterItemRegistry {
   registerBuiltinFooterItems(registry)
   return registry
 }
+
+/** The builtin items with a REAL responsive compact density (the plan's
+ * A + B classes): under width pressure the composer's compact pass
+ * renders a strictly shorter form BEFORE any importance drop. A future
+ * builtin must either join this list or the intentional no-op list —
+ * there is no third "not handled" state. */
+export const RESPONSIVE_COMPACT_ITEMS: readonly string[] = [
+  'permission-preset',
+  'plan-state',
+  'model',
+  'tasks',
+  'cwd',
+  'git-branch',
+  'context',
+  'stats-line',
+  'agent-preset',
+  'sandbox-mode',
+  'run-state',
+  'queue',
+  'agents',
+  'todo',
+  'cache-hit',
+  'token-usage',
+  'performance',
+]
+
+/** The builtin items whose compact density INTENTIONALLY equals their
+ * preferred form (the plan's C class): already short, identity-bearing,
+ * or opaque extension text — an explicit decision, never a silent
+ * "forgot to implement". */
+export const INTENTIONALLY_STABLE_DENSITY_ITEMS: readonly string[] = [
+  'turns-steps',
+  'view-scope',
+  'ext:*',
+  'reasoning',
+  'approval-policy',
+  'focus-mode',
+  'focused-seat',
+  'project',
+  'version',
+]

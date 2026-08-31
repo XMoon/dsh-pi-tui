@@ -337,11 +337,11 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 20, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
     // 20 columns: the status row's preferred form (75 cells) exceeds the
-    // 2×20-cell row budget — importance fitting drops cwd(80)/branch(70)/
-    // context(100) BEFORE model(100)/permission(110) and truncates the
-    // rest; never a slice of the wrapped lines (plan §6.2). The stats row
-    // keeps its own allowance, cut at the full width.
-    '[workspace-write]\n[deepseek/flash]\n↑1.2k ↓3.4k | LLM\n8.1s · TTFB 0s · 0 …',
+    // 2×20-cell row budget — the responsive compact pass shortens the
+    // items FIRST (ww/flash/proj/ctx 25%), and only what still does not
+    // fit drops by importance; never a slice of the wrapped lines (plan
+    // §6.2). The stats row compacts to its pressure form too.
+    'ww  flash  proj\nmain  ctx 25%  t2/s5\n↑1.2k ↓3.4k · LLM\n8.1s · 0t/s',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
