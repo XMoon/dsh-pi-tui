@@ -135,6 +135,14 @@ export class FooterComposer {
     // (plan 2026-08-31 §6.1): the surface decides how many of the 4
     // available lines it grants, not how many exist.
     const budget = options.physicalLineBudget ?? DEFAULT_PHYSICAL_LINE_BUDGET
+    // A surface may grant ZERO lines (its pinned chrome alone already
+    // fills the viewport): the composer then renders NOTHING at all —
+    // not even the Host instruction. Once the chrome alone overflows, no
+    // footer line can avoid the clip, and painting one would exceed the
+    // granted budget; the composer must agree with its Text component
+    // (zero rows). The surface owns this decision (TuiApp computes
+    // total = min(capacity, available rows), which floors at 0).
+    if (Number.isFinite(budget.total) && budget.total <= 0) return ''
     const total = Math.min(FOOTER_MAX_PHYSICAL_LINES,
       normalizePositiveInt(budget.total, FOOTER_MAX_PHYSICAL_LINES))
     const perRow = Math.min(total, FOOTER_MAX_PHYSICAL_LINES_PER_ROW,

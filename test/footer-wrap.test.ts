@@ -1,13 +1,15 @@
 /**
  * Headless tests for the narrow-screen footer (requirement 9, plan
- * 2026-08-31 §6.2/§13.1): the status row WRAPS (into at most TWO physical
- * lines within the global 3-line budget, overflow resolved by importance)
- * instead of being hard-truncated, the cap backstops runaway content (tail
- * cut with '…'), extension footer segments still merge into the footer,
- * and the compact preset keeps its single-line semantics on normal widths.
- * The test verifies IMPORTANT-INFO PRIORITY, not that every old fact
- * survives at every width — low-importance items (branch, counters, the
- * extension segment) are DESIGNED to drop first at narrow widths.
+ * 2026-08-31 §6.2/§13.1, PR #57 revision): every logical row WRAPS (into at
+ * most TWO physical lines within the surface's effective budget — the hard
+ * CAPACITY is 4 and the surface grants fewer on short viewports), and any
+ * row overflow resolves by importance instead of being hard-truncated
+ * ('…' appears when truncation, not drops, settles the row), extension
+ * footer segments still merge into the footer, and the compact preset
+ * keeps its single-line semantics on normal widths. The test verifies
+ * IMPORTANT-INFO PRIORITY, not that every old fact survives at every
+ * width — low-importance items (branch, counters, the extension segment)
+ * are DESIGNED to drop first under pressure.
  * @module @xmoon76/dsh-pi-tui/footer-wrap.test
  */
 
@@ -51,9 +53,10 @@ const SHORT_STATUS: StatusData = {
   },
 }
 
-/** Extreme status: more than the 3-row host budget even at 40 columns —
- * the cap must cut the tail with '…'. The stats line is the longest the
- * pi vocabulary can produce, so it wraps and caps too. */
+/** Extreme status: more than the whole 4-line capacity even at 40 columns
+ * with a plain-width surface — the composer's drop-by-importance fitting
+ * (and, only where drops cannot shrink it, the ANSI-safe truncate) must
+ * keep it inside the hard capability. */
 const EXTREME_STATUS: StatusData = {
   model: 'deepseek/deepseek-v4-flash',
   cwd: '/home/xmoon/project/dsh-pi-tui/src',

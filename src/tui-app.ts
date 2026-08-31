@@ -6854,6 +6854,11 @@ export class TuiApp {
   /** Phase 2: the last geometry the ADVANCED overlays were recompiled at
    * (the resize latch — recompile only on an actual geometry change). */
   private lastAdvancedGeometry: { width: number; height: number } = { width: -1, height: -1 }
+  /** PR #57 review: the last terminal geometry the footer composed at. The
+   * footer's physical-line budget derives from the terminal geometry, so a
+   * resize must recompose the footer before the frame paints — the latch
+   * keeps the recompose resize-only. */
+  private lastFooterGeometry: { width: number; height: number } = { width: -1, height: -1 }
   /** The last terminal width the transcript components were built at (the
    * right-gutter resize latch): a width change rebuilds the width-baked
    * folds, so a stale truncation never wraps at the new paint width. */
@@ -8524,6 +8529,16 @@ export class TuiApp {
       if (width !== this.lastAdvancedGeometry.width || height !== this.lastAdvancedGeometry.height) {
         this.lastAdvancedGeometry = { width, height }
         this.recompileAdvancedOverlays()
+      }
+      // PR #57 review (P1): the footer's physical-line budget derives from
+      // the terminal GEOMETRY — a resize (height AND width) must recompose
+      // the footer at the fresh surface budget before the frame paints. A
+      // freshly shrunk viewport would otherwise keep the old (taller)
+      // footer text and clip its own bottom rows — the appended Host
+      // instruction FIRST ("the instruction always survives" would break).
+      if (width !== this.lastFooterGeometry.width || height !== this.lastFooterGeometry.height) {
+        this.lastFooterGeometry = { width, height }
+        this.renderFooter()
       }
       const host = this.extensionHost
       if (host === undefined) return
