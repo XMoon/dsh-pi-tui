@@ -104,8 +104,9 @@ import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { parseFooterLayout, isFooterLayout, resolveCommandFooterFallback } from './footer/layout.ts'
-import type { FooterCustomItemSettings } from './footer/custom-items.ts'
+import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from './footer/custom-items.ts'
 import { FooterCommandRunner } from './footer/command-runner.ts'
+import { FooterDynamicItemRuntime, activeFooterItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
@@ -2740,6 +2741,10 @@ export function apply(ctx: Context, config: Config): void {
     // (guarded by the startup-eager-callback audit in test/rules.test.ts).
     let footerCommandRunner: FooterCommandRunner | undefined
     let footerCommandUnsubscribe: (() => void) | undefined
+    // PR D: the custom command item runtime (one runner per ACTIVE layout
+    // command item). Hoisted with the whole-footer slots for the same TDZ
+    // guards; cleanup disposes it so no child/timer survives a remount.
+    let footerDynamicItemRuntime: FooterDynamicItemRuntime | undefined
     // Idempotent teardown: abort lifecycle loads, stop the TUI, close diag.
     // Shared by /exit, the effect cleanup, and the startup-failure path.
     let cleanedUp = false
@@ -2771,6 +2776,10 @@ export function apply(ctx: Context, config: Config): void {
       footerCommandUnsubscribe = undefined
       footerCommandRunner?.dispose()
       footerCommandRunner = undefined
+      // PR D: release every per-item command runner (children, timers,
+      // abort listeners) before the app dies.
+      footerDynamicItemRuntime?.dispose()
+      footerDynamicItemRuntime = undefined
       localShellController?.abort()
       for (const file of shellTempFiles) {
         try {
@@ -5516,6 +5525,10 @@ export function apply(ctx: Context, config: Config): void {
     // the USER layer only — a project-supplied config is refused).
     let footerWarningShown = false
     let customFooterWarningShown = false
+    // PR D: the one-shot trust diagnostic latch — a layout reference to a
+    // command definition that only exists in a non-USER layer is reported
+    // ONCE (bounded), never per repaint.
+    let footerCommandItemWarningShown = false
     // footerCommandRunner / footerCommandUnsubscribe are hoisted ABOVE
     // cleanup (TDZ guard — the startup-eager onTerminalResize callback
     // reads the runner before this block can run); only the warning
@@ -5544,6 +5557,38 @@ export function apply(ctx: Context, config: Config): void {
       if (customResult.invalidCount > 0 && !customFooterWarningShown) {
         customFooterWarningShown = true
         app.notify(`${customResult.invalidCount} custom footer item${customResult.invalidCount === 1 ? '' : 's'} invalid — skipped`, 'error')
+      }
+      // PR D: arm the per-item command runners for the ACTIVE layout. The
+      // runtime receives ONLY the USER-layer trusted definitions (never the
+      // merged/project value) and only the layout's referenced ids — a
+      // project-supplied command definition can never reach a spawn. The
+      // one-shot diagnostic covers the §11.2 attack shape: a layout
+      // reference to a command definition that only exists in a non-USER
+      // layer renders unavailable, with ONE bounded notice.
+      const syncDynamicCommandItems = (activeIds: Set<string>): void => {
+        const trustedCommands = customResult.items
+          .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
+        if (footerDynamicItemRuntime === undefined) {
+          footerDynamicItemRuntime = new FooterDynamicItemRuntime({
+            snapshot: () => statusStore.snapshot(),
+            width: () => app.getTerminalWidth(),
+            height: () => app.getTerminalHeight(),
+            signal,
+            onValue: (id, value) => app.setFooterCommandItemValue(id, value),
+            onNotifyOnce: (message) => app.notify(message, 'error'),
+          })
+        }
+        footerDynamicItemRuntime.sync(trustedCommands, activeIds)
+        if (!footerCommandItemWarningShown) {
+          const mergedCommands = parseFooterCustomItems(doc.footerCustomItems).items
+            .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
+          const trustedIds = new Set(trustedCommands.map(item => item.id))
+          const untrustedReferenced = mergedCommands.some(item => activeIds.has(item.id) && !trustedIds.has(item.id))
+          if (untrustedReferenced) {
+            footerCommandItemWarningShown = true
+            app.notify('a custom command item is not user-configured — not running it', 'error')
+          }
+        }
       }
       if (doc.footer === 'command') {
         // The native FALLBACK layout must be established from the
@@ -5584,7 +5629,9 @@ export function apply(ctx: Context, config: Config): void {
           // The native layout is the user's own (default/compact/custom):
           // never reset it — the command surface overrides the composer
           // only while commandRows is set, and the M5 fallback contract
-          // restores the LAST native layout on failure.
+          // restores the LAST native layout on failure. The fallback
+          // layout IS visible, so the per-item command runners arm for it.
+          syncDynamicCommandItems(activeFooterItemIds(app.getEffectiveFooterLayout()))
           return
         }
         if (footerCommandRunner === undefined) {
@@ -5606,12 +5653,17 @@ export function apply(ctx: Context, config: Config): void {
         // a failed command (undefined rows) falls back to the user's OWN
         // default/compact/custom layout, never the builtin default.
         footerCommandRunner.requestRefresh()
+        // The whole-footer command surface covers the native items:
+        // per-item command runners must not keep spawning in the
+        // background (plan §7.2 — suspend/dispose).
+        footerDynamicItemRuntime?.sync([], new Set<string>())
         return
       }
       disableFooterCommand()
       if (doc.footer === 'compact') {
         app.setFooterPreset('compact')
         app.setFooterLayout(undefined)
+        syncDynamicCommandItems(activeFooterItemIds(app.getEffectiveFooterLayout()))
         return
       }
       if (doc.footer === 'custom') {
@@ -5623,15 +5675,18 @@ export function apply(ctx: Context, config: Config): void {
           }
           app.setFooterPreset('full')
           app.setFooterLayout(undefined)
+          syncDynamicCommandItems(activeFooterItemIds(app.getEffectiveFooterLayout()))
           return
         }
         app.setFooterPreset('full')
         app.setFooterLayout(parsed)
+        syncDynamicCommandItems(activeFooterItemIds(app.getEffectiveFooterLayout()))
         return
       }
       // 'full' | 'default' | unknown → the builtin default layout.
       app.setFooterPreset('full')
       app.setFooterLayout(undefined)
+      syncDynamicCommandItems(activeFooterItemIds(app.getEffectiveFooterLayout()))
     }
     const storedFooter = tuiSettings?.get().footer
     applyFooterSettings(tuiSettings?.get())

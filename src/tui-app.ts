@@ -1658,6 +1658,11 @@ export class TuiApp {
   /** User-owned custom definitions. The active composer reads this source;
    * unsaved configurator drafts use a layered catalog instead. */
   private readonly footerCustomItems: FooterCustomItemCatalog
+  /** PR D: the committed custom command item cache (id → the first
+   * non-empty sanitized output line). The async runtime commits through
+   * setFooterCommandItemValue; the catalog's value source reads it
+   * SYNCHRONOUSLY during render — the render path never spawns. */
+  private readonly footerCommandItemValues = new Map<string, string>()
   /** The footer composer (M1): renders the active layout against the
    * snapshot. */
   private readonly footerComposer: FooterComposer
@@ -2197,8 +2202,15 @@ export class TuiApp {
     // PR C: user-owned definitions use the ordinary item registry and
     // composer path. The source is replaced atomically by
     // setFooterCustomItems(), so a malformed settings entry cannot reach the
-    // render callback.
+    // render callback. PR D: command items render ONLY the committed cache
+    // (the runtime's onValue sink) — no cache, no placeholder, no spawn.
     this.footerCustomItems = new FooterCustomItemCatalog()
+    this.footerCustomItems.setCommandValueSource({
+      value: (id) => {
+        const text = this.footerCommandItemValues.get(id)
+        return text === undefined ? undefined : { kind: 'value', text }
+      },
+    })
     this.footerItemRegistry.setCustomSource(this.footerCustomItems)
     this.footerComposer = new FooterComposer(this.footerItemRegistry)
     // F-17: an invalidation batch re-bakes the outlets; the host then
@@ -9449,6 +9461,20 @@ export class TuiApp {
     const invalidCount = this.footerCustomItems.replace(input)
     this.renderFooter()
     return invalidCount
+  }
+
+  /** PR D: commit one command item's cached value (undefined clears it) and
+   * repaint the footer. The runtime's ONLY repaint trigger is this cache
+   * change — no snapshot rebuild, no layout rewrite, no settings write. */
+  setFooterCommandItemValue(id: string, value: string | undefined): void {
+    if (value === undefined) this.footerCommandItemValues.delete(id)
+    else this.footerCommandItemValues.set(id, value)
+    this.renderFooter()
+  }
+
+  /** PR D: the synchronous cache read (the catalog's value source). */
+  getFooterCommandItemValue(id: string): string | undefined {
+    return this.footerCommandItemValues.get(id)
   }
 
   /** PR C: detached custom definitions for an unsaved configurator draft or
