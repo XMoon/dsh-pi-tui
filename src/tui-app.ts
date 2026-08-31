@@ -78,7 +78,7 @@ import { FooterConfiguratorModel } from './footer/configurator-model.ts'
 import { FooterConfiguratorPanel } from './footer/configurator.ts'
 import { FooterCustomItemCatalog } from './footer/custom-items.ts'
 import type { FooterItemRegistry } from './footer/item-registry.ts'
-import type { FooterLayoutV1 } from './footer/types.ts'
+import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW, type FooterLayoutV1, type FooterPhysicalLineBudget } from './footer/types.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
 import { SelectedMarquee } from './marquee.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
@@ -5236,6 +5236,21 @@ export class TuiApp {
     }
   }
 
+  /** Test hook: the footer Text's RENDERED physical rows — the EXACT
+   * component output both screens' root VStacks lay out with (the same
+   * `footer.render(width)` call the layout engine itself makes; never a
+   * viewport reconstruction). The footer's physical-line budget and
+   * per-row width contracts are asserted against this, so no other
+   * chrome (below-editor widget zones, todo, working) can be mistaken
+   * for footer lines and footer content cannot fake its own count (plan
+   * 2026-08-31 §6.1/§13.2). `render` is pure — the hook cannot perturb
+   * the frame. */
+  footerRenderRowsForTest(): readonly string[] {
+    // Defensive copy: Text may cache its rendered rows; a caller mutating
+    // the returned array must not be able to corrupt subsequent layout.
+    return [...this.footer.render(Math.max(1, this.terminal.columns))]
+  }
+
   /** Test hook: a COPY of the live Focus root disclosure set — the
    * fullscreen Ctrl+O bulk-toggle tests assert per-turn state; the
    * internal set is never handed out. */
@@ -6839,6 +6854,16 @@ export class TuiApp {
   /** Phase 2: the last geometry the ADVANCED overlays were recompiled at
    * (the resize latch — recompile only on an actual geometry change). */
   private lastAdvancedGeometry: { width: number; height: number } = { width: -1, height: -1 }
+  /** PR #57 review: the last terminal geometry + surface the footer
+   * composed at. The footer's physical-line budget derives from the
+   * terminal geometry AND the active surface (the fullscreen root does
+   * not mount the widget zones), so a resize OR a fullscreen toggle must
+   * recompose the footer before the frame paints — the latch keeps the
+   * recompose change-only (the MEASURED effective total is part of the
+   * key, so a widget-zone bake re-composes too). */
+  private lastFooterGeometry: { surface: 'main' | 'alt'; width: number; height: number; total: number } = {
+    surface: 'main', width: -1, height: -1, total: -1,
+  }
   /** The last terminal width the transcript components were built at (the
    * right-gutter resize latch): a width change rebuilds the width-baked
    * folds, so a stale truncation never wraps at the new paint width. */
@@ -8510,9 +8535,21 @@ export class TuiApp {
         this.lastAdvancedGeometry = { width, height }
         this.recompileAdvancedOverlays()
       }
+      // PR #57 review (P1): the footer's physical-line budget derives from
+      // the terminal GEOMETRY, the ACTIVE SURFACE and the MEASURED chrome
+      // heights — a resize (height AND width), a fullscreen toggle or a
+      // widget-zone change must recompose the footer at the fresh surface
+      // budget before the frame paints. A freshly shrunk viewport would
+      // otherwise keep the old (taller) footer text and clip its own
+      // bottom rows — the appended Host instruction FIRST ("the
+      // instruction always survives" would break); a regular ->
+      // fullscreen switch at unchanged geometry would keep a budget
+      // measured against chrome the fullscreen root doesn't mount. The
+      // recompose runs AFTER the extension-host refresh below (widget
+      // rows bake there), keyed on the MEASURED effective total.
       const host = this.extensionHost
-      if (host === undefined) return
-      const current = host.state().surface
+      if (host !== undefined) {
+        const current = host.state().surface
       // focusedSeat derives from the actual focus state (follow-up P1): the
       // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
       // question/approval/fullscreen entry; the requestRender mirror only
@@ -8520,18 +8557,32 @@ export class TuiApp {
       // focusSeat (not the microtask-published copy) is authoritative — a
       // publish that changed nothing must still mirror the real seat.
       this.publishFocusSeat()
-      const focusedSeat = this.focusSeat
-      if (current.width !== width || current.height !== height || current.focusedSeat !== focusedSeat) {
-        host.updateSurface({ width, height, focusedSeat })
-        if (current.width !== width) {
-          // The outlet budgets are baked from the snapshot width: re-bake
-          // the width-budgeted outlets (dock + footer) and re-merge the
-          // chrome rows NOW, so the new width takes effect immediately —
-          // waiting for the next extension invalidation would keep the old
-          // low/high segment set baked at the stale width (follow-up P1).
-          host.refreshOutlets()
-          this.refreshChrome()
+        const focusedSeat = this.focusSeat
+        if (current.width !== width || current.height !== height || current.focusedSeat !== focusedSeat) {
+          host.updateSurface({ width, height, focusedSeat })
+          if (current.width !== width) {
+            // The outlet budgets are baked from the snapshot width: re-bake
+            // the width-budgeted outlets (dock + footer) and re-merge the
+            // chrome rows NOW, so the new width takes effect immediately —
+            // waiting for the next extension invalidation would keep the old
+            // low/high segment set baked at the stale width (follow-up P1).
+            host.refreshOutlets()
+            this.refreshChrome()
+          }
         }
+      }
+      // The footer recompose runs LAST: the budget is keyed on the
+      // MEASURED effective total (surface + geometry + actual chrome
+      // heights), so a widget-zone bake, a resize or a mode switch all
+      // land here before the frame paints.
+      const surface: 'main' | 'alt' = this.fullscreen !== undefined ? 'alt' : 'main'
+      const available = this.footerPhysicalLineBudget().total
+      if (surface !== this.lastFooterGeometry.surface
+        || width !== this.lastFooterGeometry.width
+        || height !== this.lastFooterGeometry.height
+        || available !== this.lastFooterGeometry.total) {
+        this.lastFooterGeometry = { surface, width, height, total: available }
+        this.renderFooter()
       }
     } finally {
       this.syncingSurfaceGeometry = false
@@ -9416,9 +9467,12 @@ export class TuiApp {
    * emptied-footer layout test). */
   private renderFooter(): void {
     const width = Math.max(1, this.terminal.columns)
-    // M6 keybindings: a pending leader sequence shows the which-key hint in
-    // the SAME line-2 slot as the Ctrl+C exit hint — both are Host-owned
-    // instructions (exit outranks the leader; the stats line comes last).
+    // M6 keybindings: a pending leader sequence shows the which-key hint as
+    // a Host-owned instruction beside the Ctrl+C exit hint (exit outranks
+    // the leader; resolveFooterInstruction picks ONE). The instruction is
+    // an INDEPENDENT surface (plan 2026-08-31 §7): it appends its own
+    // reserved physical line after the layout rows — never a "line-2 slot"
+    // replacement of the stats row.
     const leader = this.keybindings.leaderMachine()
     const instruction = resolveFooterInstruction({
       ctrlCExitArmed: this.ctrlCExitArmed,
@@ -9428,10 +9482,19 @@ export class TuiApp {
     let text: string
     if (this.commandRows !== undefined) {
       // M5: the command surface owns the Status Surface; the Host
-      // instruction still merges on top (never user-hideable).
-      text = mergeCommandSurface(this.commandRows, instruction, width)
+      // instruction still merges on top (never user-hideable). The
+      // SURFACE budget applies here too (PR #57 review): the instruction
+      // reserves its line first, so a chrome-heavy short viewport can
+      // never clip the hint behind command rows.
+      text = mergeCommandSurface(this.commandRows, instruction, width, this.footerPhysicalLineBudget())
     } else {
       const snapshot = this.statusStore.snapshot()
+      // The SURFACE decides how many of the composer's hard-capacity
+      // lines the current screen can actually give the footer (plan
+      // 2026-08-31 §6.1 / PR #57 review): without this, chrome-heavy
+      // short viewports (e.g. 20x10 with a wrapped todo panel) clipped
+      // the footer's own bottom rows — the appended Host instruction
+      // FIRST — violating "the instruction always survives".
       text = this.footerComposer.render({
         snapshot,
         layout: this.currentFooterLayout(),
@@ -9441,10 +9504,66 @@ export class TuiApp {
           extensionFooterText: this.extensionHost?.footerText() ?? '',
         },
         instruction,
+        physicalLineBudget: this.footerPhysicalLineBudget(),
       })
     }
     this.footer.setText(text)
     this.requestRender()
+  }
+
+  /** The SURFACE-owned footer physical-line budget (plan 2026-08-31 §6.1
+   * / PR #57 review — host-owned by design: the composer never knows
+   * about header/editor/dock/todo/working/widgets/fullscreen):
+   *
+   * - the composer's hard capacity is FOOTER_MAX_PHYSICAL_LINES (4);
+   * - the effective budget is min(capacity, currently-available footer
+   *   rows) — terminal height minus every pinned (`shrink: 0`) chrome row
+   *   the ACTIVE surface lays above the footer. The transcript /
+   *   ScrollView is the shrinkable region and is deliberately NOT
+   *   subtracted (it shrinks to zero first);
+   * - measuring via each component's own `render(width)` is the SAME
+   *   pattern the mouse hit-map uses, so the measurement always matches
+   *   what the layout actually paints;
+   * - widget zones are fullscreen-inactive and the REGULAR surface is a
+   *   flowing document (overflow enters the terminal scrollback; the
+   *   footer is never viewport-clipped there) — so the regular surface
+   *   always grants the FULL capacity, and only fullscreen's pinned
+   *   chrome rows are measured;
+   * - the command surface consumes the same effective total through
+   *   mergeCommandSurface (instruction reserves first, trusted rows keep
+   *   the remaining slots in order).
+   *
+   * Floored at 0: when the pinned chrome alone already fills the
+   * viewport the granted budget is ZERO and the footer renders nothing
+   * at all — including the Host instruction (no footer line could avoid
+   * the clip, and painting one would exceed the granted budget). */
+  private footerPhysicalLineBudget(): FooterPhysicalLineBudget {
+    const width = Math.max(1, this.terminal.columns)
+    const height = Math.max(1, this.terminal.rows)
+    // ONLY the fullscreen surface is a fixed-height VStack with pinned
+    // (shrink: 0) chrome rows around a shrinkable ScrollView — that is
+    // the layout that can clip the footer's own bottom rows, so only it
+    // gets a dynamically shrunk budget: terminal height minus every
+    // pinned chrome row ABOVE the footer. The widget zones exist ONLY on
+    // the regular surface (the fullscreen root does not mount them) and
+    // are never measured here.
+    //
+    // The REGULAR surface is a flowing document (sequential Container):
+    // overflow pushes into the terminal scrollback and the footer stays
+    // visible at the bottom — it is never viewport-clipped, so shrinking
+    // its budget would only destroy information. It always receives the
+    // full hard capacity.
+    if (this.fullscreen === undefined) {
+      return { perRow: FOOTER_MAX_PHYSICAL_LINES_PER_ROW, total: FOOTER_MAX_PHYSICAL_LINES }
+    }
+    let used = 0
+    for (const chrome of [this.header, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat]) {
+      used += chrome.render(width).length
+    }
+    return {
+      perRow: FOOTER_MAX_PHYSICAL_LINES_PER_ROW,
+      total: Math.min(FOOTER_MAX_PHYSICAL_LINES, Math.max(0, height - used)),
+    }
   }
 
   /** The M6 which-key hint: the pending leader sequence and its

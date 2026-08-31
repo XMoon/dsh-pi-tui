@@ -98,5 +98,42 @@ export interface FooterItemDefinition {
   ): FooterSegment | null
 }
 
-/** The hard cap on footer physical rows (plan §9.5). */
-export const FOOTER_MAX_LINES = 4
+/** The footer's physical-line budget (plan 2026-08-31 §6.1): the host
+ * surface owns how many TERMINAL physical lines the footer may occupy;
+ * the persisted 1..2 LAYOUT-ROW schema (FooterLayoutV1) is independent of
+ * it — a future Add-Row surface raises `total`, never the row renderer.
+ * Both values normalize defensively: non-finite values fall back to the
+ * composer defaults, finite junk floors at 1, absurd values clamp to the
+ * hard capability (perRow ≤ 2, total ≤ 4). A surface granting ZERO lines
+ * (its pinned chrome alone fills the viewport) signals exactly
+ * `total: 0` and the footer renders nothing at all — not even the Host
+ * instruction; negative totals are invalid input and normalize like
+ * every other finite junk value. */
+export interface FooterPhysicalLineBudget {
+  /** The max physical lines ONE logical row may occupy (1..2). */
+  readonly perRow: number
+  /** The max physical lines the whole footer surface may occupy
+   * (0..4; exactly 0 = render nothing). */
+  readonly total: number
+}
+
+/** The max physical lines one logical row wraps into at narrow widths
+ * (plan 2026-08-31 §6.1/§6.2): past the cap the row resolves overflow
+ * through the semantic compact → importance-drop → ANSI-safe truncate
+ * discipline — never by slicing the wrapped lines. Composer HARD
+ * capability: callers may never raise this past 2. */
+export const FOOTER_MAX_PHYSICAL_LINES_PER_ROW = 2
+
+/** The Composer's HARD capacity ceiling for the footer status surface
+ * (plan 2026-08-31 §6.1, revised 2026-08-31 PR #57 review): with the
+ * default two-logical-row layout the CAPACITY is status ≤ 2 + stats ≤ 2.
+ * This is a ceiling, NOT the everyday render height — the actual render
+ * budget is decided by the SURFACE (TuiApp passes
+ * `physicalLineBudget.total = min(4, currently-available footer rows)`,
+ * so short viewports render fewer lines and the Host instruction is
+ * never viewport-clipped). */
+export const FOOTER_MAX_PHYSICAL_LINES = 4
+
+/** The legacy physical-line cap name — physical lines, never logical
+ * rows. Kept as an alias for external ABI; prefer the explicit names. */
+export const FOOTER_MAX_LINES = FOOTER_MAX_PHYSICAL_LINES
