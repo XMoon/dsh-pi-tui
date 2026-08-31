@@ -36,7 +36,12 @@ import {
 } from '../../provider-catalog.ts'
 import { cancellationError } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import { resolveTrustedFooterCommand, resolveUserLayerFooterLayout, resolveUserLayerFooterMode } from '../../footer/command-trust.ts'
+import {
+  resolveTrustedFooterCommand,
+  resolveUserCommandItemActivationIds,
+  resolveUserCommandItemFallbackActivationIds,
+  resolveUserLayerFooterMode,
+} from '../../footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../footer/custom-items.ts'
 import type {
   AuthorizationConfig,
@@ -152,14 +157,24 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
     return resolveTrustedFooterCommand([descriptor], 'dsh-pi-tui')
   }
 
-  /** The USER layer's declared custom layout (PR D activation trust): the
-   * only layout whose refs may arm custom command items. A project merged
-   * layout can render user:* ids, but it can never activate a dormant USER
-   * command. */
-  get userFooterLayout() {
+  /** The ids the USER layer authorizes for custom command item execution
+   * (PR D activation trust, mode-gated): the USER custom layout's refs,
+   * but only while the USER layer itself declares footer: custom — a
+   * stale leftover layout under footer: default/compact authorizes
+   * nothing, so a project merged layout can never resurrect a dormant
+   * USER command. */
+  get userCommandItemActivationIds() {
     const descriptor = this.readDescriptor()
-    if (descriptor === undefined) return undefined
-    return resolveUserLayerFooterLayout([descriptor], 'dsh-pi-tui')
+    if (descriptor === undefined) return new Set<string>()
+    return resolveUserCommandItemActivationIds([descriptor], 'dsh-pi-tui')
+  }
+
+  /** The ids authorized for the native FALLBACK surface (the USER's own
+   * footerFallbackMode decides). */
+  get userCommandItemFallbackActivationIds() {
+    const descriptor = this.readDescriptor()
+    if (descriptor === undefined) return new Set<string>()
+    return resolveUserCommandItemFallbackActivationIds([descriptor], 'dsh-pi-tui')
   }
 
   /** One describe() read per synchronous evaluation: the two getters are
