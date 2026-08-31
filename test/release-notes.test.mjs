@@ -57,7 +57,27 @@ test('release-notes accepts stable v tags and next-v prerelease tags', () => {
   }
 })
 
-test('current 0.4 release body carries the DSH/TUI install pairing', () => {
+test('current 0.4 prerelease guidance remains under Unreleased', () => {
+  const changelogs = [
+    readFileSync(join(repo, 'CHANGELOG.md'), 'utf8'),
+    readFileSync(join(repo, 'CHANGELOG.en.md'), 'utf8'),
+  ]
+  const unreleased = changelog => {
+    const start = changelog.indexOf('## [Unreleased]')
+    const nextHeading = changelog.indexOf('\n## [', start + 1)
+    return changelog.slice(start, nextHeading === -1 ? changelog.length : nextHeading)
+  }
+  const body = changelogs.map(unreleased).join('\n')
+  assert.doesNotMatch(changelogs[0], /^## \[0\.4\.0-alpha\.1\]/mu)
+  assert.doesNotMatch(changelogs[1], /^## \[0\.4\.0-alpha\.1\]/mu)
+  for (const command of [
+    '@deepseek-ai/dsh@0.1.2-alpha.1',
+    '@xmoon76/dsh-pi-tui@next',
+    '@xmoon76/dsh-pi-tui@0.3',
+  ]) {
+    assert.ok(body.includes(command), `Unreleased guidance is missing ${command}`)
+  }
+
   const output = join(tmpdir(), `dsh-pi-tui-release-notes-${process.pid}.md`)
   try {
     const result = spawnSync(
@@ -65,15 +85,8 @@ test('current 0.4 release body carries the DSH/TUI install pairing', () => {
       [join(repo, 'scripts/release-notes.mjs'), 'next-v0.4.0-alpha.1', output],
       { cwd: repo, encoding: 'utf8' },
     )
-    assert.equal(result.status, 0, result.stderr)
-    const body = readFileSync(output, 'utf8')
-    for (const command of [
-      '@deepseek-ai/dsh@0.1.2-alpha.1',
-      '@xmoon76/dsh-pi-tui@next',
-      '@xmoon76/dsh-pi-tui@0.3',
-    ]) {
-      assert.ok(body.includes(command), `release body is missing ${command}`)
-    }
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /Version 0\.4\.0-alpha\.1 not found/u)
   } finally {
     rmSync(output, { force: true })
   }
