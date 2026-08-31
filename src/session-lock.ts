@@ -6,12 +6,9 @@
  * interrupted-turn closers into the shared log while the FIRST process keeps
  * appending from its own in-memory seq — the classic seq collision that
  * corrupts the log (the `session/end-seed` marker colliding with the other
- * process's next append). The divergence guard (`guard.ts`) only protects the
- * WRITE path: it compares the file's committed event count against this
- * process's memory right before an append, so a second process that resumes
- * while the first is mid-turn sees a file that matches its own freshly loaded
- * memory and sails through — the corruption happens later, on the FIRST
- * process's next append.
+ * process's next append). No submit-time check can catch it: the second
+ * process's freshly loaded memory matches the file from its very first
+ * write, and the corruption surfaces on the FIRST process's next append.
  *
  * This module closes the OPEN path: whoever resumes a session first records a
  * tiny lock file next to the session log; a second process attempting to open
@@ -39,16 +36,17 @@
  *
  * `unavailable` means this deployment could not establish the low-level lock
  * (no persistence / no artifact / no lock dir / write error). Writable TUI
- * callers MUST FAIL CLOSED on it — the divergence guard is a backstop, never
- * permission to proceed without an owner lock.
+ * callers MUST FAIL CLOSED on it — the lock is the ONLY single-writer
+ * mechanism, never permission to proceed without an owner lock.
  *
  * The lock only guards TUI-vs-TUI opens. A web surface or an older TUI that
- * knows nothing about the lock can still write concurrently; the divergence
- * guard remains the write-path backstop and is deliberately untouched.
+ * knows nothing about the lock is out of scope by design (the submit-time
+ * divergence guard that used to cover it was removed — see
+ * docs/concurrency.md).
  *
- * The module is deliberately narrow and structural (like `guard.ts`): it
- * declares only the filesystem and /proc surfaces it uses, injected so the
- * headless suite can drive every branch without a real process.
+ * The module is deliberately narrow and structural: it declares only the
+ * filesystem and /proc surfaces it uses, injected so the headless suite can
+ * drive every branch without a real process.
  * @module @xmoon76/dsh-pi-tui/session-lock
  */
 
@@ -68,7 +66,7 @@ export interface SessionLockInfo {
   tty?: string
 }
 
-/** The session identity the lock resolves against (a `GuardSessionLike`-shaped surface). */
+/** The session identity the lock resolves against (a minimal id+header surface). */
 export interface SessionLockSession {
   readonly id: string
   readonly header?: { readonly cwd?: string }
@@ -195,8 +193,8 @@ function tryCreate(
  * process owns it), `taken-over-stale` (a dead owner's lock was replaced),
  * `unverifiable` (the owner could not be probed — refuse), or `unavailable`
  * (this deployment could not establish the lock — writable TUI callers MUST
- * fail closed on it; the divergence guard is a backstop, never permission to
- * proceed). Never throws.
+ * fail closed on it; the lock is the ONLY single-writer mechanism, never
+ * permission to proceed). Never throws.
  */
 export function acquireSessionLock(
   deps: { persistence: SessionLockPersistence | undefined; fs: SessionLockFs; proc: SessionLockProc },
@@ -237,8 +235,8 @@ export function acquireSessionLock(
       // target-lock-before-create rule is only real when the lock can
       // physically exist ahead of the session). Without it, no lock is
       // possible — the acquire settles `unavailable` and the writable
-      // TUI caller fails closed on it (the divergence guard is a
-      // backstop, never permission to proceed).
+      // TUI caller fails closed on it (the lock is the ONLY single-writer
+      // mechanism, never permission to proceed).
       if (created.error?.code === 'ENOENT' && fs.mkdirSync !== undefined && !dirPrecreated) {
         try {
           fs.mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 })

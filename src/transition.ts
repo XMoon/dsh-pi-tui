@@ -13,7 +13,7 @@
  * 5. create/resume — a rejection is NEVER retried (no same-ID recovery):
  *    the target is PINNED immediately (fail-closed) and the old session
  *    stays current
- * 6. COMMIT — a synchronous critical section (guard reset, generation
+ * 6. COMMIT — a synchronous critical section (generation
  *    bump, live replacement) with NO lock changes
  * 7. RETIRE — dispose the old handle; the old lease enters COOLING
  *    (verification happens outside the transaction); child surface/catalog
@@ -78,7 +78,7 @@ export interface TransitionHost<T> {
   /** The target is about to enter the DSH boundary (agents.create/resume):
    * from here on no business path may release it. */
   markTargetTouched(sessionId: string): void
-  /** Synchronous COMMIT: guard reset, generation bump, live replacement.
+  /** Synchronous COMMIT: generation bump, live replacement.
    * NO lock changes happen here. */
   commit(next: T): void
   /** Async teardown AFTER the commit: dispose the OLD handle, hand the old

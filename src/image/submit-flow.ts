@@ -7,7 +7,7 @@
  * Contract:
  * ```text
  * reserve(text)                      // synchronous, same call stack as the editor clearing
- *   → run()                          // async: ensureSession / guard / prepare / send
+ *   → run()                          // async: ensureSession / prepare / send
  *       → success → consume
  *       → failure → restore(text)    // BEFORE the reservation releases
  *   → release()                      // finally
@@ -24,7 +24,7 @@
 export interface SubmitFlowDeps {
   /** Reserve the referenced drafts synchronously; returns the release. */
   reserve(text: string): () => void
-  /** The async submission work (ensure session, guard, prepare, send). */
+  /** The async submission work (ensure session, prepare, send). */
   run(text: string): Promise<void>
   /** Restore the editor draft on failure (before the release). */
   restore(text: string): void

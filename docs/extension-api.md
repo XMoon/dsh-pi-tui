@@ -287,7 +287,7 @@ shell, or keyboard focus — the host owns all of it.
   external-editor round-trips; only a final surface dispose invalidates
   old handles (they become inert no-ops).
 - A STABLE plugin can never touch: the terminal, focus, submission policy,
-  approvals/questions, session lock/guard, the overlay stack, the editor
+  approvals/questions, session lock, the overlay stack, the editor
   seat's internals, or the root layout. These boundaries are Stable-tier
   limits; Advanced / Unstable may later expose higher-freedom access through
   their own supported entry.

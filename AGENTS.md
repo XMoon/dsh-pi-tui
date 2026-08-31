@@ -203,7 +203,7 @@ and update them in the same PR.
   Advanced/Unstable keep their documented compatibility policies.
 
 - **Session ownership safety is not migration cleanup.** The Direct backend's
-  owner lock, lease/cooling state machine, PINNED quarantine, divergence guard,
+  owner lock, lease/cooling state machine, PINNED quarantine,
   transition gate and operation barrier remain authoritative until a dedicated
   later milestone proves that every TUI session write is Host-owned and
   cross-client concurrency is safe. Do not remove or weaken them as
@@ -530,7 +530,7 @@ gitignored):
 
 The rules below must never be broken; the full contracts live in `docs/`.
 
-- **One surface per session.** dsh has no cross-process session coordination: two processes (TUI + web, or two TUIs) holding one session can mint the same `seq` and corrupt the log. The TUI refuses to OPEN a session already held by another live dsh process (`src/session-lock.ts` + `src/session-lock-proc.ts`: an `owner.lock` next to the log, pid + `/proc` starttime probe, stale locks from crashes are taken over, `wx`-exclusive create — never a plain `w` overwrite); it also detects the external writer at write time (`src/guard.ts`) and blocks the send; the identical operation again forces through with a ONE-TIME token (session + observed revision + action + draft fingerprint). Full contract: `docs/concurrency.md`.
+- **One surface per session.** dsh has no cross-process session coordination: two processes (TUI + web, or two TUIs) holding one session can mint the same `seq` and corrupt the log. The TUI refuses to OPEN a session already held by another live dsh process (`src/session-lock.ts` + `src/session-lock-proc.ts`: an `owner.lock` next to the log, pid + `/proc` starttime probe, stale locks from crashes are taken over, `wx`-exclusive create — never a plain `w` overwrite). The owner lock is the ONLY single-writer mechanism: the former submit-time divergence guard (`src/guard.ts`, blocked sends + one-time force token) was REMOVED as a hot-path latency fix, so nothing may reintroduce per-submit persistence reads on the Enter/Ctrl+S path (pinned by `test/submit-hot-path.test.ts`). Full contract: `docs/concurrency.md`.
 - **Never a bare `void somePromise()`.** Fire-and-forget work goes through `src/detached.ts` (`runDetached` / `runOwned`, task factory invoked synchronously); the TASK / result-consumer / terminal-handler phases classify failures differently, and error observation is sync-total. The only bare-`void` exceptions are the sinks inside detached.ts (exempt by filename) and the two lifecycle roots, which carry an `allowlist` comment; `test/rules.test.ts` enforces the common forms. Full contract: `docs/failure-model.md`.
 - **Never repair a log as one whole zstd frame** — dsh readers reject it (`corrupt Zstandard session log: first frame is not exactly one header line`). `scripts/repair-session.mjs` (`--scan` read-only; `--yes` applies with backup + verify) preserves the frame layout, refuses ambiguous duplicate-`seq` references, and writes 0600. Full contract: `docs/repair-session.md`.
 - **Zero-event catalog probes — REMOVED, do not reintroduce.** Composition probes were deleted along with their tests: `session/created` observers in this deployment write durable knob events, so any probe both fails a zero-event gate and materializes an artifact. Cold catalog discovery goes through the standing scope only (`standingKeyFor` + `snapshot`); never call `agents.create()` for a catalog. Full contract: `docs/surface-catalog.md`.

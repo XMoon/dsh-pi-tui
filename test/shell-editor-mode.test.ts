@@ -337,8 +337,8 @@ test('a BARE ! / !! (empty body) is a serialized PAYLOAD, never an empty guard v
 test('a rejected submission restores the serialized text AND the mode', async () => {
   const { vt, app, submitted } = startApp(fixtureWorkspace(), {
     onSubmit: (text) => {
-      // Simulate the runner's divergence-guard rejection: the draft comes
-      // back through setEditorText with the serialized wire form.
+      // Simulate the runner's synchronous rejection restore: the draft
+      // comes back through setEditorText with the serialized wire form.
       app.setEditorText(text)
     },
   })
@@ -2323,8 +2323,8 @@ test('a declined pageUp/pageDown keeps the open dropdown alive (fork parity)', a
 
 // ── review round: synchronous rejection restore survives the fallback ──────
 // The fork clears the host editor BEFORE onSubmit, and a SYNCHRONOUS
-// rejection (the runner's divergence-guard shape: onSubmit restores the
-// draft through the wire boundary and returns) rewrites the VISIBLE
+// rejection (the runner's shape: onSubmit restores the draft through the
+// wire boundary and returns) rewrites the VISIBLE
 // plugin seat while the fallback dispatch is still on the stack. The
 // fallback tail must not clobber that restore with the post-submit empty
 // host state — the seat's change revision distinguishes "nothing
@@ -2340,7 +2340,7 @@ test('a synchronous rejection restore survives the fallback sync-back', async ()
     onSubmit: (text) => {
       submitted.push(text)
       // Synchronous rejection: restore the draft through the wire
-      // boundary and return (the divergence-guard shape).
+      // boundary and return (the runner's rejection-restore shape).
       app.setEditorText(text)
     },
     onExit: () => {},

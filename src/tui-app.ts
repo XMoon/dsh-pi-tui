@@ -124,6 +124,7 @@ import { FocusActivityComponent, projectFocus, type FocusProjectedBlock } from '
 import { WorkingIndicator, workingFramesFor } from './working.ts'
 import { iconFor, iconLead, iconPrefix, type IconStyle } from './icons.ts'
 import { indeterminateProgressFrames } from './progress.ts'
+import { submitAckLabel, type SubmitPendingDetail } from './submit-ack.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceHost } from './extension/internal/surface-host.ts'
@@ -1913,6 +1914,11 @@ export class TuiApp {
   private compactionPhase: CompactionPhase = 'idle'
   /** The working row's turn-derived activity (setWorking input). */
   private workingActive = false
+  /** Local submit acknowledgement (submit-ack.ts, plan D): the submission
+   * work between the editor clearing and the FIRST authoritative DSH event
+   * ('submit' → Submitting…, 'queued' → Queued…). A status driver for the
+   * working row — never a synthetic transcript row. */
+  private submitPendingDetail: SubmitPendingDetail | undefined
   /** Phase 4: the plugin working-message override (advanced host state). */
   private workingMessageOverride: string | undefined
   /** Timestamp of the last Ctrl+C press, for the empty-editor exit chord. */
@@ -4181,7 +4187,7 @@ export class TuiApp {
     // Repaints do NOT clear the transient notify line: an active session
     // repaints every frame (streaming chunks, tool cards), and clearing on
     // each repaint would make every notice — including error blocks like
-    // the divergence guard's — flash for a frame. The notify expires via
+    // error blocks — flash for a frame. The notify expires via
     // its 8s auto-clear timer or an explicit clear (user submit, session
     // switch, stop).
     // (The component cache is pruned inside rebuildMessages below.)
@@ -5036,12 +5042,30 @@ export class TuiApp {
     this.syncExtensionState()
   }
 
+  /**
+   * Show or clear the local submit acknowledgement on the row directly
+   * above the editor: 'submit' → "Submitting…", 'queued' → "Queued…",
+   * undefined clears. This is the ONLY local feedback between the editor
+   * clearing and the first authoritative DSH event (the runner clears it
+   * on the inbox/user-message/turn-start events, on session switches and
+   * from its failure sinks) — a working-row status, never a transcript
+   * row, so the authoritative user/message never collides with a fake.
+   */
+  setSubmitPending(detail: SubmitPendingDetail | undefined): void {
+    this.submitPendingDetail = detail
+    this.reconcileWorkingRow()
+    this.requestRender()
+    this.syncExtensionState()
+  }
+
   /** The working row's effective label: the base Working label (or the
-   * Phase-4 plugin override) ALWAYS leads, and a running compaction
-   * appends its stage — one unified row whether the turn is busy, the
-   * compaction is standalone, or both. */
+   * Phase-4 plugin override, or the pending-submit ack) ALWAYS leads, and
+   * a running compaction appends its stage — one unified row whether the
+   * turn is busy, the compaction is standalone, a submission is pending,
+   * or several are. */
   private effectiveWorkingMessage(): string {
-    const base = this.workingMessageOverride ?? 'Working...'
+    const base = this.workingMessageOverride
+      ?? (this.submitPendingDetail !== undefined ? submitAckLabel(this.submitPendingDetail) : 'Working...')
     switch (this.compactionPhase) {
       case 'summarizing':
         return `${base} · Compacting context…`
@@ -5052,10 +5076,10 @@ export class TuiApp {
     }
   }
 
-  /** Reconcile the working row against its two drivers (turn activity,
-   * compaction): the row animates while either is live, with the label
-   * chosen by {@link effectiveWorkingMessage} and an indeterminate
-   * progress-bar suffix while a compaction runs. */
+  /** Reconcile the working row against its drivers (turn activity,
+   * compaction, pending submit): the row animates while any is live, with
+   * the label chosen by {@link effectiveWorkingMessage} and an
+   * indeterminate progress-bar suffix while a compaction runs. */
   private reconcileWorkingRow(): void {
     this.working.setMessage(this.effectiveWorkingMessage())
     if (this.compactionPhase === 'idle') {
@@ -5063,7 +5087,7 @@ export class TuiApp {
     } else {
       this.working.setSuffixAnimation({ frames: COMPACTION_PROGRESS_FRAMES })
     }
-    if (this.workingActive || this.compactionPhase !== 'idle') {
+    if (this.workingActive || this.compactionPhase !== 'idle' || this.submitPendingDetail !== undefined) {
       this.working.start()
     } else {
       this.working.stop()
@@ -5644,8 +5668,9 @@ export class TuiApp {
   }
 
   /**
-   * Replace the editor draft. The runner restores a submission that the
-   * divergence guard blocked, so the user's text survives for a retry.
+   * Replace the editor draft. The runner restores a submission that was
+   * refused (stale send, transition fence), so the user's text survives
+   * for a retry.
    * The text is a SERIALIZED user input (`!x` / `!!x`), so the host
    * editor decodes it into mode + body (the shell-editor-mode boundary);
    * a plugin editor (no mode) receives the raw text. While a CONTINUABLE
