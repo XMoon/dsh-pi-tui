@@ -151,9 +151,11 @@ export interface TurnActivity {
   /** The Think slot: the latest meaningful line of the bounded reasoning
    * tail (compact preview only — never the raw reasoning stream). */
   readonly think?: { readonly text: string }
-  /** The Message slot: the latest meaningful line of the current
-   * candidate / confirmed intermediate assistant text. The FINAL answer
-   * never enters this slot (it renders outside the Thought). */
+  /** The Message slot: the bounded LATEST TAIL of the current candidate /
+   * confirmed intermediate assistant text, kept MULTILINE (the Focus
+   * renderer wraps it to the current width and shows the last three
+   * visual rows — a single-line flatten would destroy that). The FINAL
+   * answer never enters this slot (it renders outside the Thought). */
   readonly message?: { readonly text: string }
   /** The Tool slot: the LATEST real `tool/call` (any name — event-first
    * classification), settled by its own `tool/result` only. */
@@ -218,7 +220,8 @@ interface MutableTurnActivity {
    * — the turn/end final-answer check compares the candidate's step
    * against this. */
   lastAssistantStep?: number
-  /** The materialized Message slot (candidate ?? confirmed, latest line). */
+  /** The materialized Message slot (candidate ?? confirmed, bounded
+   * multiline tail). */
   message?: { text: string }
   /** The Tool slot: the latest real tool/call, settled by its own result. */
   tool?: {
@@ -628,14 +631,16 @@ export class TranscriptFolder {
   }
 
   /** Materialize the Message slot from the candidate (running) or the
-   * resolved candidate/confirmed pair (settled): the latest meaningful
-   * line, bounded. */
+   * resolved candidate/confirmed pair (settled): the bounded MULTILINE
+   * tail — never a single-line flatten. Both sources are already bounded
+   * to MESSAGE_TAIL_CAP, so the slot stays bounded without a second
+   * copy; terminal-width wrapping is the renderer's job (plan: the fold
+   * never wraps, the renderer re-wraps per frame). */
   private syncMessage(activity: MutableTurnActivity): void {
     const candidate = activity.messageCandidate
     const candidateText = candidate?.tail
     const text = candidateText ?? activity.messageConfirmed
-    const line = text === undefined ? undefined : latestLine(text).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
-    activity.message = line === undefined || line === '' ? undefined : { text: line }
+    activity.message = text === undefined || text === '' ? undefined : { text }
   }
 
   /** Resolve the Message slot at turn/end (plan §5.5): for a completed /
