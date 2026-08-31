@@ -1015,13 +1015,17 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
   const probe = installProbe()
-  // Capture the runner's DIRECT stdout writes (the status seam). The TUI
-  // itself writes through the ProcessTerminal, so filtering for the status
-  // strings isolates exactly the pre-mount status lines.
-  const stdoutWrites: string[] = []
+  // Capture the runner's DIRECT stdout writes (the status seam) and the
+  // cordis logger messages into ONE ordered log: the TUI itself writes
+  // through the ProcessTerminal, so filtering for the status strings
+  // isolates exactly the pre-mount status lines, and the shared order
+  // lets the failure path assert that the status is suspended BEFORE the
+  // failure logs (a TTY shares one cursor between stdout and stderr).
+  const orderedLog: string[] = []
   const originalWrite = process.stdout.write.bind(process.stdout)
   process.stdout.write = ((text: unknown) => {
-    stdoutWrites.push(String(text))
+    const line = String(text)
+    orderedLog.push(`stdout:${line}`)
     return true
   }) as typeof process.stdout.write
   // The status seam is TTY-gated: force the test runner's piped stdout to
@@ -1044,8 +1048,9 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
     const resumeHarness = makeHarness(home, resumed)
     resumeContext = new Context()
     resumeFiber = await mountRunner(resumeContext, home, resumeHarness, { sessionId: resumed.id }, { sessionId: resumed.id })
-    const statusWrites = stdoutWrites.filter(write =>
-      write.includes('Resuming session') || write.includes('Preparing conversation') || write === '\r\x1b[2K')
+    const statusWrites = orderedLog
+      .filter(write => write.startsWith('stdout:') && (write.includes('Resuming session') || write.includes('Preparing conversation') || write === 'stdout:\r\x1b[2K'))
+      .map(write => write.slice('stdout:'.length))
     assert.ok(statusWrites.some(write => write.includes('Resuming session…')),
       `the resume status must be written before mount: ${JSON.stringify(statusWrites)}`)
     assert.ok(statusWrites.some(write => write.includes('Preparing conversation…')),
@@ -1053,8 +1058,11 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
     const showIndexes = statusWrites
       .map((write, index) => write.includes('Resuming') || write.includes('Preparing') ? index : -1)
       .filter(index => index >= 0)
-    const clearIndex = statusWrites.findIndex(write => write === '\r\x1b[2K')
-    assert.ok(clearIndex > showIndexes[showIndexes.length - 1]!,
+    // The status is suspended before the success log (a mid-resume clear)
+    // and cleared again before mount: the LAST clear must follow the last
+    // show.
+    const lastClearIndex = statusWrites.map((write, index) => write === '\r\x1b[2K' ? index : -1).filter(index => index >= 0).at(-1)
+    assert.ok(lastClearIndex !== undefined && lastClearIndex > showIndexes[showIndexes.length - 1]!,
       `the status must be cleared after the last show (before mount): ${JSON.stringify(statusWrites)}`)
     // The resume lifecycle is untouched: exactly one hydration, no extra
     // transcript rows.
@@ -1068,12 +1076,12 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
     resumeContext = undefined
 
     // A fresh (deferred) start must not emit the resume status.
-    stdoutWrites.length = 0
+    orderedLog.length = 0
     const deferredHarness = makeHarness(home)
     deferredContext = new Context()
     deferredFiber = await mountRunner(deferredContext, home, deferredHarness, {}, {})
-    assert.ok(!stdoutWrites.some(write => write.includes('Resuming session')),
-      `a fresh start must stay silent: ${JSON.stringify(stdoutWrites)}`)
+    assert.ok(!orderedLog.some(write => write.includes('Resuming session')),
+      `a fresh start must stay silent: ${JSON.stringify(orderedLog)}`)
 
     await deferredFiber.dispose()
     await disposeContext(deferredContext)
@@ -1081,16 +1089,39 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
     deferredContext = undefined
 
     // A FAILED resume also clears the status (the surface starts
-    // sessionless — no stale line may survive).
-    stdoutWrites.length = 0
+    // sessionless — no stale line may survive), and the clear happens
+    // BEFORE the failure logs: the status owns the current terminal
+    // line, so a logger write must never interleave with it (a TTY
+    // shares one cursor between stdout and stderr).
+    orderedLog.length = 0
     const failHarness = makeHarness(home) // no persisted session
-    failContext = new Context()
+    const failCtx = new Context()
+    failContext = failCtx
+    // Capture the runner's failure logs through the cordis logger
+    // exporter (the same sink a real deployment registers). The exporter
+    // threshold lives in `levels.default` (the MAXIMUM level exported):
+    // WARN (2) admits the runner's warn/error lines (the default INFO
+    // threshold would drop them). Registered inside a fiber — cordis
+    // registers exporters through ctx.effect.
+    const exporterFiber = failCtx.plugin(() => {
+      failCtx.logger.exporter({
+        levels: { default: 2 },
+        export: (message) => {
+          orderedLog.push(`log:${message.name}:${message.args.map(String).join(' ')}`)
+        },
+      })
+    })
+    await exporterFiber
     failFiber = await mountRunner(failContext, home, failHarness, { sessionId: 'missing-session' }, { sessionId: 'missing-session' })
-    const failWrites = stdoutWrites.filter(write => write.includes('Resuming session') || write === '\r\x1b[2K')
+    const failWrites = orderedLog.filter(write => write.includes('Resuming session') || write === 'stdout:\r\x1b[2K')
     assert.ok(failWrites.some(write => write.includes('Resuming session…')),
       `the failed resume still shows the status: ${JSON.stringify(failWrites)}`)
-    assert.ok(failWrites.some(write => write === '\r\x1b[2K'),
+    assert.ok(failWrites.some(write => write === 'stdout:\r\x1b[2K'),
       `the failed resume clears the status: ${JSON.stringify(failWrites)}`)
+    const clearIndexInLog = orderedLog.findIndex(write => write === 'stdout:\r\x1b[2K')
+    const warnIndexInLog = orderedLog.findIndex(write => write.startsWith('log:') && write.includes('resume missing-session failed'))
+    assert.ok(clearIndexInLog >= 0 && warnIndexInLog > clearIndexInLog,
+      `the status must be cleared BEFORE the failure log (clear at ${clearIndexInLog}, warn at ${warnIndexInLog}): ${JSON.stringify(orderedLog)}`)
   } finally {
     if (resumeFiber !== undefined) await resumeFiber.dispose()
     if (deferredFiber !== undefined) await deferredFiber.dispose()

@@ -33,6 +33,12 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; ge
   return { vt, app, submitted, get exits(): number { return exits } }
 }
 
+/** Pause longer than the todo click-coalescing window (500ms): a
+ * deliberate second todo click must be a NEW gesture, never coalesced. */
+function sleepBeyondTodoCoalesce(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 550))
+}
+
 test('renders the header and the editor frame', async () => {
   const { vt } = startApp()
   await vt.waitForRender()
@@ -563,8 +569,10 @@ test('fullscreen click on the todo panel toggles its compact/full expansion', as
   // 80x24 terminal: footer (2) + editor seat (3) at the bottom, so the
   // expanded panel (11 rows) spans 0-based rows 8..19 — click row 17 (a
   // different row from the first click, so the fork never reads a
-  // double-click).
+  // double-click). Paced beyond the todo click-coalescing window: this is
+  // a DELIBERATE second gesture, not a rapid double-click.
   await vt.waitForRender()
+  await sleepBeyondTodoCoalesce()
   vt.sendInput('\x1b[<0;30;18M')
   vt.sendInput('\x1b[<0;30;18m')
   await vt.waitForRender()
@@ -601,7 +609,9 @@ test('fullscreen click on the todo summary dock row opens the todo panel', async
   assert.ok(view.includes('todo item 0'), `compact panel must show after the click:\n${view}`)
   // With the panel open the summary is hidden and the panel owns rows
   // 12..19 — the same cell is now a panel row, so the next click runs the
-  // compact → full step of the loop.
+  // compact → full step of the loop. Paced beyond the todo click-coalescing
+  // window: a DELIBERATE second gesture, not a rapid double-click.
+  await sleepBeyondTodoCoalesce()
   vt.sendInput('\x1b[<0;20;19M')
   vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
@@ -690,14 +700,56 @@ test('todo state machine: ≤5 items is a two-state summary ↔ list (no redunda
   assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
   assert.ok(!app.isTodoPanelExpanded(), 'opens compact (visually identical to full at ≤5)')
   // With the panel open (border + title + 5 rows = rows 15..21) the same
-  // cell is a panel row: the click must close the panel DIRECTLY — the
-  // second click returns to the summary, no third click needed, and no
-  // intermediate todoExpanded state exists.
+  // cell is a panel row: a DELIBERATE second click (paced beyond the
+  // coalescing window) must close the panel DIRECTLY — the second click
+  // returns to the summary, no third click needed, and no intermediate
+  // todoExpanded state exists.
+  await sleepBeyondTodoCoalesce()
   vt.sendInput('\x1b[<0;20;19M')
   vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelVisible(), 'second click closes the panel (list → summary)')
   assert.ok(!app.isTodoPanelExpanded(), 'no ghost expanded state at ≤5')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo rapid double-click at the SAME coordinate is ONE gesture (no flash open/close)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 5 }, (_, i) => ({
+    content: `todo item ${i}`,
+    status: i === 0 ? ('in_progress' as const) : ('pending' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // The dock summary row sits at 0-based row 18. Two press/release groups
+  // at the SAME coordinate, the first render landing between them, both
+  // inside the double-click window (no pacing): the first click opens the
+  // panel, the layout mutates (the dock vanishes, the panel takes its
+  // rows), and the second click would land on a panel row — WITHOUT the
+  // todo coalescing it would immediately close the panel (the todo
+  // "flashes and vanishes"). The coalesced pair must leave the todo in
+  // the state the FIRST click produced.
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'fixture: the first click opens the panel')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'the rapid second click must be coalesced — the panel stays open')
+  assert.ok(!app.isTodoPanelExpanded(), 'and stays in the first click\'s state (compact)')
+  // A click on the TRANSCRIPT (a different target) resets the coalescing:
+  // the next todo click is a fresh gesture and closes the panel.
+  vt.sendInput('\x1b[<0;40;5M')
+  vt.sendInput('\x1b[<0;40;5m')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'after a different-target click the next todo click works')
   app.setFullscreen(false)
   app.stop()
 })
@@ -712,6 +764,8 @@ test('todo state machine: 1 item also closes on the second click (boundary)', as
   vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
+  // Deliberate second gesture (paced beyond the coalescing window).
+  await sleepBeyondTodoCoalesce()
   vt.sendInput('\x1b[<0;20;19M')
   vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
@@ -764,7 +818,9 @@ test('todo state machine: >5 items keeps summary → compact → full → summar
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('todo item 5'), `expanded panel shows the full list:\n${view}`)
   // Full panel (8 rows) occupies rows 14..21 — click a DIFFERENT row
-  // (17): full → summary.
+  // (17): full → summary. Paced beyond the todo click-coalescing window:
+  // a DELIBERATE third gesture, not a rapid double-click.
+  await sleepBeyondTodoCoalesce()
   vt.sendInput('\x1b[<0;30;18M')
   vt.sendInput('\x1b[<0;30;18m')
   await vt.waitForRender()

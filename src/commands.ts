@@ -1512,7 +1512,7 @@ export function registerTuiCommands(
           {
             id: 'wheel-scroll-lines',
             label: 'Mouse wheel lines',
-            description: 'Number of transcript lines moved per mouse-wheel event in fullscreen',
+            description: 'Number of transcript lines moved per mouse-wheel event in fullscreen; applies on the next fullscreen entry',
             // The fallback applies HERE too: an invalid/missing persisted
             // value must never render as a row outside the values list.
             currentValue: String(wheelScrollLinesOf(settingsDoc?.wheelScrollLines)),
