@@ -32,7 +32,9 @@
   layout id。USER 授权由 `ConfigPort.footerCommandTrust.userCommandItemActivationIds`
   按 USER 自己的 mode 计算（仅 `footer: custom` 时 USER layout 才授权；`/settings`
   切回 default/compact 后残留的 stale layout 授权为空；whole-footer command 的
-  native fallback 按 USER 自己的 `footerFallbackMode` 决定）。project/merged 配置
+  native fallback 仅在 USER 自己声明 `footer: command` 时才按 USER 的
+  `footerFallbackMode` 授权——PROJECT 强制 merged command mode 无法把 stale
+  fallback metadata 变成执行授权）。project/merged 配置
   既不能提供命令字符串，也不能通过 merged layout 激活 dormant 或隐藏的 command
   item（未保存 draft 与保存失败的新命令同样永不执行）。
 - **新增 client-local `FooterDynamicItemRuntime`。** 只为 active layout 引用的

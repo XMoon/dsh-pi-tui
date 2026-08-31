@@ -5502,10 +5502,18 @@ export function apply(ctx: Context, config: Config): void {
           // never reset it — the command surface overrides the composer
           // only while commandRows is set, and the M5 fallback contract
           // restores the LAST native layout on failure. The fallback
-          // layout IS visible, but only the USER layer's own layout may
-          // activate custom command items (a merged fallback layout can
-          // render user:* ids, never arm them).
-          syncDynamicCommandItems(trust.userCommandItemFallbackActivationIds)
+          // layout IS visible, but the authorization follows the USER's
+          // CURRENT mode: only a USER who opted into command mode
+          // (userMode === 'command') may fall back per their own
+          // footerFallbackMode; a USER whose current mode is
+          // default/compact authorizes NOTHING — a PROJECT forcing the
+          // merged command mode can never turn stale fallback metadata
+          // (a leftover footerFallbackMode: custom) into execution
+          // authorization.
+          const authorizedIds = userMode === 'command'
+            ? trust.userCommandItemFallbackActivationIds
+            : trust.userCommandItemActivationIds
+          syncDynamicCommandItems(authorizedIds)
           return
         }
         if (footerCommandRunner === undefined) {
