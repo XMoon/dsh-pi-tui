@@ -158,8 +158,11 @@ run. It reuses a valid per-SHA source pack from:
 ~/.cache/dsh-pi-tui/source-packs/<exact-sha>/
 ```
 
-DSH is rebuilt only when the cache is missing or invalid, the pin changed,
-or the environment is stale.
+The cached DSH source pack is rebuilt only when the per-SHA cache is
+missing or invalid (a changed pin selects a different cache key).
+
+A stale local development environment may require re-materializing the
+worktree with `dev:bootstrap`, but a valid source pack is still reused.
 
 When the source environment must actually be loaded (commands that need the
 source-distribution variables), enter it with:
