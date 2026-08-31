@@ -31,6 +31,7 @@ dsh --profile pi-tui
 * Plan Review
 * Todo / Goal status
 * Human-readable terminal window titles
+* Bounded long-session windows with stable paging and live-follow position
 * No duplicate ghost Tool Cards after compaction / pruning
 
 `Ctrl+O` controls Tool and System details — and in fullscreen Focus it bulk-expands the recent Thought roots or collapses them all. `Alt+T` controls Thinking separately.
@@ -135,6 +136,8 @@ Typing `@` opens workspace file search and completion:
 @"path with spaces/file.ts"
 ```
 
+`/image <path>` also completes files and directories; paths with spaces, quotes, or Windows separators preserve the input dialect, and directories can be expanded further.
+
 Resolvable relative paths are canonicalized before submission.
 
 Clipboard images can be added with `Ctrl+V` and persisted through the DSH Attachment service.
@@ -198,7 +201,9 @@ one-keystroke Reset). The preview is composed by the real footer engine
 and — with the contextual help — pinned to the top of the panel; it never
 scrolls away at any terminal size. `S` on the Row Selector saves
 (persisted); `Esc` walks back page by page and closes on the first page
-without touching the active layout. Usable before any session exists.
+without touching the active layout. With dirty changes, `Esc` first offers
+Save & Exit, Discard & Exit, or Keep Editing; saving waits for the settings
+write to succeed. Usable before any session exists.
 
 The Add Picker also offers `+ Create Custom Text` for user-defined static text items. Their text, default semantic tone, display name, and deletion are editable; definitions are read and persisted only from the USER layer. The definition tone is separate from the placement Tone, and the item can otherwise be shown/hidden, moved, and reordered like any other footer item.
 
@@ -310,6 +315,7 @@ segments aggregate into the single `ext:*` item. Full author guide:
 | `Ctrl+T`      | Toggle the todo panel                               |
 | `Ctrl+R`      | Search input history                                |
 | `Ctrl+F`      | Search Transcript                                   |
+| `Ctrl+End`    | Jump to the latest Transcript output in fullscreen  |
 | `Ctrl+O`      | Expand / collapse Tool and System details; in fullscreen Focus, bulk-toggle the Thought roots |
 | `Alt+T`       | Expand / collapse Thinking                          |
 | `Ctrl+G`      | Edit current input in `$VISUAL`/`$EDITOR`           |
@@ -630,6 +636,7 @@ Contributor-oriented repository structure and development rules are documented i
 | [docs/concurrency.md](docs/concurrency.md)             | Session concurrency               |
 | [docs/failure-model.md](docs/failure-model.md)         | Async failure / cancellation      |
 | [docs/perf-baseline.md](docs/perf-baseline.md)         | Performance baseline              |
+| [docs/local-development.md](docs/local-development.md) | Local development and worktree policy |
 | [docs/extension-api.md](docs/extension-api.md)         | Extension API                     |
 | [AGENTS.md](AGENTS.md)                                 | Contributor operating manual      |
 

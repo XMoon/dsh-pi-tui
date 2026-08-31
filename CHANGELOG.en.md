@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-08-31
+
+### Added
+
+- **`@` mentions and `/image` arguments now share one file-completion engine.** Both entry points use the same path parsing, ranking, quoting, and directory continuation while keeping `@` on the Host file scope and `/image` on the local file scope. Completion handles quoted paths with spaces, CJK-adjacent text, Windows separators, and `fd`/fallback discovery; async results are safely discarded when input, session, or scope changes, so an older dropdown cannot overwrite a newer one.
+- **Long Sessions now use a bounded transcript window.** Fullscreen can page through older and newer turns with overlap, and `Ctrl+End` jumps back to the latest output; search, subagent switching, and returning to the live tail preserve the correct window anchors and follow state. Cold resume uses bulk hydration and linear grouping, so each repaint no longer materializes the complete history.
+- **Submission now has immediate feedback and an observable latency timeline.** `Submitting…` or `Queued…` appears between the editor clearing and the first authoritative DSH event. Debug diagnostics record phase timings from acceptance, dispatch, inbox/turn start, `user.message`, and the first assistant chunk; this is status feedback only and never creates a synthetic transcript row.
+- **A dual-mode local development toolchain is available.** `dev:doctor` performs a read-only worktree check, `dev:bootstrap` repairs dependencies idempotently, and `dev:shell` enters source mode. The main registry mode and next exact-SHA source mode keep independent `node_modules` directories and reusable source-pack caches.
+
+### Changed
+
+- **`/footer` saving is now discoverable and transactional.** The Row Selector adds `Save changes` and `Unsaved / No changes / Saving…` status. Pressing `Esc` with dirty changes first offers Save & Exit, Discard & Exit, or Keep Editing. Saving waits for the settings write to succeed before closing; failures keep the draft open for correction.
+- **Session writes now use a fail-closed ownership model.** The submit-time full-log divergence guard and one-shot force-through path are gone. A writable Session must acquire its owner lock first, with the process lease, cooling verifier, and operation barrier maintaining the single-writer boundary; submissions no longer reread the entire log or offer a force write that could damage it.
+
+### Fixed
+
+- **Async completion results always repaint the active screen.** A late autocomplete commit during fullscreen no longer paints only the stopped main screen, and newer requests, older requests, and cancellation paths cannot overwrite one another.
+- **The footer now honors the real available budget on narrow terminals, fullscreen changes, and command surfaces.** Logical rows use at most two physical lines and the Host instruction remains independent; zero budgets, invisible instructions, non-finite dimensions, and ANSI-colored output follow bounded safe layout/truncation paths instead of producing black bands, overflow, or hidden hints.
+- **Transcript window changes, search, and live follow no longer lose viewport anchors.** Paging or replaying a summary restores the content at the user's top/bottom edge, while stats replay is isolated by lifecycle so late events from an old turn cannot contaminate new state.
+
+> **Known limitation:** The production default backend remains Direct; remote attach is not supported while M2–M8 are unfinished.
+
 ## [0.3.5] - 2026-08-28
 
 ### Added
@@ -1464,7 +1486,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...v0.3.3

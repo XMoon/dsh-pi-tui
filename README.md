@@ -31,6 +31,7 @@ dsh --profile pi-tui
 * Plan Review
 * Todo / Goal 状态展示
 * 可读的终端窗口标题
+* 长会话按有界窗口浏览，并保留翻页与实时跟随位置
 * Compaction / prune 后不会出现重复的幽灵 Tool Card
 
 `Ctrl+O` 控制工具和系统详情;在全屏 Focus 下它整体展开最近几个 Thought root,或全部收起。`Alt+T` 单独控制 Thinking。
@@ -135,6 +136,8 @@ Shell 卡片默认只显示有限的输出预览，`Ctrl+O` 可以展开完整�
 @"path with spaces/file.ts"
 ```
 
+`/image <path>` 也支持文件与目录补全；带空格、引号或 Windows 分隔符的路径会保留输入方言，目录可以继续展开。
+
 能够解析的相对路径会在提交时转换为明确的文件路径。
 
 支持通过 `Ctrl+V` 添加剪贴板图片，并使用 DSH Attachment 能力保存到 Session。
@@ -191,7 +194,8 @@ label / id / 描述过滤,选中项下方显示描述),`M` 进入 Move Mode
 Tone 语义色;Advanced 编辑 prefix / suffix / importance 并可一键
 Reset)。预览由真实 Footer 引擎合成,与 contextual help 一起固定在
 面板顶部,任何终端尺寸下都不会随列表滚动消失。Row Selector 页 `S`
-保存(持久化),`Esc` 逐页返回、在首页关闭且不影响当前生效布局。
+保存(持久化),`Esc` 逐页返回、在首页关闭且不影响当前生效布局。存在未保存改动时，
+`Esc` 会先显示 Save & Exit、Discard & Exit 或 Keep Editing；保存会等待设置写入成功。
 无会话时也可使用。
 
 Add Picker 的末尾还可以选择 `+ Create Custom Text`,创建用户自定义的静态文本条目。创建后可编辑文本、默认语义色、显示名称,也可以删除;条目定义只从 USER 层读取并持久化。定义 Tone 与布局中的放置 Tone 分开,条目仍可在 `/footer` 中显示/隐藏、移动和排序。
@@ -294,6 +298,7 @@ id 本身不得包含 `/`。旧的 `chrome.footer.status` 槽位不变:
 | `Ctrl+T`      | 切换 Todo 面板              |
 | `Ctrl+R`      | 搜索输入历史                 |
 | `Ctrl+F`      | 搜索 Transcript          |
+| `Ctrl+End`    | 全屏时跳到最新 Transcript 输出 |
 | `Ctrl+O`      | 展开 / 折叠工具和系统详情;全屏 Focus 下整体切换 Thought root |
 | `Alt+T`       | 展开 / 折叠 Thinking       |
 | `Ctrl+G`      | 使用 `$VISUAL`/`$EDITOR` 编辑输入 |
@@ -606,6 +611,7 @@ packages/pi-tui/AGENTS.md
 | [docs/concurrency.md](docs/concurrency.md)             | Session 并发                   |
 | [docs/failure-model.md](docs/failure-model.md)         | Async failure / cancellation |
 | [docs/perf-baseline.md](docs/perf-baseline.md)         | 性能基线                         |
+| [docs/local-development.md](docs/local-development.md) | 本地开发环境与 worktree 约定       |
 | [docs/extension-api.md](docs/extension-api.md)         | Extension API                |
 | [AGENTS.md](AGENTS.md)                                 | Contributor operating manual |
 
