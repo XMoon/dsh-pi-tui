@@ -473,11 +473,15 @@ export function mergeCommandSurface(
   if (budget.total === 0) return ''
   const total = Math.min(FOOTER_MAX_PHYSICAL_LINES, normalizePositiveInt(budget.total, FOOTER_MAX_PHYSICAL_LINES))
   const truncate = (row: string): string => truncateToWidth(row, w, '…')
-  if (instruction === undefined) return rows.slice(0, total).map(truncate).join('\n')
+  // An INVISIBLE instruction (empty/whitespace/blank-SGR spans) is
+  // treated as absent, exactly like the native composer.
+  const instructionText = instruction === undefined ? undefined : renderInstruction(instruction)
+  const hasInstruction = instructionText !== undefined && stripSgr(instructionText).trim() !== ''
+  if (!hasInstruction) return rows.slice(0, total).map(truncate).join('\n')
   // The instruction reserves 1 first; the trusted command rows keep the
   // remaining slots in layout order — a wrapped row would silently spend
   // a second slot and push the hint out of the budget.
-  const wrapped = wrapTextWithAnsi(renderInstruction(instruction), w)
+  const wrapped = wrapTextWithAnsi(instructionText!, w)
   const instructionRow = wrapped.length > 1 ? capRowWithEllipsis(wrapped[0]!, w) : wrapped[0]!
   const kept = rows.slice(0, Math.max(0, total - 1)).map(truncate)
   return [...kept, instructionRow].join('\n')
