@@ -12,8 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Source Mode local/CI validation: pin the complete DeepSeek Harness SHA, run the official `build:official` and `release:pack --family dsh` commands, then validate the complete tarball family through temporary pnpm overrides without writing source paths into the package contract or lockfile.
 - `next` pushes/PRs use Source Mode; `main` and every tag (including `next-v*`) use frozen npm Mode. The source lane explicitly skips the published `pi2dsh` check until a compatible published combination exists, while npm mode remains blocking.
 
-## [0.4.0-alpha.1] - 2026-08-28
-
 ### Migration notes
 
 - **0.4.0-alpha.1 moves to DeepSeek Harness 0.1.2.** The declared support range
@@ -1535,8 +1533,7 @@ Installation section.
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...HEAD
-[0.4.0-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...next-v0.4.0-alpha.1
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...HEAD
 [0.3.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4

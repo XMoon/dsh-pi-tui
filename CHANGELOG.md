@@ -12,8 +12,6 @@
 - 新增 Source Mode 本地/CI 验证：固定 DeepSeek Harness 完整 SHA，使用官方 `build:official` 与 `release:pack --family dsh` 生成完整 tarball family，再通过临时 pnpm overrides 验证 TUI。发布包的 peer contract 保持为 `>=0.1.2-alpha.1`，不会把源码路径写入 package 或 lockfile。
 - `next` push/PR 使用 Source Mode；`main` 和所有 tag（包括 `next-v*`）使用 frozen npm Mode。源码 lane 对依赖已发布 `pi2dsh` 的检查明确标记为 skipped，npm lane 仍然阻断不兼容结果。
 
-## [0.4.0-alpha.1] - 2026-08-28
-
 ### 迁移说明
 
 - **0.4.0-alpha.1 切换到 DeepSeek Harness 0.1.2。** 声明支持范围为
@@ -1225,8 +1223,7 @@ dsh --profile pi-tui
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...HEAD
-[0.4.0-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...next-v0.4.0-alpha.1
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...HEAD
 [0.3.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4
