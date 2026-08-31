@@ -231,6 +231,11 @@ export type CompactionPhase = 'idle' | 'summarizing' | 'applying'
 /** The indeterminate progress-bar frames shown while a compaction runs:
  * width 12 / block 3, the same visual weight as the footer context bar. */
 const COMPACTION_PROGRESS_FRAMES = indeterminateProgressFrames()
+/** The compact todo panel cap: at most this many rows before the panel
+ * gains a DISTINCT full state. With ≤ this many items the compact and
+ * full lists are visually identical, so the state machine skips the
+ * redundant full state entirely (summary ↔ list only). */
+export const TODO_COMPACT_LIMIT = 5
 /** Folded preview lines for tool results; mirrors pi's RESULT_PREVIEW_LINES. */
 export const RESULT_PREVIEW_LINES = 3
 /** Diff-body cap for default-view tool cards; mirrors kimi COMMAND_PREVIEW_LINES. */
@@ -1796,6 +1801,13 @@ export class TuiApp {
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
+  /** The fullscreen mouse-wheel step (transcript lines per wheel event).
+   * A Client runtime preference: the fork's `wheelScrollLines` is a
+   * constructor-time alt-screen option, so this value feeds the NEXT
+   * TuiAltScreen mount — a change while fullscreen is active applies on
+   * the next fullscreen re-entry (v1 semantics, never a private-field
+   * hack on the live alt screen). */
+  private wheelScrollLines = 1
   /** One shared in-flight autodetect; concurrent callers coalesce onto it
    * (overlapping OSC 11 queries would mis-pair replies by FIFO order). */
   private autoDetectInFlight: Promise<void> | undefined
@@ -3906,6 +3918,15 @@ export class TuiApp {
     return this.fullscreen !== undefined
   }
 
+  /** Set the fullscreen mouse-wheel step (transcript lines per wheel
+   * event) for the NEXT alt-screen mount. Defensive normalize; never
+   * reads Host settings — a pure Client runtime preference. The live
+   * alt screen keeps its constructor-time value until the next
+   * fullscreen re-entry (v1 semantics — the fork exposes no setter). */
+  setWheelScrollLines(lines: number): void {
+    this.wheelScrollLines = Number.isFinite(lines) ? Math.max(1, Math.floor(lines)) : 1
+  }
+
   /**
    * Enter or leave fullscreen (alt screen), reporting the change through
    * {@link TuiAppEvents.onFullscreenChange} so the host can persist it.
@@ -3940,6 +3961,10 @@ export class TuiApp {
       // click reaches us through its onCellClick callback so cards can be
       // expanded individually, exactly like a web disclosure row.
       const alt = new TuiAltScreen(this.terminal, undefined, undefined, {
+        // The fullscreen mouse-wheel step (Client preference): the fork
+        // reads it at construction, so a change while fullscreen is
+        // active applies on the next re-entry.
+        wheelScrollLines: this.wheelScrollLines,
         onCellClick: (x, y) => this.handleFullscreenClick(x, y),
         // Host transcript actions must win before the fork's own viewport
         // key handling. In particular, the fork's Ctrl+Shift+F search only
@@ -8672,10 +8697,14 @@ export class TuiApp {
   /**
    * Reflect the todo list in the dock summary line: active (non-completed)
    * count and, when the list is non-empty, the first active item's text.
+   * A list that shrank to the compact cap (or below) has no distinct full
+   * state: the ghost `todoExpanded` is cleared so the panel never shows a
+   * visually identical "full" list (plan: >5 → ≤5 auto-normalizes).
    * @param todos - the latest todo/write snapshot.
    */
   setTodoSummary(todos: readonly TodoItem[]): void {
     this.todoItems = todos
+    if (!this.hasTodoOverflow()) this.todoExpanded = false
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.renderDock()
@@ -8697,22 +8726,46 @@ export class TuiApp {
   }
 
   /** Toggle the todo panel between the compact five rows and the full list
-   * (fullscreen click on the panel's area). */
+   * (fullscreen click on the panel's area). Fail-closed: without overflow
+   * the compact and full lists are visually identical, so the expansion
+   * never enters a meaningless state (other callers cannot manufacture
+   * one either). */
   toggleTodoExpanded(): boolean {
     if (!this.todoPanelVisible) return false
+    if (!this.hasTodoOverflow()) {
+      this.todoExpanded = false
+      return false
+    }
     this.todoExpanded = !this.todoExpanded
     this.renderTodoPanel()
     this.requestRender()
     return this.todoExpanded
   }
 
-  /** The fullscreen click loop over the todo panel's own rows: compact →
-   * full list → back to the summary row (the panel closes). The mouse thus
-   * opens AND closes the panel without Ctrl+T; the dock summary row itself
-   * opens it (handleFullscreenClick's dock region). */
+  /** Whether the todo list exceeds the compact cap (the full state would
+   * actually differ from the compact list). All todos enter the ordered
+   * render list, so the raw length is the renderable count. */
+  private hasTodoOverflow(): boolean {
+    return this.todoItems.length > TODO_COMPACT_LIMIT
+  }
+
+  /** The fullscreen click loop over the todo panel's own rows: with ≤5
+   * items the panel is a two-state summary ↔ list (a second click closes
+   * it — never a visually identical intermediate full state); with >5
+   * items it keeps the three-state summary → compact → full → summary.
+   * The mouse thus opens AND closes the panel without Ctrl+T; the dock
+   * summary row itself opens it (handleFullscreenClick's dock region). */
   private handleTodoPanelClick(): void {
-    if (this.todoExpanded) this.toggleTodoPanel()
-    else this.toggleTodoExpanded()
+    if (this.todoExpanded) {
+      // full -> summary
+      this.toggleTodoPanel()
+    } else if (this.hasTodoOverflow()) {
+      // compact -> full, only when full actually differs
+      this.toggleTodoExpanded()
+    } else {
+      // <=5: list -> summary directly
+      this.toggleTodoPanel()
+    }
   }
 
   /** Whether the todo panel is currently shown. */
@@ -8727,9 +8780,9 @@ export class TuiApp {
 
   /**
    * Rebuild the todo panel text: a border rule + `Todo` title (both indented
-   * one cell) plus up to five rows by default (in_progress first, then
-   * pending, then completed (strikethrough)); the full list when expanded
-   * (fullscreen click on the panel toggles).
+   * one cell) plus up to {@link TODO_COMPACT_LIMIT} rows by default
+   * (in_progress first, then pending, then completed (strikethrough)); the
+   * full list when expanded (fullscreen click on the panel toggles).
    */
   private renderTodoPanel(): void {
     if (!this.todoPanelVisible) {
@@ -8744,7 +8797,7 @@ export class TuiApp {
       ...this.todoItems.filter(todo => todo.status === 'pending'),
       ...this.todoItems.filter(todo => todo.status === 'completed'),
     ]
-    const shown = this.todoExpanded ? ordered : ordered.slice(0, 5)
+    const shown = this.todoExpanded ? ordered : ordered.slice(0, TODO_COMPACT_LIMIT)
     const width = Math.max(1, this.terminal.columns)
     const border = color.border(` ${'─'.repeat(Math.max(0, width - 2))} `)
     // Title: bold, two-cell indent.

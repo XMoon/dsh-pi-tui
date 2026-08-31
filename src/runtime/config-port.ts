@@ -30,8 +30,8 @@ import type { FooterCommandConfig } from '../footer/command-runner.ts'
 import type { FooterCustomItemsParseResult } from '../footer/custom-items.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
- * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/focusMode).
- * The old
+ * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/
+ * focusMode/wheelScrollLines). The old
  * `history` field moved to $DSH_HOME/user-history/*.jsonl and is
  * deliberately NOT part of the document anymore. `footerLayout` is the
  * M2 versioned custom layout (nested settings object), absent when not
@@ -68,6 +68,11 @@ export interface TuiSettingsDoc {
   localShellSandbox: string
   homeEndKeys: string
   focusMode: string
+  /** The fullscreen mouse-wheel step (`1/2/3/5/8`, default `1`). A
+   * Client preference persisted in the TUI settings document — never a
+   * Session / Agent state; a future Remote adapter round-trips it like
+   * every other TUI setting, with no dedicated RPC. */
+  wheelScrollLines: string
   keybindings?: unknown
 }
 

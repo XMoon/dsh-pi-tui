@@ -66,6 +66,7 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
     focusMode: 'off',
+    wheelScrollLines: '1',
     ...(options.iconStyle === undefined ? {} : { iconStyle: options.iconStyle }),
   })
   const runner: TuiCommandRunner = {

@@ -209,6 +209,7 @@ test('TuiSettingsDoc round-trip: a whole-document replace never wipes the truste
     localShellSandbox: 'bypass',
     homeEndKeys: 'input',
     focusMode: 'off',
+    wheelScrollLines: '1',
     keybindings: { version: 1, bindings: {} },
   }
   const port = new DirectConfigPort({ get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', user: { footerCommand } }] }) } as never, {
