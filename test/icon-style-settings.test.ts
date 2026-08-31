@@ -75,6 +75,11 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: settings.value,
     agents: {} as never,
     sessionReader: {
