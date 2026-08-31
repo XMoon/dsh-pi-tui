@@ -778,3 +778,41 @@ test('dispose REMOVES the abort listener (a process-wide signal must not retain 
   // An abort after dispose is a harmless no-op (idempotent dispose).
   controller.abort()
 })
+
+test('setConfig re-arms IMMEDIATELY: a config change never waits out the old cadence', async () => {
+  // The review's P2: setConfig used to requestRefresh() against the OLD
+  // run's lastStartAt — with a 60s refresh, an edited command would not
+  // run for almost a minute (the item unavailable the whole time). A
+  // config identity change is an explicit re-arm: the new command must
+  // start promptly, then re-arm on the NEW interval.
+  const outputs: Array<string[] | undefined> = []
+  const runner = new FooterCommandRunner({
+    config: { ...CONFIG, refreshIntervalMs: 60000, timeoutMs: 10000, command: 'node -e "process.stdout.write(\'old\\n\')"' },
+    snapshot: () => emptyStatusSnapshot(),
+    width: () => 100,
+    height: () => 30,
+    onOutput: (rows) => outputs.push(rows),
+    signal: new AbortController().signal,
+  })
+  try {
+    runner.requestRefresh()
+    const deadline = Date.now() + 5000
+    while (outputs.length < 1 && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(outputs[0], ['old'])
+    // Change the command: the clearing write (undefined) lands
+    // synchronously, then the NEW value must commit PROMPTLY — never
+    // after the 60s cadence.
+    runner.setConfig({ ...CONFIG, refreshIntervalMs: 60000, timeoutMs: 10000, command: 'node -e "process.stdout.write(\'new\\n\')"' })
+    const deadline2 = Date.now() + 5000
+    while (!outputs.some(rows => rows?.[0] === 'new') && Date.now() < deadline2) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.ok(outputs.some(rows => rows?.[0] === 'new'),
+      `the new command must run promptly after a config change (got ${JSON.stringify(outputs)})`)
+    // The old generation must never commit after the change.
+    const oldAfterChange = outputs.slice(1).some(rows => rows?.[0] === 'old')
+    assert.equal(oldAfterChange, false, 'the old generation must never commit under the new config')
+  } finally {
+    runner.dispose()
+  }
+})

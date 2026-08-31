@@ -17,7 +17,7 @@ import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 import type { FooterLayoutV1 } from '../src/footer/types.ts'
 import type { FooterCustomItemSettings } from '../src/footer/custom-items.ts'
-import { FooterDynamicItemRuntime, activeFooterItemIds } from '../src/footer/dynamic-item-runtime.ts'
+import { FooterDynamicItemRuntime, activeFooterItemIds, trustedActivationLayout } from '../src/footer/dynamic-item-runtime.ts'
 import { serializeTuiSettingsMutation } from '../src/runtime/config-port.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
@@ -49,14 +49,16 @@ function wireRuntimeApply(app: TuiApp): FooterDynamicItemRuntime {
 }
 
 /** The PR D part of the real applyFooterSettings: sync the runtime with
- * the trusted (saved) command definitions + the active layout's ids. */
+ * the trusted (saved) command definitions + the TRUSTED activation layout
+ * (a /footer save's validated layout; nothing else is activatable in
+ * these tests — no USER-layer layout is wired). */
 function syncRuntimeApply(
   runtime: FooterDynamicItemRuntime,
-  app: TuiApp,
   savedCustomItems: readonly FooterCustomItemSettings[] | undefined,
+  savedLayout: FooterLayoutV1 | undefined,
 ): void {
   const trusted = (savedCustomItems ?? []).filter((item): item is import('../src/footer/custom-items.ts').FooterCustomCommandItemSettings => item.kind === 'command')
-  runtime.sync(trusted, activeFooterItemIds(app.getEffectiveFooterLayout()))
+  runtime.sync(trusted, activeFooterItemIds(trustedActivationLayout(savedLayout, undefined)))
 }
 
 /** A fake commands service capturing registrations. */
@@ -1128,7 +1130,7 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
           app.setFooterPreset('full')
           app.setFooterLayout(d.footerLayout as never)
         }
-        syncRuntimeApply(runtime, app, savedCustomItems)
+        syncRuntimeApply(runtime, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
       },
     }
     registerTuiCommands(runner)
@@ -1240,7 +1242,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
           app.setFooterPreset('full')
           app.setFooterLayout(d.footerLayout as never)
         }
-        syncRuntimeApply(runtime, app, savedCustomItems)
+        syncRuntimeApply(runtime, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
       },
     }
     registerTuiCommands(runner)
@@ -1338,7 +1340,7 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
           app.setFooterPreset('full')
           app.setFooterLayout(d.footerLayout as never)
         }
-        syncRuntimeApply(runtime, app, savedCustomItems)
+        syncRuntimeApply(runtime, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
       },
     }
     registerTuiCommands(runner)

@@ -84,6 +84,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     footerCommandTrust: {
       userFooterMode: undefined,
       command: undefined,
+      userFooterLayout: undefined,
     },
     footerCustomItems: {
       get: () => ({ items: [], invalidCount: 0 }),

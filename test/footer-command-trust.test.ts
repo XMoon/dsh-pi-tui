@@ -227,3 +227,37 @@ test('TuiSettingsDoc round-trip: a whole-document replace never wipes the truste
   assert.deepEqual(reread.footerCustomItems, footerCustomItems,
     'footerCustomItems must survive a whole-document replace')
 })
+
+test('the USER-layer layout projection is the ONLY activation source (PR D activation trust)', async () => {
+  const userLayout = { schemaVersion: 1, rows: [{ left: [{ id: 'user:clock' }], right: [] }] }
+  const port = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      // The PROJECT (merged) layer supplies a custom layout referencing
+      // user:clock; the USER layer declares footer: default and no layout.
+      value: { footer: 'custom', footerLayout: userLayout },
+      user: { footer: 'default' },
+    }] }),
+  } as never, undefined, () => undefined)
+  assert.equal(port.footerCommandTrust.userFooterLayout, undefined,
+    'a project merged layout must never surface as the USER-layer activation layout')
+
+  // The USER layer declaring custom + a valid layout IS the activation.
+  const userPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'custom', footerLayout: userLayout },
+      user: { footer: 'custom', footerLayout: userLayout },
+    }] }),
+  } as never, undefined, () => undefined)
+  assert.deepEqual(userPort.footerCommandTrust.userFooterLayout, userLayout)
+
+  // An INVALID user layout activates nothing (fail-safe).
+  const invalidPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      user: { footer: 'custom', footerLayout: { schemaVersion: 1, rows: 'junk' } },
+    }] }),
+  } as never, undefined, () => undefined)
+  assert.equal(invalidPort.footerCommandTrust.userFooterLayout, undefined)
+})

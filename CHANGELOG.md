@@ -26,9 +26,13 @@
   `+ Create Custom Command`，创建/编辑流程覆盖 Name → Command → Refresh
   （默认 5s）→ Timeout（默认 300ms）→ Tone；Item Editor 提供
   Command/Refresh/Timeout/Default tone/Rename/Delete。
-- **命令只从 USER-layer trusted 来源激活。** `ConfigPort.footerCustomItems.get()`
-  或 `/footer` 保存成功后的 validated 结果才是可执行来源；project/merged 配置
-  永远无法触发命令（未保存 draft 与保存失败的新命令同样永不执行）。
+- **命令只从 USER-layer trusted 来源激活（definition trust + activation trust）。**
+  `ConfigPort.footerCustomItems.get()` 或 `/footer` 保存成功后的 validated 结果才是
+  可执行定义来源；可执行 id = USER trusted 定义 ∩ USER trusted active layout
+  （`ConfigPort.footerCommandTrust.userFooterLayout`，或 `/footer` 保存的
+  validated layout）。project/merged 配置既不能提供命令字符串，也不能通过
+  merged layout 激活用户 dormant 的 command item（未保存 draft 与保存失败的
+  新命令同样永不执行）。
 - **新增 client-local `FooterDynamicItemRuntime`。** 只为 active layout 引用的
   command item 建 runner（复用 whole-footer `FooterCommandRunner` 的
   spawn/shell/stdin/timeout/refresh/generation/sanitize/process-tree-kill），

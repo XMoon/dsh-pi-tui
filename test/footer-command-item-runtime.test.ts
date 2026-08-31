@@ -14,8 +14,8 @@ import test from 'node:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FooterDynamicItemRuntime, activeFooterItemIds, customCommandConfigOf } from '../src/footer/dynamic-item-runtime.ts'
-import { DEFAULT_CUSTOM_COMMAND_REFRESH_MS, type FooterCustomCommandItemSettings } from '../src/footer/custom-items.ts'
+import { FooterDynamicItemRuntime, activeFooterItemIds, trustedActivationLayout } from '../src/footer/dynamic-item-runtime.ts'
+import { customCommandConfigOf, DEFAULT_CUSTOM_COMMAND_REFRESH_MS, effectiveCustomCommandRefreshMs, effectiveCustomCommandTimeoutMs, type FooterCustomCommandItemSettings } from '../src/footer/custom-items.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import type { FooterLayoutV1 } from '../src/footer/types.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
@@ -87,6 +87,39 @@ test('an ABSENT refreshIntervalMs runs at the custom 5s default (same cadence as
   // The timeout default stays the whole-footer 300ms.
   assert.equal(absent?.timeoutMs, 300)
   assert.equal(absent?.maxRows, 1)
+})
+
+test('the EFFECTIVE helpers report the SAME normalized values the runner executes (no UI/runtime drift)', () => {
+  // A hand-edited out-of-range raw value is preserved in storage, but the
+  // effective value (UI display + dirty comparator) must equal the
+  // runner's clamped config — the UI never lies about the real cadence.
+  const clamped = { schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date', refreshIntervalMs: 100, timeoutMs: 5000 }
+  assert.equal(effectiveCustomCommandRefreshMs(clamped), 1000, 'refresh < 1s clamps to 1s')
+  assert.equal(effectiveCustomCommandTimeoutMs(clamped), 1000, 'timeout > 1s clamps to 1s')
+  assert.equal(customCommandConfigOf(clamped)?.refreshIntervalMs, 1000)
+  assert.equal(customCommandConfigOf(clamped)?.timeoutMs, 1000)
+  const lowTimeout = { schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date', timeoutMs: 0 }
+  assert.equal(effectiveCustomCommandTimeoutMs(lowTimeout), 1, 'timeout < 1ms clamps to 1ms')
+  // In-range values pass through unchanged.
+  const inRange = { schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date', refreshIntervalMs: 10000, timeoutMs: 500 }
+  assert.equal(effectiveCustomCommandRefreshMs(inRange), 10000)
+  assert.equal(effectiveCustomCommandTimeoutMs(inRange), 500)
+})
+
+test('a config change re-arms IMMEDIATELY even with a long refresh cadence (no 60s wait)', async () => {
+  const { runtime, values } = harness()
+  try {
+    const old = item('user:clock', 'process.stdout.write("old\\n")', { refreshIntervalMs: 60000 })
+    runtime.sync([old], new Set(['user:clock']))
+    await waitFor(() => values.get('user:clock') === 'old')
+    // Change the command: the new value must arrive PROMPTLY — the 60s
+    // cadence of the old config must not delay the first run of the new
+    // command (the item would otherwise be unavailable for ~a minute).
+    runtime.sync([item('user:clock', 'process.stdout.write("new\\n")', { refreshIntervalMs: 60000 })], new Set(['user:clock']))
+    await waitFor(() => values.get('user:clock') === 'new', 5000)
+  } finally {
+    runtime.dispose()
+  }
 })
 
 test('duplicate trusted definitions are FIRST-wins (the catalog projection wins)', async () => {
@@ -319,6 +352,69 @@ test('a project-only command definition never spawns (the trust gate, plan §11.
     await spin(300)
     assert.equal(existsSync(marker), false, 'the project command must never run')
     assert.equal(values.get('user:clock'), undefined, 'the item must stay unavailable')
+    runtime.dispose()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1 regression: a PROJECT merged layout can never activate a dormant USER command', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-activation-'))
+  const marker = join(dir, 'pwn')
+  try {
+    // The ATTACK SHAPE: the USER layer defines user:deploy (a real,
+    // trusted command) but its own layout does NOT reference it — the
+    // command is DORMANT. The PROJECT layer supplies footer: custom +
+    // a merged layout that references user:deploy.
+    const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
+    const projectLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
+    const port = new DirectConfigPort({
+      get: () => ({ describe: () => [{
+        ns: 'dsh-pi-tui',
+        value: { footer: 'custom', footerLayout: projectLayout, footerCustomItems: [userCommand] },
+        user: { footer: 'default', footerCustomItems: [userCommand] },
+      }] }),
+    } as never, undefined, () => undefined)
+    const trusted = port.footerCustomItems.get().items
+    assert.equal(trusted.length, 1, 'the USER command definition itself is trusted')
+    // The activation layout is the USER layer's declared layout: the user
+    // declares footer: default, so there is NO custom layout — the
+    // PROJECT merged layout's user:deploy ref can never arm the dormant
+    // command.
+    const activation = trustedActivationLayout(undefined, port.footerCommandTrust.userFooterLayout)
+    assert.equal(activation, undefined, 'the USER layer declares no custom layout')
+    const { runtime, values } = harness()
+    runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), activeFooterItemIds(activation))
+    await spin(300)
+    assert.equal(existsSync(marker), false, 'a PROJECT layout must never activate a dormant USER command')
+    assert.equal(values.get('user:deploy'), undefined, 'the runner must not arm')
+    runtime.dispose()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1 positive: a USER-declared custom layout DOES activate its command items', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-activation-ok-'))
+  const marker = join(dir, 'pwn')
+  try {
+    const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
+    const userLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
+    const port = new DirectConfigPort({
+      get: () => ({ describe: () => [{
+        ns: 'dsh-pi-tui',
+        value: { footer: 'custom', footerLayout: userLayout, footerCustomItems: [userCommand] },
+        user: { footer: 'custom', footerLayout: userLayout, footerCustomItems: [userCommand] },
+      }] }),
+    } as never, undefined, () => undefined)
+    const trusted = port.footerCustomItems.get().items
+    const activation = trustedActivationLayout(undefined, port.footerCommandTrust.userFooterLayout)
+    assert.ok(activation, 'the USER layer declares a custom layout')
+    const { runtime } = harness()
+    runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), activeFooterItemIds(activation))
+    const deadline = Date.now() + 8000
+    while (!existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
+    assert.equal(existsSync(marker), true, 'a USER-declared layout must activate its command items')
     runtime.dispose()
   } finally {
     rmSync(dir, { recursive: true, force: true })
