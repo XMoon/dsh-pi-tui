@@ -50,6 +50,28 @@ dsh --profile pi-tui
 需要保留 DSH `0.1.1-rc.2` 的用户应改用 `@xmoon76/dsh-pi-tui@0.3`，不要
 把 `@next` 与旧运行时混用。完整版本矩阵和更新/卸载命令见 README 的「安装」。
 
+## [0.3.6] - 2026-08-31
+
+### 新增
+
+- **`@` 提及与 `/image` 参数现在共用统一的文件补全引擎。** 两种入口共享路径解析、排序、引号和目录续补逻辑，同时保留 `@` 的 Host 文件范围与 `/image` 的本地文件范围。补全支持带空格的引号路径、CJK 相邻文本、Windows 分隔符与 `fd`/回退扫描；异步结果遇到输入、会话或作用域变化时会安全丢弃，不会覆盖较新的下拉框。
+- **长会话支持有界的转录窗口。** 全屏下可以按重叠页面浏览较旧或较新的回合，并用 `Ctrl+End` 跳回最新输出；搜索、切换子代理和回到实时尾部会保留正确的窗口锚点与跟随状态。冷恢复改用批量 hydration 与线性分组，渲染不再为每一帧物化完整历史。
+- **提交现在有即时反馈与可观测的延迟时间线。** 编辑器清空到 DSH 首个权威事件之间会显示 `Submitting…` 或 `Queued…`，调试诊断会记录从接受、派发、入队/回合开始、`user.message` 到首个 assistant chunk 的阶段耗时；这只是状态反馈，不会制造伪造的 transcript 行。
+- **新增双模式本地开发工具链。** `dev:doctor` 只读检查当前 worktree，`dev:bootstrap` 幂等修复依赖，`dev:shell` 进入 source-mode 环境；main 的 registry 模式与 next 的精确 SHA source 模式各自维护独立的 `node_modules` 与可复用的 source-pack 缓存。
+
+### 变更
+
+- **`/footer` 保存流程改为可发现且事务化。** Row Selector 新增 `Save changes` 与 `Unsaved / No changes / Saving…` 状态；脏状态下按 `Esc` 会先确认 Save & Exit、Discard & Exit 或 Keep Editing。保存会等待设置写入成功后才关闭，失败时保留编辑内容并允许继续修正。
+- **会话写入安全模型改为 fail-closed。** 删除提交前全量 divergence guard 与一次性 force-through 路径；可写 Session 必须先取得 owner lock，并由 process lease、cooling verifier 与 operation barrier 共同维护单写者边界，避免每次提交重读整个日志和提供可能破坏日志的强制写入。
+
+### 修复
+
+- **异步补全结果始终重绘当前活动屏幕。** 全屏切换期间，晚到的 autocomplete 提交不再只写入已停止的主屏幕；新请求、旧请求和取消路径也不会互相覆盖。
+- **Footer 在窄终端、全屏切换与 command surface 下遵守真实可用预算。** 逻辑行最多占两条物理行，Host 指令会独立保留；零预算、不可见指令、非有限尺寸和 ANSI 彩色输出都会走有限且安全的布局/截断路径，不再出现黑边、越界或隐藏提示。
+- **转录窗口切换、搜索和实时跟随不再丢失 viewport 锚点。** 翻页或摘要重放后会恢复用户正在看的顶部/底部内容；统计 replay 也按当前生命周期隔离，迟到的旧回合事件不会污染新状态。
+
+> **已知限制：** 当前生产默认后端仍为 Direct；M2–M8 尚未完成，因此暂不支持 remote attach。
+
 ## [0.3.5] - 2026-08-28
 
 ### 新增
@@ -1205,6 +1227,7 @@ dsh --profile pi-tui
 
 [Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...HEAD
 [0.4.0-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...next-v0.4.0-alpha.1
+[0.3.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.2...v0.3.3
