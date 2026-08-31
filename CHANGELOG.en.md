@@ -26,6 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **New client-local `FooterDynamicItemRuntime`.** It arms one runner per command item the active layout references (reusing the whole-footer `FooterCommandRunner`'s spawn/shell/stdin/timeout/refresh/generation/sanitize/process-tree-kill), caching the first non-empty sanitized output line; `FooterItemDefinition.render()` reads the cache synchronously and the render path never spawns. Removing/hiding/renaming an item or entering whole-footer command mode disposes the runner and clears the cache immediately; multiple command items are isolated.
 - **`FooterLayoutV1`, perRow=2 / hard total=4, the Host Instruction and the public extension ABI are unchanged.**
 
+### UX improvements
+
+#### Changed
+
+- **Focus expanded view preserves user steer chronology.** Inside an expanded Thought the initial user stays before the Thought, later steers/users return to their actual chronological position (after the tool, after the thinking, …), and the final assistant remains the last settled answer; the collapsed summary semantics are unchanged.
+- **Focus compact Message is the third process slot and shows the latest up to three visual rows.** The slot order is Think → Tool → Message; the Message body is re-wrapped to the current width on every render and cut to the newest three rows, so streaming appends roll toward the latest tail and a resize re-wraps.
+- **The fullscreen mouse-wheel step is configurable.** `/settings` gains a `Mouse wheel lines` row (1/2/3/5/8, default 1) applied through the existing `TuiAltScreenOptions.wheelScrollLines`; a change while fullscreen is active takes effect on the next fullscreen re-entry.
+- **The todo panel skips a redundant full state when five or fewer items exist.** The state machine becomes a two-state summary ↔ list (the second click closes the panel); with more than five items the three-state summary → compact(5) → full(N) → summary stays, and a >5 → ≤5 shrink automatically clears a ghost `todoExpanded`.
+
+#### Fixed
+
+- **Explicit cold resume shows startup progress before the TUI mounts.** `dsh --profile <p> --session <id>` now prints a single-line `Resuming session…` (and `Preparing conversation…` when needed) before mount and clears it completely before the first frame, so the blank terminal no longer reads as a hang; fresh starts emit nothing and non-TTY output stays silent.
+
 ### Migration notes
 
 - **0.4.0-alpha.1 moves to DeepSeek Harness 0.1.2.** The declared support range

@@ -511,6 +511,7 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
   }
 })
 
+
 test('switching between two old Sessions restores each Session own model', async () => {
   const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-runner-switch-'))
   const previousHome = process.env.DSH_HOME
@@ -557,10 +558,12 @@ test('/new without an explicit default intent observes the persisted default, ne
   const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-runner-new-default-'))
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
+
   const probe = installProbe()
   let context: Context | undefined
   let fiber: { dispose: () => Promise<unknown> } | undefined
   try {
+
     const resumed: FakeSession = {
       id: 'new-default-session',
       header: { id: 'new-default-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
@@ -875,6 +878,63 @@ test('a live /model choice survives an immediate exit and resume', async () => {
   }
 })
 
+test('startup applies the persisted wheel step BEFORE the first fullscreen mount', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-wheel-startup-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+
+  const probe = installProbe()
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  try {
+
+    // A long transcript so the first fullscreen frame can scroll.
+    const longText = Array.from({ length: 60 }, (_, index) => `line ${index}`).join('\n')
+    const resumed: FakeSession = {
+      id: 'wheel-startup-session',
+      header: { id: 'wheel-startup-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+      events: sessionEvents(longText),
+    }
+    const harness = makeHarness(home, resumed)
+    context = new Context()
+    // A settings service carrying the persisted wheel step AND fullscreen
+    // 'on': the runner must hand the step to the app BEFORE the first
+    // alt-screen mount (the fork reads it at construction).
+    const doc: Record<string, unknown> = {
+      theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'on',
+      busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
+      focusMode: 'off', wheelScrollLines: '8',
+    }
+    context.provide('settings', {
+      register: () => ({
+        get: () => ({ ...doc }),
+        replace: async (next: Record<string, unknown>) => { Object.assign(doc, next) },
+      }),
+    } as never)
+    fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+    const app = probe.apps.at(-1)
+    assert.ok(app, 'the production runner must create a TuiApp')
+    await vt.waitForRender()
+    const bottom = app.fullscreenScrollForTest()
+    assert.ok(bottom !== undefined && bottom.maxScrollTop > 0, 'precondition: scrollable transcript')
+    vt.sendInput('\x1b[<64;50;10M') // wheel up over the transcript pane
+    await vt.waitForRender()
+    const after = app.fullscreenScrollForTest()
+    assert.equal(after?.scrollTop, bottom.maxScrollTop - 8,
+      'the FIRST fullscreen mount must already use the persisted wheel step (apply before setFullscreen)')
+  } finally {
+    if (fiber !== undefined) await fiber.dispose()
+    if (context !== undefined) await disposeContext(context)
+    probe.restore()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+
 test('live repaint preserves manual scrolling in the latest window', async () => {
   const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-live-follow-'))
   const previousHome = process.env.DSH_HOME
@@ -944,6 +1004,104 @@ test('live repaint preserves manual scrolling in the latest window', async () =>
     if (context !== undefined) await disposeContext(context)
     probe.restore()
     restoreTerminal()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('explicit cold resume shows the pre-mount status and clears it before mount; fresh start stays silent', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-startup-status-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const probe = installProbe()
+  // Capture the runner's DIRECT stdout writes (the status seam). The TUI
+  // itself writes through the ProcessTerminal, so filtering for the status
+  // strings isolates exactly the pre-mount status lines.
+  const stdoutWrites: string[] = []
+  const originalWrite = process.stdout.write.bind(process.stdout)
+  process.stdout.write = ((text: unknown) => {
+    stdoutWrites.push(String(text))
+    return true
+  }) as typeof process.stdout.write
+  // The status seam is TTY-gated: force the test runner's piped stdout to
+  // look interactive so the wiring is exercised (the pure helper tests
+  // cover the non-TTY silence).
+  const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
+  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true })
+  let resumeContext: Context | undefined
+  let deferredContext: Context | undefined
+  let failContext: Context | undefined
+  let resumeFiber: { dispose: () => Promise<unknown> } | undefined
+  let deferredFiber: { dispose: () => Promise<unknown> } | undefined
+  let failFiber: { dispose: () => Promise<unknown> } | undefined
+  try {
+    const resumed: FakeSession = {
+      id: 'startup-status-session',
+      header: { id: 'startup-status-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+      events: sessionEvents('resumed answer'),
+    }
+    const resumeHarness = makeHarness(home, resumed)
+    resumeContext = new Context()
+    resumeFiber = await mountRunner(resumeContext, home, resumeHarness, { sessionId: resumed.id }, { sessionId: resumed.id })
+    const statusWrites = stdoutWrites.filter(write =>
+      write.includes('Resuming session') || write.includes('Preparing conversation') || write === '\r\x1b[2K')
+    assert.ok(statusWrites.some(write => write.includes('Resuming session…')),
+      `the resume status must be written before mount: ${JSON.stringify(statusWrites)}`)
+    assert.ok(statusWrites.some(write => write.includes('Preparing conversation…')),
+      `the preparing stage must replace the resume line: ${JSON.stringify(statusWrites)}`)
+    const showIndexes = statusWrites
+      .map((write, index) => write.includes('Resuming') || write.includes('Preparing') ? index : -1)
+      .filter(index => index >= 0)
+    const clearIndex = statusWrites.findIndex(write => write === '\r\x1b[2K')
+    assert.ok(clearIndex > showIndexes[showIndexes.length - 1]!,
+      `the status must be cleared after the last show (before mount): ${JSON.stringify(statusWrites)}`)
+    // The resume lifecycle is untouched: exactly one hydration, no extra
+    // transcript rows.
+    assert.equal(probe.transcriptHydrateCount, 1)
+    assert.equal(probe.statsHydrateCount, 1)
+    assert.equal(probe.transcriptApplyCount, 1)
+
+    await resumeFiber.dispose()
+    await disposeContext(resumeContext)
+    resumeFiber = undefined
+    resumeContext = undefined
+
+    // A fresh (deferred) start must not emit the resume status.
+    stdoutWrites.length = 0
+    const deferredHarness = makeHarness(home)
+    deferredContext = new Context()
+    deferredFiber = await mountRunner(deferredContext, home, deferredHarness, {}, {})
+    assert.ok(!stdoutWrites.some(write => write.includes('Resuming session')),
+      `a fresh start must stay silent: ${JSON.stringify(stdoutWrites)}`)
+
+    await deferredFiber.dispose()
+    await disposeContext(deferredContext)
+    deferredFiber = undefined
+    deferredContext = undefined
+
+    // A FAILED resume also clears the status (the surface starts
+    // sessionless — no stale line may survive).
+    stdoutWrites.length = 0
+    const failHarness = makeHarness(home) // no persisted session
+    failContext = new Context()
+    failFiber = await mountRunner(failContext, home, failHarness, { sessionId: 'missing-session' }, { sessionId: 'missing-session' })
+    const failWrites = stdoutWrites.filter(write => write.includes('Resuming session') || write === '\r\x1b[2K')
+    assert.ok(failWrites.some(write => write.includes('Resuming session…')),
+      `the failed resume still shows the status: ${JSON.stringify(failWrites)}`)
+    assert.ok(failWrites.some(write => write === '\r\x1b[2K'),
+      `the failed resume clears the status: ${JSON.stringify(failWrites)}`)
+  } finally {
+    if (resumeFiber !== undefined) await resumeFiber.dispose()
+    if (deferredFiber !== undefined) await deferredFiber.dispose()
+    if (failFiber !== undefined) await failFiber.dispose()
+    if (resumeContext !== undefined) await disposeContext(resumeContext)
+    if (deferredContext !== undefined) await disposeContext(deferredContext)
+    if (failContext !== undefined) await disposeContext(failContext)
+    probe.restore()
+    process.stdout.write = originalWrite
+    if (originalIsTTY === undefined) delete (process.stdout as { isTTY?: boolean }).isTTY
+    else Object.defineProperty(process.stdout, 'isTTY', originalIsTTY)
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     rmSync(home, { recursive: true, force: true })

@@ -136,6 +136,8 @@ import { ImageInputError } from './image/errors.ts'
 import { clipboardBackendOf, commandOnPath, createClipboardRunner, readClipboardImage, type ClipboardEnvironment } from './image/clipboard.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from './clipboard.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
+import { wheelScrollLinesOf } from './wheel-scroll.ts'
+import { createStartupStatus } from './startup-status.ts'
 import { iconStyleOf } from './icons.ts'
 import { checkImageLimits } from './image/intake.ts'
 import { ImageLoadError } from './image/errors.ts'
@@ -1534,6 +1536,10 @@ export function apply(ctx: Context, config: Config): void {
         // Focus Mode: 'on' collapses turn-intermediate activity into a
         // live Thought block (default 'off' — Focus OFF == current UI).
         focusMode: z.string(),
+        // Fullscreen mouse-wheel step: '1' (default) | '2' | '3' | '5' |
+        // '8' — the transcript lines moved per wheel event. A Client
+        // preference; wheelScrollLinesOf is the single parsing authority.
+        wheelScrollLines: z.string(),
         // Icon style: 'emoji' (default) or 'symbols' — the first-party
         // structural icon palette (see src/icons.ts). A persisted invalid
         // value fails safe to emoji at consumption.
@@ -1552,7 +1558,7 @@ export function apply(ctx: Context, config: Config): void {
       // The base layout is the builtin default; the schemastery output
       // type is fully-populated, so the cast bridges the sparse literal
       // (the runtime validation accepts missing optional fields).
-      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCustomItems: undefined as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off' } },
+      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCustomItems: undefined as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1' } },
     )
     // The ONE authoritative Focus runtime state (plan §5): restored from
     // the persisted document BEFORE the first compose/resume below, mutated
@@ -1869,8 +1875,24 @@ export function apply(ctx: Context, config: Config): void {
     // sessionless (the next input creates a new session); the failure is
     // surfaced as a notify line.
     let resumeFailure: string | undefined
+    // Pre-mount startup status (explicit resume only): the resume
+    // transaction (preflight, lock, DSH resume) and the whenIdle/catalog
+    // barrier run BEFORE the TUI mounts — a single-line TTY hint keeps
+    // the blank terminal from reading as a hang. Pure presentation: it
+    // never owns lifecycle state, and every teardown path (success,
+    // resume reject, abort/signal, HMR unload, startup exception) clears
+    // it — the abort listener covers the teardown paths, the explicit
+    // clear covers the success path.
+    const startupStatus = createStartupStatus({
+      isTTY: process.stdout.isTTY === true,
+      write: (text) => process.stdout.write(text),
+    })
+    lifecycleController.signal.addEventListener('abort', () => startupStatus.clear(), { once: true })
     let handle: SessionHandle | undefined
     if (sessionId !== undefined) {
+      // The explicit-resume path is the ONLY pre-mount wait worth
+      // explaining: deferred / sessionless starts have nothing to resume.
+      startupStatus.show('Resuming session…')
       try {
         // The lock file lives next to the session log, whose path needs the
         // session's stored cwd: resolve the header first (best-effort — an
@@ -1988,6 +2010,10 @@ export function apply(ctx: Context, config: Config): void {
       // The committed live session's lease becomes ACTIVE (a successful
       // launch resume must not stay TOUCHED — review round 32).
       leaseManager.markActive(liveAgent.session.id)
+      // The resume transaction succeeded; the remaining pre-mount wait is
+      // the conversation preparation (whenIdle + catalog barrier) — the
+      // second status stage replaces the first in place.
+      startupStatus.show('Preparing conversation…')
       await liveAgent.whenIdle()
     }
     // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
@@ -4532,6 +4558,9 @@ export function apply(ctx: Context, config: Config): void {
       isTTY: () => process.stdout.isTTY === true,
       writeOsc52: (text) => process.stdout.write(buildOsc52Sequence(text, (process.env.TMUX ?? '').length > 0)),
     }
+    // The TUI is about to mount: the pre-mount status line must be gone
+    // before the first frame (no stale scrollback line after mount).
+    startupStatus.clear()
     app = startProcessTui({
       onSubmit: (text) => dispatchUserInput(text),
       // The image-only submit gate (plan §11.1): an empty-text draft with
@@ -5456,6 +5485,11 @@ export function apply(ctx: Context, config: Config): void {
     // fullscreen frame so the first frame and later behavior agree (plan
     // §4.8); an invalid persisted value falls back to `viewport`.
     applyHomeEndKeyMode(homeEndKeysModeOf(tuiSettings?.get().homeEndKeys))
+    // The wheel step is a constructor-time alt-screen option: hand the
+    // preference to the app BEFORE the first fullscreen entry, or the
+    // first alt screen would still scroll 1 line per wheel event (the
+    // order matters — never apply after setFullscreen).
+    app.setWheelScrollLines(wheelScrollLinesOf(tuiSettings?.get().wheelScrollLines))
     if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)
     const storedTheme = tuiSettings?.get().theme
     if (storedTheme === 'auto') {
@@ -7012,6 +7046,8 @@ export function apply(ctx: Context, config: Config): void {
     }
     // Startup failure: cancel every in-flight lifecycle load, then tear
     // down. (The runner-internal cleanup() never ran — the body threw.)
+    // The pre-mount status line is cleared by the lifecycle abort
+    // listener registered at startup (idempotent).
     try {
       lifecycleController.abort()
     } catch {
