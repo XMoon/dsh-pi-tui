@@ -36,6 +36,7 @@ import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SkillRegistry, { type SkillProvider } from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -78,6 +79,9 @@ async function mountRuntime(): Promise<Context> {
   await ctx.plugin(AgentLoop)
   await ctx.plugin(CommandRuntime)
   await ctx.plugin(SkillRegistry, {})
+  // alpha.2 agent-presets registers its projection unit at construction and
+  // requires the shared projection registry to be composed first.
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentPresets, {
     default: 'fixture',
     roots: [{ path: FIXTURE_ROOT, trust: 'system' }],

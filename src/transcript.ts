@@ -17,11 +17,11 @@
  */
 
 import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, SessionHeader, JsonValue } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
 import type { IconSemantic } from './icons.ts'
-import { firstLine, latestLine } from './present.ts'
+import { firstLine, latestLine, type JsonValue } from './present.ts'
 import { StepUsageAccumulator, totalTokens, type TokenUsageTotals } from './token-usage.ts'
 // Load the official command event declarations.
 import type {} from '@deepseek-ai/dsh-commands'

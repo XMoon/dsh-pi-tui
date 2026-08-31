@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 
 const OFFICIAL_IDS = ['standard', 'ptc', 'minimal', 'cordis'] as const
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -80,6 +81,10 @@ test('DSH owns the complete official shipped preset roster', async () => {
   const loader = ctx.plugin(Loader)
   await loader
   ctx.baseUrl = pathToFileURL(`${process.cwd()}/`).href
+  // alpha.2 agent-presets registers its projection unit at construction and
+  // requires the shared projection registry to be composed first.
+  const projectionsFiber = ctx.plugin(SessionProjectionRegistry)
+  await projectionsFiber
   const presetsFiber = ctx.plugin(AgentPresets, {
     default: 'standard',
     roots: [],
@@ -105,6 +110,6 @@ test('DSH owns the complete official shipped preset roster', async () => {
     // package-only test does not install every Host plugin named by the
     // official rows. The real-profile smoke is the blocking mount check.
   } finally {
-    await dispose([presetsFiber, loader])
+    await dispose([presetsFiber, projectionsFiber, loader])
   }
 })

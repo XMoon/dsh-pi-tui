@@ -1,11 +1,12 @@
 /**
  * Access status derivation (plan §4.2): the effective permission preset,
  * the sandbox mode and the approval policy are INDEPENDENT facts. The
- * preset is the official `permissionPresets.current(events)` resolution;
- * the sandbox mode comes from the official sandbox policy service (or the
- * official fold); the approval policy comes from the official approval
- * fold. Nothing is guessed from preset names, runner names or platform
- * names, and `custom` is a neutral unmatched combination — never danger.
+ * preset is the official `permissionPresets.current(session)` resolution
+ * (alpha.2 reads the session's knob state); the sandbox mode comes from
+ * the official sandbox policy service (or the official fold); the approval
+ * policy comes from the official approval fold. Nothing is guessed from
+ * preset names, runner names or platform names, and `custom` is a neutral
+ * unmatched combination — never danger.
  *
  * The module is generic over the event type so it stays free of Host type
  * imports (the boundary gate): the runner instantiates it with the real
@@ -16,8 +17,8 @@
 import type { AccessStatus } from './types.ts'
 
 /** The official permission-presets service surface (structural). */
-export interface PermissionPresetsLike<E> {
-  current(events: readonly E[]): string
+export interface PermissionPresetsLike {
+  current(session: unknown): string
   optionOf(name: string): { name: string; label?: string }
 }
 
@@ -31,7 +32,7 @@ export type ApprovalFold<E> = (events: readonly E[]) => 'ask' | 'never' | undefi
 
 /** The derivation inputs; every service is optional (capability-gated). */
 export interface AccessDeriveDeps<E> {
-  permissionPresets?: PermissionPresetsLike<E>
+  permissionPresets?: PermissionPresetsLike
   sandboxPolicy?: SandboxPolicyLike
   approvalFold?: ApprovalFold<E>
   /** The official sandbox fold (dsh-sandbox-policy's effectiveSandboxMode),
@@ -75,9 +76,9 @@ export function deriveAccessStatus<E>(
   } = {}
 
   const presets = deps.permissionPresets
-  if (presets !== undefined) {
+  if (presets !== undefined && session !== undefined) {
     try {
-      const id = presets.current(events)
+      const id = presets.current(session)
       const option = presets.optionOf(id)
       status.permissionPreset = {
         id,

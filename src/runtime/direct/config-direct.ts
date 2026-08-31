@@ -17,7 +17,6 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { CredentialKey, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   AuthorizationDeclinedError,
@@ -144,13 +143,13 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   get userFooterMode(): string | undefined {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
-    return resolveUserLayerFooterMode([descriptor], settingsNamespace('dsh-pi-tui'))
+    return resolveUserLayerFooterMode([descriptor], 'dsh-pi-tui')
   }
 
   get command() {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
-    return resolveTrustedFooterCommand([descriptor], settingsNamespace('dsh-pi-tui'))
+    return resolveTrustedFooterCommand([descriptor], 'dsh-pi-tui')
   }
 
   /** One describe() read per synchronous evaluation: the two getters are
@@ -160,7 +159,7 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
     if (this.descriptorCache !== null) return this.descriptorCache
     const settings = this.ctx.get('settings') as { describe?(): readonly SettingsDescriptorLike[] | undefined } | undefined
     const descriptors = settings?.describe?.()
-    const found = descriptors?.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
+    const found = descriptors?.find(entry => entry.ns === 'dsh-pi-tui')
     this.descriptorCache = found ?? undefined
     // The cache is per-synchronous-evaluation only: reset on the next
     // macrotask so a settings change is picked up.
@@ -205,7 +204,7 @@ class DirectFooterCustomItems implements FooterCustomItemsConfig {
       if (settings === undefined || typeof settings.describe !== 'function') return { value: undefined, failed: true }
       const descriptors = settings.describe()
       if (descriptors === undefined) return { value: undefined, failed: true }
-      const descriptor = descriptors.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
+      const descriptor = descriptors.find(entry => entry.ns === 'dsh-pi-tui')
       if (descriptor === undefined) return { value: undefined, failed: true }
       const user = descriptor.user
       if (user === undefined) return { value: undefined, failed: false }
@@ -234,7 +233,7 @@ const PROVIDER_ROUTE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 function isKeylessProfileSlot(ns: string, path: readonly string[], route: string): boolean {
   return route !== 'deepseek-official'
     && PROVIDER_ROUTE_PATTERN.test(route)
-    && ns === settingsNamespace('llm-pi-ai')
+    && ns === 'llm-pi-ai'
     && path.length === 2 && path[0] === 'providers' && path[1] === route
 }
 
@@ -293,7 +292,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
 
   /** The llm-pi-ai `providers` dict (route → apiKeyEnv), detached. */
   private readPiAiProvidersInternal(): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
-    const section = this.readSectionInternal(settingsNamespace('llm-pi-ai')) as
+    const section = this.readSectionInternal('llm-pi-ai') as
       | { providers?: Record<string, { apiKeyEnv?: string } | undefined> }
       | undefined
     if (section === undefined || typeof section !== 'object' || section === null) return undefined
@@ -341,7 +340,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
         // branch applies (the conventional `providers.<route>` slot): a
         // hostile providers key that fails the route pattern (or the
         // builtin) is never advertised as writable.
-        canProvisionProfile: isKeylessProfileSlot(settingsNamespace('llm-pi-ai'), ['providers', route], route),
+        canProvisionProfile: isKeylessProfileSlot('llm-pi-ai', ['providers', route], route),
       }
     })
   }
@@ -350,7 +349,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
     if (!PROVIDER_ROUTE_PATTERN.test(route)) throw new Error('invalid provider route')
-    await settings.mutate(settingsNamespace('llm-pi-ai'), [
+    await settings.mutate('llm-pi-ai', [
       { op: 'set', path: ['providers', route], value: profile },
     ])
   }
@@ -385,7 +384,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     // conventional llm-pi-ai slot apply.
     const llm = this.llm()
     if (llm === undefined) {
-      await settings.mutate(settingsNamespace('llm-pi-ai'), [
+      await settings.mutate('llm-pi-ai', [
         { op: 'set', path: ['providers', route], value: {} },
       ])
       return { kind: 'written' }
@@ -788,7 +787,7 @@ export class DirectPermissionConfig implements PermissionConfig {
     const settings = this.settings()
     if (settings === undefined) return undefined
     try {
-      const doc = settings.get(settingsNamespace('permission')) as { defaultPreset?: string } | undefined
+      const doc = settings.get('permission') as { defaultPreset?: string } | undefined
       return doc?.defaultPreset
     } catch {
       // The namespace is absent until the presets service registers it.
@@ -799,7 +798,7 @@ export class DirectPermissionConfig implements PermissionConfig {
   async setDefaultPreset(name: string): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) return
-    await settings.mutate(settingsNamespace('permission'), [
+    await settings.mutate('permission', [
       { op: 'set', path: ['defaultPreset'], value: name },
     ])
   }
@@ -846,7 +845,7 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
     const settings = this.settings()
     if (settings === undefined) return undefined
     try {
-      const doc = settings.get(settingsNamespace('agent-presets')) as { default?: string } | undefined
+      const doc = settings.get('agent-presets') as { default?: string } | undefined
       // `??` semantics: an empty saved value is displayed as-is, only an
       // ABSENT value falls back to the roster default (old behavior).
       if (doc?.default !== undefined) return doc.default
@@ -860,7 +859,7 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
   async set(id: string): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
-    await settings.mutate(settingsNamespace('agent-presets'), [
+    await settings.mutate('agent-presets', [
       { op: 'set', path: ['default'], value: id },
     ])
   }
