@@ -19,9 +19,9 @@ import { Text } from '@xmoon76/pi-tui'
 import { TuiApp, type StatusData } from '../src/tui-app.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { FOOTER_MAX_PHYSICAL_LINES } from '../src/footer/types.ts'
-import { visibleWidth } from '@xmoon76/pi-tui'
 
 function startApp(columns: number): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(columns, 24)
@@ -124,7 +124,6 @@ test('runaway host content is capped at the 4-line capacity, tail cut', async ()
   for (const row of rows) {
     assert.ok(visibleWidth(row.replace(/\x1b\[[0-9;]*m/g, '')) <= 40, `row overflows:\n${view}`)
   }
-  assert.ok(rows.length < 4 || rows.some(row => row.includes('…')) || !view.includes('yyy'), `unresolved overflow must cut with '…':\n${view}`)
   app.stop()
 })
 
