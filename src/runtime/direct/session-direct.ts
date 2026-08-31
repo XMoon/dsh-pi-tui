@@ -276,10 +276,10 @@ export class DirectSessionReader implements SessionReader {
 
     const sessionQuery = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
     if (sessionQuery?.filterEvents !== undefined) {
-      // `searchSessions` is intentionally disabled by the shipped SQLite
-      // composition (`openAt: never`). `filterEvents` remains the public,
-      // backend-independent semantic text seam, so use it over the query
-      // engine's live-preferred corpus rather than scanning raw JSONL.
+      // `searchSessions` is intentionally disabled by the shipped SQLite FTS
+      // session-query provider (`openAt: never`). `filterEvents` remains the
+      // public, backend-independent semantic text seam, so use it over the
+      // query engine's live-preferred corpus rather than scanning raw JSONL.
       const records = [...await sessionQuery.listSessions()]
         .sort((a, b) => b.header.createdAt - a.header.createdAt)
         .slice(0, 100)

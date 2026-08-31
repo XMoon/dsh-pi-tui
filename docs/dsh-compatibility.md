@@ -18,9 +18,9 @@ published peer contract intentionally uses a lower bound only: later DSH
 versions remain eligible until a concrete compatibility failure is found.
 
 ```sh
-# 推荐：安装本 TUI 当前验证过的 exact DSH（0.1.2-alpha.2 属于 npm alpha
+# 推荐：安装本 TUI 当前验证过的 exact DSH（0.1.2-alpha.3 属于 npm alpha
 # channel，不是 latest；exact 版本让恢复目标确定，不随 alpha tag 漂移）
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.2
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.3
 
 # 或跟随 DSH alpha channel
 npm install -g @deepseek-ai/dsh@alpha
@@ -29,7 +29,7 @@ npm install -g @xmoon76/dsh-pi-tui@0.3
 ```
 
 The first command upgrades the Harness for 0.4 (the concrete family validated
-by the current Source baseline is `0.1.2-alpha.2`; the peer contract stays
+by the current Source baseline is `0.1.2-alpha.3`; the peer contract stays
 lower-bound-only at `>=0.1.2-alpha.2`). The second pins the compatible
 TUI line when the installed Harness must remain on 0.1.1. Later DSH versions are
 eligible under the lower-bound-only peer contract; each release still runs its
@@ -39,7 +39,7 @@ package contract rather than an early TUI-specific API branch. Peer prerelease
 tuples are validated separately before each release.
 
 Note that `npm install -g @deepseek-ai/dsh` without an explicit `@alpha`
-follows npm's `latest` dist-tag, which is NOT the alpha.2 line — always name
+follows npm's `latest` dist-tag, which is NOT the alpha.3 line — always name
 the exact version or the `alpha` channel explicitly.
 
 ## Data compatibility
