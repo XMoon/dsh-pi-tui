@@ -56,11 +56,12 @@ import type {} from '@deepseek-ai/dsh-commands'
 // The skill registry merge for the /skill command.
 import type {} from '@deepseek-ai/dsh-skill'
 // The settings service merge for persisting TUI preferences.
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-settings'
 // The user-questions service merge: ctx.userQuestions for ask_user_question.
 import type {} from '@deepseek-ai/dsh-user-questions'
-// The plan-mode fold for the header badge.
-import { foldPlanMode } from '@deepseek-ai/dsh-plan-mode'
+// The plan-mode merge for the header badge (the fold is local — alpha.2
+// replaced dsh-plan-mode's exported fold with the `plan` projection).
 import type {} from '@deepseek-ai/dsh-plan-mode'
 // The persistence service for the session picker.
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -95,7 +96,7 @@ import { deriveRunnerPermission } from './status/derive-permission.ts'
 import { StatusStore } from './status/store.ts'
 import { initialStatusSnapshot } from './status/snapshot.ts'
 import { deriveAccessStatus } from './status/derive-access.ts'
-import { derivePlanStatus } from './status/derive-plan.ts'
+import { derivePlanStatus, foldPlanMode } from './status/derive-plan.ts'
 import { usageFromStats } from './status/derive-usage.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
@@ -1448,7 +1449,7 @@ export function apply(ctx: Context, config: Config): void {
     // (theme/footer/fullscreen/…) still run after the app exists.
     // Theme values: auto | dark | light | custom:<name>.
     const tuiSettings = ctx.get('settings')?.register(
-      settingsNamespace('dsh-pi-tui'),
+      'dsh-pi-tui' as SettingsNamespace,
       z.object({
         theme: z.string(),
         footer: z.string(),
@@ -4513,7 +4514,7 @@ export function apply(ctx: Context, config: Config): void {
             if (permission === undefined) break
             const names = permission.names
             if (names.length === 0) break
-            const current = permission.current(liveAgent.session.events)
+            const current = (permission as { current(session: unknown): string }).current(liveAgent.session)
             const index = names.indexOf(current)
             const next = names[(index + 1) % names.length] ?? names[0]
             if (next === undefined || next === current) break
@@ -4722,7 +4723,7 @@ export function apply(ctx: Context, config: Config): void {
         if (permission === undefined) return
         const names = permission.names
         if (names.length === 0) return
-        const current = permission.current(liveAgent.session.events)
+        const current = (permission as { current(session: unknown): string }).current(liveAgent.session)
         const index = names.indexOf(current)
         const next = names[(index + 1) % names.length] ?? names[0]
         if (next === undefined || next === current) return
@@ -5497,7 +5498,7 @@ export function apply(ctx: Context, config: Config): void {
     let legacyHistory: Record<string, readonly string[]> | undefined
     try {
       const descriptor = ctx.get('settings')?.describe()
-        .find(d => d.ns === settingsNamespace('dsh-pi-tui'))
+        .find(d => d.ns === 'dsh-pi-tui')
       const user = descriptor?.user as Record<string, unknown> | undefined
       const value = user?.history
       if (typeof value === 'object' && value !== null) {
@@ -6644,7 +6645,7 @@ export function apply(ctx: Context, config: Config): void {
     // callback.
     ctx.on('llm/adapters-updated', () => { refreshStatus(); updateWelcomeCard() })
     ctx.on('settings/document-updated', (ns) => {
-      if (ns === settingsNamespace('llm-pi-ai') || ns === settingsNamespace('llm-deepseek')) {
+      if (ns === 'llm-pi-ai' || ns === 'llm-deepseek') {
         refreshStatus()
         updateWelcomeCard()
       }

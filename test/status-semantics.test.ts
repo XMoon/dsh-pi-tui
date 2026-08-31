@@ -16,7 +16,7 @@ import type { SessionStats } from '../src/stats.ts'
 
 // ── Access ────────────────────────────────────────────────────────────────
 
-function presets(current: string, label?: string): PermissionPresetsLike<never> {
+function presets(current: string, label?: string): PermissionPresetsLike {
   return {
     current: () => current,
     optionOf: name => ({ name, ...label === undefined ? {} : { label } }),
@@ -35,6 +35,7 @@ test('access: read-only + ask derives independent facts', () => {
       approvalFold: () => 'ask',
     },
     [],
+    {},
   )
   assert.deepEqual(status, {
     permissionPreset: { id: 'read-only', label: 'read-only', matched: true },
@@ -51,6 +52,7 @@ test('access: danger-full-access + never', () => {
       approvalFold: () => 'never',
     },
     [],
+    {},
   )
   assert.equal(status.permissionPreset?.id, 'danger-full-access')
   assert.equal(status.permissionPreset?.label, 'Danger')
@@ -67,6 +69,7 @@ test('access: custom is a neutral unmatched combination, never danger', () => {
       approvalFold: () => 'ask',
     },
     [],
+    {},
   )
   assert.equal(status.permissionPreset?.id, 'custom')
   assert.equal(status.permissionPreset?.matched, false)
@@ -87,6 +90,7 @@ test('access: throwing services degrade to absent facts', () => {
       approvalFold: () => { throw new Error('boom') },
     },
     [],
+    {},
   )
   assert.deepEqual(status, {})
 })

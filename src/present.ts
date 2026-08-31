@@ -10,11 +10,19 @@
  */
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { JsonValue } from '@deepseek-ai/dsh-session'
 import type {
   FileDiff, ToolCallView, ToolResult, ToolResultView, WebFetchResultView, WebSearchResultView,
 } from '@deepseek-ai/dsh-tools'
 import { type IconSemantic } from './icons.ts'
+
+/**
+ * A JSON-serializable value (the tool-private presentation payload shape).
+ * DSH 0.1.2-alpha.2 moved `JsonValue` from `@deepseek-ai/dsh-session` to
+ * `@deepseek-ai/dsh-util-values`; the TUI keeps a local type-only copy so
+ * the presentation surface needs no new peer dependency. Identical to the
+ * official recursive definition.
+ */
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
 /** Figma row titles per variant (design literals, not translatable copy). */
 const VARIANT_TITLES = {
