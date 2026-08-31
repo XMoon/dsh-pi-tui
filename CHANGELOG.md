@@ -11,6 +11,13 @@
 
 - 新增 Source Mode 本地/CI 验证：固定 DeepSeek Harness 完整 SHA，使用官方 `build:official` 与 `release:pack --family dsh` 生成完整 tarball family，再通过临时 pnpm overrides 验证 TUI。发布包的 peer contract 保持为 `>=0.1.2-alpha.1`，不会把源码路径写入 package 或 lockfile。
 - `next` push/PR 使用 Source Mode；`main` 和所有 tag（包括 `next-v*`）使用 frozen npm Mode。源码 lane 对依赖已发布 `pi2dsh` 的检查明确标记为 skipped，npm lane 仍然阻断不兼容结果。
+- **Source 验证基线切到 DSH 0.1.2-alpha.2**（exact SHA `0a53fb55bea101816fa226bb964ae2bed71c343b`）。产品 peer floor 保持 `>=0.1.2-alpha.1`：cold-preset 路径使用的官方 session observation/projection seam 在 alpha.1 已存在；未新增 alpha.1/alpha.2 runtime capability branch。
+
+### Session Projection 收敛
+
+- **cold session preset 改走官方 observation seam。** `recordedSessionPreset()` 使用 `sessionQuery.observeSession()`——live/cold 源选择、persistence borrow/preparation、projection cache hydration、tail replay、projection cut 全部由引擎负责；TUI 不再为读取 `agentPreset` projection 自行构造 detached `Session`。
+- **`/sessions` picker 先查 zero-I/O projection cache。** 有缓存 `agentPreset`（`sessionProjectionCache.cachedSnapshot`）的 cold row 不做任何 observation 即可富化；只有 cache miss 才走 bounded（并发 4）`observeSession()`。`list()` 捕获的 header snapshot 消除了第二次全量 list，第一帧仍在任何 cold enrichment 之前打开。
+- **`SessionEvent.ignorable` round-trip 回归。** alpha.2 恢复的 `ignorable?: true` envelope marker 在每种 repair 形态（healthy no-op、duplicate-seq renumber、re-frame、torn-tail salvage）下都原样保留，`data` 不变、不发明 `surfaceOp`；无 marker 的 unknown event 仍然 fail closed（不自动补 marker、不删除）。
 
 ### 迁移说明
 
@@ -40,7 +47,7 @@
 加入 profile：
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.1
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.2
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
