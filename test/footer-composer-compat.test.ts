@@ -284,6 +284,15 @@ test('mergeCommandSurface keeps its contract under the new capacity (smoke)', ()
     mergeCommandSurface(['cmd'], instr, Number.NaN, { total: 4 }).replace(/\x1b\[[0-9;]*m/g, ''),
     '…\n…',
   )
+  // Non-finite totals are SUPPLIED budgets: they fall back to the hard
+  // capacity instead of bypassing the budget (the legacy path is only
+  // for an OMITTED budget).
+  for (const nonFinite of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    const lines = mergeCommandSurface(['cmd', 'cmd two'], instr, 20, { total: nonFinite })
+      .replace(/\x1b\[[0-9;]*m/g, '').split('\n')
+    assert.ok(lines.length <= 4, `non-finite total ${nonFinite} must stay inside the capacity:\n${lines}`)
+    assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again'), `the hint must survive a non-finite total ${nonFinite}:\n${lines}`)
+  }
 })
 
 /** Deep-mutable build shape (the snapshot is deeply readonly). */
