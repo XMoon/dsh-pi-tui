@@ -264,6 +264,37 @@ test('invalid perRow/total budgets normalize inside the hard capability', () => 
   assertNormalized({ total: 999 }, { perRow: 2, total: 4 }, 'total 999')
 })
 
+test('an oversized UN-droppable item resolves by ANSI-safe truncate with …', () => {
+  // A single-item row whose preferred form exceeds even the full
+  // allowance cannot be compacted shorter and cannot lose its only item —
+  // the ONLY semantic exit is the ANSI-safe tail truncate: the surviving
+  // rows carry the '…' marker, stay width-bounded, and never contain
+  // the raw oversized payload.
+  const registry = createBuiltinFooterRegistry()
+  registry.register({
+    id: 'wall',
+    label: 'Wall',
+    defaultZone: 'left',
+    defaultImportance: 100,
+    formats: ['x'],
+    defaultFormat: 'x',
+    render: () => ({ spans: [{ text: `${'y'.repeat(300)}END-MARKER` }] }),
+  })
+  const wallComposer = new FooterComposer(registry)
+  const text = wallComposer.render({
+    snapshot: emptyStatusSnapshot(),
+    layout: { schemaVersion: 1, rows: [{ left: [{ id: 'wall' }], right: [] }] },
+    width: 40,
+    context: { taskBrowserAvailable: false, extensionFooterText: '' },
+  })
+  const lines = text.replace(/\x1b\[[0-9;]*m/g, '').split('\n')
+  assert.equal(lines.length, 2, `the item must take its 2-line allowance:\n${JSON.stringify(lines)}`)
+  assert.ok(lines[1]!.includes('…'), `the tail must carry the truncate marker:\n${JSON.stringify(lines)}`)
+  const joined = lines.join('')
+  assert.ok(!joined.includes('END-MARKER'), `the raw payload must not survive (it was cut):\n${JSON.stringify(lines)}`)
+  for (const line of lines) assert.ok(visibleWidth(line) <= 40, `overflow:\n${JSON.stringify(lines)}`)
+})
+
 test('a surface that grants ZERO lines renders nothing at all', () => {
   // total ≤ 0 is a surface DECISION (its pinned chrome alone fills the
   // viewport): the composer renders NOTHING — not even the Host
