@@ -34,6 +34,23 @@ const TONES: ReadonlySet<string> = new Set([
   'primary', 'accent', 'text', 'textStrong', 'textDim', 'textMuted',
   'border', 'success', 'warning', 'error', 'roleUser', 'shellMode',
 ])
+/** The EXACT key set a v1 text definition may carry. A known-kind object
+ * with any OTHER key is forward-compatible raw data (plan §12.1 — an
+ * "unknown field object" keeps its raw slot): a future client's field must
+ * never be silently normalized away by an unrelated save. */
+const TEXT_ITEM_KEYS: ReadonlySet<string> = new Set(['schemaVersion', 'id', 'kind', 'text', 'tone'])
+/** The EXACT key set a v1 command definition may carry (same rule). */
+const COMMAND_ITEM_KEYS: ReadonlySet<string> = new Set([
+  'schemaVersion', 'id', 'kind', 'command', 'refreshIntervalMs', 'timeoutMs', 'tone',
+])
+
+/** Whether the raw object carries a key outside the allowed v1 set. */
+function hasUnknownKeys(raw: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) return true
+  }
+  return false
+}
 
 /** The PR C/PR D v1 definition union. PR D added the `command`
  * discriminant without changing FooterItemRef or the layout schema. */
@@ -131,6 +148,7 @@ export function parseFooterCustomItem(input: unknown): FooterCustomItemSettings 
     // would make an unrelated get→replace cycle lossy.
     const tone = raw.tone === undefined ? undefined : raw.tone
     if (raw.kind === 'text') {
+      if (hasUnknownKeys(raw, TEXT_ITEM_KEYS)) return undefined
       if (typeof raw.text !== 'string' || raw.text.trim() === '' || CONTROL_CHARS.test(raw.text)) return undefined
       if (codePointLength(raw.text) > MAX_CUSTOM_ITEM_TEXT_LENGTH) return undefined
       return {
@@ -142,6 +160,7 @@ export function parseFooterCustomItem(input: unknown): FooterCustomItemSettings 
       }
     }
     if (raw.kind === 'command') {
+      if (hasUnknownKeys(raw, COMMAND_ITEM_KEYS)) return undefined
       // The command/refresh/timeout bounds come from the whole-footer
       // command parser (command-trust): one rule set for both surfaces.
       // Non-finite numeric fields are DROPPED (treated as absent — the

@@ -466,6 +466,18 @@ test('PR D: the catalog creates/edits/renames/removes command definitions', () =
   assert.equal(catalog.get('user:Time'), undefined)
 })
 
+test('PR D: known-kind objects with unknown/future fields are forward-compatible raw data (never normalized)', () => {
+  // A future client's field on a KNOWN kind must never be silently
+  // normalized away: the object classifies as unknown (preserved raw by
+  // the /footer merge, excluded from the runtime projection).
+  assert.equal(parseFooterCustomItem({ schemaVersion: 1, id: 'user:clock', kind: 'command', command: 'date', futureField: { version: 2 } }), undefined)
+  assert.equal(parseFooterCustomItem({ schemaVersion: 1, id: 'user:env', kind: 'text', text: 'PROD', futureField: 1 }), undefined)
+  // The exact v1 key sets still parse.
+  assert.ok(parseFooterCustomItem(VALID_CLOCK))
+  assert.ok(parseFooterCustomItem(VALID_ENVIRONMENT))
+  assert.ok(parseFooterCustomItem({ ...VALID_CLOCK, refreshIntervalMs: 5000, timeoutMs: 300, tone: 'auto' }))
+})
+
 test('PR D: a command definition render reads the cache ONLY (no cache → null, placeholder → dim marker)', () => {
   const catalog = new FooterCustomItemCatalog([VALID_CLOCK])
   const registry = new FooterItemRegistry()
