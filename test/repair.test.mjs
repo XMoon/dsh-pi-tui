@@ -12,6 +12,7 @@ import test from 'node:test'
 import { spawnSync } from 'node:child_process'
 import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
 import { KNOWN_SESSION_EVENT_TYPES, Session, SessionId, decodeStorageRecord, isSurfaceEligibleType } from '@deepseek-ai/dsh-session'
+import { PersistenceCoordinator, SessionFormatUnsupportedError } from '@deepseek-ai/dsh-session-persistence'
 import {
   compressLog,
   decompressFrames,
@@ -947,10 +948,38 @@ test('ignorable event: CLI torn-tail repair keeps the marker on the salvaged pre
   assertIgnorableIntact(read.events[2], 2)
 })
 
-test('ignorable event: the repaired log passes the alpha.2 Session envelope read', () => {
+/**
+ * Drive the REAL DSH persistence read path (the coordinator's `inspect`)
+ * over one stored log, so the fail-closed vocabulary gate is exercised
+ * exactly as the harness enforces it: `assertEventsSupported` refuses any
+ * event type outside `KNOWN_SESSION_EVENT_TYPES` unless the event carries
+ * `ignorable: true`. The minimal ctx/backend stubs only feed the stored
+ * record; the coordinator's own validation does the rest.
+ */
+function readLikePersistence(events, header = JSON.parse(HEADER)) {
+  const ctx = {
+    sessions: {
+      get: () => undefined,
+      list: () => [],
+      prepare: (_id, { seed, meta }) => ({ header: meta, events: seed }),
+    },
+    effect: () => () => {},
+    on: () => () => {},
+    logger: { warn: () => {} },
+  }
+  const backend = {
+    name: 'test-backend',
+    loadStored: async () => ({ meta: header, events, revision: 0 }),
+    readStoredRevision: async () => 0,
+    locate: () => undefined,
+  }
+  return new PersistenceCoordinator(ctx, backend).inspect(SessionId(String(header.id)))
+}
+
+test('ignorable event: the repaired log passes the alpha.2 Session envelope read', async () => {
   // alpha.2's envelope validation accepts the `ignorable` key (alpha.1
   // rejected it as an invalid envelope field), so a successful
-  // Session.fromRestore is the alpha.2-specific reread gate. The events are
+  // Session.fromRestore is the alpha.2-specific envelope gate. The events are
   // non-surface (permission/preset + turn/start) so no surfaceOp is required.
   const events = [
     { type: 'permission/preset', seq: 0, time: 1000, data: { preset: 'workspace-write' } },
@@ -960,15 +989,26 @@ test('ignorable event: the repaired log passes the alpha.2 Session envelope read
   const { events: scanned } = scanEvents(encodeLog(HEADER, events), decodeStorageRecord)
   const session = Session.fromRestore(SessionId('session-test'), scanned, JSON.parse(HEADER))
   assertIgnorableIntact(session.events[2], 2)
+  // The official persistence read path accepts the same log: the unknown
+  // type is covered by the ignorable marker, so the coordinator's vocabulary
+  // gate passes and the marker/data survive the read.
+  const inspection = await readLikePersistence(scanned)
+  assertIgnorableIntact(inspection.events[2], 2)
 })
 
-test('required unknown event: repair never auto-marks, deletes, or header-falls-back (fail closed)', () => {
+test('required unknown event: repair never auto-marks, deletes, or header-falls-back (fail closed)', async () => {
   // An unknown event WITHOUT the ignorable marker is a REQUIRED event: the
   // DSH read path refuses the log. The repair layer must not "fix" it —
   // no auto-added ignorable:true, no deletion, no header-only fallback —
-  // so the durable compatibility refusal survives the round-trip.
+  // so the durable compatibility refusal survives the round-trip. The
+  // surrounding events are non-surface (permission/preset + turn/start) so
+  // the coordinator's vocabulary gate is the ONLY rejection reason.
   const unknown = { type: 'third-party/custom-info', seq: 2, time: 1002, data: { foo: 'bar' } }
-  const events = [...buildEvents([0, 1]), unknown]
+  const events = [
+    { type: 'permission/preset', seq: 0, time: 1000, data: { preset: 'workspace-write' } },
+    { type: 'turn/start', seq: 1, time: 1001, data: {} },
+    unknown,
+  ]
   const text = encodeLog(HEADER, events)
   const { events: scanned, issue } = scanEvents(text, decodeStorageRecord)
   assert.equal(issue, undefined, 'the repair scanner does not know the vocabulary')
@@ -982,9 +1022,16 @@ test('required unknown event: repair never auto-marks, deletes, or header-falls-
   assert.deepEqual(kept.data, { foo: 'bar' })
   assert.equal(kept.surfaceOp, undefined)
   // The DSH read path's vocabulary gate: the type is unknown to this build
-  // and the event is unmarked, so the log must be refused (fail closed).
+  // and the event is unmarked, so the official persistence read MUST reject
+  // the repaired log (fail closed) — not merely "the repair left it alone".
   assert.equal(KNOWN_SESSION_EVENT_TYPES.has(kept.type), false)
-  assert.equal(kept.ignorable === true, false)
+  await assert.rejects(
+    readLikePersistence(again.events),
+    error => error instanceof SessionFormatUnsupportedError
+      && error.message.includes('third-party/custom-info')
+      && error.message.includes('not marked ignorable'),
+    'the official DSH read path must refuse the repaired log',
+  )
 })
 
 test('surface fixture contract: only the three message types are surface-eligible', () => {
