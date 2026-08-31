@@ -123,30 +123,43 @@ test('pi2dsh metadata preflight blocks an unsupported consumer contract', () => 
   }
 })
 
-test('pi2dsh metadata preflight classifies a TUI-peer-only mismatch as stale, not blocking', () => {
+test('pi2dsh metadata preflight classifies the four peer-declaration cases', () => {
   const manifest = { dshVersion: '0.1.2-alpha.1' }
   const candidate = { name: '@xmoon76/dsh-pi-tui', version: '0.4.0-alpha.1' }
-  const supported = {
+  const base = {
     name: 'pi2dsh',
     version: '0.24.0',
     peerDependencies: {
-      '@xmoon76/dsh-pi-tui': '^0.3.3',
+      '@xmoon76/dsh-pi-tui': '^0.4.0-alpha.1',
       '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1',
       '@deepseek-ai/dsh-commands': '>=0.1.2-alpha.1',
     },
   }
-  // DSH peers cover the target; ONLY the TUI peer is stale → classified, not thrown.
-  const classification = validateConsumerMetadata(supported, manifest, candidate)
+
+  // 1. TUI peer current + DSH peers covering → ok.
+  assert.equal(classifyConsumerMetadata(base, manifest, candidate).kind, 'ok')
+
+  // 2. TUI peer stale ONLY (DSH peers still cover) → stale-tui-peer, not thrown.
+  const stale = { ...base, peerDependencies: { ...base.peerDependencies, '@xmoon76/dsh-pi-tui': '^0.3.3' } }
+  const classification = validateConsumerMetadata(stale, manifest, candidate)
   assert.equal(classification.kind, 'stale-tui-peer')
   assert.equal(classification.tuiRange, '^0.3.3')
   // The narrow allowance is required: without it the preflight still blocks.
   assert.throws(
-    () => failConsumerMetadata(supported, manifest, candidate, [`  @xmoon76/dsh-pi-tui: ${classification.tuiRange}`]),
+    () => failConsumerMetadata(stale, manifest, candidate, [`  @xmoon76/dsh-pi-tui: ${classification.tuiRange}`]),
     error => error?.name === 'CompatFailure' && error?.phase === 'ECOSYSTEM_CONTRACT_BLOCKER',
   )
-  // A DSH peer mismatch is never classified as stale.
+
+  // 3. TUI peer MISSING entirely → block (never a stale range: "declared too
+  // old" can be proven stale by the runtime smoke, "never declared" cannot).
+  const missing = { ...base, peerDependencies: { '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1' } }
+  const missingClassification = classifyConsumerMetadata(missing, manifest, candidate)
+  assert.equal(missingClassification.kind, 'block')
+  assert.match(missingClassification.problems.join('\n'), /@xmoon76\/dsh-pi-tui: \(missing\)/)
+
+  // 4. DSH peer mismatch → block, never classified as stale.
   const dshMismatch = classifyConsumerMetadata(
-    { ...supported, peerDependencies: { ...supported.peerDependencies, '@deepseek-ai/dsh-agent': '^0.1.1' } },
+    { ...base, peerDependencies: { ...base.peerDependencies, '@deepseek-ai/dsh-agent': '^0.1.1' } },
     manifest,
     candidate,
   )

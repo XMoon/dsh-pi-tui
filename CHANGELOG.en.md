@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### CI and compatibility
 
 - Added Source Mode local/CI validation: pin the complete DeepSeek Harness SHA, run the official `build:official` and `release:pack --family dsh` commands, then validate the complete tarball family through temporary pnpm overrides without writing source paths into the package contract or lockfile.
-- `next` pushes/PRs use Source Mode; `main` and every tag (including `next-v*`) use frozen npm Mode. The source lane explicitly skips the published `pi2dsh` check until a compatible published combination exists, while npm mode remains blocking.
+- `next` pushes/PRs use Source Mode; `main` and every tag (including `next-v*`) use frozen npm Mode. Source Mode still validates the TUI against the exact DSH source family; the pi2dsh ecosystem gate independently uses the published DSH/pi2dsh, so it now runs in BOTH TUI validation modes.
 - **Source validation baseline moved to DSH 0.1.2-alpha.2** (exact SHA `0a53fb55bea101816fa226bb964ae2bed71c343b`). The product peer floor is formally raised to `>=0.1.2-alpha.2` (the runtime code already uses alpha.2 APIs such as `permissionPresets.current(session)`); no alpha.1/alpha.2 runtime capability branch was added.
 
 ### Session projection cleanup

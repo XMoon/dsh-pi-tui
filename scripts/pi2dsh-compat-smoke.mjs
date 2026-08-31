@@ -509,7 +509,6 @@ function classifyConsumerMetadata(consumerPackage, manifest, candidatePackage) {
   const tuiRange = peerDependencies?.[EXPECTED_PACKAGE_NAME]
   const dshPeers = relevantDshPeerEntries(consumerPackage)
   const unsupportedDshPeers = dshPeers.filter(([, range]) => !rangeIncludesVersion(range, manifest.dshVersion))
-  const tuiUncovered = !rangeIncludesVersion(tuiRange, candidatePackage.version)
 
   if (dshPeers.length === 0) {
     return { kind: 'block', problems: ['  @deepseek-ai/dsh-* peers: (none declared)'] }
@@ -517,8 +516,14 @@ function classifyConsumerMetadata(consumerPackage, manifest, candidatePackage) {
   if (unsupportedDshPeers.length > 0) {
     return { kind: 'block', problems: unsupportedDshPeers.map(([name, range]) => `  ${name}: ${range}`) }
   }
-  if (tuiUncovered) {
-    return { kind: 'stale-tui-peer', tuiRange: typeof tuiRange === 'string' ? tuiRange : '(missing)' }
+  // A MISSING TUI peer is a contract blocker, not a stale range: "declared
+  // too old" can be proven stale by the real runtime smoke, but "never
+  // declared a dependency on the TUI at all" cannot.
+  if (typeof tuiRange !== 'string' || tuiRange.trim() === '') {
+    return { kind: 'block', problems: [`  ${EXPECTED_PACKAGE_NAME}: (missing)`] }
+  }
+  if (!rangeIncludesVersion(tuiRange, candidatePackage.version)) {
+    return { kind: 'stale-tui-peer', tuiRange }
   }
   return { kind: 'ok' }
 }
