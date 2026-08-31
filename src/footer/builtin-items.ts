@@ -549,7 +549,7 @@ const performanceItem: FooterItemDefinition = {
   },
 }
 
-/** The host version: `v0.4.0-alpha.1` (tui), `dsh-0.1.2-alpha.1` (dsh), or both. */
+/** The host version: `v0.4.0-alpha.1` (tui), `dsh-0.1.2-alpha.2` (dsh), or both. */
 const versionItem: FooterItemDefinition = {
   id: 'version',
   label: 'Version',

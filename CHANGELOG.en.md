@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added Source Mode local/CI validation: pin the complete DeepSeek Harness SHA, run the official `build:official` and `release:pack --family dsh` commands, then validate the complete tarball family through temporary pnpm overrides without writing source paths into the package contract or lockfile.
 - `next` pushes/PRs use Source Mode; `main` and every tag (including `next-v*`) use frozen npm Mode. The source lane explicitly skips the published `pi2dsh` check until a compatible published combination exists, while npm mode remains blocking.
-- **Source validation baseline moved to DSH 0.1.2-alpha.2** (exact SHA `0a53fb55bea101816fa226bb964ae2bed71c343b`). The product peer floor stays `>=0.1.2-alpha.1` because the official session observation/projection seams used by the cold-preset path already exist in alpha.1; no alpha.1/alpha.2 runtime capability branch was added.
+- **Source validation baseline moved to DSH 0.1.2-alpha.2** (exact SHA `0a53fb55bea101816fa226bb964ae2bed71c343b`). The product peer floor is formally raised to `>=0.1.2-alpha.2` (the runtime code already uses alpha.2 APIs such as `permissionPresets.current(session)`); no alpha.1/alpha.2 runtime capability branch was added.
 
 ### Session projection cleanup
 
@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Migration notes
 
 - **0.4.0-alpha.1 moves to DeepSeek Harness 0.1.2.** The declared support range
-  is `>=0.1.2-alpha.1`; DSH 0.1.1 is no longer supported, and each release
+  is `>=0.1.2-alpha.2`; DSH 0.1.1 and 0.1.2-alpha.1 are no longer supported, and each release
   validates its concrete DSH family. Users keeping DSH 0.1.1 should pin
   `@xmoon76/dsh-pi-tui@0.3`.
 - **Gate B now preflights published consumer peer metadata.** If the target DSH or

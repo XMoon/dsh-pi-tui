@@ -18,7 +18,7 @@ dsh --profile pi-tui
 
 ## DSH 兼容性与源码验证
 
-发布包通过 `package.json` peer contract 使用 DSH `>=0.1.2-alpha.1`；源码验证不会修改这个发布契约，也不会把 DSH vendor 进本仓库。
+发布包通过 `package.json` peer contract 使用 DSH `>=0.1.2-alpha.2`；源码验证不会修改这个发布契约，也不会把 DSH vendor 进本仓库。
 
 当目标 DSH 版本尚未发布到 npm 时，可以用固定 commit 的官方源码包做本地验证：
 
@@ -394,7 +394,7 @@ dsh-pi-tui:
 
 | TUI 包版本 | 对应 DSH 版本 | 说明 |
 |---|---|---|
-| `0.4.0-alpha.1`（`@next`） | `>=0.1.2-alpha.1` | 当前预发布线；按每个发布版本的具体 DSH family 验证 |
+| `0.4.0-alpha.1`（`@next`） | `>=0.1.2-alpha.2` | 当前预发布线；按每个发布版本的具体 DSH family 验证 |
 | `0.3.x`（`@0.3`） | `0.1.1-rc.2` | 旧运行时兼容线 |
 
 不要把两条线混装：DSH 0.1.1 不在 0.4 的 peer 支持范围内，运行时会在
@@ -404,7 +404,7 @@ dsh-pi-tui:
 TUI 装入 profile）：
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.1
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.2
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
@@ -417,7 +417,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 dsh --profile pi-tui
 ```
 
-`0.4` 的声明支持范围是 `>=0.1.2-alpha.1`；每个发布版本都会验证具体的
+`0.4` 的声明支持范围是 `>=0.1.2-alpha.2`；每个发布版本都会验证具体的
 DSH family。仅执行 `npm install -g @xmoon76/dsh-pi-tui` 不会把插件安装进
 DSH profile，实际使用仍应执行上面的 `dsh plugin` 命令。
 

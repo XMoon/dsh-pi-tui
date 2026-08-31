@@ -1,8 +1,8 @@
 {
   "issue": 26,
   "consumer": "pi2dsh",
-  "pi2dshVersion": "0.20.0",
-  "dshVersion": "0.1.2-alpha.1",
+  "pi2dshVersion": "0.24.0",
+  "dshVersion": "0.1.2-alpha.2",
   "contracts": [
     "root.LOCAL_COMMANDS",
     "extensions/unstable.UNSTABLE_API_LEVEL=1",

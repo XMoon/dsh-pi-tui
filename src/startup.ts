@@ -107,7 +107,7 @@ export interface HarnessCompatEntry {
   max?: string
   /** The bundle release line that first required this constraint. */
   since: string
-  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.2-alpha.1 or later`. */
+  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.2-alpha.2 or later`. */
   requires: string
   /** The target DSH version to install when the current runtime is too old. */
   upgradeDsh?: string
@@ -124,10 +124,10 @@ export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
   // the first matching entry is the user-facing source of truth for this
   // artifact, and older guidance would recommend an unusable 0.1.1 runtime.
   {
-    max: '0.1.2-alpha.1',
+    max: '0.1.2-alpha.2',
     since: '0.4.0-alpha.1',
-    requires: 'DeepSeek Harness 0.1.2-alpha.1 or later',
-    upgradeDsh: '0.1.2-alpha.1',
+    requires: 'DeepSeek Harness 0.1.2-alpha.2 or later',
+    upgradeDsh: '0.1.2-alpha.2',
     fallbackTui: '0.3',
   },
 ]

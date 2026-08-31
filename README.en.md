@@ -18,7 +18,7 @@ dsh --profile pi-tui
 
 ## DSH compatibility and source validation
 
-The published package declares the lower-bound-only DSH peer contract `>=0.1.2-alpha.1`. Source validation does not change that contract or vendor DSH into this repository.
+The published package declares the lower-bound-only DSH peer contract `>=0.1.2-alpha.2`. Source validation does not change that contract or vendor DSH into this repository.
 
 When the target DSH version is not yet available from npm, validate against the official checkout pinned by commit SHA:
 
@@ -421,7 +421,7 @@ dsh-pi-tui:
 
 | TUI package line | Matching DSH line | Notes |
 |---|---|---|
-| `0.4.0-alpha.1` (`@next`) | `>=0.1.2-alpha.1` | Current prerelease; each release validates its concrete DSH family |
+| `0.4.0-alpha.1` (`@next`) | `>=0.1.2-alpha.2` | Current prerelease; each release validates its concrete DSH family |
 | `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
 
 Do not mix the two lines: DSH 0.1.1 is outside the 0.4 peer window and the
@@ -432,7 +432,7 @@ keep DSH 0.1.1, use the 0.3 TUI line. For the current `0.4.0-alpha.1`, install
 DSH first and then add the TUI to a profile:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.1
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.2
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
@@ -445,7 +445,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 dsh --profile pi-tui
 ```
 
-The declared 0.4 support range is `>=0.1.2-alpha.1`; each release validates
+The declared 0.4 support range is `>=0.1.2-alpha.2`; each release validates
 its concrete DSH family. Running only `npm install -g @xmoon76/dsh-pi-tui` does
 not install the plugin into a DSH profile; the `dsh plugin` command is still
 required.

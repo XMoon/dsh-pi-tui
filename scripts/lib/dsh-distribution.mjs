@@ -480,7 +480,7 @@ export function loadDshDistribution({
     return distribution
   }
   if (mode !== 'npm') fail(`unsupported DSH distribution mode ${mode}; expected source or npm`)
-  return npmDshDistribution(version ?? process.env.DSH_VERSION ?? '0.1.2-alpha.1')
+  return npmDshDistribution(version ?? process.env.DSH_VERSION ?? '0.1.2-alpha.2')
 }
 
 /** Return temporary pnpm override values for every packed DSH package. */

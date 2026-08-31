@@ -373,7 +373,7 @@ node --import tsx/esm demo.ts   # standalone demo in a real TTY
 ### DSH distribution validation
 
 The published package contract is the lower-bound-only DSH peer range
-`>=0.1.2-alpha.1`; do not add `file:`, `link:`, or `workspace:` DSH specs to
+`>=0.1.2-alpha.2`; do not add `file:`, `link:`, or `workspace:` DSH specs to
 `package.json` or the tracked lockfile. Source Mode is test-only and is used
 for `next` pushes and pull requests targeting `next` when the exact upstream
 DSH family is not yet published. It checks out the full SHA in
