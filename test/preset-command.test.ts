@@ -128,6 +128,11 @@ function stubRunner(options: {
     get liveAgent() { return options.agent },
     ensureSession: async () => { options.ensureCalls?.push('ensureSession') },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
     agents: options.agents ?? {
