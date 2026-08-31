@@ -52,7 +52,7 @@ test('CI source preparation and publication have explicit time and registry boun
   assert.ok(workflow.includes("printf 'registry=https://registry.npmjs.org/\\n' > \"$RUNNER_TEMP/dsh-publish-npmrc\""))
 })
 
-test('Source Mode matrix uses a clean distribution-aware fresh install and skips pi2dsh', () => {
+test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2dsh gate runs in both modes', () => {
   const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
   const compatStart = workflow.indexOf('  compat-smoke:')
   const ecosystemStart = workflow.indexOf('  ecosystem-compat:', compatStart)
@@ -65,7 +65,10 @@ test('Source Mode matrix uses a clean distribution-aware fresh install and skips
 
   const officialStart = workflow.indexOf('  official-preset-assembly:')
   const ecosystem = workflow.slice(ecosystemStart, officialStart)
-  assert.match(ecosystem, /needs\.dsh-context\.outputs\.mode == 'npm'/u)
+  // The published pi2dsh ecosystem is evaluated in BOTH modes: the smoke
+  // installs the published DSH and pi2dsh from the registry, so Source Mode
+  // no longer skips the gate (pi2dsh@0.24.0 declares DSH 0.1.2-alpha.2).
+  assert.doesNotMatch(ecosystem, /needs\.dsh-context\.outputs\.mode == 'npm'/u)
   assert.doesNotMatch(ecosystem, /Download DSH source pack/u)
   assert.doesNotMatch(ecosystem, /Source mode ecosystem status/u)
   assert.match(ecosystem, /Run pi2dsh compatibility smoke/u)
