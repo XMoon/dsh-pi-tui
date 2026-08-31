@@ -10,7 +10,7 @@
 ### CI 与兼容性
 
 - 新增 Source Mode 本地/CI 验证：固定 DeepSeek Harness 完整 SHA，使用官方 `build:official` 与 `release:pack --family dsh` 生成完整 tarball family，再通过临时 pnpm overrides 验证 TUI。发布包的 peer contract 为 `>=0.1.2-alpha.2`，不会把源码路径写入 package 或 lockfile。
-- `next` push/PR 使用 Source Mode；`main` 和所有 tag（包括 `next-v*`）使用 frozen npm Mode。源码 lane 对依赖已发布 `pi2dsh` 的检查明确标记为 skipped，npm lane 仍然阻断不兼容结果。
+- `next` push/PR 使用 Source Mode；`main` 和所有 tag（包括 `next-v*`）使用 frozen npm Mode。Source Mode 仍使用 exact DSH source family 验证 TUI；pi2dsh ecosystem gate 独立使用 published DSH/pi2dsh，因此在 Source/npm 两种 TUI validation mode 下都会执行。
 - **Source 验证基线切到 DSH 0.1.2-alpha.2**（exact SHA `0a53fb55bea101816fa226bb964ae2bed71c343b`）。产品 peer floor 正式提高到 `>=0.1.2-alpha.2`（业务代码已实际使用 alpha.2 API，如 `permissionPresets.current(session)`）；未新增 alpha.1/alpha.2 runtime capability branch。
 
 ### Session Projection 收敛
