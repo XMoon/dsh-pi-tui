@@ -45,6 +45,10 @@ import type { StatusSnapshot } from '../status/types.ts'
 import { FooterComposer, renderSpans } from './composer.ts'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
 import {
+  CUSTOM_COMMAND_REFRESH_CHOICES_MS,
+  CUSTOM_COMMAND_TIMEOUT_CHOICES_MS,
+  customCommandRefreshChoices,
+  customCommandTimeoutChoices,
   flatLengthOf,
   flatPositionOf,
   FOOTER_TONE_CHOICES,
@@ -52,6 +56,7 @@ import {
   toneChoicesFor,
 } from './configurator-model.ts'
 import type { FooterConfiguratorModel } from './configurator-model.ts'
+import { effectiveCustomCommandRefreshMs, effectiveCustomCommandTimeoutMs } from './custom-items.ts'
 import { MAX_ITEMS_PER_ROW } from './layout.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
 import { stripControlChars } from './layout.ts'
@@ -140,8 +145,9 @@ export class FooterConfiguratorPanel implements Component {
       const textMode = state.mode === 'add'
         || state.mode === 'create-name'
         || state.mode === 'create-text'
+        || state.mode === 'create-command'
         || (state.mode === 'advanced' && state.editing)
-        || ((state.mode === 'custom-text' || state.mode === 'custom-name') && state.editing)
+        || ((state.mode === 'custom-text' || state.mode === 'custom-command' || state.mode === 'custom-name') && state.editing)
       if (textMode && matchesKey(data, 'backspace')) {
         this.model.backspace()
         return
@@ -543,7 +549,7 @@ export class FooterConfiguratorPanel implements Component {
   }
 
   /** The page title (the header). */
-  private title(state: { mode: string; rowIndex: number; cursor: number; addSide: 'left' | 'right' }): string {
+  private title(state: { mode: string; rowIndex: number; cursor: number; addSide: 'left' | 'right'; customKind: 'text' | 'command' }): string {
     switch (state.mode) {
       case 'row':
         return `Edit Row ${state.rowIndex + 1}`
@@ -561,14 +567,23 @@ export class FooterConfiguratorPanel implements Component {
         return `Advanced · ${this.itemLabel(state.rowIndex, state.cursor)}`
       case 'custom-text':
         return `Text · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-command':
+        return `Command · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-refresh':
+        return `Refresh · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-timeout':
+        return `Timeout · ${this.itemLabel(state.rowIndex, state.cursor)}`
       case 'custom-name':
         return `Rename · ${this.itemLabel(state.rowIndex, state.cursor)}`
       case 'custom-delete':
         return `Delete · ${this.itemLabel(state.rowIndex, state.cursor)}`
       case 'create-name':
       case 'create-text':
+      case 'create-command':
+      case 'create-refresh':
+      case 'create-timeout':
       case 'create-tone':
-        return 'Create Custom Text'
+        return state.customKind === 'command' ? 'Create Custom Command' : 'Create Custom Text'
       case 'add':
         // The side is decided when the picker opens (the cursor item's
         // zone): showing it spares the user guessing where the item will
@@ -597,17 +612,24 @@ export class FooterConfiguratorPanel implements Component {
       case 'style':
       case 'tone':
       case 'custom-tone':
+      case 'custom-refresh':
+      case 'custom-timeout':
         return '↑↓ Select · Enter Apply · Esc Back'
       case 'advanced':
         return state.editing ? 'Type · Enter Confirm · Esc Cancel' : '↑↓ Select · Enter Edit · Esc Back'
       case 'custom-text':
+      case 'custom-command':
       case 'custom-name':
         return 'Type · Enter Confirm · Esc Cancel'
       case 'custom-delete':
         return 'Enter Confirm · Esc Cancel'
       case 'create-name':
       case 'create-text':
+      case 'create-command':
         return 'Type · Enter Next · Esc Cancel'
+      case 'create-refresh':
+      case 'create-timeout':
+        return '↑↓ Select · Enter Next · Esc Cancel'
       case 'create-tone':
         return '↑↓ Select · Enter Create · Esc Cancel'
       case 'add':
@@ -623,20 +645,24 @@ export class FooterConfiguratorPanel implements Component {
   private previewLines(width: number): string[] {
     const state = this.model.state()
     if (state.mode === 'item' || state.mode === 'style' || state.mode === 'tone'
-      || state.mode === 'advanced' || state.mode === 'custom-text' || state.mode === 'custom-tone'
-      || state.mode === 'custom-name' || state.mode === 'custom-delete') {
+      || state.mode === 'advanced' || state.mode === 'custom-text' || state.mode === 'custom-command'
+      || state.mode === 'custom-refresh' || state.mode === 'custom-timeout'
+      || state.mode === 'custom-tone' || state.mode === 'custom-name' || state.mode === 'custom-delete') {
       const ref = this.refAt(state.rowIndex, state.cursor)
       return [ref === undefined ? color.textMuted('(no item)') : this.itemPreview(ref)]
     }
-    if (state.mode === 'create-name' || state.mode === 'create-text' || state.mode === 'create-tone') {
+    if (state.mode === 'create-name' || state.mode === 'create-text' || state.mode === 'create-tone'
+      || state.mode === 'create-command' || state.mode === 'create-refresh' || state.mode === 'create-timeout') {
       const tone = state.mode === 'create-tone'
         ? FOOTER_TONE_CHOICES[state.pickerIndex]?.value ?? state.customTone
         : state.customTone
-      const text = state.customText === '' ? color.textMuted('(enter text)') : renderSpans([{
-        text: stripControlChars(state.customText),
+      const text = state.customKind === 'command' ? state.customCommand : state.customText
+      const placeholder = state.customKind === 'command' ? '(enter command)' : '(enter text)'
+      const preview = text === '' ? color.textMuted(placeholder) : renderSpans([{
+        text: stripControlChars(text),
         ...(tone === 'auto' ? {} : { tone }),
       }])
-      return [text]
+      return [preview]
     }
     const preview = this.composer.render({
       snapshot: this.snapshot(),
@@ -674,7 +700,10 @@ export class FooterConfiguratorPanel implements Component {
       return [color.textMuted('(row is full — remove an item first)')]
     }
     if (this.model.isCreateOption()) {
-      return [color.textMuted('Create a user-defined static footer item.')]
+      const kind = this.model.createActionKind()
+      return [color.textMuted(kind === 'command'
+        ? 'Create a user-defined command item.'
+        : 'Create a user-defined static footer item.')]
     }
     const matches = this.model.addMatches()
     const id = matches[Math.min(state.pickerIndex, Math.max(0, matches.length - 1))]
@@ -768,7 +797,8 @@ export class FooterConfiguratorPanel implements Component {
       }
       case 'item': {
         const ref = this.refAt(state.rowIndex, state.cursor)
-        const custom = ref !== undefined && this.model.isCustomItem(ref.id)
+        const customItem = ref === undefined ? undefined : this.model.customItem(ref.id)
+        const custom = customItem?.kind
         const menu = itemMenuFor(ref === undefined ? undefined : this.registry.get(ref.id)?.formats, custom)
         const lines = menu.map((entry, index) => {
           const active = index === state.itemCursor
@@ -785,11 +815,23 @@ export class FooterConfiguratorPanel implements Component {
             return this.menuRow(marker, toneMenuLabel(entry.kind), this.tonePaint(tone, label), active)
           }
           if (entry.kind === 'custom-text') {
-            const value = this.model.customItem(ref?.id ?? '')?.text
+            const value = customItem?.kind === 'text' ? customItem.text : undefined
             return this.menuRow(marker, 'Text', value === undefined ? undefined : color.text(value), active)
           }
+          if (entry.kind === 'custom-command') {
+            const value = customItem?.kind === 'command' ? customItem.command : undefined
+            return this.menuRow(marker, 'Command', value === undefined ? undefined : color.text(clipText(value, 48)), active)
+          }
+          if (entry.kind === 'custom-refresh') {
+            const value = customItem?.kind === 'command' ? formatRefreshMs(effectiveCustomCommandRefreshMs(customItem)) : undefined
+            return this.menuRow(marker, 'Refresh', value === undefined ? undefined : color.text(value), active)
+          }
+          if (entry.kind === 'custom-timeout') {
+            const value = customItem?.kind === 'command' ? formatTimeoutMs(effectiveCustomCommandTimeoutMs(customItem)) : undefined
+            return this.menuRow(marker, 'Timeout', value === undefined ? undefined : color.text(value), active)
+          }
           if (entry.kind === 'custom-tone') {
-            const tone = this.model.customItem(ref?.id ?? '')?.tone ?? 'auto'
+            const tone = customItem?.tone ?? 'auto'
             const label = toneChoicesFor(tone).find(choice => choice.value === tone)?.label ?? 'Auto'
             return this.menuRow(marker, toneMenuLabel(entry.kind), this.tonePaint(tone, label), active)
           }
@@ -844,9 +886,38 @@ export class FooterConfiguratorPanel implements Component {
         })
         return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)) }
       }
+      case 'custom-refresh': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const item = this.model.customItem(ref?.id ?? '')
+        const current = item?.kind === 'command' ? effectiveCustomCommandRefreshMs(item) : 5000
+        const choices = customCommandRefreshChoices(current)
+        const lines = choices.map((ms, index) => {
+          const active = index === state.pickerIndex
+          const marker = active ? color.primary('›') : ' '
+          const label = formatRefreshMs(ms)
+          const suffix = current === ms ? color.textMuted('  (current)') : ''
+          return `${marker} ${active ? color.textStrong(label) : color.text(label)}${suffix}`
+        })
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)) }
+      }
+      case 'custom-timeout': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const item = this.model.customItem(ref?.id ?? '')
+        const current = item?.kind === 'command' ? effectiveCustomCommandTimeoutMs(item) : 300
+        const choices = customCommandTimeoutChoices(current)
+        const lines = choices.map((ms, index) => {
+          const active = index === state.pickerIndex
+          const marker = active ? color.primary('›') : ' '
+          const label = formatTimeoutMs(ms)
+          const suffix = current === ms ? color.textMuted('  (current)') : ''
+          return `${marker} ${active ? color.textStrong(label) : color.text(label)}${suffix}`
+        })
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)) }
+      }
       case 'custom-text':
+      case 'custom-command':
       case 'custom-name': {
-        const label = state.mode === 'custom-text' ? 'Text' : 'Name'
+        const label = state.mode === 'custom-text' ? 'Text' : state.mode === 'custom-command' ? 'Command' : 'Name'
         const raw = stripControlChars(state.editBuffer)
         const value = raw === '' ? color.textMuted('(empty)') : color.textStrong(`${raw}▏`)
         const lines = [this.menuRow(color.primary('›'), label, value, true)]
@@ -884,10 +955,58 @@ export class FooterConfiguratorPanel implements Component {
         if (state.customError !== '') lines.push(color.error(state.customError))
         return { lines, cursor: 1 }
       }
-      case 'create-tone': {
+      case 'create-command': {
+        const name = state.customName === '' ? color.textMuted('(unnamed)') : color.text(state.customName)
+        const value = state.customCommand === '' ? color.textMuted('(required)') : color.textStrong(`${stripControlChars(state.customCommand)}▏`)
+        const lines = [
+          this.menuRow(' ', 'Name', name, false),
+          this.menuRow(color.primary('›'), 'Command', value, true),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: 1 }
+      }
+      case 'create-refresh': {
         const lines = [
           this.menuRow(' ', 'Name', color.text(state.customName), false),
-          this.menuRow(' ', 'Text', color.text(state.customText), false),
+          this.menuRow(' ', 'Command', color.text(clipText(stripControlChars(state.customCommand), 48)), false),
+          color.textStrong('Refresh'),
+          ...CUSTOM_COMMAND_REFRESH_CHOICES_MS.map((ms, index) => {
+            const active = index === state.pickerIndex
+            const marker = active ? color.primary('›') : ' '
+            const label = formatRefreshMs(ms)
+            const suffix = ms === (CUSTOM_COMMAND_REFRESH_CHOICES_MS[state.pickerIndex] ?? 5000)
+              ? color.textMuted('  (selected)')
+              : ''
+            return `${marker} ${active ? color.textStrong(label) : color.text(label)}${suffix}`
+          }),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1) }
+      }
+      case 'create-timeout': {
+        const lines = [
+          this.menuRow(' ', 'Name', color.text(state.customName), false),
+          this.menuRow(' ', 'Command', color.text(clipText(stripControlChars(state.customCommand), 48)), false),
+          color.textStrong('Timeout'),
+          ...CUSTOM_COMMAND_TIMEOUT_CHOICES_MS.map((ms, index) => {
+            const active = index === state.pickerIndex
+            const marker = active ? color.primary('›') : ' '
+            const label = formatTimeoutMs(ms)
+            const suffix = ms === (CUSTOM_COMMAND_TIMEOUT_CHOICES_MS[state.pickerIndex] ?? 300)
+              ? color.textMuted('  (selected)')
+              : ''
+            return `${marker} ${active ? color.textStrong(label) : color.text(label)}${suffix}`
+          }),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1) }
+      }
+      case 'create-tone': {
+        const contentLabel = state.customKind === 'command' ? 'Command' : 'Text'
+        const content = state.customKind === 'command' ? state.customCommand : state.customText
+        const lines = [
+          this.menuRow(' ', 'Name', color.text(state.customName), false),
+          this.menuRow(' ', contentLabel, color.text(clipText(stripControlChars(content), 48)), false),
           color.textStrong('Tone'),
           ...FOOTER_TONE_CHOICES.map((choice, index) => {
             const active = index === state.pickerIndex
@@ -945,9 +1064,11 @@ export class FooterConfiguratorPanel implements Component {
         })
         const createIndex = matches.length
         if (matches.length === 0) lines.push(color.textMuted('(no matching items)'))
-        const createActive = state.pickerIndex === createIndex
-        lines.push(`${createActive ? color.primary('›') : ' '} ${createActive ? color.textStrong('+ Create Custom Text') : color.text('+ Create Custom Text')}`)
-        return { lines, cursor: Math.min(state.pickerIndex, createIndex) }
+        const createTextActive = state.pickerIndex === createIndex
+        const createCommandActive = state.pickerIndex === createIndex + 1
+        lines.push(`${createTextActive ? color.primary('›') : ' '} ${createTextActive ? color.textStrong('+ Create Custom Text') : color.text('+ Create Custom Text')}`)
+        lines.push(`${createCommandActive ? color.primary('›') : ' '} ${createCommandActive ? color.textStrong('+ Create Custom Command') : color.text('+ Create Custom Command')}`)
+        return { lines, cursor: Math.min(state.pickerIndex, createIndex + 1) }
       }
     }
   }
@@ -1070,6 +1191,16 @@ export class FooterConfiguratorPanel implements Component {
   private styleText(ref: FooterItemRef): string {
     return this.formatDisplay(ref)
   }
+}
+
+/** A refresh interval in user-facing units ('5s', '30s', '1s'). */
+function formatRefreshMs(ms: number): string {
+  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`
+}
+
+/** A timeout in user-facing units ('300ms', '1s'). */
+function formatTimeoutMs(ms: number): string {
+  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`
 }
 
 const BRACKETED_PASTE_START = '\x1b[200~'

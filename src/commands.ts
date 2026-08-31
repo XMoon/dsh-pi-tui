@@ -42,7 +42,7 @@ import {
   type FooterCustomItemSettings,
 } from './footer/custom-items.ts'
 import { FooterItemRegistry } from './footer/item-registry.ts'
-import { FooterConfiguratorModel } from './footer/configurator-model.ts'
+import { FooterConfiguratorModel, sameFooterCustomItem } from './footer/configurator-model.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
@@ -1873,6 +1873,21 @@ export function registerTuiCommands(
       // cannot mutate the active footer or its persisted definitions.
       const registry = new FooterItemRegistry(app.getFooterItemRegistry())
       const customItems = new FooterCustomItemCatalog(app.getFooterCustomItems())
+      // PR D preview contract (§14): the preview NEVER executes a command.
+      // A draft command item shows the committed cache ONLY while its
+      // definition is unchanged (same command/refresh/timeout/tone) — a
+      // modified draft must not pretend the old cache is the new command's
+      // result — and the dim `[command]` placeholder otherwise.
+      customItems.setCommandValueSource({
+        value: (id) => {
+          const draft = customItems.get(id)
+          if (draft === undefined || draft.kind !== 'command') return undefined
+          const committed = app.getFooterCustomItems().find(item => item.id === id)
+          if (committed === undefined || !sameFooterCustomItem(draft, committed)) return { kind: 'placeholder' }
+          const text = app.getFooterCommandItemValue(id)
+          return text === undefined ? { kind: 'placeholder' } : { kind: 'value', text }
+        },
+      })
       registry.setCustomSource(customItems)
       const composer = new FooterComposer(registry)
       const model = new FooterConfiguratorModel(initial, registry, customItems)
