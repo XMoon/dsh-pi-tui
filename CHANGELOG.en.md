@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added Source Mode local/CI validation: pin the complete DeepSeek Harness SHA, run the official `build:official` and `release:pack --family dsh` commands, then validate the complete tarball family through temporary pnpm overrides without writing source paths into the package contract or lockfile.
 - `next` pushes/PRs use Source Mode; `main` and every tag (including `next-v*`) use frozen npm Mode. The source lane explicitly skips the published `pi2dsh` check until a compatible published combination exists, while npm mode remains blocking.
+- **Source validation baseline moved to DSH 0.1.2-alpha.2** (exact SHA `0a53fb55bea101816fa226bb964ae2bed71c343b`). The product peer floor stays `>=0.1.2-alpha.1` because the official session observation/projection seams used by the cold-preset path already exist in alpha.1; no alpha.1/alpha.2 runtime capability branch was added.
+
+### Session projection cleanup
+
+- **Cold session presets now read through the official observation seam.** `recordedSessionPreset()` uses `sessionQuery.observeSession()` — the engine owns live/cold source selection, persistence borrow/preparation, projection-cache hydration, tail replay, and the projection cut. The TUI no longer reconstructs a detached `Session` just to read the `agentPreset` projection.
+- **The `/sessions` picker consults the zero-I/O projection cache first.** Cold rows with a cached `agentPreset` (`sessionProjectionCache.cachedSnapshot`) are enriched without any observation; only cache misses go through bounded (concurrency 4) `observeSession()` reads. The header snapshot captured by `list()` removed the second full corpus listing, and the first picker frame still opens before any cold enrichment.
+- **`SessionEvent.ignorable` round-trip regression.** The alpha.2-restored `ignorable?: true` envelope marker is preserved through every repair shape (healthy no-op, duplicate-seq renumber, re-frame, torn-tail salvage) with `data` untouched and no `surfaceOp` invented; an unknown event without the marker still fails closed (never auto-marked, never deleted).
 
 ### Migration notes
 
@@ -44,7 +51,7 @@ For this prerelease, install the matching DSH first and then add the TUI bundle
 into a profile:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.1
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.2
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```

@@ -145,6 +145,35 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
   client-local UI over Host-owned settings** (the dsh-pi-tui settings
   document via the settings service).
 
+## Alpha.2 official seam mapping (DSH 0.1.2-alpha.2)
+
+The M2/M3 Remote backend maps to the official alpha.2 seams below — it must
+not copy Direct Host implementation or invent parallel protocols. The Direct
+backend already consumes the same seams in-process (the session-preset
+adapter reads cold sessions through `sessionQuery.observeSession()` and the
+picker's preset enrichment consults `sessionProjectionCache.cachedSnapshot`
+before any observation), so the Remote adapter's job is transport mapping,
+not reimplementation.
+
+- **Session history** — `session.follow` / `session.page` are the Remote
+  history authority. The client renders from the official Session client
+  object; it never builds its own history RPC or transport cursor.
+- **Existing-session skills** — the official skills Remote serves the
+  catalog for an existing session. The Remote adapter must not copy
+  `serviceFor` / `standingKeyFor` discovery; the sessionless staged-preset
+  catalog (`StagedPresetSkillCatalog`) stays client-side because no session
+  exists yet to attach a Remote to.
+- **Remote errors** — use the official `RemoteResult<T>` / `RemoteError.code`
+  vocabulary. Do not define a `TuiRemoteError` / `SessionRemoteError` family,
+  and never `instanceof RemoteError` across bundle boundaries (identity does
+  not survive the wire; match on `code`).
+- **Preset / plugin diagnostics** — use `agentPresets.compositionInventory()`
+  instead of parsing `agent.cordis.yml` by hand. It is a diagnostic surface,
+  never a substitute for a real Agent mount smoke.
+- **Transcript window** — `transcript-window` is CLIENT render retention
+  only. It owns none of: history authority, transport cursor, gap repair
+  protocol, projection fold, durability, or reconnect generation.
+
 ## Known blockers
 
 | Blocker | Level | Mitigation |
