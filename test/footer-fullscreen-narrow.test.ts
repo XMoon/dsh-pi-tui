@@ -12,7 +12,7 @@
  * and the SURFACE hands the composer the effective budget
  * min(4, currently-available footer rows) — so the whole footer always
  * fits beside the other pinned chrome on short viewports and the appended
- * Host instruction is never viewport-clipped (plan §6.1, PR #57 task §一–§三).
+ * Host instruction is never viewport-clipped (plan §6.1; the PR #57 review task, sections 1-3).
  * @module @xmoon76/dsh-pi-tui/footer-fullscreen-narrow.test
  */
 
@@ -187,7 +187,7 @@ test('the armed Ctrl+C instruction never pushes the footer out of a narrow fulls
 })
 
 test('the armed Ctrl+C instruction on a chrome-heavy 20x10 viewport is NEVER clipped', async () => {
-  // THE P2 regression (PR #57 task §二/§七.1): at 20x10 the pinned chrome
+  // THE P2 regression (PR #57 review task, sections 2 and 7.1): at 20x10 the pinned chrome
   // (header + wrapped todo + working + editor) leaves only TWO footer
   // slots. Without the surface budget the composer still emitted
   // status + stats + instruction (4 rows at this width) and — since the

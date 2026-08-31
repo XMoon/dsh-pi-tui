@@ -77,7 +77,8 @@ const DEFAULT_PHYSICAL_LINE_BUDGET: FooterPhysicalLineBudget = {
   total: FOOTER_MAX_PHYSICAL_LINES,
 }
 
-/** Normalize one positive-integer budget input (plan PR #57 review §十):
+/** Normalize one positive-integer budget input (the PR #57 review's
+ * budget-normalization requirement):
  * NaN/±Infinity/out-of-range inputs fall back instead of propagating —
  * `wrapped.length <= NaN` is always false, which would hang
  * wrapFitRow's shrink loop forever. */
@@ -454,30 +455,29 @@ export function mergeCommandSurface(
   // The width normalizes like the composer's (finite integer >= 1): a
   // degenerate width must not produce rows wider than the terminal.
   const w = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1
-  if (instruction === undefined) {
-    if (budget !== undefined && Number.isFinite(budget.total)) {
-      // Exactly 0 = the surface grants nothing; other finite values
-      // normalize (floor 1) and clamp to the hard capacity.
-      if (budget.total === 0) return ''
-      const cap = Math.min(FOOTER_MAX_PHYSICAL_LINES, normalizePositiveInt(budget.total, FOOTER_MAX_PHYSICAL_LINES))
-      return rows.slice(0, cap).join('\n')
-    }
-    return rows.join('\n')
+  // NO budget = the legacy command contract, untouched.
+  if (budget === undefined) {
+    if (instruction === undefined) return rows.join('\n')
+    const legacyWrapped = wrapTextWithAnsi(renderInstruction(instruction), w)
+    const legacyRow = legacyWrapped.length > 1 ? capRowWithEllipsis(legacyWrapped[0]!, w) : legacyWrapped[0]!
+    const legacyMerged = rows.length > 1 ? [...rows.slice(0, -1), legacyRow] : [...rows, legacyRow]
+    return legacyMerged.join('\n')
   }
+  // A SUPPLIED budget normalizes ALWAYS — even a non-finite total falls
+  // back to the hard capacity instead of bypassing the budget: exactly 0
+  // is the only zero-grant value, everything else normalizes (floor 1)
+  // and clamps to perRow/capability.
+  if (budget.total === 0) return ''
+  const total = Math.min(FOOTER_MAX_PHYSICAL_LINES, normalizePositiveInt(budget.total, FOOTER_MAX_PHYSICAL_LINES))
+  const truncate = (row: string): string => truncateToWidth(row, w, '…')
+  if (instruction === undefined) return rows.slice(0, total).map(truncate).join('\n')
+  // The instruction reserves 1 first; the trusted command rows keep the
+  // remaining slots in layout order — a wrapped row would silently spend
+  // a second slot and push the hint out of the budget.
   const wrapped = wrapTextWithAnsi(renderInstruction(instruction), w)
   const instructionRow = wrapped.length > 1 ? capRowWithEllipsis(wrapped[0]!, w) : wrapped[0]!
-  if (budget !== undefined && Number.isFinite(budget.total)) {
-    // The instruction reserves 1 first; exactly zero grants render
-    // nothing (same semantics as the native composer). Kept rows are
-    // ANSI-safely truncated to the width — a wrapped row would silently
-    // spend a second slot and push the hint out of the budget.
-    if (budget.total === 0) return ''
-    const total = Math.min(FOOTER_MAX_PHYSICAL_LINES, normalizePositiveInt(budget.total, FOOTER_MAX_PHYSICAL_LINES))
-    const kept = rows.slice(0, total - 1).map(row => truncateToWidth(row, w, '…'))
-    return [...kept, instructionRow].join('\n')
-  }
-  const merged = rows.length > 1 ? [...rows.slice(0, -1), instructionRow] : [...rows, instructionRow]
-  return merged.join('\n')
+  const kept = rows.slice(0, Math.max(0, total - 1)).map(truncate)
+  return [...kept, instructionRow].join('\n')
 }
 
 /** Strip SGR sequences — params may be `;`- or colon-separated (e.g.

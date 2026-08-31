@@ -9533,10 +9533,10 @@ export class TuiApp {
    *   mergeCommandSurface (instruction reserves first, trusted rows keep
    *   the remaining slots in order).
    *
-   * Floored at 0: when the pinned chrome alone already exceeds the
-   * viewport nothing can keep the footer unclipped, and the composer
-   * still spends the last available line on the Host instruction
-   * (instruction > user rows). */
+   * Floored at 0: when the pinned chrome alone already fills the
+   * viewport the granted budget is ZERO and the footer renders nothing
+   * at all — including the Host instruction (no footer line could avoid
+   * the clip, and painting one would exceed the granted budget). */
   private footerPhysicalLineBudget(): FooterPhysicalLineBudget {
     const width = Math.max(1, this.terminal.columns)
     const height = Math.max(1, this.terminal.rows)
