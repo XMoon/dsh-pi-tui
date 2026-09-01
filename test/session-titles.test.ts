@@ -16,8 +16,8 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // Carries the `session/title` event map augmentation into the test program.
 import type {} from '@deepseek-ai/dsh-session-title'
 import {
-  TITLE_BATCH_SIZE,
-  TITLE_FIRST_BATCH,
+  PROJECTION_BATCH_SIZE,
+  PROJECTION_FIRST_BATCH,
   fileTitleCache,
   loadSessionTitleBatch,
   sessionLogPath,
@@ -47,8 +47,8 @@ function recordingQuery(reads: { count: number }) {
 }
 
 test('progressive loading constants keep the first batch visible-window sized', () => {
-  assert.equal(TITLE_FIRST_BATCH, 20, 'the first batch must fill the visible picker window')
-  assert.ok(Number.isInteger(TITLE_BATCH_SIZE) && TITLE_BATCH_SIZE > 0 && TITLE_BATCH_SIZE >= TITLE_FIRST_BATCH)
+  assert.equal(PROJECTION_FIRST_BATCH, 20, 'the first batch must fill the visible picker window')
+  assert.ok(Number.isInteger(PROJECTION_BATCH_SIZE) && PROJECTION_BATCH_SIZE > 0 && PROJECTION_BATCH_SIZE >= PROJECTION_FIRST_BATCH)
 })
 
 test('a valid cache hit skips the engine read entirely', async () => {
