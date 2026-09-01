@@ -126,7 +126,7 @@ export interface AppKeybindingDefinition {
    * user direct bindings BOTH compile into the effective model as
    * owner=editor rules, participate in conflict/shadow/winner selection,
    * but execution is deferred to the fork editor (the effective keys
-   * sync into its `tui.input.submit` via onEditorSubmitSync), preserving
+   * sync into its `tui.editor.submit` via onEditorSubmitSync — X037), preserving
    * backslash-newline semantics. */
   readonly hostResolved?: boolean
 }

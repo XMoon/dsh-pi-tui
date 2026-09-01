@@ -157,6 +157,43 @@ test('registered older-boundary callback preserves history follow state', async 
   app.stop()
 })
 
+test('fullscreen Ctrl+Up/Ctrl+Down drive the host turn navigation (prompt-nav seam)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const olderCalls: number[] = []
+  const newerCalls: number[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onTranscriptTurnOlder: () => {
+      olderCalls.push(Date.now())
+      return true
+    },
+    onTranscriptTurnNewer: () => {
+      newerCalls.push(Date.now())
+      return true
+    },
+  })
+  app.start()
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join('\n'),
+  }])
+  app.setFullscreen(true)
+  await vt.waitForRender()
+
+  // Ctrl+Up / Ctrl+Down (the fork's previousPrompt/nextPrompt defaults)
+  // must reach the HOST seams in fullscreen — not vanish into the fork's
+  // OSC 133 scan (a permanent no-op on DSH transcripts).
+  vt.sendInput('\x1b[1;5A') // ctrl+up
+  await vt.waitForRender()
+  vt.sendInput('\x1b[1;5B') // ctrl+down
+  await vt.waitForRender()
+  assert.equal(olderCalls.length, 1, 'Ctrl+Up must reach onTranscriptTurnOlder exactly once')
+  assert.equal(newerCalls.length, 1, 'Ctrl+Down must reach onTranscriptTurnNewer exactly once')
+  app.stop()
+})
+
 test('history window paging preserves the overlap row across uneven heights', async () => {
   const vt = new VirtualTerminal(80, 24)
   const longMarkdown = ['turn-82', ...Array.from({ length: 80 }, (_, index) => `markdown row ${index + 1}`)].join('\n')

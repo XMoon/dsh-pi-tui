@@ -383,6 +383,18 @@ export const editorTheme: EditorTheme = {
   selectList: selectListTheme,
 }
 
+/**
+ * Markdown rendering options shared by EVERY host transcript renderer
+ * (assistant cards, thinking blocks, plugin component compilation).
+ * LaTeX-to-Unicode rendering is deliberately OFF (the kimi-host parity
+ * choice): the Earendil 0.84.4 re-vendor introduced `renderLatex`
+ * defaulting to true, which silently changed how `$...$`/`$$...$$`
+ * segments in assistant output render. Keep the pre-re-vendor rendering;
+ * revisit as an explicit setting if LaTeX output ever becomes a product
+ * requirement.
+ */
+export const HOST_MARKDOWN_OPTIONS = { renderLatex: false } as const
+
 /** Markdown palette for assistant messages. */
 export const markdownTheme: MarkdownTheme = {
   heading: (text: string) => chalk.bold.hex(currentPalette.textStrong)(text),

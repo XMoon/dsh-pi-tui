@@ -56,11 +56,17 @@ test('diff detection and line colorization', () => {
   assert.equal(renderDiffLine(' context'), ' context')
 })
 
-test('latex renders inside assistant markdown', async () => {
+test('latex stays RAW in assistant markdown (kimi-parity product decision)', async () => {
+  // renderLatex: false everywhere (HOST_MARKDOWN_OPTIONS): the Earendil
+  // 0.84.4 re-vendor introduced LaTeX-to-Unicode rendering defaulting to
+  // ON, which silently changed transcript rendering; the host keeps the
+  // pre-re-vendor behavior (raw $...$ text) until an explicit setting
+  // opts in.
   const { vt, app } = startApp()
   app.setTranscript([{ kind: 'assistant', turn: 0, text: 'Energy $E=mc^2$ rules' }])
   const view = await viewport(vt)
-  assert.ok(view.includes('²'), `latex not rendered:\n${view}`)
+  assert.ok(view.includes('E=mc^2'), `latex source must render verbatim:\n${view}`)
+  assert.ok(!view.includes('²'), `latex must not render to unicode yet:\n${view}`)
 })
 
 test('ctrl+t toggles the todo panel with markers', async () => {

@@ -281,6 +281,50 @@ async function powershellProbe(run: RunCommand, wsl: boolean): Promise<Clipboard
  * failures throw {@link ClipboardImageError} (a clipboard that DOES carry
  * an image but cannot be read must be distinguished from no image).
  */
+/**
+ * Read the system clipboard as PLAIN TEXT (the fullscreen right-click
+ * paste — native Windows terminals lose their right-click paste under the
+ * alt screen's mouse capture, so the host reads the clipboard itself and
+ * feeds a bracketed paste). Returns undefined when no backend is
+ * available; best-effort, never throws.
+ */
+export async function readClipboardText(run: RunCommand, env: ClipboardEnvironment): Promise<string | undefined> {
+  const platformCommand = (): { command: string; args: string[]; syntheticTrailingNewline: boolean } | undefined => {
+    if (isTermux(env)) return { command: 'termux-clipboard-get', args: [], syntheticTrailingNewline: false }
+    if (env.platform === 'darwin') return { command: 'pbpaste', args: [], syntheticTrailingNewline: false }
+    if (env.platform === 'win32' || isWsl(env)) {
+      // Get-Clipboard SYNTHESIZES a trailing CRLF that is NOT part of the
+      // copied text; every other backend returns the clipboard verbatim
+      // (a real trailing newline belongs to the content and must survive).
+      return {
+        command: isWsl(env) ? 'powershell.exe' : 'powershell',
+        args: ['-NoProfile', '-Command', 'Get-Clipboard'],
+        syntheticTrailingNewline: true,
+      }
+    }
+    if (env.env.WAYLAND_DISPLAY !== undefined && env.exists('wl-paste')) {
+      // NO --no-newline: wl-paste would strip a REAL trailing newline from
+      // the copied content — only PowerShell's synthetic CRLF is removed.
+      return { command: 'wl-paste', args: [], syntheticTrailingNewline: false }
+    }
+    if (env.env.DISPLAY !== undefined && env.exists('xclip')) {
+      return { command: 'xclip', args: ['-selection', 'clipboard', '-o'], syntheticTrailingNewline: false }
+    }
+    return undefined
+  }
+  const target = platformCommand()
+  if (target === undefined) return undefined
+  try {
+    const result = await run(target.command, target.args, { timeoutMs: 2000 })
+    if (result.code !== 0) return undefined
+    const text = result.stdout.toString('utf8')
+    if (!target.syntheticTrailingNewline) return text
+    return text.replace(/\r\n$/, '').replace(/\n$/, '')
+  } catch {
+    return undefined
+  }
+}
+
 export async function readClipboardImage(run: RunCommand, env: ClipboardEnvironment): Promise<ClipboardReadResult> {
   if (isTermux(env)) return { kind: 'unsupported' }
   if (env.platform === 'darwin') return macosProbe(run)

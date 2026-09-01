@@ -423,6 +423,52 @@ test('the read-only viewer lets a REMAPPED fold key reach the host fold (effecti
   app.stop()
 })
 
+test('app.input.submit remap does NOT leak into question free-text Inputs (X037)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
+  await vt.waitForRender()
+
+  const answers = app.askQuestions([{ id: 'q1', question: 'Name?', options: [] }])
+  await vt.waitForRender()
+  vt.sendInput('A')
+  vt.sendInput('B')
+  await vt.waitForRender()
+  // The remapped EDITER submit key must NOT commit a plain Input's answer.
+  vt.sendInput('\x18') // ctrl+x
+  await vt.waitForRender()
+  // Enter still submits the free-text answer (Input keeps its own Enter):
+  // first Enter commits the question, second Enter submits the review page.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  const settled = await Promise.race([answers, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('question never settled')), 500))])
+  assert.deepEqual(settled, [{ id: 'q1', selected: [], custom: 'AB' }], 'ctrl+x must not commit; Enter commits the typed answer')
+  app.stop()
+})
+
+test('app.input.submit remap does NOT leak into the history search Input (X037)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
+  await vt.waitForRender()
+  // Ctrl+R opens the panel; a source must be wired for it to open at all.
+  ;(app as unknown as { historySearchSource: unknown }).historySearchSource = {
+    query: async () => ({ rows: [{ text: 'alpha' }, { text: 'beta' }] }),
+  }
+  app.openHistorySearch()
+  await vt.waitForRender()
+  vt.sendInput('a')
+  vt.sendInput('\x18') // ctrl+x — an editor-only submit key; the search box keeps editing
+  await vt.waitForRender()
+  const viewport = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  assert.ok(viewport.includes('a'), 'the search box must still show the typed query')
+  app.closeHistorySearch()
+  app.stop()
+})
+
 test('app.input.submit remap: the NEW key submits and Enter no longer does (PR review)', async () => {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []

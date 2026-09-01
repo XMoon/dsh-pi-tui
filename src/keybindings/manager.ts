@@ -64,7 +64,7 @@ export interface HostKeybindingManagerOptions {
   /**
    * Called after every rebuild with the EFFECTIVE submit keys of
    * `app.input.submit` (an empty array = the action is disabled). The
-   * app syncs them into the fork editor's `tui.input.submit` binding so
+   * app syncs them into the fork editor's `tui.editor.submit` binding (X037) so
    * a user remap/disable of submit REALLY moves/removes the editor's
    * Enter submission (review finding — the editor path was previously
    * physical-only and ignored user config).
@@ -115,7 +115,7 @@ export class HostKeybindingManager {
     this.keymap = this.buildKeymap()
     // Sync the BUILTIN submit keys immediately: the fork's keybindings
     // are PROCESS-GLOBAL, so a fresh manager must restore the default
-    // `tui.input.submit` — otherwise a previous TUI instance's remap/
+    // `tui.editor.submit` — otherwise a previous TUI instance's remap/
     // disable leaks into this one (PR review finding: remap → stop →
     // new default app kept the old ctrl+x/disabled submit).
     this.onEditorSubmitSync(this.editorSubmitKeysFor())
@@ -242,7 +242,7 @@ export class HostKeybindingManager {
     const leaderKey = effectiveLeaderConfig?.key
     // Collision with BOTH the host keymap's active keys AND the
     // EDITOR-OWNED submit keys (hostResolved:false actions — the fork
-    // editor's tui.input.submit owns them; the keymap does not list them,
+    // editor's tui.editor.submit owns them (X037); the keymap does not list them,
     // so e.g. `leader: enter` would silently swallow Enter — PR review
     // finding) AND the live PLUGIN keys (the leader machine feeds before
     // the plugin stage — round-12 finding).
@@ -295,14 +295,14 @@ export class HostKeybindingManager {
     // Sync the effective submit keys into the fork editor's binding
     // (review finding): a user remap or `false` of app.input.submit must
     // REALLY move/remove the editor's submission — the fork editor routes
-    // Enter (or the remapped key) through tui.input.submit. Empty = the
+    // Enter (or the remapped key) through tui.editor.submit (X037). Empty = the
     // action is disabled (no key submits).
     this.onEditorSubmitSync(this.editorSubmitKeysFor())
     this.onInvalidate()
   }
 
   /** The effective submit keys of `app.input.submit` as the fork editor's
-   * `tui.input.submit` should carry them: the action's effective direct
+   * `tui.editor.submit` should carry them: the action's effective direct
    * keys, or an EMPTY array when disabled (`false`) or safe mode dropped
    * them. `app.input.submit` is hostResolved:false — the host ladder
    * NEVER consumes these keys; the editor owns them, so the sync is the
@@ -478,7 +478,7 @@ export class HostKeybindingManager {
    * the action's context predicate, convergence §4.7). */
   canActivate(action: AppKeybindingId, context: KeybindingContext): boolean {
     // Editor-owned submit: active whenever it has an EFFECTIVE editor
-    // trigger (the fork editor's tui.input.submit or a live leader
+    // trigger (the fork editor's tui.editor.submit or a live leader
     // sequence) — a leader submit completion must activate iff submit
     // itself is available (convergence §4.7).
     if (action === 'app.input.submit') {

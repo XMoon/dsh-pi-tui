@@ -41,6 +41,7 @@ import {
   wrapTextWithAnsi,
   type Component,
   type Focusable,
+  isFocusable,
   type OverlayHandle,
   type OverlayOptions,
   type SelectListTruncatePrimaryContext,
@@ -55,6 +56,7 @@ import {
   detectThemeFromBackground,
   detectThemeFromColorFgBg,
   editorTheme,
+  HOST_MARKDOWN_OPTIONS,
   markdownTheme,
   selectListTheme,
   settingsListTheme,
@@ -393,6 +395,50 @@ class QuestionFrame extends Frame implements Focusable {
   private lastTermColumns = 0
 }
 
+/**
+ * A Frame that forwards the focused flag to its child (fork X042 / the
+ * IME cursor-marker contract): the fork sets `focused` only on the
+ * component it focuses directly — a plain Frame SWALLOWS the flag, so an
+ * Input-owning child behind it (HistoryPanel, SelectList's search box,
+ * SettingsList, TaskBrowserPanel) never emits the hardware CURSOR_MARKER
+ * and the IME candidate window misplaces itself. Forwarding is a no-op
+ * for non-Focusable children (plain dialogs).
+ */
+class FocusForwardingFrame extends Frame implements Focusable {
+  private readonly focusedChild: Component & Focusable | undefined
+  /** The RAW child: the frame OWNS it regardless of Focusable-ness (round-5
+   * review P2 — a non-Focusable panel behind the frame must still be
+   * disposed on overlay removal). */
+  private readonly ownedChild: Component
+  private disposed = false
+
+  constructor(child: Component, fillWidth = false) {
+    super(child, fillWidth)
+    this.ownedChild = child
+    this.focusedChild = isFocusable(child) ? (child as Component & Focusable) : undefined
+  }
+
+  get focused(): boolean {
+    return this.focusedChild?.focused ?? false
+  }
+
+  set focused(value: boolean) {
+    if (this.focusedChild !== undefined) this.focusedChild.focused = value
+  }
+
+  /**
+   * OWNING, idempotent dispose (X007): overlay removal (disposeOnHide)
+   * releases the panel behind the frame — the frame is the overlay entry,
+   * so the fork calls THIS, not the child. Idempotent so a close path
+   * that already disposed the child can never double-fire.
+   */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.ownedChild.dispose?.()
+  }
+}
+
 /** The session head card: identity facts, wrapped to the available width so
  * nothing is truncated, framed with a box whose width matches the editor's
  * border below it (a fixed-width rule looked misaligned next to the frame). */
@@ -488,13 +534,25 @@ class Spacer implements Component {
  * it), and resets the marquee. Zero fork divergence: the SelectList
  * itself is untouched, this wraps it on the consumer side.
  */
-class MarqueeFilterAdapter implements Component {
+class MarqueeFilterAdapter implements Component, Focusable {
   private readonly list: SelectList
   private readonly onFilterChange: () => void
+  private _focused = false
 
   constructor(list: SelectList, onFilterChange: () => void) {
     this.list = list
     this.onFilterChange = onFilterChange
+  }
+
+  /** Focusable (X042): forward to the wrapped SelectList so its search
+   * Input emits the hardware CURSOR_MARKER (IME positioning). */
+  get focused(): boolean {
+    return this._focused
+  }
+
+  set focused(value: boolean) {
+    this._focused = value
+    this.list.focused = value
   }
 
   invalidate(): void {
@@ -517,6 +575,9 @@ class MarqueeFilterAdapter implements Component {
     return this.list.render(width)
   }
 }
+
+/** SGR mouse reports (press/drag/release/wheel) — the alt screen owns them. */
+const MOUSE_SEQUENCE = /^\x1b\[<\d+;\d+;\d+[Mm]$/
 
 /**
  * The transcript surface's RIGHT GUTTER (the transcript right-gutter width contract):
@@ -1067,6 +1128,16 @@ export interface TuiAppEventsBase {
   onTranscriptMoveOlder?: (source: 'wheel' | 'page' | 'scrollbar') => boolean
   /** A fullscreen viewport reached the newer edge. */
   onTranscriptMoveNewer?: (source: 'wheel' | 'page' | 'scrollbar') => boolean
+  /**
+   * Prompt-turn navigation (fullscreen Ctrl+Up / Ctrl+Down): move the
+   * virtual transcript window exactly one turn older / newer. The host
+   * claims the fork's `previousPrompt`/`nextPrompt` keys BEFORE the fork's
+   * built-in OSC 133 scan (the DSH transcript emits no OSC 133 markers, so
+   * the fork scan is a permanent no-op — host wiring over X028's seam).
+   */
+  onTranscriptTurnOlder?: () => boolean
+  /** @see onTranscriptTurnOlder */
+  onTranscriptTurnNewer?: () => boolean
   /** Reset the active transcript window to the live tail. */
   onTranscriptJumpLatest?: () => boolean
   /**
@@ -1482,6 +1553,20 @@ export interface TuiAppOptions {
    * flash. Optional — absent keeps the vendor's OSC 52 fallback.
    */
   copySelection?: (text: string) => Promise<boolean>
+  /**
+   * Host-owned link activation for fullscreen OSC 8 clicks: the alt
+   * screen's mouse capture swallows the terminal's native click-to-open,
+   * so the host opens http/https URLs itself (src/open-url.ts). Optional
+   * — absent leaves fullscreen link clicks inert.
+   */
+  openExternalUrl?: (url: string) => void
+  /**
+   * Host-owned clipboard READ for the fullscreen right-click paste
+   * (native Windows terminals lose their right-click paste under mouse
+   * capture). Returns the clipboard text, or undefined when no backend
+   * exists. Optional — absent keeps right-click inert.
+   */
+  readClipboardText?: () => Promise<string | undefined>
   /**
    * The empty-editor double-Ctrl+C exit window in ms (issue #8);
    * injectable so headless tests never wait the real 1.5s. The footer
@@ -2004,6 +2089,8 @@ export class TuiApp {
    * selection (tmux → platform helper → OSC 52); undefined keeps the
    * vendor's raw OSC 52 write. */
   private readonly copySelection: ((text: string) => Promise<boolean>) | undefined
+  private readonly openExternalUrl: ((url: string) => void) | undefined
+  private readonly readClipboardText: (() => Promise<string | undefined>) | undefined
   /**
    * P1-1: the renderer registry revision observed by the LAST render pass.
    * When the registry revision moves (a renderer registered/unloaded —
@@ -2312,15 +2399,19 @@ export class TuiApp {
       },
       // A user remap/disable of app.input.submit must REALLY move/remove
       // the editor's submission: the fork editor routes the submit key
-      // through its OWN tui.input.submit binding, so we sync the
-      // effective keys there (review finding — the editor path was
-      // previously physical-only and ignored user config). Empty = the
-      // action is disabled (no key submits; plain Enter becomes inert).
+      // through its OWN tui.editor.submit binding (X037 — deliberately NOT
+      // tui.input.submit: keybindings are process-global and a remap there
+      // would leak into every plain Input — search boxes, question
+      // free-text, pickers), so we sync the effective keys there. Empty =
+      // the action is disabled (no key submits; plain Enter becomes inert).
+      // tui.input.submit is reset to its builtin default in the same write:
+      // a pre-X037 instance (or test) may have left a remap behind.
       onEditorSubmitSync: (keys) => {
         const kb = getKeybindings()
         kb.setUserBindings({
           ...kb.getUserBindings(),
-          'tui.input.submit': keys.length === 0 ? [] : keys.length === 1 ? keys[0]! : [...keys],
+          'tui.input.submit': 'enter',
+          'tui.editor.submit': keys.length === 0 ? [] : keys.length === 1 ? keys[0]! : [...keys],
         })
       },
     })
@@ -2328,6 +2419,8 @@ export class TuiApp {
     this.renderers = options.renderers
     this.editorRegistry = options.editorRegistry
     this.copySelection = options.copySelection
+    this.openExternalUrl = options.openExternalUrl
+    this.readClipboardText = options.readClipboardText
     this.overlayBroker = new OverlayBroker({
       question: () => this.activeQuestions,
       setFocusSeat: (seat) => this.setFocusSeat(seat),
@@ -2421,7 +2514,14 @@ export class TuiApp {
       // shell-mode draft round-trips through the viewer with its mode.
       const viewer = this.viewerMode
       if (viewer !== undefined && isViewerAccessInteractive(resolveViewerAccess(viewer.mode, viewer.access))) {
-        this.subagentDrafts.set(viewer.childSessionId, this.serializeSeatDraft(this.seatEditor().getText()))
+        // Paste markers must not outlive the live registry: a submit
+        // between mirror and restore clears it, orphaning the marker text
+        // (same class as the external-editor round-trip).
+        const draftSeat = this.seatEditor()
+        this.subagentDrafts.set(
+          viewer.childSessionId,
+          this.serializeSeatDraft(draftSeat.getExpandedText?.() ?? draftSeat.getText()),
+        )
       }
       // P1-11: every HOST-driven editor mutation notifies the seat
       // holder's subscribers (the fork Editor's own typing/editing flows
@@ -2463,27 +2563,26 @@ export class TuiApp {
         // safety.
         switch (action) {
           case 'submit': {
-            const text = this.seatEditor().getText()
-            // Emptiness is judged on the SERIALIZED wire form: a bare `!`
-            // / `!!` shell mode has an empty BODY but a non-empty wire
-            // form, and must reach the existing protocol like the literal
-            // prefix did before the mode feature.
-            if (!serializedDraftHasPayload(this.serializeSeatDraft(text))) return false
+            // Emptiness is judged on the SERIALIZED (marker-expanded) wire
+            // form: a bare `!` / `!!` shell mode has an empty BODY but a
+            // non-empty wire form, and must reach the existing protocol
+            // like the literal prefix did before the mode feature.
+            if (!serializedDraftHasPayload(this.expandedSeatWireDraft())) return false
             this.submitDraft(false)
             return true
           }
           case 'queue-submit': {
-            const text = this.seatEditor().getText()
-            if (!serializedDraftHasPayload(this.serializeSeatDraft(text))) return false
+            if (!serializedDraftHasPayload(this.expandedSeatWireDraft())) return false
             this.submitDraft(true)
             return true
           }
           case 'steer': {
-            const text = this.seatEditor().getText()
             // The shell-editor-mode boundary, like the Ctrl+S path: the
             // wire form leaves the app (identity for a plugin editor,
             // whose document IS the wire form; defensive for a host seat).
-            const serialized = this.serializeSeatDraft(text)
+            // Paste markers are EXPANDED — the steer wire never carries
+            // registry-bound marker text.
+            const serialized = this.expandedSeatWireDraft()
             this.seatEditor().setText('')
             this.editorSeatHolder.notifyChanged()
             this.resetEditorMode()
@@ -2590,6 +2689,76 @@ export class TuiApp {
     this.tui.start()
   }
 
+  /**
+   * The fullscreen right-click paste: read the clipboard through the
+   * host's platform policy, then feed the text to the FOCUSED component
+   * as a bracketed paste (both the fork Editor and plain Input understand
+   * the markers; their paste paths clean newlines). The feed bypasses
+   * routeInput deliberately — a synthetic paste is not user input, and
+   * the host ladder must not get a chance to consume it as a shortcut.
+   */
+  private rightClickPasteFromClipboard(): void {
+    const read = this.readClipboardText
+    if (read === undefined) return
+    // Fire-and-forget through the owned-task entry (AGENTS.md hard rule —
+    // never a bare `void promise`): a clipboard-read failure is classified
+    // and logged, never an unhandled rejection; success feeds the paste.
+    this.events.runOwned?.('clipboard paste', async () => {
+      let text: string | undefined
+      try {
+        text = await read()
+      } catch {
+        return // best-effort: no backend / helper failure is user-invisible
+      }
+      if (text === undefined || text === '') return
+      this.activeScreen.getFocusedComponent()?.handleInput?.(`\x1b[200~${text}\x1b[201~`)
+      this.activeScreen.requestRender()
+    }, { onCancel: () => {}, onError: () => {} })
+  }
+
+  /**
+   * MINIMAL suspend for the external-editor round-trip (Ctrl+G): stops
+   * ONLY the active screen — a fullscreen surface is stopped with
+   * `preserveScreen` (exit the alt buffer WITHOUT replaying the transcript
+   * into the main buffer; $EDITOR takes the terminal over) and its
+   * renderer INSTANCE survives, so {@link resumeFromExternalEditor} can
+   * re-enter the SAME fullscreen surface. This deliberately replaces the
+   * old `stop()/start()` pair, which dropped `this.fullscreen` entirely:
+   * returning from $EDITOR always landed on the regular screen (P2
+   * lifecycle violation — the external-editor round-trip is documented as
+   * a temporary transition INSIDE one surface generation). Questions,
+   * approvals, the busy indicator and extension registrations all survive
+   * the round-trip (they die only with dispose()).
+   */
+  private suspendForExternalEditor(): void {
+    this.keybindings.cancelLeader()
+    this.clearCtrlCExit()
+    this.lastEscapeAt = undefined
+    if (this.fullscreen !== undefined) {
+      this.fullscreen.stop({ preserveScreen: true })
+    } else {
+      this.tui.stop()
+    }
+  }
+
+  /**
+   * Re-enter the surface {@link suspendForExternalEditor} stopped. Focus
+   * is deliberately NOT reassigned: TuiBase keeps its focusedComponent
+   * across stop/start on the same instance, so whatever owned focus before
+   * the suspend (the seat editor, an active question's QuestionFrame, an
+   * approval overlay) still owns it — forcing the seat editor here would
+   * break a live question's modal focus and IME anchor.
+   */
+  private resumeFromExternalEditor(): void {
+    if (this.fullscreen !== undefined) {
+      this.fullscreen.start()
+      this.fullscreen.requestRender(true)
+    } else {
+      this.tui.start()
+      this.tui.requestRender(true)
+    }
+  }
+
   /** Leave raw mode and stop rendering. */
   stop(): void {
     this.clearNotify()
@@ -2631,15 +2800,16 @@ export class TuiApp {
     // keymap and schedule rendering — the disposed manager makes those
     // rebuilds inert (PR review finding).
     this.keybindings.dispose()
-    // Restore the fork's global submit binding to the builtin default:
+    // Restore the fork's global submit bindings to the builtin defaults:
     // the fork keybindings are PROCESS-GLOBAL, and a disposed surface
     // must not leak its remap/disable into a LATER TuiApp instance (PR
     // review finding — remap → stop → new app inherited ctrl+x/inert
     // Enter). The manager's constructor re-syncs the builtin default for
-    // a fresh instance too; this covers the no-new-instance case.
+    // a fresh instance too; this covers the no-new-instance case. Both
+    // the editor binding (X037) and the plain-Input default are restored.
     try {
       const kb = getKeybindings()
-      kb.setUserBindings({ ...kb.getUserBindings(), 'tui.input.submit': 'enter' })
+      kb.setUserBindings({ ...kb.getUserBindings(), 'tui.input.submit': 'enter', 'tui.editor.submit': 'enter' })
     } catch {
       // Best effort: the global keybindings may already be torn down.
     }
@@ -2903,6 +3073,17 @@ export class TuiApp {
   /** The host's own input precedence ladder (the raw stage has already
    * run — see {@link handleInput}). */
   private handleInputCore(data: string): TuiInputListenerResult {
+    // MOUSE chunks bypass the host KEY ladder (X043): with the viewport
+    // listener now registered AFTER this router, the ladder sees mouse
+    // sequences first — and a question/approval handler consumes EVERY
+    // key, which would starve the alt screen's selection/click handling
+    // (fullscreen question clicks route through onCellClick, not keys).
+    // Fall through so the viewport listener owns the mouse, exactly as it
+    // did when it was registered first. (Unstable raw captures already ran
+    // BEFORE this point and still see every chunk.)
+    if (MOUSE_SEQUENCE.test(data) || (data.length === 6 && data.startsWith('\x1b[M'))) {
+      return undefined
+    }
     // Kitty-protocol terminals report press, repeat, and release events as
     // separate sequences; the app must act on the PRESS only. A release of
     // Ctrl+O would otherwise double-toggle the fold (press expands, release
@@ -3111,7 +3292,7 @@ export class TuiApp {
       // - 'host' → the Host dispatcher (the only owner that may run the
       //   Host-private app.* actions);
       // - 'editor' → the FORK EDITOR executes (hostResolved: false — the
-      //   editor's tui.input.submit was synced by onEditorSubmitSync, so
+      //   editor's tui.editor.submit was synced by onEditorSubmitSync, so
       //   the key really submits there with backslash-newline semantics);
       // - 'plugin' → NEVER the AppActionDispatcher: a Stable plugin may
       //   only trigger the PUBLIC TuiAction set, and those execute
@@ -3227,7 +3408,7 @@ export class TuiApp {
     }
     if (action === 'app.input.submit' && data !== '') {
       // The fork editor OWNS the direct submit keys (backslash-newline
-      // semantics live in its tui.input.submit — the
+      // semantics live in its tui.editor.submit — X037; the
       // effective keys are synced there by onEditorSubmitSync). The host
       // ladder never consumes a DIRECT submit key: resolving it here would
       // bypass the editor's full submit logic (PR review finding — a
@@ -3435,7 +3616,7 @@ export class TuiApp {
           // `!` / `!!` shell mode has an empty BODY but a non-empty wire
           // form, and must reach the queue protocol like the literal
           // prefix did before the mode feature.
-          if (!serializedDraftHasPayload(this.serializeSeatDraft(this.seatEditor().getText()))) return true
+          if (!serializedDraftHasPayload(this.expandedSeatWireDraft())) return true
         }
         this.submitDraft(forceQueue)
         return true
@@ -3449,8 +3630,7 @@ export class TuiApp {
         // editor buffer holds the bare command body, so the wire form is
         // re-serialized here (serializeSeatDraft) and the mode reset with
         // the draft.
-        const draft = this.seatEditor().getText()
-        const serialized = this.serializeSeatDraft(draft)
+        const serialized = this.expandedSeatWireDraft()
         this.seatEditor().setText('')
         this.editorSeatHolder.notifyChanged()
         this.resetEditorMode()
@@ -3664,7 +3844,7 @@ export class TuiApp {
           'tui.editor.deleteWordBackward', 'tui.editor.deleteWordForward',
           'tui.editor.deleteToLineStart', 'tui.editor.deleteToLineEnd',
           'tui.editor.yank', 'tui.editor.yankPop', 'tui.editor.undo',
-          'tui.input.newLine', 'tui.input.submit', 'tui.input.tab', 'tui.input.copy',
+          'tui.input.newLine', 'tui.editor.submit', 'tui.input.tab', 'tui.input.copy',
           'tui.select.up', 'tui.select.down', 'tui.select.pageUp', 'tui.select.pageDown',
           'tui.select.confirm', 'tui.select.cancel',
         ].some(binding => kb.matches(data, binding as never))
@@ -3702,7 +3882,11 @@ export class TuiApp {
    * @param options - overlay sizing/positioning.
    * @returns the handle; hide() also forgets the handle.
    */
-  private showOverlayOnHost(component: Component, options: OverlayOptions): OverlayHandle {
+  private showOverlayOnHost(
+    component: Component,
+    options: OverlayOptions,
+    ownership: { remountable?: boolean } = {},
+  ): OverlayHandle {
     // P1-09: never mount on a finally-disposed surface (the plugin lease
     // path guards earlier; this is the last-chance guard for every other
     // caller — a stopped screen's showOverlay would otherwise revive a
@@ -3713,7 +3897,16 @@ export class TuiApp {
     // M6: an overlay owns the focused component now — any pending leader
     // sequence is cancelled (focus-transition cancellation).
     this.keybindings.cancelLeader()
-    const handle = this.activeScreen.showOverlay(component, options)
+    // X007 ownership: by default an overlay entry OWNS its component —
+    // removal (hide) disposes it (panels stop their timers exactly once,
+    // via the owning frame or the component itself). REMOUNTABLE overlays
+    // (extension/advanced/unstable leases, re-mounted across fullscreen
+    // screen switches) opt out: their component must survive the screen's
+    // teardown; their lease owns the lifecycle instead.
+    const merged: OverlayOptions = ownership.remountable === true
+      ? { ...options, disposeOnHide: false }
+      : { disposeOnHide: true, ...options }
+    const handle = this.activeScreen.showOverlay(component, merged)
     // M8: the stacking graph + suspension rules live in the broker (plan
     // §13 — behavior identical; the existing modal-stacking tests gate
     // the extraction).
@@ -3740,17 +3933,22 @@ export class TuiApp {
   }
 
   /**
-   * Launch the external editor with the current draft. The TUI stops first
-   * (raw mode released) and restarts after the editor returns; a fullscreen
-   * mode is not restored (the editor session ends in regular mode).
+   * Launch the external editor with the current draft. The ACTIVE screen
+   * suspends first (raw mode released) and resumes after the editor
+   * returns — a fullscreen surface is PRESERVED across the round-trip
+   * (suspendForExternalEditor / resumeFromExternalEditor).
    *
    * SINGLE-FLIGHT: only ONE editor ownership exists at a time. The latch is
    * set synchronously at entry and cleared in the OUTERMOST `finally`, so
-   * no stage — draft read, stop, the editor round-trip, draft apply, start —
-   * can throw and leave the latch stuck: every terminal outcome (success,
-   * failure, cancellation, a restart failure) releases it, and a repeated
-   * Ctrl+G in the same input batch, a macro, or a direct caller can never
-   * start a second editor while one is pending.
+   * no stage — draft read, suspend, the editor round-trip, draft apply,
+   * resume — can throw and leave the latch stuck: every terminal outcome
+   * (success, failure, cancellation, a resume failure) releases it, and a
+   * repeated Ctrl+G in the same input batch, a macro, or a direct caller
+   * can never start a second editor while one is pending.
+   *
+   * The round-trip SUSPENDS the active screen (see
+   * suspendForExternalEditor) instead of stopping the app: a fullscreen
+   * surface is preserved across the editor and re-entered afterwards.
    */
   async launchExternalEditor(): Promise<void> {
     const open = this.events.openExternalEditor
@@ -3763,8 +3961,27 @@ export class TuiApp {
       // back through the decode — the user can switch `! ↔ !! ↔ prompt`
       // in $EDITOR and the mode follows. A plugin editor (no mode) keeps
       // identity.
-      const draft = this.serializeSeatDraft(this.seatEditor().getText())
-      this.stop()
+      // P1 (large-paste loss): expand fork paste markers BEFORE the text
+      // leaves the editor — the later restore clears the paste registry,
+      // so $EDITOR (and the re-staged draft) would otherwise keep only the
+      // literal `[paste #N +123 lines]` marker. Plugin editors without a
+      // registry fall back to getText().
+      const seat = this.seatEditor()
+      const draft = this.serializeSeatDraft(seat.getExpandedText?.() ?? seat.getText())
+      // Round-2 review P1: a PARTIALLY-applied suspend (screen state
+      // mutated, then stop() threw) must not leave the TUI permanently
+      // stopped — attempt a best-effort resume before propagating, so the
+      // outer latch release lands on a surface that still runs.
+      try {
+        this.suspendForExternalEditor()
+      } catch (suspendError) {
+        try {
+          this.resumeFromExternalEditor()
+        } catch {
+          // Best effort: the diagnostics path reports the original throw.
+        }
+        throw suspendError
+      }
       try {
         const next = await open(draft)
         if (this.disposed) return
@@ -3775,7 +3992,7 @@ export class TuiApp {
           this.editorSeatHolder.notifyChanged()
         }
       } finally {
-        if (!this.disposed) this.start()
+        if (!this.disposed) this.resumeFromExternalEditor()
       }
     } finally {
       this.externalEditorInFlight = false
@@ -3993,6 +4210,16 @@ export class TuiApp {
         // Suppress the fork search key even after the host action is remapped
         // so an old default never silently re-enables rendered-line search.
         onBeforeViewportInput: (data) => {
+          // Prompt-turn navigation (X028 seam): claim the fork's prompt-nav keys
+          // before its built-in handler — the fork scans for OSC 133
+          // markers, which the DSH transcript never emits (a stable no-op);
+          // the host's virtual window owns the real turn boundaries.
+          if (getKeybindings().matches(data, 'tui.altScreen.previousPrompt')) {
+            return this.events.onTranscriptTurnOlder?.() === true
+          }
+          if (getKeybindings().matches(data, 'tui.altScreen.nextPrompt')) {
+            return this.events.onTranscriptTurnNewer?.() === true
+          }
           if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
             return this.events.onTranscriptJumpLatest?.() === true
           }
@@ -4012,6 +4239,22 @@ export class TuiApp {
         // helpers, OSC 52 last) replaces the vendor's raw OSC 52 write —
         // the alt screen never needs to understand tmux/SSH/Wayland/X11.
         copySelection: this.copySelection,
+        // Fullscreen mouse capture also swallows native OSC 8 link
+        // activation and (on Windows) the native right-click paste — the
+        // host owns both: the opener validates http/https and the paste
+        // reads the clipboard then feeds a bracketed paste to the focused
+        // component.
+        openUrl: this.openExternalUrl,
+        onRightClickPaste: this.readClipboardText === undefined ? undefined : () => {
+          this.rightClickPasteFromClipboard()
+        },
+        // X043: defer the viewport input listener so the host's single
+        // router (installed below) sees every raw chunk BEFORE the
+        // viewport consumes wheel/mouse events and semantic scroll keys —
+        // the unstable raw-capture contract ("see/consume/rewrite ANY
+        // chunk") and the host key ladder must observe the same stream on
+        // BOTH screens.
+        deferViewportListener: true,
       })
       // Fullscreen layout: header and todo pinned, the transcript scrolls in
       // the middle (grow), and the editor + footer stay pinned to the bottom
@@ -4031,8 +4274,10 @@ export class TuiApp {
         { component: this.paintProbe, shrink: 0 },
         { component: this.header, shrink: 0 },
         // grow is a stack-entry option: the transcript pane takes all the
-        // height the pinned rows leave behind.
-        { component: this.fullscreenScroll, grow: 1 },
+        // height the pinned rows leave behind. basis: 0 skips the pane's
+        // intrinsic-height measurement pass (the ScrollView's content
+        // height is irrelevant — grow fills whatever remains).
+        { component: this.fullscreenScroll, basis: 0, grow: 1 },
         { component: this.dock, shrink: 0 },
         { component: this.todoPanel, shrink: 0 },
         { component: this.goalLine, shrink: 0 },
@@ -4044,7 +4289,11 @@ export class TuiApp {
         { component: this.footer, shrink: 0 },
       ])
       alt.setLayoutRoot(root)
+      // Registration order IS dispatch order (X043): the host router goes
+      // in FIRST, then the viewport listener takes whatever the ladder
+      // did not consume.
       alt.addInputListener((data) => this.routeInput(data))
+      alt.installViewportListener()
       this.tui.stop()
       alt.start()
       // The alt screen starts with NO focused component: without this, every
@@ -4188,13 +4437,14 @@ export class TuiApp {
     })
     panel.start()
     this.historyPanel = panel
-    this.historyOverlay = this.showOverlayOnHost(new Frame(panel), { width, maxHeight })
+    this.historyOverlay = this.showOverlayOnHost(new FocusForwardingFrame(panel), { width, maxHeight })
   }
 
   /** Close the history panel (Esc/Ctrl+C, accept, surface dispose). */
   closeHistorySearch(): void {
     if (this.historyOverlay === undefined) return
-    this.historyPanel?.dispose()
+    // The owning FocusForwardingFrame + disposeOnHide release the panel's
+    // debounce timer/controller on hide (X007).
     this.historyOverlay.hide()
     this.historyOverlay = undefined
     this.historyPanel = undefined
@@ -5864,7 +6114,7 @@ export class TuiApp {
     if (this.viewerMode === undefined) {
       // Preserve the main draft in its SERIALIZED wire form, so a
       // shell-mode draft round-trips through the viewer with its mode.
-      this.mainDraftBeforeViewer = this.serializeSeatDraft(this.seatEditor().getText())
+      this.mainDraftBeforeViewer = this.expandedSeatWireDraft()
       // The viewer renders ONLY the child transcript: the main session's
       // local cards (`!` shell runs) must never leak into it. The runner
       // repaints the child folder right after, so the cleared list is
@@ -6002,7 +6252,7 @@ export class TuiApp {
   private parkSubagentDraft(childSessionId: string): void {
     // The slot stores the SERIALIZED wire form (mode + body), so the
     // visible text is serialized the same way before comparing/folding.
-    const visible = this.serializeSeatDraft(this.seatEditor().getText())
+    const visible = this.expandedSeatWireDraft()
     const slotted = this.subagentDrafts.get(childSessionId)
     if (visible === slotted) return
     if (slotted === undefined || slotted === '') {
@@ -6045,11 +6295,12 @@ export class TuiApp {
     const target = this.viewerMode
     if (target === undefined || target.mode !== 'continuable') return
     if (this.events.onSubagentSubmit === undefined) return
-    const text = this.seatEditor().getText()
     // The shell-editor-mode boundary: the visible body is re-serialized
     // into the wire form before it leaves the app (a shell-mode draft
-    // reaches the child exactly as the user would have typed it).
-    const serialized = this.serializeSeatDraft(text)
+    // reaches the child exactly as the user would have typed it) — with
+    // paste markers EXPANDED (round-2 P1): the child wire must never
+    // carry registry-bound marker text.
+    const serialized = this.expandedSeatWireDraft()
     // Emptiness is judged on the SERIALIZED wire form: a bare `!` / `!!`
     // shell mode has an empty BODY but a non-empty wire form, and must
     // reach the child like the literal prefix did before the mode feature.
@@ -6205,7 +6456,7 @@ export class TuiApp {
       if (closed || raw !== undefined) return
       const compiled = compileView(view)
       const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
-      raw = this.showOverlayOnHost(component, mountOptions)
+      raw = this.showOverlayOnHost(component, mountOptions, { remountable: true })
       if (hiddenByLease) raw.setHidden(true)
     }
     mount()
@@ -6328,7 +6579,7 @@ export class TuiApp {
       )
       wrapper = created
       this.advancedOverlayWrappers.add(created)
-      raw = this.showOverlayOnHost(created, mountOptions)
+      raw = this.showOverlayOnHost(created, mountOptions, { remountable: true })
       if (hiddenByLease) raw.setHidden(true)
     }
     mount()
@@ -6558,7 +6809,7 @@ export class TuiApp {
       )
       adapter = created
       this.unstableMountAdapters.add(created)
-      raw = this.showOverlayOnHost(created, mountOptions)
+      raw = this.showOverlayOnHost(created, mountOptions, { remountable: true })
       if (hiddenByLease) raw.setHidden(true)
     }
     mount()
@@ -6973,6 +7224,13 @@ export class TuiApp {
     const editor = this.editor
     return {
       getText: () => editor.getText(),
+      // P1 (large-paste external-editor loss): the draft that LEAVES the
+      // editor context must carry the REAL paste content — getText()
+      // returns `[paste #N +123 lines]` markers whose registry is cleared
+      // by the later restore, so $EDITOR and draft snapshots would keep
+      // only the marker text. The fork Editor expands via its registry.
+      getExpandedText: () => editor.getExpandedText(),
+      getExpandedCursor: () => editor.getExpandedCursor(),
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete(),
       getInputMode: () => editor.getInputMode(),
@@ -7116,6 +7374,20 @@ export class TuiApp {
     const seat = this.seatEditor()
     const mode = seat.id === 'host' ? this.editor.getInputMode() : 'prompt'
     return serializeEditorInput(mode, text)
+  }
+
+  /**
+   * The visible seat draft in WIRE form with fork paste markers EXPANDED
+   * (round-2 review P1): every path where draft text LEAVES the editor's
+   * own context — the wire (submit/steer/queue), draft parking slots, the
+   * viewer submission — must carry the REAL paste content; getText()'s
+   * `[paste #N …]` markers orphan as soon as any later restore clears the
+   * registry, silently replacing the pasted content with the marker text.
+   * Plugin editors without a registry fall back to getText().
+   */
+  private expandedSeatWireDraft(): string {
+    const seat = this.seatEditor()
+    return this.serializeSeatDraft(seat.getExpandedText?.() ?? seat.getText())
   }
 
   /**
@@ -7678,9 +7950,9 @@ export class TuiApp {
       const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
       if (message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined) {
         return this.renderBlockSequence(message.content, (text) =>
-          new BulletedComponent(new Markdown(text, 0, 0, markdownTheme), bullet), message)
+          new BulletedComponent(new Markdown(text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet), message)
       }
-      return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme), bullet)
+      return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
     }
     if (message.kind === 'thinking') {
       // The unified Thinking disclosure card (plan §4/§13): COMPACT is
@@ -7781,7 +8053,7 @@ export class TuiApp {
       if (expanded) {
         if (counts !== '') card.addChild(new Text(color.textDim(counts), 0, 0))
         if (message.text !== '') {
-          card.addChild(new Markdown(message.text, 0, 0, markdownTheme))
+          card.addChild(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS))
         } else if (message.error !== undefined) {
           card.addChild(new Text(color.textDim(message.error), 0, 0))
         }
@@ -9313,9 +9585,9 @@ export class TuiApp {
    * the wire form). */
   getDraft(): string {
     const target = this.viewerMode
-    if (target === undefined) return this.serializeSeatDraft(this.seatEditor().getText())
+    if (target === undefined) return this.expandedSeatWireDraft()
     if (isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
-      return this.serializeSeatDraft(this.seatEditor().getText())
+      return this.expandedSeatWireDraft()
     }
     return this.mainDraftBeforeViewer ?? ''
   }
@@ -9933,7 +10205,7 @@ export class TuiApp {
     // restart the cycle even without a selection move — review P2); with
     // no marquee the list mounts directly, exactly as before.
     const mounted = marquee === undefined ? list : new MarqueeFilterAdapter(list, () => marquee.reset())
-    const handle = this.showOverlayOnHost(new Frame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+    const handle = this.showOverlayOnHost(new FocusForwardingFrame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
     // Phase 4: an abort signal closes the picker and fires onCancel (the
     // imperative select broker's fiber-cancellation path). The listener
     // is removed on a normal select/cancel AND on the handle's close
@@ -10089,7 +10361,7 @@ export class TuiApp {
       // Search edits inside a category must restart the marquee too (the
       // vendored SelectList fires no selection change for query edits).
       const mounted = marquee === undefined ? next : new MarqueeFilterAdapter(next, () => marquee.reset())
-      overlay = this.showOverlayOnHost(new Frame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+      overlay = this.showOverlayOnHost(new FocusForwardingFrame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
     }
     // Phase 4 parity: an abort signal closes the CURRENT overlay and fires
     // onCancel. The listener lives once on the signal — category switches
@@ -10198,15 +10470,16 @@ export class TuiApp {
       },
       () => this.requestRender(),
     )
-    const handle = this.showOverlayOnHost(new Frame(panel, true), { width: options.width ?? 72, maxHeight: options.maxHeight ?? 24 })
+    const handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), { width: options.width ?? 72, maxHeight: options.maxHeight ?? 24 })
     // One close path: hide the overlay AND stop the panel's 1s elapsed tick
     // (an unref'd interval must still be cleared — the panel is gone).
     // `close` is a `let` declared before the panel callbacks above reference
     // it; it is assigned here, after `handle` exists. The callbacks only
     // fire on later user input, so the late assignment is safe.
     let close: () => void = () => {}
+    // The owning FocusForwardingFrame + disposeOnHide release the panel
+    // (its 1s elapsed tick) on hide — no manual dispose here (X007).
     close = (): void => {
-      panel.dispose()
       handle.hide()
     }
     return {
@@ -10256,7 +10529,7 @@ export class TuiApp {
       handle?.hide()
       onCancel()
     }, { enableSearch: true })
-    handle = this.showOverlayOnHost(new Frame(settings, true), { width: 72, maxHeight: 28 })
+    handle = this.showOverlayOnHost(new FocusForwardingFrame(settings, true), { width: 72, maxHeight: 28 })
     return () => handle?.hide()
   }
 
@@ -10285,12 +10558,14 @@ export class TuiApp {
   openKeybindingEditor(panel: Component): () => void {
     let handle: OverlayHandle | undefined
     const unregister = this.trackKeybindingEditor(panel)
+    // The owning FocusForwardingFrame + disposeOnHide dispose the panel on
+    // hide (X007); `unregister` still runs first so the tracking set never
+    // holds a closing panel.
     const close = (): void => {
-      panel.dispose?.()
       unregister()
       handle?.hide()
     }
-    handle = this.showOverlayOnHost(new Frame(panel, true), {
+    handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
       width: 88,
       maxHeight: '100%',
     })
@@ -10363,7 +10638,7 @@ export class TuiApp {
         options.onCancel()
       },
     })
-    handle = this.showOverlayOnHost(new Frame(panel, true), {
+    handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
       width: 88,
       // The overlay's hard cut must never exceed the terminal: the panel
       // budgets its content to rows-2 (Frame borders add 2), so the
@@ -10414,7 +10689,7 @@ export class TuiApp {
         options.onStop?.()
       }
     }
-    const handle = this.showOverlayOnHost(new Frame(panel, true), { width: 88, maxHeight: 24 })
+    const handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), { width: 88, maxHeight: 24 })
     timer = setInterval(() => {
       if (closed) return
       panel.setBody(options.refresh())

@@ -35,7 +35,7 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     // The submit key stays with the FORK editor's submit path
     // (backslash-newline semantics live there — plan §8 resolver
     // priority 5); the host ladder NEVER consumes it. A user remap /
-    // `false` is synced into the fork editor's `tui.input.submit` binding
+    // `false` is synced into the fork editor's `tui.editor.submit` binding (X037)
     // by the runner (onEditorSubmitSync), so Enter REALLY moves / gets
     // disabled — not just the hints (PR review finding).
     hostResolved: false,
