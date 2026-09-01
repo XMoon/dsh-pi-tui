@@ -187,9 +187,9 @@
     "typecheck:fork": "pnpm --dir packages/pi-tui typecheck",
     "typecheck:bundle": "tsc -p tsconfig.json --noEmit",
     "typecheck": "pnpm typecheck:fork && pnpm typecheck:bundle",
-    "test:fork": "pnpm --dir packages/pi-tui test",
+    "test:fork": "node scripts/run-with-temp-root.mjs pnpm --dir packages/pi-tui test",
     "test:bundle": "pnpm test:product && pnpm test:tooling",
-    "test:docs": "node --test docs/tmux/*.test.mjs",
+    "test:docs": "node scripts/run-with-temp-root.mjs node --test docs/tmux/*.test.mjs",
     "test": "pnpm test:fork && pnpm test:product && pnpm test:tooling && pnpm test:docs",
     "smoke": "node scripts/tarball-smoke.mjs",
     "smoke:fixture": "node scripts/extension-fixture-smoke.mjs",
@@ -204,6 +204,7 @@
     "compat:dsh:npm": "node scripts/dsh-npm-verify.mjs",
     "prepare:dsh:test": "node scripts/prepare-dsh-test-environment.mjs",
     "gate:source-leak": "node scripts/dsh-source-leak-gate.mjs",
+    "gate:temp-hygiene": "node scripts/temp-hygiene-gate.mjs",
     "smoke:vim": "node scripts/vim-plugin-smoke.mjs",
     "gate:pi-surface-compat": "node --test test/pi-component-compat.test.ts",
     "smoke:examples": "node scripts/examples-plugin-smoke.mjs",
@@ -216,12 +217,12 @@
     "dev:doctor": "node scripts/dev-doctor.mjs",
     "dev:bootstrap": "node scripts/dev-bootstrap.mjs",
     "dev:shell": "node scripts/dev-shell.mjs",
-    "verify:prepush": "pnpm typecheck:fork && pnpm test:fork && pnpm test:docs && pnpm test:tooling && node scripts/naming-gate.mjs && pnpm gate:boundary && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release",
-    "verify:prepush:nofork": "pnpm test:docs && pnpm test:tooling && node scripts/naming-gate.mjs && pnpm gate:boundary && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release",
+    "verify:prepush": "pnpm typecheck:fork && pnpm test:fork && pnpm test:docs && pnpm test:tooling && node scripts/naming-gate.mjs && pnpm gate:temp-hygiene && pnpm gate:boundary && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release",
+    "verify:prepush:nofork": "pnpm test:docs && pnpm test:tooling && node scripts/naming-gate.mjs && pnpm gate:temp-hygiene && pnpm gate:boundary && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release",
     "prepare": "husky",
     "gate:boundary": "node scripts/client-boundary-gate.mjs",
     "gate:keybindings": "node --import tsx/esm scripts/check-host-keybindings.mts",
-    "test:tooling": "node --test test/dev-environment.test.mjs test/pre-push-hook.test.mjs test/pre-push-stages.test.mjs test/dsh-ci-context.test.mjs test/dsh-distribution.test.mjs test/dsh-npm-verify.test.mjs test/dsh-peer-window.test.mjs test/dsh-process.test.mjs test/dsh-runtime-boundary.test.mjs test/dsh-source-identity.test.mjs test/dsh-source-leak.test.mjs test/release-context.test.mjs test/release-notes.test.mjs test/source-mode-rules.test.mjs test/client-boundary-gate.test.mjs test/tarball-source-install.test.mjs test/pi2dsh-compat-smoke.test.mjs",
-    "test:product": "node --test test/*.test.ts test/repair.test.mjs test/tarball-smoke.test.mjs"
+    "test:tooling": "node scripts/run-with-temp-root.mjs node --test test/dev-environment.test.mjs test/pre-push-hook.test.mjs test/pre-push-stages.test.mjs test/dsh-ci-context.test.mjs test/dsh-distribution.test.mjs test/dsh-npm-verify.test.mjs test/dsh-peer-window.test.mjs test/dsh-process.test.mjs test/dsh-runtime-boundary.test.mjs test/dsh-source-identity.test.mjs test/dsh-source-leak.test.mjs test/release-context.test.mjs test/release-notes.test.mjs test/source-mode-rules.test.mjs test/client-boundary-gate.test.mjs test/tarball-source-install.test.mjs test/pi2dsh-compat-smoke.test.mjs test/temp-hygiene-gate.test.mjs test/run-with-temp-root.test.mjs",
+    "test:product": "node scripts/run-with-temp-root.mjs node --test test/*.test.ts test/repair.test.mjs test/tarball-smoke.test.mjs"
   }
 }

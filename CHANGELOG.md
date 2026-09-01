@@ -7,6 +7,31 @@
 
 ## [Unreleased]
 
+### 开发环境临时文件卫生（/tmp hygiene）
+
+- **单测 fixture 临时目录改为 test-owned 生命周期**：新增
+  `test/support/temp-lifecycle.ts`（`testLifecycle(t).tempDir(prefix)` +
+  `defer()`），目录由创建它的测试在 teardown 时逆序回收（资源先
+  dispose、后删目录，兼容 Windows 文件占用语义）；根套件全部直接
+  `mkdtemp*` 使用点已迁移，单独跑某个测试文件不再向系统 `/tmp` 遗留
+  `dsh-*` fixture 目录。
+- **新增 `gate:temp-hygiene` 门禁**（文本扫描，`scripts/temp-hygiene-gate.mjs`）：
+  普通 test 文件禁止出现 `mkdtemp`/`mkdtempSync` 字样，统一走 lifecycle
+  helper；白名单极小且带理由（helper 自身、门禁自测文件、两个内嵌
+  fake-pnpm 子进程脚本——其真实临时目录创建由 runner containment 兜底）；
+  已接入 `verify:prepush`。
+- **测试 runner 增加 TMPDIR 隔离层**（`scripts/run-with-temp-root.mjs`）：
+  `test:product` / `test:tooling` / `test:docs` / `test:fork` 在一次性
+  temp root 下运行，未来漏写 cleanup 最多残留一个 runner root；
+  `DSH_TEST_KEEP_TMP=1` 可保留现场调试。
+- **`dev:bootstrap` 的 ephemeral source pack 增加代际回收**：每代
+  ephemeral 目录写入 owner marker（`.dsh-pi-tui-ephemeral.json`，记录
+  workspaceRoot/pid/时间）；同一 worktree 的下一次成功 bootstrap（或
+  切换到 npm/durable 模式）在提交新状态后才安全删除上一代；失败路径
+  不动上一代；绝不触碰其他 worktree 的目录，也不做 `/tmp/dsh-*` 宽泛
+  清扫。官方 `dsh-spill-*` / `dsh-subprocess-*` 的 retention 语义保持
+  不变。
+
 ### Vendored fork 重定基到 Earendil v0.84.4
 
 - **`packages/pi-tui` 从 kimi-code 快照（44a6c70e / v0.84.3）重定基到原版

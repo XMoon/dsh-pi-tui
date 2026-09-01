@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Development temp-file hygiene (/tmp hygiene)
+
+- **Test-fixture temp directories now have a test-owned lifecycle**:
+  `test/support/temp-lifecycle.ts` (`testLifecycle(t).tempDir(prefix)` +
+  `defer()`) hands every fixture root to the test that created it and
+  disposes it in reverse order at teardown (resources disposed before
+  directory removal — Windows file-lock safe). Every direct `mkdtemp*`
+  call in the root suite is migrated, so running a single test file no
+  longer litters the system `/tmp` with `dsh-*` fixture directories.
+- **New `gate:temp-hygiene` gate** (text scan, `scripts/temp-hygiene-gate.mjs`):
+  plain test files may not contain the `mkdtemp`/`mkdtempSync` tokens —
+  everything goes through the lifecycle helper; the whitelist is tiny and
+  reasoned (the helper itself, the gate's own fixtures, and two embedded
+  fake-pnpm child scripts whose real temp creation is contained by the
+  runner); wired into `verify:prepush`.
+- **Test runners gained a TMPDIR containment layer**
+  (`scripts/run-with-temp-root.mjs`): `test:product` / `test:tooling` /
+  `test:docs` / `test:fork` run inside a disposable temp root, so a
+  future forgotten cleanup can leave at most one runner root;
+  `DSH_TEST_KEEP_TMP=1` preserves it for debugging.
+- **`dev:bootstrap` ephemeral source packs now reclaim superseded
+  generations**: each ephemeral root carries an owner marker
+  (`.dsh-pi-tui-ephemeral.json` with workspaceRoot/pid/createdAt); the
+  next successful bootstrap of the SAME worktree (or a switch to
+  npm/durable mode) removes exactly the previous generation after the new
+  state commits. Failures never touch the previous generation; other
+  worktrees' directories are never removed; no broad `/tmp/dsh-*` sweep.
+  The official `dsh-spill-*` / `dsh-subprocess-*` retention contracts are
+  untouched.
+
 ### Vendored fork rebased onto Earendil v0.84.4
 
 - **`packages/pi-tui` rebased from the kimi-code snapshot (44a6c70e /
