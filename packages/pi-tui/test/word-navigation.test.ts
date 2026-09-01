@@ -117,6 +117,25 @@ describe("findWordForward", () => {
 		assert.strictEqual(findWordForward(text, 6), 9);
 	});
 
+
+	it("skips leading punctuation of a word-like segment (dsh-pi-tui divergence X006)", () => {
+		// The default Intl.Segmenter classifies leading-punctuation runs as
+		// non-word-like, so the fork branch (punctuation AT THE START of a
+		// word-like segment) is only reachable through a custom segmenter.
+		const seg = (text: string): Iterable<Intl.SegmentData> => [
+			{ segment: "'twas", index: 0, input: text, isWordLike: true },
+		];
+		// X006: skip the leading quote (cursor advances 1); upstream stops
+		// before it (a no-op move from 0).
+		assert.strictEqual(findWordForward("'twas brillig", 0, { segment: seg }), 1);
+		// A segment whose punctuation starts later keeps the upstream
+		// stop-before-punctuation behavior.
+		const later = (text: string): Iterable<Intl.SegmentData> => [
+			{ segment: "can't", index: 0, input: text, isWordLike: true },
+		];
+		assert.strictEqual(findWordForward("can't stop", 0, { segment: later }), 3);
+	});
+
 	it("cursor at end returns end", () => {
 		assert.strictEqual(findWordForward("hello", 5), 5);
 	});

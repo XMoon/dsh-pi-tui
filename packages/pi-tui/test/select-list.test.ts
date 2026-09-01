@@ -279,4 +279,44 @@ describe("SelectList", () => {
 			assert.equal(list.getSelectedItem()?.value, "5");
 		});
 	});
+
+	describe("setFilter without search (X001 navigation bounds)", () => {
+		it("navigates and selects within the filtered list only", () => {
+			const items = [
+				{ value: "session-a", label: "alpha" },
+				{ value: "session-b", label: "beta" },
+				{ value: "session-c", label: "gamma" },
+			];
+			const list = new SelectList(items, 5, testTheme);
+			let selected = "";
+			list.onSelect = (item) => {
+				selected = item.value;
+			};
+
+			// Filter to the last row only: Up/Down/Enter must never walk
+			// into the invisible rows (regression: navigation used the raw
+			// items while render drew the filtered list).
+			list.setFilter("gamma");
+			assert.equal(list.getSelectedItem()?.value, "session-c");
+			list.handleInput("\x1b[A"); // up wraps within the filtered list
+			assert.equal(list.getSelectedItem()?.value, "session-c");
+			list.handleInput("\x1b[B"); // down wraps within the filtered list
+			assert.equal(list.getSelectedItem()?.value, "session-c");
+			list.handleInput("\r"); // confirm
+			assert.equal(selected, "session-c");
+		});
+
+		it("keeps selection within bounds after narrowing to a middle row", () => {
+			const items = Array.from({ length: 10 }, (_, i) => ({ value: String(i), label: `item-${i}` }));
+			const list = new SelectList(items, 5, testTheme);
+			list.setSelectedIndex(9);
+			list.setFilter("7");
+			// Only item-7 survives; the selected index must clamp to it.
+			assert.equal(list.getSelectedItem()?.value, "7");
+			list.handleInput("\x1b[6~"); // pageDown
+			assert.equal(list.getSelectedItem()?.value, "7");
+			list.handleInput("\x1b[A"); // up
+			assert.equal(list.getSelectedItem()?.value, "7");
+		});
+	});
 });
