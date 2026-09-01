@@ -1,15 +1,18 @@
 /**
  * The builtin footer items (plan §7.1/§13.3): the semantic items the
- * default/compact presets compose. Every render callback is pure,
- * synchronous, I/O-free and reads only the StatusSnapshot + the host
- * surface context.
+ * default/compact presets and custom layouts compose. Every render
+ * callback is pure, synchronous, I/O-free and reads only the
+ * StatusSnapshot + the host surface context.
  *
- * M1 parity rules (plan §10.1/§13.6): the default preset reproduces the
- * legacy footer EXACTLY — including the viewer identity block (the legacy
- * viewer footer had no model/permission/plan/task/context/branch/extension
- * parts, so those items are view-conditional: they render only on the main
- * subject, and the data-source items (cwd/turns-steps/stats-line) follow
- * the display subject's section values).
+ * Default-preset composition: the status row is view-conditional — the
+ * main-only badges (model/permission/plan/task/context/branch/extension)
+ * render only on the main subject, while the data-source items
+ * (cwd/turns-steps and the stats-row placements: token-usage/cache-hit/
+ * performance) follow the display subject's section values. The default
+ * stats row composes semantic placements (token-usage:pi · cache-hit:pi ·
+ * performance:latency · performance:speed — the RECENT performance
+ * contract); `stats-line` stays registered as the legacy composite for
+ * existing custom layouts, never in the default preset.
  * @module @xmoon76/dsh-pi-tui/footer/builtin-items
  */
 

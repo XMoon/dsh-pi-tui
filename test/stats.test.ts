@@ -1119,3 +1119,44 @@ test('cancelled and failed steps contribute no recent performance samples', () =
   assert.equal(oneShot.firstTokenMsAvg, 0)
   assert.deepEqual(folder.snapshot(), oneShot)
 })
+
+test('an authoritative duplicate that invalidates the sample REMOVES it (no stale throughput)', () => {
+  const t = 1_700_000_000_000
+  const message = (seq: number, time: number, outputTokens: number | undefined): SessionEvent => event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId(`m-invalidate-${seq}`),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    ...(outputTokens === undefined ? {} : { usage: { inputTokens: 10, outputTokens } }),
+  }, seq, time)
+  const prefix = [
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: 'answer' },
+    }, 1, t + 100),
+    message(2, t + 1_000, 100),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 1_100),
+  ]
+  // The authoritative duplicate corrects outputTokens to 0: the step's
+  // sample is no longer valid and must not keep feeding the recent rate.
+  const invalidating = message(4, t + 2_000, 0)
+  const log = [...prefix, invalidating]
+  const oneShot = computeStats(log)
+  const folder = new StatsFolder()
+  folder.apply(prefix)
+  assert.equal(folder.snapshot().tokensPerSec, 100, 'the valid sample rides the window first')
+  folder.apply([invalidating])
+  assert.deepEqual(folder.snapshot(), oneShot)
+  assert.equal(folder.snapshot().tokensPerSec, 0, 'the invalidated sample leaves the window')
+  // Timing facts survive the correction untouched.
+  assert.equal(folder.snapshot().llmMs, 1_000)
+  assert.equal(folder.snapshot().firstTokenMsAvg, 100)
+  // The usage accounting applied the authoritative replacement.
+  assert.equal(folder.snapshot().outputTokens, 0)
+})

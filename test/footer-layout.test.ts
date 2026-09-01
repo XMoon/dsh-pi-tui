@@ -8,11 +8,21 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback, stripControlChars } from '../src/footer/layout.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 
 test('the builtin default layout parses as valid', () => {
   const parsed = parseFooterLayout(DEFAULT_FOOTER_LAYOUT)
   assert.ok(isFooterLayout(parsed), `default layout must parse: ${JSON.stringify(parsed)}`)
+})
+
+test('the presets never share placement objects (no cross-preset aliasing)', () => {
+  // The status-row placements come from a FACTORY: mutating one preset's
+  // refs (a runtime consumer ignoring the readonly types) must never
+  // reach the other preset.
+  const defaultRef = DEFAULT_FOOTER_LAYOUT.rows[0]!.left[0]!
+  const compactRef = COMPACT_FOOTER_LAYOUT.rows[0]!.left[0]!
+  assert.notEqual(defaultRef, compactRef, 'each preset owns its placement objects')
+  assert.deepEqual(defaultRef, compactRef, 'the placement content is identical')
 })
 
 test('a custom layout with zones, separator, formats and tones parses', () => {
