@@ -225,8 +225,8 @@ left group is session cumulative usage; the right group is recent model
 performance — the average time-to-first-token and the effective output
 throughput over the last five completed model requests (a model/provider
 switch resets that window). The session lifetime LLM wall time is still
-accumulated and available through `/stats`, but no longer part of the
-default Footer row.
+accumulated and remains visible on the `/status` detail line, but it is no
+longer part of the default Footer row.
 
 Omitting `format` keeps that item's default Style.
 

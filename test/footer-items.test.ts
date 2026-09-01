@@ -461,26 +461,35 @@ test('token-usage:pi and cache-hit:pi render the pi vocabulary with compact pres
   assert.equal(cacheSegment === null ? '' : plain(renderSpans(cacheSegment.spans)), '93.9%')
 })
 
-test('formatStatsLine is source-consistent with the legacy formatStats (guarded)', async () => {
-  // The formatter's doc comment claims a source-consistency guard — make
-  // it real: the structured stats line must equal the legacy pi-vocabulary
-  // line for the same stats.
+test('the footer stats line and the /status detail line are SEPARATE contracts', async () => {
+  // The footer's stats-line is chrome: recent metrics only, no lifetime
+  // LLM wall. formatStats is the /status DETAIL line: it keeps the labeled
+  // lifetime wall beside the recent metrics. They share the pi token
+  // vocabulary but must never be forced into string equality — the old
+  // source-consistency guard pinned them together and would have dragged
+  // the LLM wall back into every footer.
   const { formatStatsLine } = await import('../src/footer/formatters.ts')
   const { formatStats } = await import('../src/stats.ts')
   const { usageFromStats } = await import('../src/status/derive-usage.ts')
   const stats = {
     turns: 12,
     steps: 38,
-    llmMs: 120000,
-    firstTokenMsAvg: 2000,
+    llmMs: 120_000,
+    firstTokenMsAvg: 2_000,
     tokensPerSec: 40,
     cacheHitPct: 91.9,
-    inputTokens: 2579,
-    outputTokens: 5507,
+    inputTokens: 2_579,
+    outputTokens: 5_507,
     contextWindow: 1_000_000,
-    cacheReadTokens: 20000,
+    cacheReadTokens: 20_000,
     cacheWriteTokens: 0,
   }
-  assert.equal(formatStatsLine(usageFromStats(stats as never)), formatStats(stats as never),
-    'formatStatsLine must mirror formatStats exactly')
+  const footerLine = formatStatsLine(usageFromStats(stats as never))
+  const detailLine = formatStats(stats as never)
+  assert.ok(!footerLine.includes('LLM'), `the footer line carries no lifetime wall:\n${footerLine}`)
+  assert.ok(footerLine.includes('TTFB 2s') && footerLine.includes('40 tok/s'), `recent metrics on the footer line:\n${footerLine}`)
+  assert.ok(detailLine.includes('LLM 2m00s'), `the detail line keeps the lifetime wall:\n${detailLine}`)
+  assert.ok(detailLine.includes('TTFB 2s') && detailLine.includes('40 tok/s'), `recent metrics on the detail line:\n${detailLine}`)
+  // The token/cache prefix stays IDENTICAL between the two surfaces.
+  assert.ok(footerLine.split(' | ')[0] === detailLine.split(' | ')[0], `shared pi vocabulary:\n${footerLine}\n${detailLine}`)
 })

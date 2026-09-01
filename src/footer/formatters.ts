@@ -223,12 +223,14 @@ export function formatTurnsSteps(turns: number, steps: number, format = 'both'):
   }
 }
 
-/** The pi-vocabulary stats line (the legacy line-2 format), derived from
- * the STRUCTURED usage facts: `↑34k ↓8.1k R520k CH93.9% | TTFB 2.6s ·
+/** The pi-vocabulary FOOTER stats line (the legacy line-2 format), derived
+ * from the STRUCTURED usage facts: `↑34k ↓8.1k R520k CH93.9% | TTFB 2.6s ·
  * 51 tok/s`. The performance tail carries the RECENT metrics only — the
- * lifetime `LLM` wall left the line so a legacy composite never mixes
- * lifetime and recent windows. Mirrors formatStats exactly (guarded by a
- * source-consistency test). */
+ * lifetime `LLM` wall left the footer so a composite never mixes lifetime
+ * and recent windows. This is a SEPARATE presentation contract from
+ * formatStats (the /status detail line, which keeps the labeled lifetime
+ * `LLM ...` term beside the recent metrics) — footer chrome vs detail
+ * surface, never forced into string equality. */
 export function formatStatsLine(usage: UsageStatus): string {
   const piParts = [
     `↑${formatTokens(usage.tokens.input)}`,
