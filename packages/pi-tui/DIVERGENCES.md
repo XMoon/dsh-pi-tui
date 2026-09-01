@@ -43,7 +43,8 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - Consumer: host `/sessions` picker, model picker, category picker,
   autocomplete compact picker, dynamic title enrichment.
 - Upstream status: open upstream PRs exist but are not part of the pinned baseline.
-- Tests: "search", "group headers", "page keys" describes in `test/select-list.test.ts`.
+- Tests: "search", "group headers", "page keys", and "setFilter without
+  search (X001 navigation bounds)" describes in `test/select-list.test.ts`.
 - Migration action: re-apply on top of Earendil 0.84.4 `select-list.ts`; keep
   upstream layout contract (`truncatePrimary`, description behavior).
 
@@ -192,7 +193,7 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 ### X010 — Width state sync; capped ESC-prefix scans (was #10)
 
 - Category: `BUGFIX_MISSING_UPSTREAM`
-- Files: `src/tui-main-screen.ts`, `src/stdin-buffer.ts`
+- Files: `src/stdin-buffer.ts`
 - Reason: the stdin buffer caps ESC-prefix scanning
   (`MAX_ESCAPE_SEQUENCE_LENGTH = 1024`) so a never-terminating ESC prefix
   degrades to a plain character instead of an O(n²) reslice. (The main
