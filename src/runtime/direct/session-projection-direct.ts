@@ -50,7 +50,7 @@ export interface SessionProjectionReaderLike {
   snapshot(
     session: Session,
     keys?: readonly ProjectionKey[],
-  ): { readonly asOfSeq: number; readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } } | undefined
+  ): { readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } } | undefined
 }
 
 /** The zero-I/O projection-cache hint (structural subset of
@@ -61,7 +61,7 @@ export interface SessionProjectionCacheLike {
   cachedSnapshot(
     meta: SessionHeader,
     keys?: readonly ProjectionKey[],
-  ): { readonly asOfSeq: number; readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } } | undefined
+  ): { readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } } | undefined
 }
 
 /** The official observation lease (structural subset of `SessionObservation`,

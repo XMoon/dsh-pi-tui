@@ -98,7 +98,7 @@ export class DirectModelSelectionOwner implements SessionModelSelectionOwnerLike
     const existing = this.installed.get(agent)
     if (existing !== undefined) return existing
 
-    const folded = foldPendingModelSelection(agent.session.events)
+    const folded = foldPendingModelSelection(agent.session.snapshotEvents())
     let picked = agentSelection(folded.pending)
     const owner = this
     const selection: InstalledModelSelection = {

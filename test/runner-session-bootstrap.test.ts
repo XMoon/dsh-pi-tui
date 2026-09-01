@@ -56,7 +56,7 @@ function modelHistory(provider: string, model: string, reasoningEffort: string):
 
 /** The newest durable model/selection intent recorded in a Session log. */
 function durableSelectionOf(session: FakeSession): { provider?: string; model?: string; reasoningEffort?: string } | undefined {
-  const event = [...session.events].reverse().find(candidate => (candidate as unknown as { type?: unknown }).type === 'model/selection')
+  const event = session.snapshotEvents().findLast(candidate => (candidate as unknown as { type?: unknown }).type === 'model/selection')
   return (event as unknown as { data?: { provider?: string; model?: string; reasoningEffort?: string } } | undefined)?.data
 }
 
@@ -85,12 +85,47 @@ function sessionEvents(text: string): SessionEvent[] {
   ]
 }
 
-interface FakeSession {
+/** A FakeSession literal before the alpha.4 log accessors are attached. */
+interface FakeSessionInit {
   id: string
   header: { id: string; cwd: string; createdAt: number; version: number }
   events: SessionEvent[]
   requestHeader?: () => unknown
   append?: (type: string, data: unknown) => unknown
+}
+
+/** The alpha.4 Session shape: the backing log is PRIVATE — production code
+ * sees only `seq` / `eventAt` / `snapshotEvents`, so a mock can never again
+ * mask old `Session.events` API drift (compatibility-plan B4). */
+interface FakeSession {
+  id: string
+  header: { id: string; cwd: string; createdAt: number; version: number }
+  readonly seq: number
+  eventAt(seq: number): SessionEvent | undefined
+  snapshotEvents(): readonly SessionEvent[]
+  requestHeader?(): unknown
+  append?(type: string, data: unknown): unknown
+}
+
+/** Build the alpha.4 Session mock over a private backing log. */
+function fakeSession(init: FakeSessionInit): FakeSession {
+  const events = [...init.events]
+  return {
+    id: init.id,
+    header: init.header,
+    get seq() { return events.length },
+    eventAt: (seq: number) => events[seq],
+    snapshotEvents: () => Object.freeze([...events]),
+    requestHeader: init.requestHeader ?? (() => {
+      const found = events.findLast(candidate => (candidate as unknown as { type?: unknown }).type === 'request/header')
+      return (found as unknown as { data?: { header?: unknown } } | undefined)?.data?.header
+    }),
+    append: init.append ?? ((type: string, data: unknown) => {
+      const appended = { type, seq: events.length, time: Date.now(), data } as unknown as SessionEvent
+      events.push(appended)
+      return appended
+    }),
+  }
 }
 
 interface RunnerHarness {
@@ -120,19 +155,6 @@ function fakeAgent(session: FakeSession): Agent {
     whenIdle: async () => {},
   } as unknown as Agent
   agentContext.agent = agent
-  if (session.requestHeader === undefined) {
-    session.requestHeader = () => {
-      const event = [...session.events].reverse().find(candidate => (candidate as unknown as { type?: unknown }).type === 'request/header')
-      return (event as unknown as { data?: { header?: unknown } } | undefined)?.data?.header
-    }
-  }
-  if (session.append === undefined) {
-    session.append = (type: string, data: unknown) => {
-      const event = { type, seq: session.events.length, time: Date.now(), data } as unknown as SessionEvent
-      session.events.push(event)
-      return event
-    }
-  }
   return agent
 }
 
@@ -168,7 +190,7 @@ function makeHarness(
     inspect: async (id: unknown) => {
       const session = persisted.get(String(id))
       if (session === undefined) throw new Error(`unknown test session ${String(id)}`)
-      return { meta: session.header, events: session.events }
+      return { meta: session.header, events: [...session.snapshotEvents()] }
     },
     readRaw: async () => undefined,
     locate: ({ id }: { id: string }) => ({ kind: 'session', path: join(home, 'sessions', `${id}.jsonl`) }),
@@ -189,11 +211,11 @@ function makeHarness(
       createOptions.push({ ...agentOptions })
       if (createGate !== undefined) await createGate()
       const id = String(sessionId)
-      const session: FakeSession = {
+      const session: FakeSession = fakeSession({
         id,
         header: { id, cwd: home, createdAt: Date.now(), version: SESSION_FORMAT_VERSION },
         events: sessionEvents('created answer'),
-      }
+      })
       createdSessions.push(session)
       persisted.set(id, session)
       const handle = makeHandle(session)
@@ -431,7 +453,7 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
   life.defer(() => { if (resumeContext !== undefined) return disposeContext(resumeContext) })
   life.defer(() => { if (deferredFiber !== undefined) return deferredFiber.dispose() })
   life.defer(() => { if (resumeFiber !== undefined) return resumeFiber.dispose() })
-  const resumed: FakeSession = {
+  const resumed: FakeSession = fakeSession({
     id: 'runner-session-a',
     header: { id: 'runner-session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('resumed answer'), ...modelHistory('provider-a', 'model-a', 'high')],
@@ -525,7 +547,7 @@ test('switching between two old Sessions restores each Session own model', async
   let fiber: { dispose: () => Promise<unknown> } | undefined
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
-  const sessionA: FakeSession = {
+  const sessionA: FakeSession = fakeSession({
     id: 'switch-session-a',
     header: { id: 'switch-session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('answer a'), ...modelHistory('provider-a', 'model-a', 'high')],
@@ -568,7 +590,7 @@ test('/new without an explicit default intent observes the persisted default, ne
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
 
-  const resumed: FakeSession = {
+  const resumed: FakeSession = fakeSession({
     id: 'new-default-session',
     header: { id: 'new-default-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('old answer'), ...modelHistory('provider-a', 'model-a', 'high')],
@@ -696,7 +718,7 @@ test('/model refreshes the Welcome card and footer from the authoritative Sessio
   let fiber: { dispose: () => Promise<unknown> } | undefined
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
-  const resumed: FakeSession = {
+  const resumed: FakeSession = fakeSession({
     id: 'welcome-session',
     header: { id: 'welcome-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('welcome answer'), ...modelHistory('provider-a', 'model-a', 'high')],
@@ -730,7 +752,7 @@ test('a global-default save failure keeps the Session, footer, and Welcome on th
   let fiber: { dispose: () => Promise<unknown> } | undefined
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
-  const resumed: FakeSession = {
+  const resumed: FakeSession = fakeSession({
     id: 'welcome-savefail-session',
     header: { id: 'welcome-savefail-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('welcome answer'), ...modelHistory('provider-a', 'model-a', 'high')],
@@ -766,7 +788,7 @@ test('a failed durable append leaves the Session, footer, and Welcome on the old
   let fiber: { dispose: () => Promise<unknown> } | undefined
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
-  const resumed: FakeSession = {
+  const resumed: FakeSession = fakeSession({
     id: 'welcome-appendfail-session',
     header: { id: 'welcome-appendfail-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('welcome answer'), ...modelHistory('provider-a', 'model-a', 'high')],
@@ -799,7 +821,7 @@ test('malformed request/header events cannot break the session event firehose', 
   let fiber: { dispose: () => Promise<unknown> } | undefined
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
-  const resumed: FakeSession = {
+  const resumed: FakeSession = fakeSession({
     id: 'malformed-session',
     header: { id: 'malformed-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents('malformed answer'),
@@ -840,7 +862,7 @@ test('a live /model choice survives an immediate exit and resume', async (t) => 
   let fiber: { dispose: () => Promise<unknown> } | undefined
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
-  const resumed: FakeSession = {
+  const resumed: FakeSession = fakeSession({
     id: 'exit-resume-session',
     header: { id: 'exit-resume-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('first answer'), ...modelHistory('provider-a', 'model-a', 'high')],
@@ -888,7 +910,7 @@ test('startup applies the persisted wheel step BEFORE the first fullscreen mount
 
   // A long transcript so the first fullscreen frame can scroll.
   const longText = Array.from({ length: 60 }, (_, index) => `line ${index}`).join('\n')
-  const resumed: FakeSession = {
+  const resumed: FakeSession = fakeSession({
     id: 'wheel-startup-session',
     header: { id: 'wheel-startup-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents(longText),
@@ -942,7 +964,7 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
   const initialText = Array.from({ length: 80 }, (_, index) => `initial line ${index}`).join('\n')
-  const resumed: FakeSession = {
+  const resumed: FakeSession = fakeSession({
     id: 'live-follow-session',
     header: { id: 'live-follow-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents(initialText),
@@ -1033,7 +1055,7 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
   life.defer(() => { if (failFiber !== undefined) return failFiber.dispose() })
   life.defer(() => { if (deferredFiber !== undefined) return deferredFiber.dispose() })
   life.defer(() => { if (resumeFiber !== undefined) return resumeFiber.dispose() })
-  const resumed: FakeSession = {
+  const resumed: FakeSession = fakeSession({
     id: 'startup-status-session',
     header: { id: 'startup-status-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents('resumed answer'),

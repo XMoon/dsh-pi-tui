@@ -582,3 +582,31 @@ test('skills standing throws when no registry is reachable', async () => {
   const skills = port({ agentPresets: {} }).skills
   await assert.rejects(() => skills.standing(undefined, '/ws'), /skill service unavailable/)
 })
+
+test('model discovery stays on the official seam (alpha.4 profile-header regression)', async () => {
+  // Alpha.4 fixed the HOST to reuse a configured provider profile's custom
+  // headers during discovery. The TUI's contract is unchanged and must
+  // STAY unchanged: the request is forwarded VERBATIM to
+  // `ctx.llm.discoverModels` (the only seam — the TUI never reconstructs
+  // headers, reads stored credentials, or fetches /models itself), and the
+  // answer is projected to detached id/name DTOs only.
+  const seen: Array<{ ns: string; request: unknown }> = []
+  const models = port({
+    llm: {
+      listProviders: () => [],
+      listModels: async () => [],
+      resolveModelInfo: async () => ({}),
+      discoverModels: async (ns: string, request: unknown) => {
+        seen.push({ ns, request })
+        return [{ id: 'profiled-model' }]
+      },
+      listConfigurableProviders: () => [],
+    },
+  }).models
+  const request = { provider: 'acme-gateway', baseURL: 'https://acme.example/v1', api: 'openai' }
+  const discovered = await models.discoverModels(request)
+  assert.deepEqual(discovered, [{ id: 'profiled-model' }])
+  assert.equal(seen.length, 1, 'exactly one official discovery call')
+  assert.equal(seen[0]!.ns, 'llm-pi-ai', 'the adapter owns the settings namespace')
+  assert.deepEqual(seen[0]!.request, request, 'the request crosses the seam verbatim (headers stay HOST-side)')
+})

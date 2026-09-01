@@ -37,7 +37,8 @@
 export interface CreateSessionRequest {
   /** The pre-generated session identity (the TUI owns the id). */
   sessionId: string
-  /** Durable session metadata (cwd, parent session, seed length, ...). */
+  /** Durable session metadata (cwd, parent session, the `isSeeded` fork
+   * marker, ...). */
   meta: Record<string, unknown>
   provider?: string
   model?: string
@@ -47,6 +48,9 @@ export interface CreateSessionRequest {
   /** The seed events (fork/rewind); a Remote backend maps them to its own
    * seed contract. */
   seed?: readonly unknown[]
+  /** Exact fork-inherited prefix length when `meta.isSeeded` is set
+   * (alpha.4's seeded-session contract). */
+  inheritedEventCount?: number
   /** CLIENT-LOCAL control field (never serialized): creation-only
    * cancellation; the handle detaches on publication. */
   signal?: AbortSignal

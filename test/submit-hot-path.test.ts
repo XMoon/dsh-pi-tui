@@ -84,10 +84,26 @@ function longSessionEvents(totalTurns: number): SessionEvent[] {
   return events
 }
 
+/** The alpha.4 Session shape: the backing log is private; production code
+ * sees only the snapshot reads (compatibility-plan B4). */
 interface LiveSession {
   id: string
   header: { id: string; cwd: string; createdAt: number; version: number }
-  events: SessionEvent[]
+  readonly seq: number
+  eventAt(seq: number): SessionEvent | undefined
+  snapshotEvents(): readonly SessionEvent[]
+}
+
+/** Build the alpha.4 Session mock over a private backing log. */
+function makeLiveSession(id: string, header: LiveSession['header'], events: readonly SessionEvent[]): LiveSession {
+  const log = [...events]
+  return {
+    id,
+    header,
+    get seq() { return log.length },
+    eventAt: (seq: number) => log[seq],
+    snapshotEvents: () => Object.freeze([...log]),
+  }
 }
 
 interface FakeAgentHost {
@@ -182,7 +198,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   const live = new Map<string, Agent>()
   let liveSession: LiveSession | undefined
   if (initial !== undefined) {
-    liveSession = { id: initial.id, header: { id: initial.id, cwd: home, createdAt: 1_700_000_000_000, version: 0 }, events: initial.events }
+    liveSession = makeLiveSession(initial.id, { id: initial.id, cwd: home, createdAt: 1_700_000_000_000, version: 0 }, initial.events)
     persisted.set(liveSession.id, liveSession)
   }
   const makeHandle = (session: LiveSession): { agent: Agent; dispose: () => Promise<void> } => {
@@ -199,10 +215,10 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     // Session.fromRestore validation — the inspection must carry the header.
     inspect: async (id: unknown) => {
       const session = persisted.get(String(id))
-      return { meta: session?.header, events: session?.events ?? [] }
+      return { meta: session?.header, events: session === undefined ? [] : [...session.snapshotEvents()] }
     },
     readFrom: async (id: unknown, from: number) => ({
-      events: (persisted.get(String(id))?.events ?? []).slice(Number(from)),
+      events: (persisted.get(String(id))?.snapshotEvents() ?? []).slice(Number(from)),
     }),
     locate: ({ id }: { id: string; cwd?: string }) => ({ kind: 'session', path: join(home, 'sessions', `${id}.jsonl`) }),
   }
@@ -218,7 +234,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   const agents = {
     create: async ({ sessionId }: { sessionId: string }) => {
       if (createGate !== undefined) await createGate
-      const session: LiveSession = { id: String(sessionId), header: { id: String(sessionId), cwd: home, createdAt: Date.now(), version: 0 }, events: [] }
+      const session = makeLiveSession(String(sessionId), { id: String(sessionId), cwd: home, createdAt: Date.now(), version: 0 }, [])
       persisted.set(session.id, session)
       return makeHandle(session)
     },

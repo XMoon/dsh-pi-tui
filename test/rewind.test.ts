@@ -273,6 +273,7 @@ test('rewindSeed refuses a vanished point and an open-turn boundary', () => {
 interface CreatedCall {
   sessionId: string
   meta: Record<string, unknown>
+  inheritedEventCount?: number
   provider?: string
   model?: string
   agentPreset?: string
@@ -323,6 +324,7 @@ function makeRig(options: {
         const record: CreatedCall = {
           sessionId: String(call.sessionId),
           meta: call.meta,
+          ...call.inheritedEventCount === undefined ? {} : { inheritedEventCount: call.inheritedEventCount },
           provider: call.provider,
           model: call.model,
           agentPreset: call.agentPreset,
@@ -356,17 +358,22 @@ function makeRig(options: {
 }
 
 function sourceAgent(sessionId = 'session-source', events: readonly SessionEvent[] = [], agentPreset?: string, cwd = '/ws'): Agent {
+  // The alpha.4 Session shape: the log is served through the snapshot
+  // reads (the comment at the fold below still explains WHY the log is
+  // the source of truth — the accessor, not the field).
   return {
     session: {
       id: sessionId,
-      header: { version: 0, id: sessionId, createdAt: 1, cwd, ...(agentPreset === undefined ? {} : { agentPreset }) },
-      events,
+      header: { version: 0, id: sessionId, createdAt: 1, isSeeded: false, cwd, ...(agentPreset === undefined ? {} : { agentPreset }) },
+      get seq() { return events.length },
+      eventAt: (seq: number) => events[seq],
+      snapshotEvents: () => events,
     },
     options: { provider: 'deepseek', model: 'deepseek-chat' },
   } as unknown as Agent
 }
 
-test('C04: createForkedAgent records preset, source cwd, parent, seedLength, provider/model', async () => {
+test('C04: createForkedAgent records preset, source cwd, parent, seeded lineage, provider/model', async () => {
   const rig = makeRig({ sessionCwd: '/other-cwd' })
   const seed = turn(0, 1, 'A')
   // The concrete preset id rides the create (migration M1.11 — no
@@ -380,7 +387,8 @@ test('C04: createForkedAgent records preset, source cwd, parent, seedLength, pro
   assert.equal(call.meta.cwd, '/ws', 'the SOURCE workspace wins, never a live-surface value')
   assert.equal(call.meta.agentPreset, 'minimal')
   assert.equal(call.meta.parentSession, 'session-parent')
-  assert.equal(call.meta.seedLength, 4)
+  assert.equal(call.meta.isSeeded, true)
+  assert.equal(call.inheritedEventCount, 4)
   assert.equal(call.provider, 'deepseek')
   assert.equal(call.model, 'deepseek-chat')
   assert.equal(call.seed, seed)
@@ -400,7 +408,7 @@ test('review P2: the cwd is captured BEFORE the create await (no parent=A cwd=B 
     agents: {
       create: async (call) => {
         liveCwd = '/ws-b' // a switch lands DURING the create await
-        created.push({ sessionId: String(call.sessionId), meta: call.meta, provider: call.provider, model: call.model, agentPreset: call.agentPreset, seed: call.seed })
+        created.push({ sessionId: String(call.sessionId), meta: call.meta, ...call.inheritedEventCount === undefined ? {} : { inheritedEventCount: call.inheritedEventCount }, provider: call.provider, model: call.model, agentPreset: call.agentPreset, seed: call.seed })
         return { session: { id: String(call.sessionId) }, direct: { agent: { session: { id: String(call.sessionId) } }, ownerHandle: { dispose: async () => {} } } }
       },
       resume: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
@@ -442,7 +450,7 @@ test('I01: commitRewind creates, swaps and restores the selected prompt', async 
   assert.equal(outcome.turn, 2)
   assert.equal(rig.created.length, 1)
   assert.equal(rig.created[0]!.meta.parentSession, 'session-source')
-  assert.equal(rig.created[0]!.meta.seedLength, 4, 'seed = everything before turn 2/start')
+  assert.equal(rig.created[0]!.inheritedEventCount, 4, 'seed = everything before turn 2/start')
   assert.equal(rig.committed.length, 1, 'the transaction commits the created child')
   assert.equal(rig.committed[0]!.session.id, rig.created[0]!.sessionId)
   assert.deepEqual(rig.drafts, ['B'], 'the selected prompt restores into the editor')
@@ -548,7 +556,7 @@ test('I03: rewinding to the FIRST turn seeds an empty child', async () => {
     generation: 1,
   })
   assert.equal(outcome.kind, 'rewound')
-  assert.equal(rig.created[0]!.meta.seedLength, 0)
+  assert.equal(rig.created[0]!.inheritedEventCount, 0)
 })
 
 test('I05: a stale generation cancels BEFORE any create', async () => {

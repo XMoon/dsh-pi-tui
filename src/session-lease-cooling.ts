@@ -81,18 +81,24 @@ export function tailFingerprintOf(events: readonly FingerprintEventLike[], tail 
   return hash.digest('hex')
 }
 
-/** The final pre-switch snapshot of a session (after whenIdle + flush). */
+/** The final pre-switch snapshot of a session (after whenIdle + flush).
+ * The structural shape mirrors alpha.4's `Session`: `seq` is the log
+ * offset (the event count without materializing the log) and
+ * `snapshotEvents(from?)` serves only the TAIL the fingerprint hashes —
+ * a long session never copies its full log here. */
 export function snapshotSession(session: {
   id: string
-  events: readonly FingerprintEventLike[]
+  seq: number
+  snapshotEvents(fromSeq?: number, toSeqExclusive?: number): readonly FingerprintEventLike[]
 }): RetiredSessionSnapshot {
-  const events = session.events
+  const count = Number(session.seq)
+  const tail = count === 0 ? [] : session.snapshotEvents(Math.max(0, count - COOLING_TAIL_EVENTS))
   return {
     sessionId: session.id,
-    eventCount: events.length,
-    lastSeq: events.length > 0 ? events[events.length - 1]!.seq : undefined,
-    tailFingerprint: tailFingerprintOf(events),
-    empty: events.length === 0,
+    eventCount: count,
+    lastSeq: tail.length > 0 ? tail[tail.length - 1]!.seq : undefined,
+    tailFingerprint: tailFingerprintOf(tail),
+    empty: count === 0,
     capturedAt: Date.now(),
   }
 }

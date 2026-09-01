@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
-import { composeAgent, recordedPreset, recomposeBlank } from '../src/index.ts'
+import { composeAgent, recordedPreset, recomposeBlank, type RecomposableSession } from '../src/index.ts'
 import { presetDisplayText } from '../src/commands.ts'
 import { sessionPresetOf, type SessionObservationLike } from '../src/runtime/direct/session-preset-direct.ts'
 import {
@@ -57,6 +57,7 @@ function sessionHeader(id: string, agentPreset?: string): SessionHeader {
     id: SessionId(id),
     createdAt: 1,
     cwd: '/tmp',
+    isSeeded: false,
     ...(agentPreset === undefined ? {} : { agentPreset }),
   }
 }
@@ -65,7 +66,7 @@ function sessionHeader(id: string, agentPreset?: string): SessionHeader {
 const agentPresetProjection = {
   stateOf(session: Session, _key: 'agentPreset'): string | null {
     let value = agentPresetProjectionDefinition.init(session.header)
-    for (const event of session.events) value = agentPresetProjectionDefinition.apply(value, event)
+    for (const event of session.snapshotEvents()) value = agentPresetProjectionDefinition.apply(value, event)
     return value
   },
 }
@@ -267,13 +268,15 @@ test('sessionPresetOf reads a header-only session through the projection seam', 
 })
 
 /** A blank/started session double recording appended selections. */
-function sessionWith(events: readonly SessionEvent[]): { session: { id: string; events: readonly SessionEvent[]; append: (type: string, data: unknown) => void }; appended: unknown[] } {
+function sessionWith(events: readonly SessionEvent[]): { session: RecomposableSession; appended: unknown[] } {
   const appended: unknown[] = []
   return {
     appended,
+    // The alpha.4 Session shape: the log is served through snapshot reads,
+    // never a live `events` array.
     session: {
       id: 's1',
-      events,
+      snapshotEvents: () => events,
       append: (_type: string, data: unknown) => { appended.push(data) },
     },
   }

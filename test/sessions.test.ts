@@ -108,7 +108,7 @@ test('sessionPickerItem marks the current session, subagents, forks, live', () =
 
 test('headerToPickerRow maps a header onto the row shape', () => {
   const row = headerToPickerRow({
-    version: 0,
+    version: 0, isSeeded: false,
     id: SessionId('session-0123456789abcdef'),
     createdAt: 42,
     cwd: '/w',
@@ -127,7 +127,7 @@ test('headerToPickerRow maps a header onto the row shape', () => {
 
 test('headerToPickerRow preserves code until a roster-aware reader can disambiguate it', () => {
   const row = headerToPickerRow({
-    version: 0,
+    version: 0, isSeeded: false,
     id: SessionId('session-legacy'),
     createdAt: 42,
     agentPreset: 'code',

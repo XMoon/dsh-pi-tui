@@ -162,7 +162,7 @@ test('the standing mount is reused: the same key object on re-resolution and aft
       await handle.agent.whenIdle()
       const key3 = await presets.standingKeyFor('fixture')
       assert.equal(key3, key1, 'the real Agent must join the existing standing generation, not mount a second one')
-      assert.equal(handle.agent.session.events.length, 0, 'the fixture composition stays zero-event')
+      assert.equal(Number(handle.agent.session.seq), 0, 'the fixture composition stays zero-event')
     } finally {
       await handle.dispose()
     }

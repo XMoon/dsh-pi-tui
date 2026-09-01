@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url'
 
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
-const HEADER = '{"type":"session","version":0,"id":"session-test","createdAt":1,"cwd":"/work","delegationDepth":0,"agentPreset":"standard"}'
+const HEADER = '{"type":"session","version":0,"id":"session-test","createdAt":1,"cwd":"/work","isSeeded":false,"delegationDepth":0,"agentPreset":"standard"}'
 
 /** Build events for a small log; seqs may be overridden for corruption. */
 function buildEvents(seqs) {
@@ -1001,7 +1001,9 @@ test('ignorable event: the repaired log passes the alpha.2 Session envelope read
   ]
   const { events: scanned } = scanEvents(encodeLog(HEADER, events), decodeStorageRecord)
   const session = Session.fromRestore(SessionId('session-test'), scanned, JSON.parse(HEADER))
-  assertIgnorableIntact(session.events[2], 2)
+  // Alpha.4 Session shape: the restored log is served through the snapshot
+  // reads (`events` was removed as a public getter).
+  assertIgnorableIntact(session.snapshotEvents()[2], 2)
   // The official persistence read path accepts the same log: the unknown
   // type is covered by the ignorable marker, so the coordinator's vocabulary
   // gate passes and the marker/data survive the read.
