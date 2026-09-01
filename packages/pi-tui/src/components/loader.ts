@@ -72,7 +72,13 @@ export class Loader extends Text {
 		this.frames = indicator?.frames !== undefined ? [...indicator.frames] : [...DEFAULT_FRAMES];
 		this.intervalMs = indicator?.intervalMs && indicator.intervalMs > 0 ? indicator.intervalMs : DEFAULT_INTERVAL_MS;
 		this.currentFrame = 0;
-		this.start();
+		// Reconfigure WITHOUT restarting a stopped loader: setIndicator after
+		// stop() must stay stopped (the old code unconditionally re-started).
+		// (dsh-pi-tui divergence X013.)
+		if (this.intervalId !== null) {
+			this.restartAnimation();
+		}
+		this.updateDisplay();
 	}
 
 	private restartAnimation(): void {
