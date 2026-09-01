@@ -20,6 +20,13 @@ import {
   deferInitialContextMeasure,
   type ContextMeasureReason,
 } from '../src/status/context-measurement.ts'
+import { emptyStatusSnapshot } from '../src/status/types.ts'
+import { StatusStore } from '../src/status/store.ts'
+import { usageFromStats } from '../src/status/derive-usage.ts'
+import { plainSectionEqual } from '../src/status/equal.ts'
+import type { SessionStats } from '../src/stats.ts'
+import { TuiApp } from '../src/tui-app.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 import { contextRefreshKind } from '../src/index.ts'
 
 /** A counting reader standing in for SessionReader.measureContext. */
@@ -280,6 +287,71 @@ test('contextRefreshKind classifier: model-visible events measure, UI-only event
   }
 })
 
+test('P1: a session switch never shows the OLD session context through the status chain', () => {
+  // The FULL projection chain, replayed with the runner's exact
+  // refreshStatusCheap semantics: coordinator->valueFor, the store usage
+  // projection (usageFromStats + plainSectionEqual patch, like the runner),
+  // then app.setStatus with the legacy context fields. TuiApp.setStatus
+  // MERGES into its legacy status and usageFromStatus() falls back to the
+  // store's current usage — so BOTH the legacy fields AND the store
+  // projection must be driven by the CURRENT session's (un)measured
+  // context. The runner MUST project `contextTokens: undefined` explicitly
+  // (a conditional spread leaves session A's value in the merge).
+  const coordinator = new ContextMeasurementCoordinator()
+  const store = new StatusStore(emptyStatusSnapshot())
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { statusStore: store })
+  app.start()
+  const stats = (inputTokens: number): SessionStats => ({
+    turns: 5, steps: 9, llmMs: 100, firstTokenMsAvg: 50, tokensPerSec: 10, cacheHitPct: 0,
+    inputTokens, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0, contextWindow: 128_000,
+  })
+  try {
+    const refreshCheap = (sessionId: string | undefined, sessionStats: SessionStats): void => {
+      const contextTokens = coordinator.valueFor(sessionId)
+      const usage = usageFromStats(sessionStats, contextTokens)
+      const current = store.snapshot()
+      const patch: { usage?: typeof usage } = {}
+      if (!plainSectionEqual(current.usage, usage)) patch.usage = usage
+      store.update(patch)
+      app.setStatus({ contextTokens, contextWindow: contextTokens === undefined ? undefined : sessionStats.contextWindow })
+    }
+    // Session A measured 110k/128k and projected.
+    coordinator.bind('session-a')
+    coordinator.measure('session-a', () => 110_000)
+    refreshCheap('session-a', stats(5_000))
+    assert.equal(store.snapshot().usage?.context?.usedTokens, 110_000, 'session A pressure is visible')
+
+    // Switch to B: the deferred measurement has NOT run yet — B's first
+    // cheap refresh must show B's own fallback, never A's 110k.
+    coordinator.bind('session-b')
+    refreshCheap('session-b', stats(3_000))
+    const afterSwitch = store.snapshot().usage?.context
+    assert.ok(afterSwitch !== undefined && afterSwitch.usedTokens !== 110_000, 'B must never show A context pressure')
+
+    // B's measurement FAILS (undefined, then throw): A's value must not
+    // revive — the cleared fields stay cleared, the fallback stays B's.
+    coordinator.measure('session-b', () => undefined)
+    refreshCheap('session-b', stats(3_000))
+    const afterUndefined = store.snapshot().usage?.context
+    assert.ok(afterUndefined !== undefined && afterUndefined.usedTokens !== 110_000, 'A context must not revive after an undefined measurement')
+    coordinator.markDirty()
+    coordinator.measure('session-b', () => { throw new Error('backend exploded') })
+    refreshCheap('session-b', stats(3_000))
+    const afterThrow = store.snapshot().usage?.context
+    assert.ok(afterThrow !== undefined && afterThrow.usedTokens !== 110_000, 'A context must not revive after a throwing measurement')
+
+    // B's later SUCCESS projects B's own value (the clear was per-session,
+    // not a permanent blank).
+    const later = coordinator.measure('session-b', () => 12_000)
+    assert.equal(later, 12_000)
+    refreshCheap('session-b', stats(3_000))
+    assert.equal(store.snapshot().usage?.context?.usedTokens, 12_000)
+  } finally {
+    app.stop()
+  }
+})
+
 test('D2 structural gate: the runner source keeps measurement out of cheap refreshes', () => {
   // The same source-audit style as test/rules.test.ts: a regression that
   // reintroduces a measuring reader (or the direct tokenMeter service)
@@ -297,4 +369,9 @@ test('D2 structural gate: the runner source keeps measurement out of cheap refre
   assert.ok(!cheapBlock.includes('tokenMeter'), 'the cheap refresh must never read the tokenMeter service')
   assert.ok(!stripped.includes("ctx.get('tokenMeter')"), 'the runner no longer reads tokenMeter directly (the Direct adapter owns it)')
   assert.ok(stripped.includes('backend.sessionReader.measureContext'), 'measurement goes through the SessionReader port')
+  // P1: the legacy context fields must be projected EXPLICITLY (undefined
+  // clears the TuiApp merge) — a conditional spread would leave the
+  // previous session's context on the new session's first frames.
+  assert.ok(cheapBlock.includes('contextTokens,'), 'setStatus must always carry the contextTokens field (undefined clears)')
+  assert.ok(cheapBlock.includes('contextWindow: contextTokens === undefined ? undefined :'), 'an unmeasured session must clear the window too')
 })

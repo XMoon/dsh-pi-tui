@@ -660,21 +660,25 @@ async function main(): Promise<void> {
       row(`  normalized text recomputes during queries`, `${afterQueries.normalizedRefreshes - diag.normalizedRefreshes} (must stay 0)`)
     }
     // Incremental typing with prefix refinement: n -> ne -> nee -> need ->
-    // needle. Full scans happen once per corpus; every extension refines.
+    // needle. EACH sample starts from a FRESH 'n' full scan and refines the
+    // four extensions (a sample that carried the previous sample's needle
+    // candidates would measure a cheaper, unreal typing sequence — the
+    // candidates must always be the previous prefix's).
     for (const turns of [1000, 10_000]) {
       const folder = new TranscriptFolder()
       folder.hydrate(buildSearchEvents(turns))
       const diag = folder.searchDiagnosticsForTest()
-      let matches = folder.search('n')
-      let revision = folder.searchRevision()
       const sequence = timeIt(FAST ? 10 : 20, () => {
+        let matches = folder.search('n')
+        let revision = folder.searchRevision()
         for (const partial of ['ne', 'nee', 'need', 'needle']) {
           matches = folder.search(partial, { previousQuery: partial.slice(0, -1), previousMatches: matches, revision })
           revision = folder.searchRevision()
         }
       })
       const after = folder.searchDiagnosticsForTest()
-      row(`incremental typing ${turns} turns (5 queries, refined)`, `${fmt(stats(sequence))} · fullScans ${after.fullScans - diag.fullScans} · refinedScans ${after.refinedScans - diag.refinedScans}`)
+      const samples = FAST ? 10 : 20
+      row(`incremental typing ${turns} turns (5 queries ×${samples} samples, refined)`, `${fmt(stats(sequence))} · fullScans ${after.fullScans - diag.fullScans} (${samples} fresh 'n' scans) · refinedScans ${after.refinedScans - diag.refinedScans}`)
     }
   }
 

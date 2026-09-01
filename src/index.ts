@@ -1234,6 +1234,49 @@ export function contextRefreshKind(eventType: string): 'measure' | 'cheap' {
   }
 }
 
+/** The runner's search-overlay state (the input of {@link refreshedSearchState}). */
+export interface SearchOverlayState {
+  readonly matches: readonly TranscriptSearchMatch[]
+  readonly current: number
+  readonly query: string
+  readonly revision: number
+  /** The folder the query ran on (identity guard: another folder's
+   * revision must never be considered current). */
+  readonly folder: TranscriptFolder | undefined
+}
+
+/** PR D1 P1: the search-overlay refresh policy. While the overlay is open
+ * the transcript keeps changing under it (settlements, read-group reflow,
+ * new messages), so Next/Prev must never jump with a stale candidate list
+ * or a stale turn. `changed: false` means the stored state is still
+ * current; otherwise the SAME query is re-run as a lightweight scan (never
+ * the previous candidates — a foreign folder or a moved revision must not
+ * refine against them), the previously current match is recovered by
+ * stable id when it still matches, and the current index is clamped
+ * otherwise. Returns the refreshed state the runner commits. */
+export function refreshedSearchState(
+  state: SearchOverlayState,
+  activeFolder: TranscriptFolder,
+): { matches: TranscriptSearchMatch[]; current: number; revision: number; changed: boolean } {
+  if (state.folder === activeFolder && activeFolder.searchRevision() === state.revision) {
+    return { matches: state.matches as TranscriptSearchMatch[], current: state.current, revision: state.revision, changed: false }
+  }
+  if (state.query === '') {
+    return { matches: [], current: -1, revision: activeFolder.searchRevision(), changed: true }
+  }
+  const previousId = state.current >= 0 ? state.matches[state.current]?.id : undefined
+  const matches = activeFolder.search(state.query)
+  const revision = activeFolder.searchRevision()
+  let current: number
+  if (previousId !== undefined) {
+    const found = matches.findIndex(match => match.id === previousId)
+    current = found >= 0 ? found : Math.min(state.current, Math.max(0, matches.length - 1))
+  } else {
+    current = matches.length > 0 ? 0 : -1
+  }
+  return { matches, current, revision, changed: true }
+}
+
 /**
  * The in-flight compaction state a resumed session log implies: the newest
  * compaction bracket decides. A `session/end-seed` boundary makes any
@@ -2721,7 +2764,16 @@ export function apply(ctx: Context, config: Config): void {
         // extension snapshot (a state transition where the permission
         // preset service or the live agent is momentarily gone).
         permission: deriveRunnerPermission(permission, liveAgent),
-        ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
+        // EXPLICITLY CLEAR the legacy context fields when unmeasured: the
+        // TuiApp merge keeps old fields otherwise, and the session
+        // switch / cold-resume window before the deferred measurement
+        // would show the PREVIOUS session's context pressure — exactly the
+        // permission policy above (P1 finding: the previous conditional
+        // spread skipped the fields, leaving session A's measurement on
+        // session B's first frames, indefinitely when B's measurement
+        // fails).
+        contextTokens,
+        contextWindow: contextTokens === undefined ? undefined : stats.contextWindow,
       })
     }
 
@@ -3484,7 +3536,27 @@ export function apply(ctx: Context, config: Config): void {
       })
       return sessionGeneration
     }
+    // PR D1 P1: while the search overlay is open the transcript keeps
+    // changing (settlements, read-group reflow, new messages), so Next/Prev
+    // must never jump with a stale candidate list or a stale turn. This
+    // re-runs the SAME lightweight query when the active folder's
+    // projection revision moved (or the folder itself changed), recovers
+    // the previously current match by stable id, and clamps the index.
+    const refreshSearchMatchesIfStale = (): void => {
+      const folder = activeFolder()
+      const refreshed = refreshedSearchState(
+        { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
+        folder,
+      )
+      if (!refreshed.changed) return
+      searchMatches = refreshed.matches
+      searchCurrent = refreshed.current
+      lastSearchRevision = refreshed.revision
+      lastSearchFolder = folder
+      app.setSearchResult(searchCurrent + 1, searchMatches.length)
+    }
     const jumpToSearchMatch = (): void => {
+      refreshSearchMatchesIfStale()
       const match = searchMatches[searchCurrent]
       if (match === undefined) return
       // ONE fold snapshot: the anchored message window and the activities
