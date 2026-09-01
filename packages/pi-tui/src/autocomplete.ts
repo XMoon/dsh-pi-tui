@@ -120,6 +120,50 @@ function buildCompletionValue(
 	return `${openQuote}${path}${closeQuote}`;
 }
 
+/**
+ * Type fd's plain-text stdout lines into file/directory entries. fd's
+ * default print format does NOT guarantee a trailing separator on
+ * directories (a bare path is the contract; trailing slashes were even a
+ * long-standing fd feature request), so the real type is resolved against
+ * the filesystem via `statSync` (which follows symlinks, so a symlink to a
+ * directory still completes with `/`). The trailing separator remains only
+ * as a fallback when the stat fails (e.g. a racing removal between fd and
+ * here). Result paths are normalized WITHOUT a trailing separator so
+ * consumers never slice a directory name. (dsh-pi-tui divergence X027.)
+ * Exported for tests: the regression is that a BARE directory line (no
+ * trailing `/`) must still classify as a directory.
+ */
+export function typeDirectoryOutputLines(
+	baseDir: string,
+	lines: readonly string[],
+): Array<{ path: string; isDirectory: boolean }> {
+	const results: Array<{ path: string; isDirectory: boolean }> = [];
+
+	for (const line of lines) {
+		const displayLine = toDisplayPath(line);
+		const hasTrailingSeparator = displayLine.endsWith("/");
+		const normalizedPath = hasTrailingSeparator ? displayLine.slice(0, -1) : displayLine;
+		if (normalizedPath === ".git" || normalizedPath.startsWith(".git/") || normalizedPath.includes("/.git/")) {
+			continue;
+		}
+
+		let isDirectory = hasTrailingSeparator;
+		if (!isDirectory) {
+			try {
+				isDirectory = statSync(join(baseDir, normalizedPath)).isDirectory();
+			} catch {
+				isDirectory = false;
+			}
+		}
+
+		results.push({
+			path: normalizedPath,
+			isDirectory,
+		});
+	}
+	return results;
+}
+
 // Use fd to walk directory tree (fast, respects .gitignore)
 async function walkDirectoryWithFd(
 	baseDir: string,
@@ -200,23 +244,7 @@ async function walkDirectoryWithFd(
 			}
 
 			const lines = stdout.trim().split("\n").filter(Boolean);
-			const results: Array<{ path: string; isDirectory: boolean }> = [];
-
-			for (const line of lines) {
-				const displayLine = toDisplayPath(line);
-				const hasTrailingSeparator = displayLine.endsWith("/");
-				const normalizedPath = hasTrailingSeparator ? displayLine.slice(0, -1) : displayLine;
-				if (normalizedPath === ".git" || normalizedPath.startsWith(".git/") || normalizedPath.includes("/.git/")) {
-					continue;
-				}
-
-				results.push({
-					path: displayLine,
-					isDirectory: hasTrailingSeparator,
-				});
-			}
-
-			finish(results);
+			finish(typeDirectoryOutputLines(baseDir, lines));
 		});
 	});
 }
@@ -786,7 +814,11 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 			const suggestions: AutocompleteItem[] = [];
 			for (const { path: entryPath, isDirectory } of topEntries) {
-				const pathWithoutSlash = isDirectory ? entryPath.slice(0, -1) : entryPath;
+				// typeDirectoryOutputLines normalizes paths WITHOUT a trailing
+				// separator, so no slicing here — the old slice cut the last
+				// character whenever fd omitted the slash on a directory.
+				// (dsh-pi-tui divergence X027.)
+				const pathWithoutSlash = entryPath;
 				const displayPath = scopedQuery
 					? this.scopedPathForDisplay(scopedQuery.displayBase, pathWithoutSlash)
 					: pathWithoutSlash;
