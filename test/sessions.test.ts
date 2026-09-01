@@ -1,16 +1,15 @@
 /**
- * Headless tests for the `/sessions` picker support: pure row assembly,
- * title loading (sessionQuery batch + persistence fallback), and the
- * searchable picker overlay driven through the virtual terminal.
+ * Headless tests for the `/sessions` picker support: pure row assembly and
+ * the searchable picker overlay driven through the virtual terminal.
+ * Session derived state (titles, presets) is Host-owned and arrives through
+ * the projection port — see session-reader-port.test.ts and
+ * session-picker-projections.test.ts for those contracts.
  * @module @xmoon76/dsh-pi-tui/sessions.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
-// Carries the `session/title` event map augmentation into the test program.
-import type {} from '@deepseek-ai/dsh-session-title'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import {
@@ -18,23 +17,12 @@ import {
   findSessionMatch,
   formatSessionAge,
   headerToPickerRow,
-  loadSessionTitles,
   sameWorkspace,
   sessionPickerItem,
   shortSessionId,
   workspaceKey,
   type SessionPickerRow,
 } from '../src/sessions.ts'
-
-/** A title event minimal enough for foldSessionTitle. */
-function titleEvent(title: string, seq = 1, time = 1000): SessionEvent<'session/title'> {
-  return {
-    type: 'session/title',
-    seq,
-    time,
-    data: { title, messageSeqs: [seq], source: { kind: 'user' } },
-  } as SessionEvent<'session/title'>
-}
 
 test('shortSessionId strips the prefix and keeps 8 characters', () => {
   assert.equal(shortSessionId('session-0123456789abcdef'), '01234567')
@@ -145,66 +133,6 @@ test('headerToPickerRow preserves code until a roster-aware reader can disambigu
     agentPreset: 'code',
   }, false)
   assert.equal(row.preset, 'code')
-})
-
-test('loadSessionTitles uses the sessionQuery batch when mounted', async () => {
-  const fakeQuery = {
-    readTitleSnapshots: async (ids: readonly string[]) =>
-      ids.map(id => id === 'session-a'
-        ? { sessionId: id, status: 'fulfilled', value: { session: {}, title: { title: 'alpha title' } } }
-        : { sessionId: id, status: 'rejected', reason: new Error('boom') }),
-  }
-  const titles = await loadSessionTitles(
-    fakeQuery as never,
-    undefined,
-    ['session-a', 'session-b'],
-  )
-  assert.equal(titles.get('session-a'), 'alpha title')
-  assert.equal(titles.has('session-b'), false, 'failed reads must be isolated')
-})
-
-test('loadSessionTitles falls back to persistence inspections', async () => {
-  const eventsBy: Record<string, SessionEvent[]> = {
-    'session-a': [titleEvent('alpha title')],
-    'session-b': [],
-  }
-  const fakePersistence = {
-    inspect: async (id: string) => ({ meta: {}, events: eventsBy[id] ?? [] }),
-  }
-  const titles = await loadSessionTitles(
-    undefined,
-    fakePersistence as never,
-    ['session-a', 'session-b', 'session-c'],
-  )
-  assert.equal(titles.get('session-a'), 'alpha title')
-  assert.equal(titles.has('session-b'), false, 'untitled session must be absent')
-  assert.equal(titles.has('session-c'), false, 'missing session must be absent, not throw')
-})
-
-test('loadSessionTitles preserves an unsupported session-format refusal', async () => {
-  const refusal = Object.assign(new Error('unknown durable event'), { name: 'SessionFormatUnsupportedError' })
-  const fakePersistence = {
-    inspect: async () => { throw refusal },
-  }
-  await assert.rejects(
-    loadSessionTitles(undefined, fakePersistence as never, ['session-unknown']),
-    error => error === refusal,
-  )
-})
-
-test('loadSessionTitles honors an aborted signal', async () => {
-  const controller = new AbortController()
-  controller.abort()
-  const fakeQuery = {
-    readTitleSnapshots: async (_ids: readonly string[], signal?: AbortSignal) => {
-      signal?.throwIfAborted()
-      return []
-    },
-  }
-  await assert.rejects(
-    loadSessionTitles(fakeQuery as never, undefined, ['session-a'], controller.signal),
-    /abort/i,
-  )
 })
 
 test('MAX_PICKER_SESSIONS keeps its legacy exported value', () => {
