@@ -14,7 +14,7 @@ import { writeFileSync } from 'node:fs'
 import { scheduler } from 'node:timers/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
@@ -22,7 +22,6 @@ import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import { createForkedAgent } from './session-fork.ts'
-import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
@@ -55,6 +54,7 @@ import { readImageFile } from './image/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
 import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from './theme-menu.ts'
+import { SubagentModelAllowlistSubmenu, allowlistSummary } from './subagent-model-menu.ts'
 import { resolveThemeSelection, normalizePersistedTheme } from './theme-source.ts'
 import { suggestPathArgument } from './mentions.ts'
 import { FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
@@ -1398,6 +1398,11 @@ export function registerTuiCommands(
       // Both panel rows degrade gracefully when the service is absent.
       const permissions = runner.config.permissions
       const permissionNames: string[] = [...permissions.presetNames()]
+      // Serialized whole-section writes for the subagent model-selection
+      // toggle: rapid toggles commit in order (a slow earlier write can
+      // never land after a newer one), and every settle re-syncs the row
+      // to the ACTUAL committed state (review round 2).
+      let subagentModelWriteChain: Promise<void> = Promise.resolve()
       const defaultPermission = permissions.defaultPreset()
       // Before the first session (deferred start) the session-scoped rows —
       // approval policy and the read-only session facts — do not exist yet;
@@ -1425,13 +1430,18 @@ export function registerTuiCommands(
           keyboardShortcutsRow.currentValue = model.summary
         },
       ) ?? new KeybindingEditorUnavailablePanel(done)
-      app.openSettings(
+      // The live allowlist submenu instance (created lazily when the row
+      // opens): the panel teardown disposes it so a write pending when the
+      // whole /settings overlay closes can never repaint or toast after
+      // the panel is gone (review round 6).
+      let allowlistMenu: SubagentModelAllowlistSubmenu | undefined
+      const closeSettings = app.openSettings(
         [
           ...liveAgent === undefined ? [] : [{
             id: 'approval',
             label: 'Approval policy (this session)',
             description: 'How tool approvals are handled in this session',
-            currentValue: effectiveApprovalPolicy(liveAgent.session.events) ?? 'ask',
+            currentValue: permissions.approvalOverrideOf(liveAgent.session) ?? 'ask',
             values: ['ask', 'never'],
           }],
           ...permissionNames.length > 0 ? [{
@@ -1441,6 +1451,44 @@ export function registerTuiCommands(
             currentValue: defaultPermission ?? permissionNames[0] ?? '',
             values: permissionNames,
           }] : [],
+          // The OFFICIAL subagent model-selection preference (DSH's
+          // `subagent-model-selection` section): when enabled, a NEW
+          // session's `subagent` tool may pick a child provider/model from
+          // the allowlist below. Sampled at session composition — turning
+          // it on never rewrites an already-running session's tools.
+          ...(runner.config.subagentModelSelection.available() && runner.catalog.models.available()) ? (() => {
+            const subagentSelection = runner.config.subagentModelSelection.get()
+            return [{
+              id: 'subagent-model-selection',
+              label: 'Subagent model selection',
+              description: 'Let new sessions pick a child provider/model in the subagent tool (official DSH setting; needs at least one allowed route)',
+              currentValue: subagentSelection.enabled ? 'on' : 'off',
+              values: ['off', 'on'],
+            }, {
+              id: 'subagent-model-allowlist',
+              label: 'Subagent allowed models',
+              description: 'The child LLM routes the official subagent tool may pick from',
+              currentValue: allowlistSummary(subagentSelection.allowedModels),
+              submenu: (_currentValue: string, done: (selected?: string) => void) => {
+                const menu = new SubagentModelAllowlistSubmenu({
+                  selection: runner.config.subagentModelSelection,
+                  catalog: runner.catalog.models,
+                  notify: (message, kind) => app.notify(message, kind),
+                  requestRender: () => app.requestRender(),
+                  done,
+                  runOwned: (label, task, options) => {
+                    runOwned(label, task, {
+                      diag: runner.diag,
+                      sessionId: () => runner.liveAgent?.session.id,
+                      ...options,
+                    })
+                  },
+                })
+                allowlistMenu = menu
+                return menu
+              },
+            }]
+          })() : [],
           {
             id: 'theme',
             label: 'Theme',
@@ -1599,6 +1647,37 @@ export function registerTuiCommands(
           } else if (id === 'default-permission') {
             if (permissionNames.includes(value)) {
               detach('permission default write', () => runner.config.permissions.setDefaultPreset(value) as Promise<unknown>, { notify: true })
+            }
+          } else if (id === 'subagent-model-selection') {
+            // The OFFICIAL section write (never a TUI-owned copy). The
+            // whole current allowlist rides along; enabling with an empty
+            // allowlist is refused by the official rule (the Direct
+            // adapter fails fast with the official message and the Host
+            // validates again at the section boundary). Writes are
+            // SERIALIZED (the payload is captured at toggle time, so the
+            // last toggle wins) and every settle re-syncs the row to the
+            // ACTUAL committed state — a rejected write rolls back, and a
+            // superseded success never leaves a stale display.
+            if (value === 'on' || value === 'off') {
+              const current = runner.config.subagentModelSelection.get()
+              const previous = current.enabled ? 'on' : 'off'
+              const desired = value === 'on'
+              subagentModelWriteChain = subagentModelWriteChain
+                .then(() => runner.config.subagentModelSelection.set({
+                  enabled: desired,
+                  allowedModels: current.allowedModels,
+                }))
+                .then(
+                  () => {
+                    // Re-sync to the committed state (a later toggle may
+                    // have superseded this one).
+                    revert(runner.config.subagentModelSelection.get().enabled ? 'on' : 'off')
+                  },
+                  (error: unknown) => {
+                    revert(previous)
+                    app.notify(`subagent model selection write failed: ${safeErrorMessage(error)}`, 'error')
+                  },
+                )
             }
           } else if (id === 'theme') {
             // The submenu fires onChange with the SOURCE-QUALIFIED selectable
@@ -1878,7 +1957,13 @@ export function registerTuiCommands(
             }
           }
         },
-        () => {},
+        () => {
+          // Esc: close without writing. The allowlist submenu is disposed
+          // with the panel — a write pending when the whole /settings
+          // overlay closes must not repaint or toast after teardown
+          // (review round 6).
+          allowlistMenu?.dispose()
+        },
       )
       return { kind: 'success' }
     },
@@ -3164,7 +3249,7 @@ export function registerTuiCommands(
       // A started conversation's history was produced under its preset's
       // tools: offer no selectable roster — say why instead (the typed
       // /preset <id> path above refuses the same way).
-      if (liveAgent !== undefined && liveAgent.session.events.some(event => event.type === 'turn/start')) {
+      if (liveAgent !== undefined && liveAgent.session.snapshotEvents().some(event => event.type === 'turn/start')) {
         const message = `preset switching is only available in a new session — session "${liveAgent.session.id}" has already started; its preset is fixed (use /new for a fresh session, or /preset default <id> for future sessions)`
         app.notify(message, 'error')
         return { kind: 'error', text: message }
@@ -3287,8 +3372,17 @@ export function registerTuiCommands(
     description: 'Copy the last assistant message to the system clipboard (tmux-aware)',
     handler: async () => {
       const liveAgent = await requireAgent()
-      const last = liveAgent.session.events.findLast((event): event is SessionEvent<'assistant/message'> =>
-        event.type === 'assistant/message')
+      // Single-event lookup: walk BACKWARDS from the log offset with
+      // eventAt (alpha.4) — never materialize the whole log for one
+      // message (the plan's count/eventAt/snapshot split).
+      let last: SessionEvent<'assistant/message'> | undefined
+      for (let seq = Number(liveAgent.session.seq) - 1; seq >= 0; seq -= 1) {
+        const event = liveAgent.session.eventAt(SessionSeq(seq))
+        if (event?.type === 'assistant/message') {
+          last = event
+          break
+        }
+      }
       if (last === undefined) return { kind: 'error', text: 'no assistant message yet' }
       const text = last.data.message.content
         .filter(block => block.type === 'text')
@@ -3421,11 +3515,11 @@ export function registerTuiCommands(
     description: 'Fork this session at the last completed turn',
     handler: () => runner.withSessionTransition(async () => {
       const source = runner.liveAgent
-      const seed = source === undefined ? undefined : forkSeed(source.session.events)
+      const seed = source === undefined ? undefined : forkSeed(source.session.snapshotEvents())
       if (seed === undefined || source === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
       // Shared child creation with rewind (plan §6.2): preset inheritance,
       // live session cwd, provider/model inheritance, parentSession +
-      // seedLength metadata — one chain, no drift between the two surfaces.
+      // isSeeded/inheritedEventCount metadata — one chain, no drift between the two surfaces.
       // The child's id is PRE-GENERATED so the transaction acquires its
       // open lock BEFORE the create publishes it (review round 6); the
       // create runs inside the unified transaction, and a failure before
@@ -3473,7 +3567,7 @@ export function registerTuiCommands(
     description: 'Show session stats and identity',
     handler: async () => {
       const liveAgent = await requireAgent()
-      const stats = computeStats(liveAgent.session.events)
+      const stats = computeStats(liveAgent.session.snapshotEvents())
       // Explicit status: measure NOW through the runner's context
       // coordinator — the panel and the cached footer value share ONE
       // measurement (no duplicate reads, no stale footer). Stubs without

@@ -18,7 +18,7 @@ dsh --profile pi-tui
 
 ## DSH 兼容性与源码验证
 
-发布包通过 `package.json` peer contract 使用 DSH `>=0.1.2-alpha.2`；源码验证不会修改这个发布契约，也不会把 DSH vendor 进本仓库。
+发布包通过 `package.json` peer contract 使用 DSH `>=0.1.2-alpha.4`；源码验证不会修改这个发布契约，也不会把 DSH vendor 进本仓库。
 
 当目标 DSH 版本尚未发布到 npm 时，可以用固定 commit 的官方源码包做本地验证：
 
@@ -115,9 +115,14 @@ main
 
 已经结束的 one-shot Subagent 仍可以打开并查看持久化 Transcript。
 
-对于当前 Session 的直接 `continuable` Child，可以进入交互式 Viewer，并直接向该 Subagent 发送后续消息。Child 使用自己的 Transcript、Draft 和运行状态，不会修改主 Session 的输入。
+对于当前 Session 的直接 `continuable` Child，可以进入交互式 Viewer，并直接向该 Subagent 发送后续消息（走 DSH 官方 `subagents.prompt()` 人类输入通道——按顺序排队为 Child 自己的下一个 turn，并保留 user 来源）。Child 使用自己的 Transcript、Draft 和运行状态，不会修改主 Session 的输入。
 
 更深层的 nested Subagent 默认以只读方式查看。
+
+官方 Subagent 模型选择（DSH `subagent-model-selection` 设置）可在 `/settings`
+中开关并维护 allowlist：开启后**新建** Session 的官方 `subagent` 工具可以按调用
+选择子 Agent 的 provider/model（受 allowlist 限制）。设置在 Session 组合时采样，
+不会改写已在运行的 Session 的工具。
 
 ### Shell
 
@@ -301,17 +306,19 @@ dsh-pi-tui:
 
 | TUI 包版本 | 对应 DSH 版本 | 说明 |
 |---|---|---|
-| `0.4.0-alpha.1`（`@next`） | `>=0.1.2-alpha.2` | 当前预发布线；按每个发布版本的具体 DSH family 验证 |
+| `0.4.x-alpha`（`@next`） | `>=0.1.2-alpha.4` | 当前预发布线；按每个发布版本的具体 DSH family 验证 |
+| `0.4.0-alpha.1`（已发布） | `>=0.1.2-alpha.2` | 上一条 0.4 预发布线；其发布版本按 alpha.2/alpha.3 family 验证 |
 | `0.3.x`（`@0.3`） | `0.1.1-rc.2` | 旧运行时兼容线 |
 
 不要把两条线混装：DSH 0.1.1 不在 0.4 的 peer 支持范围内，运行时会在
 正常的不兼容边界以非零状态失败。启动行会在 Loader 并发挂载顺序允许时打印
 升级和回退提示，但该友好提示是 best-effort，不是启动顺序保证；保留 DSH
-0.1.1 时请使用 0.3。`0.4.0-alpha.1` 的推荐安装顺序如下（先装 DSH，再把
-TUI 装入 profile）：
+0.1.1 时请使用 0.3，保留 alpha.2/alpha.3 时请使用
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.1`。当前 0.4 预发布线的推荐安装顺序如下
+（先装 DSH，再把 TUI 装入 profile）：
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.3
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.4
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
@@ -324,8 +331,8 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 dsh --profile pi-tui
 ```
 
-`0.4` 的声明支持范围是 `>=0.1.2-alpha.2`；每个发布版本都会验证具体的
-DSH family。仅执行 `npm install -g @xmoon76/dsh-pi-tui` 不会把插件安装进
+`0.4` 当前线的声明支持范围是 `>=0.1.2-alpha.4`；每个发布版本都会验证
+具体的 DSH family。仅执行 `npm install -g @xmoon76/dsh-pi-tui` 不会把插件安装进
 DSH profile，实际使用仍应执行上面的 `dsh plugin` 命令。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义

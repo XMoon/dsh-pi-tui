@@ -52,9 +52,13 @@
       config:
         default: standard
 
-    # The official standard preset enables per-session subagent model
-    # selection. Its tool-subagent row requires this Host service when it
-    # mounts; without the row the default standard composition throws.
+    # The official standard preset composes its `subagent` tool with
+    # `modelSelectionSettings: true`, which injects this Host-owned setting
+    # service — the row is required for the standard composition to mount.
+    # Mounting the service ALONE enables nothing: it only owns the
+    # `subagent-model-selection` settings section (default enabled=false,
+    # empty allowlist). Each NEW session samples that section at
+    # composition; the TUI exposes the toggle + allowlist in /settings.
     - id: subagent-model-selection-settings
       name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
 
@@ -84,8 +88,8 @@
 #
 # Rows that STAY on the host plane (not listed): `tools` (registry), `shell-env`
 # (publishes the DSH env the model's shell sees), `subagent` + its spawn/fork
-# backends (process singletons), `tool-subagent-report` (host singleton),
-# `subagent-model-selection-settings`, the goal/jobs/compaction services and
+# backends (process singletons), `subagent-model-selection-settings`, the
+# goal/jobs/compaction services and
 # their host infrastructure, `permission`, `approval`, `sandbox*`,
 # `fs-observation-policy`, `spill*`, `timeout-policy`, `repeat-tool-reminder`,
 # `session-*`, `token-meter`. `command-goal` is disabled below and reintroduced

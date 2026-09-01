@@ -324,7 +324,8 @@ export interface AuthorizationConfig {
 }
 
 /** The permission sub-domain: permission preset names, the persisted
- * default, and preset application (/yolo). */
+ * default, preset application (/yolo), and the session's approval-policy
+ * override. */
 export interface PermissionConfig {
   /** The advertised preset names, in the preset table's declaration order. */
   presetNames(): readonly string[]
@@ -333,6 +334,12 @@ export interface PermissionConfig {
   defaultPreset(): string | undefined
   /** Persist the default preset for future sessions. */
   setDefaultPreset(name: string): Promise<void>
+  /** The session's own approval-policy override (the official approval
+   * service's `overrideOf(session)` read — alpha.4; the configured default
+   * is deliberately NOT applied, an override-less session answers
+   * undefined and the consumer shows its own default). Degrades to
+   * undefined when the approval service is absent. */
+  approvalOverrideOf(session: unknown): 'ask' | 'never' | undefined
   /** Apply one permission preset to a live session (/yolo applies
    * `danger-full-access` through the OFFICIAL command line so the switch
    * takes the exact host path — sandbox + approval writer + policy-change
@@ -342,6 +349,32 @@ export interface PermissionConfig {
     presetId: string,
     signal?: AbortSignal,
   ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' }>
+}
+
+/** One official allowed child-LLM route (the exact provider+model pair
+ * the official `subagent-model-selection` section authorizes). */
+export interface SubagentAllowedModelRoute {
+  readonly provider: string
+  readonly model: string
+}
+
+/** The official subagent model-selection preference (the DSH
+ * `subagent-model-selection` settings section, owned Host-side by the
+ * `subagent-model-selection-settings` service). The TUI reads and writes
+ * the OFFICIAL section through this sub-domain — it never maintains a
+ * parallel TUI-owned subagent routing setting. Sampling is per NEW
+ * session composition: a settings change never rewrites the tool schema
+ * of an Agent that is already running. */
+export interface SubagentModelSelectionConfig {
+  /** Whether the Host settings section is present (it registers when the
+   * deployment mounts the subagent-model-selection-settings service). */
+  available(): boolean
+  /** The current official preference (defaults: disabled, empty list). */
+  get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }
+  /** Persist the official section. Rejects with the official validation
+   * error when enabling without at least one route, or when the list
+   * repeats a provider+model pair. */
+  set(value: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }): Promise<void>
 }
 
 /** The saved agent-preset default sub-domain (`/preset default`): the
@@ -377,4 +410,6 @@ export interface ConfigPort {
   readonly permissions: PermissionConfig
   /** The saved default agent preset. */
   readonly presetDefault: PresetDefaultConfig
+  /** The official subagent model-selection preference. */
+  readonly subagentModelSelection: SubagentModelSelectionConfig
 }

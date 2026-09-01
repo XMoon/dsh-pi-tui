@@ -48,6 +48,9 @@ test('release-notes accepts stable v tags and next-v prerelease tags', (t) => {
 })
 
 test('current 0.4 release body carries the DSH/TUI install pairing', () => {
+  // The PUBLISHED 0.4.0-alpha.1 line documents its own alpha.3 family; the
+  // alpha.4 floor is recorded in [Unreleased] and lands with the NEXT
+  // version bump (the release commit moves the section).
   const output = join(tmpdir(), `dsh-pi-tui-release-notes-${process.pid}.md`)
   try {
     const result = spawnSync(

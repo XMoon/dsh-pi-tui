@@ -96,6 +96,60 @@ and the pre-rebase snapshot; the audit record lives at
   worktrees' directories are never removed; no broad `/tmp/dsh-*` sweep.
   The official `dsh-spill-*` / `dsh-subprocess-*` retention contracts are
   untouched.
+### DSH compatibility baseline raised to 0.1.2-alpha.4
+
+- **The minimum DSH moves from `0.1.2-alpha.2` to `0.1.2-alpha.4`** (the
+  peer contract stays lower-bound-only with no upper limit; dev/test
+  dependencies and the Source Mode pin move to `dsh-v0.1.2-alpha.4`, and
+  the lockfile is rebuilt). Runtimes below alpha.4 get the startup notice:
+  alpha.2/alpha.3 fall back to the previous 0.4 prerelease line
+  (`@xmoon76/dsh-pi-tui@0.4.0-alpha.1`), older runtimes fall back to 0.3.
+- **`Session.events` migrated onto the alpha.4 read surface**: the public
+  `events` getter was removed upstream; every read migrated by purpose —
+  count hot paths use `session.seq`, single events use
+  `eventAt(SessionSeq)`, and only genuine full-log folds (transcript
+  export, rewind/fork seeds, cold hydration) use `snapshotEvents()`. A new
+  static gate (`scripts/check-no-session-events.mjs`) prevents a
+  regression.
+- **Permission reads are session-oriented**: `permissionPresets.current(session)`,
+  and the approval read now uses the official `approval.overrideOf(session)`
+  (alpha.4 removed the `effectiveApprovalPolicy` / `effectiveSandboxMode`
+  event-fold exports); the sandbox-fold probe shim is gone with them.
+- **The subagent viewer's human input now rides the official
+  `subagents.prompt()`**: `SubagentPort.followup` is renamed to `prompt`,
+  the Direct adapter carries a caller-minted `requestId` (one UUID per
+  submit), and failures classify through the official RemoteError
+  vocabulary (`subagent/parent-unavailable`, `subagent/not-resumable`,
+  `subagent/unauthorized`, `subagent/delivery-unavailable`,
+  `gateway/cancelled`). The old `followup()` call, the hand-built message
+  source, and the local parent-authority shim are gone; the viewer's
+  stale-settle / draft-restore guards and the `@file` canonicalization are
+  unchanged. The Agent-authored Steer path (`subagents.sendMessage`) stays
+  strictly separate from human prompts.
+- **The official subagent model-selection setting surface**: `/settings`
+  gains a "Subagent model selection" toggle and a "Subagent allowed models"
+  route picker that read and write the official `subagent-model-selection`
+  settings section directly (default off; enabling requires at least one
+  route; sampled at NEW session composition, never rewriting a running
+  session). No parallel TUI-owned subagent routing setting exists; on
+  DSH >= 0.1.2-alpha.4 the official capability is preferred over external
+  legacy tools (e.g. `subagent_route`).
+- **Fork/rewind creation follows the alpha.4 seeded-session contract**: the
+  header `seedLength` field is rejected upstream; creation now sends
+  `meta.isSeeded: true` + `inheritedEventCount`.
+- **Version gates updated**: the runtime-boundary smoke asserts the
+  alpha.4 rejection boundary (0.1.1-rc.2 and the alpha.2/alpha.3 fallback
+  paths separately); release-notes prerelease guidance and the pi2dsh
+  compatibility manifest track alpha.4.
+- **The pi2dsh ecosystem gate is temporarily disabled**: the published
+  `pi2dsh@0.24.0` bridge is runtime-incompatible with the `0.1.2-alpha.4`
+  baseline (its `^0.1.2-alpha.1` peers satisfy alpha.4 semver-wise, so the
+  metadata preflight passes, but the bridge predates the alpha.4
+  Session/subagent APIs and fails the real runtime smoke). The CI
+  `ecosystem-compat` job is switched off with a documented re-enable
+  procedure; the official-preset assembly job keeps the real preset
+  coverage. Re-enable when a pi2dsh release declares and runs on DSH
+  `>= 0.1.2-alpha.4`.
 
 ### Vendored fork rebased onto Earendil v0.84.4
 
