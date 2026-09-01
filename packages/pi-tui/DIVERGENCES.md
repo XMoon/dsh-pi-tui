@@ -35,7 +35,9 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
   `SelectListOptions` (`enableSearch`, `header`, `noMatchText`, `showHint`,
   `initialQuery`), `SelectItem.group` + `SelectListTheme.groupHeader`,
   PageUp/PageDown page navigation, and substring search over
-  value+label+description. Upstream 0.84.4 still has none of these.
+  value+label+description. `setFilter` is redefined to the same
+  case-insensitive substring filter (upstream prefix-matched value only).
+  Upstream 0.84.4 still has none of these.
 - Consumer: host `/sessions` picker, model picker, category picker,
   autocomplete compact picker, dynamic title enrichment.
 - Upstream status: open upstream PRs exist but are not part of the pinned baseline.
@@ -474,8 +476,9 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
   component tree.
 - Consumer: host narrow-terminal support.
 - Upstream status: absent.
-- Tests: none dedicated (narrow-width renders exercised by the fork and
-  bundle suites).
+- Tests: "Container width clamp (dsh-pi-tui divergence X032)" in
+  `test/tui-render.test.ts` (widths 0 / -3 / 5 must clamp to 1 / 1 / 5)
+  plus the bundle suite's narrow-width renders.
 - Migration action: re-apply (3-line patch).
 
 ## Removed kimi-only code (do NOT re-apply)

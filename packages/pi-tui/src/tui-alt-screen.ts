@@ -643,6 +643,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		const keybindings = getKeybindings();
 		const isRelease = isKeyRelease(data);
+		// A focused (non-search) overlay keeps priority over EVERYTHING,
+		// including the host seam: overlay input must never be preempted by
+		// a host-claimed viewport key (Home/End, search chords). The search
+		// overlay is excluded so the host seam below can still suppress the
+		// built-in search key while the search input is focused.
+		if (this.shouldDeferViewportInputToOverlay()) return undefined;
 		if (!isRelease && this.onBeforeViewportInput?.(data) === true) return { consume: true };
 		// When the primary scroll view has nothing to scroll (short content, or a
 		// full-screen component mounted as the layout root), let navigation keys
@@ -666,7 +672,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				return { consume: true };
 			}
 		}
-		if (this.shouldDeferViewportInputToOverlay()) return undefined;
 		if (keybindings.matches(data, "tui.altScreen.pageUp")) {
 			if (!primaryScrollable) {
 				if (!isRelease && this.onScrollBoundary?.(-1, "page") === true) return { consume: true };
