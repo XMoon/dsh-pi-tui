@@ -729,11 +729,16 @@ async function main(): Promise<void> {
     const coordinator = new ContextMeasurementCoordinator()
     coordinator.bind('bench-session')
     let measureCalls = 0
+    // The Direct tokenMeter scan walks the live session's requests: model
+    // it as a scan proportional to the historical context (synthetic but
+    // non-trivial — the point is the cost is paid ONLY on explicit
+    // measures, never on cheap refreshes).
+    const history = new Array<number>(10_000).fill(1)
     const reader = (_sessionId: string): number => {
       measureCalls += 1
-      // The tokenMeter scan walks live session requests: model it as real
-      // work proportional to the historical context.
-      return 81_000
+      let scanned = 0
+      for (let i = 0; i < history.length; i += 1) scanned += history[i]!
+      return 81_000 + scanned
     }
     // Cheap-only phase: measure once (initial), then 1000 UI-only refreshes.
     coordinator.measure('bench-session', reader)
@@ -759,6 +764,39 @@ async function main(): Promise<void> {
       coordinator.measure('bench-session', reader)
     })
     row(`explicit measureContext ×${FAST ? 20 : 50} (dirty each call)`, fmt(stats(explicit)))
+  }
+
+  // 9. PR D1 LIVE hot-path maintenance (the review's P1 blockers): the
+  //    search projection must NOT make streaming or read-grouping
+  //    quadratic. The acceptance is the GROWTH CURVE, not a millisecond
+  //    threshold: size x10 must not come close to x100 time. (A 1 MiB
+  //    assistant streamed in 1 KiB chunks used to pay ~512 MiB of
+  //    lowercase work; a 1000-read group used to re-scan the whole merged
+  //    text per append.)
+  {
+    // Streaming: one growing assistant message, fixed 1 KiB chunks.
+    for (const totalKiB of [10, 100, 1000]) {
+      const events: SessionEvent[] = []
+      pushEvent(events, 'turn/start', { turn: 0 })
+      const chunk = 'x'.repeat(1024)
+      for (let i = 0; i < totalKiB; i += 1) {
+        pushEvent(events, 'assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: i, text: chunk } })
+      }
+      const apply = warmedP50(FAST ? 3 : 5, () => {
+        const folder = new TranscriptFolder()
+        folder.apply(events)
+      })
+      row(`streaming search-index maintenance (${totalKiB} KiB assistant, 1 KiB chunks)`, fmtMs(apply))
+    }
+    // Live adjacent read grouping: one growing merged read group.
+    for (const reads of [10, 100, 1000]) {
+      const events = buildReadHeavyEvents(1, reads)
+      const apply = warmedP50(FAST ? 3 : 5, () => {
+        const folder = new TranscriptFolder()
+        folder.apply(events)
+      })
+      row(`live read-group append (${reads} adjacent reads)`, fmtMs(apply))
+    }
   }
 
   console.log(rows.join('\n'))
