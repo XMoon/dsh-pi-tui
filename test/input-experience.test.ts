@@ -337,6 +337,53 @@ test('two ctrl+g in one input batch start the external editor only once (single-
   app.stop()
 })
 
+test('the external editor round-trip EXPANDS paste markers (P1 large-paste loss)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const seenDrafts: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async (draft) => {
+      seenDrafts.push(draft)
+      return draft
+    },
+    runOwned: owned,
+  })
+  app.start()
+  // A large multi-line paste lands as a `[paste #N +12 lines]` marker in
+  // the editor text; the registry holds the real content.
+  const pasted = Array.from({ length: 12 }, (_, i) => `real line ${i + 1}`).join('\n')
+  vt.sendInput(`\x1b[200~${pasted}\x1b[201~`)
+  await vt.waitForRender()
+  await app.launchExternalEditor()
+  assert.equal(seenDrafts.length, 1)
+  assert.ok(seenDrafts[0]!.includes('real line 12'), `$EDITOR must see the REAL paste content, got: ${seenDrafts[0]}`)
+  assert.ok(!seenDrafts[0]!.includes('[paste #'), 'the marker text must never reach $EDITOR')
+  app.stop()
+})
+
+test('the external editor round-trip preserves fullscreen and the surface generation (P2)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async (draft) => draft,
+    runOwned: owned,
+  })
+  app.start()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.equal(app.isFullscreen(), true, 'fullscreen is up before the round-trip')
+  const generationBefore = app.getSurfaceGeneration()
+  await app.launchExternalEditor()
+  await vt.waitForRender()
+  assert.equal(app.isFullscreen(), true, 'returning from $EDITOR must re-enter the SAME fullscreen surface')
+  assert.equal(app.getSurfaceGeneration(), generationBefore, 'the round-trip stays inside one surface generation')
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  app.stop()
+})
+
 test('the editor single-flight latch releases after a failed launch', async () => {
   const vt = new VirtualTerminal(80, 24)
   let calls = 0
@@ -373,16 +420,18 @@ test('the editor latch releases even when the TUI restart (start) throws', async
     runOwned: owned,
   })
   app.start()
-  const originalStart = app.start.bind(app)
-  // The first launch's restart throws: the failure lands in diagnostics
-  // (the runOwned error path in production), but the latch MUST still
-  // clear — otherwise the editor capability dies silently for the rest of
-  // the session. Direct calls are used because after a failed restart the
-  // TUI is stopped, so keyboard input no longer reaches the app.
-  app.start = () => { throw new Error('restart failed') }
+  const screen = (app as unknown as { tui: { start: () => void; stop: () => void } }).tui
+  const originalStart = screen.start.bind(screen)
+  // The first launch's resume (screen restart) throws: the failure lands
+  // in diagnostics (the runOwned error path in production), but the latch
+  // MUST still clear — otherwise the editor capability dies silently for
+  // the rest of the session. The resume seam stops/starts the ACTIVE
+  // screen directly (suspendForExternalEditor /
+  // resumeFromExternalEditor), not TuiApp.start.
+  screen.start = () => { throw new Error('restart failed') }
   await app.launchExternalEditor().catch(() => {})
   assert.equal(calls, 1, 'the editor round-trip ran')
-  app.start = originalStart
+  screen.start = originalStart
   await app.launchExternalEditor()
   assert.equal(calls, 2, 'the latch must release even when restart threw')
   app.stop()
@@ -401,11 +450,14 @@ test('the editor latch releases even when the TUI stop throws', async () => {
     runOwned: owned,
   })
   app.start()
-  const originalStop = app.stop.bind(app)
-  app.stop = () => { throw new Error('stop failed') }
+  const screen = (app as unknown as { tui: { start: () => void; stop: () => void } }).tui
+  const originalStop = screen.stop.bind(screen)
+  // The suspend seam stops the ACTIVE screen (suspendForExternalEditor),
+  // not TuiApp.stop — patch the screen's stop.
+  screen.stop = () => { throw new Error('stop failed') }
   await app.launchExternalEditor().catch(() => {})
   assert.equal(calls, 0, 'the editor never opened (stop threw first)')
-  app.stop = originalStop
+  screen.stop = originalStop
   await app.launchExternalEditor()
   assert.equal(calls, 1, 'the latch must release even when stop threw')
   app.stop()

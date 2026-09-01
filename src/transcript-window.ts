@@ -167,6 +167,41 @@ export class TranscriptWindowController {
     return true
   }
 
+  /**
+   * Move exactly ONE turn toward older (Ctrl+Up prompt navigation — a
+   * single-turn variant of {@link moveOlder}'s page step). From live-tail
+   * this anchors history at the previous turn's end.
+   */
+  turnOlder(): boolean {
+    this.refreshTurnOrder()
+    if (this.turns.length === 0) return false
+    const latestIndex = this.turns.length - 1
+    const currentIndex = this.current.mode === 'latest'
+      ? latestIndex
+      : this.turnIndex(this.current.endTurn ?? this.turns[latestIndex]!)
+    if (currentIndex <= 0) return false
+    const endTurn = this.turns[currentIndex - 1]
+    if (endTurn === undefined) return false
+    this.current = { mode: 'history', endTurn }
+    return true
+  }
+
+  /**
+   * Move exactly ONE turn toward newer, resuming live-tail at the newest
+   * (Ctrl+Down prompt navigation — single-turn variant of {@link moveNewer}).
+   */
+  turnNewer(): boolean {
+    this.refreshTurnOrder()
+    if (this.current.mode !== 'history' || this.turns.length === 0) return false
+    const currentIndex = this.turnIndex(this.current.endTurn ?? this.turns[0]!)
+    if (currentIndex < 0) return false
+    if (currentIndex >= this.turns.length - 1) return this.latest()
+    const endTurn = this.turns[currentIndex + 1]
+    if (endTurn === undefined) return false
+    this.current = { mode: 'history', endTurn }
+    return true
+  }
+
   /** Move one overlapping page toward newer turns, resuming live-tail at end. */
   moveNewer(): boolean {
     this.refreshTurnOrder()

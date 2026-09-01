@@ -50,6 +50,22 @@ interface ChangeSubscription {
 export interface SeatEditor {
   readonly id: 'host' | string
   getText(): string
+  /**
+   * The draft with fork paste markers (`[paste #N ...]`) EXPANDED to their
+   * real content (the fork Editor's registry lookup; X004A). Use this
+   * whenever draft text LEAVES the editor's own context — the external
+   * editor round-trip, draft snapshots — or the registry can be cleared
+   * before the marker is expanded again and the real content is lost.
+   * Absent on editors without a paste registry: fall back to getText().
+   */
+  getExpandedText?(): string
+  /**
+   * The cursor offset mapped into the expanded text's coordinates
+   * (X045): pairs with getExpandedText() for seat HANDOFFS, where the
+   * cursor must survive marker expansion too. Absent together with
+   * getExpandedText on editors without a paste registry.
+   */
+  getExpandedCursor?(): number
   setText(text: string): void
   getCursor(): number
   setCursor(offset: number): void
@@ -92,6 +108,10 @@ export interface SeatEditor {
 /** A host-editor adapter (the fork Editor + history/autocomplete). */
 export interface HostEditorAdapter {
   getText(): string
+  /** The draft with paste markers expanded (external-editor round-trip). */
+  getExpandedText?(): string
+  /** The cursor offset in the expanded text's coordinates (X045). */
+  getExpandedCursor?(): number
   setText(text: string): void
   /** Whether the host editor's autocomplete dropdown is open. */
   isShowingAutocomplete?(): boolean
@@ -250,6 +270,12 @@ export class EditorSeatHolder {
     const seat: SeatEditor = {
       id: 'host',
       getText: () => editor.getText(),
+      getExpandedText: editor.getExpandedText === undefined
+        ? undefined
+        : () => editor.getExpandedText!(),
+      getExpandedCursor: editor.getExpandedCursor === undefined
+        ? undefined
+        : () => editor.getExpandedCursor!(),
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete?.() ?? false,
       getInputMode: () => editor.getInputMode?.() ?? 'prompt',
@@ -300,13 +326,23 @@ export class EditorSeatHolder {
    */
   private wireCursorOf(seat: SeatEditor): { wireText: string; wireCursor: number } {
     const mode = seat.getInputMode?.() ?? 'prompt'
+    // Round-2 review P1: expand paste markers for the handoff — the
+    // target editor holds no share in THIS editor's paste registry, so
+    // literal `[paste #N …]` markers would orphan the moment any restore
+    // clears the registry. The cursor maps through the same expansion
+    // (X045) so it lands at the same visual position in the new document.
+    const rawText = seat.getText()
+    const expandedText = seat.getExpandedText?.()
+    const expanded = expandedText !== undefined && expandedText !== rawText
+    const text = expanded ? expandedText! : rawText
+    const cursor = expanded ? seat.getExpandedCursor?.() ?? seat.getCursor() : seat.getCursor()
     if (mode !== 'prompt') {
       return {
-        wireText: serializeEditorInput(mode, seat.getText()),
-        wireCursor: seat.getCursor() + shellPrefixForMode(mode).length,
+        wireText: serializeEditorInput(mode, text),
+        wireCursor: cursor + shellPrefixForMode(mode).length,
       }
     }
-    return { wireText: seat.getText(), wireCursor: seat.getCursor() }
+    return { wireText: text, wireCursor: cursor }
   }
 
   /** The current seat snapshot (Phase 2: the ADVANCED editor controls

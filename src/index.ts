@@ -135,7 +135,8 @@ import { FileHistorySearchSource } from './history-search.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import { DraftImageStore } from './image/draft-store.ts'
 import { ImageInputError } from './image/errors.ts'
-import { clipboardBackendOf, commandOnPath, createClipboardRunner, readClipboardImage, type ClipboardEnvironment } from './image/clipboard.ts'
+import { clipboardBackendOf, commandOnPath, createClipboardRunner, readClipboardImage, readClipboardText, type ClipboardEnvironment } from './image/clipboard.ts'
+import { openExternalUrl } from './open-url.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from './clipboard.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { wheelScrollLinesOf } from './wheel-scroll.ts'
@@ -5013,6 +5014,25 @@ export function apply(ctx: Context, config: Config): void {
         else app.restoreTranscriptViewportAnchor(anchor, 'top')
         return true
       },
+      // Ctrl+Up / Ctrl+Down in fullscreen: single-turn prompt navigation
+      // over the virtual window (the fork's OSC 133 scan finds nothing in
+      // DSH transcripts — the semantic turn list lives HERE).
+      onTranscriptTurnOlder: () => {
+        if (!app.isFullscreen()) return false
+        const controller = activeWindow()
+        if (!controller.turnOlder()) return false
+        repaint(app, activeFolder(), controller)
+        app.scrollToBottom({ disableFollow: true })
+        return true
+      },
+      onTranscriptTurnNewer: () => {
+        if (!app.isFullscreen()) return false
+        const controller = activeWindow()
+        if (!controller.turnNewer()) return false
+        repaint(app, activeFolder(), controller)
+        app.scrollToBottom({ disableFollow: true })
+        return true
+      },
       onTranscriptMoveNewer: () => {
         const anchor = app.captureTranscriptViewportAnchor()
         const controller = activeWindow()
@@ -5316,6 +5336,12 @@ export function apply(ctx: Context, config: Config): void {
       // shared policy as /copy (tmux → platform helper → OSC 52) — a bare
       // OSC 52 write is a silent lie under tmux `set-clipboard external`.
       copySelection: (text) => copyToClipboard(text, runCopyCommand, copyEnv),
+      // Fullscreen OSC 8 link clicks + the Windows right-click paste: the
+      // alt screen's mouse capture swallows both native behaviors, so the
+      // host opens http/https links itself and reads the clipboard through
+      // the same platform-aware policy as the image paste probe.
+      openExternalUrl: (url) => openExternalUrl(url),
+      readClipboardText: () => readClipboardText(runClipboardCommand, clipboardEnv),
       // M7: the transcript/tool renderer registry. Renderer failures are
       // isolated per contribution (the registry catches throws and the
       // host falls back); the health sink records them for /status.
