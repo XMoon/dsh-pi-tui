@@ -149,3 +149,32 @@ never run in the frame loop for unchanged content.
 > and the wire-local phase adds its own measured gates (startup, first
 > paint, first keystroke, event-to-paint latency, idle RSS, streaming CPU)
 > before any default flip.
+
+## Session picker projection alignment (2026-09-01)
+
+> Measured 2026-09-01 · `next @ 2fff355` (before) vs
+> `perf/session-picker-projection` (after) · real session corpus copied to a
+> temp `DSH_HOME`: **1478 sessions · 848 MB compressed logs** · cold
+> projection/title caches, page cache warmed for both · tmux-driven
+> (`scripts/bench-session-picker.sh`; first Enter after boot is dropped by
+> the terminal, so every `picker_frame_ms` includes a ~3.0 s retry — the
+> deltas are what matter).
+
+| metric | before (next) | after (this PR) |
+|---|---|---|
+| cold: interactive picker frame (Enter → overlay owns input) | ≈ 1.4 s (opens only after `list()`) | ≈ 0.11 s (loading frame, pre-list) |
+| cold: "All directories" rows visible after Tab | **63.4 s** | 7.4 s |
+| cold: first enriched row (title+preset in one batch) | masked — presets land behind the same starved loop | +11 ms after rows |
+| Esc during cold enrichment | 124 ms (measured after loop pressure passed) | 574 ms worst, stays interactive |
+| warm reopen: picker frame | ≈ 20 s | ≈ 70 ms |
+| warm reopen: rows visible | **62.6 s** | 6.3 s |
+
+Reading: the old orchestration opened the picker only after the listing,
+then started TWO eager detached enrichment paths (an `observeSession` preset
+replay plus a per-session full-log title fold over every main row, ~848 MB
+of zstd) that starved the event loop — the Tab re-render did not land for
+over a minute, on every open. The new path opens the overlay before any
+Host read, keeps the loop yielding between bounded batches, resolves title
+AND agentPreset in one observation per cold cache miss, and drops the
+TUI-private title cache (DSH's projection cache owns the durability), so a
+warm reopen is metadata-only.
