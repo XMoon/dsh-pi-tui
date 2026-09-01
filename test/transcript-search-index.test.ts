@@ -739,6 +739,40 @@ test('streaming lowercasing is whole-string — Greek sigma across chunk boundar
   assert.equal(folder.search('οσ').length, 0)
 })
 
+test('stale overlay edge: Next/Prev discover a match that arrived AFTER an empty search (P1)', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'alpha only'), turnEnd(2, 0)])
+  // The overlay searched with zero matches...
+  const empty = folder.search('needle-new')
+  assert.equal(empty.length, 0)
+  const state = { matches: empty, current: -1, query: 'needle-new', revision: folder.searchRevision(), folder }
+  // ...and a matching message arrives while it stays open.
+  folder.apply([turnStart(3, 1), userMessage(4, 'a needle-new live message', 1), turnEnd(5, 1)])
+  const refreshed = refreshedSearchState(state, folder)
+  assert.equal(refreshed.changed, true)
+  assert.equal(refreshed.matches.length, 1, 'Next/Prev must find the live new match')
+  assert.equal(refreshed.current, 0)
+})
+
+test('stale overlay edge: an EMPTIED result set clamps to -1 (the 0/0 counter) (P2)', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    turnStart(0, 0),
+    assistantMessage(1, 0, 0, 'needle alpha'),
+  ])
+  const initial = folder.search('needle')
+  assert.equal(initial.length, 1)
+  const state = { matches: initial, current: 0, query: 'needle', revision: folder.searchRevision(), folder }
+  // The same step's authoritative text is REPLACED without the needle
+  // (replay semantics: the transcript entry mutates in place, the search
+  // projection follows) — every match disappears.
+  folder.apply([assistantMessage(2, 0, 0, 'no match here')])
+  const refreshed = refreshedSearchState(state, folder)
+  assert.equal(refreshed.changed, true)
+  assert.equal(refreshed.matches.length, 0)
+  assert.equal(refreshed.current, -1, 'an emptied result set must clamp to -1, never 0 (0/0 counter)')
+})
+
 test('transcriptSearchText is the single corpus source (tool = name args result)', () => {
   const folder = new TranscriptFolder()
   folder.apply([

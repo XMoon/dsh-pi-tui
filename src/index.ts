@@ -1268,11 +1268,14 @@ export function refreshedSearchState(
   const matches = activeFolder.search(state.query)
   const revision = activeFolder.searchRevision()
   let current: number
-  if (previousId !== undefined) {
+  if (matches.length === 0) {
+    // An emptied result set clamps to -1 (the 0/0 counter), never 0.
+    current = -1
+  } else if (previousId !== undefined) {
     const found = matches.findIndex(match => match.id === previousId)
-    current = found >= 0 ? found : Math.min(state.current, Math.max(0, matches.length - 1))
+    current = found >= 0 ? found : Math.min(state.current, matches.length - 1)
   } else {
-    current = matches.length > 0 ? 0 : -1
+    current = 0
   }
   return { matches, current, revision, changed: true }
 }
@@ -5093,11 +5096,16 @@ export function apply(ctx: Context, config: Config): void {
         if (searchCurrent >= 0) jumpToSearchMatch()
       },
       onSearchNext: () => {
+        // PR D1 P1: refresh BEFORE the empty guard — a search that began
+        // with zero matches must discover a match that arrived while the
+        // overlay stayed open.
+        refreshSearchMatchesIfStale()
         if (searchMatches.length === 0) return
         searchCurrent = (searchCurrent + 1) % searchMatches.length
         jumpToSearchMatch()
       },
       onSearchPrev: () => {
+        refreshSearchMatchesIfStale()
         if (searchMatches.length === 0) return
         searchCurrent = (searchCurrent - 1 + searchMatches.length) % searchMatches.length
         jumpToSearchMatch()
