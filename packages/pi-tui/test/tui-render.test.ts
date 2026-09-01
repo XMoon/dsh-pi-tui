@@ -13,7 +13,7 @@ import {
 	setCapabilities,
 	setCellDimensions,
 } from "../src/terminal-image.ts";
-import type { Component, TUI } from "../src/tui.ts";
+import { Container, type Component, type TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -896,6 +896,53 @@ describe("TUI differential rendering", () => {
 			"Editor 1",
 			"Editor 2",
 		]);
+
+		tui.stop();
+	});
+});
+
+describe("Container width clamp (dsh-pi-tui divergence X032)", () => {
+	it("clamps non-positive widths to 1 before rendering children", () => {
+		const container = new Container();
+		const received: number[] = [];
+		container.addChild({
+			render(width: number): string[] {
+				received.push(width);
+				return [];
+			},
+			invalidate(): void {},
+		});
+		container.render(0);
+		container.render(-3);
+		container.render(5);
+		assert.deepStrictEqual(received, [1, 1, 5]);
+	});
+});
+
+describe("TUI overwide line handling (dsh-pi-tui divergence X033)", () => {
+	it("truncates lines wider than the terminal instead of throwing", async () => {
+		const terminal = new VirtualTerminal(4, 10);
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		component.lines = ["ok"];
+		tui.addChild(component);
+		tui.start();
+		await terminal.waitForRender();
+
+		// Switch to overwide lines and re-render through the differential
+		// path (this threw before the fix).
+		component.lines = ["xxxxxxxxxx", "\x1b[31myyyyyyyyyy\x1b[0m", "你好世界"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const viewport = terminal.getViewport();
+		// With truncation each logical line occupies exactly one viewport
+		// row; without it, xterm auto-wraps the overwide lines and shifts
+		// the following rows, failing the exact assertions below.
+		assert.strictEqual(viewport[0], "xxxx");
+		assert.strictEqual(viewport[1], "yyyy");
+		assert.strictEqual(viewport[2], "你好");
+		assert.strictEqual(viewport[3], "");
 
 		tui.stop();
 	});

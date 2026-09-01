@@ -172,10 +172,11 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Files: `src/tui-main-screen.ts`, `src/stdin-buffer.ts`
-- Reason: the main screen's width state stays in sync across resizes, and the
-  stdin buffer caps ESC-prefix scanning (`MAX_ESCAPE_SEQUENCE_LENGTH = 1024`)
-  so a never-terminating ESC prefix degrades to a plain character instead of
-  an O(n²) reslice. Upstream 0.84.4 has neither.
+- Reason: the stdin buffer caps ESC-prefix scanning
+  (`MAX_ESCAPE_SEQUENCE_LENGTH = 1024`) so a never-terminating ESC prefix
+  degrades to a plain character instead of an O(n²) reslice. (The main
+  screen's width-state sync half of the old #10 is already in upstream
+  0.84.4 — only the ESC cap is local.)
 - Consumer: host resize handling, corrupt/oversized input streams.
 - Upstream status: absent.
 - Tests: ESC/sequence describes in `test/stdin-buffer.test.ts`.
@@ -522,8 +523,9 @@ re-vendor:
 - Consumer: host narrow-terminal support (40-column minimum) and defensive
   host layouts.
 - Upstream status: absent (upstream throws).
-- Tests: bundle suite (shell-editor-mode, subagent-viewer-interactive and
-  other narrow-width renders must not crash).
+- Tests: "TUI overwide line handling (dsh-pi-tui divergence X033)" in
+  `test/tui-render.test.ts` (overwide + styled + CJK lines at width 4 must
+  truncate, not throw) plus the bundle suite's narrow-width renders.
 - Migration action: re-applied (truncation pass after applyLineResets).
 
 ## Final status after the v0.84.4 re-vendor (2026-02)
@@ -541,4 +543,7 @@ re-vendor:
   inlineSlashTrigger, setHistoryFilter, preservePasteRegistry,
   additionalBasePaths, inlineSkill data, getLayoutRoot, per-frame
   processed-line reuse + asciiVisibleWidth, FOCUS passthrough,
-  WIDTH_CACHE_SIZE 4096, negative-width repeat guards.
+  WIDTH_CACHE_SIZE 4096. (Defensive negative-width `repeat()` guards are
+  dropped in text/truncated-text/markdown/editor; layout.ts retains one
+  `Math.max(0, ...)` padding guard as part of X014's scrollbar safety —
+  upstream 0.84.4 has the rest.)

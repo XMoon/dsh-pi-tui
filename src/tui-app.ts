@@ -3104,8 +3104,7 @@ export class TuiApp {
       //   Host-private app.* actions);
       // - 'editor' → the FORK EDITOR executes (hostResolved: false — the
       //   editor's tui.input.submit was synced by onEditorSubmitSync, so
-      //   the key really submits there with paste-burst/backslash-newline
-      //   semantics);
+      //   the key really submits there with backslash-newline semantics);
       // - 'plugin' → NEVER the AppActionDispatcher: a Stable plugin may
       //   only trigger the PUBLIC TuiAction set, and those execute
       //   through the router's plugin remainder (onExtensionAction).
@@ -3219,13 +3218,13 @@ export class TuiApp {
       return true
     }
     if (action === 'app.input.submit' && data !== '') {
-      // The fork editor OWNS the direct submit keys (paste-burst and
-      // backslash-newline semantics live in its tui.input.submit — the
+      // The fork editor OWNS the direct submit keys (backslash-newline
+      // semantics live in its tui.input.submit — the
       // effective keys are synced there by onEditorSubmitSync). The host
       // ladder never consumes a DIRECT submit key: resolving it here would
       // bypass the editor's full submit logic (PR review finding — a
       // remapped Ctrl+X submitted via submitDraft and skipped the
-      // backslash-newline/paste-burst handling). Fall through so the
+      // backslash-newline handling). Fall through so the
       // editor processes the key natively. The LEADER-activated submit
       // (data === '') is the exception: the leader machine already
       // consumed the completing key, so the host dispatches it.
@@ -3246,7 +3245,7 @@ export class TuiApp {
   /** Whether one raw input is the EFFECTIVE submit key (app.input.submit —
    * a user remap moves submission to the new key; Shift+Enter stays the
    * newline, never a submit). The fork editor owns the actual submit
-   * semantics (paste-burst / backslash-newline); this check drives the
+   * semantics (backslash-newline); this check drives the
    * HOST-owned seams that must mirror it: the continuable viewer's child
    * submit and the replacement-editor Enter forward. */
   private isSubmitKey(data: string): boolean {

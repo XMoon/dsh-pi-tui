@@ -526,6 +526,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 
 			output.append("\x1b[2K"); // Clear current line
+			// Note: the X033 truncation pass above already guarantees every
+			// non-image line fits the terminal, so this upstream crash path
+			// is unreachable for non-image lines; it is kept verbatim as the
+			// upstream baseline (and would still fire for image lines if the
+			// image payload were ever mis-classified).
 			if (!isImage && visibleWidth(line) > width) {
 				// Log all lines to crash file for debugging
 				const crashLogPath = path.join(this.logDirectory, "pi-crash.log");

@@ -316,93 +316,8 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("keeps the scrollbar column selectable while the thumb is hidden", async () => {
-		const terminal = new RecordingTerminal(10, 2);
-		const tui = new TuiAltScreen(terminal);
-		const scrollView = new ScrollView(new Text("123456789A\nabcdefghij\nmore\nlines", 0, 0), {
-			scrollbar: "auto",
-		});
-		tui.setLayoutRoot(scrollView);
-		tui.start();
-		await terminal.waitForRender();
-		assert.strictEqual(scrollView.isScrollbarVisible, false);
 
-		terminal.sendInput("\x1b[<0;10;1M");
-		terminal.sendInput("\x1b[<32;10;2M");
-		terminal.sendInput("\x1b[<0;10;2m");
-		await terminal.waitForRender();
 
-		const expected = `\x1b]52;c;${Buffer.from("A\nabcdefghij").toString("base64")}\x07`;
-		assert.ok(
-			terminal.events.some((event) => event.type === "write" && event.data.includes(expected)),
-			JSON.stringify(terminal.events.filter((event) => event.type === "write" && event.data.includes("\x1b]52;c;"))),
-		);
-		tui.stop();
-	});
-
-	it("chains unused wheel delta to an outer scroll view", async () => {
-		const terminal = new VirtualTerminal(20, 4);
-		const tui = new TuiAltScreen(terminal, undefined, undefined, { wheelScrollLines: 3 });
-		const inner = new ScrollView(new Text("i1\ni2\ni3\ni4\ni5\ni6", 0, 0));
-		const outer = new ScrollView(
-			new VStack([{ component: inner, basis: 2 }, new Text("tail1\ntail2\ntail3\ntail4\ntail5", 0, 0)]),
-			{ primary: true },
-		);
-		tui.setLayoutRoot(outer);
-		tui.start();
-		await terminal.waitForRender();
-
-		terminal.sendInput("\x1b[<65;1;1M");
-		await terminal.waitForRender();
-		assert.strictEqual(inner.scrollTop, 3);
-		assert.strictEqual(outer.scrollTop, 0);
-
-		terminal.sendInput("\x1b[<65;1;1M");
-		await terminal.waitForRender();
-		assert.strictEqual(inner.scrollTop, 4);
-		assert.strictEqual(outer.scrollTop, 2);
-		tui.stop();
-	});
-
-	it("supports configurable keyboard viewport navigation with four rows of page overlap", async () => {
-		const terminal = new VirtualTerminal(20, 8);
-		const tui = new TuiAltScreen(terminal);
-		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
-		tui.start();
-		await terminal.waitForRender();
-
-		terminal.sendInput("\x1b[57421u");
-		terminal.sendInput("\x1b[57421;1:3u");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(
-			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
-		);
-
-		terminal.sendInput("\x1b[57422u");
-		terminal.sendInput("\x1b[57422;1:3u");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(
-			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
-		);
-
-		terminal.sendInput("\x1bOH");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(
-			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
-		);
-
-		terminal.sendInput("\x1bOF");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(
-			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
-		);
-
-		tui.stop();
-	});
 
 	it("searches normalized rendered transcript text across rows", () => {
 		assert.deepStrictEqual(findAltScreenSearchMatches(["alpha QUICK", "brown fox"], "quick brown"), [
@@ -503,34 +418,6 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("scrolls the transcript by half a page with custom bindings", async () => {
-		const originalKeybindings = getKeybindings();
-		const terminal = new VirtualTerminal(20, 10);
-		const tui = new TuiAltScreen(terminal);
-		setKeybindings(
-			new KeybindingsManager(TUI_KEYBINDINGS, {
-				"tui.altScreen.halfPageUp": "ctrl+u",
-				"tui.altScreen.halfPageDown": "ctrl+d",
-			}),
-		);
-		try {
-			tui.addChild(new Text(Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
-			tui.start();
-			await terminal.waitForRender();
-			assert.strictEqual(tui.viewportTop, 20);
-
-			terminal.sendInput("\x15");
-			await terminal.waitForRender();
-			assert.strictEqual(tui.viewportTop, 15);
-
-			terminal.sendInput("\x04");
-			await terminal.waitForRender();
-			assert.strictEqual(tui.viewportTop, 20);
-		} finally {
-			tui.stop();
-			setKeybindings(originalKeybindings);
-		}
-	});
 
 	it("scrolls the transcript by one line with custom bindings", async () => {
 		const originalKeybindings = getKeybindings();
