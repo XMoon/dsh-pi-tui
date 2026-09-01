@@ -101,6 +101,7 @@ import { deriveAccessStatus } from './status/derive-access.ts'
 import { derivePlanStatus, projectedPlanActive, type PlanProjectionLike } from './status/derive-plan.ts'
 import { usageFromStats } from './status/derive-usage.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
+import { ContextMeasurementCoordinator, deferInitialContextMeasure, type ContextMeasureReason } from './status/context-measurement.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { parseFooterLayout, isFooterLayout, resolveCommandFooterFallback } from './footer/layout.ts'
@@ -2598,20 +2599,31 @@ export function apply(ctx: Context, config: Config): void {
       // when the runner is already torn down (the detached task outlives
       // the surface — a stale refresh would touch disposed state).
       if (signal.aborted) return
-      refreshStatus()
+      refreshStatusCheap()
     }
     runDetached('sandbox fold probe', resolveSandboxFold, { diag })
-    const refreshStatus = (): void => {
+    // PR D2: the session-bound context-measurement cache. The coordinator
+    // owns the value/dirty/session identity; the runner owns the event
+    // classification (which events mark dirty, which only repaint cheaply).
+    const contextMeasurement = new ContextMeasurementCoordinator()
+    const markContextDirty = (): void => { contextMeasurement.markDirty() }
+
+    // PR D2: the cheap status refresh NEVER measures context. UI-only
+    // events (theme, keybinding, permission, focus, resize, search,
+    // credential/llm surface changes, …) read the CACHED measurement; the
+    // only measuring path is refreshContextMeasurement below, driven by
+    // model-visible lifecycle events through the semantic SessionReader
+    // port (never a direct ctx.get('tokenMeter') read — the Direct adapter
+    // owns that coupling).
+    const refreshStatusCheap = (): void => {
       const stats = statsFolder.snapshot()
-      let contextTokens: number | undefined
-      const meter = ctx.get('tokenMeter')
-      if (meter !== undefined && liveAgent !== undefined) {
-        try {
-          contextTokens = meter.measure(liveAgent.session).totalTokens
-        } catch {
-          // Measurement is best-effort; the footer falls back to no context.
-        }
-      }
+      // The CACHED context pressure of the live session (the only measured
+      // subject — never a fresh measurement here). While the subagent
+      // viewer is open, the usage PROJECTION below still refuses to ride
+      // the parent's measurement on the child's stats (same rule as before
+      // the split); the legacy setStatus field keeps carrying the parent's
+      // cached value exactly like the old path.
+      const contextTokens = contextMeasurement.valueFor(liveAgent?.session.id)
       // The footer's [yolo]/[workspace-write]/[read-only]/[custom] mode badge
       // rides the effective preset (derived from the sandbox+approval knob
       // folds).
@@ -2692,6 +2704,43 @@ export function apply(ctx: Context, config: Config): void {
         permission: deriveRunnerPermission(permission, liveAgent),
         ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
       })
+    }
+
+    // PR D2: the explicit, event-driven context measurement path. Call
+    // sites FIRST mark the cache dirty (markContextDirty — only
+    // model-visible lifecycle events may), then this function measures
+    // through the semantic SessionReader port and repaints cheaply. A
+    // clean cache skips the reader (same-sync-chain dedupe); a failed or
+    // unavailable measurement keeps the last-good value and the footer
+    // falls back — never a dialog, never a stale foreign session value
+    // (the coordinator is session-bound).
+    const refreshContextMeasurement = (_reason: ContextMeasureReason): void => {
+      const session = liveAgent?.session
+      if (session === undefined) return
+      contextMeasurement.bind(session.id)
+      contextMeasurement.measure(session.id, (id) => backend.sessionReader.measureContext(id))
+      refreshStatusCheap()
+    }
+
+    // The initial/post-switch measurement is deferred one event-loop turn
+    // past the first usable paint: cold resume must never block the first
+    // frame on a long-session context scan (plan §16.2 — setImmediate, not
+    // a microtask). The fence captures the session generation + id: a
+    // switch,/new, viewer swap or dispose before the callback runs makes it
+    // a no-op (a stale deferred measurement can never commit).
+    let cancelDeferredContextMeasure: (() => void) | undefined
+    const scheduleInitialContextMeasure = (agent: Agent): void => {
+      const generation = sessionGeneration
+      const sessionId = agent.session.id
+      cancelDeferredContextMeasure?.()
+      cancelDeferredContextMeasure = deferInitialContextMeasure(
+        (callback) => setImmediate(callback),
+        () => generation === sessionGeneration && liveAgent?.session.id === sessionId,
+        () => {
+          markContextDirty()
+          refreshContextMeasurement('initial')
+        },
+      )
     }
 
     let app: TuiApp
@@ -2840,6 +2889,10 @@ export function apply(ctx: Context, config: Config): void {
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.
       catalogCoordinator?.dispose()
+      // PR D2: cancel the deferred initial context measure — a stale
+      // callback must never measure/repaint into the disposed surface.
+      cancelDeferredContextMeasure?.()
+      cancelDeferredContextMeasure = undefined
       // M5: release the footer command surface BEFORE the app dies — a
       // late status-store notification must not refresh into a disposed
       // surface. The lifecycle abort above already disposes an armed
@@ -3406,7 +3459,9 @@ export function apply(ctx: Context, config: Config): void {
         app.discardFocusViewerScope()
         repaint(app, folder, windowController)
         windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
-        refreshStatus()
+        // The new session's own measurement comes from its initLiveSession
+        // deferred path — the teardown refresh is UI-only.
+        refreshStatusCheap()
       })
       return sessionGeneration
     }
@@ -3595,7 +3650,7 @@ export function apply(ctx: Context, config: Config): void {
       // child's result, the parent's streaming): restore the parent's semantic latest/history position
       // so the pop never loses an intentional history anchor.
       windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
-      refreshStatus()
+      refreshStatusCheap()
       return true
     }
     /** Error sink for a failed session creation: restore the draft and
@@ -4776,7 +4831,7 @@ export function apply(ctx: Context, config: Config): void {
               ? `⚠ ${next} — no approvals`
               : `permission: ${next}`,
             next === 'danger-full-access' ? 'error' : 'info')
-            refreshStatus()
+            refreshStatusCheap()
             break
           }
         }
@@ -4994,7 +5049,7 @@ export function apply(ctx: Context, config: Config): void {
           ? `⚠ ${next} — no approvals`
           : `permission: ${next}`,
         next === 'danger-full-access' ? 'error' : 'info')
-        refreshStatus()
+        refreshStatusCheap()
       },
       // Alt+↑: pull every QUEUED USER message back into the editor draft
       // (pi's dequeue). Only user-origin rows are the user's own input —
@@ -6235,8 +6290,12 @@ export function apply(ctx: Context, config: Config): void {
       // settlements must notify again.
       notifiedSubagentNotices.clear()
       repaint(app, folder, windowController)
-      refreshStatus()
+      // PR D2: the first usable frame paints with the cached measurement
+      // (or none); the context measure is deferred one event-loop turn so
+      // cold resume never blocks first paint on a long-session scan.
+      refreshStatusCheap()
       refreshQueue()
+      scheduleInitialContextMeasure(agent)
       // Repaint both background channels: the dock/badge are owner-fenced,
       // and a session switch must not leave the previous session's tasks
       // or subagents on screen until the next registry event.
@@ -6471,7 +6530,7 @@ export function apply(ctx: Context, config: Config): void {
       app.setFocusMode(enabled)
       // The footer's focus-mode item reads the store: repaint it right
       // away (no session event is guaranteed to follow an idle toggle).
-      refreshStatus()
+      refreshStatusCheap()
       const settings = tuiSettings
       if (settings !== undefined) {
         runDetached('settings focus write', () => serializeTuiSettingsMutation(
@@ -6704,7 +6763,10 @@ export function apply(ctx: Context, config: Config): void {
       transitionTo,
       currentPreset,
       recomposeBlank: (id) => recomposeBlank(ctx, liveAgent as Agent, id),
-      refreshStatus,
+      // PR D2: the command surface's generic refresh is UI-only (a
+      // measurement-triggering command uses refreshContextMeasurement or
+      // the /status port call directly).
+      refreshStatus: refreshStatusCheap,
       updateWelcomeCard,
       openJobView,
       openTasksBrowser,
@@ -6785,7 +6847,7 @@ export function apply(ctx: Context, config: Config): void {
       await initLiveSession(liveAgent)
     } else {
       app.setWelcomeIdle(true)
-      refreshStatus()
+      refreshStatusCheap()
       refreshTerminalTitle()
     }
     // Command registration is sessionless: it must run on BOTH startup
@@ -6920,7 +6982,9 @@ export function apply(ctx: Context, config: Config): void {
       // knob events between turns: refresh the footer mode badge right away
       // instead of waiting for the next step/turn boundary.
       if (isKnob) {
-        refreshStatus()
+        // Knob events are UI-only: the permission badge repaints from
+        // cached facts — never a context measurement.
+        refreshStatusCheap()
       }
       // Every durable inbox mutation (followup, steer, splice) commits
       // an agent/inbox/spliced event. The upstream Inbox commits the event
@@ -6969,7 +7033,10 @@ export function apply(ctx: Context, config: Config): void {
         // turn/end. The working row hands back to the turn state: a
         // turn-enclosed compaction keeps the turn animation, a standalone
         // one clears.
-        settleCompactionSurface(app, refreshStatus, workingFromLog(liveAgent.session.events))
+        // Compaction rewrites the model-visible surface: re-measure NOW
+        // (the footer would otherwise show stale pressure until the next
+        // step/start or turn/end).
+        settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(liveAgent.session.events))
       }
       if (compacted.notify !== undefined) app.notify(compacted.notify.text, compacted.notify.kind)
       // Persist each completed turn so a crash loses at most the live turn.
@@ -6996,7 +7063,9 @@ export function apply(ctx: Context, config: Config): void {
         // compaction settles) — the single-Esc cancel stays armed.
         app.setBusy(busyAfterTurnBoundary('turn/end', compactingId !== undefined))
         paintNow()
-        refreshStatus()
+        // A turn ended: the context composition settled — measure once.
+        markContextDirty()
+        refreshContextMeasurement('turn-end')
         // Persist each completed turn so a crash loses at most the live
         // turn. Detached: a flush rejection must never surface as an
         // unhandled rejection in the event firehose. An ENOENT flush (the
@@ -7014,7 +7083,10 @@ export function apply(ctx: Context, config: Config): void {
           recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
         })
       } else if (event.type === 'step/start') {
-        refreshStatus()
+        // A step is about to run: the model-visible context may have
+        // changed (new user message, tool results, compositions).
+        markContextDirty()
+        refreshContextMeasurement('step-start')
       }
     })
     // Subagent lifecycle events drive the continuable-children half of the
@@ -7052,14 +7124,14 @@ export function apply(ctx: Context, config: Config): void {
     // The credential update surface has reference and durable-record events;
     // both change the same footer/welcome state, so they share one refresh
     // callback.
-    ctx.on('llm/adapters-updated', () => { refreshStatus(); updateWelcomeCard() })
+    ctx.on('llm/adapters-updated', () => { refreshStatusCheap(); updateWelcomeCard() })
     ctx.on('settings/document-updated', (ns) => {
       if (ns === 'llm-pi-ai' || ns === 'llm-deepseek') {
-        refreshStatus()
+        refreshStatusCheap()
         updateWelcomeCard()
       }
     })
-    const refreshCredentialSurface = (): void => { refreshStatus(); updateWelcomeCard() }
+    const refreshCredentialSurface = (): void => { refreshStatusCheap(); updateWelcomeCard() }
     // The credential event wiring is the config port's (migration M1.9):
     // reference- and record-updated both change the same surface. The
     // subscription is DISPOSED on teardown — a remount/HMR must never
