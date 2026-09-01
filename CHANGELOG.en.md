@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Vendored fork rebased onto Earendil v0.84.4
+
+- **`packages/pi-tui` rebased from the kimi-code snapshot (44a6c70e /
+  v0.84.3) onto the pristine Earendil `v0.84.4`** (b79e4cc8, see
+  `packages/pi-tui/UPSTREAM.json`); host-required local divergences are
+  re-applied per the new divergence ledger
+  (`packages/pi-tui/DIVERGENCES.md`, X001–X036). Kimi-only code with no
+  host consumer (PasteBurst, inline slash, `WIDTH_CACHE_SIZE` 4096,
+  etc.) is no longer carried.
+- **PR-review fixes**:
+  - X016 — `ProcessTerminal.start()` again removes the previous resize
+    listener BEFORE assigning the new handler (the migration had
+    accidentally swapped the order, leaking one listener per restart);
+    a regression test now guards it.
+  - Fullscreen FOCUS_IN/FOCUS_OUT reports pass through to app-level
+    input listeners again (deleted during the migration as
+    "unconsumed"; notification/clipboard focus tracking depends on the
+    channel) — regression test restored (ledger X036).
+  - The TuiMainScreen per-frame processed-line reuse cache is restored
+    (ledger X035): without it, steady frames on long sessions measured
+    29–377 ms/frame (1k–10k lines, only the trailing spinner changing)
+    versus ~0.1–1.6 ms/frame with it; the host's reference-stable
+    component caches are built around that contract. Guard test and
+    benchmark script added
+    (`packages/pi-tui/test/render-preprocess-bench.ts`).
+  - X013 (`setIndicator` never revives a stopped Loader) verified to
+    have no consumer and reverted to upstream; X025 now records the
+    native-module self-reference following the package rename
+    (`@xmoon76/pi-tui`).
+- **Verification**: fork suite 978 tests, bundle suite, docs,
+  pi-surface-compat, typecheck, and build all green; the divergence
+  ledger was re-verified entry by entry against the implementation.
+
 ## [0.4.0-alpha.1] - 2026-09-01
 
 ### Installation and version pairing
