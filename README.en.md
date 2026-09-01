@@ -183,134 +183,25 @@ Slash Commands registered by other plugins through `ctx.commands` are discovered
 
 ### Footer customization
 
-The status line is a **composable surface** — no plugin or shell needed
-for the common cases.
+`/footer` is the interactive Footer editor. You can combine builtin status items, change their side and order, choose a Style and Tone, edit Prefix/Suffix and Importance, and create your own Footer items.
 
-`/settings` → Status line (or the `footer` key in the `dsh-pi-tui`
-settings document) selects the preset:
+Four item sources are supported:
 
-| Value | Meaning |
-|---|---|
-| `default` (legacy `full`) | the classic two-row footer (status + stats) |
-| `compact` | the status row only (stats line hidden) |
-| `custom` | a versioned `footerLayout` (see below) |
-| `command` | a user-configured command renders the status surface (see below) |
+- **Builtin Item** — Model, Context, Token, Tasks, Git branch, and other built-in status facts;
+- **Custom Text** — a user-created static text item;
+- **Custom Command Item** — a user-created dynamic command output that can be composed with other items;
+- **Extension Item** — a Footer item contributed by a plugin through the Stable Extension API.
 
-The first three values are selectable in the `/settings` panel; `command`
-is NOT in the panel — it can only be enabled through the USER-layer
-settings document (`footer: "command"` + `footerCommand`). The `/settings`
-Status line row offers exactly `default / compact / custom`.
+On narrow terminals, builtins with compact forms shorten before lower-importance content is dropped. Runtime compaction never rewrites the Style you saved.
 
-`/footer` is a hierarchical interactive configurator: pick a row first
-(Row Selector), then edit that row's items — `↑/↓` walks every item of
-the row in order (Left/Right are visual grouping only), `←/→` moves an
-item across sides, `Space` removes it, `A` opens a searchable Add Picker
-(filtered by label / id / description, with the highlighted item's
-description below), `M` enters Move Mode to reorder, and `Enter` opens
-the Item Editor (Style candidates previewed with the item's real render;
-semantic tones; Advanced edits prefix / suffix / importance with a
-one-keystroke Reset). The preview is composed by the real footer engine
-and — with the contextual help — pinned to the top of the panel; it never
-scrolls away at any terminal size. `S` on the Row Selector saves
-(persisted); `Esc` walks back page by page and closes on the first page
-without touching the active layout. With dirty changes, `Esc` first offers
-Save & Exit, Discard & Exit, or Keep Editing; saving waits for the settings
-write to succeed. Usable before any session exists.
+A `/footer` Custom Command Item is different from `footer: command`: the former is one dynamic item that can sit next to Model, Context, and other items; the latter hands the whole Footer status surface to one user command.
 
-The Add Picker also offers `+ Create Custom Text` for user-defined static text items. Their text, default semantic tone, display name, and deletion are editable; definitions are read and persisted only from the USER layer. The definition tone is separate from the placement Tone, and the item can otherwise be shown/hidden, moved, and reordered like any other footer item.
+For the full `/footer` workflow, Custom Text / Command items, YAML reference, security model, and troubleshooting, see:
 
-`footerLayout` is a nested settings object (schemaVersion 1, 1–2 rows,
-left/right zones, a separator, finite formatters, semantic tones,
-prefix/suffix, importance). The `/footer` configurator builds it
-interactively; the YAML shape is:
+- [Footer customization guide](docs/footer-customization.md)
+- [Extension API for plugin authors](docs/extension-api.md)
 
-```yaml
-footer: custom
-footerLayout:
-  schemaVersion: 1
-  rows:
-    - left:
-        - id: agent-preset
-          format: compact
-        - id: model
-        - id: project
-        - id: context
-          format: full
-        - id: cache-hit
-        - id: token-usage
-          format: io
-        - id: performance
-          format: speed
-        - id: version
-          format: tui
-      right:
-        - id: focus-mode
-      separator:
-        text: " │ "
-        tone: textDim
-```
-
-Builtin format choices are finite and use the existing `format` field (no
-second style schema): Model `badge` / `plain` / `compact`; Permission preset
-`badge` / `plain` / `compact`; Plan state `badge` / `plain`; Working directory
-`short` / `basename` / `full`; Git branch `plain` / `label`; Context `bar` /
-`percent` / `full`; Token usage `io` / `total` / `compact`; Cache hit `full` /
-`compact`; Performance `full` / `speed` / `latency` measures average time
-to first token; Turns/steps `both` / `turns` / `steps`; Version keeps `tui` / `dsh` /
-`both`. Omitting `format` continues to use each item's legacy default.
-
-Builtin item ids: `agent-preset`, `model`, `reasoning`,
-`permission-preset`, `sandbox-mode`, `approval-policy`, `plan-state`,
-`focus-mode`, `focused-seat`, `view-scope`, `cwd`, `project`,
-`git-branch`, `run-state`, `queue`, `tasks`, `agents`, `todo`,
-`context`, `cache-hit`, `token-usage`, `performance`, `turns-steps`,
-`stats-line`, `version`, `ext:*` (the legacy extension segments).
-An invalid `footerLayout` warns once and falls back to the default — the
-TUI always starts.
-
-`footer: command` hands the Status Surface to a user-configured command
-(Claude/Kimi style): the current status snapshot is serialized to JSON on
-the command's stdin (schemaVersion 1 — no secrets, no credentials, no
-prompts), and the command's stdout (sanitized: SGR colors and OSC 8
-hyperlinks only) renders the status surface. The Host's instruction
-surface (e.g. the Ctrl+C exit hint) always survives on top.
-
-```yaml
-footer: command
-footerCommand:
-  schemaVersion: 1
-  command: "~/.config/dsh/statusline.sh"
-  timeoutMs: 300        # default 300, max 1000
-  refreshIntervalMs: 1000  # min 1000
-  maxRows: 1            # 1..2
-```
-
-**Security:** the command is executed ONLY when it lives in the USER
-layer of your settings document. A repository/project-supplied
-`footerCommand` is never executed — command mode is disabled and the
-native layout applies. The command refreshes periodically according to
-`refreshIntervalMs` and renders at most two rows; failures (empty output,
-non-zero exit, timeout) fall back to the native layout automatically.
-
-### Extension footer items
-
-Plugins can contribute **configurable footer items** through the Stable
-extension API (`@xmoon76/dsh-pi-tui/extensions`): register a
-`FooterItemContribution` on the `chrome.footer.item` slot — a label and a
-plain-data `segment` (styled spans; the host strips any terminal control
-sequence, plugins never style the terminal). Users show/hide, reorder and
-zone-place the item in `/footer` exactly like a builtin item. Feature-detect
-the `slot.chrome.footer.item` capability before registering (it is
-advertised before any surface exists). The item's config identity is the
-canonical key `ext:<owner>/<id>` where the owner is the plugin's stable
-name — **stable across HMR**: a layout referencing an unloaded plugin's
-item keeps the reference and recovers automatically when the plugin
-reloads. An npm-scoped plugin name (`@scope/name`) is legal: its `/` is
-percent-encoded via `encodeURIComponent` in the key
-(`ext:%40scope%2Fname/<id>`); the id itself must
-not contain `/`. The legacy `chrome.footer.status` slot is unchanged: its
-segments aggregate into the single `ext:*` item. Full author guide:
-[docs/extension-api.md](docs/extension-api.md).
+`/statusline` is an alias of `/footer`.
 
 ## Common keys
 
