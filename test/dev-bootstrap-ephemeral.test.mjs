@@ -1022,3 +1022,59 @@ test('pack success then a state commit failure discards the uncommitted generati
   assert.equal(readFileSync(join(root, DEV_STATE_FILE), 'utf8'), stateAfterFirst, 'the committed state must still point at A')
   assert.ok(readFileSync(context.envPath, 'utf8').includes(generationA), 'the rolled-back env must still point at A')
 })
+
+test('a stale shell recovers to the committed ephemeral generation instead of the canonical cache', { skip: process.platform === 'win32' }, async (t) => {
+  const life = testLifecycle(t)
+  const { root, config, harness } = sourceBootstrapFixture(life)
+  const pnpm = fakePackPnpm(life)
+  const runBootstrap = sourceBootstrapRunner(life, { root, config, harness })
+
+  const first = await runBootstrap()
+  const generationA = dirname(first.distributionPath)
+  const second = await runBootstrap()
+  const generationB = dirname(second.distributionPath)
+  assert.equal(existsSync(generationA), false, 'A must be reclaimed after B commits')
+
+  // A long-lived shell still exports the reclaimed generation A: its next
+  // bootstrap must recover to the committed generation B — not hard-load A,
+  // not switch to the canonical cache (which would reclaim the working B).
+  const staleShell = {
+    DSH_DEV_ROOT: root,
+    DSH_DEV_MODE: 'source',
+    DSH_SOURCE_CONFIG: config,
+    DSH_SOURCE_DISTRIBUTION: join(generationA, 'pack'),
+    DSH_DEV_EPHEMERAL: '1',
+  }
+  const before = ephemeralRootsInTmpdir()
+  const logs = []
+  const originalLog = console.log
+  console.log = (...args) => { logs.push(args.join(' ')) }
+  const previousPackages = process.env.DSH_FAKE_PACKAGES
+  const previousVersion = process.env.DSH_FAKE_VERSION
+  process.env.DSH_FAKE_PACKAGES = JSON.stringify(['@deepseek-ai/dsh'])
+  process.env.DSH_FAKE_VERSION = VERSION
+  let result
+  try {
+    result = await withPnpmExecutable(pnpm, () => bootstrapDevelopmentEnvironment({
+      root,
+      mode: 'source',
+      config,
+      environment: { ...staleShell, XDG_CACHE_HOME: join(root, 'cache') },
+    }))
+  } finally {
+    console.log = originalLog
+    if (previousPackages === undefined) delete process.env.DSH_FAKE_PACKAGES
+    else process.env.DSH_FAKE_PACKAGES = previousPackages
+    if (previousVersion === undefined) delete process.env.DSH_FAKE_VERSION
+    else process.env.DSH_FAKE_VERSION = previousVersion
+  }
+  assert.equal(result.distributionPath, second.distributionPath, 'the stale shell must adopt the committed generation B')
+  assert.ok(logs.some(line => line.includes('committed ephemeral')), 'the committed-generation recovery path must be taken')
+  assert.equal(logs.some(line => line.includes('materialize DSH source distribution')), false, 'no unnecessary materialization may run')
+  assert.equal(existsSync(generationB), true, 'B must survive the stale shell bootstrap')
+  const leaked = ephemeralRootsInTmpdir().filter(path => !before.includes(path))
+  assert.deepEqual(leaked, [], 'no new ephemeral generation may be created')
+  const state = JSON.parse(readFileSync(join(root, DEV_STATE_FILE), 'utf8'))
+  assert.equal(state.distribution, second.distributionPath, 'the committed state must still point at B')
+  assert.equal(state.ephemeral, true, 'the committed state must stay ephemeral')
+})

@@ -223,9 +223,15 @@ function readState(context) {
   }
 }
 
-function stateCoreMatches(context, state, pnpm) {
+function stateCoreMatches(context, state, pnpm, distributionPath = undefined) {
   if (state === undefined || state.schemaVersion !== 1 || state.mode !== context.mode) return false
-  if (context.mode === 'source' && state.ephemeral === true) return false
+  if (context.mode === 'source' && state.ephemeral === true) {
+    // An ephemeral state only matches when it references the exact
+    // distribution this run is about to use: a stale ephemeral generation
+    // must never be treated as the current one, and a run that is about to
+    // switch to the canonical cache must not skip its materialization.
+    if (distributionPath === undefined || resolve(state.distribution) !== resolve(distributionPath)) return false
+  }
   const required = ['node', 'pnpm', 'root', 'packageJsonHash', 'lockfileHash']
   if (required.some(field => !Object.hasOwn(state, field))) return false
   if (typeof state.node !== 'string' || typeof state.pnpm !== 'string' || typeof state.root !== 'string'
@@ -1100,6 +1106,35 @@ function discardOwnedEphemeralRoot(ownedEphemeral) {
   }
 }
 
+/**
+ * The ephemeral generation the committed dev state still references, when
+ * it is still usable: the state is source+ephemeral with a matching
+ * repository/ref/expectedVersion identity, and the referenced distribution
+ * still exists as an OWNED generation of this worktree (full ownership
+ * contract) with a loadable manifest. Returns { distribution, path } or
+ * undefined. A shell whose inherited generation was reclaimed by another
+ * bootstrap recovers to this committed generation instead of silently
+ * switching the worktree to the canonical source-pack cache — which would
+ * reclaim the still-working generation (and, for a dirty provided pack,
+ * quietly replace it with the pinned/canonical source).
+ */
+function committedEphemeralDistribution(helper, context) {
+  const state = readState(context)
+  if (state === undefined || state.mode !== 'source' || state.ephemeral !== true) return undefined
+  if (state.repository !== context.source.repository
+    || state.ref !== context.source.ref
+    || state.expectedVersion !== context.source.expectedVersion) return undefined
+  const path = state.distribution
+  if (typeof path !== 'string' || !isAbsolute(path) || basename(path) !== 'pack') return undefined
+  if (ephemeralRootOwnedBy(context, resolve(dirname(path))) === undefined) return undefined
+  try {
+    const distribution = distributionFromPath(helper, context, path, { allowDirty: true })
+    return { distribution, path }
+  } catch {
+    return undefined
+  }
+}
+
 async function sourceDistribution(helper, context, values) {
   // An explicit checkout is the debug escape hatch and must win over a stale
   // DSH_SOURCE_DISTRIBUTION inherited from a previously sourced shell.
@@ -1113,6 +1148,16 @@ async function sourceDistribution(helper, context, values) {
     const distribution = distributionFromPath(helper, context, providedPath, { allowDirty: true })
     console.log(`Source pack: provided (${providedPath})`)
     return { distribution, path: providedPath, cacheHit: false, provided: true }
+  }
+  // No inherited distribution (or one whose generation was reclaimed by
+  // another bootstrap): recover to the generation the committed state still
+  // references before falling back to the canonical source-pack cache. The
+  // committed state is authoritative — switching to the cache would reclaim
+  // the working generation.
+  const committed = committedEphemeralDistribution(helper, context)
+  if (committed !== undefined) {
+    console.log(`Source pack: committed ephemeral (${committed.path})`)
+    return { distribution: committed.distribution, path: committed.path, cacheHit: false, provided: false }
   }
   const lock = await acquireSourceLock(helper, context)
   try {
@@ -1294,7 +1339,7 @@ async function materializeSource(helper, context, distribution, distributionPath
   const pnpmCommand = configuredPnpm()
   const pnpm = currentPnpmVersion(pnpmCommand, context.root)
   const state = readState(context)
-  const already = !force && provided !== true && stateCoreMatches(context, state, pnpm) && sourceMaterialized(helper, context, distribution)
+  const already = !force && provided !== true && stateCoreMatches(context, state, pnpm, distributionPath) && sourceMaterialized(helper, context, distribution)
   if (!already) {
     const prepareScript = join(context.root, SOURCE_PREPARE_SCRIPT)
     if (!existsSync(prepareScript)) fail(`source mode requires ${SOURCE_PREPARE_SCRIPT}`)
