@@ -137,7 +137,10 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
   move).
 - Consumer: host editor word navigation.
 - Upstream status: absent.
-- Tests: word-navigation describes in `test/word-navigation.test.ts`.
+- Tests: "skips leading punctuation of a word-like segment (dsh-pi-tui
+  divergence X006)" in `test/word-navigation.test.ts` (reaches the branch
+  via a custom segmenter — the default Intl.Segmenter classifies leading
+  punctuation as non-word-like) plus the word-navigation describes.
 - Migration action: re-apply.
 
 ### X007 — Component `dispose()` lifecycle (was #7)
@@ -535,16 +538,23 @@ re-vendor:
   exceeds the terminal width. The host's components can overflow by a
   column in narrow terminals (wide graphemes at small widths, defensive
   host layouts), and a throw stops the whole TUI. The main screen
-  truncates overwide non-image lines to the terminal width instead; the
-  trailing segment reset survives the slice so truncated lines cannot
-  leak styles. Kimi-code provenance; upstream 0.84.4 (and 0.84.3) throws.
+  truncates overwide non-image lines to the terminal width instead.
+  IMPORTANT ordering detail: the truncation runs BEFORE applyLineResets —
+  sliceByColumn drops trailing zero-width codes at the cut column, so the
+  segment reset must be appended AFTER the slice or a truncated styled
+  line leaks its open style into subsequent rows. Kimi-code provenance;
+  upstream 0.84.4 (and 0.84.3) throws.
 - Consumer: host narrow-terminal support (40-column minimum) and defensive
   host layouts.
 - Upstream status: absent (upstream throws).
-- Tests: "TUI overwide line handling (dsh-pi-tui divergence X033)" in
-  `test/tui-render.test.ts` (overwide + styled + CJK lines at width 4 must
-  truncate, not throw) plus the bundle suite's narrow-width renders.
-- Migration action: re-applied (truncation pass after applyLineResets).
+- Tests: "TUI overwide line handling (dsh-pi-tui divergence X033)" and
+  "appends the segment reset AFTER the truncation slice (styled leak
+  regression)" in `test/tui-render.test.ts` (overwide + styled + CJK
+  lines at width 4 must truncate, not throw; truncated styled lines must
+  carry their full segment reset) plus the bundle suite's narrow-width
+  renders.
+- Migration action: re-applied (truncation pass BEFORE applyLineResets so
+  the segment reset is appended after the slice).
 
 
 ### X034 — wordWrapLine single-grapheme overwide guard (kimi-code, host-dependent)
