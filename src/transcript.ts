@@ -1112,9 +1112,13 @@ export class TranscriptFolder {
       this.groupMeta.set(previousGroup, { firstTurn, spansTurns })
       if (!wasCross && spansTurns) this.crossTurnGroups += 1
       this.groupedToolCount -= 1
-      // The merged card's text changed (args count + result): refresh every
-      // member entry to the SHARED group text (one lowercase per group).
-      this.refreshSearchRange(previousIndex, index)
+      // The merged card's text changed (args count + result): refresh the
+      // WHOLE group's entries to the SHARED group text (one lowercase per
+      // group). The range starts at the FIRST member — earlier members
+      // would otherwise keep the stale pre-merge text and turn, and a
+      // match deduplicated to the first member would anchor the wrong
+      // turn (round-4 finding).
+      this.refreshSearchRange(members[0]!, index)
       return true
     }
 

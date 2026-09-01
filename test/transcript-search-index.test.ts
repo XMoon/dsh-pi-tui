@@ -625,6 +625,39 @@ test('interleaved reasoning and text deltas search their OWN entries (namespaced
   assert.equal(folder.search('marker').length, 2, 'both entries hit the shared word, each once')
 })
 
+test('live cross-turn append refreshes the WHOLE group (turn + shared text)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/a.ts', 0),
+    toolResult(2, 'r1', 'alpha content'),
+    turnEnd(3, 0),
+    turnStart(4, 1),
+    readToolCall(5, 'r2', 'src/b.ts', 1),
+    toolResult(6, 'r2', 'beta content'),
+    turnEnd(7, 1),
+  ])
+  // a+b merged into one cross-turn card (turn = 1).
+  assert.equal(folder.search('alpha').length, 1)
+  // Live append: a turn-2 read joins the group; the group turn moves to 2.
+  folder.apply([
+    turnStart(8, 2),
+    readToolCall(9, 'r3', 'src/c.ts', 2),
+    toolResult(10, 'r3', 'gamma-only-needle content'),
+    turnEnd(11, 2),
+  ])
+  // The match for text present ONLY in the newest member must carry the
+  // NEW group turn (max), never the stale first-member turn (round-4
+  // finding: the tail-append refresh used to cover only the last two
+  // entries, leaving the earlier members' turn and text stale).
+  const matches = folder.search('gamma-only-needle')
+  assert.equal(matches.length, 1)
+  assert.equal(matches[0]!.turn, 2, 'the match must carry the NEW group turn')
+  // The shared text is refreshed for ALL members: the merged args count is
+  // searchable, and the superseded count is gone (strict legacy parity).
+  assertCorpusParity(folder, ['gamma-only-needle', 'alpha content', 'beta content', '3 files', '2 files'])
+})
+
 test('transcriptSearchText is the single corpus source (tool = name args result)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
