@@ -18,21 +18,25 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import semver from 'semver'
+
 import { cleanupTimedOutProcessTree, pnpmExecutable } from './lib/process.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
+
 // The minimum-supported boundary: every DSH below the 0.4 floor must be
-// rejected. Only PUBLISHED versions can be installed here, and
-// 0.1.2-alpha.1 was never published to npm (the alpha channel jumped from
-// 0.1.1-rc.2 to 0.1.2-alpha.2), so the real-install rejection case is
-// 0.1.1-rc.2. The exact alpha.1 floor regression (alpha.1 reject /
-// alpha.2 accept) is pinned by the startup-gate unit tests instead.
+// rejected. Only PUBLISHED versions can be installed here, and the
+// published lines below the floor are 0.1.1-rc.2 plus the
+// 0.1.2-alpha.2/alpha.3 baseline, so the real-install rejection case is
+// 0.1.1-rc.2 (the oldest reproducible one). The finer alpha floor
+// regressions are pinned by the startup-gate unit tests instead.
 const OLD_DSH_VERSION = '0.1.1-rc.2'
-const TARGET_DSH_VERSION = '0.1.2-alpha.2'
+const TARGET_DSH_VERSION = '0.1.2-alpha.4'
 const OLD_TUI_LINE = '0.3'
+const ALPHA23_TUI_LINE = '0.4.0-alpha.1'
 const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
 const EXPECTED_BOUNDARY_IMPORT = /@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|session|session-persistence|settings)/iu
 
@@ -126,17 +130,30 @@ function installCandidate(invocation, tarball, harnessDir, env) {
   if (result.status !== 0) throw new Error(`candidate plugin install failed:\n${outputOf(result)}`)
 }
 
+// Mirrors src/startup.ts HARNESS_COMPAT (the startup-gate unit tests pin
+// the table itself): runtimes below the alpha.2 baseline fall back to the
+// 0.3 TUI line with the historical alpha.2 requirement text, while the
+// alpha.2/alpha.3 baseline falls back to the previous 0.4 alpha with the
+// alpha.4 requirement.
+function floorNoticeFor(oldVersion) {
+  if (semver.lt(oldVersion, '0.1.2-alpha.2')) {
+    return { requires: '0.1.2-alpha.2', upgrade: TARGET_DSH_VERSION, fallbackTui: OLD_TUI_LINE }
+  }
+  return { requires: TARGET_DSH_VERSION, upgrade: TARGET_DSH_VERSION, fallbackTui: ALPHA23_TUI_LINE }
+}
+
 function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION) {
   if (status === 0) throw new Error(`0.4 candidate unexpectedly started on DSH ${oldVersion}`)
+  const notice = floorNoticeFor(oldVersion)
   const friendly = output.includes(`running dsh ${oldVersion}`)
-    && output.includes(`DeepSeek Harness ${TARGET_DSH_VERSION} or later`)
+    && output.includes(`DeepSeek Harness ${notice.requires} or later`)
   if (friendly) {
     const required = [
       'dsh-pi-tui',
       `running dsh ${oldVersion}`,
-      `DeepSeek Harness ${TARGET_DSH_VERSION} or later`,
-      `npm install -g @deepseek-ai/dsh@${TARGET_DSH_VERSION}`,
-      `npm install -g @xmoon76/dsh-pi-tui@${OLD_TUI_LINE}`,
+      `DeepSeek Harness ${notice.requires} or later`,
+      `npm install -g @deepseek-ai/dsh@${notice.upgrade}`,
+      `npm install -g @xmoon76/dsh-pi-tui@${notice.fallbackTui}`,
       'dsh --profile pi-tui',
     ]
     for (const text of required) {
