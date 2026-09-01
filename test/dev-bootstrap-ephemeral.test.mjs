@@ -1078,3 +1078,37 @@ test('a stale shell recovers to the committed ephemeral generation instead of th
   assert.equal(state.distribution, second.distributionPath, 'the committed state must still point at B')
   assert.equal(state.ephemeral, true, 'the committed state must stay ephemeral')
 })
+
+test('a malformed ephemeral state is a cache miss, not an exception', (t) => {
+  const life = testLifecycle(t)
+  const { context } = sourceFixture(life)
+  const pnpm = '11.7.0'
+  const base = {
+    schemaVersion: 1,
+    mode: 'source',
+    node: String(process.versions.node.split('.')[0]),
+    pnpm,
+    root: context.root,
+    packageJsonHash: hashFile(join(context.root, 'package.json')),
+    lockfileHash: hashFile(join(context.root, 'pnpm-lock.yaml')),
+    repository: REPOSITORY,
+    ref: SHA,
+    expectedVersion: VERSION,
+    ephemeral: true,
+  }
+  const used = join(context.root, 'pack')
+  // A malformed distribution field (old version, partial write, manual
+  // edit) must be treated as a cache miss — never crash the bootstrap.
+  for (const malformed of [null, 42, {}, [], 'relative/path']) {
+    const state = { ...base, distribution: malformed }
+    assert.doesNotThrow(() => bootstrapTest.stateCoreMatches(context, state, pnpm, used))
+    assert.equal(bootstrapTest.stateCoreMatches(context, state, pnpm, used), false,
+      `distribution=${JSON.stringify(malformed)} must be a cache miss`)
+  }
+  // A valid ephemeral state referencing the exact distribution in use
+  // still matches.
+  const valid = { ...base, distribution: used }
+  assert.equal(bootstrapTest.stateCoreMatches(context, valid, pnpm, used), true)
+  // ... and a different distribution is a miss, not a match.
+  assert.equal(bootstrapTest.stateCoreMatches(context, valid, pnpm, join(context.root, 'other-pack')), false)
+})

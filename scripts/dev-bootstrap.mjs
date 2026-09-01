@@ -229,8 +229,13 @@ function stateCoreMatches(context, state, pnpm, distributionPath = undefined) {
     // An ephemeral state only matches when it references the exact
     // distribution this run is about to use: a stale ephemeral generation
     // must never be treated as the current one, and a run that is about to
-    // switch to the canonical cache must not skip its materialization.
-    if (distributionPath === undefined || resolve(state.distribution) !== resolve(distributionPath)) return false
+    // switch to the canonical cache must not skip its materialization. A
+    // malformed distribution field (old version, partial write, manual
+    // edit) is a cache miss, never an exception.
+    if (typeof state.distribution !== 'string' || !isAbsolute(state.distribution)
+      || distributionPath === undefined || resolve(state.distribution) !== resolve(distributionPath)) {
+      return false
+    }
   }
   const required = ['node', 'pnpm', 'root', 'packageJsonHash', 'lockfileHash']
   if (required.some(field => !Object.hasOwn(state, field))) return false
