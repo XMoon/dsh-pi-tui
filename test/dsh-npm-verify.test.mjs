@@ -67,7 +67,7 @@ test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2d
   const ecosystem = workflow.slice(ecosystemStart, officialStart)
   // The published pi2dsh ecosystem is evaluated in BOTH modes: the smoke
   // installs the published DSH and pi2dsh from the registry, so Source Mode
-  // no longer skips the gate (pi2dsh@0.24.0 declares DSH 0.1.2-alpha.2).
+  // no longer skips the gate (pi2dsh@0.24.0 declares DSH 0.1.2-alpha.4).
   assert.doesNotMatch(ecosystem, /needs\.dsh-context\.outputs\.mode == 'npm'/u)
   assert.doesNotMatch(ecosystem, /Download DSH source pack/u)
   assert.doesNotMatch(ecosystem, /Source mode ecosystem status/u)

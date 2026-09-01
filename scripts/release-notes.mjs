@@ -140,10 +140,15 @@ function containsExactGuidance(content, command) {
   return new RegExp(`${escaped}(?![0-9A-Za-z.+-])`, 'u').test(content)
 }
 
+// The DSH install pin each 0.4 prerelease documents: 0.4.0-alpha.1 shipped
+// on the alpha.3 family; the alpha.4 floor (this line's [Unreleased]) starts
+// with the NEXT 0.4 prerelease. Released changelog sections are immutable,
+// so the requirement follows the version being released.
+const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3' : '0.1.2-alpha.4'
 if (version.startsWith('0.4.')) {
   const requiredGuidance = channel === 'next'
     ? [
-        '@deepseek-ai/dsh@0.1.2-alpha.3',
+        `@deepseek-ai/dsh@${dshAlphaPin}`,
         '@xmoon76/dsh-pi-tui@next',
         '@xmoon76/dsh-pi-tui@0.3',
       ]

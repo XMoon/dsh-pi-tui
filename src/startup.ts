@@ -123,11 +123,23 @@ export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
   // 0.4 is a new runtime line. Do not retain the historical 0.3 floor here:
   // the first matching entry is the user-facing source of truth for this
   // artifact, and older guidance would recommend an unusable 0.1.1 runtime.
+  //
+  // The alpha.4 floor splits the too-old range in two: runtimes on the
+  // alpha.2/alpha.3 baseline fall back to the previous 0.4 alpha that still
+  // accepts them, while everything older belongs on the 0.3 line.
+  {
+    min: '0.1.2-alpha.2',
+    max: '0.1.2-alpha.4',
+    since: '0.4.0-alpha.2',
+    requires: 'DeepSeek Harness 0.1.2-alpha.4 or later',
+    upgradeDsh: '0.1.2-alpha.4',
+    fallbackTui: '0.4.0-alpha.1',
+  },
   {
     max: '0.1.2-alpha.2',
     since: '0.4.0-alpha.1',
     requires: 'DeepSeek Harness 0.1.2-alpha.2 or later',
-    upgradeDsh: '0.1.2-alpha.2',
+    upgradeDsh: '0.1.2-alpha.4',
     fallbackTui: '0.3',
   },
 ]

@@ -86,7 +86,7 @@ test('an older harness gets actionable guidance without a hard Loader-ordering t
     assert.equal((ctx.get(TUI_STARTUP_SERVICE) as { sessionId: string }).sessionId, 's1')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes(`running dsh 0.1.0-rc.8`), `stderr must name the installed version:\n${joined}`)
-    assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.2'), `stderr must give the upgrade path:\n${joined}`)
+    assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.4'), `stderr must give the upgrade path:\n${joined}`)
     assert.ok(joined.includes('npm install -g @xmoon76/dsh-pi-tui@0.3'), `stderr must give the rollback path:\n${joined}`)
   } finally {
     stderr.restore()
@@ -96,7 +96,7 @@ test('an older harness gets actionable guidance without a hard Loader-ordering t
 
 test('the minimum harness version starts normally and provides the service', (t) => {
   const life = testLifecycle(t)
-  const launcher = fakeLauncher(life, '0.1.2-alpha.2')
+  const launcher = fakeLauncher(life, '0.1.2-alpha.4')
   const stderr = captureStderr()
   try {
     const ctx = mountStartup(['--session', 's1'])
@@ -109,21 +109,23 @@ test('the minimum harness version starts normally and provides the service', (t)
   }
 })
 
-test('the previous alpha.1 floor is rejected by the minimum gate', (t) => {
+test('the previous alpha.3 floor is rejected by the minimum gate', (t) => {
   const life = testLifecycle(t)
-  // The 0.4 minimum is >=0.1.2-alpha.2: alpha.1 is below the floor and must
-  // be refused (the exact minimum-boundary regression — a future code drift
-  // that silently uses alpha.3-only APIs is easier to spot when the floor
+  // The 0.4 minimum is >=0.1.2-alpha.4: the alpha.2/alpha.3 baseline is
+  // below the floor and must be refused with the previous-0.4-alpha
+  // fallback (the exact minimum-boundary regression — a future code drift
+  // that silently uses alpha.4-only APIs is easier to spot when the floor
   // contract is pinned on both sides).
-  const launcher = fakeLauncher(life, '0.1.2-alpha.1')
+  const launcher = fakeLauncher(life, '0.1.2-alpha.3')
   const stderr = captureStderr()
   try {
     const ctx = mountStartup(['--session', 's1'])
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block concurrent profile mounting')
     const joined = stderr.lines.join('')
-    assert.ok(joined.includes('running dsh 0.1.2-alpha.1'), `stderr must name the installed version:\n${joined}`)
-    assert.ok(joined.includes('DeepSeek Harness 0.1.2-alpha.2 or later'), `stderr must name the requirement:\n${joined}`)
-    assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.2'), `stderr must give the upgrade path:\n${joined}`)
+    assert.ok(joined.includes('running dsh 0.1.2-alpha.3'), `stderr must name the installed version:\n${joined}`)
+    assert.ok(joined.includes('DeepSeek Harness 0.1.2-alpha.4 or later'), `stderr must name the requirement:\n${joined}`)
+    assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.4'), `stderr must give the upgrade path:\n${joined}`)
+    assert.ok(joined.includes('npm install -g @xmoon76/dsh-pi-tui@0.4.0-alpha.1'), `stderr must give the 0.4-alpha fallback:\n${joined}`)
   } finally {
     stderr.restore()
     launcher.restore()
@@ -131,7 +133,7 @@ test('the previous alpha.1 floor is rejected by the minimum gate', (t) => {
 })
 
 test('the later alpha and 0.1.2 release line starts normally', (t) => {
-  for (const version of ['0.1.2-alpha.2', '0.1.2-alpha.3', '0.1.2', '0.1.3']) {
+  for (const version of ['0.1.2-alpha.4', '0.1.2', '0.1.3']) {
     const life = testLifecycle(t)
     const launcher = fakeLauncher(life, version)
     try {
@@ -166,7 +168,7 @@ test('incompatibleHarnessMessage is actionable and names both versions', () => {
   assert.ok(message.includes(`dsh-pi-tui v${pkg.version}`), `must name the bundle version: ${message}`)
   assert.ok(message.includes('DeepSeek Harness 0.1.2-alpha.2 or later'), 'must name the requirement')
   assert.ok(message.includes('0.1.0-rc.8'), 'must name the installed version')
-  assert.ok(message.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.2'), 'must give the upgrade command')
+  assert.ok(message.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.4'), 'must give the upgrade command')
   assert.ok(message.includes('npm install -g @xmoon76/dsh-pi-tui@0.3'), 'must give the compatible TUI pin command')
 })
 
@@ -183,25 +185,29 @@ test('DSH peer ranges keep the lower-bound compatibility contract', () => {
     .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
   assert.ok(dshPeers.length > 0, 'the bundle must declare DSH peers')
   for (const [name, range] of dshPeers) {
-    assert.equal(range, '>=0.1.2-alpha.2', `${name} must use the lower-bound DSH compatibility contract`)
+    assert.equal(range, '>=0.1.2-alpha.4', `${name} must use the lower-bound DSH compatibility contract`)
     assert.ok(!range.includes('0.1.1'), `${name} must not claim DSH 0.1.1`)
   }
   for (const [name, version] of Object.entries(packageJson.devDependencies ?? {})) {
     if (name.startsWith('@deepseek-ai/dsh')) {
-      assert.equal(version, '0.1.2-alpha.3', `${name} dev dependency must stay exact`)
+      assert.equal(version, '0.1.2-alpha.4', `${name} dev dependency must stay exact`)
     }
   }
 })
 
 test('harnessCompatEntryFor protects only the too-old runtime boundary', () => {
-  const old = HARNESS_COMPAT.find(candidate => candidate.max === '0.1.2-alpha.2')
-  assert.ok(old !== undefined, 'the pre-alpha.2 entry must exist')
-  assert.equal(old?.since, '0.4.0-alpha.1')
-  assert.equal(harnessCompatEntryFor('0.1.1-rc.2'), old, 'the old runtime is incompatible')
-  assert.equal(harnessCompatEntryFor('0.1.2-alpha.0'), old, 'alpha.0 is below the floor')
-  assert.equal(harnessCompatEntryFor('0.1.2-alpha.1'), old, 'the previous alpha.1 floor is now below the minimum')
-  assert.equal(harnessCompatEntryFor('0.1.2-alpha.2'), undefined, 'the floor itself is supported')
-  assert.equal(harnessCompatEntryFor('0.1.2-alpha.3'), undefined, 'a later alpha is supported')
+  const preAlpha2 = HARNESS_COMPAT.find(candidate => candidate.max === '0.1.2-alpha.2')
+  assert.ok(preAlpha2 !== undefined, 'the pre-alpha.2 entry must exist')
+  assert.equal(preAlpha2?.since, '0.4.0-alpha.1')
+  const preAlpha4 = HARNESS_COMPAT.find(candidate => candidate.max === '0.1.2-alpha.4')
+  assert.ok(preAlpha4 !== undefined, 'the alpha.4 floor entry must exist')
+  assert.equal(preAlpha4?.min, '0.1.2-alpha.2', 'the alpha.4 entry covers only the alpha.2/alpha.3 baseline')
+  assert.equal(harnessCompatEntryFor('0.1.1-rc.2'), preAlpha2, 'the old runtime falls back to the 0.3 line')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.0'), preAlpha2, 'alpha.0 is below the floor')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.1'), preAlpha2, 'the previous alpha.1 floor falls back to the 0.3 line')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.2'), preAlpha4, 'the alpha.2 baseline falls back to the previous 0.4 alpha')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.3'), preAlpha4, 'the alpha.3 baseline falls back to the previous 0.4 alpha')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.4'), undefined, 'the floor itself is supported')
   assert.equal(harnessCompatEntryFor('0.1.2'), undefined)
   assert.equal(harnessCompatEntryFor('0.1.3'), undefined, 'future runtimes are not rejected without evidence')
   assert.equal(harnessCompatEntryFor('1.0.0'), undefined)

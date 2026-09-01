@@ -6,7 +6,7 @@ import {
   resolveDshMode,
 } from '../scripts/dsh-ci-context.mjs'
 
-const nextSha = 'dd6322d604e00eec1ba5e0c8541159906a21094a'
+const nextSha = '4e84901e6471b79ec0338099867ebb4606d12bb5'
 
 test('DSH mode resolver selects source only for next branch compatibility', () => {
   assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/next' }), 'source')
@@ -29,7 +29,7 @@ test('context exposes the tracked source pin only in source mode', () => {
   const source = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next' })
   assert.equal(source.mode, 'source')
   assert.equal(source.sourceRef, nextSha)
-  assert.equal(source.sourceExpectedVersion, '0.1.2-alpha.3')
+  assert.equal(source.sourceExpectedVersion, '0.1.2-alpha.4')
 
   const npm = resolveDshContext({ eventName: 'push', ref: 'refs/heads/main' })
   assert.equal(npm.mode, 'npm')
