@@ -24,6 +24,8 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - `PACKAGING` — package/build shell owned by XMoon.
 - `ABSORBED_UPSTREAM` — upstream now provides an equivalent; do NOT re-apply.
 - `STALE_LEDGER` — ledger entry that no longer matches reality; fixed in place.
+- `REMOVED_UNUSED` — old kimi-only or defective divergence; do NOT re-apply
+  (used by X003 and the removal notes).
 
 ## Divergences
 
