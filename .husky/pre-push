@@ -65,6 +65,14 @@ else
   VERIFY="verify:prepush:nofork"
 fi
 
+# git push sets GIT_DIR/GIT_WORK_TREE/GIT_PREFIX/... for the hook process;
+# the verification stages spawn their own ISOLATED git fixtures
+# (dev-environment tests), which would otherwise inherit them and operate
+# on THIS repository instead of the fixture. Clear them before running
+# the stages.
+unset GIT_DIR GIT_WORK_TREE GIT_PREFIX GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_COMMON_DIR 2>/dev/null || true
+
 # Single source of truth: derive the ordered stage list from the selected
 # package.json script. Non-verify scripts (typecheck / typecheck:bundle)
 # are passed through as a single stage.
