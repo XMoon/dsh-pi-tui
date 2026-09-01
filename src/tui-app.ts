@@ -596,8 +596,8 @@ export class TranscriptGutterComponent implements Component {
  * The prefixed output keeps a REFERENCE-STABLE cache: when the child
  * returns the same array instance (its own text+width cache hit) at the
  * same width, the wrapper returns the same prefixed array — so the fork's
- * per-frame processed-line reuse (fork AGENTS.md divergence 5) keeps
- * hitting on steady frames instead of re-normalizing every line.
+ * per-frame processed-line reuse (packages/pi-tui/DIVERGENCES.md X035)
+ * keeps hitting on steady frames instead of re-normalizing every line.
  */
 export class BulletedComponent implements Component {
   private readonly child: Component
@@ -653,7 +653,8 @@ export class BulletedComponent implements Component {
  * The EMPTY entry renders the bare title — never a fake "No reasoning"
  * row (plan §13.3). The output is REFERENCE-STABLE per width: the same
  * component + same width returns the same array instance, so steady
- * frames keep the fork's per-frame processed-line reuse.
+ * frames keep the fork's per-frame processed-line reuse (DIVERGENCES.md
+ * X035).
  */
 export class ThinkingCompactComponent implements Component {
   private readonly message: Extract<TranscriptMessage, { kind: 'thinking' }>

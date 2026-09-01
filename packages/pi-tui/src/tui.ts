@@ -264,7 +264,7 @@ export class Container implements Component {
 /**
  * TUI - Main class for managing terminal UI with differential rendering
  */
-const SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
+export const SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
 
 /** Composite overlay content into a terminal line at a fixed column. */
 export function compositeTuiLine(

@@ -2,6 +2,7 @@ import assert from "node:assert";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Image } from "../src/components/image.ts";
@@ -975,6 +976,80 @@ describe("TUI overwide line handling (dsh-pi-tui divergence X033)", () => {
 			"\x1b[0m\x1b]8;;\x07",
 			"the truncated line must carry its segment reset",
 		);
+
+		tui.stop();
+	});
+});
+
+describe("Per-frame processed-line reuse (dsh-pi-tui divergence X035)", () => {
+	it("keeps steady frames near-constant instead of reprocessing every line", () => {
+		// The host transcript keeps unchanged lines reference-stable across
+		// frames (BulletedComponent / ThinkingCompactComponent), and the main
+		// screen's processed-line cache turns that into O(#changed) work per
+		// frame. Without the cache every spinner tick re-normalizes,
+		// re-measures, and re-scans the whole transcript: ~30-370 ms per
+		// frame at 1k-10k rendered lines (measured on the Earendil 0.84.4
+		// base without the reuse). The time budget below is generous (the
+		// cached path needs ~2 ms per frame here; the uncached path needs
+		// seconds), so it only fails on an order-of-magnitude regression.
+		const terminal = new BoundedWriteTerminal();
+		terminal.columns = 100;
+		terminal.rows = 30;
+		const tui = new TuiMainScreen(terminal);
+
+		const lineCount = 10_000;
+		const base: string[] = [];
+		for (let i = 0; i < lineCount - 1; i++) {
+			base.push(`\x1b[36m${String(i).padStart(6, " ")} ▸ streamed row ${i} with styled content\x1b[0m`);
+		}
+		let tick = 0;
+		const component = {
+			focused: false,
+			render(_width: number): string[] {
+				tick++;
+				return [...base, `⠋ thinking ${tick}`];
+			},
+			invalidate(): void {},
+		};
+		tui.addChild(component);
+		tui.setFocus(component);
+
+		tui.renderNow();
+		for (let i = 0; i < 10; i++) tui.renderNow();
+
+		const start = performance.now();
+		for (let i = 0; i < 10; i++) tui.renderNow();
+		const elapsed = performance.now() - start;
+		// 10 spinner-only frames over a 10k-line transcript must stay far
+		// below 1.5 s (uncached preprocessing alone needs ~3.7 s here).
+		assert.ok(
+			elapsed < 1500,
+			`steady-frame rendering regressed to full-transcript preprocessing (${elapsed.toFixed(0)} ms for 10 frames)`,
+		);
+		assert.ok(terminal.writes.some((write) => write.includes(`thinking ${tick}`)));
+
+		tui.stop();
+	});
+
+	it("reuses the processed output verbatim for reference-identical raw lines", async () => {
+		const terminal = new LoggingVirtualTerminal(20, 10);
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		// Same string REFERENCES every frame (a component render-cache hit).
+		const stable = ["\x1b[31mstable row\x1b[0m", "plain row"];
+		component.lines = [...stable];
+		tui.addChild(component);
+		tui.start();
+		await terminal.waitForRender();
+		terminal.clearWrites();
+
+		// Identical content AND identical references: the differential path
+		// must not write anything (neither the preprocessing nor the diff
+		// loop may churn).
+		component.lines = [...stable];
+		tui.requestRender();
+		await terminal.waitForRender();
+		assert.strictEqual(terminal.getWrites(), "");
 
 		tui.stop();
 	});

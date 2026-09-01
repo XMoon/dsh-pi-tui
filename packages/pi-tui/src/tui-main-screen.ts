@@ -1,11 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
-import { type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
-import { sliceByColumn, visibleWidth } from "./utils.ts";
+import { SEGMENT_RESET, type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
+import { asciiVisibleWidth, normalizeTerminalOutput, sliceByColumn, visibleWidth } from "./utils.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
+const EMPTY_IMAGE_IDS: readonly number[] = [];
 
 /**
  * Streams terminal output in 1 MiB chunks so a full render never forms one string large enough to exceed V8's limit.
@@ -123,6 +124,18 @@ export interface TuiMainScreenRenderState {
 export class TuiMainScreen extends TuiBase implements TUI {
 	readonly mode = "regular" as const;
 	private previousLines: string[] = [];
+	/**
+	 * Raw (pre-processing) lines of the previous frame, aligned with
+	 * {@link previousLines}. Component render caches return identical string
+	 * references for unchanged content (the host's BulletedComponent /
+	 * ThinkingCompactComponent keep their output reference-stable for exactly
+	 * this contract), which lets each frame reuse the processed output for
+	 * every untouched line instead of re-normalizing, re-measuring, and
+	 * re-scanning the whole transcript. (dsh-pi-tui divergence X035.)
+	 */
+	private previousRawLines: string[] = [];
+	/** Per-line kitty image ids of the previous frame, aligned with previousRawLines. */
+	private previousLineImageIds: ReadonlyArray<number>[] = [];
 	private previousKittyImageIds = new Set<number>();
 	private previousWidth = 0;
 	private previousHeight = 0;
@@ -145,6 +158,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 	restoreRenderState(state: TuiMainScreenRenderState): void {
 		this.previousLines = state.previousLines.map((line) => (isImageLine(line) ? "" : line));
+		this.previousRawLines = [];
+		this.previousLineImageIds = [];
 		this.previousKittyImageIds = new Set();
 		this.previousWidth = state.previousWidth;
 		this.previousHeight = state.previousHeight;
@@ -156,6 +171,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 	protected override resetRenderState(): void {
 		this.previousLines = [];
+		this.previousRawLines = [];
+		this.previousLineImageIds = [];
 		this.previousWidth = -1;
 		this.previousHeight = -1;
 		this.cursorRow = 0;
@@ -177,10 +194,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.terminal.write("\r\n");
 	}
 
-	private collectKittyImageIds(lines: string[]): Set<number> {
+	private unionKittyImageIds(lineImageIds: ReadonlyArray<number>[]): Set<number> {
 		const ids = new Set<number>();
-		for (const line of lines) {
-			for (const id of extractKittyImageIds(line)) {
+		for (const lineIds of lineImageIds) {
+			for (const id of lineIds) {
 				ids.add(id);
 			}
 		}
@@ -213,12 +230,13 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		firstChanged: number,
 		lastChanged: number,
 		newLines: string[],
+		newLineImageIds: ReadonlyArray<number>[],
 	): { firstChanged: number; lastChanged: number } {
 		let expandedFirstChanged = firstChanged;
 		let expandedLastChanged = lastChanged;
-		const expandForLines = (lines: string[]): void => {
+		const expandForLines = (lines: string[], lineImageIds: ReadonlyArray<number>[]): void => {
 			for (let i = 0; i < lines.length; i++) {
-				if (extractKittyImageIds(lines[i]).length === 0) continue;
+				if ((lineImageIds[i] ?? EMPTY_IMAGE_IDS).length === 0) continue;
 				const blockEnd = i + this.getKittyImageReservedRows(lines, i) - 1;
 				if (i >= firstChanged || (i <= lastChanged && blockEnd >= firstChanged)) {
 					expandedFirstChanged = Math.min(expandedFirstChanged, i);
@@ -227,8 +245,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 		};
 
-		expandForLines(this.previousLines);
-		expandForLines(newLines);
+		expandForLines(this.previousLines, this.previousLineImageIds);
+		expandForLines(newLines, newLineImageIds);
 		return { firstChanged: expandedFirstChanged, lastChanged: expandedLastChanged };
 	}
 
@@ -238,7 +256,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		const ids = new Set<number>();
 		const maxLine = Math.min(lastChanged, this.previousLines.length - 1);
 		for (let i = firstChanged; i <= maxLine; i++) {
-			for (const id of extractKittyImageIds(this.previousLines[i] ?? "")) {
+			for (const id of this.previousLineImageIds[i] ?? EMPTY_IMAGE_IDS) {
 				ids.add(id);
 			}
 		}
@@ -273,19 +291,49 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Extract cursor position before applying line resets (marker must be found first)
 		const cursorPos = this.extractCursorPosition(newLines, height);
 
-		// Never write a line wider than the terminal: truncate defensively
-		// instead of crashing. Extremely narrow terminals can make components
-		// overflow by a column (e.g. wide graphemes at width 1). Image lines
-		// are exempt (their payload is not cell content). This runs BEFORE
-		// applyLineResets so the segment reset is appended AFTER the slice —
-		// sliceByColumn drops trailing zero-width codes at the cut column,
-		// so truncating after the resets would leak the open style into
-		// subsequent rows. (dsh-pi-tui divergence X033.)
-		newLines = newLines.map((line) =>
-			isImageLine(line) || visibleWidth(line) <= width ? line : sliceByColumn(line, 0, width, true),
-		);
-
-		newLines = this.applyLineResets(newLines);
+		// Process raw lines for output. Never write a line wider than the
+		// terminal: truncate defensively instead of crashing. Extremely narrow
+		// terminals can make components overflow by a column (e.g. wide
+		// graphemes at width 1). Image lines are exempt (their payload is not
+		// cell content). The truncation runs BEFORE the segment reset is
+		// appended — sliceByColumn drops trailing zero-width codes at the cut
+		// column, so the reset must land AFTER the slice or a truncated styled
+		// line leaks its open style into subsequent rows. (dsh-pi-tui
+		// divergence X033.)
+		//
+		// Lines whose raw string is reference-identical to the previous
+		// frame's reuse their processed output verbatim: component render
+		// caches return the same string references for unchanged content, so
+		// a steady frame only pays for the lines that actually changed
+		// instead of re-normalizing and re-measuring the whole transcript.
+		// (dsh-pi-tui divergence X035.) A width change invalidates every
+		// cached truncation.
+		const rawLines = newLines;
+		const reuseProcessed = !widthChanged && this.previousRawLines.length > 0;
+		const processedLines: string[] = new Array(rawLines.length);
+		const lineImageIds: ReadonlyArray<number>[] = new Array(rawLines.length);
+		for (let i = 0; i < rawLines.length; i++) {
+			const rawLine = rawLines[i]!;
+			if (reuseProcessed && rawLine === this.previousRawLines[i]) {
+				processedLines[i] = this.previousLines[i]!;
+				lineImageIds[i] = this.previousLineImageIds[i]!;
+				continue;
+			}
+			let line = rawLine;
+			let imageIds: readonly number[] = EMPTY_IMAGE_IDS;
+			if (isImageLine(line)) {
+				imageIds = extractKittyImageIds(line);
+			} else {
+				const lineWidth = asciiVisibleWidth(line, width) ?? visibleWidth(line);
+				if (lineWidth > width) {
+					line = sliceByColumn(line, 0, width, true);
+				}
+				line = normalizeTerminalOutput(line) + SEGMENT_RESET;
+			}
+			processedLines[i] = line;
+			lineImageIds[i] = imageIds;
+		}
+		newLines = processedLines;
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
@@ -327,7 +375,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			this.previousViewportTop = Math.max(0, bufferLength - height);
 			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousLines = newLines;
-			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+			this.previousRawLines = rawLines;
+			this.previousLineImageIds = lineImageIds;
+			this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
 			this.previousWidth = width;
 			this.previousHeight = height;
 		};
@@ -396,7 +446,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			lastChanged = newLines.length - 1;
 		}
 		if (firstChanged !== -1) {
-			const expandedRange = this.expandChangedRangeForKittyImages(firstChanged, lastChanged, newLines);
+			const expandedRange = this.expandChangedRangeForKittyImages(firstChanged, lastChanged, newLines, lineImageIds);
 			firstChanged = expandedRange.firstChanged;
 			lastChanged = expandedRange.lastChanged;
 		}
@@ -407,6 +457,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousViewportTop = prevViewportTop;
 			this.previousHeight = height;
+			// Processed output is unchanged, but keep the raw/image-id caches in
+			// sync so future frames keep hitting the reuse fast path (e.g. the
+			// cursor-marker line gets a fresh string every frame).
+			this.previousRawLines = rawLines;
+			this.previousLineImageIds = lineImageIds;
 			return;
 		}
 
@@ -453,7 +508,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousLines = newLines;
-			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+			this.previousRawLines = rawLines;
+			this.previousLineImageIds = lineImageIds;
+			this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
 			this.previousWidth = width;
 			this.previousHeight = height;
 			this.previousViewportTop = prevViewportTop;
@@ -629,7 +686,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.positionHardwareCursor(cursorPos, newLines.length);
 
 		this.previousLines = newLines;
-		this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+		this.previousRawLines = rawLines;
+		this.previousLineImageIds = lineImageIds;
+		this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
 		this.previousWidth = width;
 		this.previousHeight = height;
 	}
