@@ -533,7 +533,11 @@ export class TranscriptFolder {
   /** Bumped on EVERY entry mutation (append, settlement, group reflow):
    * query refinement must not reuse previous candidates across a revision. */
   private searchRevisionCounter = 0
-  /** Step key → raw item index, for in-place streaming text updates. */
+  /** Step key → raw item index, for in-place streaming text updates.
+   * Namespaced by entry kind (`assistant:` / `thinking:`): a step streams
+   * BOTH reasoning and text, and the two entries share the same
+   * stepKey(turn, step) — an un-namespaced map would let one kind's deltas
+   * land on the other kind's searchable entry. */
   private readonly searchIndexByStepKey = new Map<string, number>()
   /** Workflow run card indices by runId (run-end fills the result text). */
   private readonly workflowRunIndex = new Map<string, number>()
@@ -1558,7 +1562,7 @@ export class TranscriptFolder {
     if (entry === undefined) {
       entry = { kind: 'thinking', turn, text: '', running: true }
       this.thinkingEntries.set(key, entry)
-      this.searchIndexByStepKey.set(key, this.appendItem(entry))
+      this.searchIndexByStepKey.set(`thinking:${key}`, this.appendItem(entry))
       let open = this.openThinkingByTurn.get(turn)
       if (open === undefined) {
         open = new Set()
@@ -1576,7 +1580,7 @@ export class TranscriptFolder {
     if (entry === undefined) {
       entry = { kind: 'assistant', turn, text: '' }
       this.assistantEntries.set(key, entry)
-      this.searchIndexByStepKey.set(key, this.appendItem(entry))
+      this.searchIndexByStepKey.set(`assistant:${key}`, this.appendItem(entry))
     }
     return entry
   }
@@ -1762,7 +1766,7 @@ export class TranscriptFolder {
         if (chunk.type === 'text-delta') {
           this.assistantEntry(event.data.turn, step).text += chunk.text
           // Search projection: O(delta) incremental lowercase append.
-          this.appendSearchTextDelta(stepKey(event.data.turn, step), chunk.text)
+          this.appendSearchTextDelta(`assistant:${stepKey(event.data.turn, step)}`, chunk.text)
           // Focus aggregation: the streaming assistant text feeds the
           // Message candidate IMMEDIATELY (no assistant/message wait —
           // plan §5.2), so the running card previews the intermediate
@@ -1771,7 +1775,7 @@ export class TranscriptFolder {
         } else if (chunk.type === 'reasoning-delta') {
           this.thinkingEntry(event.data.turn, step).text += chunk.text
           // Search projection: O(delta) incremental lowercase append.
-          this.appendSearchTextDelta(stepKey(event.data.turn, step), chunk.text)
+          this.appendSearchTextDelta(`thinking:${stepKey(event.data.turn, step)}`, chunk.text)
           // Focus aggregation: keep a compact reasoning preview (the
           // rolling tail — never the full stream, plan §10.6/§42).
           this.foldThinking(this.activityFor(event.data.turn), chunk.text)
@@ -1801,7 +1805,7 @@ export class TranscriptFolder {
           if (messageBlocks.some(block => block.type !== 'text')) entry.content = messageBlocks
           // The settled text REPLACES the streamed tail: the search
           // projection must mirror the authoritative text, not the chunks.
-          const searchIndex = this.searchIndexByStepKey.get(key)
+          const searchIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
           if (searchIndex !== undefined) this.refreshSearchEntry(searchIndex)
         } else {
           // ALWAYS preserve the entry — an empty settled message with no
@@ -1810,7 +1814,11 @@ export class TranscriptFolder {
           // earlier answer (review finding).
           const created: TranscriptMessage = { kind: 'assistant', turn: event.data.turn, text, ...(messageBlocks.some(block => block.type !== 'text') ? { content: messageBlocks } : {}) }
           this.assistantEntries.set(key, created)
-          this.appendItem(created)
+          // The created entry must register its search index too: a later
+          // replay replacement or text delta mutates this entry in place
+          // and must be able to refresh its searchable entry (review
+          // finding — the streaming-created path already registers).
+          this.searchIndexByStepKey.set(`assistant:${key}`, this.appendItem(created))
         }
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.

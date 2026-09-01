@@ -649,6 +649,11 @@ async function main(): Promise<void> {
       const afterQueries = folder.searchDiagnosticsForTest()
       row(`search ${turns} turns (${messages.length} logical messages, ${afterQueries.entries} entries)`, `common hits ${folder.search('needle').length} · fullScans ${afterQueries.fullScans - diag.fullScans}`)
       row('  cold hydrate + index build', fmtMs(cold[0]!))
+      // Plan §8.3 counters: the cold full projection count (logical
+      // messages), the one-time normalized rebuild work at hydrate, and the
+      // grouping rebuild count (all MUST stay flat across queries — the
+      // query rows above prove it).
+      row('  cold projection counters (fullProjectionCount / normalizedRebuilds / groupingRebuilds)', `${messages.length} / ${diag.normalizedRefreshes} / ${diag.groupingRebuilds}`)
       row(`  query miss ×${SEARCH_SAMPLES}`, fmt(stats(miss)))
       row(`  query common ×${SEARCH_SAMPLES}`, fmt(stats(common)))
       row(`  query rare ×${SEARCH_SAMPLES}`, fmt(stats(rare)))
