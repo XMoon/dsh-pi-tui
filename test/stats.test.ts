@@ -1159,4 +1159,25 @@ test('an authoritative duplicate that invalidates the sample REMOVES it (no stal
   assert.equal(folder.snapshot().firstTokenMsAvg, 100)
   // The usage accounting applied the authoritative replacement.
   assert.equal(folder.snapshot().outputTokens, 0)
+
+  // The stale-denominator repro: a SECOND valid step after the
+  // invalidation must pool over its own wall only. Keeping A's wall
+  // (the lifetime-style subtract-only variant → 300 tokens / 2 s = 150)
+  // or keeping A's sample whole (the unremoved variant → 400 tokens /
+  // 2 s = 200) both miss; the correct removal yields 300 tok/s.
+  const stepB = completedStep(0, 1, 5, t + 10_000, { outputTokens: 300, wallMs: 1_000 })
+  const withB = [...prefix, invalidating, ...stepB]
+  const oneShotWithB = computeStats(withB)
+  const folderB = new StatsFolder()
+  folderB.apply(prefix)
+  folderB.apply([invalidating, ...stepB])
+  assert.equal(folderB.snapshot().tokensPerSec, 300, `the invalidated wall must not ride the window:\n${JSON.stringify(folderB.snapshot())}`)
+  assert.deepEqual(folderB.snapshot(), oneShotWithB)
+
+  // A LATER VALID duplicate of the invalidated step re-inserts its sample
+  // at the ORIGINAL completion ordinal (0 → 500: pooled with B = 400).
+  const revalid = message(9, t + 20_000, 500)
+  folderB.apply([revalid])
+  assert.deepEqual(folderB.snapshot(), computeStats([...withB, revalid]))
+  assert.equal(folderB.snapshot().tokensPerSec, 400, 'the re-validated step rejoins the pooled window')
 })
