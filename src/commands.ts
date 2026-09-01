@@ -2071,7 +2071,15 @@ export function registerTuiCommands(
    * settlement from a closed/superseded picker is dropped. */
   let sessionPickerGeneration = 0
   let activeSessionPickerScan: AbortController | undefined
-  const openSessionPicker = async (invocation: { rawInput: string }, header: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
+  const openSessionPicker = async (
+    invocation: { rawInput: string },
+    header: string,
+    /** `/resume <arg>`: after the ONE shared listing lands, resolve the
+     * argument as a direct id/prefix match — a unique match closes the
+     * picker and switches; no match falls through to the filtered picker
+     * (the argument stays as the live search query). */
+    directMatchQuery?: string,
+  ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
     // The current marker is the live session's id; before the first session
     // (deferred start) no row is marked current, and the picker can still
     // browse and switch to a persisted session without creating one.
@@ -2124,11 +2132,37 @@ export function registerTuiCommands(
     // dead loading frame; Esc still closes it).
     let statusRow = loadingItem
     const categories = sessionPickerCategories(rows, runner.sessionCwd(), header, itemFor, () => statusRow)
+    /** The `/resume <arg>` outcome of the ONE shared listing, resolved by
+     * the detached load task — the overlay stays interactive the whole
+     * time, and the awaiting handler keeps the OLD synchronous semantics
+     * (the switch has started before the handler returns). */
+    type ListingOutcome =
+      | { kind: 'switched' }
+      | { kind: 'picker' }
+      | { kind: 'refused'; text: string }
+      | { kind: 'cancelled' }
+    let settleListing: ((outcome: ListingOutcome) => void) | undefined
+    const listing = directMatchQuery === undefined
+      ? undefined
+      : new Promise<ListingOutcome>(resolve => { settleListing = resolve })
+    /** Idempotent outcome settle — later calls are no-ops (the abort
+     * listener races the task's own settles). */
+    const settleOnce = (outcome: ListingOutcome): void => {
+      settleListing?.(outcome)
+      settleListing = undefined
+    }
+    if (listing !== undefined) {
+      // Esc / any close settles the awaiting /resume <arg> handler; a real
+      // switch settles 'switched' BEFORE the abort so the listener cannot
+      // overwrite it.
+      controller.signal.addEventListener('abort', () => settleOnce({ kind: 'cancelled' }), { once: true })
+    }
     const picker = app.openPicker(
       categories[0]!.items(),
       (id) => {
         // Any close — including the loading row's Enter — ends the scan:
         // the picker is gone, so late enrichment may not touch the UI.
+        if (id !== '' && id !== currentId) settleOnce({ kind: 'switched' })
         controller.abort()
         // Enter on the loading placeholder (value '') must never resume.
         if (id === '' || id === currentId) return
@@ -2171,19 +2205,53 @@ export function registerTuiCommands(
 
       // The session READ port (migration M1.3): live-preferred listing with
       // the persistence fallback lives in the Direct adapter, never here.
-      const listed = await runner.sessionReader.list(currentId, scanSignal)
+      let listed: readonly SessionSummary[] | undefined
+      try {
+        listed = await runner.sessionReader.list(currentId, scanSignal)
+      } catch (error) {
+        // A real listing failure surfaces in-picker (the overlay is already
+        // open) and settles the awaiting /resume <arg> handler — never a
+        // dead loading frame, never a hanging handler.
+        if (stale()) return
+        const message = safeErrorMessage(error)
+        statusRow = { value: '', label: `session listing failed: ${message}`, description: '', group: '' }
+        picker.refresh?.()
+        settleOnce({ kind: 'refused', text: message })
+        return
+      }
       if (stale()) return
       if (listed === undefined || listed.length === 0) {
         // The overlay is already open — keep it open on the refusal row
         // (Esc closes as always) instead of leaving a dead loading frame.
-        statusRow = {
-          value: '',
-          label: listed === undefined ? 'session persistence unavailable' : 'no persisted sessions',
-          description: '',
-          group: '',
-        }
+        const text = listed === undefined ? 'session persistence unavailable' : 'no persisted sessions'
+        statusRow = { value: '', label: text, description: '', group: '' }
         picker.refresh?.()
+        settleOnce({ kind: 'refused', text })
         return
+      }
+      // `/resume <arg>` direct fast path, resolved against the ONE shared
+      // listing (never a second one): a unique id/prefix match closes the
+      // picker and switches (the switch has STARTED before the awaiting
+      // handler returns — the old synchronous semantics); matching the
+      // CURRENT session surfaces the already-on notice; no match falls
+      // through to the filtered picker with the argument preserved as the
+      // live search query.
+      if (directMatchQuery !== undefined) {
+        const match = findSessionMatch(listed, directMatchQuery)
+        if (match !== undefined) {
+          if (match.id === currentId) {
+            statusRow = { value: '', label: 'already on this session', description: '', group: '' }
+            picker.refresh?.()
+            settleOnce({ kind: 'refused', text: 'already on this session' })
+            return
+          }
+          settleOnce({ kind: 'switched' })
+          controller.abort()
+          picker.close()
+          switchSession(match.id)
+          return
+        }
+        settleOnce({ kind: 'picker' })
       }
       // Mutate the shared row array in place: the category factories read
       // it at activation time, so this one splice swaps the loading
@@ -2230,6 +2298,14 @@ export function registerTuiCommands(
         await loadBatch(mainRows.slice(offset, offset + PROJECTION_BATCH_SIZE))
       }
     })
+    if (listing === undefined) return { kind: 'success' }
+    // `/resume <arg>` keeps the OLD synchronous command semantics — the
+    // switch has started before the handler returns — while the overlay
+    // stays interactive during the wait (Esc cancels). No match settles as
+    // success with the filtered picker; a refusal returns the error text.
+    const outcome = await listing
+    if (outcome.kind === 'refused') return { kind: 'error', text: outcome.text }
+    if (outcome.kind === 'cancelled') return { kind: 'error', text: 'resume cancelled' }
     return { kind: 'success' }
   }
 
@@ -2239,26 +2315,16 @@ export function registerTuiCommands(
     input: { hint: '[query]' },
     handler: (invocation) => openSessionPicker(invocation, 'sessions'),
     aliases: ['resume'],
-    // /resume keeps its direct-resume fast path (exact/prefix id match);
-    // without a match it falls back to the same picker under its own name.
+    // /resume keeps its direct-resume fast path (exact id, a session-
+    // prefixed prefix, or the short id prefix) — resolved against the ONE
+    // input-first listing inside the shared picker lifecycle: the overlay
+    // opens immediately, and a unique match switches as soon as `list()`
+    // lands. No match leaves the filtered picker with the argument as the
+    // live search query. Never a second listing.
     aliasHandlers: {
-      resume: async (invocation) => {
+      resume: (invocation) => {
         const raw = invocation.rawInput.trim()
-        if (raw !== '') {
-          // Direct resume: exact id, a session- prefixed prefix, or the short
-          // id prefix. Falls back to the picker when nothing matches.
-          const currentId = runner.liveAgent?.session.id
-          const rows = await runner.sessionReader.list(currentId, signal)
-          if (rows !== undefined) {
-            const match = findSessionMatch(rows, raw)
-            if (match !== undefined) {
-              if (match.id === currentId) return { kind: 'error', text: 'already on this session' }
-              switchSession(match.id)
-              return { kind: 'success' }
-            }
-          }
-        }
-        return openSessionPicker(invocation, 'resume')
+        return openSessionPicker(invocation, 'resume', raw === '' ? undefined : raw)
       },
     },
   })

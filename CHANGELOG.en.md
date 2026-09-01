@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   yield the event loop between chunks; closing the picker, quitting, or
   re-opening aborts the scan, and late results from a closed or superseded
   picker are dropped instead of refreshing stale UI.
+- **`/resume <arg>` shares the same lifecycle.** The direct id/prefix match
+  resolves against the ONE shared input-first listing (never a pre-list,
+  never a second list on a miss): the overlay opens immediately, a unique
+  match closes it and switches before the handler returns (the old
+  synchronous semantics, Esc cancels), and a miss falls through to the
+  filtered picker with the argument as the live search query.
 
 ## [0.4.0-alpha.1] - 2026-09-01
 

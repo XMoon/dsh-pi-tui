@@ -444,6 +444,64 @@ test('projectionBatch normalizes a cached legacy code through the roster', async
   assert.equal(projections.get('session-cached-code')?.title, 'kept title')
 })
 
+test('projectionBatch isolates a throwing preset resolver on the cache path', async () => {
+  // The isolation hole: a cached legacy `code` identity + a failed roster
+  // read routes resolution through presets.resolve, whose NON-unknown
+  // failure used to reject the WHOLE batch — killing every other row's
+  // enrichment despite valid cached titles.
+  const diagnostics: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  const healthy = header('session-healthy', 110)
+  const legacy = header('session-legacy-code', 100)
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query(
+      [{ header: healthy, live: false }, { header: legacy, live: false }],
+      undefined,
+      () => Promise.reject(new Error('a resolver failure must never reach the observation seam')),
+    ),
+    sessionProjectionCache: {
+      cachedSnapshot: (meta: { id: unknown }) => String(meta.id) === 'session-healthy'
+        ? { asOfSeq: 1, values: { title: 'healthy title', agentPreset: 'ptc' } }
+        : { asOfSeq: 1, values: { title: 'kept title', agentPreset: 'code' } },
+    },
+    agentPresets: {
+      list: async () => { throw new Error('roster service down') },
+      resolve: async () => { throw new Error('resolver exploded') },
+    },
+  }), undefined, {
+    info: (message, fields) => diagnostics.push({ message, fields }),
+  })
+  const rows = await reader.list(undefined)
+  const projections = await reader.projectionBatch(rows!)
+  assert.equal(projections.get('session-healthy')?.title, 'healthy title', 'the untouched row keeps its full cache hit')
+  assert.equal(projections.get('session-healthy')?.preset, 'ptc')
+  assert.equal(projections.get('session-legacy-code')?.title, 'kept title', 'the cached title survives the resolver failure')
+  assert.equal(projections.get('session-legacy-code')?.preset, undefined, 'the unusable identity stays absent — never faked')
+  assert.equal(diagnostics.length, 1, 'the isolated failure lands in diagnostics')
+  assert.equal(diagnostics[0]!.fields?.session, 'session-legacy-code')
+  assert.match(String(diagnostics[0]!.fields?.reason), /resolver exploded/)
+})
+
+test('projectionBatch degrades a live row whose composition read throws', async () => {
+  const liveHeader = header('session-live', 300)
+  const session = { header: liveHeader }
+  const liveAgent = { session }
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: liveHeader, live: true }], undefined, () => {
+      throw new Error('a live row is never observed')
+    }),
+    sessionProjections: {
+      // The preset projection read races a teardown and throws; the title
+      // snapshot over the same in-memory log still answers.
+      stateOf: () => { throw new Error('teardown race') },
+      snapshot: (target: unknown) => (target === session ? { asOfSeq: 9, values: { title: 'live title' } } : undefined),
+    },
+  }), id => (id === 'session-live' ? liveAgent : undefined))
+  const rows = await reader.list(undefined)
+  const projections = await reader.projectionBatch(rows!)
+  assert.deepEqual(projections.get('session-live'), { title: 'live title' },
+    'a throwing composition read degrades to the title instead of failing the batch')
+})
+
 test('projectionBatch keeps the cached partial fields when the observation rejects', async () => {
   const persistedHeader = header('session-partial-broken', 100)
   const diagnostics: Array<{ message: string; fields?: Record<string, unknown> }> = []

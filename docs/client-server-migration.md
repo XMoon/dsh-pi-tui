@@ -72,7 +72,12 @@ recreate them as TUI-specific DTOs.
 Session list/projection/search/filter semantics belong to the public DSH
 `sessionQuery` + projection services. The picker's `title` and `agentPreset`
 values are Host-owned DSH projections read through ONE semantic port method,
-`SessionReader.projectionBatch()`: live rows via `sessionProjections.snapshot()`,
+`SessionReader.projectionBatch()`: live rows read the `title` via
+`sessionProjections.snapshot()` while the live preset prefers the Agent's
+CURRENT composed roster entry (`agentPresets.composedPreset()`) — a
+deliberate live-only exception (the running Agent's actual composition is
+the authoritative effective preset even while it trails the durable
+projection mid-switch), with the projection value as the fallback;
 cold rows via the zero-I/O `sessionProjectionCache.cachedSnapshot()` checkpoint
 keyed by the listing's header identity, and at most ONE bounded
 `sessionQuery.observeSession()` per cold cache miss, whose projection cut

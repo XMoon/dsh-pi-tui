@@ -9,7 +9,13 @@
  * module consumes exactly those official semantics and never folds a second
  * copy of either:
  *
- * 1. live session  → `sessionProjections.snapshot(...)` (in-memory, zero I/O);
+ * 1. live session  → the `title` comes from `sessionProjections.snapshot()`
+ *    (in-memory, zero I/O); the preset prefers the agent's CURRENT composed
+ *    roster entry (`agentPresets.composedPreset()`) — a deliberate
+ *    live-only exception: the running Agent's actual composition is the
+ *    authoritative effective preset even while it trails or leads the
+ *    durable projection mid-switch — with the projection value as the
+ *    fallback;
  * 2. cold + cache  → `sessionProjectionCache.cachedSnapshot(header, keys)`
  *    (a durable checkpoint read keyed by the `list()` header identity — no
  *    full-log fold);
@@ -19,8 +25,9 @@
  *    `observation[Symbol.dispose]()`.
  *
  * Everything is bounded (one worker pool per batch) and cancellable (an
- * aborted signal rejects the whole batch; per-row corruption is isolated
- * with a diagnostic instead of hiding the picker).
+ * aborted signal rejects the whole batch; per-row corruption — including a
+ * throwing live composition read or a broken preset resolver on the cache
+ * path — is isolated with a diagnostic instead of hiding the picker).
  *
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-projection-direct
  */
@@ -140,14 +147,30 @@ function safeCachedSnapshot(
 
 /** The live fast path: title from the official projection snapshot over the
  * in-memory log (zero I/O), preset from the authoritative composed
- * composition. Absent/`null` title means the session genuinely has none. */
+ * composition (a DELIBERATE live-only exception: the composed roster entry
+ * reflects the running Agent's actual composition, which can trail or lead
+ * the durable projection during a switch; the projection value remains the
+ * fallback). BOTH reads are per-row isolated — one throwing read degrades to
+ * the other field instead of failing the batch. Absent/`null` title means
+ * the session genuinely has none. */
 function liveProjection(
   deps: ProjectionBatchDeps,
   projections: SessionProjectionReaderLike | undefined,
   sessionId: string,
 ): SessionProjectionSummary | undefined {
-  const preset = deps.livePresetOf(sessionId)
-  const live = deps.liveAgentOf(sessionId)
+  let preset: string | undefined
+  try {
+    preset = deps.livePresetOf(sessionId)
+  } catch {
+    // A composition read racing teardown is not a picker error; the title
+    // (or the short-id presentation) still applies.
+  }
+  let live: { readonly session: Session } | undefined
+  try {
+    live = deps.liveAgentOf(sessionId)
+  } catch {
+    // Same teardown race as above: the title still applies.
+  }
   let title: string | undefined
   if (live !== undefined && projections !== undefined) {
     try {
@@ -251,9 +274,23 @@ export async function projectionBatch(
         // the observation would return the same value and resolve the same
         // way, so spending a cold read on it would buy nothing.
         presetKnown = true
-        const resolved = await resolveProjectedPresetId(values.agentPreset, rosterIds, presets)
-        if (resolved !== undefined) {
-          result.set(row.id, { ...result.get(row.id), preset: resolved })
+        try {
+          const resolved = await resolveProjectedPresetId(values.agentPreset, rosterIds, presets)
+          if (resolved !== undefined) {
+            result.set(row.id, { ...result.get(row.id), preset: resolved })
+          }
+        } catch (error) {
+          // Per-row isolation on the cache path too: a throwing resolver
+          // (e.g. a broken roster service) must not fail the WHOLE batch —
+          // the cached title above survives, the preset stays absent, and
+          // the row is final for this batch (a cold observation would
+          // usually reproduce the same value and the same resolver failure).
+          signal?.throwIfAborted()
+          deps.diag?.info('session projection unavailable', {
+            session: row.id,
+            code: errorCodeOf(error),
+            reason: safeErrorMessage(error),
+          })
         }
       }
     }
