@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it, test } from "node:test";
-import { CombinedAutocompleteProvider, typeDirectoryOutputLines } from "../src/autocomplete.ts";
+import { CombinedAutocompleteProvider } from "../src/autocomplete.ts";
 
 const resolveFdPath = (): string | null => {
 	const command = process.platform === "win32" ? "where" : "which";
@@ -111,71 +111,6 @@ describe("CombinedAutocompleteProvider", () => {
 			if (result) {
 				assert.strictEqual(result.prefix, "/", "Prefix should be '/'");
 			}
-		});
-	});
-
-	describe("typeDirectoryOutputLines", () => {
-		let rootDir = "";
-		let baseDir = "";
-
-		beforeEach(() => {
-			rootDir = mkdtempSync(join(tmpdir(), "pi-autocomplete-type-"));
-			baseDir = join(rootDir, "cwd");
-			mkdirSync(baseDir, { recursive: true });
-		});
-
-		afterEach(() => {
-			rmSync(rootDir, { recursive: true, force: true });
-		});
-
-		test("classifies BARE directory lines (no trailing slash) as directories", () => {
-			// The regression: fd's plain output does not guarantee a
-			// trailing `/` on directories. A bare `src` line must still be
-			// typed as a directory so `@src<Tab>` completes to `@src/` and
-			// the next Tab can descend into it.
-			setupFolder(baseDir, {
-				dirs: ["src", "other"],
-				files: { "src/index.ts": "export {};", "file.txt": "content" },
-			});
-
-			const typed = typeDirectoryOutputLines(baseDir, ["src", "other", "file.txt", "src/index.ts"]);
-
-			const byPath = new Map(typed.map((entry) => [entry.path, entry.isDirectory]));
-			assert.strictEqual(byPath.get("src"), true, "bare src must type as a directory");
-			assert.strictEqual(byPath.get("other"), true, "bare other must type as a directory");
-			assert.strictEqual(byPath.get("file.txt"), false, "a file stays a file");
-			assert.strictEqual(byPath.get("src/index.ts"), false, "a nested file stays a file");
-		});
-
-		test("normalizes trailing separators away and keeps the .git exclusion", () => {
-			setupFolder(baseDir, {
-				dirs: [".git", "src"],
-			});
-
-			// Duplicate lines (a slash-form and a bare form of the same
-			// path) both normalize to the same entry — the consumer
-			// (bestByAbs) dedups by absolute path.
-			const typed = typeDirectoryOutputLines(baseDir, ["src/", ".git/", "src"]);
-			assert.deepStrictEqual(typed, [
-				{ path: "src", isDirectory: true },
-				{ path: "src", isDirectory: true },
-			]);
-		});
-
-		test("follows a symlink to a directory (keeps the / completion)", () => {
-			setupFolder(baseDir, {
-				dirs: ["real-dir"],
-				files: { "real-dir/file.txt": "content" },
-			});
-			symlinkSync("real-dir", join(baseDir, "linked-dir"));
-
-			const typed = typeDirectoryOutputLines(baseDir, ["linked-dir"]);
-			assert.deepStrictEqual(typed, [{ path: "linked-dir", isDirectory: true }]);
-		});
-
-		test("tolerates a missing path (racing removal) without throwing", () => {
-			const typed = typeDirectoryOutputLines(baseDir, ["gone-dir"]);
-			assert.deepStrictEqual(typed, [{ path: "gone-dir", isDirectory: false }]);
 		});
 	});
 
@@ -293,87 +228,6 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.ok(!values?.includes("@packages/ai/src/autocomplete.ts"));
 		});
 
-		test("searches additional base paths with fd for @ mentions", async () => {
-			setupFolder(baseDir, {
-				files: { "shared-cwd.ts": "export {};" },
-			});
-			setupFolder(outsideDir, {
-				files: { "shared-extra.ts": "export {};" },
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath(), [outsideDir]);
-			const result = await getSuggestions(provider, ["@shared"], 0, 7);
-
-			const values = result?.items.map((item) => item.value) ?? [];
-			assert.ok(values.includes("@shared-cwd.ts"));
-			assert.ok(values.includes(`@${join(outsideDir, "shared-extra.ts").replace(/\\/g, "/")}`));
-		});
-
-		test("scopes @dir/ queries across every root", async () => {
-			setupFolder(baseDir, {
-				files: { "sub/cwd-file.ts": "export {};" },
-			});
-			setupFolder(outsideDir, {
-				files: { "sub/extra-file.ts": "export {};" },
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath(), [outsideDir]);
-			const result = await getSuggestions(provider, ["@sub/file"], 0, 9);
-
-			const values = result?.items.map((item) => item.value) ?? [];
-			assert.ok(values.includes("@sub/cwd-file.ts"));
-			assert.ok(values.includes(`@${join(outsideDir, "sub", "extra-file.ts").replace(/\\/g, "/")}`));
-		});
-
-		test("deduplicates entries when an additional root is inside cwd", async () => {
-			const nestedDir = join(baseDir, "extra");
-			setupFolder(nestedDir, {
-				files: { "Overlap.ts": "export {};" },
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath(), [nestedDir]);
-			const result = await getSuggestions(provider, ["@overlap"], 0, 8);
-
-			const values = result?.items.map((item) => item.value) ?? [];
-			const absValue = `@${join(nestedDir, "Overlap.ts").replace(/\\/g, "/")}`;
-			const relValue = "@extra/Overlap.ts";
-			const overlapCount = values.filter((v) => v === absValue || v === relValue).length;
-			assert.strictEqual(overlapCount, 1);
-		});
-
-		test("merges empty @ query across roots within the result cap", async () => {
-			const cwdFiles: Record<string, string> = {};
-			for (let i = 0; i < 15; i++) cwdFiles[`f${i}.ts`] = "export {};";
-			setupFolder(baseDir, { files: cwdFiles });
-			const extraFiles: Record<string, string> = {};
-			for (let i = 0; i < 15; i++) extraFiles[`g${i}.ts`] = "export {};";
-			setupFolder(outsideDir, { files: extraFiles });
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath(), [outsideDir]);
-			const result = await getSuggestions(provider, ["@"], 0, 1);
-
-			const count = result?.items.length ?? 0;
-			assert.ok(count <= 20, `expected <= 20 items, got ${count}`);
-			assert.ok(count > 0);
-		});
-
-		test("falls back to full-path per root when another root has the scoped directory", async () => {
-			setupFolder(baseDir, {
-				files: { "packages/tui/src/autocomplete.ts": "export {};" },
-			});
-			// outsideDir has a top-level src/ but no matching file; a global fallback
-			// would skip cwd's full-path search entirely and hide the cwd match.
-			setupFolder(outsideDir, {
-				files: { "src/other.ts": "export {};" },
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath(), [outsideDir]);
-			const result = await getSuggestions(provider, ["@src/auto"], 0, 9);
-
-			const values = result?.items.map((item) => item.value) ?? [];
-			assert.ok(values.includes("@packages/tui/src/autocomplete.ts"));
-		});
-
 		test("matches directory in middle of path with --full-path", async () => {
 			setupFolder(baseDir, {
 				files: {
@@ -408,6 +262,42 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.ok(values?.includes("@../outside/nested/alpha.ts"));
 			assert.ok(values?.includes("@../outside/nested/deeper/also-alpha.ts"));
 			assert.ok(!values?.includes("@../outside/nested/deeper/zzz.ts"));
+		});
+
+		test("ranks shallower same-score @ matches before deeper matches", async () => {
+			setupFolder(baseDir, {
+				dirs: ["scope/aaa/venv/lib/python3.12/site-packages/pkg/core/profile", "scope/projects"],
+			});
+
+			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const line = "@scope/pro";
+			const result = await getSuggestions(provider, [line], 0, line.length);
+
+			const values = result?.items.map((item) => item.value) ?? [];
+			assert.strictEqual(values[0], "@scope/projects/");
+			assert.ok(values.includes("@scope/aaa/venv/lib/python3.12/site-packages/pkg/core/profile/"));
+		});
+
+		test("includes scoped direct children when recursive @ matches are flooded", async () => {
+			const floodedDirs = Array.from(
+				{ length: 250 },
+				(_, index) =>
+					`scope/a${String(index + 1).padStart(3, "0")}/venv/lib/python3.12/site-packages/pkg/core/profile`,
+			);
+			setupFolder(baseDir, {
+				dirs: ["scope/projects", ...floodedDirs],
+			});
+
+			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const line = "@scope/pro";
+			const result = await getSuggestions(provider, [line], 0, line.length);
+
+			const values = result?.items.map((item) => item.value) ?? [];
+			assert.strictEqual(values[0], "@scope/projects/");
+			assert.ok(
+				values.some((value) => value.includes("/profile/")),
+				"Should keep deep fuzzy matches after direct children",
+			);
 		});
 
 		test("quotes paths with spaces for @ suggestions", async () => {

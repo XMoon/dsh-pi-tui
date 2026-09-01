@@ -121,56 +121,13 @@ function buildCompletionValue(
 }
 
 // Use fd to walk directory tree (fast, respects .gitignore)
-/**
- * Type fd's plain-text stdout lines into file/directory entries. fd's
- * default print format does NOT guarantee a trailing separator on
- * directories (a bare path is the contract; trailing slashes were even a
- * long-standing fd feature request), so the real type is resolved against
- * the filesystem via `statSync` (which follows symlinks, so a symlink to a
- * directory still completes with `/`). The trailing separator remains only
- * as a fallback when the stat fails (e.g. a racing removal between fd and
- * here). Result paths are normalized WITHOUT a trailing separator so
- * consumers never slice a directory name.
- * Exported for tests: the regression is that a BARE directory line (no
- * trailing `/`) must still classify as a directory.
- */
-export function typeDirectoryOutputLines(
-	baseDir: string,
-	lines: readonly string[],
-): Array<{ path: string; isDirectory: boolean }> {
-	const results: Array<{ path: string; isDirectory: boolean }> = [];
-
-	for (const line of lines) {
-		const displayLine = toDisplayPath(line);
-		const hasTrailingSeparator = displayLine.endsWith("/");
-		const normalizedPath = hasTrailingSeparator ? displayLine.slice(0, -1) : displayLine;
-		if (normalizedPath === ".git" || normalizedPath.startsWith(".git/") || normalizedPath.includes("/.git/")) {
-			continue;
-		}
-
-		let isDirectory = hasTrailingSeparator;
-		if (!isDirectory) {
-			try {
-				isDirectory = statSync(join(baseDir, normalizedPath)).isDirectory();
-			} catch {
-				isDirectory = false;
-			}
-		}
-
-		results.push({
-			path: normalizedPath,
-			isDirectory,
-		});
-	}
-	return results;
-}
-
 async function walkDirectoryWithFd(
 	baseDir: string,
 	fdPath: string,
 	query: string,
 	maxResults: number,
 	signal: AbortSignal,
+	maxDepth?: number,
 ): Promise<Array<{ path: string; isDirectory: boolean }>> {
 	const args = [
 		"--base-directory",
@@ -190,6 +147,10 @@ async function walkDirectoryWithFd(
 		"--exclude",
 		".git/**",
 	];
+
+	if (maxDepth !== undefined) {
+		args.push("--max-depth", String(maxDepth));
+	}
 
 	if (toDisplayPath(query).includes("/")) {
 		args.push("--full-path");
@@ -239,7 +200,23 @@ async function walkDirectoryWithFd(
 			}
 
 			const lines = stdout.trim().split("\n").filter(Boolean);
-			finish(typeDirectoryOutputLines(baseDir, lines));
+			const results: Array<{ path: string; isDirectory: boolean }> = [];
+
+			for (const line of lines) {
+				const displayLine = toDisplayPath(line);
+				const hasTrailingSeparator = displayLine.endsWith("/");
+				const normalizedPath = hasTrailingSeparator ? displayLine.slice(0, -1) : displayLine;
+				if (normalizedPath === ".git" || normalizedPath.startsWith(".git/") || normalizedPath.includes("/.git/")) {
+					continue;
+				}
+
+				results.push({
+					path: displayLine,
+					isDirectory: hasTrailingSeparator,
+				});
+			}
+
+			finish(results);
 		});
 	});
 }
@@ -248,8 +225,6 @@ export interface AutocompleteItem {
 	value: string;
 	label: string;
 	description?: string;
-	/** Provider-specific metadata forwarded unchanged to applyCompletion. */
-	data?: Record<string, unknown>;
 }
 
 type Awaitable<T> = T | Promise<T>;
@@ -303,18 +278,11 @@ export interface AutocompleteProvider {
 export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	private commands: (SlashCommand | AutocompleteItem)[];
 	private basePath: string;
-	private additionalBasePaths: string[];
 	private fdPath: string | null;
 
-	constructor(
-		commands: (SlashCommand | AutocompleteItem)[] = [],
-		basePath: string,
-		fdPath: string | null = null,
-		additionalBasePaths: readonly string[] = [],
-	) {
+	constructor(commands: (SlashCommand | AutocompleteItem)[] = [], basePath: string, fdPath: string | null = null) {
 		this.commands = commands;
 		this.basePath = basePath;
-		this.additionalBasePaths = additionalBasePaths.map((p) => toDisplayPath(p));
 		this.fdPath = fdPath;
 	}
 
@@ -555,24 +523,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		return path;
 	}
 
-	private searchRoots(): string[] {
-		const seen = new Set<string>();
-		const roots: string[] = [];
-		for (const root of [this.basePath, ...this.additionalBasePaths]) {
-			const key = toDisplayPath(root);
-			if (seen.has(key)) continue;
-			seen.add(key);
-			roots.push(root);
-		}
-		return roots;
-	}
-
-	private resolveScopedFuzzyQuery(
-		rawQuery: string,
-	):
-		| { kind: "relative"; displayBase: string; query: string }
-		| { kind: "absolute"; baseDir: string; displayBase: string; query: string }
-		| null {
+	private resolveScopedFuzzyQuery(rawQuery: string): { baseDir: string; query: string; displayBase: string } | null {
 		const normalizedQuery = toDisplayPath(rawQuery);
 		const slashIndex = normalizedQuery.lastIndexOf("/");
 		if (slashIndex === -1) {
@@ -582,22 +533,24 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const displayBase = normalizedQuery.slice(0, slashIndex + 1);
 		const query = normalizedQuery.slice(slashIndex + 1);
 
-		// Absolute (~/, /) scopes resolve to a single existing directory and do
-		// not fan out across additional roots. Relative scopes are expanded per
-		// search root by the caller.
-		if (displayBase.startsWith("~/") || displayBase.startsWith("/")) {
-			const baseDir = displayBase.startsWith("~/") ? this.expandHomePath(displayBase) : displayBase;
-			try {
-				if (!statSync(baseDir).isDirectory()) {
-					return null;
-				}
-			} catch {
-				return null;
-			}
-			return { kind: "absolute", baseDir, displayBase, query };
+		let baseDir: string;
+		if (displayBase.startsWith("~/")) {
+			baseDir = this.expandHomePath(displayBase);
+		} else if (displayBase.startsWith("/")) {
+			baseDir = displayBase;
+		} else {
+			baseDir = join(this.basePath, displayBase);
 		}
 
-		return { kind: "relative", displayBase, query };
+		try {
+			if (!statSync(baseDir).isDirectory()) {
+				return null;
+			}
+		} catch {
+			return null;
+		}
+
+		return { baseDir, query, displayBase };
 	}
 
 	private scopedPathForDisplay(displayBase: string, relativePath: string): string {
@@ -768,159 +721,86 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		return score;
 	}
 
-	// Fuzzy file search using fd (fast, respects .gitignore). Fans out across
-	// every search root (cwd + additional dirs) so `@` completion covers all
-	// roots while still pushing the query down to fd.
+	private async getBaseDirSuggestions(
+		baseDir: string,
+		query: string,
+		signal: AbortSignal,
+	): Promise<Array<{ path: string; isDirectory: boolean }>> {
+		if (!this.fdPath || signal.aborted) {
+			return [];
+		}
+
+		return await walkDirectoryWithFd(baseDir, this.fdPath, query, 100, signal, 1);
+	}
+
+	// Fuzzy file search using fd (fast, respects .gitignore)
 	private async getFuzzyFileSuggestions(
 		query: string,
 		options: { isQuotedPrefix: boolean; signal: AbortSignal },
 	): Promise<AutocompleteItem[]> {
-		const fdPath = this.fdPath;
-		if (!fdPath || options.signal.aborted) {
+		if (!this.fdPath || options.signal.aborted) {
 			return [];
 		}
 
 		try {
-			const scoped = this.resolveScopedFuzzyQuery(query);
-
-			type RootTarget = {
-				baseDir: string;
-				pathRoot: string;
-				displayBase: string;
-				fdQuery: string;
-				isAdditional: boolean;
-				absolute: boolean;
-			};
-			const targets: RootTarget[] = [];
-
-			const pushFullPathTarget = (root: string) => {
-				// Whole-tree search for this root using the original query (which
-				// contains "/", so fd runs in --full-path mode).
-				targets.push({
-					baseDir: root,
-					pathRoot: root,
-					displayBase: "",
-					fdQuery: query,
-					isAdditional: root !== this.basePath,
-					absolute: false,
-				});
-			};
-
-			if (scoped?.kind === "absolute") {
-				targets.push({
-					baseDir: scoped.baseDir,
-					pathRoot: scoped.baseDir,
-					displayBase: scoped.displayBase,
-					fdQuery: scoped.query,
-					isAdditional: false,
-					absolute: true,
-				});
-			} else if (scoped?.kind === "relative") {
-				for (const root of this.searchRoots()) {
-					const baseDir = join(root, scoped.displayBase);
-					let isDir = false;
-					try {
-						isDir = statSync(baseDir).isDirectory();
-					} catch {
-						isDir = false;
-					}
-					if (isDir) {
-						targets.push({
-							baseDir,
-							pathRoot: root,
-							displayBase: scoped.displayBase,
-							fdQuery: scoped.query,
-							isAdditional: root !== this.basePath,
-							absolute: false,
-						});
-					} else {
-						// This root does not have the scoped directory. Fall back to a
-						// per-root full-path search so another root having the prefix
-						// does not hide matches that only exist under this root.
-						pushFullPathTarget(root);
-					}
-				}
-			} else {
-				for (const root of this.searchRoots()) {
-					pushFullPathTarget(root);
-				}
-			}
-
-			if (targets.length === 0) {
-				return [];
-			}
-
-			const perRoot = await Promise.all(
-				targets.map(async (target) => {
-					const entries = await walkDirectoryWithFd(target.baseDir, fdPath, target.fdQuery, 100, options.signal);
-					return entries.map((entry) => ({ entry, target }));
+			const scopedQuery = this.resolveScopedFuzzyQuery(query);
+			const fdBaseDir = scopedQuery?.baseDir ?? this.basePath;
+			const fdQuery = scopedQuery?.query ?? query;
+			const baseDirEntries = await this.getBaseDirSuggestions(fdBaseDir, fdQuery, options.signal);
+			const recursiveEntries = await walkDirectoryWithFd(fdBaseDir, this.fdPath, fdQuery, 100, options.signal);
+			const seenPaths = new Set(baseDirEntries.map((entry) => entry.path));
+			const entries = [
+				...baseDirEntries,
+				...recursiveEntries.filter((entry) => {
+					if (seenPaths.has(entry.path)) return false;
+					seenPaths.add(entry.path);
+					return true;
 				}),
-			);
+			];
 			if (options.signal.aborted) {
 				return [];
 			}
 
-			type Scored = {
-				path: string;
-				isDirectory: boolean;
-				score: number;
-				target: RootTarget;
-				absPath: string;
-			};
-			const bestByAbs = new Map<string, Scored>();
-			for (const group of perRoot) {
-				for (const { entry, target } of group) {
-					const score = target.fdQuery ? this.scoreEntry(entry.path, target.fdQuery, entry.isDirectory) : 1;
-					if (score <= 0) continue;
-					// walkDirectoryWithFd normalizes paths WITHOUT a
-					// trailing separator, so no slicing here.
-					const pathWithoutSlash = entry.path;
-					const absPath = target.absolute
-						? toDisplayPath(join(target.displayBase, pathWithoutSlash))
-						: toDisplayPath(join(target.pathRoot, target.displayBase, pathWithoutSlash));
-					const existing = bestByAbs.get(absPath);
-					if (!existing || score > existing.score) {
-						bestByAbs.set(absPath, {
-							path: entry.path,
-							isDirectory: entry.isDirectory,
-							score,
-							target,
-							absPath,
-						});
-					}
-				}
-			}
+			const scoredEntries = entries
+				.map((entry) => ({
+					...entry,
+					score: fdQuery ? this.scoreEntry(entry.path, fdQuery, entry.isDirectory) : 1,
+				}))
+				.filter((entry) => entry.score > 0);
 
-			const scored = [...bestByAbs.values()];
-			scored.sort((a, b) => b.score - a.score);
-			const topEntries = scored.slice(0, 20);
+			scoredEntries.sort((a, b) => {
+				const scoreDiff = b.score - a.score;
+				if (scoreDiff !== 0) return scoreDiff;
+
+				const aDepth = toDisplayPath(a.path).split("/").filter(Boolean).length;
+				const bDepth = toDisplayPath(b.path).split("/").filter(Boolean).length;
+				const depthDiff = aDepth - bDepth;
+				if (depthDiff !== 0) return depthDiff;
+
+				const lengthDiff = a.path.length - b.path.length;
+				if (lengthDiff !== 0) return lengthDiff;
+
+				return a.path.localeCompare(b.path);
+			});
+			const topEntries = scoredEntries.slice(0, 20);
 
 			const suggestions: AutocompleteItem[] = [];
-			for (const item of topEntries) {
-				// walkDirectoryWithFd normalizes paths to no trailing
-				// separator, so no slicing is needed here either.
-				const pathWithoutSlash = item.path;
+			for (const { path: entryPath, isDirectory } of topEntries) {
+				const pathWithoutSlash = isDirectory ? entryPath.slice(0, -1) : entryPath;
+				const displayPath = scopedQuery
+					? this.scopedPathForDisplay(scopedQuery.displayBase, pathWithoutSlash)
+					: pathWithoutSlash;
 				const entryName = basename(pathWithoutSlash);
-				let displayPath: string;
-				if (item.target.absolute) {
-					displayPath = this.scopedPathForDisplay(item.target.displayBase, pathWithoutSlash);
-				} else if (item.target.isAdditional) {
-					displayPath = item.absPath;
-				} else {
-					displayPath = item.target.displayBase
-						? this.scopedPathForDisplay(item.target.displayBase, pathWithoutSlash)
-						: pathWithoutSlash;
-				}
-				const completionPath = item.isDirectory ? `${displayPath}/` : displayPath;
+				const completionPath = isDirectory ? `${displayPath}/` : displayPath;
 				const value = buildCompletionValue(completionPath, {
-					isDirectory: item.isDirectory,
+					isDirectory,
 					isAtPrefix: true,
 					isQuotedPrefix: options.isQuotedPrefix,
 				});
 
 				suggestions.push({
 					value,
-					label: entryName + (item.isDirectory ? "/" : ""),
+					label: entryName + (isDirectory ? "/" : ""),
 					description: displayPath,
 				});
 			}

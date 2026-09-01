@@ -44,13 +44,6 @@ export interface Component {
 	 * Called when theme changes or when component needs to re-render from scratch.
 	 */
 	invalidate(): void;
-
-	/**
-	 * Release resources (timers, listeners, render callbacks) when the
-	 * component is removed from a container. Containers call this on
-	 * removeChild/clear.
-	 */
-	dispose?(): void;
 }
 
 export type TuiInputListenerResult = { consume?: boolean; data?: string } | undefined;
@@ -121,7 +114,7 @@ function parseSizeValue(value: SizeValue | undefined, referenceSize: number): nu
 	// Parse percentage string like "50%"
 	const match = value.match(/^(\d+(?:\.\d+)?)%$/);
 	if (match) {
-		return Math.floor((referenceSize * parseFloat(match[1]!)) / 100);
+		return Math.floor((referenceSize * parseFloat(match[1])) / 100);
 	}
 	return undefined;
 }
@@ -226,17 +219,11 @@ export class Container implements Component {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
-			component.dispose?.();
 		}
 	}
 
 	clear(): void {
-		for (const child of this.children) child.dispose?.();
 		this.children = [];
-	}
-
-	dispose(): void {
-		for (const child of this.children) child.dispose?.();
 	}
 
 	invalidate(): void {
@@ -246,9 +233,6 @@ export class Container implements Component {
 	}
 
 	render(width: number): string[] {
-		// Extremely narrow terminals can report tiny or even non-positive
-		// column counts; never propagate a width below 1 into components.
-		width = Math.max(1, width);
 		const lines: string[] = [];
 		for (const child of this.children) {
 			const childLines = child.render(width);
@@ -263,7 +247,7 @@ export class Container implements Component {
 /**
  * TUI - Main class for managing terminal UI with differential rendering
  */
-export const SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
+const SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
 
 /** Composite overlay content into a terminal line at a fixed column. */
 export function compositeTuiLine(
@@ -357,8 +341,8 @@ export abstract class TuiBase extends Container implements TUI {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
-	private showHardwareCursor = process.env['PI_HARDWARE_CURSOR'] === "1";
-	private clearOnShrink = process.env['PI_CLEAR_ON_SHRINK'] === "1";
+	private showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
+	private clearOnShrink = process.env.PI_CLEAR_ON_SHRINK === "1";
 	protected fullRedrawCount = 0;
 	protected stopped = false;
 	private pendingOsc11BackgroundReplies = 0;
@@ -379,7 +363,7 @@ export abstract class TuiBase extends Container implements TUI {
 	constructor(terminal: Terminal, showHardwareCursor?: boolean, logDirectory?: string) {
 		super();
 		this.terminal = terminal;
-		this.logDirectory = logDirectory ?? process.env['PI_CODING_AGENT_DIR'] ?? path.join(os.homedir(), ".pi", "agent");
+		this.logDirectory = logDirectory ?? process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
 		if (showHardwareCursor !== undefined) {
 			this.showHardwareCursor = showHardwareCursor;
 		}
@@ -678,6 +662,13 @@ export abstract class TuiBase extends Container implements TUI {
 		return this.overlayStack.some((o) => this.isOverlayVisible(o));
 	}
 
+	/** Check if the focused component is a visible overlay */
+	protected isOverlayFocused(): boolean {
+		return this.overlayStack.some(
+			(entry) => entry.component === this.focusedComponent && this.isOverlayVisible(entry),
+		);
+	}
+
 	/** Check if an overlay entry is currently visible */
 	private isOverlayVisible(entry: OverlayStackEntry): boolean {
 		if (entry.hidden) return false;
@@ -911,13 +902,12 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	private consumeOsc11BackgroundResponse(data: string): boolean {
-		// A reply that arrives after its query timed out must still be
-		// swallowed: it is a terminal protocol response, never editor input.
-		if (!isOsc11BackgroundColorResponse(data)) {
+		if (this.pendingOsc11BackgroundReplies <= 0) {
 			return false;
 		}
-		if (this.pendingOsc11BackgroundReplies <= 0) {
-			return true;
+
+		if (!isOsc11BackgroundColorResponse(data)) {
+			return false;
 		}
 
 		const rgb = parseOsc11BackgroundColor(data);
@@ -954,8 +944,8 @@ export abstract class TuiBase extends Container implements TUI {
 			return false;
 		}
 
-		const heightPx = parseInt(match[1]!, 10);
-		const widthPx = parseInt(match[2]!, 10);
+		const heightPx = parseInt(match[1], 10);
+		const widthPx = parseInt(match[2], 10);
 		if (heightPx <= 0 || widthPx <= 0) {
 			return true;
 		}
@@ -1022,7 +1012,7 @@ export abstract class TuiBase extends Container implements TUI {
 				const match = opt.row.match(/^(\d+(?:\.\d+)?)%$/);
 				if (match) {
 					const maxRow = Math.max(0, availHeight - effectiveHeight);
-					const percent = parseFloat(match[1]!) / 100;
+					const percent = parseFloat(match[1]) / 100;
 					row = marginTop + Math.floor(maxRow * percent);
 				} else {
 					// Invalid format, fall back to center
@@ -1044,7 +1034,7 @@ export abstract class TuiBase extends Container implements TUI {
 				const match = opt.col.match(/^(\d+(?:\.\d+)?)%$/);
 				if (match) {
 					const maxCol = Math.max(0, availWidth - width);
-					const percent = parseFloat(match[1]!) / 100;
+					const percent = parseFloat(match[1]) / 100;
 					col = marginLeft + Math.floor(maxCol * percent);
 				} else {
 					// Invalid format, fall back to center
@@ -1158,8 +1148,8 @@ export abstract class TuiBase extends Container implements TUI {
 					// Defensive: truncate overlay line to declared width before compositing
 					// (components should already respect width, but this ensures it)
 					const truncatedOverlayLine =
-						visibleWidth(overlayLines[i]!) > w ? sliceByColumn(overlayLines[i]!, 0, w, true) : overlayLines[i]!;
-					result[idx] = this.compositeLineAt(result[idx]!, truncatedOverlayLine, col, w, termWidth);
+						visibleWidth(overlayLines[i]) > w ? sliceByColumn(overlayLines[i], 0, w, true) : overlayLines[i];
+					result[idx] = this.compositeLineAt(result[idx], truncatedOverlayLine, col, w, termWidth);
 				}
 			}
 		}
@@ -1170,7 +1160,7 @@ export abstract class TuiBase extends Container implements TUI {
 	protected applyLineResets(lines: string[]): string[] {
 		const reset = SEGMENT_RESET;
 		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i]!;
+			const line = lines[i];
 			if (!isImageLine(line)) {
 				lines[i] = normalizeTerminalOutput(line) + reset;
 			}
@@ -1200,7 +1190,7 @@ export abstract class TuiBase extends Container implements TUI {
 		// Only scan the bottom `height` lines (visible viewport)
 		const viewportTop = Math.max(0, lines.length - height);
 		for (let row = lines.length - 1; row >= viewportTop; row--) {
-			const line = lines[row]!;
+			const line = lines[row];
 			const markerIndex = line.indexOf(CURSOR_MARKER);
 			if (markerIndex !== -1) {
 				// Calculate visual column (width of text before marker)
@@ -1235,16 +1225,6 @@ export abstract class TuiBase extends Container implements TUI {
 				}
 				query.settled = true;
 				query.timer = undefined;
-				// The reply may still arrive late. Drop the query from the queue so
-				// the pending counter stays in sync: without this, every timed-out
-				// query leaked +1 into pendingOsc11BackgroundReplies, which made
-				// later unrelated input get consumed as replies and shifted the
-				// queue/counter pair out of alignment.
-				const index = this.pendingOsc11BackgroundQueries.indexOf(query);
-				if (index !== -1) {
-					this.pendingOsc11BackgroundQueries.splice(index, 1);
-					this.pendingOsc11BackgroundReplies -= 1;
-				}
 				query.resolve?.(undefined);
 				query.resolve = undefined;
 			}, timeoutMs);

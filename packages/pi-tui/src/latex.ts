@@ -819,7 +819,7 @@ class LatexParser {
 	private parseSequence(endCharacter?: string): string {
 		let result = "";
 		while (this.position < this.source.length) {
-			const character = this.source[this.position]!;
+			const character = this.source[this.position];
 			if (endCharacter && character === endCharacter) {
 				this.position++;
 				return result;
@@ -920,6 +920,13 @@ class LatexParser {
 
 		let command = "";
 		const first = this.source[this.position] ?? "";
+		if (first === "\n" || first === "\r") {
+			this.position++;
+			if (first === "\r" && this.source[this.position] === "\n") {
+				this.position++;
+			}
+			return " ";
+		}
 		if (/[A-Za-z]/.test(first)) {
 			const start = this.position;
 			while (this.position < this.source.length && /[A-Za-z]/.test(this.source[this.position] ?? "")) {
