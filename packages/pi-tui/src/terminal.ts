@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { setKittyProtocolActive } from "./keys.ts";
 import { isNativeModifierPressed } from "./native-modifiers.ts";
+import { getNativeModuleCandidates } from "./native-module-path.ts";
 import { StdinBuffer } from "./stdin-buffer.ts";
 
 const cjsRequire = createRequire(import.meta.url);
@@ -38,7 +38,7 @@ function isKeyboardProtocolNegotiationSequencePrefix(sequence: string): boolean 
 }
 
 export function isAppleTerminalSession(): boolean {
-	return process.platform === "darwin" && process.env['TERM_PROGRAM'] === "Apple_Terminal";
+	return process.platform === "darwin" && process.env.TERM_PROGRAM === "Apple_Terminal";
 }
 
 export function normalizeNativeShiftEnterInput(
@@ -110,11 +110,11 @@ const DEFAULT_SSH_ESCAPE_TIMEOUT_MS = 100;
  * another byte, so high-latency transports need a longer reassembly window.
  */
 export function resolveEscapeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
-	const configured = Number(env['PI_TUI_ESC_TIMEOUT']);
+	const configured = Number(env.PI_TUI_ESC_TIMEOUT);
 	if (Number.isFinite(configured) && configured > 0) {
 		return configured;
 	}
-	if (env['SSH_CONNECTION'] || env['SSH_TTY']) {
+	if (env.SSH_CONNECTION || env.SSH_TTY) {
 		return DEFAULT_SSH_ESCAPE_TIMEOUT_MS;
 	}
 	return DEFAULT_ESCAPE_TIMEOUT_MS;
@@ -136,7 +136,7 @@ export class ProcessTerminal implements Terminal {
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
 	private writeLogPath = (() => {
-		const env = process.env['PI_TUI_WRITE_LOG'] || "";
+		const env = process.env.PI_TUI_WRITE_LOG || "";
 		if (!env) return "";
 		try {
 			if (fs.statSync(env).isDirectory()) {
@@ -159,11 +159,6 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	start(onInput: (data: string) => void, onResize: () => void): void {
-		// A repeated start() must not stack resize listeners: stop() can only
-		// remove the CURRENT reference, so any earlier listener would leak.
-		if (this.resizeHandler) {
-			process.stdout.removeListener("resize", this.resizeHandler);
-		}
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
 
@@ -375,16 +370,10 @@ export class ProcessTerminal implements Terminal {
 			if (arch !== "x64" && arch !== "arm64") return;
 
 			// Dynamic require so non-Windows and bundled/browser paths never load the
-			// native helper. In the npm package native/ is next to dist/; in compiled
-			// binary archives native/ is copied next to the executable.
-			const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+			// native helper. Installed packages resolve it from pi-tui; standalone
+			// binaries resolve the copy next to the executable.
 			const nativePath = path.join("native", "win32", "prebuilds", `win32-${arch}`, "win32-console-mode.node");
-			const candidates = [
-				path.join(moduleDir, "..", nativePath),
-				path.join(moduleDir, nativePath),
-				path.join(path.dirname(process.execPath), nativePath),
-			];
-			for (const modulePath of candidates) {
+			for (const modulePath of getNativeModuleCandidates(nativePath)) {
 				try {
 					const helper = cjsRequire(modulePath) as { enableVirtualTerminalInput?: () => boolean };
 					helper.enableVirtualTerminalInput?.();
@@ -496,11 +485,11 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	get columns(): number {
-		return process.stdout.columns || Number(process.env['COLUMNS']) || 80;
+		return process.stdout.columns || Number(process.env.COLUMNS) || 80;
 	}
 
 	get rows(): number {
-		return process.stdout.rows || Number(process.env['LINES']) || 24;
+		return process.stdout.rows || Number(process.env.LINES) || 24;
 	}
 
 	moveBy(lines: number): void {

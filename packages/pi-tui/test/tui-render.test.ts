@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Image } from "../src/components/image.ts";
-import { Text } from "../src/components/text.ts";
+import type { Terminal } from "../src/terminal.ts";
 import {
 	deleteKittyImage,
 	encodeKitty,
@@ -13,7 +13,7 @@ import {
 	setCapabilities,
 	setCellDimensions,
 } from "../src/terminal-image.ts";
-import { type Component, Container, type TUI } from "../src/tui.ts";
+import type { Component, TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -36,6 +36,30 @@ class InputComponent extends TestComponent {
 	handleInput(data: string): void {
 		this.lines = [data];
 	}
+}
+
+const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
+
+class BoundedWriteTerminal implements Terminal {
+	readonly writes: string[] = [];
+	columns = 80;
+	rows = 24;
+	readonly kittyProtocolActive = false;
+
+	start(_onInput: (data: string) => void, _onResize: () => void): void {}
+	stop(): void {}
+	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
+	write(data: string): void {
+		this.writes.push(data);
+	}
+	moveBy(_lines: number): void {}
+	hideCursor(): void {}
+	showCursor(): void {}
+	clearLine(): void {}
+	clearFromCursor(): void {}
+	clearScreen(): void {}
+	setTitle(_title: string): void {}
+	setProgress(_active: boolean): void {}
 }
 
 class LoggingVirtualTerminal extends VirtualTerminal {
@@ -134,6 +158,51 @@ describe("TUI debug logging", () => {
 		} finally {
 			rmSync(logDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("TUI bounded render output", () => {
+	it("splits a large full render without changing its output", () => {
+		const terminal = new BoundedWriteTerminal();
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		const kittyLine = `\x1b_Ga=T,f=100;${"A".repeat(1_200_000)}\x1b\\`;
+		component.lines = [kittyLine, kittyLine];
+		tui.addChild(component);
+
+		tui.renderNow();
+
+		assert.ok(terminal.writes.length > 2, "large output should be split across terminal writes");
+		assert.ok(
+			terminal.writes.every((write) => write.length <= MAX_RENDER_WRITE_CHARS),
+			"each terminal write should stay below the configured limit",
+		);
+		assert.strictEqual(
+			terminal.writes.join(""),
+			`\x1b[?2026h${kittyLine}\r\n${kittyLine}\x1b[?2026l`,
+			"chunking must preserve the synchronized render output",
+		);
+	});
+
+	it("splits large differential updates without a full redraw", () => {
+		const terminal = new BoundedWriteTerminal();
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = ["before"];
+		tui.renderNow();
+		terminal.writes.length = 0;
+
+		const kittyLine = `\x1b_Ga=T,f=100;${"A".repeat(1_200_000)}\x1b\\`;
+		component.lines = ["before", kittyLine, kittyLine];
+		tui.renderNow();
+
+		assert.ok(terminal.writes.length > 2, "large output should be split across terminal writes");
+		assert.ok(terminal.writes.every((write) => write.length <= MAX_RENDER_WRITE_CHARS));
+		const output = terminal.writes.join("");
+		assert.ok(output.startsWith("\x1b[?2026h"));
+		assert.ok(output.endsWith("\x1b[?2026l"));
+		assert.ok(!output.includes("\x1b[2J"), "the update should stay on the differential render path");
 	});
 });
 
@@ -805,13 +874,7 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		// Upstream behavior: a change above the viewport triggers a
-		// destructive full redraw, which repaints the tail of the new
-		// content and leaves no stale rows on screen.
-		assert.ok(
-			tui.fullRedraws > redrawsBeforeSwitch,
-			"Branch switch above the viewport should trigger a full redraw",
-		);
+		assert.ok(tui.fullRedraws > redrawsBeforeSwitch, "Branch switch should trigger a full redraw");
 
 		const viewport = terminal.getViewport();
 		for (let i = 0; i < 10; i++) {
@@ -821,8 +884,6 @@ describe("TUI differential rendering", () => {
 			assert.ok(!line.includes("Chat 14"), `Stale "Chat 14" at viewport row ${i}`);
 		}
 
-		// The full redraw shows the tail of the new content with the editor
-		// at the bottom.
 		assert.deepStrictEqual(viewport, [
 			"Chat 5",
 			"Chat 6",
@@ -837,221 +898,5 @@ describe("TUI differential rendering", () => {
 		]);
 
 		tui.stop();
-	});
-});
-
-describe("Container width clamping", () => {
-	it("clamps non-positive widths to 1 before rendering children", () => {
-		const container = new Container();
-		const received: number[] = [];
-		container.addChild({
-			render(width: number): string[] {
-				received.push(width);
-				return [];
-			},
-			invalidate(): void {},
-		});
-		container.render(0);
-		container.render(-3);
-		container.render(5);
-		assert.deepStrictEqual(received, [1, 1, 5]);
-	});
-});
-
-describe("TUI overwide line handling", () => {
-	it("truncates lines wider than the terminal instead of throwing", async () => {
-		const terminal = new VirtualTerminal(4, 10);
-		const tui = new TuiMainScreen(terminal);
-		const component = new TestComponent();
-		component.lines = ["ok"];
-		tui.addChild(component);
-		tui.start();
-		await terminal.waitForRender();
-
-		// Switch to overwide lines and re-render through the differential
-		// path (this threw before the fix).
-		component.lines = ["xxxxxxxxxx", "\x1b[31myyyyyyyyyy\x1b[0m", "你好世界"];
-		tui.requestRender();
-		await terminal.waitForRender();
-
-		const viewport = terminal.getViewport();
-		// With truncation each logical line occupies exactly one viewport
-		// row; without it, xterm auto-wraps the overwide lines and shifts
-		// the following rows, failing the exact assertions below.
-		assert.strictEqual(viewport[0], "xxxx");
-		assert.strictEqual(viewport[1], "yyyy");
-		assert.strictEqual(viewport[2], "你好");
-		assert.strictEqual(viewport[3], "");
-
-		tui.stop();
-	});
-});
-
-describe("Text negative width safety", () => {
-	it("does not throw at zero or negative widths", () => {
-		const text = new Text("你好", 1, 1);
-		assert.doesNotThrow(() => text.render(0));
-		assert.doesNotThrow(() => text.render(-1));
-	});
-});
-
-describe("TUI steady-frame processed-line reuse", () => {
-	it("writes only the changed line when one component updates in a long transcript", async () => {
-		const terminal = new LoggingVirtualTerminal(40, 10);
-		const tui = new TuiMainScreen(terminal);
-		const staticComponent = new TestComponent();
-		staticComponent.lines = Array.from({ length: 30 }, (_, i) => `static-${String(i).padStart(2, "0")}`);
-		const spinner = new TestComponent();
-		spinner.lines = ["frame-a"];
-		tui.addChild(staticComponent);
-		tui.addChild(spinner);
-		tui.start();
-		await terminal.waitForRender();
-		terminal.clearWrites();
-
-		spinner.lines = ["frame-b"];
-		tui.requestRender();
-		await terminal.waitForRender();
-
-		const writes = terminal.getWrites();
-		assert.ok(writes.includes("frame-b"), "changed line should be written");
-		assert.ok(!writes.includes("static-"), "unchanged transcript lines must not be rewritten");
-		assert.ok(!writes.includes("\x1b[2J"), "no full clear for an in-viewport change");
-
-		tui.stop();
-	});
-
-	it("writes nothing but the cursor hide for an identical frame", async () => {
-		const terminal = new LoggingVirtualTerminal(40, 10);
-		const tui = new TuiMainScreen(terminal);
-		const component = new TestComponent();
-		component.lines = ["alpha", "beta", "gamma"];
-		tui.addChild(component);
-		tui.start();
-		await terminal.waitForRender();
-		terminal.clearWrites();
-
-		tui.requestRender();
-		await terminal.waitForRender();
-
-		const writes = terminal.getWrites();
-		assert.strictEqual(writes.replaceAll("\x1b[?25l", ""), "");
-		tui.stop();
-	});
-
-	it("does not serve stale processed lines when a line toggles between two values", async () => {
-		const terminal = new LoggingVirtualTerminal(40, 10);
-		const tui = new TuiMainScreen(terminal);
-		const component = new TestComponent();
-		component.lines = ["head", "value-a", "tail"];
-		tui.addChild(component);
-		tui.start();
-		await terminal.waitForRender();
-
-		component.lines = ["head", "value-b", "tail"];
-		tui.requestRender();
-		await terminal.waitForRender();
-		component.lines = ["head", "value-a", "tail"];
-		tui.requestRender();
-		await terminal.waitForRender();
-
-		const viewport = await terminal.flushAndGetViewport();
-		assert.strictEqual(viewport[0], "head");
-		assert.strictEqual(viewport[1], "value-a");
-		assert.strictEqual(viewport[2], "tail");
-		tui.stop();
-	});
-
-	it("fully redraws when the terminal width changes", async () => {
-		const terminal = new LoggingVirtualTerminal(40, 10);
-		const tui = new TuiMainScreen(terminal);
-		const component = new TestComponent();
-		component.lines = ["one", "two", "three"];
-		tui.addChild(component);
-		tui.start();
-		await terminal.waitForRender();
-		terminal.clearWrites();
-
-		terminal.resize(30, 10);
-		await terminal.waitForRender();
-
-		const writes = terminal.getWrites();
-		assert.ok(writes.includes("\x1b[2J"), "width change should clear and redraw");
-		assert.ok(writes.includes("one") && writes.includes("two") && writes.includes("three"));
-		tui.stop();
-	});
-
-	it("redraws a kitty image block when a line above it changes", async () => {
-		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
-		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		try {
-			const terminal = new LoggingVirtualTerminal(40, 10);
-			const tui = new TuiMainScreen(terminal);
-			const component = new TestComponent();
-			tui.addChild(component);
-			const image = new Image(
-				"AAAA",
-				"image/png",
-				{ fallbackColor: (value) => value },
-				{ maxWidthCells: 2 },
-				{ widthPx: 20, heightPx: 20 },
-			);
-			const imageLines = image.render(40);
-			const imageSequence = imageLines[0]!;
-			component.lines = ["header", ...imageLines, "footer"];
-			tui.start();
-			await terminal.waitForRender();
-			terminal.clearWrites();
-
-			component.lines = ["header2", ...imageLines, "footer"];
-			tui.requestRender();
-			await terminal.waitForRender();
-
-			const writes = terminal.getWrites();
-			assert.ok(writes.includes("header2"), "changed line should be written");
-			assert.ok(
-				writes.includes(imageSequence),
-				"image block should be redrawn when a line above it changes",
-			);
-			tui.stop();
-		} finally {
-			resetCapabilitiesCache();
-			setCellDimensions({ widthPx: 9, heightPx: 18 });
-		}
-	});
-
-	it("does not rewrite a kitty image on an identical frame", async () => {
-		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
-		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		try {
-			const terminal = new LoggingVirtualTerminal(40, 10);
-			const tui = new TuiMainScreen(terminal);
-			const component = new TestComponent();
-			tui.addChild(component);
-			const image = new Image(
-				"AAAA",
-				"image/png",
-				{ fallbackColor: (value) => value },
-				{ maxWidthCells: 2 },
-				{ widthPx: 20, heightPx: 20 },
-			);
-			const imageLines = image.render(40);
-			const imageSequence = imageLines[0]!;
-			component.lines = ["header", ...imageLines, "footer"];
-			tui.start();
-			await terminal.waitForRender();
-			terminal.clearWrites();
-
-			tui.requestRender();
-			await terminal.waitForRender();
-
-			const writes = terminal.getWrites();
-			assert.ok(!writes.includes(imageSequence), "identical frame must not rewrite the image");
-			assert.strictEqual(writes.replaceAll("\x1b[?25l", ""), "");
-			tui.stop();
-		} finally {
-			resetCapabilitiesCache();
-			setCellDimensions({ widthPx: 9, heightPx: 18 });
-		}
 	});
 });

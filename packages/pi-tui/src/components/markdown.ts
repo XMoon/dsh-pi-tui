@@ -13,104 +13,12 @@ class StrictStrikethroughTokenizer extends Tokenizer {
 			return undefined;
 		}
 
-		const text = match[2]!;
+		const text = match[2];
 		return {
 			type: "del",
 			raw: match[0],
 			text,
 			tokens: this.lexer.inlineTokens(text),
-		};
-	}
-}
-
-// Local divergence (not upstream; keep StrictStrikethroughTokenizer untouched
-// for re-vendoring): marked's GFM autolink accepts any non-space characters
-// after the domain and its backpedal only strips ASCII trailing punctuation,
-// so CJK/full-width punctuation right after a bare URL is absorbed into the
-// link text and href (`.../pull/232（本地` becomes one anchor). Cut the match
-// at the first CJK punctuation character BEFORE the ASCII backpedal so trailing
-// ASCII punctuation left by the cut is still normalized away. Full-width
-// parentheses are handled like GFM handles ASCII ones: balanced pairs stay
-// part of the URL (`.../wiki/中华人民共和国（1949年）`, punctuation inside
-// them included), and only an unbalanced `（` / `）` terminates the match.
-// Guarded by the "CJK punctuation after bare URLs" tests in
-// test/markdown.test.ts.
-const FULLWIDTH_LEFT_PAREN = 0xff08; // （
-const FULLWIDTH_RIGHT_PAREN = 0xff09; // ）
-const CJK_URL_TERMINATOR_REGEX =
-	/[\u3000-\u303f\uff01-\uff07\uff0a-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65\u2013\u2014\u2018\u2019\u201c\u201d\u2026]/;
-
-/**
- * Index at which to cut an autolink match, or -1 to keep it whole. Non-paren
- * CJK punctuation terminates the URL outside of full-width parens; full-width
- * parens only terminate it when unbalanced. Punctuation inside a balanced
- * parenthetical (e.g. the ，in （北京，1949年）) stays part of the URL —
- * prose parentheticals contain spaces and never survive marked's match this
- * far, so a balanced group is almost always deliberate URL content.
- */
-function findCjkUrlBoundary(match: string): number {
-	let parenDepth = 0;
-	let unmatchedOpen = -1;
-	for (let i = 0; i < match.length; i++) {
-		const code = match.charCodeAt(i);
-		if (code === FULLWIDTH_LEFT_PAREN) {
-			parenDepth++;
-			if (unmatchedOpen === -1) {
-				unmatchedOpen = i;
-			}
-		} else if (code === FULLWIDTH_RIGHT_PAREN) {
-			if (parenDepth === 0) {
-				return i;
-			}
-			parenDepth--;
-			if (parenDepth === 0) {
-				unmatchedOpen = -1;
-			}
-		} else if (parenDepth === 0 && CJK_URL_TERMINATOR_REGEX.test(match[i]!)) {
-			return i;
-		}
-	}
-	return parenDepth > 0 ? unmatchedOpen : -1;
-}
-
-class CjkBoundaryUrlTokenizer extends StrictStrikethroughTokenizer {
-	override url(src: string): Tokens.Link | undefined {
-		const cap = this.rules.inline.url.exec(src);
-		if (!cap) {
-			return undefined;
-		}
-		// Autolinked emails (cap[2] === "@") skip the backpedal upstream; keep
-		// that behavior exactly.
-		if (cap[2] === "@") {
-			const text = cap[0];
-			return {
-				type: "link",
-				raw: text,
-				text,
-				href: `mailto:${text}`,
-				tokens: [{ type: "text", raw: text, text }],
-			};
-		}
-		const boundary = findCjkUrlBoundary(cap[0]);
-		if (boundary !== -1) {
-			cap[0] = cap[0].slice(0, boundary);
-		}
-		if (!cap[0]) {
-			return undefined;
-		}
-		let previous: string;
-		do {
-			previous = cap[0];
-			cap[0] = this.rules.inline._backpedal.exec(cap[0])?.[0] ?? "";
-		} while (previous !== cap[0]);
-		const text = cap[0];
-		const href = cap[1] === "www." ? `http://${text}` : text;
-		return {
-			type: "link",
-			raw: text,
-			text,
-			href,
-			tokens: [{ type: "text", raw: text, text }],
 		};
 	}
 }
@@ -203,7 +111,7 @@ function tokenizeBlockLatex(source: string): LatexToken | undefined {
 
 	const pendingBracket = /^ {0,3}\\\[[ \t]*(?:\n)?([\s\S]*)$/.exec(source);
 	if (pendingBracket) {
-		return { type: "latexBlock", raw: pendingBracket[0], text: pendingBracket[1]!, pending: true };
+		return { type: "latexBlock", raw: pendingBracket[0], text: pendingBracket[1], pending: true };
 	}
 	const pendingDollar = /^ {0,3}\$\$[ \t]*(?:\n)?([\s\S]*)$/.exec(source);
 	if (pendingDollar?.[1] && looksLikePendingDollarMath(pendingDollar[1])) {
@@ -262,7 +170,7 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 
 const markdownParser = new Marked();
 markdownParser.setOptions({
-	tokenizer: new CjkBoundaryUrlTokenizer(),
+	tokenizer: new StrictStrikethroughTokenizer(),
 });
 markdownParser.use({ extensions: [...LATEX_MARKDOWN_EXTENSIONS] });
 
@@ -397,7 +305,7 @@ export class Markdown implements Component {
 		const renderedLines: string[] = [];
 
 		for (let i = 0; i < tokens.length; i++) {
-			const token = tokens[i]!;
+			const token = tokens[i];
 			const nextToken = tokens[i + 1];
 			const tokenLines = this.renderToken(token, contentWidth, nextToken?.type);
 			for (const tokenLine of tokenLines) {
@@ -442,7 +350,7 @@ export class Markdown implements Component {
 		}
 
 		// Add top/bottom padding (empty lines)
-		const emptyLine = " ".repeat(Math.max(0, width));
+		const emptyLine = " ".repeat(width);
 		const emptyLines: string[] = [];
 		for (let i = 0; i < this.paddingY; i++) {
 			const line = bgFn ? applyBackgroundToLine(emptyLine, width, bgFn) : emptyLine;
@@ -669,7 +577,7 @@ export class Markdown implements Component {
 				const quoteTokens = token.tokens || [];
 				const renderedQuoteLines: string[] = [];
 				for (let i = 0; i < quoteTokens.length; i++) {
-					const quoteToken = quoteTokens[i]!;
+					const quoteToken = quoteTokens[i];
 					const nextQuoteToken = quoteTokens[i + 1];
 					renderedQuoteLines.push(
 						...this.renderToken(quoteToken, quoteContentWidth, nextQuoteToken?.type, quoteInlineStyleContext),
@@ -695,7 +603,7 @@ export class Markdown implements Component {
 			}
 
 			case "hr":
-				lines.push(this.theme.hr("─".repeat(Math.max(0, Math.min(width, 80)))));
+				lines.push(this.theme.hr("─".repeat(Math.min(width, 80))));
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after horizontal rules (unless space token follows)
 				}
@@ -852,7 +760,7 @@ export class Markdown implements Component {
 		const startNumber = typeof token.start === "number" ? token.start : 1;
 
 		for (let i = 0; i < token.items.length; i++) {
-			const item = token.items[i]!;
+			const item = token.items[i];
 			const isLastItem = i === token.items.length - 1;
 			const bullet = token.ordered
 				? this.options.preserveOrderedListMarkers
@@ -918,8 +826,13 @@ export class Markdown implements Component {
 	 * Delegates to wrapTextWithAnsi() so ANSI codes + long tokens are handled
 	 * consistently with the rest of the renderer.
 	 */
-	private wrapCellText(text: string, maxWidth: number): string[] {
-		return wrapTextWithAnsi(text, Math.max(1, maxWidth));
+	private wrapCellText(text: string, maxWidth: number, stylePrefix = ""): string[] {
+		const lines = wrapTextWithAnsi(text, Math.max(1, maxWidth));
+		return lines.map((line, index) => {
+			// Reset text styles after each non-final fragment, then restore the surrounding style before padding and borders.
+			const styleReset = index < lines.length - 1 ? "\x1b[22;23;24;25;27;28;29;39m" : "";
+			return `${line}${styleReset}${stylePrefix}`;
+		});
 	}
 
 	/**
@@ -958,13 +871,13 @@ export class Markdown implements Component {
 		const naturalWidths: number[] = [];
 		const minWordWidths: number[] = [];
 		for (let i = 0; i < numCols; i++) {
-			const headerText = this.renderInlineTokens(token.header[i]!.tokens || [], styleContext);
+			const headerText = this.renderInlineTokens(token.header[i].tokens || [], styleContext);
 			naturalWidths[i] = visibleWidth(headerText);
 			minWordWidths[i] = Math.max(1, this.getLongestWordWidth(headerText, maxUnbrokenWordWidth));
 		}
 		for (const row of token.rows) {
 			for (let i = 0; i < row.length; i++) {
-				const cellText = this.renderInlineTokens(row[i]!.tokens || [], styleContext);
+				const cellText = this.renderInlineTokens(row[i].tokens || [], styleContext);
 				naturalWidths[i] = Math.max(naturalWidths[i] || 0, visibleWidth(cellText));
 				minWordWidths[i] = Math.max(
 					minWordWidths[i] || 1,
@@ -988,13 +901,13 @@ export class Markdown implements Component {
 				});
 
 				for (let i = 0; i < numCols; i++) {
-					minColumnWidths[i]! += growth[i] ?? 0;
+					minColumnWidths[i] += growth[i] ?? 0;
 				}
 
 				const allocated = growth.reduce((total, width) => total + width, 0);
 				let leftover = remaining - allocated;
 				for (let i = 0; leftover > 0 && i < numCols; i++) {
-					minColumnWidths[i]!++;
+					minColumnWidths[i]++;
 					leftover--;
 				}
 			}
@@ -1008,15 +921,15 @@ export class Markdown implements Component {
 
 		if (totalNaturalWidth <= availableWidth) {
 			// Everything fits naturally
-			columnWidths = naturalWidths.map((width, index) => Math.max(width, minColumnWidths[index]!));
+			columnWidths = naturalWidths.map((width, index) => Math.max(width, minColumnWidths[index]));
 		} else {
 			// Need to shrink columns to fit
 			const totalGrowPotential = naturalWidths.reduce((total, width, index) => {
-				return total + Math.max(0, width - minColumnWidths[index]!);
+				return total + Math.max(0, width - minColumnWidths[index]);
 			}, 0);
 			const extraWidth = Math.max(0, availableForCells - minCellsWidth);
 			columnWidths = minColumnWidths.map((minWidth, index) => {
-				const naturalWidth = naturalWidths[index]!;
+				const naturalWidth = naturalWidths[index];
 				const minWidthDelta = Math.max(0, naturalWidth - minWidth);
 				let grow = 0;
 				if (totalGrowPotential > 0) {
@@ -1031,8 +944,8 @@ export class Markdown implements Component {
 			while (remaining > 0) {
 				let grew = false;
 				for (let i = 0; i < numCols && remaining > 0; i++) {
-					if (columnWidths[i]! < naturalWidths[i]!) {
-						columnWidths[i]!++;
+					if (columnWidths[i] < naturalWidths[i]) {
+						columnWidths[i]++;
 						remaining--;
 						grew = true;
 					}
@@ -1050,14 +963,14 @@ export class Markdown implements Component {
 		// Render header with wrapping
 		const headerCellLines: string[][] = token.header.map((cell, i) => {
 			const text = this.renderInlineTokens(cell.tokens || [], styleContext);
-			return this.wrapCellText(text, columnWidths[i]!);
+			return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix);
 		});
 		const headerLineCount = Math.max(...headerCellLines.map((c) => c.length));
 
 		for (let lineIdx = 0; lineIdx < headerLineCount; lineIdx++) {
 			const rowParts = headerCellLines.map((cellLines, colIdx) => {
 				const text = cellLines[lineIdx] || "";
-				const padded = text + " ".repeat(Math.max(0, columnWidths[colIdx]! - visibleWidth(text)));
+				const padded = text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
 				return this.theme.bold(padded);
 			});
 			lines.push(`│ ${rowParts.join(" │ ")} │`);
@@ -1070,17 +983,17 @@ export class Markdown implements Component {
 
 		// Render rows with wrapping
 		for (let rowIndex = 0; rowIndex < token.rows.length; rowIndex++) {
-			const row = token.rows[rowIndex]!;
+			const row = token.rows[rowIndex];
 			const rowCellLines: string[][] = row.map((cell, i) => {
 				const text = this.renderInlineTokens(cell.tokens || [], styleContext);
-				return this.wrapCellText(text, columnWidths[i]!);
+				return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix);
 			});
 			const rowLineCount = Math.max(...rowCellLines.map((c) => c.length));
 
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
 				const rowParts = rowCellLines.map((cellLines, colIdx) => {
 					const text = cellLines[lineIdx] || "";
-					return text + " ".repeat(Math.max(0, columnWidths[colIdx]! - visibleWidth(text)));
+					return text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
 				});
 				lines.push(`│ ${rowParts.join(" │ ")} │`);
 			}

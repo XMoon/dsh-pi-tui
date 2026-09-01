@@ -56,11 +56,6 @@ export class ScrollView extends Container {
 		return this.currentScrollTop;
 	}
 
-	/** Whether the content currently exceeds the viewport (scrolling is possible). */
-	get canScroll(): boolean {
-		return this.contentHeight > this.currentViewportHeight;
-	}
-
 	get isFollowingEnd(): boolean {
 		return this.followingEnd;
 	}
@@ -207,18 +202,6 @@ export class ScrollView extends Container {
 
 	override clear(): void {
 		throw new Error("ScrollView child cannot be cleared");
-	}
-
-	/**
-	 * Release the component's resources: the scrollbar hide timer and the
-	 * layout's render callback. Called by containers on removeChild/clear, so
-	 * a discarded ScrollView neither fires stray renders nor keeps the TUI
-	 * (and itself) alive through the timer closure.
-	 */
-	override dispose(): void {
-		this.hideTransientScrollbar();
-		this.requestRenderCallback = undefined;
-		super.dispose();
 	}
 
 	override render(width: number): string[] {

@@ -48,7 +48,7 @@ const terminalSpacingMarkRegex =
 const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
 
 // Cache for non-ASCII strings
-const WIDTH_CACHE_SIZE = 4096;
+const WIDTH_CACHE_SIZE = 512;
 const widthCache = new Map<string, number>();
 
 export const cjkBreakRegex =
@@ -366,32 +366,6 @@ export function getOsc8LinkAtColumn(line: string, column: number): string | unde
 }
 
 /**
- * Fast visible-width scan for lines whose printable content is plain ASCII,
- * skipping over ANSI escape sequences. Returns the visible width, or
- * `undefined` when the line contains control characters or non-ASCII
- * content (caller should fall back to visibleWidth()). Early-exits as soon
- * as the width exceeds `limit`, returning the partial count (> limit).
- */
-export function asciiVisibleWidth(line: string, limit: number): number | undefined {
-	let width = 0;
-	let i = 0;
-	while (i < line.length) {
-		const code = line.charCodeAt(i);
-		if (code === 0x1b) {
-			const ansi = extractAnsiCode(line, i);
-			if (!ansi) return undefined;
-			i += ansi.length;
-			continue;
-		}
-		if (code < 0x20 || code > 0x7e) return undefined;
-		width++;
-		if (width > limit) return width;
-		i++;
-	}
-	return width;
-}
-
-/**
  * Normalize text for terminal output without changing logical editor content.
  * Some terminals render precomposed Thai/Lao AM vowels inconsistently during
  * differential repaint. Their compatibility decompositions have the same cell
@@ -563,7 +537,7 @@ class AnsiCodeTracker {
 		const match = ansiCode.match(/\x1b\[([\d;]*)m/);
 		if (!match) return;
 
-		const params = match[1]!;
+		const params = match[1];
 		if (params === "" || params === "0") {
 			// Full reset
 			this.reset();
@@ -574,7 +548,7 @@ class AnsiCodeTracker {
 		const parts = params.split(";");
 		let i = 0;
 		while (i < parts.length) {
-			const code = Number.parseInt(parts[i]!, 10);
+			const code = Number.parseInt(parts[i], 10);
 
 			// Handle 256-color and RGB codes which consume multiple parameters
 			if (code === 38 || code === 48) {
@@ -736,38 +710,14 @@ class AnsiCodeTracker {
 
 	/**
 	 * Get reset codes for attributes that need to be turned off at line end.
-	 * Every non-background attribute is closed (bold, dim, italic, underline,
-	 * blink, inverse, hidden, strikethrough, foreground) so content appended
-	 * after a wrapped line — cell padding, table borders — cannot inherit the
-	 * style. The background is deliberately LEFT OPEN: padding must keep the
-	 * cell's background. Active OSC 8 hyperlinks are closed and re-opened on
-	 * the next line. Returns empty string if no attributes need closing.
+	 * Underline must be closed to prevent bleeding into padding.
+	 * Active OSC 8 hyperlinks must be closed and re-opened on the next line.
+	 * Returns empty string if no attributes need closing.
 	 */
 	getLineEndReset(): string {
 		let result = "";
-		if (this.bold || this.dim) {
-			result += "\x1b[22m"; // Bold/dim off
-		}
-		if (this.italic) {
-			result += "\x1b[23m"; // Italic off
-		}
 		if (this.underline) {
-			result += "\x1b[24m"; // Underline off
-		}
-		if (this.blink) {
-			result += "\x1b[25m"; // Blink off
-		}
-		if (this.inverse) {
-			result += "\x1b[27m"; // Inverse off
-		}
-		if (this.hidden) {
-			result += "\x1b[28m"; // Hidden off
-		}
-		if (this.strikethrough) {
-			result += "\x1b[29m"; // Strikethrough off
-		}
-		if (this.fgColor) {
-			result += "\x1b[39m"; // Default foreground (background preserved for padding)
+			result += "\x1b[24m"; // Underline off only
 		}
 		if (this.activeHyperlink) {
 			result += formatOsc8Close(this.activeHyperlink.terminator); // Re-opened at line start via getActiveCodes()
@@ -943,7 +893,7 @@ function wrapSingleLine(line: string, width: number): string[] {
 			for (let i = 0; i < broken.length - 1; i++) {
 				wrapped.push(broken[i]!);
 			}
-			currentLine = broken[broken.length - 1]!;
+			currentLine = broken[broken.length - 1];
 			currentVisibleLength = visibleWidth(currentLine);
 			continue;
 		}
@@ -977,13 +927,7 @@ function wrapSingleLine(line: string, width: number): string[] {
 	}
 
 	if (currentLine) {
-		// Close non-background attributes at the end of the final line too, so
-		// every emitted physical line is self-contained: content appended after
-		// the wrap (cell padding, table borders) cannot inherit the color.
-		const lineEndReset = tracker.getLineEndReset();
-		if (lineEndReset) {
-			currentLine += lineEndReset;
-		}
+		// No reset at end of final line - let caller handle it
 		wrapped.push(currentLine);
 	}
 

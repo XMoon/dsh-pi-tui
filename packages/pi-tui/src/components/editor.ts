@@ -2,7 +2,6 @@ import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocompl
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
-import { PasteBurst } from "../paste-burst.ts";
 import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
 import {
@@ -21,14 +20,6 @@ const wordSegmenter = getWordSegmenter();
 
 /** Regex matching paste markers like `[paste #1 +123 lines]` or `[paste #2 1234 chars]`. */
 const PASTE_MARKER_REGEX = /\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g;
-
-/**
- * Pastes larger than this are NOT stored in the pastes map: a stored paste
- * is cloned into every undo snapshot (structuredClone), so a multi-MB paste
- * multiplies its memory across the whole undo stack. Beyond the cap the
- * marker trade-off reverses — expand inline like ordinary multi-line text.
- */
-const MAX_PASTE_STORED_CHARS = 256 * 1024;
 
 /** Non-global version for single-segment testing. */
 const PASTE_MARKER_SINGLE = /^\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]$/;
@@ -175,18 +166,7 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 
 			// The segment remains logically atomic for cursor
 			// movement / editing — the split is purely visual for word-wrap layout.
-			const subSegments = [...graphemeSegmenter.segment(grapheme)];
-			if (subSegments.length <= 1) {
-				// An indivisible grapheme wider than maxWidth (e.g. a CJK
-				// character at maxWidth 1) cannot be split further —
-				// re-wrapping it would recurse forever. Keep it as the
-				// current open chunk and let it overflow by one column;
-				// the TUI paint layer truncates overwide lines.
-				currentWidth = gWidth;
-				wrapOppIndex = -1;
-				continue;
-			}
-			const subChunks = wordWrapLine(grapheme, maxWidth, subSegments);
+			const subChunks = wordWrapLine(grapheme, maxWidth);
 			for (let j = 0; j < subChunks.length - 1; j++) {
 				const sc = subChunks[j]!;
 				chunks.push({ text: sc.text, startIndex: charIndex + sc.startIndex, endIndex: charIndex + sc.endIndex });
@@ -253,14 +233,6 @@ export interface EditorTheme {
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
-	disablePasteBurst?: boolean;
-	/**
-	 * When true, typing `/` after whitespace mid-input also auto-triggers
-	 * autocomplete, so providers can offer inline completions (e.g. inline
-	 * skill selection). The default providers treat such `/` as a path prefix,
-	 * so the default is false to avoid surprising other consumers.
-	 */
-	inlineSlashTrigger?: boolean;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -329,6 +301,7 @@ export class Editor implements Component, Focusable {
 	private autocompleteMaxVisible: number = 5;
 	private autocompleteAbort?: AbortController;
 	private autocompleteDebounceTimer?: ReturnType<typeof setTimeout>;
+	private autocompleteRequestTask: Promise<void> = Promise.resolve();
 	private autocompleteStartToken: number = 0;
 	private autocompleteRequestId: number = 0;
 
@@ -340,17 +313,10 @@ export class Editor implements Component, Focusable {
 	private pasteBuffer: string = "";
 	private isInPaste: boolean = false;
 
-	// Non-bracketed paste-burst fallback
-	private pasteBurst = new PasteBurst();
-	private disablePasteBurst: boolean = false;
-	private inlineSlashTrigger: boolean = false;
-
 	// Prompt history for up/down navigation
 	private history: string[] = [];
 	private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 	private historyDraft: EditorState | null = null;
-	private hostHistoryDraft: unknown = undefined;
-	private historyFilter: ((entry: string) => boolean) | null = null;
 
 	// Kill ring for Emacs-style kill/yank operations
 	private killRing = new KillRing();
@@ -374,22 +340,6 @@ export class Editor implements Component, Focusable {
 
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
-	/**
-	 * Called when a history entry is recalled, before it is put into the buffer.
-	 * Return the text to display, or `undefined` to use the entry as-is. Lets the
-	 * host decorate entries (e.g. strip a marker) and react to recalls (e.g.
-	 * switch input mode) without touching editor internals.
-	 */
-	public onRecall?: (entry: string, direction: 1 | -1) => string | undefined;
-	/**
-	 * Called when entering history browsing, to capture host state that should be
-	 * saved alongside the editor draft. The returned value is passed to
-	 * `onHistoryDraftRestore` when the user navigates back to the draft, so the
-	 * host can restore state the editor does not own (e.g. an input mode).
-	 */
-	public onHistoryDraftSave?: () => unknown;
-	/** Called with the value from `onHistoryDraftSave` when the draft is restored. */
-	public onHistoryDraftRestore?: (state: unknown) => void;
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -400,8 +350,6 @@ export class Editor implements Component, Focusable {
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
 		this.autocompleteMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
-		this.disablePasteBurst = options.disablePasteBurst ?? false;
-		this.inlineSlashTrigger = options.inlineSlashTrigger ?? false;
 	}
 
 	/** Set of currently valid paste IDs, for marker-aware segmentation. */
@@ -438,25 +386,10 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	setDisablePasteBurst(disabled: boolean): void {
-		this.disablePasteBurst = disabled;
-		if (disabled) {
-			this.pasteBurst.reset();
-		}
-	}
-
 	setAutocompleteProvider(provider: AutocompleteProvider): void {
 		this.cancelAutocomplete();
 		this.autocompleteProvider = provider;
 		this.setAutocompleteTriggerCharacters(provider.triggerCharacters ?? []);
-	}
-
-	/**
-	 * Limit which history entries ↑/↓ navigate. `null` (default) visits every
-	 * entry. The filter is evaluated against each stored entry as-is.
-	 */
-	setHistoryFilter(filter: ((entry: string) => boolean) | null): void {
-		this.historyFilter = filter;
 	}
 
 	/**
@@ -473,17 +406,6 @@ export class Editor implements Component, Focusable {
 		if (this.history.length > 100) {
 			this.history.pop();
 		}
-	}
-
-	/**
-	 * Drop every history entry (up/down recall) and leave browsing state.
-	 * Used by hosts that swap the whole history context (a session switch to
-	 * another workspace must not recall the previous workspace's inputs).
-	 */
-	clearHistory(): void {
-		this.history = [];
-		this.historyIndex = -1;
-		this.historyDraft = null;
 	}
 
 	private isEditorEmpty(): boolean {
@@ -506,48 +428,13 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 		if (this.history.length === 0) return;
 
-		// When entering browse, capture host state up front — before the filter
-		// runs — so the host's filter can read the browse-entry mode rather than a
-		// mode that changes as entries are recalled. The captured value is only
-		// committed to hostHistoryDraft once a matching entry is actually found.
-		const entering = this.historyIndex === -1;
-		const pendingHostDraft = entering ? this.onHistoryDraftSave?.() : undefined;
-
-		// Find the next index that passes the filter. Up(-1) increases index,
-		// Down(1) decreases. The draft (-1) is always reachable; stepping past
-		// either end is a no-op.
-		let newIndex = this.historyIndex;
-		let found = false;
-		while (true) {
-			newIndex = newIndex - direction;
-			if (newIndex === -1) {
-				found = true;
-				break;
-			}
-			if (newIndex < -1 || newIndex >= this.history.length) {
-				found = false;
-				break;
-			}
-			const candidate = this.history[newIndex];
-			if (!this.historyFilter || (candidate !== undefined && this.historyFilter(candidate))) {
-				found = true;
-				break;
-			}
-		}
-		if (!found) return;
+		const newIndex = this.historyIndex - direction; // Up(-1) increases index, Down(1) decreases
+		if (newIndex < -1 || newIndex >= this.history.length) return;
 
 		// Capture state when first entering history browsing mode
-		if (entering && newIndex >= 0) {
+		if (this.historyIndex === -1 && newIndex >= 0) {
 			this.pushUndoSnapshot();
-			// Shallow copy: line strings are immutable, so the detached
-			// array is a full snapshot (structuredClone would copy every
-			// line's text on every history entry).
-			this.historyDraft = {
-				lines: [...this.state.lines],
-				cursorLine: this.state.cursorLine,
-				cursorCol: this.state.cursorCol,
-			};
-			this.hostHistoryDraft = pendingHostDraft;
+			this.historyDraft = structuredClone(this.state);
 		}
 
 		this.historyIndex = newIndex;
@@ -560,25 +447,18 @@ export class Editor implements Component, Focusable {
 				this.preferredVisualCol = null;
 				this.snappedFromCursorCol = null;
 				this.scrollOffset = 0;
-				if (this.hostHistoryDraft !== undefined) {
-					this.onHistoryDraftRestore?.(this.hostHistoryDraft);
-					this.hostHistoryDraft = undefined;
-				}
 				if (this.onChange) this.onChange(this.getText());
 			} else {
 				this.setTextInternal("");
 			}
 		} else {
-			const rawEntry = this.history[this.historyIndex] || "";
-			const entry = this.onRecall ? this.onRecall(rawEntry, direction) ?? rawEntry : rawEntry;
-			this.setTextInternal(entry, direction === -1 ? "start" : "end");
+			this.setTextInternal(this.history[this.historyIndex] || "", direction === -1 ? "start" : "end");
 		}
 	}
 
 	private exitHistoryBrowsing(): void {
 		this.historyIndex = -1;
 		this.historyDraft = null;
-		this.hostHistoryDraft = undefined;
 	}
 
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
@@ -647,7 +527,7 @@ export class Editor implements Component, Focusable {
 			const border = createScrollBorder("↑", this.scrollOffset, width);
 			result.push(this.borderColor(border));
 		} else {
-			result.push(horizontal.repeat(Math.max(0, width)));
+			result.push(horizontal.repeat(width));
 		}
 
 		// Render each visible layout line
@@ -704,7 +584,7 @@ export class Editor implements Component, Focusable {
 			const border = createScrollBorder("↓", linesBelow, width);
 			result.push(this.borderColor(border));
 		} else {
-			result.push(horizontal.repeat(Math.max(0, width)));
+			result.push(horizontal.repeat(width));
 		}
 
 		// Add autocomplete list if active
@@ -748,7 +628,6 @@ export class Editor implements Component, Focusable {
 		if (data.includes("\x1b[200~")) {
 			this.isInPaste = true;
 			this.pasteBuffer = "";
-			this.pasteBurst.reset();
 			data = data.replace("\x1b[200~", "");
 		}
 
@@ -763,21 +642,12 @@ export class Editor implements Component, Focusable {
 				this.isInPaste = false;
 				const remaining = this.pasteBuffer.substring(endIndex + 6);
 				this.pasteBuffer = "";
-				this.pasteBurst.reset();
 				if (remaining.length > 0) {
 					this.handleInput(remaining);
 				}
 				return;
 			}
 			return;
-		}
-
-		const isEnterKey = data !== "\n" && kb.matches(data, "tui.input.submit");
-		const charCode = data.charCodeAt(0);
-		const printableForBurst = decodePrintableKey(data) ??
-			(data.length === 1 && charCode >= 32 && charCode !== 0x7f ? data : undefined);
-		if (!this.disablePasteBurst && !isEnterKey && printableForBurst === undefined) {
-			this.pasteBurst.reset();
 		}
 
 		// Ctrl+C - let parent handle (exit/clear)
@@ -840,11 +710,7 @@ export class Editor implements Component, Focusable {
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
 
-					// Slash-command completions submit on confirm (Enter runs the
-					// command); inline completions marked by the provider (e.g. an
-					// inline skill token mid-prompt) are content edits, so confirm
-					// behaves like Tab and never submits.
-					if (this.autocompletePrefix.startsWith("/") && selected.data?.["inlineSkill"] !== true) {
+					if (this.autocompletePrefix.startsWith("/")) {
 						this.cancelAutocomplete();
 						// Fall through to submit
 					} else {
@@ -959,12 +825,6 @@ export class Editor implements Component, Focusable {
 				return;
 			}
 
-			if (!this.disablePasteBurst && this.pasteBurst.shouldInsertNewlineInsteadOfSubmit(Date.now())) {
-				this.addNewLine();
-				this.pasteBurst.extendWindow(Date.now());
-				return;
-			}
-
 			this.submitValue();
 			return;
 		}
@@ -1032,18 +892,12 @@ export class Editor implements Component, Focusable {
 
 		const printable = decodePrintableKey(data);
 		if (printable !== undefined) {
-			if (!this.disablePasteBurst) {
-				this.pasteBurst.onPlainChar(Date.now());
-			}
 			this.insertCharacter(printable);
 			return;
 		}
 
 		// Regular characters
 		if (data.charCodeAt(0) >= 32) {
-			if (!this.disablePasteBurst) {
-				this.pasteBurst.onPlainChar(Date.now());
-			}
 			this.insertCharacter(data);
 		}
 	}
@@ -1165,62 +1019,7 @@ export class Editor implements Component, Focusable {
 		return { line: this.state.cursorLine, col: this.state.cursorCol };
 	}
 
-	/**
-	 * Set the cursor position without changing the document or firing onChange.
-	 * Positions are clamped to a valid line and grapheme boundary so hosts can
-	 * temporarily synchronize an editor before forwarding a key to it.
-	 */
-	setCursor(cursor: { line: number; col: number }): void {
-		const requestedLine = Number.isFinite(cursor.line) ? Math.floor(cursor.line) : 0;
-		const line = Math.max(0, Math.min(requestedLine, this.state.lines.length - 1));
-		const text = this.state.lines[line] ?? "";
-		const requestedCol = Number.isFinite(cursor.col) ? Math.floor(cursor.col) : 0;
-		const boundedCol = Math.max(0, Math.min(requestedCol, text.length));
-		let col = 0;
-		for (const segment of this.segment(text, "grapheme")) {
-			if (segment.index >= boundedCol) break;
-			const end = segment.index + segment.segment.length;
-			if (boundedCol < end) break;
-			col = end;
-		}
-		if (boundedCol === text.length) col = boundedCol;
-		this.state.cursorLine = line;
-		this.setCursorCol(col);
-		this.scrollOffset = 0;
-		this.tui.requestRender();
-	}
-
-	/**
-	 * Replace the document and cursor atomically without changing editor
-	 * transient state. Unlike setText(), this does not cancel autocomplete,
-	 * leave history browsing, push an undo snapshot, clear paste markers, or
-	 * fire onChange. Hosts use this narrow seam to stage a replacement-editor
-	 * draft before forwarding one declined key through the normal editor path.
-	 */
-	setTextAndCursor(text: string, cursor: { line: number; col: number }): void {
-		const normalized = this.normalizeText(text);
-		this.state.lines = normalized.split("\n");
-		const requestedLine = Number.isFinite(cursor.line) ? Math.floor(cursor.line) : 0;
-		const line = Math.max(0, Math.min(requestedLine, this.state.lines.length - 1));
-		const textAtLine = this.state.lines[line] ?? "";
-		const requestedCol = Number.isFinite(cursor.col) ? Math.floor(cursor.col) : 0;
-		const boundedCol = Math.max(0, Math.min(requestedCol, textAtLine.length));
-		let col = 0;
-		for (const segment of this.segment(textAtLine, "grapheme")) {
-			if (segment.index >= boundedCol) break;
-			const end = segment.index + segment.segment.length;
-			if (boundedCol < end) break;
-			col = end;
-		}
-		if (boundedCol === textAtLine.length) col = boundedCol;
-		this.state.cursorLine = line;
-		this.setCursorCol(col);
-		this.scrollOffset = 0;
-		this.tui.requestRender();
-	}
-
-
-	setText(text: string, options?: { preservePasteRegistry?: boolean }): void {
+	setText(text: string): void {
 		this.cancelAutocomplete();
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
@@ -1229,10 +1028,8 @@ export class Editor implements Component, Focusable {
 		if (this.getText() !== normalized) {
 			this.pushUndoSnapshot();
 		}
-		if (!options?.preservePasteRegistry) {
-			this.pastes.clear();
-			this.pasteCounter = 0;
-		}
+		this.pastes.clear();
+		this.pasteCounter = 0;
 		this.setTextInternal(normalized);
 	}
 
@@ -1299,10 +1096,7 @@ export class Editor implements Component, Focusable {
 			];
 
 			this.state.cursorLine += insertedLines.length - 1;
-			// Cursor columns are grapheme indices, not code units: an emoji or
-			// combining sequence at the end of the last inserted line must not
-			// land the cursor mid-grapheme.
-			this.setCursorCol([...this.segment(insertedLines[insertedLines.length - 1] || "", "grapheme")].length);
+			this.setCursorCol((insertedLines[insertedLines.length - 1] || "").length);
 		}
 
 		if (this.onChange) {
@@ -1340,11 +1134,8 @@ export class Editor implements Component, Focusable {
 
 		// Check if we should trigger or update autocomplete
 		if (!this.autocompleteState) {
-			// Auto-trigger for "/" at the start of a line (slash commands). When
-			// the editor opts in, also trigger "/" after whitespace mid-input so
-			// the provider can offer inline completions; ordinary prose slashes
-			// (paths, fractions) are left untouched.
-			if (char === "/" && (this.isAtStartOfMessage() || (this.inlineSlashTrigger && this.isAtInlineSlashTrigger()))) {
+			// Auto-trigger for "/" at the start of a line (slash commands)
+			if (char === "/" && this.isAtStartOfMessage()) {
 				this.tryTriggerAutocomplete();
 			}
 			// Auto-trigger for symbol-based completion like @, #, or provider triggers at token boundaries
@@ -1357,7 +1148,7 @@ export class Editor implements Component, Focusable {
 				}
 			}
 			// Also auto-trigger when typing letters in a slash command or symbol completion context
-			else if (/[a-zA-Z0-9.:\-_]/.test(char)) {
+			else if (/[a-zA-Z0-9.\-_]/.test(char)) {
 				const currentLine = this.state.lines[this.state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 				// Check if we're in a slash command (with or without space for arguments)
@@ -1366,12 +1157,6 @@ export class Editor implements Component, Focusable {
 				}
 				// Check if we're in a symbol-based completion context like @, #, or provider triggers
 				else if (this.autocompleteTriggerPattern.test(textBeforeCursor)) {
-					this.tryTriggerAutocomplete();
-				}
-				// Check if we're typing an inline slash token (opt-in trigger):
-				// without this the slash's in-flight request goes stale as the
-				// token grows and no fresh request replaces it.
-				else if (this.isInInlineSlashContext(textBeforeCursor)) {
 					this.tryTriggerAutocomplete();
 				}
 			}
@@ -1423,7 +1208,7 @@ export class Editor implements Component, Focusable {
 
 		// Check if this is a large paste (> 10 lines or > 1000 characters)
 		const totalChars = filteredText.length;
-		if ((pastedLines.length > 10 || totalChars > 1000) && totalChars <= MAX_PASTE_STORED_CHARS) {
+		if (pastedLines.length > 10 || totalChars > 1000) {
 			// Store the paste and insert a marker
 			this.pasteCounter++;
 			const pasteId = this.pasteCounter;
@@ -1515,7 +1300,7 @@ export class Editor implements Component, Focusable {
 			const graphemes = [...this.segment(beforeCursor, "grapheme")];
 			const lastGrapheme = graphemes[graphemes.length - 1];
 			const graphemeLength = lastGrapheme ? lastGrapheme.segment.length : 1;
-			const isPastedSegmented = PASTE_MARKER_SINGLE.exec(lastGrapheme!.segment);
+			const isPastedSegmented = PASTE_MARKER_SINGLE.exec(lastGrapheme.segment);
 
 			if (isPastedSegmented) {
 				// This contains the id part e.g 4 from [paste #4 +123 lines]
@@ -1614,7 +1399,7 @@ export class Editor implements Component, Focusable {
 		let currentVisualCol: number;
 		if (this.snappedFromCursorCol !== null) {
 			const vlIndex = this.findVisualLineAt(visualLines, currentVL.logicalLine, this.snappedFromCursorCol);
-			currentVisualCol = this.snappedFromCursorCol - visualLines[vlIndex]!.startCol;
+			currentVisualCol = this.snappedFromCursorCol - visualLines[vlIndex].startCol;
 		} else {
 			currentVisualCol = this.state.cursorCol - currentVL.startCol;
 		}
@@ -1657,8 +1442,8 @@ export class Editor implements Component, Focusable {
 					let next = targetVisualLine + 1;
 					while (
 						next < visualLines.length &&
-						visualLines[next]!.logicalLine === targetVL.logicalLine &&
-						visualLines[next]!.startCol < segEnd
+						visualLines[next].logicalLine === targetVL.logicalLine &&
+						visualLines[next].startCol < segEnd
 					) {
 						next++;
 					}
@@ -2237,20 +2022,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	private pushUndoSnapshot(): void {
-		// Shallow-clone the mutable containers only: line strings and paste
-		// bodies are immutable, so copying the ARRAY/MAP detaches the
-		// snapshot completely. structuredClone would copy every line's text
-		// AND every stored paste body on every edit — O(document) memory
-		// churn per edit, exploding with multi-MB pastes.
-		this.undoStack.push({
-			state: {
-				lines: [...this.state.lines],
-				cursorLine: this.state.cursorLine,
-				cursorCol: this.state.cursorCol,
-			},
-			pastes: new Map(this.pastes),
-			pasteCounter: this.pasteCounter,
-		});
+		this.undoStack.push({ state: this.state, pastes: this.pastes, pasteCounter: this.pasteCounter });
 	}
 
 	private undo(): void {
@@ -2258,11 +2030,7 @@ export class Editor implements Component, Focusable {
 		const snapshot = this.undoStack.pop();
 		if (!snapshot) return;
 		Object.assign(this.state, snapshot.state);
-		// Re-copy the containers so the popped snapshot stays detached: the
-		// live state mutates its lines array in place (splices), which must
-		// never corrupt a snapshot that a later undo will restore.
-		this.state.lines = [...snapshot.state.lines];
-		this.pastes = new Map(snapshot.pastes);
+		this.pastes = snapshot.pastes;
 		this.pasteCounter = snapshot.pasteCounter;
 		this.lastAction = null;
 		this.preferredVisualCol = null;
@@ -2337,38 +2105,6 @@ export class Editor implements Component, Focusable {
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 		const beforeCursor = currentLine.slice(0, this.state.cursorCol);
 		return beforeCursor.trim() === "" || beforeCursor.trim() === "/";
-	}
-
-	// Helper method to check if "/" was typed after whitespace mid-input, which
-	// providers can use for inline completions while leaving ordinary prose
-	// slashes (e.g. paths, fractions) untouched. Also covers "/" at the start
-	// of a non-first line, so inline completion works across multi-line input.
-	private isAtInlineSlashTrigger(): boolean {
-		if (this.isAtStartOfMessage()) return false;
-
-		const currentLine = this.state.lines[this.state.cursorLine] || "";
-		const beforeCursor = currentLine.slice(0, this.state.cursorCol);
-		if (!beforeCursor.endsWith("/")) return false;
-
-		// "/" at the start of a subsequent line.
-		if (this.state.cursorLine > 0 && beforeCursor.trim() === "/") {
-			return true;
-		}
-
-		const charBeforeSlash = beforeCursor[beforeCursor.length - 2];
-		return charBeforeSlash === " " || charBeforeSlash === "\t";
-	}
-
-	// Whether the token being typed is an inline slash token (opt-in trigger):
-	// a "/" after whitespace mid-input, or a "/" opening a subsequent line —
-	// isSlashMenuAllowed confines the slash-command menu to the first line,
-	// while the inline trigger deliberately covers later lines too. The
-	// leading slash-command context is owned by isInSlashCommandContext.
-	private isInInlineSlashContext(textBeforeCursor: string): boolean {
-		if (!this.inlineSlashTrigger) return false;
-		if (this.isInSlashCommandContext(textBeforeCursor)) return false;
-		if (/[ \t]\/[a-zA-Z0-9.:\-_]*$/.test(textBeforeCursor)) return true;
-		return this.state.cursorLine > 0 && /^\/[a-zA-Z0-9.:\-_]*$/.test(textBeforeCursor);
 	}
 
 	private isInSlashCommandContext(textBeforeCursor: string): boolean {
@@ -2473,33 +2209,23 @@ export class Editor implements Component, Focusable {
 		startToken: number,
 		options: { force: boolean; explicitTab: boolean },
 	): Promise<void> {
-		// No serialization queue: the latest request wins. runAutocomplete
-		// Request's requestId + text/cursor snapshot check rejects stale
-		// results, so concurrent requests cannot clobber each other's UI —
-		// the old task-chaining design stacked every request behind the
-		// previous one, so an abort that never settled (a provider that
-		// ignores the signal) stalled the whole chain forever.
-		if (startToken !== this.autocompleteStartToken || !this.autocompleteProvider) {
-			return;
-		}
-
-		const controller = new AbortController();
-		this.autocompleteAbort = controller;
-		const requestId = ++this.autocompleteRequestId;
-		const snapshotText = this.getText();
-		const snapshotLine = this.state.cursorLine;
-		const snapshotCol = this.state.cursorCol;
-
-		try {
-			await this.runAutocompleteRequest(requestId, controller, snapshotText, snapshotLine, snapshotCol, options);
-		} catch (error) {
-			// A request aborted by newer input settles silently; anything
-			// else must not take the editor down.
-			if (!controller.signal.aborted) {
-				console.error("autocomplete request failed", error);
+		const previousTask = this.autocompleteRequestTask;
+		this.autocompleteRequestTask = (async () => {
+			await previousTask;
+			if (startToken !== this.autocompleteStartToken || !this.autocompleteProvider) {
+				return;
 			}
-			this.autocompleteAbort = undefined;
-		}
+
+			const controller = new AbortController();
+			this.autocompleteAbort = controller;
+			const requestId = ++this.autocompleteRequestId;
+			const snapshotText = this.getText();
+			const snapshotLine = this.state.cursorLine;
+			const snapshotCol = this.state.cursorCol;
+
+			await this.runAutocompleteRequest(requestId, controller, snapshotText, snapshotLine, snapshotCol, options);
+		})();
+		await this.autocompleteRequestTask;
 	}
 
 	private setAutocompleteTriggerCharacters(triggerCharacters: string[]): void {
