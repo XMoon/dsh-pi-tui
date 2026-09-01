@@ -16,17 +16,17 @@ import { safeErrorMessage } from './error-boundary.ts'
 /**
  * Legacy exported window size: how many most-recent sessions the picker's
  * FIRST title batch used to be capped to, historically. It no longer caps
- * the title reads — the picker loads titles for every MAIN row it can
- * display (see commands.ts `openSessionPicker`), so a session beyond this
- * window still gets its title. Kept exported (and pinned by a test) as a
- * documented legacy value; do not reintroduce it as a read cap.
+ * any read — the picker enriches every MAIN row it can display (see
+ * commands.ts `openSessionPicker`), so a session beyond this window still
+ * gets its projection. Kept exported (and pinned by a test) as a documented
+ * legacy value; do not reintroduce it as a read cap.
  */
 export const MAX_PICKER_SESSIONS = 200
-/** First-batch size for the progressive session-title loader: the visible
+/** First-batch size for the progressive projection loader: the visible
  * picker window fills immediately, then the remaining rows load behind it. */
-export const TITLE_FIRST_BATCH = 20
-/** Batch size for the remaining title loads after the first batch. */
-export const TITLE_BATCH_SIZE = 50
+export const PROJECTION_FIRST_BATCH = 20
+/** Batch size for the remaining projection loads after the first batch. */
+export const PROJECTION_BATCH_SIZE = 50
 
 /**
  * The narrow session-query surface the picker uses. Declared structurally

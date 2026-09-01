@@ -29,6 +29,17 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 
+/** Poll an async predicate until true or the timeout elapses (the picker
+ * listing runs behind a scheduler yield inside a detached task). */
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 3000, stepMs = 10): Promise<void> {
+  const start = Date.now()
+  for (;;) {
+    if (await predicate()) return
+    if (Date.now() - start > timeoutMs) throw new Error(`waitFor timed out after ${timeoutMs}ms`)
+    await new Promise<void>(resolve => setTimeout(resolve, stepMs))
+  }
+}
+
 // themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /
 // CI=true — clear all three so the render paths under test stay live.
 process.env.NO_COLOR = ''
@@ -416,29 +427,28 @@ test('/new resolves an absent legacy code default as canonical ptc', async () =>
   t.app.stop()
 })
 
-test('/sessions opens its first picker frame before cold preset enrichment settles', async () => {
-  let started = false
+test('/sessions opens input-first and shows projection-pending rows before enrichment settles', async () => {
   let resolveBatch!: (value: Map<string, { title?: string; preset?: string }>) => void
   const batch = new Promise<Map<string, { title?: string; preset?: string }>>(resolve => { resolveBatch = resolve })
   const t = setup({
     sessionReader: {
       list: async () => [{ id: 'session-cold', createdAt: 10, cwd: '/ws', live: false }],
-      projectionBatch: async () => {
-        started = true
-        return batch
-      },
+      projectionBatch: async () => batch,
     },
   })
   const result = await t.runCommand('sessions')
   assert.deepEqual(result, { kind: 'success' })
-  assert.equal(started, true, 'cold preset replay starts after the picker is opened')
+  // The overlay owns the input immediately (loading frame); the listing is
+  // behind a scheduler yield, so poll until the row lands — still without
+  // the pending preset.
   const initial = await t.view()
-  assert.ok(initial.includes('cold'), `initial picker frame is missing the session row:\n${initial}`)
-  assert.ok(!initial.includes('preset:standard'), 'the initial frame must not wait for an effective preset')
+  assert.ok(initial.includes('Loading sessions…') || initial.includes('cold'),
+    `the first frame must be interactive (loading row or listed row):\n${initial}`)
+  await waitFor(async () => (await t.view()).includes('cold'))
+  const pending = await t.view()
+  assert.ok(!pending.includes('preset:standard'), 'a pending projection must not show an effective preset')
   resolveBatch(new Map([['session-cold', { preset: 'standard' }]]))
-  await new Promise<void>(resolve => setImmediate(resolve))
-  const enriched = await t.view()
-  assert.ok(enriched.includes('preset:standard'), `preset enrichment did not refresh the picker:\n${enriched}`)
+  await waitFor(async () => (await t.view()).includes('preset:standard'))
   t.app.stop()
 })
 

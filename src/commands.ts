@@ -11,6 +11,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
+import { scheduler } from 'node:timers/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -61,8 +62,8 @@ import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { renderTranscriptMarkdown, textOf } from './transcript.ts'
 import {
-  TITLE_BATCH_SIZE,
-  TITLE_FIRST_BATCH,
+  PROJECTION_BATCH_SIZE,
+  PROJECTION_FIRST_BATCH,
   buildSessionTree,
   findSessionMatch,
   sameWorkspace,
@@ -71,7 +72,7 @@ import {
   type SessionPickerItem,
   type SessionPickerRow,
 } from './sessions.ts'
-import type { SessionReader } from './runtime/session-reader-port.ts'
+import type { SessionReader, SessionSummary } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
@@ -137,20 +138,30 @@ function metaOf(cwd: string, presetId: string | undefined): Record<string, unkno
  * workspace (the sessionCwd the whole surface follows); `all` lists every
  * main session, grouped by its workspace. Exported so the scope contract
  * is unit-testable without a runner.
+ *
+ * The `items` factories read the SHARED `rows` array at activation time
+ * (not a snapshot taken here): the picker opens input-first on a loading
+ * placeholder and `list()` lands AFTER the categories were built — the
+ * late rows appear through the same factories on the next refresh. When
+ * `rows` is still empty and a `placeholder` is supplied, both categories
+ * render it (the loading row); once rows land the placeholder disappears
+ * naturally.
  * @param rows - the picker rows, newest first (the FULL row set — a main
- *   session beyond any read-window is still listed here, so the title
- *   loader must cover every row this function can show).
+ *   session beyond any read-window is still listed here, so the projection
+ *   loader must cover every row this function can show). The array is read
+ *   lazily and may be filled after the picker opens.
  * @param currentCwd - the live session's workspace.
  * @param header - the picker header prefix (`sessions` / `resume`).
  * @param itemFor - the row → picker item mapper (titles + current marker).
+ * @param placeholder - the loading row shown while `rows` is still empty.
  */
 export function sessionPickerCategories(
   rows: readonly SessionPickerRow[],
   currentCwd: string,
   header: string,
   itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem,
+  placeholder?: () => SessionPickerItem,
 ): PickerCategory[] {
-  const mainRows = rows.filter(row => row.origin !== 'subagent')
   return [
     {
       id: 'current',
@@ -160,9 +171,13 @@ export function sessionPickerCategories(
       // workspace's subset: a fork/rewind branch whose parent lives in
       // another workspace (or outside the window) is an orphan at depth 1 —
       // never lost, never mis-nested under an unrelated root.
-      items: () => buildSessionTree(
-        mainRows.filter(row => sameWorkspace(row.cwd, currentCwd)),
-      ).map(entry => itemFor(entry.row, entry.depth)),
+      items: () => {
+        const mainRows = rows.filter(row => row.origin !== 'subagent')
+        if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
+        return buildSessionTree(
+          mainRows.filter(row => sameWorkspace(row.cwd, currentCwd)),
+        ).map(entry => itemFor(entry.row, entry.depth))
+      },
     },
     {
       id: 'all',
@@ -172,7 +187,11 @@ export function sessionPickerCategories(
       // hang under their parentSession chain with a └─ prefix — never flat
       // roots. Orphans sit at depth 1; the tree's `placed` guard keeps
       // corrupt metadata from looping.
-      items: () => buildSessionTree(mainRows).map(entry => itemFor(entry.row, entry.depth)),
+      items: () => {
+        const mainRows = rows.filter(row => row.origin !== 'subagent')
+        if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
+        return buildSessionTree(mainRows).map(entry => itemFor(entry.row, entry.depth))
+      },
     },
   ]
 }
@@ -2042,25 +2061,42 @@ export function registerTuiCommands(
     },
   })
 
-  // Shared /sessions + /resume body: list lightweight session headers
-  // newest-first, open the picker, and enrich effective presets/titles in the
-  // background. The header parameter lets the resume alias present itself
-  // under its own name.
-  const openSessionPicker = async (invocation: { rawInput: string }, header: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {    // The current marker is the live session's id; before the first session
+  // Shared /sessions + /resume body — input-first (the official /resume
+  // fix): the picker overlay opens IMMEDIATELY on a loading placeholder and
+  // owns the input (Esc, arrows, search) while the Host listing and the
+  // combined projection enrichment land in the background. The header
+  // parameter lets the resume alias present itself under its own name.
+  /** Generation/staleness fence for the open picker load: a superseding
+   * open bumps the generation and aborts the previous scan, and any late
+   * settlement from a closed/superseded picker is dropped. */
+  let sessionPickerGeneration = 0
+  let activeSessionPickerScan: AbortController | undefined
+  const openSessionPicker = async (invocation: { rawInput: string }, header: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
+    // The current marker is the live session's id; before the first session
     // (deferred start) no row is marked current, and the picker can still
     // browse and switch to a persisted session without creating one.
     const currentId = runner.liveAgent?.session.id
-    // The session READ port (migration M1.3): live-preferred listing with
-    // the persistence fallback lives in the Direct adapter, never here.
-    const rows = await runner.sessionReader.list(currentId, signal)
-    if (rows === undefined) return { kind: 'error', text: 'session persistence unavailable' }
-    if (rows.length === 0) return { kind: 'error', text: 'no persisted sessions' }
-    // The picker opens instantly on the headers; titles land in the
-    // background below. The category scopes see the FULL row set, so "All
+    // A NEW picker open supersedes the previous one outright: bump the
+    // generation, cancel its scan, and take over as the active load.
+    sessionPickerGeneration += 1
+    const generation = sessionPickerGeneration
+    activeSessionPickerScan?.abort()
+    const controller = new AbortController()
+    activeSessionPickerScan = controller
+    const scanSignal = AbortSignal.any([signal, controller.signal])
+    /** True when this load's result may no longer touch the UI: the picker
+     * closed (abort), the runner quit, or a newer open superseded it. */
+    const stale = (): boolean => scanSignal.aborted || generation !== sessionPickerGeneration
+
+    // The picker rows: EMPTY until `list()` lands. The category factories
+    // read this shared array at activation time, so the loading placeholder
+    // renders first and the late rows appear through the same factories.
+    const rows: SessionPickerRow[] = []
+    // Live enrichment maps: the background projection batch fills them, and
+    // the category factories re-read them on every activation (Tab cycle,
+    // refresh). The category scopes see the FULL row set, so "All
     // directories" really lists every main session (round-1 review finding:
     // the old code capped the rows themselves at MAX_PICKER_SESSIONS).
-    // Live title map: the background loader fills it, and the category
-    // factories re-read it on every activation (Tab cycle, refresh).
     const titlesById = new Map<string, string>()
     const presetsById = new Map<string, string>()
     const itemFor = (row: SessionPickerRow, indent = 0): SessionPickerItem =>
@@ -2076,14 +2112,31 @@ export function registerTuiCommands(
     // Current directory scopes to the live session's workspace (the
     // sessionCwd the whole surface follows); All directories lists every
     // main session, grouped by its workspace.
-    const categories = sessionPickerCategories(rows, runner.sessionCwd(), header, itemFor)
+    const loadingItem: SessionPickerItem = {
+      value: '',
+      label: 'Loading sessions…',
+      description: '',
+      group: '',
+    }
+    // The status row the categories render while `rows` is still empty: the
+    // loading label first, swapped for the refusal text when the listing
+    // fails (the overlay is already open — an in-picker refusal beats a
+    // dead loading frame; Esc still closes it).
+    let statusRow = loadingItem
+    const categories = sessionPickerCategories(rows, runner.sessionCwd(), header, itemFor, () => statusRow)
     const picker = app.openPicker(
       categories[0]!.items(),
       (id) => {
-        if (id === currentId) return
+        // Any close — including the loading row's Enter — ends the scan:
+        // the picker is gone, so late enrichment may not touch the UI.
+        controller.abort()
+        // Enter on the loading placeholder (value '') must never resume.
+        if (id === '' || id === currentId) return
         switchSession(id)
       },
-      () => {},
+      () => {
+        controller.abort()
+      },
       {
         enableSearch: true,
         header: categories[0]!.header,
@@ -2093,40 +2146,88 @@ export function registerTuiCommands(
         maxHeight: 26,
         showHint: true,
         categories,
+        // A closed picker (select, Esc) aborts the background scan through
+        // the same controller; a runner exit closes the overlay AND cancels
+        // the scan through the shared signal.
+        signal: scanSignal,
         // The selected session's long title marquees; the lineage tree
         // connector and the `●` current marker stay fixed (plan §7.6/§7.7).
         marquee: { labelPartsOf: sessionLabelParts },
       },
     )
-    // Enrich rows with titles and presets as they load (progressive: the
-    // first TITLE_FIRST_BATCH rows land immediately so the visible window
-    // fills, then TITLE_BATCH_SIZE chunks refresh behind it — the picker's
-    // own factory re-reads the shared maps). Each row's title and preset
-    // arrive TOGETHER from the combined DSH projection batch (one cold read
-    // per session, never one scan per field). Cancellations (TUI quit, the
-    // abort signal) are debug-level through the unified entry; a real batch
-    // failure lands in diagnostics instead of being swallowed.
-    //
-    // The batches cover MAIN rows only (the categories never show subagents)
-    // and the FULL main-row set — NOT the `shown` window: the category scopes
-    // see every main session (round-1 review finding), so a session beyond
-    // MAX_PICKER_SESSIONS that IS displayed (e.g. an old session in the
-    // "Current directory" scope) would otherwise never be enriched and would
-    // show a bare short id forever.
-    const mainRows = rows.filter(row => row.origin !== 'subagent')
-    detach('session projections', async () => {
-      const loadBatch = async (batch: SessionPickerRow[]): Promise<void> => {
-        const projections = await runner.sessionReader.projectionBatch(batch, signal)
-        if (projections.size === 0) return
-        for (const [id, projection] of projections) {
-          if (projection.title !== undefined) titlesById.set(id, projection.title)
-          if (projection.preset !== undefined) presetsById.set(id, projection.preset)
+    // The listing + progressive enrichment run behind the open overlay.
+    // Cancellations (picker close, TUI quit, a superseding open) are
+    // debug-level through the unified entry; a real failure lands in
+    // diagnostics instead of being swallowed. Every await re-checks the
+    // staleness fence so a late settlement never refreshes a picker that
+    // already closed or was replaced.
+    detach('session picker load', async () => {
+      // The FIRST thing the scan does is a real event-loop yield: the
+      // overlay must be registered, focused, and repainted before any Host
+      // work starts (a microtask yield would not guarantee the terminal
+      // I/O phase a turn).
+      await scheduler.yield()
+      scanSignal.throwIfAborted()
+
+      // The session READ port (migration M1.3): live-preferred listing with
+      // the persistence fallback lives in the Direct adapter, never here.
+      const listed = await runner.sessionReader.list(currentId, scanSignal)
+      if (stale()) return
+      if (listed === undefined || listed.length === 0) {
+        // The overlay is already open — keep it open on the refusal row
+        // (Esc closes as always) instead of leaving a dead loading frame.
+        statusRow = {
+          value: '',
+          label: listed === undefined ? 'session persistence unavailable' : 'no persisted sessions',
+          description: '',
+          group: '',
         }
         picker.refresh?.()
+        return
       }
-      await loadBatch(mainRows.slice(0, TITLE_FIRST_BATCH))
-      for (let offset = TITLE_FIRST_BATCH; offset < mainRows.length; offset += TITLE_BATCH_SIZE) {
-        await loadBatch(mainRows.slice(offset, offset + TITLE_BATCH_SIZE))
+      // Mutate the shared row array in place: the category factories read
+      // it at activation time, so this one splice swaps the loading
+      // placeholder for the real rows on the next refresh.
+      rows.push(...listed)
+      picker.refresh?.()
+
+      // Progressive combined projection batches: the first
+      // PROJECTION_FIRST_BATCH rows fill the visible window, then
+      // PROJECTION_BATCH_SIZE chunks refresh behind it. Each row's title
+      // and preset arrive TOGETHER from the one DSH projection batch (one
+      // cold read per session, never one scan per field), and the yield
+      // between batches keeps the event loop responsive to input while the
+      // cold observations drain. The batches cover MAIN rows only (the
+      // categories never show subagents) and the FULL main-row set — NOT
+      // the `shown` window: a session beyond MAX_PICKER_SESSIONS that IS
+      // displayed (e.g. an old session in the "Current directory" scope)
+      // would otherwise never be enriched and would show a bare short id
+      // forever.
+      const mainRows = listed.filter(row => row.origin !== 'subagent')
+      const loadBatch = async (batch: readonly SessionSummary[]): Promise<void> => {
+        const projections = await runner.sessionReader.projectionBatch(batch, scanSignal)
+        if (stale()) return
+        let enriched = false
+        for (const [id, projection] of projections) {
+          if (projection.title !== undefined) {
+            titlesById.set(id, projection.title)
+            enriched = true
+          }
+          if (projection.preset !== undefined) {
+            presetsById.set(id, projection.preset)
+            enriched = true
+          }
+        }
+        if (enriched) picker.refresh?.()
+      }
+      await loadBatch(mainRows.slice(0, PROJECTION_FIRST_BATCH))
+      if (stale()) return
+      for (let offset = PROJECTION_FIRST_BATCH; offset < mainRows.length; offset += PROJECTION_BATCH_SIZE) {
+        // Yield between batches so input/repaint keep their turns even when
+        // every projection is a cold miss.
+        await scheduler.yield()
+        if (stale()) return
+        await loadBatch(mainRows.slice(offset, offset + PROJECTION_BATCH_SIZE))
       }
     })
     return { kind: 'success' }
