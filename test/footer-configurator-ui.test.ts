@@ -191,8 +191,10 @@ test('A opens the Add picker; typing filters; Enter adds and closes', async () =
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('Add Item → Row 1 · Left'), `picker title missing (the add side is shown):\n${view}`)
   assert.ok(view.includes('Search:'), `search line missing:\n${view}`)
-  // Type to filter (one chunk — the paste-burst path).
-  vt.sendInput('cache')
+  // Type to filter (one chunk — the paste-burst path). The label 'cache
+  // hit' pins the match: the unfiltered catalog also carries stats-line,
+  // whose description contains 'cache'.
+  vt.sendInput('cache hit')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('Cache hit'), `the search must filter to the match:\n${view}`)
@@ -205,14 +207,16 @@ test('A opens the Add picker; typing filters; Enter adds and closes', async () =
   assert.equal(model.state().mode, 'row', 'a successful add closes the picker')
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('Edit Row 1'), `the picker must close back into the row editor:\n${view}`)
-  // Reopen: the query is FRESH, and the added item has left the pool.
+  // Reopen: the query is FRESH, and the added definition is STILL offered
+  // (a definition may be placed repeatedly — another Add appends an
+  // independent placement).
   vt.sendInput('a')
   await vt.waitForRender()
   assert.equal(model.state().addQuery, '')
-  vt.sendInput('cache')
+  vt.sendInput('cache hit')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('(no matching items)'), `the pool must drop the added item:\n${view}`)
+  assert.ok(view.includes('Cache hit'), `the placed definition stays addable:\n${view}`)
   // Esc clears the search first, then returns to the row editor.
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -416,8 +420,8 @@ test('bracketed paste split across terminal chunks buffers until the end marker'
   vt.sendInput('a')
   await vt.waitForRender()
   // Start/content/end split across chunks (slow terminals deliver paste
-  // in pieces). 'cach' filters to Cache hit (context is already IN the
-  // default layout, so the pool wouldn't list it).
+  // in pieces). 'cach' filters to Cache hit (the definition catalog lists
+  // every item; the substring still isolates the match).
   vt.sendInput('\x1b[200~c')
   await vt.waitForRender()
   vt.sendInput('ac')

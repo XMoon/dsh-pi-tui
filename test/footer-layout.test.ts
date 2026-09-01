@@ -36,6 +36,32 @@ test('a custom layout with zones, separator, formats and tones parses', () => {
   assert.equal(layout.rows[0]!.separator?.text, ' │ ')
 })
 
+test('DUPLICATE item ids parse in order with every ref intact (repeated placements)', () => {
+  // The ordered array IS the placement identity (rowIndex + zone + index):
+  // the same definition may be placed repeatedly with independent
+  // overrides — no instance id, no schema change (schemaVersion stays 1).
+  const parsed = parseFooterLayout({
+    schemaVersion: 1,
+    rows: [{
+      left: [
+        { id: 'performance', format: 'latency' },
+        { id: 'performance', format: 'speed' },
+        { id: 'user:env', tone: 'primary' },
+        { id: 'user:env', importance: 10 },
+      ],
+      right: [{ id: 'performance' }],
+    }],
+  })
+  assert.ok(isFooterLayout(parsed), `duplicate placements must parse: ${JSON.stringify(parsed)}`)
+  const layout = parsed as Exclude<typeof parsed, { kind: 'error' }>
+  const left = layout.rows[0]!.left
+  assert.deepEqual(left.map(ref => ref.id), ['performance', 'performance', 'user:env', 'user:env'])
+  assert.deepEqual(left.map(ref => ref.format), ['latency', 'speed', undefined, undefined])
+  assert.equal(left[2]!.tone, 'primary')
+  assert.equal(left[3]!.importance, 10)
+  assert.deepEqual(layout.rows[0]!.right.map(ref => ref.id), ['performance'])
+})
+
 test('invalid documents fail soft with a message', () => {
   const cases: Array<[unknown, RegExp]> = [
     [null, /must be an object/],
