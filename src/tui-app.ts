@@ -1328,6 +1328,13 @@ export interface PickerHandle {
   /** Categorized pickers only: switch to a category by id (re-running its
    * items factory). No-op on a plain picker. */
   setCategory?(id: string): void
+  /** The live search filter (the query the user sees/edits). */
+  getFilter?(): string
+  /** Set the live search filter programmatically (applies to the current
+   * rows; the search input follows). Callers deferring an initial query
+   * until real rows land use this so pre-row STATUS rows (loading,
+   * refusal) are never hidden behind a prefilled filter. */
+  setFilter?(filter: string): void
   /** Host-internal: drop the abort listener (the imperative select
    * broker's settle path — a settled promise must not retain the
    * listener on the caller's signal). */
@@ -9973,6 +9980,11 @@ export class TuiApp {
         list.setItems(next.map(item => ({ ...item })))
         this.requestRender()
       },
+      getFilter: () => list.getFilter(),
+      setFilter: (filter) => {
+        list.setFilter(filter)
+        this.requestRender()
+      },
       _removeAbortListener: removeAbortListener,
     }
   }
@@ -10127,6 +10139,15 @@ export class TuiApp {
         currentIndex = index
         state.index = index
         activate()
+      },
+      getFilter: () => list?.getFilter() ?? '',
+      setFilter: (filter) => {
+        if (list === undefined) return
+        // The internal `query` mirrors the edit so a later category switch
+        // carries the PROGRAMMATIC filter exactly like a typed one.
+        query = filter
+        list.setFilter(filter)
+        this.requestRender()
       },
       _removeAbortListener: () => {
         if (onAbort !== undefined && options.signal !== undefined) {
