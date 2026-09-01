@@ -372,7 +372,7 @@ test('P2: /status forces ONE measurement through the coordinator, never a duplic
     find: () => undefined,
     execute: async () => undefined,
   } as never)
-  const agent = { session: { id: 'session-b', events: [], header: { cwd: '/ws' } } } as unknown as Agent
+  const agent = { session: { id: 'session-b', seq: 0, snapshotEvents: () => [], header: { cwd: '/ws' } } } as unknown as Agent
   try {
     // Run the handler under BOTH force outcomes: a measured value AND an
     // undefined force (no live session / measurement failure). The direct

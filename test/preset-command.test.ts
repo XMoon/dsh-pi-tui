@@ -48,8 +48,15 @@ process.env.CI = ''
 
 /** A blank or started fake agent. */
 function fakeAgent(sessionId: string, events: readonly { type: string }[] = []): Agent {
+  // The alpha.4 Session shape: the log is served through the snapshot reads.
   return {
-    session: { id: sessionId, header: { cwd: '/ws' }, events },
+    session: {
+      id: sessionId,
+      header: { cwd: '/ws' },
+      get seq() { return events.length },
+      eventAt: (seq: number) => events[seq],
+      snapshotEvents: () => events,
+    },
     ctx: { on: () => () => {} },
     options: { provider: 'p', model: 'm' },
   } as unknown as Agent

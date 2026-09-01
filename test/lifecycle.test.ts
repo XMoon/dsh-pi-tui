@@ -802,7 +802,7 @@ test('isCancellation recognizes AbortError name and ABORT_ERR code', () => {
 
 // --- createExitController: the ONE exit orchestration (Ctrl+C/D, /exit, /quit) ---
 
-const SESSION: ExitSessionLike = { id: 'session-exit', events: { length: 7 } }
+const SESSION: ExitSessionLike = { id: 'session-exit', seq: 7 }
 
 /** A controller harness recording every side effect; `exit` resolves the
  * returned promise so tests await the orchestration's completion. */

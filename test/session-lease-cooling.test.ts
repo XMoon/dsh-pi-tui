@@ -62,8 +62,18 @@ function makeRig(script: Step[], missingInspect = false): Rig {
   return { manager, released, coordinator, epoch: 0 }
 }
 
+/** The alpha.4 Session shape over a plain event array (the cooling
+ * snapshot reads only the tail through the range read). */
+function sessionLike(id: string, events: Ev[]): { id: string; seq: number; snapshotEvents(fromSeq?: number): readonly Ev[] } {
+  return {
+    id,
+    get seq() { return events.length },
+    snapshotEvents: (fromSeq?: number) => events.slice(fromSeq ?? 0),
+  }
+}
+
 function startCooling(rig: Rig, id: string, seed: Ev[]): void {
-  const snapshot = snapshotSession({ id, events: seed })
+  const snapshot = snapshotSession(sessionLike(id, seed))
   rig.manager.reserve({ id })
   rig.manager.markTouched(id)
   rig.manager.markActive(id)
@@ -293,7 +303,7 @@ test('Case C: ABA — a stale verifier can neither release nor pin cooling#2', a
   rig.manager.reserveForActivation({ id: 'session-a' })
   rig.manager.markTouched('session-a')
   rig.manager.markActive('session-a')
-  const snapshot2 = snapshotSession({ id: 'session-a', events: seed })
+  const snapshot2 = snapshotSession(sessionLike('session-a', seed))
   const epoch2 = rig.manager.beginCooling('session-a', snapshot2)!
   assert.notEqual(epoch2, rig.epoch, 'cooling #2 has a different epoch')
   // A NEW verifier task starts for epoch2 while epoch1 still runs.
@@ -324,7 +334,7 @@ test('Case D: a newer retirement is accepted while the old task still runs (epoc
   rig.manager.reserveForActivation({ id: 'session-a' })
   rig.manager.markTouched('session-a')
   rig.manager.markActive('session-a')
-  const snapshot2 = snapshotSession({ id: 'session-a', events: seed })
+  const snapshot2 = snapshotSession(sessionLike('session-a', seed))
   const epoch2 = rig.manager.beginCooling('session-a', snapshot2)!
   rig.coordinator.start('session-a', snapshot2, epoch2)
   // Both tasks are now awaiting inspects; the SECOND task must run to
@@ -347,7 +357,7 @@ test('Case E: an HMR abort is neutral — COOLING stays COOLING, resumePending c
   const manager = new ProcessSessionLeaseManager({
     acquire: (target) => ({ result: { kind: 'acquired' }, release: () => { released.push(target.id) } }),
   })
-  const snapshot = snapshotSession({ id: 'session-a', events: seed })
+  const snapshot = snapshotSession(sessionLike('session-a', seed))
   manager.reserve({ id: 'session-a' })
   manager.markTouched('session-a')
   manager.markActive('session-a')

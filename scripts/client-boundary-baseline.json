@@ -1,113 +1,115 @@
 {
- "commands.ts": [
-  "import:dsh-agent",
-  "import:dsh-session"
- ],
- "index.ts": [
-  "agentDefaultModel",
-  "agentPresets",
-  "agents",
-  "attachments",
-  "commands",
-  "import:dsh-agent",
-  "import:dsh-session",
-  "jobs",
-  "llm",
-  "permissionPresets",
-  "planMode",
-  "sandboxPolicy",
-  "sessionPersistence",
-  "sessions",
-  "settings",
-  "shell",
-  "subagents",
-  "tokenMeter",
-  "tools"
- ],
- "model-menu.ts": [
-  "import:dsh-agent"
- ],
- "present.ts": [
-  "import:dsh-session"
- ],
- "rewind.ts": [
-  "import:dsh-session"
- ],
- "runtime/direct/catalog-direct.ts": [
-  "agentDefaultModel",
-  "agentPresets",
-  "import:dsh-agent",
-  "llm",
-  "tools"
- ],
- "runtime/direct/config-direct.ts": [
-  "agentPresets",
-  "authorization",
-  "commands",
-  "credentials",
-  "llm",
-  "permissionPresets",
-  "settings"
- ],
- "runtime/direct/interaction-direct.ts": [
-  "approval",
-  "userQuestions"
- ],
- "runtime/direct/session-direct.ts": [
-  "agentPresets",
-  "import:dsh-session",
-  "sessionPersistence",
-  "sessionQuery",
-  "tokenMeter"
- ],
- "runtime/direct/session-preset-direct.ts": [
-  "agentPresets",
-  "import:dsh-agent",
-  "import:dsh-session",
-  "sessionQuery"
- ],
- "runtime/direct/session-projection-direct.ts": [
-  "agentPresets",
-  "import:dsh-agent",
-  "import:dsh-session",
-  "sessionQuery"
- ],
- "runtime/direct/session-lifecycle-direct.ts": [
-  "agents",
-  "import:dsh-agent",
-  "import:dsh-session"
- ],
- "runtime/direct/model-selection-direct.ts": [
-  "import:dsh-agent"
- ],
- "runtime/direct/session-writer-direct.ts": [
-  "sessionTitle"
- ],
- "runtime/direct/subagent-direct.ts": [
-  "subagents"
- ],
- "session-fork.ts": [
-  "import:dsh-agent",
-  "import:dsh-session"
- ],
- "sessions.ts": [
-  "import:dsh-session"
- ],
- "skill-catalog-refresh.ts": [
-  "import:dsh-agent"
- ],
- "skill-catalog.ts": [
-  "agentPresets",
-  "skills"
- ],
- "stats.ts": [
-  "import:dsh-session"
- ],
- "surface-catalog.ts": [
-  "commands",
-  "import:dsh-agent"
- ],
- "transcript.ts": [
-  "import:dsh-session"
- ]
+  "commands.ts": [
+    "import:dsh-agent",
+    "import:dsh-session"
+  ],
+  "index.ts": [
+    "agentDefaultModel",
+    "agentPresets",
+    "agents",
+    "approval",
+    "attachments",
+    "commands",
+    "import:dsh-agent",
+    "import:dsh-session",
+    "jobs",
+    "llm",
+    "permissionPresets",
+    "planMode",
+    "sandboxPolicy",
+    "sessionPersistence",
+    "sessions",
+    "settings",
+    "shell",
+    "subagents",
+    "tokenMeter",
+    "tools"
+  ],
+  "model-menu.ts": [
+    "import:dsh-agent"
+  ],
+  "present.ts": [
+    "import:dsh-session"
+  ],
+  "rewind.ts": [
+    "import:dsh-session"
+  ],
+  "runtime/direct/catalog-direct.ts": [
+    "agentDefaultModel",
+    "agentPresets",
+    "import:dsh-agent",
+    "llm",
+    "tools"
+  ],
+  "runtime/direct/config-direct.ts": [
+    "agentPresets",
+    "approval",
+    "authorization",
+    "commands",
+    "credentials",
+    "llm",
+    "permissionPresets",
+    "settings"
+  ],
+  "runtime/direct/interaction-direct.ts": [
+    "approval",
+    "userQuestions"
+  ],
+  "runtime/direct/session-direct.ts": [
+    "agentPresets",
+    "import:dsh-session",
+    "sessionPersistence",
+    "sessionQuery",
+    "tokenMeter"
+  ],
+  "runtime/direct/session-preset-direct.ts": [
+    "agentPresets",
+    "import:dsh-agent",
+    "import:dsh-session",
+    "sessionQuery"
+  ],
+  "runtime/direct/session-projection-direct.ts": [
+    "agentPresets",
+    "import:dsh-agent",
+    "import:dsh-session",
+    "sessionQuery"
+  ],
+  "runtime/direct/session-lifecycle-direct.ts": [
+    "agents",
+    "import:dsh-agent",
+    "import:dsh-session"
+  ],
+  "runtime/direct/model-selection-direct.ts": [
+    "import:dsh-agent"
+  ],
+  "runtime/direct/session-writer-direct.ts": [
+    "sessionTitle"
+  ],
+  "runtime/direct/subagent-direct.ts": [
+    "subagents"
+  ],
+  "session-fork.ts": [
+    "import:dsh-agent",
+    "import:dsh-session"
+  ],
+  "sessions.ts": [
+    "import:dsh-session"
+  ],
+  "skill-catalog-refresh.ts": [
+    "import:dsh-agent"
+  ],
+  "skill-catalog.ts": [
+    "agentPresets",
+    "skills"
+  ],
+  "stats.ts": [
+    "import:dsh-session"
+  ],
+  "surface-catalog.ts": [
+    "commands",
+    "import:dsh-agent"
+  ],
+  "transcript.ts": [
+    "import:dsh-session"
+  ]
 }

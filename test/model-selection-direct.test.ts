@@ -8,8 +8,11 @@ function fakeAgent(events: readonly unknown[], header: unknown) {
   const appended: unknown[] = []
   const agent = {
     ctx: { on: () => () => {} },
+    // The alpha.4 Session shape: the log is served through snapshot reads.
     session: {
-      events,
+      get seq() { return events.length },
+      eventAt: (seq: number) => events[seq],
+      snapshotEvents: () => events,
       requestHeader: () => header,
       append: (type: string, data: unknown) => { appended.push({ type, data }) },
     },

@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deriveAccessStatus, sandboxModeName, type PermissionPresetsLike, type SandboxPolicyLike } from '../src/status/derive-access.ts'
+import { deriveAccessStatus, sandboxModeName, type ApprovalServiceLike, type PermissionPresetsLike, type SandboxPolicyLike } from '../src/status/derive-access.ts'
 import { deriveActivityPhase, deriveActivityStatus } from '../src/status/derive-activity.ts'
 import { derivePlanStatus } from '../src/status/derive-plan.ts'
 import { usageFromStats } from '../src/status/derive-usage.ts'
@@ -27,14 +27,17 @@ function sandbox(mode: string): SandboxPolicyLike {
   return { resolve: () => ({ mode }) }
 }
 
+function approval(policy: 'ask' | 'never'): ApprovalServiceLike {
+  return { overrideOf: () => policy }
+}
+
 test('access: read-only + ask derives independent facts', () => {
   const status = deriveAccessStatus(
     {
       permissionPresets: presets('read-only'),
       sandboxPolicy: sandbox('read-only'),
-      approvalFold: () => 'ask',
+      approval: approval('ask'),
     },
-    [],
     {},
   )
   assert.deepEqual(status, {
@@ -49,9 +52,8 @@ test('access: danger-full-access + never', () => {
     {
       permissionPresets: presets('danger-full-access', 'Danger'),
       sandboxPolicy: sandbox('danger-full-access'),
-      approvalFold: () => 'never',
+      approval: approval('never'),
     },
-    [],
     {},
   )
   assert.equal(status.permissionPreset?.id, 'danger-full-access')
@@ -66,9 +68,8 @@ test('access: custom is a neutral unmatched combination, never danger', () => {
     {
       permissionPresets: presets('custom'),
       sandboxPolicy: sandbox('workspace-write'),
-      approvalFold: () => 'ask',
+      approval: approval('ask'),
     },
-    [],
     {},
   )
   assert.equal(status.permissionPreset?.id, 'custom')
@@ -78,7 +79,7 @@ test('access: custom is a neutral unmatched combination, never danger', () => {
 })
 
 test('access: missing services degrade to absent facts', () => {
-  const status = deriveAccessStatus({}, [])
+  const status = deriveAccessStatus({})
   assert.deepEqual(status, {})
 })
 
@@ -87,20 +88,11 @@ test('access: throwing services degrade to absent facts', () => {
     {
       permissionPresets: { current: () => { throw new Error('boom') }, optionOf: () => { throw new Error('boom') } },
       sandboxPolicy: { resolve: () => { throw new Error('boom') } },
-      approvalFold: () => { throw new Error('boom') },
+      approval: { overrideOf: () => { throw new Error('boom') } },
     },
-    [],
     {},
   )
   assert.deepEqual(status, {})
-})
-
-test('access: sandbox fold fallback when the policy service is absent', () => {
-  const status = deriveAccessStatus(
-    { sandboxFold: () => 'workspace-write' },
-    [],
-  )
-  assert.deepEqual(status.sandbox, { mode: 'workspace-write' })
 })
 
 test('access: unknown sandbox modes are omitted, never guessed', () => {
@@ -241,20 +233,11 @@ test('activity: nonzero child counts ride the section', () => {
   assert.equal(status.taskCount, 0)
 })
 
-test('access: the sandbox FOLD is a pure capability input (the derive never imports the upstream module)', async () => {
-  // The runner's sandboxFold is capability-detected at apply time (a
-  // dynamic import in a detached probe — a Harness whose
-  // dsh-sandbox-policy lacks effectiveSandboxMode degrades to the
-  // sandboxPolicy service or an absent fact, never a load-time crash).
-  // The derive itself stays pure: any fold function is accepted, and its
-  // absence falls back to the service.
-  const status = deriveAccessStatus(
-    { sandboxFold: (events: readonly never[]) => (events.length > 0 ? 'workspace-write' : undefined) },
-    [{ kind: 'sandbox/mode' }] as never,
-  )
-  assert.deepEqual(status.sandbox, { mode: 'workspace-write' })
-  // Absent fold + absent service: absent fact (already covered by the
-  // missing-services test — this pins the fold fallback order).
-  const without = deriveAccessStatus({}, [])
+test('access: alpha.4 drops the event-log fold inputs entirely (service-only reads)', () => {
+  // The alpha.4 sandbox-policy package removed effectiveSandboxMode and the
+  // approval package removed effectiveApprovalPolicy — every access fact is
+  // now a session-oriented service read, so the derive takes NO event array
+  // at all and an absent service stays an absent fact.
+  const without = deriveAccessStatus({})
   assert.deepEqual(without, {})
 })

@@ -56,7 +56,7 @@ export interface SessionProjectionCacheLike {
   cachedSnapshot(
     meta: SessionHeader,
     keys?: readonly AgentPresetProjectionKey[],
-  ): { readonly asOfSeq: number; readonly values?: { readonly agentPreset?: string | null } } | undefined
+  ): { readonly values?: { readonly agentPreset?: string | null } } | undefined
 }
 
 /** The minimum context surface of the runner. */

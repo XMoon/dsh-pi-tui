@@ -85,10 +85,12 @@ export function flushWithTimeout(
   })
 }
 
-/** The live session the exit flush targets; undefined when none was created. */
+/** The live session the exit flush targets; undefined when none was created.
+ * `seq` is the session's log offset (alpha.4's `Session.seq`) — the count
+ * read for diagnostics without materializing the event log. */
 export interface ExitSessionLike {
   readonly id: string
-  readonly events: { readonly length: number }
+  readonly seq: number
 }
 
 /** Diagnostics sink used by the exit controller (subset of Diag). */
@@ -165,7 +167,7 @@ export function createExitController(deps: ExitControllerDeps): { requestExit():
             session: exitSession.id,
             outcome: flushOutcome.kind,
             tookMs: flushOutcome.tookMs,
-            events: exitSession.events.length,
+            events: Number(exitSession.seq),
             ...flushOutcome.kind === 'failed' ? { error: flushOutcome.error } : {},
           })
         }

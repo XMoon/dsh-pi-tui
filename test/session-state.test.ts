@@ -43,11 +43,14 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 
 /** A minimal fake agent whose identity marks which session a refresh ran for. */
 function fakeAgent(sessionId: string): Agent {
+  // The alpha.4 Session shape over a private backing log.
   const events: unknown[] = []
   const session = {
     id: sessionId,
     header: { cwd: '/ws' },
-    events,
+    get seq() { return events.length },
+    eventAt: (seq: number) => events[seq],
+    snapshotEvents: () => Object.freeze([...events]),
     append: (type: string, data: unknown) => {
       const event = { type, seq: events.length, time: Date.now(), data }
       events.push(event)

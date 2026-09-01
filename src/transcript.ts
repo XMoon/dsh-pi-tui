@@ -2291,7 +2291,7 @@ function markdownContent(blocks: readonly ContentBlock[]): string {
 
 export function renderTranscriptMarkdown(session: {
   header: SessionHeader
-  events: readonly SessionEvent[]
+  snapshotEvents(): readonly SessionEvent[]
 }): string {
   const lines: string[] = [
     `# Session ${session.header.id}`,
@@ -2301,7 +2301,9 @@ export function renderTranscriptMarkdown(session: {
       : [`- agent preset: ${session.header.agentPreset}`],
     '',
   ]
-  for (const event of session.events) {
+  // Alpha.4 Session shape: the raw log arrives as a snapshot read, never a
+  // live array — the markdown export is a full-log fold by definition.
+  for (const event of session.snapshotEvents()) {
     // The same append-origin contract as the transcript fold: a surface
     // replacement is a model-only rewrite (pruned tool result, compaction
     // summary checkpoint) and must never be replayed in a human-facing

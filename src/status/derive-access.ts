@@ -1,16 +1,17 @@
 /**
  * Access status derivation (plan §4.2): the effective permission preset,
  * the sandbox mode and the approval policy are INDEPENDENT facts. The
- * preset is the official `permissionPresets.current(session)` resolution
- * (alpha.2 reads the session's knob state); the sandbox mode comes from
- * the official sandbox policy service (or the official fold); the approval
- * policy comes from the official approval fold. Nothing is guessed from
+ * preset is the official `permissionPresets.current(session)` resolution;
+ * the sandbox mode comes from the official sandbox policy service; the
+ * approval policy comes from the official approval service's session
+ * override read (`overrideOf(session)`, no configured default applied —
+ * an absent override stays an absent fact). Nothing is guessed from
  * preset names, runner names or platform names, and `custom` is a neutral
  * unmatched combination — never danger.
  *
- * The module is generic over the event type so it stays free of Host type
- * imports (the boundary gate): the runner instantiates it with the real
- * session event type.
+ * Every seam is session-oriented (alpha.4): no event-log array crosses
+ * this boundary, so the module stays free of Host type imports (the
+ * boundary gate) while the official services own their own folds.
  * @module @xmoon76/dsh-pi-tui/status/derive-access
  */
 
@@ -27,17 +28,18 @@ export interface SandboxPolicyLike {
   resolve(request?: { session?: unknown }): { mode: string }
 }
 
-/** The official approval fold (dsh-user-approval's effectiveApprovalPolicy). */
-export type ApprovalFold<E> = (events: readonly E[]) => 'ask' | 'never' | undefined
+/** The official approval service surface (structural; `overrideOf(session)`
+ * reads the session's own `approval/policy` fold without the configured
+ * default). */
+export interface ApprovalServiceLike {
+  overrideOf(session: unknown): 'ask' | 'never' | undefined
+}
 
 /** The derivation inputs; every service is optional (capability-gated). */
-export interface AccessDeriveDeps<E> {
+export interface AccessDeriveDeps {
   permissionPresets?: PermissionPresetsLike
   sandboxPolicy?: SandboxPolicyLike
-  approvalFold?: ApprovalFold<E>
-  /** The official sandbox fold (dsh-sandbox-policy's effectiveSandboxMode),
-   * used when the sandbox policy service is absent. */
-  sandboxFold?: (events: readonly E[]) => string | undefined
+  approval?: ApprovalServiceLike
 }
 
 /** The sandbox modes the TUI's own vocabulary names. */
@@ -60,15 +62,10 @@ export function sandboxModeName(mode: string | undefined): SandboxModeName | und
  * Derive the access section from the official services. Every input is
  * optional: a missing service degrades to an absent fact, never a crash.
  * @param deps - the service surfaces.
- * @param events - the display subject's session events (log order).
- * @param session - the live session object for the sandbox policy resolve
- *   (optional; the fold fallback covers its absence).
+ * @param session - the display subject's live session (opaque; each
+ *   service reads it through its own official seam).
  */
-export function deriveAccessStatus<E>(
-  deps: AccessDeriveDeps<E>,
-  events: readonly E[],
-  session?: unknown,
-): AccessStatus {
+export function deriveAccessStatus(deps: AccessDeriveDeps, session?: unknown): AccessStatus {
   const status: {
     permissionPreset?: AccessStatus['permissionPreset']
     sandbox?: AccessStatus['sandbox']
@@ -90,28 +87,20 @@ export function deriveAccessStatus<E>(
     }
   }
 
-  let sandboxMode: string | undefined
   const policy = deps.sandboxPolicy
   if (policy !== undefined) {
     try {
-      sandboxMode = policy.resolve(session === undefined ? undefined : { session }).mode
+      const mode = sandboxModeName(policy.resolve(session === undefined ? undefined : { session }).mode)
+      if (mode !== undefined) status.sandbox = { mode }
     } catch {
-      sandboxMode = undefined
+      // Degrade to an absent fact.
     }
   }
-  if (sandboxMode === undefined && deps.sandboxFold !== undefined) {
-    try {
-      sandboxMode = deps.sandboxFold(events)
-    } catch {
-      sandboxMode = undefined
-    }
-  }
-  const mode = sandboxModeName(sandboxMode)
-  if (mode !== undefined) status.sandbox = { mode }
 
-  if (deps.approvalFold !== undefined) {
+  const approval = deps.approval
+  if (approval !== undefined && session !== undefined) {
     try {
-      const policy = deps.approvalFold(events)
+      const policy = approval.overrideOf(session)
       if (policy !== undefined) status.approval = { policy }
     } catch {
       // Degrade to an absent fact.

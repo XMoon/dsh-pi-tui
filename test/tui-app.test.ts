@@ -10,6 +10,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { ToolCallId, MessageId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -227,7 +228,7 @@ test('tool cards present through the real registry: read shows the relativized p
     // registered tool for real, then its outcome lands as tool/result.
     const callEvent: SessionEvent = {
       type: 'tool/call',
-      seq: 0,
+      seq: SessionSeq(0),
       time: 1_700_000_000_000,
       data: { turn: 0, step: 0, callId, name: 'read', arguments: JSON.stringify({ file_path: filePath }) },
     }
@@ -1148,7 +1149,7 @@ function diffCallArgs(): string {
 function diffCallEvent(seq: number, callId: string): SessionEvent {
   return {
     type: 'tool/call',
-    seq,
+    seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
     data: { turn: 0, step: 0, callId: ToolCallId(callId), name: 'edit', arguments: diffCallArgs() },
   }
@@ -1157,7 +1158,7 @@ function diffCallEvent(seq: number, callId: string): SessionEvent {
 function diffResultEvent(seq: number, callId: string, text: string): SessionEvent {
   return {
     type: 'tool/result',
-    seq,
+    seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
     data: {
       turn: 0,
@@ -1170,7 +1171,7 @@ function diffResultEvent(seq: number, callId: string, text: string): SessionEven
 function subagentRouteCallEvent(seq: number, callId: string, args: string): SessionEvent {
   return {
     type: 'tool/call',
-    seq,
+    seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
     data: { turn: 0, step: 0, callId: ToolCallId(callId), name: 'subagent_route', arguments: args },
   }
@@ -1179,7 +1180,7 @@ function subagentRouteCallEvent(seq: number, callId: string, args: string): Sess
 function subagentRouteResultEvent(seq: number, callId: string): SessionEvent {
   return {
     type: 'tool/result',
-    seq,
+    seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
     data: {
       turn: 0,
