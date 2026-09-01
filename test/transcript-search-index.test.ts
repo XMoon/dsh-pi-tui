@@ -582,6 +582,49 @@ test('command/done and workflow cards are searchable exactly like legacy', () =>
   assert.equal(folder.resolveSearchMatch(workflow[0]!)?.kind, 'tool')
 })
 
+test('a settled assistant message created WITHOUT chunks stays searchable after replacement', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    turnStart(0, 0),
+    assistantMessage(1, 0, 0, 'original settled text'),
+  ])
+  assertCorpusParity(folder, ['original settled'])
+  // A replay replacement (different authoritative text) mutates the entry
+  // in place: the search projection must follow (review finding — the
+  // entry created without a preceding streaming chunk used to miss its
+  // search-index registration).
+  folder.apply([assistantMessage(2, 0, 0, 'replaced authoritative text')])
+  assertCorpusParity(folder, ['replaced authoritative'])
+  assert.equal(folder.search('original settled').length, 0, 'the old text is gone from the corpus')
+  // A late text delta after the replacement also lands in the projection.
+  folder.apply([
+    ...assistantChunks(3, 0, 0, ['with a streamed tail']),
+  ])
+  assertCorpusParity(folder, ['replaced authoritative', 'streamed tail'])
+})
+
+test('interleaved reasoning and text deltas search their OWN entries (namespaced projection)', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    turnStart(0, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning-corpse marker' } }, 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'assistant-corpse marker' } }, 2),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: ' more reasoning deltas' } }, 3),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 1, text: ' more text deltas' } }, 4),
+  ])
+  assertCorpusParity(folder, ['reasoning-corpse', 'assistant-corpse', 'more reasoning', 'more text'])
+  // Parity catches the contamination vector: a reasoning-only needle must
+  // match ONLY the thinking card, never the assistant card (the shared
+  // step key used to route reasoning deltas into the assistant entry).
+  const reasoningMatches = folder.search('reasoning-corpse')
+  assert.equal(reasoningMatches.length, 1)
+  assert.equal(folder.resolveSearchMatch(reasoningMatches[0]!)?.kind, 'thinking')
+  const textMatches = folder.search('assistant-corpse')
+  assert.equal(textMatches.length, 1)
+  assert.equal(folder.resolveSearchMatch(textMatches[0]!)?.kind, 'assistant')
+  assert.equal(folder.search('marker').length, 2, 'both entries hit the shared word, each once')
+})
+
 test('transcriptSearchText is the single corpus source (tool = name args result)', () => {
   const folder = new TranscriptFolder()
   folder.apply([

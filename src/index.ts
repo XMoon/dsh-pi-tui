@@ -1215,6 +1215,25 @@ export function busyAfterTurnBoundary(eventType: 'turn/start' | 'turn/end', comp
   return eventType === 'turn/start' || compacting
 }
 
+/** PR D2 test seam: whether a session event type marks the model-visible
+ * context dirty (re-measure through the SessionReader port) or only
+ * repaints cheaply (cached measurement). The firehose routes every event
+ * through this classification — the single source of truth for the
+ * status/measurement split. `compaction/end` is classified 'measure' but
+ * the firehose deliberately SKIPS it here: a matched compaction settle
+ * re-measures through the fold-outcome path (settleCompactionSurface), so
+ * a STALE compaction/end can never trigger a measurement. */
+export function contextRefreshKind(eventType: string): 'measure' | 'cheap' {
+  switch (eventType) {
+    case 'step/start':
+    case 'turn/end':
+    case 'compaction/end':
+      return 'measure'
+    default:
+      return 'cheap'
+  }
+}
+
 /**
  * The in-flight compaction state a resumed session log implies: the newest
  * compaction bracket decides. A `session/end-seed` boundary makes any
@@ -7039,6 +7058,15 @@ export function apply(ctx: Context, config: Config): void {
         settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(liveAgent.session.events))
       }
       if (compacted.notify !== undefined) app.notify(compacted.notify.text, compacted.notify.kind)
+      // PR D2: route the context re-measure decision through the single
+      // classifier (test seam). compaction/end is NOT routed here — its
+      // re-measure is driven by the MATCHED compaction fold above (a stale
+      // compaction/end must never re-measure).
+      const eventType = String(event.type)
+      if (eventType !== 'compaction/end' && contextRefreshKind(eventType) === 'measure') {
+        markContextDirty()
+        refreshContextMeasurement(eventType === 'turn/end' ? 'turn-end' : 'step-start')
+      }
       // Persist each completed turn so a crash loses at most the live turn.
       // The busy indicator follows turn boundaries: on from the moment a
       // turn starts (model wait + tool calls), off when it ends.
@@ -7063,9 +7091,6 @@ export function apply(ctx: Context, config: Config): void {
         // compaction settles) — the single-Esc cancel stays armed.
         app.setBusy(busyAfterTurnBoundary('turn/end', compactingId !== undefined))
         paintNow()
-        // A turn ended: the context composition settled — measure once.
-        markContextDirty()
-        refreshContextMeasurement('turn-end')
         // Persist each completed turn so a crash loses at most the live
         // turn. Detached: a flush rejection must never surface as an
         // unhandled rejection in the event firehose. An ENOENT flush (the
@@ -7082,11 +7107,6 @@ export function apply(ctx: Context, config: Config): void {
           ),
           recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
         })
-      } else if (event.type === 'step/start') {
-        // A step is about to run: the model-visible context may have
-        // changed (new user message, tool results, compositions).
-        markContextDirty()
-        refreshContextMeasurement('step-start')
       }
     })
     // Subagent lifecycle events drive the continuable-children half of the

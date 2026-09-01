@@ -14,11 +14,13 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 import {
   ContextMeasurementCoordinator,
   deferInitialContextMeasure,
   type ContextMeasureReason,
 } from '../src/status/context-measurement.ts'
+import { contextRefreshKind } from '../src/index.ts'
 
 /** A counting reader standing in for SessionReader.measureContext. */
 function countingReader(initial = 42_000): {
@@ -263,4 +265,36 @@ test('reason names are the documented model-visible triggers', () => {
   ]
   assert.equal(reasons.length, 6)
   assert.ok(reasons.includes('step-start') && reasons.includes('compaction-end'))
+})
+
+test('contextRefreshKind classifier: model-visible events measure, UI-only events repaint cheaply', () => {
+  assert.equal(contextRefreshKind('step/start'), 'measure')
+  assert.equal(contextRefreshKind('turn/end'), 'measure')
+  assert.equal(contextRefreshKind('compaction/end'), 'measure', 'classified measure; the firehose skips it (fold-outcome path)')
+  for (const uiOnly of [
+    'turn/start', 'user/message', 'assistant/chunk', 'assistant/message',
+    'tool/call', 'tool/result', 'subagent/start', 'subagent/end', 'agent/status',
+    'session/end-seed', 'compaction/start', 'llm/retry', 'command/run',
+  ]) {
+    assert.equal(contextRefreshKind(uiOnly), 'cheap', `${uiOnly} must only repaint cheaply`)
+  }
+})
+
+test('D2 structural gate: the runner source keeps measurement out of cheap refreshes', () => {
+  // The same source-audit style as test/rules.test.ts: a regression that
+  // reintroduces a measuring reader (or the direct tokenMeter service)
+  // into a generic status refresh fails here instead of waiting for a
+  // review round. Comments are stripped so documentation cannot mask code.
+  const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const stripped = source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+  const cheapStart = stripped.indexOf('const refreshStatusCheap =')
+  const cheapEnd = stripped.indexOf('const refreshContextMeasurement =')
+  assert.ok(cheapStart !== -1 && cheapEnd > cheapStart, 'both status functions exist')
+  const cheapBlock = stripped.slice(cheapStart, cheapEnd)
+  assert.ok(!cheapBlock.includes('measureContext'), 'the cheap refresh must never call a measurement reader')
+  assert.ok(!cheapBlock.includes('tokenMeter'), 'the cheap refresh must never read the tokenMeter service')
+  assert.ok(!stripped.includes("ctx.get('tokenMeter')"), 'the runner no longer reads tokenMeter directly (the Direct adapter owns it)')
+  assert.ok(stripped.includes('backend.sessionReader.measureContext'), 'measurement goes through the SessionReader port')
 })
