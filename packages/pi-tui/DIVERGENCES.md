@@ -414,13 +414,17 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
   self-referencing native-module lookup (`TUI_PACKAGE_NAME` in
   `native-module-path.ts`) must follow the rename — otherwise the
   installed-package candidate for `.node` prebuilds can never resolve
-  (round-2 review finding).
+  (round-2 review finding). Package `author` follows the pinned upstream
+  metadata (`Mario Zechner`) — the old `Moonshot AI` value was a kimi-era
+  leftover; the LICENSE already carries the correct upstream copyright.
 - Consumer: package build (`pnpm --dir packages/pi-tui build` must produce
   `dist/index.mjs` + `dist/index.d.mts`); native prebuild discovery
   (native-modifiers / Windows VT input) if native assets are ever shipped.
 - Migration action: keep the XMoon shell; do NOT copy the upstream
   package.json / tsgo contract; on re-vendor, re-apply the
-  `TUI_PACKAGE_NAME` rename to `@xmoon76/pi-tui`.
+  `TUI_PACKAGE_NAME` rename to `@xmoon76/pi-tui` and keep `author` in sync
+  with the pinned upstream metadata (never restore the kimi-era
+  `Moonshot AI`).
 
 ### X026 — Injectable selection clipboard handler (was #26)
 

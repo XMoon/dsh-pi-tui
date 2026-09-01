@@ -4,7 +4,7 @@
 	"private": true,
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications (vendored fork of @earendil-works/pi-tui, see UPSTREAM.json)",
 	"license": "MIT",
-	"author": "Moonshot AI",
+	"author": "Mario Zechner",
 	"homepage": "https://github.com/XMoon/dsh-pi-tui#readme",
 	"repository": {
 		"type": "git",
