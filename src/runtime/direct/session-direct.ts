@@ -1,26 +1,55 @@
 /**
  * The Direct session reader (M1.3) — the in-process implementation of
  * `SessionReader` over the dsh `sessionPersistence` / `sessionQuery` /
- * `sessionTitle` services. This is the ONLY module in the session-read
+ * projection services. This is the ONLY module in the session-read
  * path that touches `ctx`; the consumer (commands.ts) depends on the port,
  * and a Remote adapter will implement the same interface in a later
  * milestone.
  *
  * The domain semantics live here: live-preferred listing with the
- * persistence fallback, the bounded content search, and the cached title
- * batches (the pure helpers in src/sessions.ts stay the shared core).
+ * persistence fallback and the bounded content search; the combined
+ * `title`+`agentPreset` projection batch delegates to
+ * `session-projection-direct.ts` (the official projection/cache/observation
+ * ladder).
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-direct
  */
 
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
-import { dshHome } from '../../diag.ts'
-import { isUnsupportedSessionFormatError, loadSessionTitleBatch, type SessionEventSearchDocumentLike, type SessionPickerPersistence, type SessionQueryLike, type TitleDiagLike } from '../../sessions.ts'
-import { recordedSessionPreset, resolveProjectedPresetId, sessionPresetOf, type SessionProjectionCacheLike, type SessionQueryObservationLike } from './session-preset-direct.ts'
+import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import { isUnsupportedSessionFormatError, type SessionEventSearchDocumentLike } from '../../sessions.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import type { ExportReadResult, SessionSearchHit, SessionReader, SessionSummary } from '../session-reader-port.ts'
+import { projectionBatch, type SessionQueryObservationLike, type SessionReaderDiagLike } from './session-projection-direct.ts'
+import { sessionPresetOf } from './session-preset-direct.ts'
+import type { ExportReadResult, SessionProjectionSummary, SessionSearchHit, SessionReader, SessionSummary } from '../session-reader-port.ts'
+
+/**
+ * The narrow session-query surface the reader's listing and semantic search
+ * use. Declared structurally instead of imported from
+ * `@deepseek-ai/dsh-session-query`: pulling that package's type graph into
+ * the program introduces a second physical copy of `dsh-session` that
+ * shadows the `session/title` event-map augmentation. The service itself is
+ * read off the live context at runtime.
+ */
+export interface SessionQueryLike {
+  listSessions(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; live: boolean }>>
+  /**
+   * Provider-independent semantic text filtering. The method is optional so
+   * older test doubles and intentionally rosterless deployments can still use
+   * the persistence capability fallback; it is not a DSH runtime fallback.
+   */
+  filterEvents?: (
+    sessionId: SessionId,
+    filters: readonly SessionEventResultFilterLike[],
+  ) => Promise<readonly SessionEventSearchDocumentLike[]>
+}
+
+/** The public session-query text filter used by the semantic search. */
+export interface SessionEventResultFilterLike {
+  readonly kind: 'text'
+  readonly text: string
+}
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -32,8 +61,6 @@ export interface HostContextLike {
 export interface SessionPersistenceLike {
   list(signal?: AbortSignal): Promise<Array<{ id: string; createdAt: number; version: number; cwd?: string; agentPreset?: string; parentSession?: string; origin?: 'subagent' }>>
   readRaw(id: string): Promise<{ content: string; filename?: string } | undefined>
-  /** The fallback title path's per-session event inspection. */
-  inspect: SessionPickerPersistence['inspect']
 }
 
 /** The structural `tokenMeter` surface the reader needs. */
@@ -48,42 +75,8 @@ export interface LiveAgentLike {
   readonly ctx?: unknown
 }
 
-/** Keep cold-session projection reads below the persistence engine's own small
- * inspection batch size. This bounds log replay/FD/memory pressure when the
- * picker contains many historical sessions. */
-export const SESSION_PRESET_READ_CONCURRENCY = 4
-
-async function mapConcurrent<T, R>(
-  items: readonly T[],
-  limit: number,
-  map: (item: T, index: number) => Promise<R>,
-  signal?: AbortSignal,
-): Promise<R[]> {
-  if (items.length === 0) return []
-  const results = new Array<R>(items.length)
-  let next = 0
-  const worker = async (): Promise<void> => {
-    while (true) {
-      // Claiming the next item is synchronous after this check, so a worker
-      // that observes cancellation never starts another cold projection read.
-      signal?.throwIfAborted()
-      const index = next++
-      if (index >= items.length) return
-      results[index] = await map(items[index]!, index)
-    }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(Math.max(1, limit), items.length) }, () => worker()),
-  )
-  return results
-}
-
-/** Read a typed query-service error without depending on its package surface. */
-function errorCodeOf(error: unknown): string | undefined {
-  if (typeof error !== 'object' || error === null) return undefined
-  const code = (error as { code?: unknown }).code
-  return typeof code === 'string' ? code : undefined
-}
+/** The diagnostics sink for isolated per-row projection failures. */
+export type SessionReaderDiag = SessionReaderDiagLike
 
 /** Make one semantic event document suitable for the existing search port. */
 function semanticSnippet(document: SessionEventSearchDocumentLike, query: string): string {
@@ -95,15 +88,22 @@ function semanticSnippet(document: SessionEventSearchDocumentLike, query: string
   return text.slice(start, index + needle.length + 40).trim()
 }
 
+/** Read a typed query-service error without depending on its package surface. */
+function errorCodeOf(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' ? code : undefined
+}
+
 /** The Direct backend's session reader: `ctx` services behind the semantic
  * `SessionReader` interface. */
 export class DirectSessionReader implements SessionReader {
   private readonly ctx: HostContextLike
   private readonly agentFor: (sessionId: string) => unknown | undefined
-  private readonly diag: TitleDiagLike | undefined
+  private readonly diag: SessionReaderDiagLike | undefined
   /**
    * The most recent listing's complete `SessionHeader` values, keyed by
-   * session id. `presetBatch` reads the projection-cache hint from these
+   * session id. `projectionBatch` reads the projection-cache hint from these
    * instead of re-listing the corpus (the port rows stay lightweight
    * `SessionSummary` DTOs — raw headers never leak into the presentation
    * surface). Refreshed on every `list()`; a batch caller that never listed
@@ -114,7 +114,7 @@ export class DirectSessionReader implements SessionReader {
   constructor(
     ctx: HostContextLike,
     agentFor?: (sessionId: string) => unknown | undefined,
-    diag?: TitleDiagLike,
+    diag?: SessionReaderDiagLike,
   ) {
     this.ctx = ctx
     this.agentFor = agentFor ?? (() => undefined)
@@ -170,7 +170,7 @@ export class DirectSessionReader implements SessionReader {
     let rows: SessionSummary[]
     if (query !== undefined) {
       // Listing is deliberately header/live-only. Cold projection replay is a
-      // separate presetBatch() operation so /sessions can open its first
+      // separate projectionBatch() operation so /sessions can open its first
       // picker frame without waiting on every historical session log.
       const records = await query.listSessions(signal)
       signal?.throwIfAborted()
@@ -203,71 +203,27 @@ export class DirectSessionReader implements SessionReader {
   }
 
   /**
-   * Enrich already-listed rows with effective preset ids. Live composed
-   * presets are authoritative; cold rows first consult the zero-I/O
-   * projection-cache hint (`sessionProjectionCache.cachedSnapshot`) using the
-   * header identity captured by the preceding `list()` — no second corpus
-   * listing — and only cache misses go through the bounded, cancellable
-   * `observeSession()` observation seam. Corrupt or unsupported logs are
-   * omitted rather than being treated as a header-only effective preset.
+   * Enrich already-listed rows with the combined DSH projections (`title` +
+   * `agentPreset`) through the official ladder in
+   * `session-projection-direct.ts`: live projection snapshot → zero-I/O
+   * projection-cache checkpoint (`sessionProjectionCache.cachedSnapshot`,
+   * keyed by the header identity captured by the preceding `list()` — no
+   * second corpus listing) → at most ONE bounded, cancellable
+   * `observeSession()` observation per cold cache miss, resolving BOTH
+   * fields together. Corrupt or unsupported logs are omitted rather than
+   * being treated as an empty value, and never trigger a second raw-log
+   * read.
    */
-  async presetBatch(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, string>> {
-    const result = new Map<string, string>()
-    if (rows.length === 0) return result
-    signal?.throwIfAborted()
-
-    const query = this.ctx.get('sessionQuery') as SessionQueryObservationLike | undefined
-    const cache = this.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
-    const presets = this.ctx.get('agentPresets') as
-      | { readonly defaultId?: string; resolve(id?: string): Promise<{ readonly id: string }> }
-      | undefined
-
-    // A live composed preset is already authoritative and does not need cold
-    // replay. The roster snapshot is shared by all historical rows so legacy
-    // `code` data is mapped only when no custom `code` entry exists.
-    for (const row of rows) {
-      const live = this.livePreset(row.id)
-      if (live !== undefined) result.set(row.id, live)
-    }
-    if (query === undefined) return result
-    const coldRows = rows.filter(row => !result.has(row.id))
-    if (coldRows.length === 0) return result
-    const rosterIds = await this.presetRosterIds(signal)
-
-    // Zero-I/O cache hint first: a cached `agentPreset` row is possibly stale
-    // but never wrong, so a hit needs no observation. A `null` cached value is
-    // NOT a usable preset identity (a later selection may have landed after
-    // the checkpoint), so it stays a miss.
-    const misses: SessionSummary[] = []
-    for (const row of coldRows) {
-      const header = this.headerSnapshot.get(row.id)
-      const value = header === undefined ? undefined : cache?.cachedSnapshot(header, ['agentPreset'])?.values?.agentPreset
-      if (typeof value !== 'string') {
-        misses.push(row)
-        continue
-      }
-      const resolved = await resolveProjectedPresetId(value, rosterIds, presets)
-      if (resolved !== undefined) result.set(row.id, resolved)
-    }
-    if (misses.length === 0) return result
-
-    const values = await mapConcurrent(misses, SESSION_PRESET_READ_CONCURRENCY, async row => {
-      try {
-        return await recordedSessionPreset(this.ctx, row.id, signal, rosterIds)
-      } catch (error) {
-        signal?.throwIfAborted()
-        // Fail closed per row: a corrupt/unsupported log cannot claim its
-        // creation header as the effective preset, but it must not hide other
-        // valid picker rows either.
-        return undefined
-      }
+  projectionBatch(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, SessionProjectionSummary>> {
+    return projectionBatch({
+      ctx: this.ctx,
+      rows,
+      headerOf: id => this.headerSnapshot.get(id),
+      liveAgentOf: id => this.liveAgent(id),
+      livePresetOf: id => this.livePreset(id),
+      rosterIds: signal => this.presetRosterIds(signal),
+      diag: this.diag,
     }, signal)
-    signal?.throwIfAborted()
-    for (let index = 0; index < misses.length; index += 1) {
-      const preset = values[index]
-      if (preset !== undefined) result.set(misses[index]!.id, preset)
-    }
-    return result
   }
 
   async search(query: string): Promise<SessionSearchHit[] | undefined> {
@@ -341,12 +297,6 @@ export class DirectSessionReader implements SessionReader {
       if (hits.length >= 20) break
     }
     return hits
-  }
-
-  titles(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, string>> {
-    const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
-    const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
-    return loadSessionTitleBatch(query, persistence, dshHome(process.env), rows, signal, this.diag)
   }
 
   measureContext(sessionId: string): number | undefined {

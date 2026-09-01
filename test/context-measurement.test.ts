@@ -400,7 +400,7 @@ test('P2: /status forces ONE measurement through the coordinator, never a duplic
         forceContextMeasurement: () => { forceCalls += 1; return forceValue },
         sessionReader: {
           measureContext: () => { directReads += 1; return 99_000 },
-          list: async () => [], search: async () => [], titles: async () => new Map(), readExportData: async () => ({ kind: 'none' }),
+          list: async () => [], search: async () => [], projectionBatch: async () => new Map(), readExportData: async () => ({ kind: 'none' }),
         },
       } as unknown as TuiCommandRunner
       registerTuiCommands(runner)

@@ -1,17 +1,18 @@
 /**
- * Orchestration regression for the session-title loader behind the
+ * Orchestration regression for the combined projection batch behind the
  * /sessions and /resume picker: every MAIN row the picker can display must
- * get a title read — including rows beyond any read window — while
- * SUBAGENT rows (never shown in the human session picker) must not be read
- * at all, and each main id must enter `sessionReader.titles()` exactly
- * once across the progressive batches.
+ * enter `sessionReader.projectionBatch()` — including rows beyond any read
+ * window — while SUBAGENT rows (never shown in the human session picker)
+ * must not be read at all, and each main id must enter the batch exactly
+ * once across the progressive slices.
  *
- * The regression pins the actual bug shape: the category scopes consume
- * the FULL row set, but the title loader used to walk only the first
- * MAX_PICKER_SESSIONS rows, so a displayed session beyond that window
- * (e.g. an old session in the "Current directory" scope) never got a
- * title and showed a bare short id forever.
- * @module @xmoon76/dsh-pi-tui/session-picker-titles.test
+ * The regression pins the actual bug shapes: (1) the category scopes consume
+ * the FULL row set, but the old loader walked only the first
+ * MAX_PICKER_SESSIONS rows, so a displayed session beyond that window never
+ * got a title; (2) the old orchestration ran TWO detached enrichment paths
+ * (presetBatch + titles), a per-field read fan-out the combined batch
+ * exists to remove.
+ * @module @xmoon76/dsh-pi-tui/session-picker-projections.test
  */
 
 import assert from 'node:assert/strict'
@@ -43,7 +44,7 @@ function row(id: string, createdAt: number): import('../src/sessions.ts').Sessio
   return { id, createdAt, cwd: '/ws/project-a', live: false }
 }
 
-test('the picker title loader covers EVERY main row beyond the legacy window, and never reads subagents', async (t) => {
+test('the picker projection loader covers EVERY main row beyond the legacy window, and never reads subagents', async (t) => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -52,9 +53,9 @@ test('the picker title loader covers EVERY main row beyond the legacy window, an
   t.after(() => app.stop())
 
   // 250 main rows + 5 subagent rows; newest-first by createdAt. The
-  // subagents would appear inside the first 200 rows, so a title loader
-  // that (wrongly) capped at MAX_PICKER_SESSIONS would read them AND skip
-  // main rows #201-#249.
+  // subagents would appear inside the first 200 rows, so a loader that
+  // (wrongly) capped at MAX_PICKER_SESSIONS would read them AND skip main
+  // rows #201-#249.
   const rows = [
     { ...row('session-s000', 1_000_000 - 5), origin: 'subagent' as const },
     ...Array.from({ length: 250 }, (_, i) => row(`session-m${String(i).padStart(3, '0')}`, 1_000_000 - 6 - i)),
@@ -64,9 +65,9 @@ test('the picker title loader covers EVERY main row beyond the legacy window, an
     { ...row('session-s004', 1_000_000 - 900), origin: 'subagent' as const },
   ]
 
-  // Record every id handed to sessionReader.titles, across all batches.
-  // A Map counter (not a Set) so a duplicated id fails the exactly-once
-  // assertions below instead of being silently deduped.
+  // Record every id handed to sessionReader.projectionBatch, across all
+  // batches. A Map counter (not a Set) so a duplicated id fails the
+  // exactly-once assertions below instead of being silently deduped.
   const counts = new Map<string, number>()
   const batchLog: number[] = []
   const sessionReader = {
@@ -75,12 +76,12 @@ test('the picker title loader covers EVERY main row beyond the legacy window, an
         .sort((a, b) => b.createdAt - a.createdAt)
         .map(({ id, createdAt, cwd, origin }) => ({ id, createdAt, cwd, origin, live: false })),
     search: async () => [],
-    titles: async (batch: readonly { id: string }[]) => {
+    projectionBatch: async (batch: readonly { id: string }[]) => {
       batchLog.push(batch.length)
       for (const { id } of batch) counts.set(id, (counts.get(id) ?? 0) + 1)
-      // Every requested id gets a title; the relevant assertion is WHICH
-      // ids were requested, not the map contents.
-      return new Map(batch.map(({ id }) => [id, `title-of-${id}`]))
+      // Every requested id gets BOTH fields; the relevant assertion is
+      // WHICH ids were requested, not the map contents.
+      return new Map(batch.map(({ id }) => [id, { title: `title-of-${id}`, preset: 'standard' }]))
     },
     measureContext: () => undefined,
     readExportData: async () => ({ kind: 'none' }),
@@ -177,8 +178,9 @@ test('the picker title loader covers EVERY main row beyond the legacy window, an
     signal: new AbortController().signal,
   })
 
-  // The title loader runs detached; poll until every main row was handed
-  // to sessionReader.titles (the old impl would block at 200 and time out).
+  // The projection loader runs detached; poll until every main row was
+  // handed to sessionReader.projectionBatch (the old impl would block at
+  // 200 and time out).
   await waitUntil(() => counts.size >= 250)
 
   // Every main row exactly once, across the progressive batches.
@@ -189,11 +191,11 @@ test('the picker title loader covers EVERY main row beyond the legacy window, an
   assert.equal(counts.size, 250, 'only the 250 main rows may be read')
   assert.equal(Array.from(counts.values()).reduce((a, b) => a + b, 0), 250, 'no main id may be read twice')
   const subagentCounts = Array.from(counts.entries()).filter(([id]) => id.startsWith('session-s'))
-  assert.deepEqual(subagentCounts, [], 'subagent rows must never reach the title reader')
-  // Progressive batching: first batch ≤ TITLE_FIRST_BATCH, later batches ≤
-  // TITLE_BATCH_SIZE, and every batch is non-empty.
+  assert.deepEqual(subagentCounts, [], 'subagent rows must never reach the projection batch')
+  // Progressive batching: first batch ≤ PROJECTION_FIRST_BATCH, later
+  // batches ≤ PROJECTION_BATCH_SIZE, and every batch is non-empty.
   assert.ok(batchLog.length >= 5, `expected several batches, got ${batchLog.length}`)
-  assert.ok(batchLog[0]! <= 20, `first batch must be ≤ TITLE_FIRST_BATCH, got ${batchLog[0]}`)
+  assert.ok(batchLog[0]! <= 20, `first batch must be ≤ 20, got ${batchLog[0]}`)
   for (const size of batchLog) assert.ok(size > 0 && size <= 50, `batch size ${size} out of range`)
   assert.equal(batchLog.reduce((a, b) => a + b, 0), 250, 'the batch sizes must sum to exactly the 250 main rows')
 })
