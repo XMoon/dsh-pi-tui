@@ -801,6 +801,40 @@ test('stale overlay edge: Next enters the fresh list at the FIRST match, Prev at
   assert.equal(prev.current, 1, 'Prev enters the fresh list at the LAST match')
 })
 
+test('lazy normalization scans ONLY the dirty entries, never the history (P2)', () => {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 0; turn < 1000; turn += 1) {
+    events.push(turnStart(seq++, turn))
+    events.push(userMessage(seq++, `prompt ${turn}`, turn))
+    events.push(assistantMessage(seq++, turn, 0, `answer ${turn}`))
+    events.push(turnEnd(seq++, turn))
+  }
+  folder.hydrate(events)
+  // A query with NO mutations normalizes nothing and never scans history.
+  folder.search('answer')
+  assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 0, 'no dirty entries -> zero normalization work')
+  // One streaming chunk marks ONE entry: the next query normalizes exactly it.
+  folder.apply([...assistantChunks(seq++, 1000, 0, [' tail-one'])])
+  folder.search('tail-one')
+  assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 1)
+  // Ten more chunks on the SAME entry: the Set dedupes — still one scan.
+  folder.apply([...assistantChunks(seq++, 1000, 0, [' tail-two', ' tail-three', ' tail-four', ' tail-five', ' tail-six', ' tail-seven', ' tail-eight', ' tail-nine', ' tail-ten', ' tail-eleven'])])
+  folder.search('tail-eleven')
+  assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 2, 'repeated marks on one entry dedupe to one scan')
+  // Five DISTINCT entries: five more scans.
+  folder.apply([
+    ...assistantChunks(seq++, 1001, 0, [' x1']),
+    ...assistantChunks(seq++, 1002, 0, [' x2']),
+    ...assistantChunks(seq++, 1003, 0, [' x3']),
+    ...assistantChunks(seq++, 1004, 0, [' x4']),
+    ...assistantChunks(seq++, 1005, 0, [' x5']),
+  ])
+  folder.search('x5')
+  assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 7, 'five distinct entries -> five more scans')
+})
+
 test('transcriptSearchText is the single corpus source (tool = name args result)', () => {
   const folder = new TranscriptFolder()
   folder.apply([

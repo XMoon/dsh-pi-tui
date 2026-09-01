@@ -486,9 +486,6 @@ interface TranscriptSearchEntry {
    * only; non-representative members keep their own raw text and are
    * skipped at scan time. */
   normalizedText: string
-  /** The authoritative text changed since the last normalization: the
-   * entry is re-normalized (whole-string) at the next search. */
-  dirty: boolean
 }
 
 export class TranscriptFolder {
@@ -538,6 +535,10 @@ export class TranscriptFolder {
    * lightweight scan of normalized strings — never `messages()`, never a
    * per-query lowercase pass over the whole history. */
   private readonly searchEntries: TranscriptSearchEntry[] = []
+  /** The dirty search entries (raw item indices): the discovery structure
+   * for query-time lazy normalization — a query normalizes exactly these,
+   * never a full-history scan. */
+  private readonly dirtySearchEntries = new Set<number>()
   /** Bumped on EVERY entry mutation (append, settlement, group reflow):
    * query refinement must not reuse previous candidates across a revision. */
   private searchRevisionCounter = 0
@@ -551,6 +552,9 @@ export class TranscriptFolder {
   private readonly workflowRunIndex = new Map<string, number>()
   // Test-only counters exposed by searchDiagnosticsForTest().
   private searchRefreshCount = 0
+  /** Test-only: the number of dirty entries scanned by lazy normalization
+   * (proves the query path is O(#dirty), never O(history)). */
+  private searchDirtyScanCount = 0
   private searchFullScanCount = 0
   private searchRefineCount = 0
   private groupingRebuildCount = 0
@@ -770,7 +774,6 @@ export class TranscriptFolder {
     this.searchEntries.push({
       turn: 'turn' in message ? message.turn : 0,
       normalizedText: normalizeSearchText(transcriptSearchText(message)),
-      dirty: false,
     })
     this.searchRevisionCounter += 1
     const turn = 'turn' in message ? message.turn : undefined
@@ -798,11 +801,12 @@ export class TranscriptFolder {
 
   /** Mark ONE search entry dirty (O(1) — the live hot path): the
    * authoritative text changed; the entry is re-normalized lazily at the
-   * next search. */
+   * next search. The dirty SET is the discovery structure — a query
+   * normalizes exactly the dirty entries, never a full-history scan. */
   private markSearchEntryDirty(index: number): void {
     const entry = this.searchEntries[index]
     if (entry === undefined) return
-    entry.dirty = true
+    this.dirtySearchEntries.add(index)
     this.searchRevisionCounter += 1
   }
 
@@ -820,23 +824,25 @@ export class TranscriptFolder {
 
   /** Query-time lazy normalization: every DIRTY entry is re-normalized as a
    * WHOLE string from its CURRENT authoritative card (Unicode whole-string
-   * semantics — never per-chunk lowercase, never history). Non-
-   * representative group members are skipped: the merged group's text
-   * lives ONLY on the representative entry, so a group expansion marks
-   * exactly one entry. */
+   * semantics — never per-chunk lowercase, never history). The dirty SET
+   * bounds the work to O(#dirty) — a query with no mutations normalizes
+   * nothing and never scans the history. Non-representative group members
+   * are skipped: the merged group's text lives ONLY on the representative
+   * entry, so a group expansion marks exactly one entry. */
   private normalizeDirtySearchEntries(): void {
-    for (let index = 0; index < this.searchEntries.length; index += 1) {
+    for (const index of this.dirtySearchEntries) {
+      this.searchDirtyScanCount += 1
       const entry = this.searchEntries[index]
-      if (entry === undefined || !entry.dirty) continue
+      if (entry === undefined) continue
       const group = this.groupOf.get(index)
       if (group !== undefined && this.representativeOf(index) !== index) continue
       const card = group ?? this.items[index]
       if (card === undefined) continue
       entry.turn = 'turn' in card ? card.turn : 0
       entry.normalizedText = normalizeSearchText(transcriptSearchText(card))
-      entry.dirty = false
       this.searchRefreshCount += 1
     }
+    this.dirtySearchEntries.clear()
   }
 
   /** The CURRENT output representative of one raw item id: the first member
@@ -1077,7 +1083,7 @@ export class TranscriptFolder {
       if (entry === undefined) continue
       entry.turn = group.turn
       entry.normalizedText = normalizeSearchText(transcriptSearchText(group))
-      entry.dirty = false
+      this.dirtySearchEntries.delete(first)
       this.searchRefreshCount += 1
     }
   }
@@ -1558,6 +1564,7 @@ export class TranscriptFolder {
     entries: number
     groupingRebuilds: number
     normalizedRefreshes: number
+    dirtyScans: number
     fullScans: number
     refinedScans: number
   } {
@@ -1565,6 +1572,7 @@ export class TranscriptFolder {
       entries: this.searchEntries.length,
       groupingRebuilds: this.groupingRebuildCount,
       normalizedRefreshes: this.searchRefreshCount,
+      dirtyScans: this.searchDirtyScanCount,
       fullScans: this.searchFullScanCount,
       refinedScans: this.searchRefineCount,
     }
