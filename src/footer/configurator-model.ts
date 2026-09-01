@@ -511,15 +511,13 @@ export class FooterConfiguratorModel {
     }
   }
 
-  /** The registry ids NOT present in the draft layout (addable items —
-   * builtin and extension items alike). */
+  /** The registry's DEFINITION CATALOG (the Add picker's addable items —
+   * builtin and extension items alike). A definition may be PLACED any
+   * number of times: adding an already-placed id appends an independent
+   * placement (its own format/tone/prefix/suffix/importance), so the
+   * catalog is never filtered by what the draft layout already uses. */
   availableIds(): string[] {
-    const present = new Set<string>()
-    for (const row of this.draft.rows) {
-      for (const ref of row.left) present.add(ref.id)
-      for (const ref of row.right) present.add(ref.id)
-    }
-    return this.registry.ids().filter(id => !present.has(id))
+    return this.registry.ids()
   }
 
   /** Detached custom definitions in their persisted order. */
@@ -1306,8 +1304,9 @@ export class FooterConfiguratorModel {
     this.mode = 'row-move'
   }
 
-  /** Space (Edit Row page): remove the cursor's item (it returns to the
-   * Add picker's pool — Available is derived, never stored). */
+  /** Space (Edit Row page): remove the cursor's item placement (the
+   * picker's catalog is derived from the registry — the DEFINITION stays
+   * addable, and a second placement of the same id may remain placed). */
   removeActive(): void {
     if (this.mode !== 'row') return
     const at = this.refAt(this.cursor)
@@ -1336,9 +1335,11 @@ export class FooterConfiguratorModel {
   }
 
   /** Add one available item to a side of the edited row (appended at the
-   * end; the cursor lands on it). Returns false — with NO mutation —
-   * when the edited row is already at the parser's per-row item cap: a
-   * 33rd item would make every future save fail to parse. */
+   * end; the cursor lands on it). The same id may be added REPEATEDLY —
+   * each call appends an independent placement whose format/tone/prefix/
+   * suffix/importance later diverge freely. Returns false — with NO
+   * mutation — when the edited row is already at the parser's per-row
+   * item cap: a 33rd item would make every future save fail to parse. */
   addAvailable(id: string, zone: 'left' | 'right'): boolean {
     const row = this.editedRow()
     if (row.left.length + row.right.length >= MAX_ITEMS_PER_ROW) return false

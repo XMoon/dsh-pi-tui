@@ -123,7 +123,7 @@ test('Space removes the active item; it returns to the Add pool', () => {
   assert.equal(idAtCursor(m), 'turns-steps')
 })
 
-test('the Add picker: search, add, the item leaves the pool, Esc clears then back', () => {
+test('the Add picker: search, add, the definition remains addable, Esc clears then back', () => {
   const m = model()
   m.activate()
   m.startAdd()
@@ -132,31 +132,74 @@ test('the Add picker: search, add, the item leaves the pool, Esc clears then bac
   // Label hit, case-insensitive.
   m.text('AGENT PRESET')
   assert.deepEqual(m.addMatches(), ['agent-preset'])
-  // id hit.
+  // id hit. The catalog lists EVERY definition now, so the description
+  // substring 'cache' also matches the placed stats-line — search with the
+  // label instead.
   for (let i = 0; i < 12; i += 1) m.backspace()
   assert.equal(m.state().addQuery, '')
-  m.text('cache')
+  m.text('cache hit')
   assert.deepEqual(m.addMatches(), ['cache-hit'])
   m.activate()
-  // The item joined the layout (the picker's side) and left the pool; a
-  // SUCCESSFUL add closes the picker (ccstatusline parity — the cursor
-  // lands on the added item).
+  // The placement joined the layout (the picker's side); the DEFINITION
+  // stays addable for another placement; a SUCCESSFUL add closes the
+  // picker (ccstatusline parity — the cursor lands on the added item).
   assert.ok(m.state().layout.rows[0]!.left.some(ref => ref.id === 'cache-hit'))
-  assert.ok(!m.addMatches().includes('cache-hit'))
+  assert.ok(m.addMatches().includes('cache-hit'))
   assert.equal(m.state().mode, 'row')
   assert.equal(idAtCursor(m), 'cache-hit', 'the cursor lands on the added item')
-  // Description hit ("wall time" matches the Performance description) —
-  // the picker reopens with a FRESH query.
+  // Description hit ("throughput" matches Performance AND the placed
+  // stats-line — the catalog is unfiltered) — the picker reopens with a
+  // FRESH query.
   m.startAdd()
   assert.equal(m.state().addQuery, '')
-  m.text('wall time')
-  assert.deepEqual(m.addMatches(), ['performance'])
+  m.text('throughput')
+  assert.deepEqual(m.addMatches(), ['stats-line', 'performance'])
   // Esc: clear the search first, then return to the row.
   assert.ok(m.cancel())
   assert.equal(m.state().addQuery, '')
   assert.equal(m.state().mode, 'add')
   m.cancel()
   assert.equal(m.state().mode, 'row')
+})
+
+test('duplicate placements: the same id appends independent, separately styled refs', () => {
+  const m = model()
+  m.activate()
+  m.startAdd()
+  m.text('performance')
+  assert.deepEqual(m.addMatches(), ['performance'])
+  m.activate() // first performance placement (the cursor lands on it)
+  assert.equal(m.state().mode, 'row')
+  // Second Add: the picker still offers performance.
+  m.startAdd()
+  m.text('performance')
+  assert.ok(m.addMatches().includes('performance'), 'a placed definition remains addable')
+  m.activate() // second performance placement (the cursor lands on it)
+  const refs = () => m.state().layout.rows[0]!.left.filter(ref => ref.id === 'performance')
+  assert.equal(refs().length, 2, 'two performance placements exist')
+  // The cursor sits on the second placement: style it Speed (full → speed).
+  m.cycleFormat()
+  assert.equal(refs()[1]!.format, 'speed', 'the second placement styles Speed')
+  // Walk back onto the first placement and style it Latency (full → speed
+  // → latency; a third cycle would return to the default and drop the
+  // override again).
+  while (m.state().cursor !== m.state().layout.rows[0]!.left.indexOf(refs()[0]!)) m.moveUp()
+  m.cycleFormat()
+  m.cycleFormat()
+  assert.equal(refs()[0]!.format, 'latency', 'the first placement styles Latency')
+  // One placement's style never leaks into the other.
+  assert.equal(refs()[1]!.format, 'speed')
+  // A third placement can live in the other zone (the first moves right).
+  m.moveZone('right')
+  const rightRefs = () => m.state().layout.rows[0]!.right.filter(ref => ref.id === 'performance')
+  assert.equal(rightRefs().length, 1, 'the moved placement lives in the right zone')
+  assert.equal(rightRefs()[0]!.format, 'latency', 'the moved placement keeps its own style')
+  assert.equal(refs().length, 1, 'one placement remains on the left')
+  assert.equal(refs()[0]!.format, 'speed', 'the left placement keeps its own style')
+  // The 32-item row cap is unchanged (independent of duplicate ids).
+  const padded = Array.from({ length: 32 }, (_, index) => ({ id: `pad-${index}` }))
+  const m2 = new FooterConfiguratorModel({ schemaVersion: 1, rows: [{ left: padded, right: [] }] }, registry)
+  assert.equal(m2.addAvailable('performance', 'left'), false, 'the row cap still refuses the 33rd placement')
 })
 
 test('the add side follows the cursor item (right zone)', () => {
@@ -166,9 +209,12 @@ test('the add side follows the cursor item (right zone)', () => {
   m.moveZone('right')
   m.startAdd()
   assert.equal(m.state().addSide, 'right')
-  m.activate() // add the first match (agent-preset)
-  assert.ok(m.state().layout.rows[0]!.right.some(ref => ref.id === 'agent-preset'))
-  assert.ok(!m.state().layout.rows[0]!.left.some(ref => ref.id === 'agent-preset'))
+  // The unfiltered query's first match is permission-preset — ALREADY
+  // placed in the left zone, so this is a live second placement.
+  m.activate()
+  assert.ok(m.state().layout.rows[0]!.right.some(ref => ref.id === 'permission-preset'))
+  assert.ok(m.state().layout.rows[0]!.left.some(ref => ref.id === 'permission-preset')
+    , 'the left placement is untouched')
 })
 
 test('Move Mode: M enters, ↑↓ reorder within the zone, Enter/Esc exits', () => {
@@ -739,6 +785,51 @@ test('PR E: rename and delete of a custom definition count as dirty', () => {
   m.activate() // confirm
   assert.equal(m.state().mode, 'row', 'delete returns to the row page')
   assert.equal(m.isDirty(), true, 'delete is dirty')
+})
+
+test('a custom definition placed MULTIPLE times: rename and delete update every ref', () => {
+  const { m, catalog } = customModel()
+  m.activate() // → row
+  m.startAdd()
+  m.text('env')
+  assert.ok(m.addMatches().includes('user:env'), 'a placed custom definition remains addable')
+  m.activate() // second placement — the cursor lands on it
+  const refs = () => [
+    ...m.state().layout.rows[0]!.left,
+    ...m.state().layout.rows[0]!.right,
+  ].filter(ref => ref.id.startsWith('user:'))
+  assert.equal(refs().length, 2, 'two placements of the same custom definition')
+
+  // Give the SECOND placement (the cursor is on it) its own tone override.
+  m.activate() // → item editor (menu: 0 Text, 1 Default tone, 2 Tone…)
+  m.moveDown()
+  m.moveDown()
+  m.activate() // tone picker
+  m.moveDown() // Primary
+  m.activate() // applies to THIS placement only
+  m.cancel() // → row
+  assert.ok(refs().some(ref => ref.tone === 'primary'), 'one placement is toned')
+  assert.ok(refs().some(ref => ref.tone === undefined), 'the other placement stays default')
+
+  // Rename the definition: every duplicate ref follows the new id and the
+  // per-placement overrides survive.
+  m.activate() // item editor (still on the second placement)
+  for (let i = 0; i < 4; i += 1) m.moveDown() // 4 Rename definition
+  m.activate() // custom-name
+  m.text('2')
+  m.activate() // commit user:env → user:env2
+  assert.equal(catalog.get('user:env2')?.kind, 'text')
+  assert.equal(catalog.has('user:env'), false)
+  assert.deepEqual(refs().map(ref => ref.id), ['user:env2', 'user:env2'], 'every duplicate ref renames')
+  assert.ok(refs().some(ref => ref.tone === 'primary'), 'the toned placement keeps its override')
+  assert.ok(refs().some(ref => ref.tone === undefined), 'the default placement keeps its absence')
+
+  // Delete the definition: every duplicate ref goes in one action.
+  m.moveDown() // 5 Delete definition
+  m.activate() // delete page
+  m.activate() // confirm
+  assert.equal(refs().length, 0, 'no dangling duplicate refs survive the delete')
+  assert.equal(catalog.has('user:env2'), false, 'the definition itself is gone')
 })
 
 test('PR E: the home selection covers rows plus the Save action', () => {

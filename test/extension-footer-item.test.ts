@@ -247,7 +247,7 @@ test('the configurator lists extension items in the Available section and can ad
     const layout = model.preview()
     const added = layout.rows.some(row => [...row.left, ...row.right].some(ref => ref.id.startsWith('ext:')))
     assert.ok(added, 'the extension item must be added to the draft')
-    assert.ok(!model.addMatches().some(id => id.startsWith('ext:')), 'the added item leaves the pool')
+    assert.ok(model.addMatches().some(id => id.startsWith('ext:')), 'the definition stays addable for another placement')
     view = vt.getViewport().join('\n')
     assert.ok(view.includes('kube:prod'), `the added item must render in the preview:\n${view}`)
     app.stop()
