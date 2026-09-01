@@ -1,6 +1,6 @@
 {
 	"name": "@xmoon76/pi-tui",
-	"version": "0.84.3",
+	"version": "0.84.4",
 	"private": true,
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications (vendored fork of @earendil-works/pi-tui, see UPSTREAM.json)",
 	"license": "MIT",
