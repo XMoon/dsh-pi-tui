@@ -1280,6 +1280,29 @@ export function refreshedSearchState(
   return { matches, current, revision, changed: true }
 }
 
+/** PR D1 P1: the Next/Prev stepping policy — the search overlay state MUST
+ * be refreshed BEFORE stepping (an empty candidate list still refreshes,
+ * so a match that arrived while the overlay stayed open is discoverable),
+ * then steps by one. An EMPTY refreshed list steps to -1 (the 0/0
+ * counter). The runner's onSearchNext/onSearchPrev handlers call exactly
+ * this seam. */
+export function steppedSearchOverlayState(
+  state: SearchOverlayState,
+  activeFolder: TranscriptFolder,
+  direction: 1 | -1,
+): { matches: TranscriptSearchMatch[]; current: number; revision: number; changed: boolean } {
+  const refreshed = refreshedSearchState(state, activeFolder)
+  if (refreshed.matches.length === 0) {
+    return { matches: refreshed.matches, current: -1, revision: refreshed.revision, changed: refreshed.changed }
+  }
+  const count = refreshed.matches.length
+  // A fresh list with no current item starts stepping from the first
+  // match (Next) / last match (Prev), mirroring the query-flow semantics.
+  const base = refreshed.current < 0 ? 0 : refreshed.current
+  const current = (base + direction + count) % count
+  return { matches: refreshed.matches, current, revision: refreshed.revision, changed: refreshed.changed }
+}
+
 /**
  * The in-flight compaction state a resumed session log implies: the newest
  * compaction bracket decides. A `session/end-seed` boundary makes any
@@ -5096,18 +5119,38 @@ export function apply(ctx: Context, config: Config): void {
         if (searchCurrent >= 0) jumpToSearchMatch()
       },
       onSearchNext: () => {
-        // PR D1 P1: refresh BEFORE the empty guard — a search that began
-        // with zero matches must discover a match that arrived while the
-        // overlay stayed open.
-        refreshSearchMatchesIfStale()
-        if (searchMatches.length === 0) return
-        searchCurrent = (searchCurrent + 1) % searchMatches.length
+        // PR D1 P1: refresh BEFORE stepping — an empty candidate list
+        // still refreshes (a match that arrived while the overlay stayed
+        // open must be discoverable), and the step is computed on the
+        // REFRESHED list. The policy lives in steppedSearchOverlayState,
+        // shared by both handlers.
+        const folder = activeFolder()
+        const stepped = steppedSearchOverlayState(
+          { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
+          folder,
+          1,
+        )
+        searchMatches = stepped.matches
+        searchCurrent = stepped.current
+        lastSearchRevision = stepped.revision
+        lastSearchFolder = folder
+        app.setSearchResult(searchCurrent + 1, searchMatches.length)
+        if (stepped.current < 0) return
         jumpToSearchMatch()
       },
       onSearchPrev: () => {
-        refreshSearchMatchesIfStale()
-        if (searchMatches.length === 0) return
-        searchCurrent = (searchCurrent - 1 + searchMatches.length) % searchMatches.length
+        const folder = activeFolder()
+        const stepped = steppedSearchOverlayState(
+          { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
+          folder,
+          -1,
+        )
+        searchMatches = stepped.matches
+        searchCurrent = stepped.current
+        lastSearchRevision = stepped.revision
+        lastSearchFolder = folder
+        app.setSearchResult(searchCurrent + 1, searchMatches.length)
+        if (stepped.current < 0) return
         jumpToSearchMatch()
       },
       onSearchClose: () => {

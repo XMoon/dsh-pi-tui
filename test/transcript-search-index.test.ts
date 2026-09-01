@@ -16,7 +16,7 @@ import test from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptSearchText, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
-import { refreshedSearchState } from '../src/index.ts'
+import { refreshedSearchState, steppedSearchOverlayState } from '../src/index.ts'
 
 /** Build a minimal event envelope for tests. */
 function event<K extends SessionEvent['type']>(
@@ -748,10 +748,15 @@ test('stale overlay edge: Next/Prev discover a match that arrived AFTER an empty
   const state = { matches: empty, current: -1, query: 'needle-new', revision: folder.searchRevision(), folder }
   // ...and a matching message arrives while it stays open.
   folder.apply([turnStart(3, 1), userMessage(4, 'a needle-new live message', 1), turnEnd(5, 1)])
-  const refreshed = refreshedSearchState(state, folder)
-  assert.equal(refreshed.changed, true)
-  assert.equal(refreshed.matches.length, 1, 'Next/Prev must find the live new match')
-  assert.equal(refreshed.current, 0)
+  // The RUNNER's handler path (the production seam onSearchNext/Prev call):
+  // the empty candidate list must be refreshed BEFORE the emptiness check,
+  // or the live match is never discoverable.
+  const next = steppedSearchOverlayState(state, folder, 1)
+  assert.equal(next.matches.length, 1, 'Next must find the live new match')
+  assert.equal(next.current, 0, 'Next steps onto the newly arrived match')
+  const prev = steppedSearchOverlayState(state, folder, -1)
+  assert.equal(prev.matches.length, 1, 'Prev must find the live new match too')
+  assert.equal(prev.current, 0)
 })
 
 test('stale overlay edge: an EMPTIED result set clamps to -1 (the 0/0 counter) (P2)', () => {
@@ -771,6 +776,10 @@ test('stale overlay edge: an EMPTIED result set clamps to -1 (the 0/0 counter) (
   assert.equal(refreshed.changed, true)
   assert.equal(refreshed.matches.length, 0)
   assert.equal(refreshed.current, -1, 'an emptied result set must clamp to -1, never 0 (0/0 counter)')
+  // The runner's Next/Prev seam steps an emptied list to -1 as well.
+  const next = steppedSearchOverlayState(state, folder, 1)
+  assert.equal(next.current, -1)
+  assert.equal(next.matches.length, 0)
 })
 
 test('transcriptSearchText is the single corpus source (tool = name args result)', () => {
