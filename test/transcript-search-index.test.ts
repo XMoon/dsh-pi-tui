@@ -16,6 +16,7 @@ import test from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptSearchText, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
+import { refreshedSearchState } from '../src/index.ts'
 
 /** Build a minimal event envelope for tests. */
 function event<K extends SessionEvent['type']>(
@@ -656,6 +657,86 @@ test('live cross-turn append refreshes the WHOLE group (turn + shared text)', ()
   // The shared text is refreshed for ALL members: the merged args count is
   // searchable, and the superseded count is gone (strict legacy parity).
   assertCorpusParity(folder, ['gamma-only-needle', 'alpha content', 'beta content', '3 files', '2 files'])
+})
+
+test('stale search overlay: Next/Prev refreshes matches when the transcript changed underneath (P1)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/a.ts', 0),
+    toolResult(2, 'r1', 'alpha payload'),
+    turnEnd(3, 0),
+    turnStart(4, 1),
+    readToolCall(5, 'r2', 'src/b.ts', 1),
+    toolResult(6, 'r2', 'beta payload'),
+    turnEnd(7, 1),
+  ])
+  // The overlay queried while the merged cross-turn card (turn 1) matched.
+  const initial = folder.search('payload')
+  assert.equal(initial.length, 1)
+  assert.equal(initial[0]!.turn, 1)
+  const state = { matches: initial, current: 0, query: 'payload', revision: folder.searchRevision(), folder }
+
+  // The agent keeps running: a turn-2 read joins the group — the card's
+  // turn moved to 2 and the projection revision changed. Next/Prev with
+  // the query untouched must refresh before jumping.
+  folder.apply([
+    turnStart(8, 2),
+    readToolCall(9, 'r3', 'src/c.ts', 2),
+    toolResult(10, 'r3', 'c-gamma payload'),
+    turnEnd(11, 2),
+  ])
+  const refreshed = refreshedSearchState(state, folder)
+  assert.equal(refreshed.changed, true, 'a moved revision must mark the overlay state stale')
+  assert.equal(refreshed.matches.length, 1)
+  assert.equal(refreshed.matches[0]!.turn, 2, 'the jump must use the NEW group turn, never the stale 1')
+  assert.equal(refreshed.matches[0]!.id, initial[0]!.id, 'the same logical card is recovered by stable id')
+  assert.equal(refreshed.current, 0)
+  assert.equal(refreshed.revision, folder.searchRevision(), 'the runner commits the new revision')
+
+  // Live NEW matches are visible to Next/Prev without a query change.
+  folder.apply([
+    turnStart(12, 3),
+    userMessage(13, 'three payload mentions', 3),
+    turnEnd(14, 3),
+  ])
+  const withNew = refreshedSearchState({ matches: refreshed.matches, current: refreshed.current, query: 'payload', revision: refreshed.revision, folder }, folder)
+  assert.equal(withNew.matches.length, 2, 'a live new match enters the candidate list')
+  assert.equal(withNew.current, 0, 'the previous current card stays current by id')
+
+  // An UNCHANGED revision is a no-op (query retyping path: onSearchQuery
+  // already committed the fresh revision).
+  const unchanged = refreshedSearchState({ matches: withNew.matches, current: 0, query: 'payload', revision: withNew.revision, folder }, folder)
+  assert.equal(unchanged.changed, false)
+
+  // A stale id that no longer matches clamps instead of crashing.
+  const clamped = refreshedSearchState({ matches: [{ id: 999, turn: 0 }], current: 0, query: 'payload', revision: 0, folder }, folder)
+  assert.equal(clamped.changed, true)
+  assert.ok(clamped.matches.length > 0 && clamped.current >= 0, 'the index clamps into the refreshed list')
+
+  // An empty-query overlay refreshes to nothing without searching.
+  const cleared = refreshedSearchState({ matches: initial, current: 0, query: '', revision: 0, folder }, folder)
+  assert.equal(cleared.matches.length, 0)
+  assert.equal(cleared.current, -1)
+})
+
+test('streaming lowercasing is whole-string — Greek sigma across chunk boundaries (P2)', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    turnStart(0, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'Ο' } }, 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 1, text: 'Σ' } }, 2),
+  ])
+  // Whole-string lowercase: 'ΟΣ' -> 'ος'. The chunk-split concatenation
+  // ('οσ') must NEVER be searchable, and 'ος' must match — legacy searched
+  // the final whole string.
+  assert.equal('ΟΣ'.toLowerCase(), 'ος', 'fixture sanity: sigma final-form lowercasing')
+  assertCorpusParity(folder, ['ος'])
+  assert.equal(folder.search('οσ').length, 0, 'the chunk-split lowercase must not leak into the corpus')
+  // The settled replacement restores the authoritative text either way.
+  folder.apply([assistantMessage(3, 0, 0, 'ΟΣ settled')])
+  assertCorpusParity(folder, ['ος settled', 'settled'])
+  assert.equal(folder.search('οσ').length, 0)
 })
 
 test('transcriptSearchText is the single corpus source (tool = name args result)', () => {

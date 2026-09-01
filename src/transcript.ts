@@ -835,12 +835,21 @@ export class TranscriptFolder {
 
   /** Append a lowercased text delta to one entry's normalized text (the
    * streaming hot path: O(delta) per chunk, never a full re-lowercase). */
-  private appendSearchTextDelta(key: string, delta: string): void {
+  /** Re-normalize ONE active streaming entry from its authoritative item
+   * text (assistant/thinking). Unicode lowercasing is NOT chunk-splittable
+   * — lower('ΟΣ') is 'ος' but lower('Ο') + lower('Σ') is 'οσ' (Greek
+   * sigma) — so a streaming entry is lowercased as a WHOLE string on every
+   * delta (O(one active message), never history). A settled entry is
+   * refreshed by its settlement path instead; historical entries never
+   * touch this path. */
+  private refreshStreamingEntry(key: string): void {
     const index = this.searchIndexByStepKey.get(key)
     if (index === undefined) return
     const entry = this.searchEntries[index]
     if (entry === undefined) return
-    entry.normalizedText += delta.toLowerCase()
+    const item = this.items[index]
+    if (item === undefined || !('text' in item)) return
+    entry.normalizedText = item.text.toLowerCase()
     this.searchRevisionCounter += 1
   }
 
@@ -1769,8 +1778,9 @@ export class TranscriptFolder {
         // once, not twice.
         if (chunk.type === 'text-delta') {
           this.assistantEntry(event.data.turn, step).text += chunk.text
-          // Search projection: O(delta) incremental lowercase append.
-          this.appendSearchTextDelta(`assistant:${stepKey(event.data.turn, step)}`, chunk.text)
+          // Search projection: whole-string re-normalization (Unicode
+          // lowercasing is not chunk-splittable — Greek sigma).
+          this.refreshStreamingEntry(`assistant:${stepKey(event.data.turn, step)}`)
           // Focus aggregation: the streaming assistant text feeds the
           // Message candidate IMMEDIATELY (no assistant/message wait —
           // plan §5.2), so the running card previews the intermediate
@@ -1778,8 +1788,9 @@ export class TranscriptFolder {
           this.foldMessageCandidate(this.activityFor(event.data.turn), step, chunk.text)
         } else if (chunk.type === 'reasoning-delta') {
           this.thinkingEntry(event.data.turn, step).text += chunk.text
-          // Search projection: O(delta) incremental lowercase append.
-          this.appendSearchTextDelta(`thinking:${stepKey(event.data.turn, step)}`, chunk.text)
+          // Search projection: whole-string re-normalization (Unicode
+          // lowercasing is not chunk-splittable — Greek sigma).
+          this.refreshStreamingEntry(`thinking:${stepKey(event.data.turn, step)}`)
           // Focus aggregation: keep a compact reasoning preview (the
           // rolling tail — never the full stream, plan §10.6/§42).
           this.foldThinking(this.activityFor(event.data.turn), chunk.text)
