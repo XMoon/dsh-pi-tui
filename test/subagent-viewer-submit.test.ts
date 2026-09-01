@@ -1,76 +1,109 @@
 /**
- * Runner-level tests for the interactive subagent viewer's follow-up
- * delivery seam (subagent-viewer-submit.ts, plan §17): validation, the
- * exact-live-parent check, the `ctx.subagents.followup` call, and error
- * classification — with pure dependency injection, no TUI surface.
+ * Runner-level tests for the interactive subagent viewer's human prompt
+ * delivery seam (subagent-viewer-submit.ts, plan §17; DSH 0.1.2-alpha.4):
+ * validation, the official `ctx.subagents.prompt(...)` call, requestId
+ * minting, and error classification — with pure dependency injection, no
+ * TUI surface.
  * @module @xmoon76/dsh-pi-tui/subagent-viewer-submit.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  classifySubagentFollowupError,
+  classifySubagentPromptError,
   resolveSubagentSettleTarget,
-  submitSubagentFollowup,
+  submitSubagentPrompt,
   viewerCanonicalizeScope,
-  type SubagentFollowupService,
-  type SubagentParentLike,
+  type SubagentPromptService,
   type SubagentSettleViewerState,
   type SubagentViewerSubmitDeps,
+  type SubagentViewerSubmitRequest,
 } from '../src/subagent-viewer-submit.ts'
 
-const request = {
+const request: SubagentViewerSubmitRequest = {
   parentSessionId: 'session-parent',
   childSessionId: 'session-child',
-  text: 'focus on cancellation races',
-}
-
-function parent(id = 'session-parent'): SubagentParentLike {
-  return { session: { id } }
+  content: [{ type: 'text', text: 'focus on cancellation races' }],
 }
 
 function deps(overrides: Partial<SubagentViewerSubmitDeps> = {}): SubagentViewerSubmitDeps {
   return {
-    currentParent: () => parent(),
     subagents: () => undefined,
     makeSignal: () => new AbortController().signal,
-    makeSource: () => ({ kind: 'user' }),
+    mintRequestId: () => `request-${Math.random()}`,
     ...overrides,
   }
 }
 
-function service(calls: Array<{ parent: SubagentParentLike; childId: string; content: readonly { type: 'text'; text: string }[] }>): SubagentFollowupService {
+interface RecordedCall {
+  requestId: string
+  parentSessionId: string
+  childSessionId: string
+  mode: string
+  content: readonly { type: 'text'; text: string }[]
+  clientTimeZone: string | undefined
+  signal: AbortSignal
+}
+
+function service(calls: RecordedCall[]): SubagentPromptService {
   return {
-    followup: async (followParent, childId, content) => {
-      calls.push({ parent: followParent, childId, content })
-      return `inbox-${childId}-1`
+    prompt: async (payload, signal) => {
+      calls.push({
+        requestId: payload.requestId,
+        parentSessionId: payload.parentSessionId,
+        childSessionId: payload.childSessionId,
+        mode: payload.mode,
+        content: payload.content,
+        clientTimeZone: payload.clientTimeZone,
+        signal,
+      })
+      return { messageId: `inbox-${payload.childSessionId}-1` }
     },
   }
 }
 
-test('delivers through the continuation runtime with the EXACT live parent and the child id', async () => {
-  const calls: Array<{ parent: SubagentParentLike; childId: string; content: readonly { type: 'text'; text: string }[] }> = []
-  const live = parent()
-  const outcome = await submitSubagentFollowup(request, deps({
-    currentParent: () => live,
+test('delivers through the official prompt call with the official request vocabulary', async () => {
+  const calls: RecordedCall[] = []
+  const signal = new AbortController().signal
+  const outcome = await submitSubagentPrompt(request, deps({
     subagents: () => service(calls),
-    makeSource: () => ({ kind: 'user' }),
+    makeSignal: () => signal,
+    mintRequestId: () => 'minted-request-id',
   }))
   assert.equal(outcome.kind, 'ok')
   if (outcome.kind === 'ok') assert.equal(outcome.messageId, 'inbox-session-child-1')
-  assert.equal(calls.length, 1, 'followup called exactly once')
-  assert.equal(calls[0]!.parent, live, 'the exact live parent agent object authorizes the delivery')
-  assert.equal(calls[0]!.childId, 'session-child')
-  assert.deepEqual(calls[0]!.content, [{ type: 'text', text: request.text }])
+  assert.equal(calls.length, 1, 'prompt called exactly once')
+  assert.equal(calls[0]!.requestId, 'minted-request-id', 'the caller-minted id is persisted on the call')
+  assert.equal(calls[0]!.parentSessionId, 'session-parent')
+  assert.equal(calls[0]!.childSessionId, 'session-child')
+  assert.equal(calls[0]!.mode, 'continuable', 'the browser control address keeps the continuable discriminator')
+  assert.deepEqual(calls[0]!.content, request.content)
+  assert.equal(calls[0]!.signal, signal, 'the caller-owned signal is forwarded to the official call')
 })
 
-test('the follow-up text runs through the SAME canonicalization as the main session (@-mention expansion)', async () => {
+test('every submit mints a FRESH requestId (a retry is a new human prompt)', async () => {
+  const calls: RecordedCall[] = []
+  let minted = 0
+  const depsBase = deps({
+    subagents: () => service(calls),
+    mintRequestId: () => `request-${minted += 1}`,
+  })
+  await submitSubagentPrompt(request, depsBase)
+  await submitSubagentPrompt(request, depsBase)
+  assert.notEqual(calls[0]!.requestId, calls[1]!.requestId, 'two submits never share one identity')
+})
+
+test('the prompt text runs through the SAME canonicalization as the main session (@-mention expansion)', async () => {
   // The viewer editor keeps the concise `@src/foo.ts` form; the child
   // model must receive the absolute path exactly like a main-session
   // submission (expandFileMentionsForSubmit is the runner's wiring).
-  const calls: Array<{ parent: SubagentParentLike; childId: string; content: readonly { type: 'text'; text: string }[] }> = []
-  const outcome = await submitSubagentFollowup(
-    { ...request, text: 'review @src/foo.ts' },
+  const calls: RecordedCall[] = []
+  const outcome = await submitSubagentPrompt(
+    {
+      parentSessionId: request.parentSessionId,
+      childSessionId: request.childSessionId,
+      content: [{ type: 'text', text: 'review @src/foo.ts' }],
+    },
     deps({
       subagents: () => service(calls),
       canonicalizeText: (text) => text.replace('@src/foo.ts', '@/home/xmoon/project/src/foo.ts'),
@@ -78,107 +111,78 @@ test('the follow-up text runs through the SAME canonicalization as the main sess
   )
   assert.equal(outcome.kind, 'ok')
   assert.equal(calls[0]!.content[0]!.text, 'review @/home/xmoon/project/src/foo.ts',
-    'the follow-up content must carry the canonicalized absolute path')
-})
-
-test('the caller signal is the one passed to followup (cancellation is real, never a dropped controller)', async () => {
-  const controller = new AbortController()
-  let seen: AbortSignal | undefined
-  const calls: unknown[] = []
-  const outcome = await submitSubagentFollowup(request, deps({
-    makeSignal: () => controller.signal,
-    subagents: () => ({
-      followup: async (_parent, _childId, _content, options) => {
-        seen = options.signal
-        calls.push(options.signal)
-        return 'inbox-1'
-      },
-    }),
-  }))
-  assert.equal(outcome.kind, 'ok')
-  assert.equal(seen, controller.signal, 'followup must observe the caller-owned signal')
-  assert.equal(calls.length, 1)
+    'the prompt content must carry the canonicalized absolute path')
 })
 
 test('a signal aborted while canonicalizing rejects BEFORE the write path (never a stale accept)', async () => {
   const controller = new AbortController()
   controller.abort()
   let calls = 0
-  const outcome = await submitSubagentFollowup(request, deps({
+  const outcome = await submitSubagentPrompt(request, deps({
     makeSignal: () => controller.signal,
     canonicalizeText: async (text) => text,
     subagents: () => ({
-      followup: async () => { calls += 1; return 'inbox-1' },
+      prompt: async () => {
+        calls += 1
+        return { messageId: 'inbox-1' }
+      },
     }),
   }))
   assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'cancelled' } })
   assert.equal(calls, 0, 'the write path must never be invoked with an already-aborted signal')
 })
 
-test('rejects when there is no live parent at send time', async () => {
-  const calls: unknown[] = []
-  const outcome = await submitSubagentFollowup(request, deps({
-    currentParent: () => undefined,
-    subagents: () => ({ followup: async () => { calls.push('must not be called'); return 'x' } }),
-  }))
-  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'parent-unavailable' } })
-  assert.equal(calls.length, 0)
-})
-
-test('rejects when the live parent session is NOT the viewer target (session switched while sending)', async () => {
-  const outcome = await submitSubagentFollowup(request, deps({
-    currentParent: () => parent('session-other'),
-    subagents: () => ({ followup: async () => 'x' }),
-  }))
-  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'parent-unavailable' } })
-})
-
 test('rejects when the continuation runtime is unavailable', async () => {
-  const outcome = await submitSubagentFollowup(request, deps({ subagents: () => undefined }))
+  const outcome = await submitSubagentPrompt(request, deps({ subagents: () => undefined }))
   assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'unavailable' } })
 })
 
-test('classifies the DSH typed rejections into the stable reason set', async () => {
-  const cases: Array<[string, unknown]> = [
-    ['UNAUTHORIZED', makeError('UNAUTHORIZED')],
-    ['PARENT_UNAVAILABLE', makeError('PARENT_UNAVAILABLE')],
-    ['NOT_RESUMABLE', makeError('NOT_RESUMABLE')],
-    ['DRAINING', makeError('DRAINING')],
-    ['ACTIVATION_CLOSING', makeError('ACTIVATION_CLOSING')],
-    ['DUPLICATE_CHILD', makeError('DUPLICATE_CHILD')],
+test('classifies the official RemoteError vocabulary into the stable reason set', () => {
+  const cases: Array<[string, string]> = [
+    ['subagent/parent-unavailable', 'parent-unavailable'],
+    ['subagent/not-resumable', 'stale-child'],
+    ['subagent/unauthorized', 'unauthorized'],
+    ['subagent/delivery-unavailable', 'unavailable'],
+    ['gateway/cancelled', 'cancelled'],
+    ['subagent/invalid-time-zone', 'error'],
+    ['subagent/attachment-invalid', 'error'],
+    ['gateway/bad-request', 'error'],
+    ['gateway/internal', 'error'],
   ]
-  const expectations: Record<string, string> = {
-    UNAUTHORIZED: 'unauthorized',
-    PARENT_UNAVAILABLE: 'parent-unavailable',
-    NOT_RESUMABLE: 'stale-child',
-    DRAINING: 'unavailable',
-    ACTIVATION_CLOSING: 'unavailable',
-    DUPLICATE_CHILD: 'error',
-  }
-  for (const [code, error] of cases) {
-    const reason = classifySubagentFollowupError(error)
-    assert.equal(reason.kind, expectations[code], `code ${code}`)
+  for (const [code, kind] of cases) {
+    const reason = classifySubagentPromptError(makeError(code))
+    assert.equal(reason.kind, kind, `code ${code}`)
   }
 })
 
-test('classifies cancellation before inbox acceptance as cancelled (message never owned by the child)', async () => {
-  const reason = classifySubagentFollowupError(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+test('classifies cancellation before inbox acceptance as cancelled (message never owned by the child)', () => {
+  const reason = classifySubagentPromptError(Object.assign(new Error('aborted'), { name: 'AbortError' }))
   assert.deepEqual(reason, { kind: 'cancelled' })
 })
 
-test('a followup that REJECTS surfaces the classified reason (never a throw)', async () => {
-  const outcome = await submitSubagentFollowup(request, deps({
+test('the OLD SubagentError vocabulary is NOT interpreted anymore (superseded by alpha.4)', () => {
+  // alpha.4 replaced the internal NOT_RESUMABLE/DRAINING/… codes with the
+  // RemoteError vocabulary; reading the old codes again would silently
+  // misclassify a future Host failure — they must fall through to `error`.
+  for (const code of ['NOT_RESUMABLE', 'UNAUTHORIZED', 'PARENT_UNAVAILABLE', 'DRAINING', 'ACTIVATION_CLOSING']) {
+    const reason = classifySubagentPromptError(makeError(code))
+    assert.equal(reason.kind, 'error', `legacy code ${code} must not be classified`)
+  }
+})
+
+test('a prompt that REJECTS surfaces the classified reason (never a throw)', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
     subagents: () => ({
-      followup: async () => { throw Object.assign(new Error('subagent "c" is not a live continuable subagent'), { code: 'NOT_RESUMABLE' }) },
+      prompt: async () => { throw Object.assign(new Error('subagent cannot be resumed'), { code: 'subagent/not-resumable' }) },
     }),
   }))
   assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'stale-child' } })
 })
 
 test('an unexpected throw surfaces as a safe error reason with a message', async () => {
-  const outcome = await submitSubagentFollowup(request, deps({
+  const outcome = await submitSubagentPrompt(request, deps({
     subagents: () => ({
-      followup: async () => { throw new Error('boom') },
+      prompt: async () => { throw new Error('boom') },
     }),
   }))
   assert.equal(outcome.kind, 'rejected')
@@ -189,7 +193,7 @@ test('an unexpected throw surfaces as a safe error reason with a message', async
 })
 
 function makeError(code: string): Error {
-  return Object.assign(new Error(`subagent error: ${code}`), { code })
+  return Object.assign(new Error(`remote error: ${code}`), { code })
 }
 
 // ── settle target resolution (plan §12: the current/stale split) ──────────
