@@ -7,19 +7,21 @@
 
 ## [Unreleased]
 
-### CI 与兼容性
+## [0.4.0-alpha.1] - 2026-09-01
 
-- 新增 Source Mode 本地/CI 验证：固定 DeepSeek Harness 完整 SHA，使用官方 `build:official` 与 `release:pack --family dsh` 生成完整 tarball family，再通过临时 pnpm overrides 验证 TUI。发布包的 peer contract 为 `>=0.1.2-alpha.2`，不会把源码路径写入 package 或 lockfile。
-- `next` push/PR 使用 Source Mode；`main` 和所有 tag（包括 `next-v*`）使用 frozen npm Mode。Source Mode 仍使用 exact DSH source family 验证 TUI；pi2dsh ecosystem gate 独立使用 published DSH/pi2dsh，因此在 Source/npm 两种 TUI validation mode 下都会执行。
-- **Source 验证基线切到 DSH 0.1.2-alpha.2**（exact SHA `0a53fb55bea101816fa226bb964ae2bed71c343b`）。产品 peer floor 正式提高到 `>=0.1.2-alpha.2`（业务代码已实际使用 alpha.2 API，如 `permissionPresets.current(session)`）；未新增 alpha.1/alpha.2 runtime capability branch。
-- **Source 验证基线更新到 DSH 0.1.2-alpha.3**（exact SHA `dd6322d604e00eec1ba5e0c8541159906a21094a`）。完整 Source compatibility 验证链（source identity、official build、official family pack、TUI build/typecheck/bundle tests、vendored pi-tui tests、official preset smoke、tarball fresh install、source leak gate、runtime boundary gate）全部通过；Direct runtime 无 alpha.3 回归。最低支持版本保持 `>=0.1.2-alpha.2` 不变，未新增 alpha.2/alpha.3 runtime capability branch。
-- **DSH npm 开发 baseline 更新到 0.1.2-alpha.3**（devDependencies + lockfile）。`compat:dsh:npm` 对 alpha.3（当前开发 baseline）与 alpha.2（声明的最低支持版本）均验证通过：Alpha.3 npm Distribution Compatibility: PASS；Alpha.2 npm Distribution Compatibility: PASS。peer contract 仍为 `>=0.1.2-alpha.2`。
+### 安装与版本对应
 
-### Session Projection 收敛
+当前预发布页面建议按以下顺序安装，先安装匹配的 DSH，再将 TUI bundle
+加入 profile：
 
-- **cold session preset 改走官方 observation seam。** `recordedSessionPreset()` 使用 `sessionQuery.observeSession()`——live/cold 源选择、persistence borrow/preparation、projection cache hydration、tail replay、projection cut 全部由引擎负责；TUI 不再为读取 `agentPreset` projection 自行构造 detached `Session`。
-- **`/sessions` picker 先查 zero-I/O projection cache。** 有缓存 `agentPreset`（`sessionProjectionCache.cachedSnapshot`）的 cold row 不做任何 observation 即可富化；只有 cache miss 才走 bounded（并发 4）`observeSession()`。`list()` 捕获的 header snapshot 消除了第二次全量 list，第一帧仍在任何 cold enrichment 之前打开。
-- **`SessionEvent.ignorable` round-trip 回归。** alpha.2 恢复的 `ignorable?: true` envelope marker 在每种 repair 形态（healthy no-op、duplicate-seq renumber、re-frame、torn-tail salvage）下都原样保留，`data` 不变、不发明 `surfaceOp`；无 marker 的 unknown event 仍然 fail closed（不自动补 marker、不删除）。
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.3
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+需要保留 DSH `0.1.1-rc.2` 的用户应改用 `@xmoon76/dsh-pi-tui@0.3`，不要
+把 `@next` 与旧运行时混用。完整版本矩阵和更新/卸载命令见 README 的「安装」。
 
 ### Footer 自定义命令项（PR D）
 
@@ -48,6 +50,10 @@
 - **`FooterLayoutV1`、perRow=2 / hard total=4、Host Instruction 与 public
   extension ABI 均不变。**
 
+### 模型选择
+
+- **`/model` 选择的持久化单位改为每个 live Agent。** 每个 live Agent 拥有自己的模型选择引用，从持久的 `model/selection` intent 与最近的 `request/header` 重建；footer 与 `/model` 跟随当前 live Agent，第一个 Session 创建前保持无 session 状态（仅持有乐观选择，不会安装进 Agent context）。语义 catalog 将全局默认持久化与 Session 本地选择分离，重叠的默认写入由 latest-wins fencing 裁决——迟到的旧 `/model` 操作不会清除或恢复更新的 intent。
+
 ### UX 优化
 
 #### 变更
@@ -57,10 +63,15 @@
 - **全屏鼠标滚轮步长可配置。** `/settings` 新增 `Mouse wheel lines`（1/2/3/5/8，默认 1），通过现有 `TuiAltScreenOptions.wheelScrollLines` 生效；fullscreen 已激活时修改在下次重新进入 fullscreen 后生效。
 - **Todo 面板 ≤5 条时去掉冗余 full 状态。** 状态机变为 summary ↔ list 两态（第二次点击即关闭）；>5 条保留 summary → compact(5) → full(N) → summary 三态；列表从 >5 缩到 ≤5 时自动清除 ghost `todoExpanded`。
 - **Todo 快速连点合并为一次手势。** dock summary 与 panel 行属于同一语义目标，500ms 内的连续点击（含布局切换导致的同坐标第二击）不再触发第二次状态切换——修复“快速双击让 Todo 一闪就消失”；点击其它区域后重置。
+- **长会话搜索改为稳定的索引化投影。** 全屏转录搜索（`Ctrl+F` / `Ctrl+Shift+F`）与跳转现在基于稳定的条目身份（append-only id + turn）和单一语料源（工具卡按 name/args 参与匹配）；查询只遍历自上次以来的脏条目（O(#dirty)），不再每次扫描整个历史（O(history)）；实时流式追加与读组合并的热路径保持近线性，不再对每个 chunk 全量重建索引。搜索跳转按稳定 turn 锚定，读组合并或折叠后仍能定位到当前可见卡片。
+- **状态行与 `/status` 的上下文读数统一且去重。** 普通状态刷新改为读取缓存的 context 读数，不再在每次 UI/status 更新时测量（长会话下成本显著下降）；`/status` 强制一次测量并经由 coordinator 进入缓存，面板与 footer 读数不再分叉；冷恢复或切换会话后的首次延迟测量现在绑定正确会话，已测会话不会被重复测量。
 
 #### 修复
 
 - **显式 cold resume 在 TUI mount 前显示启动进度。** `dsh --profile <p> --session <id>` 冷启动时先显示单行 `Resuming session…`（必要时 `Preparing conversation…`），`Preparing conversation…` 一直保留到 catalog ready barrier 完成，mount 前完全清除，不再让空白终端看起来像卡死；fresh start 不输出任何状态，非 TTY 静默；任何普通日志输出前先 suspend 状态行（失败日志、preset warning、catalog warning 都落在干净行上）。
+- **搜索 overlay 的 Next/Prev 不再跳过新出现的匹配。** 空搜索在 overlay 打开期间获得新匹配后，Next 现在落在第一个匹配（Prev 落在最后一个）；Next/Prev 之前先刷新 stale overlay，再对刷新后的列表做空判断；被清空的结果集 clamp 到 `-1`，不再显示无效的 `1/0` 计数。
+- **实时尾部追加会刷新整个读组。** 新读加入跨回合合并卡片时，组内所有成员条目都指向合并后的文本与新 turn，搜索跳转不会锚定到旧窗口或旧 turn（此前只刷新后两个条目，组内较早成员保留 stale 文本）。
+- **立即退出的 footer 命令子进程不再崩溃 TUI。** 命令项子进程在 JSON 载荷写入 stdin 前就退出（如 shell 下的 `true`）时，异步 EPIPE 现在被吞掉（与 clipboard 路径一致），不再触发 `uncaughtException` 使整个 TUI 进程崩溃。
 
 ### 迁移说明
 
@@ -84,19 +95,19 @@
 - **上游 alpha 注意事项。** DSH 0.1.2-alpha.1 的 subagent dispose
   行为仍有上游 caveat；发布前请按目标 Harness 版本运行兼容性门禁。
 
-### 安装与版本对应
+### Session Projection 收敛
 
-当前预发布页面建议按以下顺序安装，先安装匹配的 DSH，再将 TUI bundle
-加入 profile：
+- **cold session preset 改走官方 observation seam。** `recordedSessionPreset()` 使用 `sessionQuery.observeSession()`——live/cold 源选择、persistence borrow/preparation、projection cache hydration、tail replay、projection cut 全部由引擎负责；TUI 不再为读取 `agentPreset` projection 自行构造 detached `Session`。
+- **`/sessions` picker 先查 zero-I/O projection cache。** 有缓存 `agentPreset`（`sessionProjectionCache.cachedSnapshot`）的 cold row 不做任何 observation 即可富化；只有 cache miss 才走 bounded（并发 4）`observeSession()`。`list()` 捕获的 header snapshot 消除了第二次全量 list，第一帧仍在任何 cold enrichment 之前打开。
+- **`SessionEvent.ignorable` round-trip 回归。** alpha.2 恢复的 `ignorable?: true` envelope marker 在每种 repair 形态（healthy no-op、duplicate-seq renumber、re-frame、torn-tail salvage）下都原样保留，`data` 不变、不发明 `surfaceOp`；无 marker 的 unknown event 仍然 fail closed（不自动补 marker、不删除）。
 
-```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.2
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
-dsh --profile pi-tui
-```
+### CI 与兼容性
 
-需要保留 DSH `0.1.1-rc.2` 的用户应改用 `@xmoon76/dsh-pi-tui@0.3`，不要
-把 `@next` 与旧运行时混用。完整版本矩阵和更新/卸载命令见 README 的「安装」。
+- 新增 Source Mode 本地/CI 验证：固定 DeepSeek Harness 完整 SHA，使用官方 `build:official` 与 `release:pack --family dsh` 生成完整 tarball family，再通过临时 pnpm overrides 验证 TUI。发布包的 peer contract 为 `>=0.1.2-alpha.2`，不会把源码路径写入 package 或 lockfile。
+- `next` push/PR 使用 Source Mode；`main` 和所有 tag（包括 `next-v*`）使用 frozen npm Mode。Source Mode 仍使用 exact DSH source family 验证 TUI；pi2dsh ecosystem gate 独立使用 published DSH/pi2dsh，因此在 Source/npm 两种 TUI validation mode 下都会执行。
+- **Source 验证基线切到 DSH 0.1.2-alpha.2**（exact SHA `0a53fb55bea101816fa226bb964ae2bed71c343b`）。产品 peer floor 正式提高到 `>=0.1.2-alpha.2`（业务代码已实际使用 alpha.2 API，如 `permissionPresets.current(session)`）；未新增 alpha.1/alpha.2 runtime capability branch。
+- **Source 验证基线更新到 DSH 0.1.2-alpha.3**（exact SHA `dd6322d604e00eec1ba5e0c8541159906a21094a`）。完整 Source compatibility 验证链（source identity、official build、official family pack、TUI build/typecheck/bundle tests、vendored pi-tui tests、official preset smoke、tarball fresh install、source leak gate、runtime boundary gate）全部通过；Direct runtime 无 alpha.3 回归。最低支持版本保持 `>=0.1.2-alpha.2` 不变，未新增 alpha.2/alpha.3 runtime capability branch。
+- **DSH npm 开发 baseline 更新到 0.1.2-alpha.3**（devDependencies + lockfile）。`compat:dsh:npm` 对 alpha.3（当前开发 baseline）与 alpha.2（声明的最低支持版本）均验证通过：Alpha.3 npm Distribution Compatibility: PASS；Alpha.2 npm Distribution Compatibility: PASS。peer contract 仍为 `>=0.1.2-alpha.2`。
 
 ## [0.3.6] - 2026-08-31
 
@@ -1273,7 +1284,8 @@ dsh --profile pi-tui
   以及按生产者标注的上下文注入卡片。
 - 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...HEAD
+[0.4.0-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...next-v0.4.0-alpha.1
 [0.3.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4

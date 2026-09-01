@@ -7,19 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### CI and compatibility
+## [0.4.0-alpha.1] - 2026-09-01
 
-- Added Source Mode local/CI validation: pin the complete DeepSeek Harness SHA, run the official `build:official` and `release:pack --family dsh` commands, then validate the complete tarball family through temporary pnpm overrides without writing source paths into the package contract or lockfile.
-- `next` pushes/PRs use Source Mode; `main` and every tag (including `next-v*`) use frozen npm Mode. Source Mode still validates the TUI against the exact DSH source family; the pi2dsh ecosystem gate independently uses the published DSH/pi2dsh, so it now runs in BOTH TUI validation modes.
-- **Source validation baseline moved to DSH 0.1.2-alpha.2** (exact SHA `0a53fb55bea101816fa226bb964ae2bed71c343b`). The product peer floor is formally raised to `>=0.1.2-alpha.2` (the runtime code already uses alpha.2 APIs such as `permissionPresets.current(session)`); no alpha.1/alpha.2 runtime capability branch was added.
-- **Source validation baseline updated to DSH 0.1.2-alpha.3** (exact SHA `dd6322d604e00eec1ba5e0c8541159906a21094a`). The full Source compatibility chain (source identity, official build, official family pack, TUI build/typecheck/bundle tests, vendored pi-tui tests, official preset smoke, tarball fresh install, source leak gate, runtime boundary gate) passes; the Direct runtime has no alpha.3 regression. The minimum supported version stays `>=0.1.2-alpha.2`; no alpha.2/alpha.3 runtime capability branch was added.
-- **The DSH npm development baseline moved to 0.1.2-alpha.3** (devDependencies + lockfile). `compat:dsh:npm` passes against both alpha.3 (the current development baseline) and alpha.2 (the declared minimum): Alpha.3 npm Distribution Compatibility: PASS; Alpha.2 npm Distribution Compatibility: PASS. The peer contract remains `>=0.1.2-alpha.2`.
+### Installation and version pairing
 
-### Session projection cleanup
+For this prerelease, install the matching DSH first and then add the TUI bundle
+into a profile:
 
-- **Cold session presets now read through the official observation seam.** `recordedSessionPreset()` uses `sessionQuery.observeSession()` — the engine owns live/cold source selection, persistence borrow/preparation, projection-cache hydration, tail replay, and the projection cut. The TUI no longer reconstructs a detached `Session` just to read the `agentPreset` projection.
-- **The `/sessions` picker consults the zero-I/O projection cache first.** Cold rows with a cached `agentPreset` (`sessionProjectionCache.cachedSnapshot`) are enriched without any observation; only cache misses go through bounded (concurrency 4) `observeSession()` reads. The header snapshot captured by `list()` removed the second full corpus listing, and the first picker frame still opens before any cold enrichment.
-- **`SessionEvent.ignorable` round-trip regression.** The alpha.2-restored `ignorable?: true` envelope marker is preserved through every repair shape (healthy no-op, duplicate-seq renumber, re-frame, torn-tail salvage) with `data` untouched and no `surfaceOp` invented; an unknown event without the marker still fails closed (never auto-marked, never deleted).
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.3
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`
+instead of `@next`. Do not mix the prerelease TUI with the legacy runtime;
+the complete matrix and update/remove commands are in the README's
+Installation section.
 
 ### Footer custom command items (PR D)
 
@@ -27,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Commands activate only from the USER-layer trusted source (definition trust + activation trust).** `ConfigPort.footerCustomItems.get()` or the validated result of a successful `/footer` save is the only executable definition source; executable ids = USER-trusted definitions ∩ USER-authorized activation ids ∩ currently rendered layout ids. The USER authorization comes from `ConfigPort.footerCommandTrust.userCommandItemActivationIds`, computed from the USER's OWN mode (only `footer: custom` authorizes the USER layout; a stale leftover layout after switching back to default/compact authorizes nothing; the whole-footer command's native fallback authorizes per the USER's own `footerFallbackMode` ONLY when the USER layer itself declares `footer: command` — a PROJECT-forced merged command mode can never turn stale fallback metadata into execution authorization). Project/merged configuration can neither supply a command string nor activate a dormant or hidden USER command item through a merged layout (unsaved drafts and failed saves never execute either).
 - **New client-local `FooterDynamicItemRuntime`.** It arms one runner per command item the active layout references (reusing the whole-footer `FooterCommandRunner`'s spawn/shell/stdin/timeout/refresh/generation/sanitize/process-tree-kill), caching the first non-empty sanitized output line; `FooterItemDefinition.render()` reads the cache synchronously and the render path never spawns. Removing/hiding/renaming an item or entering whole-footer command mode disposes the runner and clears the cache immediately; multiple command items are isolated.
 - **`FooterLayoutV1`, perRow=2 / hard total=4, the Host Instruction and the public extension ABI are unchanged.**
+
+### Model selection
+
+- **`/model` selection is now persisted per live Agent.** Each live Agent owns its own selection reference, reconstructed from the durable `model/selection` intent and the latest `request/header`; the footer and `/model` follow the live Agent and stay sessionless before the first Session exists (holding only the optimistic choice, never installed into an Agent context). The semantic catalog separates global default persistence from Session-local selection, with latest-wins fencing for overlapping default writes — a late-settling older `/model` operation can never clear or restore a newer intent.
 
 ### UX improvements
 
@@ -37,10 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The fullscreen mouse-wheel step is configurable.** `/settings` gains a `Mouse wheel lines` row (1/2/3/5/8, default 1) applied through the existing `TuiAltScreenOptions.wheelScrollLines`; a change while fullscreen is active takes effect on the next fullscreen re-entry.
 - **The todo panel skips a redundant full state when five or fewer items exist.** The state machine becomes a two-state summary ↔ list (the second click closes the panel); with more than five items the three-state summary → compact(5) → full(N) → summary stays, and a >5 → ≤5 shrink automatically clears a ghost `todoExpanded`.
 - **Rapid todo clicks coalesce into one gesture.** The dock summary and the panel rows are ONE semantic target: consecutive clicks within 500ms (including the same-coordinate second click after the layout switches from dock to panel) no longer trigger a second state transition — fixing the todo "flashes and vanishes" on a fast double-click; a click on any other target resets the window.
+- **Long-session search is now a stable indexed projection.** Fullscreen transcript search (`Ctrl+F` / `Ctrl+Shift+F`) and jumps use stable item identities (append-only id + turn) over a single corpus source (tool cards match on name/args); a query iterates only the entries dirtied since the last run (O(#dirty)) instead of scanning the whole history (O(history)), while live streaming appends and read-group merges stay near-linear on the hot path instead of rebuilding the index per chunk. Search jumps anchor by the stable turn, so a read-group merge or reflow still lands on the currently visible card.
+- **Status-line and `/status` context readings are unified and deduplicated.** Ordinary status refreshes now read the cached context pressure instead of measuring on every UI/status update (a real long-session cost); `/status` forces exactly one measurement through the coordinator into the cache, so the panel and footer can no longer disagree; the deferred first measurement after a cold resume or session switch binds the captured session, and an already-measured session is never re-measured.
 
 #### Fixed
 
 - **Explicit cold resume shows startup progress before the TUI mounts.** `dsh --profile <p> --session <id>` now prints a single-line `Resuming session…` (and `Preparing conversation…` when needed); the `Preparing conversation…` stage stays on screen until the catalog ready barrier completes and is cleared completely before the first frame, so the blank terminal no longer reads as a hang; fresh starts emit nothing, non-TTY output stays silent, and any ordinary log output first suspends the status line (failure logs, preset warnings and catalog warnings all land on a clean line).
+- **Search overlay Next/Prev no longer skip newly arrived matches.** When an empty search gains matches while the overlay stays open, Next now lands on the FIRST match (Prev on the last); both handlers refresh the stale overlay before the empty guard, and an emptied result set clamps to `-1` instead of showing an invalid `1/0` counter.
+- **A live tail append refreshes the whole read group.** When a new read joins a cross-turn merged card, every member entry points at the shared post-merge text and the new max turn, so a search jump no longer anchors the wrong window or a stale turn (previously only the last two entries were refreshed, leaving earlier group members with stale text).
+- **An instantly-exiting footer command child no longer crashes the TUI.** A command-item child that exits before the JSON payload flushes to stdin (e.g. `true` via the shell) now has its async EPIPE swallowed (matching the clipboard path) instead of triggering an `uncaughtException` that takes down the whole TUI process.
 
 ### Migration notes
 
@@ -68,21 +81,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subagent-dispose caveat; run the target-Harness compatibility gates before
   publishing.
 
-### Installation and version pairing
+### Session projection cleanup
 
-For this prerelease, install the matching DSH first and then add the TUI bundle
-into a profile:
+- **Cold session presets now read through the official observation seam.** `recordedSessionPreset()` uses `sessionQuery.observeSession()` — the engine owns live/cold source selection, persistence borrow/preparation, projection-cache hydration, tail replay, and the projection cut. The TUI no longer reconstructs a detached `Session` just to read the `agentPreset` projection.
+- **The `/sessions` picker consults the zero-I/O projection cache first.** Cold rows with a cached `agentPreset` (`sessionProjectionCache.cachedSnapshot`) are enriched without any observation; only cache misses go through bounded (concurrency 4) `observeSession()` reads. The header snapshot captured by `list()` removed the second full corpus listing, and the first picker frame still opens before any cold enrichment.
+- **`SessionEvent.ignorable` round-trip regression.** The alpha.2-restored `ignorable?: true` envelope marker is preserved through every repair shape (healthy no-op, duplicate-seq renumber, re-frame, torn-tail salvage) with `data` untouched and no `surfaceOp` invented; an unknown event without the marker still fails closed (never auto-marked, never deleted).
 
-```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.2
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
-dsh --profile pi-tui
-```
+### CI and compatibility
 
-Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`
-instead of `@next`. Do not mix the prerelease TUI with the legacy runtime;
-the complete matrix and update/remove commands are in the README's
-Installation section.
+- Added Source Mode local/CI validation: pin the complete DeepSeek Harness SHA, run the official `build:official` and `release:pack --family dsh` commands, then validate the complete tarball family through temporary pnpm overrides without writing source paths into the package contract or lockfile.
+- `next` pushes/PRs use Source Mode; `main` and every tag (including `next-v*`) use frozen npm Mode. Source Mode still validates the TUI against the exact DSH source family; the pi2dsh ecosystem gate independently uses the published DSH/pi2dsh, so it now runs in BOTH TUI validation modes.
+- **Source validation baseline moved to DSH 0.1.2-alpha.2** (exact SHA `0a53fb55bea101816fa226bb964ae2bed71c343b`). The product peer floor is formally raised to `>=0.1.2-alpha.2` (the runtime code already uses alpha.2 APIs such as `permissionPresets.current(session)`); no alpha.1/alpha.2 runtime capability branch was added.
+- **Source validation baseline updated to DSH 0.1.2-alpha.3** (exact SHA `dd6322d604e00eec1ba5e0c8541159906a21094a`). The full Source compatibility chain (source identity, official build, official family pack, TUI build/typecheck/bundle tests, vendored pi-tui tests, official preset smoke, tarball fresh install, source leak gate, runtime boundary gate) passes; the Direct runtime has no alpha.3 regression. The minimum supported version stays `>=0.1.2-alpha.2`; no alpha.2/alpha.3 runtime capability branch was added.
+- **The DSH npm development baseline moved to 0.1.2-alpha.3** (devDependencies + lockfile). `compat:dsh:npm` passes against both alpha.3 (the current development baseline) and alpha.2 (the declared minimum): Alpha.3 npm Distribution Compatibility: PASS; Alpha.2 npm Distribution Compatibility: PASS. The peer contract remains `>=0.1.2-alpha.2`.
 
 ## [0.3.6] - 2026-08-31
 
@@ -1563,7 +1574,8 @@ Installation section.
 - Single-package release model: the fork is bundled into the published
   package at build time; the tarball is self-contained.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...HEAD
+[0.4.0-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...next-v0.4.0-alpha.1
 [0.3.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4

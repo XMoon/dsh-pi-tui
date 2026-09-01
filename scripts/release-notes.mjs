@@ -143,7 +143,7 @@ function containsExactGuidance(content, command) {
 if (version.startsWith('0.4.')) {
   const requiredGuidance = channel === 'next'
     ? [
-        '@deepseek-ai/dsh@0.1.2-alpha.2',
+        '@deepseek-ai/dsh@0.1.2-alpha.3',
         '@xmoon76/dsh-pi-tui@next',
         '@xmoon76/dsh-pi-tui@0.3',
       ]

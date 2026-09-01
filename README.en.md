@@ -323,7 +323,7 @@ keep DSH 0.1.1, use the 0.3 TUI line. For the current `0.4.0-alpha.1`, install
 DSH first and then add the TUI to a profile:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.2
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.3
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
