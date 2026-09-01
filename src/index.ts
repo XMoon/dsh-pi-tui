@@ -2819,6 +2819,22 @@ export function apply(ctx: Context, config: Config): void {
       refreshStatusCheap()
     }
 
+    // The /status explicit force: a user asking for status expects the
+    // FRESH context (plan §15.1 — explicit-status may force). Measures now
+    // through the coordinator so the panel AND the cached footer value
+    // agree (round-8 finding: a direct sessionReader read from the command
+    // surface bypassed the cache and could duplicate the deferred initial
+    // measurement).
+    const forceContextMeasurement = (): number | undefined => {
+      const session = liveAgent?.session
+      if (session === undefined) return undefined
+      contextMeasurement.bind(session.id)
+      contextMeasurement.markDirty()
+      const value = contextMeasurement.measure(session.id, (id) => backend.sessionReader.measureContext(id))
+      refreshStatusCheap()
+      return value
+    }
+
     // The initial/post-switch measurement is deferred one event-loop turn
     // past the first usable paint: cold resume must never block the first
     // frame on a long-session context scan (plan §16.2 — setImmediate, not
@@ -6827,6 +6843,13 @@ export function apply(ctx: Context, config: Config): void {
       // the title batches, the context measurement and the export read go
       // through the port, never ctx directly.
       sessionReader: backend.sessionReader,
+      // PR D2: the /status explicit force — measure NOW through the
+      // coordinator (mark dirty + semantic reader), repaint the footer
+      // cheaply, and return the fresh (or last-good) value for the panel.
+      // Panel and footer share ONE cached measurement: no duplicate reads
+      // against the coordinator's cache, no stale footer after an explicit
+      // status (round-8 finding).
+      forceContextMeasurement,
       // The session WRITE port (migration M1.4): follow-up delivery, steer,
       // queue pull-back, cancel and title ops go through the port.
       sessionWriter: backend.sessionWriter,
