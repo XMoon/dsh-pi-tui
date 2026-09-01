@@ -47,7 +47,7 @@ const SHORT_STATUS: StatusData = {
   // M1: the footer composes the stats line from the STRUCTURED usage.
   usage: {
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+    performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
     turns: 3,
     steps: 7,
   },

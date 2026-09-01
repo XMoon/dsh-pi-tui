@@ -518,7 +518,7 @@ test('the footer switches to the viewed child\u2019s identity and back on exit',
     // usage facts.
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+      performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
       turns: 3,
       steps: 5,
     },
@@ -528,7 +528,7 @@ test('the footer switches to the viewed child\u2019s identity and back on exit',
   assert.ok(view.includes('[subagent · continuable]'), `subagent footer badge missing:\n${view}`)
   assert.ok(view.includes('research'), `child label missing from the footer:\n${view}`)
   assert.ok(view.includes('t3/s5'), `child turn/step counters missing:\n${view}`)
-  assert.ok(view.includes('LLM 12.3s'), `child stats line missing:\n${view}`)
+  assert.ok(view.includes('TTFB 12.3s'), `child stats line missing:\n${view}`)
   assert.ok(!view.includes('parent-model'), `the parent model must not leak into the viewer footer:\n${view}`)
   // Clearing restores the parent footer (the runner's exitView calls BOTH
   // setters — the view subject and the footer payload return together).
@@ -558,7 +558,7 @@ test('the one-shot viewer footer carries the one-shot badge and no stats line un
     statsLine: 'child stats',
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+      performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
       turns: 1,
       steps: 2,
     },
@@ -566,7 +566,7 @@ test('the one-shot viewer footer carries the one-shot badge and no stats line un
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('[subagent · one-shot]'), `one-shot badge missing:\n${view}`)
-  assert.ok(!view.includes('LLM 12.3s'), `compact preset must drop the stats line:\n${view}`)
+  assert.ok(!view.includes('TTFB 12.3s'), `compact preset must drop the stats line:\n${view}`)
   app.setViewerFooter(undefined)
   app.setViewerMode(undefined)
   app.stop()
@@ -594,7 +594,7 @@ test('the viewer footer never shows the parent\u2019s Ctrl+C exit hint (round-1 
     statsLine: 'child stats line',
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+      performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
       turns: 1,
       steps: 1,
     },
@@ -602,7 +602,7 @@ test('the viewer footer never shows the parent\u2019s Ctrl+C exit hint (round-1 
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('Press Ctrl+C again'), `the parent exit hint must never leak into the viewer footer:\n${view}`)
-  assert.ok(view.includes('LLM 12.3s'), `the child stats line must show instead:\n${view}`)
+  assert.ok(view.includes('TTFB 12.3s'), `the child stats line must show instead:\n${view}`)
   app.setViewerFooter(undefined)
   app.setViewerMode(undefined)
   app.stop()

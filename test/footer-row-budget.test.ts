@@ -88,10 +88,10 @@ test('every logical row of the default layout stays inside the 1..2-line row con
     // The stats row keeps at least one visible line within its allowance —
     // with the hard capacity of 4 it may even wrap INTO two when the
     // surface has the room (its demand is lower in layout order). At
-    // degenerate widths the truncated stats line may no longer carry its
-    // 'LLM' text, only its leading '↑' counter.
+    // degenerate widths the truncated stats row may no longer carry its
+    // 'tok/s' text, only its leading '↑' counter.
     if (width > 4) {
-      const stats = lines.find(line => line.includes('LLM') || line.includes('↑'))
+      const stats = lines.find(line => line.includes('tok/s') || line.includes('↑'))
       assert.ok(stats !== undefined && visibleWidth(stats) <= Math.max(1, width), `stats row lost at ${width}:\n${JSON.stringify(lines)}`)
     }
   }
@@ -164,7 +164,7 @@ test('the Host instruction reserves its line; capacity 4 gives status 2 + stats 
   assert.equal(lines.length, 4, `2 + 1 + hint inside the capacity of 4:\n${JSON.stringify(lines)}`)
   assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again to exit'), `the hint must be its own line:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('yolo')), `the status row must survive:\n${JSON.stringify(lines)}`)
-  assert.ok(lines.some(line => line.includes('LLM')), `the stats row must survive (not be replaced):\n${JSON.stringify(lines)}`)
+  assert.ok(lines.some(line => line.includes('tok/s')), `the stats row must survive (not be replaced):\n${JSON.stringify(lines)}`)
 })
 
 test('a 3-row layout under the DEFAULT budget fits beside the instruction', () => {
@@ -197,7 +197,7 @@ test('a DYNAMIC total of 2 still keeps the instruction and drops the stats tail'
   assert.equal(lines.length, 2, `exactly the surface budget, hint included:\n${JSON.stringify(lines)}`)
   assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again to exit'), `the hint must be last:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('yolo')), `the highest-importance row must survive:\n${JSON.stringify(lines)}`)
-  assert.ok(!lines.some(line => line.includes('LLM')), `the stats tail must drop under height pressure:\n${JSON.stringify(lines)}`)
+  assert.ok(!lines.some(line => line.includes('tok/s')), `the stats tail must drop under height pressure:\n${JSON.stringify(lines)}`)
 })
 
 test('a capacity of 4 lets BOTH rows wrap (2 + 2) when no instruction competes', () => {

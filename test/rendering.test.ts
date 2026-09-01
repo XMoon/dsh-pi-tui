@@ -1207,20 +1207,20 @@ test('footer preset hides the stats line in compact mode', async () => {
     // M1: the stats line composes from the structured usage facts.
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      performance: { llmMs: 8100, firstTokenMs: 0, tokensPerSec: 0 },
+      performance: { llmMs: 8100, firstTokenMs: 8_100, tokensPerSec: 0 },
       turns: 0,
       steps: 0,
     },
   })
   let view = await viewport(vt)
-  assert.ok(view.includes('LLM 8.1s'), `stats line missing in full mode:\n${view}`)
+  assert.ok(view.includes('TTFB 8.1s'), `stats line missing in full mode:\n${view}`)
   app.setFooterPreset('compact')
   view = await viewport(vt)
-  assert.ok(!view.includes('LLM 8.1s'), `stats line visible in compact mode:\n${view}`)
+  assert.ok(!view.includes('TTFB 8.1s'), `stats line visible in compact mode:\n${view}`)
   assert.ok(view.includes('[m]'), `line 1 missing:\n${view}`)
   app.setFooterPreset('full')
   view = await viewport(vt)
-  assert.ok(view.includes('LLM 8.1s'), `stats line not restored:\n${view}`)
+  assert.ok(view.includes('TTFB 8.1s'), `stats line not restored:\n${view}`)
 })
 
 test('autoDetectTheme resolves without changing the theme when the terminal is silent', async () => {

@@ -18,6 +18,7 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import {
   formatCacheHit,
   formatCacheHitCompact,
+  formatCacheHitPi,
   formatContextFull,
   formatContextPercent,
   formatGitBranch,
@@ -25,7 +26,9 @@ import {
   formatPerformanceCompact,
   formatPerformanceFull,
   formatPerformanceLatency,
+  formatPerformanceLatencyCompact,
   formatPerformanceSpeed,
+  formatPerformanceSpeedCompact,
   formatPermissionPreset,
   formatPlanState,
   formatRunPhaseCompact,
@@ -34,6 +37,8 @@ import {
   formatStatsLineCompact,
   formatTokenUsageCompact,
   formatTokenUsageIo,
+  formatTokenUsagePi,
+  formatTokenUsagePiCompact,
   formatTokenUsageTotal,
   formatTurnsSteps,
   formatVersion,
@@ -250,11 +255,12 @@ const turnsStepsItem: FooterItemDefinition = {
 }
 
 /** The pi-vocabulary stats line (the legacy line-2), derived from the
- * STRUCTURED usage facts. */
+ * STRUCTURED usage facts. Kept registered for existing custom layouts;
+ * the default preset composes its stats row from real semantic items. */
 const statsLineItem: FooterItemDefinition = {
   id: 'stats-line',
   label: 'Stats line',
-  description: 'The pi-vocabulary usage line (tokens, cache, LLM timing, throughput).',
+  description: 'The pi-vocabulary usage line (tokens, cache, recent TTFB, throughput).',
   defaultZone: 'left',
   defaultImportance: 10,
   formats: ['pi'],
@@ -546,18 +552,27 @@ const todoItem: FooterItemDefinition = {
   },
 }
 
-/** The cache-hit share: full `C 91.9%` or compact `91.9%`. */
+/** The cache-hit share: pi `CH91.9%`, full `C 91.9%`, or compact `91.9%`.
+ * Absent cache facts (no billed input yet) render nothing — the composer
+ * eliminates the leftover separator. */
 const cacheHitItem: FooterItemDefinition = {
   id: 'cache-hit',
   label: 'Cache hit',
-  description: 'The cache-hit share of billed input tokens, full or compact.',
+  description: 'The cache-hit share of billed input tokens, pi, full, or compact.',
   defaultZone: 'left',
   defaultImportance: 55,
-  formats: ['full', 'compact'],
+  formats: ['pi', 'full', 'compact'],
   defaultFormat: 'full',
   render(snapshot: StatusSnapshot, ref, density) {
     const pct = snapshot.usage.cacheHitPct
     if (pct === undefined) return null
+    if (ref.format === 'pi') {
+      // The pi style's compact form drops the CH marker (the plan's
+      // shorter density); the user's own format choice is never written
+      // back.
+      const text = density === 'compact' ? formatCacheHitCompact(pct) : formatCacheHitPi(pct)
+      return { spans: [{ text, tone: 'success' }] }
+    }
     // Density compact reuses the persisted 'compact' style (`91.9%`);
     // the user's own format choice is never written back.
     const compact = density === 'compact' || ref.format === 'compact'
@@ -566,17 +581,27 @@ const cacheHitItem: FooterItemDefinition = {
   },
 }
 
-/** The token usage: input/output, all billed tokens, or compact total. */
+/** The token usage: pi vocabulary, input/output, all billed tokens, or
+ * compact total. */
 const tokenUsageItem: FooterItemDefinition = {
   id: 'token-usage',
   label: 'Token usage',
-  description: 'The input/output totals, billed total, or compact total.',
+  description: 'The pi input/output vocabulary, the io totals, billed total, or compact total.',
   defaultZone: 'left',
   defaultImportance: 50,
-  formats: ['io', 'total', 'compact'],
+  formats: ['pi', 'io', 'total', 'compact'],
   defaultFormat: 'io',
   render(snapshot: StatusSnapshot, ref, density) {
     const tokens = snapshot.usage.tokens
+    if (ref.format === 'pi') {
+      // The pi style keeps the cumulative input/output pair under width
+      // pressure and drops only the cache detail (`↑114M ↓54k`); the
+      // user's own format choice is never written back.
+      const text = density === 'compact'
+        ? formatTokenUsagePiCompact(tokens.input, tokens.output)
+        : formatTokenUsagePi(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite)
+      return { spans: [{ text, tone: 'success' }] }
+    }
     const preferred = ref.format === 'total'
       ? formatTokenUsageTotal(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite)
       : ref.format === 'compact'
@@ -593,32 +618,36 @@ const tokenUsageItem: FooterItemDefinition = {
   },
 }
 
-/** The performance styles: full `2.0s 40 tok/s`, speed-only, or
- * average time-to-first-token latency-only. */
+/** The recent model performance: full `TTFB 2.6s · 51 tok/s`, speed-only
+ * `51 tok/s`, or latency-only `TTFB 2.6s` — the RECENT average
+ * time-to-first-token and the RECENT effective output throughput. The
+ * definition may be PLACED TWICE (latency + speed) — the default preset
+ * does exactly that. */
 const performanceItem: FooterItemDefinition = {
   id: 'performance',
   label: 'Performance',
-  description: 'LLM wall time and output throughput, full, speed, or latency.',
+  description: 'Recent model performance: average TTFB and effective output throughput, full, speed, or latency.',
   defaultZone: 'left',
   defaultImportance: 40,
   formats: ['full', 'speed', 'latency'],
   defaultFormat: 'full',
   render(snapshot: StatusSnapshot, ref, density) {
     const performance = snapshot.usage.performance
-    const preferred = ref.format === 'speed'
-      ? formatPerformanceSpeed(performance.tokensPerSec)
-      : ref.format === 'latency'
-        ? formatPerformanceLatency(performance.firstTokenMs)
-        : formatPerformanceFull(performance.llmMs, performance.tokensPerSec)
-    if (density !== 'compact') return { spans: [{ text: preferred, tone: 'textMuted' }] }
-    // Density compact keeps BOTH facts with the shortened unit
-    // (`8.1s 40t/s`) — it never degrades to a speed-only or latency-only
-    // style (that would shift the composite item's semantic center).
-    // When the user's persisted style is ALREADY shorter (speed/latency),
-    // the compact form is the preferred form itself — a legitimate no-op,
-    // never a wider compact.
-    const compact = formatPerformanceCompact(performance.llmMs, performance.tokensPerSec)
-    const text = visibleWidth(compact) < visibleWidth(preferred) ? compact : preferred
+    if (ref.format === 'speed') {
+      const text = density === 'compact'
+        ? formatPerformanceSpeedCompact(performance.tokensPerSec)
+        : formatPerformanceSpeed(performance.tokensPerSec)
+      return { spans: [{ text, tone: 'textMuted' }] }
+    }
+    if (ref.format === 'latency') {
+      const text = density === 'compact'
+        ? formatPerformanceLatencyCompact(performance.firstTokenMs)
+        : formatPerformanceLatency(performance.firstTokenMs)
+      return { spans: [{ text, tone: 'textMuted' }] }
+    }
+    const text = density === 'compact'
+      ? formatPerformanceCompact(performance.firstTokenMs, performance.tokensPerSec)
+      : formatPerformanceFull(performance.firstTokenMs, performance.tokensPerSec)
     return { spans: [{ text, tone: 'textMuted' }] }
   },
 }

@@ -71,37 +71,53 @@ function legacyLine1(snap: StatusSnapshot, editorEmpty: boolean, extensionText: 
   ].filter(part => part !== '')
 }
 
-/** The LEGACY stats line (formatStats of the structured usage). */
-function legacyStatsLine(snap: StatusSnapshot): string {
+/** The token-count formatter (mirrors formatTokens). */
+function fmt(count: number): string {
+  if (count < 1000) return String(count)
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`
+  if (count < 1_000_000) return `${Math.round(count / 1000)}k`
+  if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`
+  return `${Math.round(count / 1_000_000)}M`
+}
+
+/** The seconds formatter (mirrors formatSeconds). */
+function sec(ms: number): string {
+  const text = (ms / 1000).toFixed(1)
+  return `${text.endsWith('.0') ? text.slice(0, -2) : text}s`
+}
+
+/** The NEW default stats row: real semantic placements (token-usage:pi,
+ * cache-hit:pi, performance:latency, performance:speed) joined by the
+ * row separator ' · '. Items whose fact is absent (no cache activity →
+ * no cacheHitPct) drop WITH their separator — mirrored here, including
+ * the semantic span tones (success = usage/cache, muted = performance). */
+function defaultStatsRow(snap: StatusSnapshot): string {
   const t = snap.usage.tokens
   const p = snap.usage.performance
-  const fmt = (count: number): string => {
-    if (count < 1000) return String(count)
-    if (count < 10000) return `${(count / 1000).toFixed(1)}k`
-    if (count < 1_000_000) return `${Math.round(count / 1000)}k`
-    if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`
-    return `${Math.round(count / 1_000_000)}M`
-  }
-  const sec = (ms: number): string => {
-    const text = (ms / 1000).toFixed(1)
-    return `${text.endsWith('.0') ? text.slice(0, -2) : text}s`
-  }
-  const piParts = [
+  const usage = [
     `↑${fmt(t.input)}`,
     `↓${fmt(t.output)}`,
     t.cacheRead > 0 ? `R${fmt(t.cacheRead)}` : '',
     t.cacheWrite > 0 ? `W${fmt(t.cacheWrite)}` : '',
-    t.cacheRead > 0 || t.cacheWrite > 0 ? `CH${(snap.usage.cacheHitPct ?? 0).toFixed(1)}%` : '',
-  ].filter(part => part !== '')
-  return `${piParts.join(' ')} | LLM ${sec(p.llmMs)} · TTFB ${sec(p.firstTokenMs)} · ${p.tokensPerSec} tok/s`
+  ].filter(part => part !== '').join(' ')
+  const spans: Array<{ text: string; tone: 'success' | 'textMuted' }> = [
+    { text: usage, tone: 'success' },
+  ]
+  if (snap.usage.cacheHitPct !== undefined) {
+    spans.push({ text: `CH${snap.usage.cacheHitPct.toFixed(1)}%`, tone: 'success' })
+  }
+  spans.push({ text: `TTFB ${sec(p.firstTokenMs)}`, tone: 'textMuted' })
+  spans.push({ text: `${p.tokensPerSec} tok/s`, tone: 'textMuted' })
+  return spans
+    .map(span => span.tone === 'success' ? color.success(span.text) : color.textMuted(span.text))
+    .join(' · ')
 }
 
 /** The REFERENCE footer rows (plan 2026-08-31 §6.2): the first row wraps
  * into 1..2 physical lines (its cap boundary cut with '…'); the tail line
  * row's allowance is the LEFTOVER capacity (up to two lines at generous
- * widths — a 42-cell stats line wraps into two FULL rows at 40 columns
- * instead of truncating), ANSI-safely truncated to the allowance when it
- * still overflows. The composer's
+ * widths), ANSI-safely truncated to the allowance when it still
+ * overflows. The composer's
  * item-level fitting can only DROP more than this reference (semantic
  * importance), never render wider or taller. */
 function referenceFooter(line1: string[], line2: string, width: number): string {
@@ -142,14 +158,14 @@ const CONTEXT = { taskBrowserAvailable: true, extensionFooterText: '' }
 
 test('default preset output is byte-equivalent to the reference footer (wide)', () => {
   const snap = mainSnapshot()
-  const expected = referenceFooter(legacyLine1(snap, true, ''), legacyStatsLine(snap), 100)
+  const expected = referenceFooter(legacyLine1(snap, true, ''), defaultStatsRow(snap), 100)
   const actual = composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
   assert.equal(actual, expected)
 })
 
 test('default preset output is byte-equivalent to the reference footer (narrow, wrapped)', () => {
   const snap = mainSnapshot()
-  const expected = referenceFooter(legacyLine1(snap, true, ''), legacyStatsLine(snap), 40)
+  const expected = referenceFooter(legacyLine1(snap, true, ''), defaultStatsRow(snap), 40)
   const actual = composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 40, context: CONTEXT })
   assert.equal(actual, expected)
 })
@@ -167,7 +183,7 @@ test('the Ctrl+C instruction appends as an INDEPENDENT line (the stats row survi
   // render beside it, position-independent.
   const snap = mainSnapshot()
   const expected = [
-    referenceFooter(legacyLine1(snap, true, ''), legacyStatsLine(snap), 100),
+    referenceFooter(legacyLine1(snap, true, ''), defaultStatsRow(snap), 100),
     color.textDim('Press Ctrl+C again to exit'),
   ].join('\n')
   const actual = composer.render({
@@ -189,7 +205,7 @@ test('permission/plan/task variants stay byte-equivalent', () => {
       collaboration: { plan: { effective: true } },
       activity: { ...snap.activity, taskCount: 1, childAgentCount: 2 },
     }
-    const expected = referenceFooter(legacyLine1(variant, true, ''), legacyStatsLine(variant), 100)
+    const expected = referenceFooter(legacyLine1(variant, true, ''), defaultStatsRow(variant), 100)
     const actual = composer.render({ snapshot: variant, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
     assert.equal(actual, expected, `permission ${permission}`)
   }
@@ -197,7 +213,7 @@ test('permission/plan/task variants stay byte-equivalent', () => {
 
 test('extension segments merge at the reference position', () => {
   const snap = mainSnapshot()
-  const expected = referenceFooter(legacyLine1(snap, true, '[EXT-SEG]'), legacyStatsLine(snap), 100)
+  const expected = referenceFooter(legacyLine1(snap, true, '[EXT-SEG]'), defaultStatsRow(snap), 100)
   const actual = composer.render({
     snapshot: snap,
     layout: DEFAULT_FOOTER_LAYOUT,
@@ -322,16 +338,16 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
-    '[workspace-write]  [deepseek/flash]  x/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k | LLM 8.1s · TTFB 0s · 0 tok/s',
+    // The stats row is the semantic placements joined by ' · '; with no
+    // cache activity the cache-hit placement drops WITH its separator.
+    '[workspace-write]  [deepseek/flash]  x/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k · TTFB 0s · 0 tok/s',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 40, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
-    // 40 columns: the status row fills its 2-line allowance exactly (75
-    // cells → 2 rows) and the stats row keeps its own 1-line allowance,
-    // The capacity of 4 lets the stats row take the remaining
-    // allowance of 2 — it WRAPS into two full rows (42 ≤ 2×40 cells).
-    '[workspace-write]  [deepseek/flash]\nx/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k | LLM 8.1s · TTFB 0s · 0\ntok/s',
+    // 40 columns: the status row fills its 2-line allowance (75 cells →
+    // 2 rows) and the 29-cell stats row keeps a single line.
+    '[workspace-write]  [deepseek/flash]\nx/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k · TTFB 0s · 0 tok/s',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 20, context: CONTEXT })
@@ -340,8 +356,9 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
     // 2×20-cell row budget — the responsive compact pass shortens the
     // items FIRST (ww/flash/proj/ctx 25%), and only what still does not
     // fit drops by importance; never a slice of the wrapped lines (plan
-    // §6.2). The stats row compacts to its pressure form too.
-    'ww  flash  proj\nmain  ctx 25%  t2/s5\n↑1.2k ↓3.4k · LLM\n8.1s · 0t/s',
+    // §6.2). The stats row's preferred form (31 cells) fits its 2-line
+    // allowance by WRAPPING — no compaction, no drop.
+    'ww  flash  proj\nmain  ctx 25%  t2/s5\n↑1.2k ↓3.4k · TTFB\n0s · 0 tok/s',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })

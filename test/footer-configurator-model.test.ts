@@ -72,8 +72,12 @@ test('the Row Selector moves between rows; Enter enters the highlighted row', ()
   assert.equal(m.state().mode, 'row')
   assert.equal(m.state().rowIndex, 1)
   assert.equal(m.state().cursor, 0)
-  // The default layout's second row has one item (stats-line).
-  assert.equal(m.state().layout.rows[1]!.left[0]!.id, 'stats-line')
+  // The default layout's second row is the semantic stats row: the usage
+  // pair leads, then cache hit, then the two performance placements.
+  assert.deepEqual(
+    m.state().layout.rows[1]!.left.map(ref => ref.id),
+    ['token-usage', 'cache-hit', 'performance', 'performance'],
+  )
 })
 
 test('Available is reachable ONLY through the Add picker (no cursor section)', () => {

@@ -129,7 +129,12 @@ Common actions:
 
 The Add picker searches labels, ids, and descriptions.
 
-In addition to builtin and extension items, it contains:
+The picker lists the whole definition catalog. Adding a definition that is
+already placed appends an independent second placement — this is how the
+default Footer shows Performance twice (once as `latency`, once as `speed`):
+each placement keeps its own Style, Tone, Prefix/Suffix, and Importance.
+
+In addition to builtin and extension items, the picker contains:
 
 ```text
 + Create Custom Text
@@ -203,11 +208,25 @@ Common builtin Style sets include:
 | Working directory | `short`, `basename`, `full` |
 | Git branch | `plain`, `label` |
 | Context | `bar`, `percent`, `full` |
-| Token usage | `io`, `total`, `compact` |
-| Cache hit | `full`, `compact` |
+| Token usage | `pi`, `io`, `total`, `compact` |
+| Cache hit | `pi`, `full`, `compact` |
 | Performance | `full`, `speed`, `latency` |
 | Turns / steps | `both`, `turns`, `steps` |
 | Version | `tui`, `dsh`, `both` |
+
+The `default` preset's second row composes real semantic placements:
+
+```text
+token-usage:pi · cache-hit:pi · performance:latency · performance:speed
+```
+
+rendering as `↑114M ↓54k R520k W12k · CH93.9% · TTFB 8.1s · 51 tok/s`. The
+left group is session cumulative usage; the right group is recent model
+performance — the average time-to-first-token and the effective output
+throughput over the last five completed model requests (a model/provider
+switch resets that window). The session lifetime LLM wall time is still
+accumulated and available through `/stats`, but no longer part of the
+default Footer row.
 
 Omitting `format` keeps that item's default Style.
 

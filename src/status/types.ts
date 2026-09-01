@@ -118,6 +118,12 @@ export interface UsageStatus {
     readonly cacheWrite: number
   }
   readonly cacheHitPct?: number
+  /** Model performance facts. Field names are frozen for the status
+   * contract; the SEMANTICS are: `llmMs` = the session LIFETIME LLM wall
+   * (kept for /stats and analysis, not shown in the default footer),
+   * `firstTokenMs` = the RECENT (last 5) average time-to-first-token,
+   * `tokensPerSec` = the RECENT (last 5) effective output throughput
+   * (Σ output / Σ full LLM wall). */
   readonly performance: {
     readonly llmMs: number
     readonly firstTokenMs: number
