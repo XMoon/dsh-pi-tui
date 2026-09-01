@@ -987,6 +987,23 @@ test('a model/provider route change resets the recent performance window', () =>
   assert.equal(folder.snapshot().outputTokens, 5_100)
 })
 
+test('route keys are delimiter-safe (provider/model containing "/" never collide)', () => {
+  const t = 1_700_000_000_000
+  // ("a/b", "c") vs ("a", "b/c"): a naive `provider + '/' + model`
+  // concatenation collapses BOTH routes to "a/b/c" and the switch goes
+  // undetected — the window would pool both steps (1100 tokens / 6 s ≈
+  // 183 tok/s, TTFB mean 2050). The tuple-encoded key must reset.
+  const stepA = completedStep(0, 0, 0, t, { provider: 'a/b', model: 'c', outputTokens: 1_000, wallMs: 5_000, firstDeltaMs: 4_000 })
+  const stepB = completedStep(0, 1, stepA.length, t + 10_000, { provider: 'a', model: 'b/c', outputTokens: 100, wallMs: 1_000, firstDeltaMs: 100 })
+  const log = [...stepA, ...stepB]
+  const oneShot = computeStats(log)
+  const folder = new StatsFolder()
+  folder.apply(log)
+  assert.equal(folder.snapshot().tokensPerSec, 100, 'the delimiter-ambiguous switch must still reset the window')
+  assert.equal(folder.snapshot().firstTokenMsAvg, 100)
+  assert.deepEqual(folder.snapshot(), oneShot)
+})
+
 test('a late usage replacement cannot resurrect a sample after a route reset', () => {
   const t = 1_700_000_000_000
   const log: SessionEvent[] = []
