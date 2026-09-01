@@ -30,6 +30,15 @@ function isPasteMarker(segment: string): boolean {
 }
 
 /**
+ * Pastes larger than this are NOT stored in the pastes map: a stored paste
+ * is cloned into every undo snapshot, so a multi-MB paste multiplies its
+ * memory across the whole undo stack. Beyond the cap the marker trade-off
+ * reverses — expand inline like ordinary multi-line text.
+ * (dsh-pi-tui divergence X004A.)
+ */
+const MAX_PASTE_STORED_CHARS = 256 * 1024;
+
+/**
  * A segmenter that wraps Intl.Segmenter and merges graphemes that fall
  * within paste markers into single atomic segments.  This makes cursor
  * movement, deletion, word-wrap, etc. treat paste markers as single units.
@@ -301,7 +310,6 @@ export class Editor implements Component, Focusable {
 	private autocompleteMaxVisible: number = 5;
 	private autocompleteAbort?: AbortController;
 	private autocompleteDebounceTimer?: ReturnType<typeof setTimeout>;
-	private autocompleteRequestTask: Promise<void> = Promise.resolve();
 	private autocompleteStartToken: number = 0;
 	private autocompleteRequestId: number = 0;
 
@@ -317,6 +325,27 @@ export class Editor implements Component, Focusable {
 	private history: string[] = [];
 	private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 	private historyDraft: EditorState | null = null;
+	private hostHistoryDraft: unknown = undefined;
+	private historyFilter: ((entry: string) => boolean) | null = null;
+
+	/**
+	 * Called when a history entry is recalled, before it is put into the buffer.
+	 * Return the text to display, or `undefined` to use the entry as-is. Lets the
+	 * host decorate entries (e.g. strip a marker) and react to recalls (e.g.
+	 * switch input mode) without touching editor internals. (dsh-pi-tui
+	 * divergence X029.)
+	 */
+	public onRecall?: (entry: string, direction: 1 | -1) => string | undefined;
+	/**
+	 * Called when entering history browsing, to capture host state that should be
+	 * saved alongside the editor draft. The returned value is passed to
+	 * `onHistoryDraftRestore` when the user navigates back to the draft, so the
+	 * host can restore state the editor does not own (e.g. an input mode).
+	 * (dsh-pi-tui divergence X029.)
+	 */
+	public onHistoryDraftSave?: () => unknown;
+	/** Called with the value from `onHistoryDraftSave` when the draft is restored. (dsh-pi-tui divergence X029.) */
+	public onHistoryDraftRestore?: (state: unknown) => void;
 
 	// Kill ring for Emacs-style kill/yank operations
 	private killRing = new KillRing();
@@ -428,13 +457,48 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 		if (this.history.length === 0) return;
 
-		const newIndex = this.historyIndex - direction; // Up(-1) increases index, Down(1) decreases
-		if (newIndex < -1 || newIndex >= this.history.length) return;
+		// When entering browse, capture host state up front — before the filter
+		// runs — so the host's filter can read the browse-entry mode rather than a
+		// mode that changes as entries are recalled. The captured value is only
+		// committed to hostHistoryDraft once a matching entry is actually found.
+		const entering = this.historyIndex === -1;
+		const pendingHostDraft = entering ? this.onHistoryDraftSave?.() : undefined;
+
+		// Find the next index that passes the filter. Up(-1) increases index,
+		// Down(1) decreases. The draft (-1) is always reachable; stepping past
+		// either end is a no-op.
+		let newIndex = this.historyIndex;
+		let found = false;
+		while (true) {
+			newIndex = newIndex - direction;
+			if (newIndex === -1) {
+				found = true;
+				break;
+			}
+			if (newIndex < -1 || newIndex >= this.history.length) {
+				found = false;
+				break;
+			}
+			const candidate = this.history[newIndex];
+			if (!this.historyFilter || (candidate !== undefined && this.historyFilter(candidate))) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) return;
 
 		// Capture state when first entering history browsing mode
-		if (this.historyIndex === -1 && newIndex >= 0) {
+		if (entering && newIndex >= 0) {
 			this.pushUndoSnapshot();
-			this.historyDraft = structuredClone(this.state);
+			// Shallow copy: line strings are immutable, so the detached
+			// array is a full snapshot (structuredClone would copy every
+			// line's text on every history entry).
+			this.historyDraft = {
+				lines: [...this.state.lines],
+				cursorLine: this.state.cursorLine,
+				cursorCol: this.state.cursorCol,
+			};
+			this.hostHistoryDraft = pendingHostDraft;
 		}
 
 		this.historyIndex = newIndex;
@@ -447,16 +511,44 @@ export class Editor implements Component, Focusable {
 				this.preferredVisualCol = null;
 				this.snappedFromCursorCol = null;
 				this.scrollOffset = 0;
+				if (this.hostHistoryDraft !== undefined) {
+					this.onHistoryDraftRestore?.(this.hostHistoryDraft);
+					this.hostHistoryDraft = undefined;
+				}
 				if (this.onChange) this.onChange(this.getText());
 			} else {
 				this.setTextInternal("");
 			}
 		} else {
-			this.setTextInternal(this.history[this.historyIndex] || "", direction === -1 ? "start" : "end");
+			const rawEntry = this.history[this.historyIndex] || "";
+			const entry = this.onRecall ? this.onRecall(rawEntry, direction) ?? rawEntry : rawEntry;
+			this.setTextInternal(entry, direction === -1 ? "start" : "end");
 		}
 	}
 
 	private exitHistoryBrowsing(): void {
+		this.historyIndex = -1;
+		this.historyDraft = null;
+		this.hostHistoryDraft = undefined;
+	}
+
+	/**
+	 * Limit which history entries ↑/↓ navigate. `null` (default) visits every
+	 * entry. The filter is evaluated against each stored entry as-is.
+	 * (dsh-pi-tui divergence X029.)
+	 */
+	setHistoryFilter(filter: ((entry: string) => boolean) | null): void {
+		this.historyFilter = filter;
+	}
+
+	/**
+	 * Drop every history entry (up/down recall) and leave browsing state.
+	 * Used by hosts that swap the whole history context (a session switch to
+	 * another workspace must not recall the previous workspace's inputs).
+	 * (dsh-pi-tui divergence X020.)
+	 */
+	clearHistory(): void {
+		this.history = [];
 		this.historyIndex = -1;
 		this.historyDraft = null;
 	}
@@ -1034,6 +1126,62 @@ export class Editor implements Component, Focusable {
 	}
 
 	/**
+	 * Set the cursor position without changing the document or firing onChange.
+	 * Positions are clamped to a valid line and grapheme boundary so hosts can
+	 * temporarily synchronize an editor before forwarding a key to it.
+	 * (dsh-pi-tui divergence X022.)
+	 */
+	setCursor(cursor: { line: number; col: number }): void {
+		const requestedLine = Number.isFinite(cursor.line) ? Math.floor(cursor.line) : 0;
+		const line = Math.max(0, Math.min(requestedLine, this.state.lines.length - 1));
+		const text = this.state.lines[line] ?? "";
+		const requestedCol = Number.isFinite(cursor.col) ? Math.floor(cursor.col) : 0;
+		const boundedCol = Math.max(0, Math.min(requestedCol, text.length));
+		let col = 0;
+		for (const segment of this.segment(text, "grapheme")) {
+			if (segment.index >= boundedCol) break;
+			const end = segment.index + segment.segment.length;
+			if (boundedCol < end) break;
+			col = end;
+		}
+		if (boundedCol === text.length) col = boundedCol;
+		this.state.cursorLine = line;
+		this.setCursorCol(col);
+		this.scrollOffset = 0;
+		this.tui.requestRender();
+	}
+
+	/**
+	 * Replace the document and cursor atomically without changing editor
+	 * transient state. Unlike setText(), this does not cancel autocomplete,
+	 * leave history browsing, push an undo snapshot, clear paste markers, or
+	 * fire onChange. Hosts use this narrow seam to stage a replacement-editor
+	 * draft before forwarding one declined key through the normal editor path.
+	 * (dsh-pi-tui divergence X023.)
+	 */
+	setTextAndCursor(text: string, cursor: { line: number; col: number }): void {
+		const normalized = this.normalizeText(text);
+		this.state.lines = normalized.split("\n");
+		const requestedLine = Number.isFinite(cursor.line) ? Math.floor(cursor.line) : 0;
+		const line = Math.max(0, Math.min(requestedLine, this.state.lines.length - 1));
+		const textAtLine = this.state.lines[line] ?? "";
+		const requestedCol = Number.isFinite(cursor.col) ? Math.floor(cursor.col) : 0;
+		const boundedCol = Math.max(0, Math.min(requestedCol, textAtLine.length));
+		let col = 0;
+		for (const segment of this.segment(textAtLine, "grapheme")) {
+			if (segment.index >= boundedCol) break;
+			const end = segment.index + segment.segment.length;
+			if (boundedCol < end) break;
+			col = end;
+		}
+		if (boundedCol === textAtLine.length) col = boundedCol;
+		this.state.cursorLine = line;
+		this.setCursorCol(col);
+		this.scrollOffset = 0;
+		this.tui.requestRender();
+	}
+
+	/**
 	 * Insert text at the current cursor position.
 	 * Used for programmatic insertion (e.g., clipboard image markers).
 	 * This is atomic for undo - single undo restores entire pre-insert state.
@@ -1096,7 +1244,10 @@ export class Editor implements Component, Focusable {
 			];
 
 			this.state.cursorLine += insertedLines.length - 1;
-			this.setCursorCol((insertedLines[insertedLines.length - 1] || "").length);
+			// Cursor columns are grapheme indices, not code units: an emoji or
+			// combining sequence at the end of the last inserted line must not
+			// land the cursor mid-grapheme. (dsh-pi-tui divergence X003.)
+			this.setCursorCol([...this.segment(insertedLines[insertedLines.length - 1] || "", "grapheme")].length);
 		}
 
 		if (this.onChange) {
@@ -1208,7 +1359,7 @@ export class Editor implements Component, Focusable {
 
 		// Check if this is a large paste (> 10 lines or > 1000 characters)
 		const totalChars = filteredText.length;
-		if (pastedLines.length > 10 || totalChars > 1000) {
+		if ((pastedLines.length > 10 || totalChars > 1000) && totalChars <= MAX_PASTE_STORED_CHARS) {
 			// Store the paste and insert a marker
 			this.pasteCounter++;
 			const pasteId = this.pasteCounter;
@@ -2022,7 +2173,22 @@ export class Editor implements Component, Focusable {
 	}
 
 	private pushUndoSnapshot(): void {
-		this.undoStack.push({ state: this.state, pastes: this.pastes, pasteCounter: this.pasteCounter });
+		// Shallow-clone the mutable containers only: line strings and paste
+		// bodies are immutable, so copying the ARRAY/MAP detaches the
+		// snapshot completely. structuredClone would copy every line's text
+		// AND every stored paste body on every edit — O(document) memory
+		// churn per edit, exploding with multi-MB pastes. UndoStack.push
+		// stores the snapshot as-is (no re-clone). (dsh-pi-tui divergence
+		// X004B.)
+		this.undoStack.push({
+			state: {
+				lines: [...this.state.lines],
+				cursorLine: this.state.cursorLine,
+				cursorCol: this.state.cursorCol,
+			},
+			pastes: new Map(this.pastes),
+			pasteCounter: this.pasteCounter,
+		});
 	}
 
 	private undo(): void {
@@ -2030,7 +2196,11 @@ export class Editor implements Component, Focusable {
 		const snapshot = this.undoStack.pop();
 		if (!snapshot) return;
 		Object.assign(this.state, snapshot.state);
-		this.pastes = snapshot.pastes;
+		// Re-copy the containers so the popped snapshot stays detached: the
+		// live state mutates its lines array in place (splices), which must
+		// never corrupt a snapshot that a later undo will restore.
+		this.state.lines = [...snapshot.state.lines];
+		this.pastes = new Map(snapshot.pastes);
 		this.pasteCounter = snapshot.pasteCounter;
 		this.lastAction = null;
 		this.preferredVisualCol = null;
@@ -2209,23 +2379,34 @@ export class Editor implements Component, Focusable {
 		startToken: number,
 		options: { force: boolean; explicitTab: boolean },
 	): Promise<void> {
-		const previousTask = this.autocompleteRequestTask;
-		this.autocompleteRequestTask = (async () => {
-			await previousTask;
-			if (startToken !== this.autocompleteStartToken || !this.autocompleteProvider) {
-				return;
-			}
+		// No serialization queue: the latest request wins. runAutocomplete
+		// Request's requestId + text/cursor snapshot check rejects stale
+		// results, so concurrent requests cannot clobber each other's UI —
+		// the old task-chaining design stacked every request behind the
+		// previous one, so an abort that never settled (a provider that
+		// ignores the signal) stalled the whole chain forever.
+		// (dsh-pi-tui divergence X005.)
+		if (startToken !== this.autocompleteStartToken || !this.autocompleteProvider) {
+			return;
+		}
 
-			const controller = new AbortController();
-			this.autocompleteAbort = controller;
-			const requestId = ++this.autocompleteRequestId;
-			const snapshotText = this.getText();
-			const snapshotLine = this.state.cursorLine;
-			const snapshotCol = this.state.cursorCol;
+		const controller = new AbortController();
+		this.autocompleteAbort = controller;
+		const requestId = ++this.autocompleteRequestId;
+		const snapshotText = this.getText();
+		const snapshotLine = this.state.cursorLine;
+		const snapshotCol = this.state.cursorCol;
 
+		try {
 			await this.runAutocompleteRequest(requestId, controller, snapshotText, snapshotLine, snapshotCol, options);
-		})();
-		await this.autocompleteRequestTask;
+		} catch (error) {
+			// A request aborted by newer input settles silently; anything
+			// else must not take the editor down.
+			if (!controller.signal.aborted) {
+				console.error("autocomplete request failed", error);
+			}
+			this.autocompleteAbort = undefined;
+		}
 	}
 
 	private setAutocompleteTriggerCharacters(triggerCharacters: string[]): void {
