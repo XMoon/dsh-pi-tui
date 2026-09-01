@@ -36,10 +36,14 @@ export class Box implements Component {
 		if (index !== -1) {
 			this.children.splice(index, 1);
 			this.invalidateCache();
+			// Removal ends ownership: release the child's resources, exactly
+			// like Container.removeChild (dsh-pi-tui divergence X007).
+			component.dispose?.();
 		}
 	}
 
 	clear(): void {
+		for (const child of this.children) child.dispose?.();
 		this.children = [];
 		this.invalidateCache();
 	}

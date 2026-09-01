@@ -166,6 +166,15 @@ export interface OverlayOptions {
 	visible?: (termWidth: number, termHeight: number) => boolean;
 	/** If true, don't capture keyboard focus when shown */
 	nonCapturing?: boolean;
+	/**
+	 * Dispose the component when the overlay is permanently removed
+	 * (hide() / hideOverlay()) — ownership ends with the removal
+	 * (dsh-pi-tui divergence X007). DEFAULT FALSE (upstream behavior):
+	 * hide() only unregisters, so an integrator that re-mounts the SAME
+	 * component elsewhere (fullscreen screen migration) keeps it alive.
+	 * Set true when this overlay's entry is the component's sole owner.
+	 */
+	disposeOnHide?: boolean;
 }
 
 /** Options for {@link OverlayHandle.unfocus}. */
@@ -587,6 +596,12 @@ export abstract class TuiBase extends Container implements TUI {
 					this.clearOverlayFocusRestoreFor(entry);
 					this.retargetOverlayPreFocus(entry);
 					this.overlayStack.splice(index, 1);
+					// Opt-in ownership end (dsh-pi-tui divergence X007): with
+					// disposeOnHide the removal releases the component's
+					// resources. The stack-guard makes this run exactly once
+					// per removal; the default (no flag) keeps upstream
+					// behavior so re-mountable integrations stay alive.
+					if (options?.disposeOnHide === true) component.dispose?.();
 					// Restore focus if this overlay had focus
 					if (this.focusedComponent === component) {
 						const topVisible = this.getTopmostVisibleOverlay();
@@ -665,6 +680,9 @@ export abstract class TuiBase extends Container implements TUI {
 		this.clearOverlayFocusRestoreFor(overlay);
 		this.retargetOverlayPreFocus(overlay);
 		this.overlayStack.pop();
+		// Opt-in ownership end (dsh-pi-tui divergence X007, same contract
+		// as OverlayHandle.hide's disposeOnHide).
+		if (overlay.options?.disposeOnHide === true) overlay.component.dispose?.();
 		if (this.focusedComponent === overlay.component) {
 			// Find topmost visible overlay, or fall back to preFocus
 			const topVisible = this.getTopmostVisibleOverlay();

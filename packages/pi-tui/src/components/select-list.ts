@@ -1,5 +1,5 @@
 import { getKeybindings } from "../keybindings.ts";
-import type { Component } from "../tui.ts";
+import type { Component, Focusable } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
 import { Input } from "./input.ts";
 
@@ -77,9 +77,19 @@ export interface SelectListOptions {
 	initialQuery?: string;
 }
 
-export class SelectList implements Component {
+export class SelectList implements Component, Focusable {
 	private items: SelectItem[] = [];
 	private filteredItems: SelectItem[] = [];
+	/**
+	 * The CANONICAL filter query. One source of truth for getFilter(),
+	 * setItems() re-application and the rendered search box: a programmatic
+	 * setFilter(), a setItems() refresh and user typing all write through
+	 * applyFilter(), so they can never drift apart (a setFilter that only
+	 * narrowed filteredItems left getFilter() reading a stale search box and
+	 * the next keystroke silently dropping the programmatic query).
+	 * (dsh-pi-tui divergence X041; upstream has no search at all.)
+	 */
+	private filterQuery = "";
 	/** Lowercased value+label+description per item, rebuilt on setItems. */
 	private searchTexts = new Map<SelectItem, string>();
 	private selectedIndex: number = 0;
@@ -93,6 +103,22 @@ export class SelectList implements Component {
 	public onSelect?: (item: SelectItem) => void;
 	public onCancel?: () => void;
 	public onSelectionChange?: (item: SelectItem) => void;
+
+	/**
+	 * Focusable (dsh-pi-tui divergence X042): the focused flag propagates to
+	 * the search Input so it emits the hardware CURSOR_MARKER for IME
+	 * candidate-window positioning. The wrapper contract: every component
+	 * owning an Input/Editor must forward focus; a plain Component swallows
+	 * the flag and the IME misplaces its candidate window.
+	 */
+	private _focused = false;
+	get focused(): boolean {
+		return this._focused;
+	}
+	set focused(value: boolean) {
+		this._focused = value;
+		if (this.searchInput !== undefined) this.searchInput.focused = value;
+	}
 
 	constructor(
 		items: SelectItem[],
@@ -129,15 +155,24 @@ export class SelectList implements Component {
 	setItems(items: SelectItem[]): void {
 		this.items = items;
 		this.searchTexts = this.buildSearchTexts(items);
-		this.applyFilter(this.searchInput?.getValue() ?? "", true);
+		// Re-apply the CANONICAL query (not the search box's value): a
+		// programmatic setFilter() must survive an async row refresh.
+		this.applyFilter(this.filterQuery, true);
 	}
 
 	/** The current search query (empty when search is disabled). */
 	getFilter(): string {
-		return this.searchInput?.getValue() ?? "";
+		return this.filterQuery;
 	}
 
 	setFilter(filter: string): void {
+		// Sync the search box so the box, the filter and getFilter() can
+		// never diverge; the setValue cursor lands at the end so the user's
+		// next keystroke APPENDS to the programmatic query instead of
+		// prepending in front of it.
+		if (this.searchEnabled && this.searchInput !== undefined && this.searchInput.getValue() !== filter) {
+			this.searchInput.setValue(filter);
+		}
 		this.applyFilter(filter);
 	}
 
@@ -274,6 +309,7 @@ export class SelectList implements Component {
 	 * survives the filter — used by setItems, where the query did not change
 	 * and snapping back to the top would fight the user's cursor. */
 	private applyFilter(query: string, preserveSelection = false): void {
+		this.filterQuery = query;
 		const previousValue = preserveSelection ? this.filteredItems[this.selectedIndex]?.value : undefined;
 		if (query === "") {
 			this.filteredItems = this.items;
