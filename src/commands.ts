@@ -433,6 +433,15 @@ export interface TuiCommandRunner {
   /** Re-compose a still-blank session onto another preset (see recomposeBlank). */
   recomposeBlank(presetId: string): Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
   refreshStatus(): void
+  /** PR D2: the /status explicit context force — measures NOW through the
+   * runner's context coordinator (mark dirty + semantic SessionReader),
+   * repaints the footer cheaply, and returns the fresh (or last-good)
+   * value for the panel. Panel and footer share ONE cached measurement —
+   * a caller SHOULD prefer this over a direct sessionReader read (which
+   * would bypass the cache and could duplicate an in-flight measurement).
+   * Optional: stubs without the coordinator fall back to a direct
+   * sessionReader read. */
+  forceContextMeasurement?(): number | undefined
   /** Whether Focus Mode is currently on (the authoritative runtime state). */
   focusEnabled(): boolean
   /** The UNIFIED Focus setter: mutates the runtime state and the TUI
@@ -3288,10 +3297,13 @@ export function registerTuiCommands(
     handler: async () => {
       const liveAgent = await requireAgent()
       const stats = computeStats(liveAgent.session.events)
-      // Best-effort context measurement through the session-read port
-      // (migration M1.11): unavailable/unmeasurable → the panel falls back
-      // to unmeasured — never a crash.
-      const contextTokens = runner.sessionReader.measureContext(liveAgent.session.id)
+      // Explicit status: measure NOW through the runner's context
+      // coordinator — the panel and the cached footer value share ONE
+      // measurement (no duplicate reads, no stale footer). Stubs without
+      // the coordinator fall back to a direct session-read port read
+      // (best-effort, migration M1.11): unavailable/unmeasurable → the
+      // panel falls back to unmeasured — never a crash.
+      const contextTokens = runner.forceContextMeasurement?.() ?? runner.sessionReader.measureContext(liveAgent.session.id)
       app.openSettings(
         [
           {

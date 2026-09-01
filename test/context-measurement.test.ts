@@ -15,6 +15,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
+import { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   ContextMeasurementCoordinator,
   deferInitialContextMeasure,
@@ -27,6 +29,7 @@ import { plainSectionEqual } from '../src/status/equal.ts'
 import type { SessionStats } from '../src/stats.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { contextRefreshKind } from '../src/index.ts'
 
 /** A counting reader standing in for SessionReader.measureContext. */
@@ -347,6 +350,58 @@ test('P1: a session switch never shows the OLD session context through the statu
     assert.equal(later, 12_000)
     refreshCheap('session-b', stats(3_000))
     assert.equal(store.snapshot().usage?.context?.usedTokens, 12_000)
+  } finally {
+    app.stop()
+  }
+})
+
+test('P2: /status forces ONE measurement through the coordinator, never a duplicate direct read', async () => {
+  // The real /status handler must route through the runner's
+  // forceContextMeasurement (mark dirty + semantic reader + cache + cheap
+  // repaint) — a direct sessionReader read from the command surface would
+  // bypass the coordinator cache and could duplicate the deferred initial
+  // measurement (round-8 finding).
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const ctx = new Context()
+  const defs: Array<{ name: string; handler?: unknown }> = []
+  ctx.provide('commands', {
+    register: (def: { name: string; handler?: unknown }): (() => void) => { defs.push(def); return () => {} },
+    list: () => [],
+    find: () => undefined,
+    execute: async () => undefined,
+  } as never)
+  const agent = { session: { id: 'session-b', events: [], header: { cwd: '/ws' } } } as unknown as Agent
+  let forceCalls = 0
+  let directReads = 0
+  const runner = {
+    ctx,
+    app,
+    cwd: '/ws',
+    signal: new AbortController().signal,
+    diag: { warn: () => {}, error: () => {}, info: () => {} },
+    commandRegistry: ctx.get('commands'),
+    recordExtensionError: () => {},
+    clearExtensionError: () => {},
+    captureExtensionHealthRef: () => {},
+    ensureSession: async () => {},
+    sessionCwd: () => '/ws',
+    get liveAgent() { return agent },
+    extensions: undefined,
+    forceContextMeasurement: () => { forceCalls += 1; return 42_000 },
+    sessionReader: {
+      measureContext: () => { directReads += 1; return 99_000 },
+      list: async () => [], search: async () => [], titles: async () => new Map(), readExportData: async () => ({ kind: 'none' }),
+    },
+  } as unknown as TuiCommandRunner
+  try {
+    registerTuiCommands(runner)
+    const statusDef = defs.find(entry => entry.name === 'status')
+    assert.ok(statusDef?.handler, 'the /status command is registered')
+    await (statusDef.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+    assert.equal(forceCalls, 1, 'the explicit status forces exactly one measurement through the coordinator')
+    assert.equal(directReads, 0, 'the direct reader is never called when the coordinator is available (no duplicate measurement)')
   } finally {
     app.stop()
   }
