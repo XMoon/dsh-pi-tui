@@ -274,9 +274,9 @@ test('StatsFolder keeps the recent throughput window bounded', () => {
     ])
   }
   const internals = folder as unknown as { recent: { throughput: unknown[]; ttft: unknown[] } }
-  assert.equal(internals.recent.throughput.length, 5, 'a long session must not retain every throughput sample')
+  assert.equal(internals.recent.throughput.length, 10, 'throughput keeps only the bounded candidate buffer (2x the window)')
   assert.equal(internals.recent.ttft.length, 5, 'a long session must not retain every TTFT sample')
-  assert.equal(folder.snapshot().tokensPerSec, 200)
+  assert.equal(folder.snapshot().tokensPerSec, 200, 'derive still pools the latest FIVE valid samples')
   assert.equal(folder.snapshot().outputTokens, 1_200)
 })
 
@@ -569,7 +569,7 @@ test('late assistant usage after step/end replaces the sampled throughput token 
   assert.equal((folder as unknown as { settledPerStep: Map<unknown, unknown> }).settledPerStep.size, 0)
 })
 
-test('formats the stats line in pi abbreviation vocabulary', () => {
+test('formats the DETAILED stats line: lifetime LLM beside the recent metrics', () => {
   const line = formatStats({
     turns: 2,
     steps: 2,
@@ -587,11 +587,22 @@ test('formats the stats line in pi abbreviation vocabulary', () => {
   assert.ok(line.includes('↓216k'), line)
   assert.ok(line.includes('R86M'), line)
   assert.ok(line.includes('CH93.9%'), line)
-  // The lifetime LLM wall left the display line (it still accumulates in
-  // SessionStats.llmMs); the tail is recent TTFB + recent throughput only.
-  assert.ok(!line.includes('LLM'), line)
+  // The /status detail line KEEPS the labeled lifetime wall beside the
+  // recent TTFB + throughput (the footer line dropped it — that split is
+  // asserted on the footer side).
+  assert.ok(line.includes('LLM 8.1s'), line)
   assert.ok(line.includes('TTFB 1.1s'), line)
   assert.ok(line.includes('118 tok/s'), line)
+})
+
+test('formats the lifetime LLM wall as a readable duration at scale', () => {
+  const at = (llmMs: number): string => formatStats({
+    turns: 1, steps: 1, llmMs, firstTokenMsAvg: 0, tokensPerSec: 0,
+    cacheHitPct: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+  })
+  assert.ok(at(8_100).includes('LLM 8.1s'), 'under a minute keeps the decimal seconds')
+  assert.ok(at(1_674_000).includes('LLM 27m54s'), 'minutes render as MmSSs')
+  assert.ok(at(3_965_000).includes('LLM 1h06m05s'), 'hours render as HhMMmSSs')
 })
 
 test('usage is counted once per step despite chunk and message both carrying it', () => {
@@ -1197,4 +1208,81 @@ test('an authoritative duplicate that invalidates the sample REMOVES it (no stal
   folderB.apply([revalid])
   assert.deepEqual(folderB.snapshot(), computeStats([...withB, revalid]))
   assert.equal(folderB.snapshot().tokensPerSec, 400, 'the re-validated step rejoins the pooled window')
+})
+
+test('a route STRING match is not enough: A → B → A cannot resurrect the first A\'s sample', () => {
+  const t = 1_700_000_000_000
+  const log: SessionEvent[] = []
+  let seq = 0
+  const push = (events: SessionEvent[]): void => {
+    log.push(...events)
+    seq += events.length
+  }
+  // Epoch 0: route A settles a big sample.
+  push(completedStep(0, 0, seq, t, { provider: 'p', model: 'a', outputTokens: 1_000, wallMs: 1_000 }))
+  // Epoch 1: route B resets the window.
+  push(completedStep(0, 1, seq, t + 10_000, { provider: 'p', model: 'b', outputTokens: 100, wallMs: 1_000 }))
+  // Epoch 2: route A AGAIN — the route string equals epoch 0's, but this
+  // is a NEW route lifecycle with a fresh window.
+  push(completedStep(0, 2, seq, t + 20_000, { provider: 'p', model: 'a', outputTokens: 200, wallMs: 1_000 }))
+  // A late authoritative duplicate of the OLD A step: its route string
+  // matches the current window's — only the epoch gate must keep it out.
+  const late = event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId('m-old-a-epoch'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'answer' }],
+      source: { kind: 'model', provider: 'p', model: 'a' },
+    },
+    usage: { inputTokens: 10, outputTokens: 9_999 },
+  }, seq, t + 30_000)
+  log.push(late)
+  const oneShot = computeStats(log)
+  const folder = new StatsFolder()
+  folder.apply(log)
+  // Only the SECOND A lifecycle's sample rides the window: 200 tok/s.
+  assert.equal(oneShot.tokensPerSec, 200, `the epoch gate must hold:\n${JSON.stringify(oneShot)}`)
+  assert.deepEqual(folder.snapshot(), oneShot)
+  // The token ACCOUNTING still applies the authoritative replacement.
+  assert.equal(oneShot.outputTokens, 10_299)
+})
+
+test('invalidating one of the latest five BACKFILLS the next-older candidate', () => {
+  const t = 1_700_000_000_000
+  const log: SessionEvent[] = []
+  let seq = 0
+  const push = (events: SessionEvent[]): void => {
+    log.push(...events)
+    seq += events.length
+  }
+  // Six same-route valid samples: 0 = 1000 tok / 1s, 1..5 = 100 tok / 1s.
+  push(completedStep(0, 0, seq, t, { outputTokens: 1_000, wallMs: 1_000 }))
+  for (let step = 1; step <= 5; step += 1) {
+    push(completedStep(0, step, seq, t + step * 10_000, { outputTokens: 100, wallMs: 1_000 }))
+  }
+  const folder = new StatsFolder()
+  folder.apply(log)
+  assert.equal(folder.snapshot().tokensPerSec, 100, 'the sixth completion evicts sample 0 from the derived window')
+  // An authoritative duplicate invalidates the NEWEST sample (ordinal 5):
+  // the window's contract is "latest 5 VALID samples", so ordinal 0 —
+  // still retained as a candidate — must BACKFILL: (1000 + 4x100) / 5 s.
+  const invalidating = event('assistant/message', {
+    turn: 0,
+    step: 5,
+    message: {
+      id: MessageId('m-backfill-invalidate'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    usage: { inputTokens: 10, outputTokens: 0 },
+  }, seq++, t + 100_000)
+  log.push(invalidating)
+  const oneShot = computeStats(log)
+  folder.apply([invalidating])
+  assert.equal(folder.snapshot().tokensPerSec, 280, `the evicted candidate must backfill:\n${JSON.stringify(folder.snapshot())}`)
+  assert.deepEqual(folder.snapshot(), oneShot)
+  assert.equal(folder.snapshot().outputTokens, 1_400, 'the accounting applies the authoritative zero')
 })

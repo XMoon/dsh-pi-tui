@@ -87,6 +87,19 @@ const EMPTY: SessionStats = {
  * staying responsive. */
 export const RECENT_PERFORMANCE_SAMPLE_LIMIT = 5
 
+/** How many throughput CANDIDATES the window physically retains (the
+ * derived metric still pools only {@link RECENT_PERFORMANCE_SAMPLE_LIMIT}
+ * of them — derive takes the latest five VALID samples). The extra
+ * candidates exist so an authoritative invalidation of one of the latest
+ * five BACKFILLS correctly: the window's contract is "the latest 5 valid
+ * samples", and a sample invalidated by a late duplicate stops being
+ * valid, letting the next-older retained candidate rejoin. Twice the
+ * window covers the worst case of every derived sample being
+ * invalidated; a duplicate older than the candidate buffer is a replay
+ * artifact beyond the recent contract. TTFT needs no candidates — its
+ * samples have no invalidation path. */
+const RECENT_PERFORMANCE_CANDIDATE_LIMIT = RECENT_PERFORMANCE_SAMPLE_LIMIT * 2
+
 /** Key identifying one step's model output (turn + step). */
 function stepKey(turn: number, step: number): string {
   return `${turn}/${step}`
@@ -115,6 +128,11 @@ interface StepTiming {
   /** The performance route the step's samples joined (provider + model)
    * — a late replacement must not cross back into a reset window. */
   routeKey?: string
+  /** The route LIFECYCLE epoch at settlement. The route STRING alone
+   * cannot gate a late replacement: A → B → A returns to an equal string
+   * while the window's samples belong to the SECOND A lifecycle — only
+   * an epoch match proves the same route generation. */
+  routeEpoch?: number
 }
 
 /** One recent effective-throughput sample: the step's FULL LLM wall
@@ -136,16 +154,24 @@ interface RecentTtftSample {
 
 /**
  * The bounded recent performance window shared by both folds (plan §6.1):
- * the latest {@link RECENT_PERFORMANCE_SAMPLE_LIMIT} valid samples per
- * metric, keyed by step, ordered by completion ordinal. A late
- * authoritative usage replacement UPSERTS its step's sample (same
- * ordinal) instead of appending a fake "newest" one. The window is
- * route-scoped: the first settled message that clearly identifies a new
- * provider + model clears both windows before its own samples join.
+ * the latest {@link RECENT_PERFORMANCE_SAMPLE_LIMIT} VALID samples per
+ * metric, keyed by step, ordered by completion ordinal (throughput keeps
+ * {@link RECENT_PERFORMANCE_CANDIDATE_LIMIT} candidates so an
+ * invalidation backfills). A late authoritative usage replacement UPSERTS
+ * its step's sample (same ordinal) instead of appending a fake "newest"
+ * one — or REMOVES it when the replacement invalidates the sample. The
+ * window is route-scoped: the first settled message that clearly
+ * identifies a new provider + model clears both windows (bumping the
+ * route epoch) before its own samples join.
  */
 class RecentPerformanceWindow {
   /** The route (provider + model) the current window belongs to. */
   routeKey: string | undefined
+  /** The current route LIFECYCLE generation — bumped on every REAL route
+   * change (A → B → A bumps twice). Samples and settled steps carry the
+   * epoch they joined, so a late replacement can only mutate the window
+   * of its own generation, never a later one with an equal route string. */
+  routeEpoch = 0
   private nextOrdinal = 0
   private throughput: RecentThroughputSample[] = []
   private ttft: RecentTtftSample[] = []
@@ -157,29 +183,29 @@ class RecentPerformanceWindow {
   }
 
   /** Observe a settled message's route key. The FIRST observation adopts
-   * it; a CHANGE clears both windows so the new route's metrics start
-   * clean. A MISSING key never resets anything (fail-soft). Returns the
-   * window's route after the observation. */
-  observeRoute(routeKey: string | undefined): string | undefined {
+   * it; a CHANGE clears both windows (and bumps the route epoch) so the
+   * new route's metrics start clean. A MISSING key never resets anything
+   * (fail-soft). */
+  observeRoute(routeKey: string | undefined): void {
     if (routeKey !== undefined) {
       if (this.routeKey === undefined) this.routeKey = routeKey
       else if (this.routeKey !== routeKey) {
         this.throughput = []
         this.ttft = []
         this.routeKey = routeKey
+        this.routeEpoch += 1
       }
     }
-    return this.routeKey
   }
 
   /** Upsert the step's TTFT sample (a replacement keeps its ordinal). */
   upsertTtft(key: string, ordinal: number, ttftMs: number): void {
-    upsertSample(this.ttft, { key, ordinal, ttftMs })
+    upsertSample(this.ttft, { key, ordinal, ttftMs }, RECENT_PERFORMANCE_SAMPLE_LIMIT)
   }
 
   /** Upsert the step's effective-throughput sample. */
   upsertThroughput(key: string, ordinal: number, wallMs: number, outputTokens: number): void {
-    upsertSample(this.throughput, { key, ordinal, wallMs, outputTokens })
+    upsertSample(this.throughput, { key, ordinal, wallMs, outputTokens }, RECENT_PERFORMANCE_CANDIDATE_LIMIT)
   }
 
   /** Drop the step's throughput sample (an authoritative replacement that
@@ -204,16 +230,17 @@ class RecentPerformanceWindow {
   }
 }
 
-/** Insert-or-replace by step key, then trim to the LATEST ordinals (a
- * late-valid old step joins at its ORIGINAL ordinal and may immediately
- * fall out of the window again — it is an old step, not a newest one). */
-function upsertSample<T extends { key: string; ordinal: number }>(samples: T[], sample: T): void {
+/** Insert-or-replace by step key, then trim to the LATEST ordinals within
+ * the caller's retention limit (a late-valid old step joins at its
+ * ORIGINAL ordinal and may immediately fall out of the derived window —
+ * it is an old step, not a newest one). */
+function upsertSample<T extends { key: string; ordinal: number }>(samples: T[], sample: T, limit: number): void {
   const index = samples.findIndex(existing => existing.key === sample.key)
   if (index >= 0) samples[index] = sample
   else samples.push(sample)
-  if (samples.length > RECENT_PERFORMANCE_SAMPLE_LIMIT) {
+  if (samples.length > limit) {
     samples.sort((a, b) => a.ordinal - b.ordinal)
-    samples.splice(0, samples.length - RECENT_PERFORMANCE_SAMPLE_LIMIT)
+    samples.splice(0, samples.length - limit)
   }
 }
 
@@ -464,7 +491,9 @@ function settleStep(
   // samples join, so a model/provider switch starts a clean window.
   const ordinal = recent.claimOrdinal()
   timing.completionOrdinal = ordinal
-  timing.routeKey = recent.observeRoute(routeKey)
+  recent.observeRoute(routeKey)
+  timing.routeKey = recent.routeKey
+  timing.routeEpoch = recent.routeEpoch
   const first = timing.firstDelta
   if (first !== undefined && start !== undefined) {
     // TTFT: step/start → first token (the projection's ttftMs). A latency
@@ -489,6 +518,9 @@ function settleStep(
  * original completion ordinal — it replaces, never appends; llmMs and
  * TTFB are never re-added; and a message belonging to a route the window
  * has moved past must not resurrect its sample into the current window.
+ * The EPOCH is the authoritative gate: A → B → A returns to an equal
+ * route STRING while the window belongs to the second A lifecycle, so
+ * only `timing.routeEpoch === recent.routeEpoch` admits the replacement.
  * A replacement that turns the sample INVALID (outputTokens corrected to
  * 0) removes it: the superseded tokens must not keep feeding the recent
  * rate. */
@@ -499,6 +531,7 @@ function replaceRecentThroughput(
   recent: RecentPerformanceWindow,
 ): void {
   if (timing.routeKey !== undefined && recent.routeKey !== undefined && timing.routeKey !== recent.routeKey) return
+  if (timing.routeEpoch !== undefined && timing.routeEpoch !== recent.routeEpoch) return
   if (timing.completionOrdinal === undefined) return
   const start = timing.start
   const completed = timing.completed
@@ -711,14 +744,28 @@ function formatSeconds(ms: number): string {
   return `${trimDecimal(ms / 1000)}s`
 }
 
+/** Format a DURATION for the detail stats surface: `8.1s` under a minute,
+ * `27m54s` under an hour, `1h06m05s` beyond — the lifetime LLM wall grows
+ * into minutes and hours, where plain seconds stop being readable. */
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000)
+  if (totalSeconds < 60) return formatSeconds(ms)
+  const seconds = totalSeconds % 60
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) return `${totalMinutes}m${String(seconds).padStart(2, '0')}s`
+  const minutes = totalMinutes % 60
+  const hours = Math.floor(totalMinutes / 60)
+  return `${hours}h${String(minutes).padStart(2, '0')}m${String(seconds).padStart(2, '0')}s`
+}
+
 /**
- * Render the stats line in pi abbreviation vocabulary:
- * `↑34k ↓8.1k R520k CH93.9% | TTFB 2.6s · 51 tok/s`
+ * Render the DETAILED stats line (the /status Stats row and the
+ * statusLine payload) in pi abbreviation vocabulary:
+ * `↑34k ↓8.1k R520k CH93.9% | LLM 27m54s · TTFB 2.6s · 51 tok/s`
  * Cost (`$0.164`) is omitted: dsh's TokenUsage carries no price data.
- * The performance tail carries the RECENT metrics only — the lifetime
- * `LLM ...` wall left the line (it still accumulates in
- * {@link SessionStats.llmMs} for /stats and session analysis), so a
- * legacy composite never mixes lifetime and recent windows.
+ * The performance tail keeps BOTH windows, each labeled: the LIFETIME
+ * `LLM ...` wall (this is the detail surface that still shows it — the
+ * footer's stats row dropped it) beside the RECENT TTFB and throughput.
  * Context pressure lives in the footer's first line (progress bar), so it
  * is not repeated here. Turn/step counters live there too.
  * @param stats - the folded statistics.
@@ -733,6 +780,7 @@ export function formatStats(stats: SessionStats): string {
     stats.cacheReadTokens > 0 || stats.cacheWriteTokens > 0 ? `CH${stats.cacheHitPct.toFixed(1)}%` : '',
   ].filter(part => part !== '')
   const ownParts = [
+    `LLM ${formatDuration(stats.llmMs)}`,
     `TTFB ${formatSeconds(stats.firstTokenMsAvg)}`,
     `${stats.tokensPerSec} tok/s`,
   ]
