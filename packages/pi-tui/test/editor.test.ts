@@ -4516,4 +4516,3 @@ describe("Oversized paste and undo snapshot isolation", () => {
 		assert.strictEqual(editor.getText(), "a\nx");
 	});
 });
-

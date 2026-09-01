@@ -225,7 +225,12 @@ export class SelectList implements Component {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
-		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
+		// Navigation/selection always operates on the FILTERED list (which
+		// tracks the live query whether or not search is enabled): with
+		// search disabled, setFilter narrows filteredItems, so bounds over
+		// the raw items would walk into invisible rows. (dsh-pi-tui
+		// divergence X001; upstream semantics restored.)
+		const displayItems = this.filteredItems;
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.selectedIndex = this.selectedIndex === 0 ? displayItems.length - 1 : this.selectedIndex - 1;

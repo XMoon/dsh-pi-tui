@@ -122,7 +122,10 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
   `autocompleteRequestTask` serially.
 - Consumer: host editor autocomplete (providers may ignore AbortSignal).
 - Upstream status: absent.
-- Tests: editor autocomplete describes in `test/editor.test.ts`.
+- Tests: "latest-wins: a never-settling provider cannot stall the newer
+  request (X005)" in `test/editor.test.ts` (a provider whose first request
+  never settles must not block the second keystroke's suggestions), plus
+  the editor autocomplete describes.
 - Migration action: re-apply; do NOT restore the serial task chain.
 
 ### X006 — Word-forward skips punctuation at segment start (was #6)
