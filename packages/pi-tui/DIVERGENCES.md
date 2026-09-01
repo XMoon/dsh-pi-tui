@@ -506,3 +506,22 @@ re-vendor:
   the guarding tests above means a local divergence was overwritten and lost.
 - `pnpm gate:pi-surface-compat` (bundle) must pass — the re-vendor
   compatibility gate for the component lifecycle contract.
+
+## Final status after the v0.84.4 re-vendor (2026-02)
+
+- `KEEP` (re-applied on the Earendil v0.84.4 base): X001, X002, X003,
+  X004A, X004B, X005, X006, X007, X008, X009, X010, X011, X012, X013,
+  X014 (measurement cache only — the scrollbar thumb clamp is already in
+  upstream 0.84.4), X016, X018, X019, X020, X021, X022, X023, X024, X027,
+  X028, X029, X030, X031, X032.
+- `ABSORBED_UPSTREAM`: X015 (dead `_lastEventType` — upstream baseline
+  restored), X017 (regular mode owns no mouse — upstream baseline),
+  X026 (copySelection/copyOnSelect — upstream 0.84.4 native).
+- `PACKAGING_ONLY`: X025 (tsdown config — XMoon shell kept).
+- `REMOVED_UNUSED` (kimi-only, no host consumer): PasteBurst,
+  inlineSlashTrigger, setHistoryFilter, preservePasteRegistry,
+  additionalBasePaths, inlineSkill data, getLayoutRoot, per-frame
+  processed-line reuse + asciiVisibleWidth, FOCUS passthrough,
+  WIDTH_CACHE_SIZE 4096, negative-width repeat guards, overwide-line
+  truncation (upstream 0.84.4 throws with a crash log; host components
+  truncate with truncateToWidth).
