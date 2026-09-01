@@ -10,7 +10,9 @@
  *   post-commit reclaim in bootstrapDevelopmentEnvironment): Case D below
  *   proves the success path deletes A, Case B proves a failing source
  *   bootstrap leaves A untouched, and condition 11 (A === active
- *   distribution) is pinned by a direct unit test.
+ *   distribution) is pinned by a direct unit test. Two further end-to-end
+ *   regressions pin "pack succeeded, then install / state commit failed":
+ *   the uncommitted generation B is discarded while A survives.
  * - Case C (ephemeral -> durable source) flows through the same post-commit
  *   seam with a distributionPath that is never under tmpdir(); its
  *   validation is reclaimableEphemeralRoot's unit matrix.
@@ -20,7 +22,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, cpSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -32,6 +34,10 @@ import { testLifecycle } from './support/temp-lifecycle.ts'
 const SHA = 'b'.repeat(40)
 const VERSION = '0.1.2-alpha.1'
 const REPOSITORY = 'deepseek-ai/deepseek-harness'
+
+// chmod-based failure injection needs POSIX permission enforcement as a
+// non-root user; skip where the platform cannot provide it.
+const chmodEnforced = process.platform !== 'win32' && process.getuid !== undefined && process.getuid() !== 0
 
 // Git repository-local environment variables must not leak into the fake
 // harness checkout's git commands (same hermeticity rule as the other
@@ -107,7 +113,7 @@ async function withPnpmExecutable(path, run) {
 test('an ephemeral generation carries an owner-only marker identifying this worktree', async (t) => {
   const life = testLifecycle(t)
   const { context } = sourceFixture(life)
-  const root = bootstrapTest.ephemeralSourcePackRoot(context)
+  const { root } = bootstrapTest.ephemeralSourcePackRoot(context)
   life.defer(() => rmSync(root, { recursive: true, force: true }))
   assert.ok(basename(root).startsWith(bootstrapTest.EPHEMERAL_ROOT_PREFIX), `root basename must keep the project shape: ${root}`)
   assert.equal(dirname(root), tmpdir(), 'the generation must live directly in the OS temp root')
@@ -127,7 +133,7 @@ test('an ephemeral generation carries an owner-only marker identifying this work
 test('reclaimableEphemeralRoot accepts the committed previous generation of this worktree', async (t) => {
   const life = testLifecycle(t)
   const { context } = sourceFixture(life)
-  const generation = bootstrapTest.ephemeralSourcePackRoot(context)
+  const { root: generation } = bootstrapTest.ephemeralSourcePackRoot(context)
   life.defer(() => rmSync(generation, { recursive: true, force: true }))
   commitEphemeralState(context, generation)
   assert.equal(bootstrapTest.reclaimableEphemeralRoot(context), generation)
@@ -178,7 +184,7 @@ test('reclaimableEphemeralRoot rejects every forged or foreign shape (Case E/F)'
   assert.equal(bootstrapTest.reclaimableEphemeralRoot(context), undefined, 'non-ephemeral state must be rejected')
 
   // Real tmpdir generation, but forged root / marker / ownership.
-  const foreign = bootstrapTest.ephemeralSourcePackRoot(context)
+  const { root: foreign } = bootstrapTest.ephemeralSourcePackRoot(context)
   life.defer(() => rmSync(foreign, { recursive: true, force: true }))
   state.ephemeral = true
   state.distribution = join(foreign, 'pack')
@@ -239,7 +245,7 @@ function scratchDir(life) {
 test('reclaimEphemeralRoot never removes the generation the new state still points at (condition 11)', async (t) => {
   const life = testLifecycle(t)
   const { context } = sourceFixture(life)
-  const generation = bootstrapTest.ephemeralSourcePackRoot(context)
+  const { root: generation } = bootstrapTest.ephemeralSourcePackRoot(context)
   life.defer(() => rmSync(generation, { recursive: true, force: true }))
   bootstrapTest.reclaimEphemeralRoot(generation, join(generation, 'pack'))
   assert.equal(existsSync(generation), true, 'the active generation must survive')
@@ -250,7 +256,7 @@ test('reclaimEphemeralRoot never removes the generation the new state still poin
 test('Case D: a successful npm bootstrap reclaims the previous ephemeral generation', async (t) => {
   const life = testLifecycle(t)
   const { root, context } = sourceFixture(life)
-  const generation = bootstrapTest.ephemeralSourcePackRoot(context)
+  const { root: generation } = bootstrapTest.ephemeralSourcePackRoot(context)
   commitEphemeralState(context, generation)
   const pnpm = fakePnpm(life)
   await withPnpmExecutable(pnpm, () => bootstrapDevelopmentEnvironment({ root, mode: 'npm', environment: {} }))
@@ -262,7 +268,7 @@ test('Case D: a successful npm bootstrap reclaims the previous ephemeral generat
 test('Case E end-to-end: another worktree generation survives a successful bootstrap', async (t) => {
   const life = testLifecycle(t)
   const { root, context } = sourceFixture(life)
-  const generation = bootstrapTest.ephemeralSourcePackRoot(context)
+  const { root: generation } = bootstrapTest.ephemeralSourcePackRoot(context)
   const markerPath = join(generation, bootstrapTest.EPHEMERAL_MARKER_NAME)
   const marker = JSON.parse(readFileSync(markerPath, 'utf8'))
   marker.workspaceRoot = '/other/worktree'
@@ -277,7 +283,7 @@ test('Case E end-to-end: another worktree generation survives a successful boots
 test('Case B: a failing source bootstrap leaves the previous generation and state untouched', async (t) => {
   const life = testLifecycle(t)
   const { root, config, context } = sourceFixture(life)
-  const generation = bootstrapTest.ephemeralSourcePackRoot(context)
+  const { root: generation } = bootstrapTest.ephemeralSourcePackRoot(context)
   commitEphemeralState(context, generation)
   const stateBefore = readFileSync(join(root, DEV_STATE_FILE), 'utf8')
   // The fixture carries no scripts/lib/dsh-distribution.mjs, so the source
@@ -295,7 +301,7 @@ test('Case B: a failing source bootstrap leaves the previous generation and stat
 test('a state commit failure rolls the environment back and never reclaims the previous generation', async (t) => {
   const life = testLifecycle(t)
   const { root, context } = sourceFixture(life)
-  const generation = bootstrapTest.ephemeralSourcePackRoot(context)
+  const { root: generation } = bootstrapTest.ephemeralSourcePackRoot(context)
   commitEphemeralState(context, generation)
   const stateBefore = readFileSync(join(root, DEV_STATE_FILE), 'utf8')
   // A previous, still-sourced environment file for this worktree.
@@ -315,46 +321,55 @@ test('a state commit failure rolls the environment back and never reclaims the p
   rmSync(generation, { recursive: true, force: true })
 })
 
-test('commitDevelopmentState rolls back when the ENV write itself fails after replacing the file', async (t) => {
+test('a .envrc shim creation failure aborts the commit before the env file is touched', { skip: !chmodEnforced && 'chmod permission enforcement unavailable' }, async (t) => {
   const life = testLifecycle(t)
   const { context } = sourceFixture(life)
   writeFileSync(context.envPath, 'OLD-ENV-MARKER\n')
-  // The env writer replaces the file and then throws (the .envrc half of
-  // writeDevelopmentEnvironment failing): the checkpoint must still roll
-  // the env file back to the previous content.
-  await assert.rejects(
-    async () => bootstrapTest.commitDevelopmentState(
-      context,
-      () => {
-        writeFileSync(context.envPath, 'NEW-ENV-MARKER\n')
-        throw new Error('envrc write failed')
-      },
-      () => { throw new Error('must not be reached') },
-    ),
-    /envrc write failed/u,
-  )
-  assert.equal(readFileSync(context.envPath, 'utf8'), 'OLD-ENV-MARKER\n', 'the env file must be rolled back when the env write fails')
+  const envrcPath = join(context.root, '.envrc')
+  assert.equal(existsSync(envrcPath), false, 'fixture starts without .envrc')
+  // The shim is created FIRST: when its (atomic) write fails, nothing else
+  // has been modified yet, so the failed commit must leave both the env
+  // file and the .envrc state exactly as they were.
+  chmodSync(context.root, 0o500)
+  try {
+    await assert.rejects(
+      async () => bootstrapTest.commitDevelopmentState(
+        context,
+        () => writeFileSync(context.envPath, 'NEW-ENV-MARKER\n'),
+        () => { throw new Error('must not be reached') },
+      ),
+      /EACCES/u,
+    )
+  } finally {
+    chmodSync(context.root, 0o700)
+  }
+  assert.equal(readFileSync(context.envPath, 'utf8'), 'OLD-ENV-MARKER\n', 'a failed shim creation must leave the env file untouched')
+  assert.equal(existsSync(envrcPath), false, 'no shim may appear when its creation fails')
 })
 
 test('commitDevelopmentState removes a previously absent env file on failure', async (t) => {
   const life = testLifecycle(t)
   const { context } = sourceFixture(life)
+  const envrcPath = join(context.root, '.envrc')
   assert.equal(existsSync(context.envPath), false, 'fixture starts without an env file')
+  assert.equal(existsSync(envrcPath), false, 'fixture starts without .envrc')
   await assert.rejects(
     async () => bootstrapTest.commitDevelopmentState(
       context,
-      () => writeFileSync(context.envPath, 'NEW-ENV-MARKER\n'),
+      () => bootstrapTest.writeDevelopmentEnvironmentFile(context, join(context.root, "pack"), { ephemeral: true }),
       () => { throw new Error('state write failed') },
     ),
     /state write failed/u,
   )
   assert.equal(existsSync(context.envPath), false, 'a failed commit must not leave a stray env file behind')
+  assert.equal(existsSync(envrcPath), false, 'a shim created by the failed commit must be removed again')
 })
 
 test('commitDevelopmentState rollback never follows a swapped-in symlink', async (t) => {
   const life = testLifecycle(t)
   const { context } = sourceFixture(life)
   writeFileSync(context.envPath, 'OLD-ENV-MARKER\n')
+  const envrcPath = join(context.root, '.envrc')
   const decoy = join(life.tempDir('dsh-ephemeral-decoy-'), 'decoy-env')
   writeFileSync(decoy, 'DECOY-CONTENT\n')
   // The env writer replaces the file, then the path is swapped to a
@@ -375,11 +390,13 @@ test('commitDevelopmentState rollback never follows a swapped-in symlink', async
   assert.equal(statSync(context.envPath).isSymbolicLink(), false, 'the rolled-back env path must be a regular file')
   assert.equal(readFileSync(context.envPath, 'utf8'), 'OLD-ENV-MARKER\n', 'the previous content must be restored')
   assert.equal(readFileSync(decoy, 'utf8'), 'DECOY-CONTENT\n', 'the symlink target must never be touched')
+  assert.equal(existsSync(envrcPath), false, 'a shim created by the failed commit must be removed again')
 })
 
 test('commitDevelopmentState removes a swapped-in symlink when there was no previous env', async (t) => {
   const life = testLifecycle(t)
   const { context } = sourceFixture(life)
+  const envrcPath = join(context.root, '.envrc')
   const decoy = join(life.tempDir('dsh-ephemeral-decoy2-'), 'decoy-env')
   writeFileSync(decoy, 'DECOY-CONTENT\n')
   await assert.rejects(
@@ -396,26 +413,29 @@ test('commitDevelopmentState removes a swapped-in symlink when there was no prev
   )
   assert.equal(existsSync(context.envPath), false, 'a failed commit with no previous env must leave the path absent')
   assert.equal(readFileSync(decoy, 'utf8'), 'DECOY-CONTENT\n', 'the symlink target must never be touched')
+  assert.equal(existsSync(envrcPath), false, 'a shim created by the failed commit must be removed again')
 })
 
-test('commitDevelopmentState never reads through an initially symlinked env path', async (t) => {
+test('an initially symlinked env path is never touched when the env write refuses', async (t) => {
   const life = testLifecycle(t)
   const { context } = sourceFixture(life)
   const decoy = join(life.tempDir('dsh-ephemeral-decoy3-'), 'decoy-env')
   writeFileSync(decoy, 'DECOY-CONTENT\n')
-  // The env path is a symlink BEFORE the commit starts: the snapshot must
-  // not follow it, and the failed commit must remove the link (never copy
-  // the target's content into a new file).
+  // The env path is a symlink BEFORE the commit starts: the real env
+  // writer (writeAtomic) refuses to replace it and throws WITHOUT
+  // modifying anything, so the failed commit must leave the user's link
+  // exactly as it was — never read through it, never remove it.
   symlinkSync(decoy, context.envPath)
   await assert.rejects(
     async () => bootstrapTest.commitDevelopmentState(
       context,
-      () => { throw new Error('env write refused') },
+      () => bootstrapTest.writeDevelopmentEnvironmentFile(context, join(context.root, "pack"), { ephemeral: true }),
       () => { throw new Error('must not be reached') },
     ),
-    /env write refused/u,
+    /refusing to replace symlink/u,
   )
-  assert.equal(existsSync(context.envPath), false, 'an unsafe env path must be removed, not copied')
+  assert.equal(lstatSync(context.envPath).isSymbolicLink(), true, 'a symlink the commit never replaced must survive')
+  assert.equal(readlinkSync(context.envPath), decoy, 'the symlink must keep pointing at the user file')
   assert.equal(readFileSync(decoy, 'utf8'), 'DECOY-CONTENT\n', 'the symlink target must never be read or touched')
 })
 
@@ -428,10 +448,7 @@ test('commitDevelopmentState rolls back a newly created .envrc on failure', asyn
   await assert.rejects(
     async () => bootstrapTest.commitDevelopmentState(
       context,
-      () => {
-        writeFileSync(context.envPath, 'NEW-ENV-MARKER\n')
-        writeFileSync(envrcPath, 'source .dsh-dev-env\n')
-      },
+      () => bootstrapTest.writeDevelopmentEnvironmentFile(context, join(context.root, "pack"), { ephemeral: true }),
       () => { throw new Error('state write failed') },
     ),
     /state write failed/u,
@@ -440,25 +457,132 @@ test('commitDevelopmentState rolls back a newly created .envrc on failure', asyn
   assert.equal(existsSync(envrcPath), false, 'a .envrc created by the failed commit must be removed')
 })
 
-test('commitDevelopmentState restores a pre-existing .envrc on failure', async (t) => {
+test('a pre-existing regular .envrc keeps inode, type, content, and mode through a failed commit', async (t) => {
   const life = testLifecycle(t)
   const { context } = sourceFixture(life)
   writeFileSync(context.envPath, 'OLD-ENV-MARKER\n')
   const envrcPath = join(context.root, '.envrc')
-  writeFileSync(envrcPath, 'OLD-ENVRC\n')
+  writeFileSync(envrcPath, 'ORIGINAL-ENVRC\n')
+  chmodSync(envrcPath, 0o644)
+  const before = statSync(envrcPath)
+  // The real writer never modifies an existing .envrc (it only creates the
+  // shim when absent); the failed commit must therefore not touch it at
+  // all — not its content, not its inode, and especially not its mode.
+  await assert.rejects(
+    async () => bootstrapTest.commitDevelopmentState(
+      context,
+      () => bootstrapTest.writeDevelopmentEnvironmentFile(context, join(context.root, 'pack'), { ephemeral: true }),
+      () => { throw new Error('state write failed') },
+    ),
+    /state write failed/u,
+  )
+  const after = statSync(envrcPath)
+  assert.equal(after.ino, before.ino, 'an untouched .envrc must keep its inode')
+  assert.equal(after.isFile(), true, 'an untouched .envrc must stay a regular file')
+  assert.equal(after.isSymbolicLink(), false)
+  assert.equal(after.mode & 0o777, 0o644, 'an untouched .envrc must keep its original mode (no silent 0600 rewrite)')
+  assert.equal(readFileSync(envrcPath, 'utf8'), 'ORIGINAL-ENVRC\n', 'an untouched .envrc must keep its content')
+  assert.equal(readFileSync(context.envPath, 'utf8'), 'OLD-ENV-MARKER\n', 'the env file must still roll back')
+})
+
+test('a pre-existing symlink .envrc survives a failed commit untouched', async (t) => {
+  const life = testLifecycle(t)
+  const { context } = sourceFixture(life)
+  writeFileSync(context.envPath, 'OLD-ENV-MARKER\n')
+  const envrcTarget = join(life.tempDir('dsh-ephemeral-envrc-'), 'user-envrc')
+  writeFileSync(envrcTarget, 'USER-ENVRC\n')
+  const envrcPath = join(context.root, '.envrc')
+  symlinkSync(envrcTarget, envrcPath, 'file')
+  // A user-managed .envrc symlink: the bootstrap never modifies it, so a
+  // failed commit must never delete or replace it.
+  await assert.rejects(
+    async () => bootstrapTest.commitDevelopmentState(
+      context,
+      () => bootstrapTest.writeDevelopmentEnvironmentFile(context, join(context.root, 'pack'), { ephemeral: true }),
+      () => { throw new Error('state write failed') },
+    ),
+    /state write failed/u,
+  )
+  assert.equal(lstatSync(envrcPath).isSymbolicLink(), true, 'the user .envrc symlink must survive')
+  assert.equal(readlinkSync(envrcPath), envrcTarget, 'the user .envrc symlink must keep its target')
+  assert.equal(readFileSync(envrcPath, 'utf8'), 'USER-ENVRC\n', 'the symlink must still resolve to the user file')
+  assert.equal(readFileSync(context.envPath, 'utf8'), 'OLD-ENV-MARKER\n', 'the env file must still roll back')
+})
+
+test('a .envrc entry swapped in after shim creation survives rollback', async (t) => {
+  const life = testLifecycle(t)
+  const { context } = sourceFixture(life)
+  writeFileSync(context.envPath, 'OLD-ENV-MARKER\n')
+  const envrcPath = join(context.root, '.envrc')
+  const decoy = join(life.tempDir('dsh-ephemeral-envrc-swap-'), 'swapped-envrc')
+  writeFileSync(decoy, 'SWAPPED-ENVRC\n')
+  assert.equal(existsSync(envrcPath), false, 'fixture starts without .envrc')
+  // The commit creates its shim, then the path is swapped to the user's
+  // symlink before the state write fails: rollback must remove only the
+  // file IT created (by inode) and leave the swapped entry alone.
   await assert.rejects(
     async () => bootstrapTest.commitDevelopmentState(
       context,
       () => {
-        writeFileSync(context.envPath, 'NEW-ENV-MARKER\n')
-        writeFileSync(envrcPath, 'NEW-ENVRC\n')
+        bootstrapTest.writeDevelopmentEnvironmentFile(context, join(context.root, 'pack'), { ephemeral: true })
+        rmSync(envrcPath)
+        symlinkSync(decoy, envrcPath, 'file')
       },
       () => { throw new Error('state write failed') },
     ),
     /state write failed/u,
   )
-  assert.equal(readFileSync(context.envPath, 'utf8'), 'OLD-ENV-MARKER\n', 'the env file must roll back')
-  assert.equal(readFileSync(envrcPath, 'utf8'), 'OLD-ENVRC\n', 'the pre-existing .envrc must be restored')
+  assert.equal(lstatSync(envrcPath).isSymbolicLink(), true, 'an entry swapped in mid-commit must survive rollback')
+  assert.equal(readlinkSync(envrcPath), decoy, 'the swapped symlink must keep its target')
+  assert.equal(readFileSync(decoy, 'utf8'), 'SWAPPED-ENVRC\n', 'the swapped target must never be touched')
+  assert.equal(readFileSync(context.envPath, 'utf8'), 'OLD-ENV-MARKER\n', 'the env file must still roll back')
+})
+
+test('an env snapshot failure after shim creation removes only the shim this commit created', { skip: !chmodEnforced && 'chmod permission enforcement unavailable' }, async (t) => {
+  const life = testLifecycle(t)
+  const { context } = sourceFixture(life)
+  const envrcPath = join(context.root, '.envrc')
+  assert.equal(existsSync(envrcPath), false, 'fixture starts without .envrc')
+  // An unreadable env file makes the pre-write SNAPSHOT fail after the
+  // shim was already created: the failed commit must still remove the
+  // shim it created and leave the env file itself untouched.
+  writeFileSync(context.envPath, 'SECRET-OLD-ENV\n')
+  chmodSync(context.envPath, 0o000)
+  try {
+    await assert.rejects(
+      async () => bootstrapTest.commitDevelopmentState(
+        context,
+        () => { throw new Error('must not be reached') },
+        () => { throw new Error('must not be reached') },
+      ),
+      /EACCES/u,
+    )
+  } finally {
+    chmodSync(context.envPath, 0o600)
+  }
+  assert.equal(existsSync(envrcPath), false, 'a shim created before the snapshot failure must be removed')
+  assert.equal(readFileSync(context.envPath, 'utf8'), 'SECRET-OLD-ENV\n', 'the unreadable env file must be untouched')
+})
+
+test('writeFileExclusively never replaces an existing entry', (t) => {
+  const life = testLifecycle(t)
+  const parent = life.tempDir('dsh-ephemeral-exclusive-')
+  const created = join(parent, 'shim')
+  const published = bootstrapTest.writeFileExclusively(created, 'CONTENT-1\n')
+  assert.equal(published.created, true, 'an absent path is created')
+  assert.notEqual(published.identity, undefined, 'creation pins the inode identity')
+  assert.equal(readFileSync(created, 'utf8'), 'CONTENT-1\n')
+  assert.equal(statSync(created).mode & 0o777, 0o600, 'the exclusive create keeps the owner-only mode')
+  assert.equal(statSync(created).ino, published.identity.ino, 'the pinned identity is the published inode')
+  const before = statSync(created)
+  assert.equal(bootstrapTest.writeFileExclusively(created, 'CONTENT-2\n').created, false, 'an existing regular file is never replaced')
+  assert.equal(readFileSync(created, 'utf8'), 'CONTENT-1\n', 'the existing content must survive')
+  assert.equal(statSync(created).ino, before.ino, 'the existing inode must survive')
+  const linked = join(parent, 'link-shim')
+  symlinkSync(created, linked, 'file')
+  assert.equal(bootstrapTest.writeFileExclusively(linked, 'CONTENT-3\n').created, false, 'an existing symlink is never replaced')
+  assert.equal(lstatSync(linked).isSymbolicLink(), true, 'the symlink must survive')
+  assert.equal(readdirSync(parent).filter(name => name.includes('.tmp')).length, 0, 'no publish temporary may be left behind')
 })
 
 test('ownership comparison is canonical: a symlinked worktree path still matches its own marker', async (t) => {
@@ -467,7 +591,7 @@ test('ownership comparison is canonical: a symlinked worktree path still matches
   const link = join(life.tempDir('dsh-ephemeral-link-'), 'worktree-link')
   symlinkSync(root, link, 'dir')
   const linkedContext = resolveDshDevContext({ root: link, mode: 'source', config: join(link, 'source.json'), environment: {} })
-  const generation = bootstrapTest.ephemeralSourcePackRoot(linkedContext)
+  const { root: generation } = bootstrapTest.ephemeralSourcePackRoot(linkedContext)
   commitEphemeralState(linkedContext, generation)
   assert.equal(bootstrapTest.reclaimableEphemeralRoot(linkedContext), generation, 'the canonical root must match through the symlink')
   rmSync(generation, { recursive: true, force: true })
@@ -515,6 +639,8 @@ test('rollback fails closed when the env path is swapped to a directory mid-comm
   const life = testLifecycle(t)
   const { context } = sourceFixture(life)
   writeFileSync(context.envPath, 'OLD-ENV-MARKER\n')
+  const envrcPath = join(context.root, '.envrc')
+  assert.equal(existsSync(envrcPath), false, 'fixture starts without .envrc')
   const swapped = join(life.tempDir('dsh-ephemeral-swap-'), 'swapped-dir')
   await assert.rejects(
     async () => bootstrapTest.commitDevelopmentState(
@@ -533,6 +659,138 @@ test('rollback fails closed when the env path is swapped to a directory mid-comm
     /state write failed/u,
   )
   assert.equal(existsSync(join(context.envPath, 'precious.txt')), true, 'a swapped-in directory must never be deleted')
+  assert.equal(existsSync(envrcPath), false, 'the fail-closed env rollback must still remove the shim this commit created')
+})
+
+test('discardOwnedEphemeralRoot never recursively removes a replaced generation root', async (t) => {
+  const life = testLifecycle(t)
+  const { context } = sourceFixture(life)
+  const scratch = life.tempDir('dsh-ephemeral-discard-')
+  const owned = bootstrapTest.ephemeralSourcePackRoot(context)
+  const generation = owned.root
+  assert.notEqual(owned.markerIdentity, undefined, 'creation pins the marker identity')
+  assert.deepEqual(bootstrapTest.ephemeralMarkerIdentity(generation), owned.markerIdentity, 'the fresh marker satisfies the owner contract')
+
+  // The generation root is replaced while the bootstrap is in flight (a
+  // different directory now sits at the path, with its own marker file):
+  // the identity revalidation must refuse the recursive removal.
+  rmSync(generation, { recursive: true, force: true })
+  mkdirSync(generation)
+  writeFileSync(join(generation, bootstrapTest.EPHEMERAL_MARKER_NAME), `${JSON.stringify({
+    schemaVersion: 1,
+    kind: bootstrapTest.EPHEMERAL_MARKER_KIND,
+    workspaceRoot: context.root,
+    createdAt: new Date().toISOString(),
+    pid: process.pid,
+  })}\n`, { mode: 0o600 })
+  writeFileSync(join(generation, 'not-ours.txt'), 'keep me')
+  bootstrapTest.discardOwnedEphemeralRoot(owned)
+  assert.equal(existsSync(join(generation, 'not-ours.txt')), true, 'a replaced root must never be recursively deleted')
+
+  // The original marker FILE moved into a replacement root keeps its inode
+  // (rename), nlink, and mode — the marker identity alone is therefore not
+  // proof; the root directory inode must differ and the discard must refuse.
+  rmSync(generation, { recursive: true, force: true })
+  const stolen = bootstrapTest.ephemeralSourcePackRoot(context)
+  const stolenMarker = join(scratch, 'stolen-marker')
+  renameSync(join(stolen.root, bootstrapTest.EPHEMERAL_MARKER_NAME), stolenMarker)
+  rmSync(stolen.root, { recursive: true, force: true })
+  mkdirSync(generation)
+  renameSync(stolenMarker, join(generation, bootstrapTest.EPHEMERAL_MARKER_NAME))
+  writeFileSync(join(generation, 'also-not-ours.txt'), 'keep me too')
+  bootstrapTest.discardOwnedEphemeralRoot({ ...stolen, root: generation })
+  assert.equal(existsSync(join(generation, 'also-not-ours.txt')), true, 'a moved marker in a replacement root must never authorize deletion')
+  rmSync(generation, { recursive: true, force: true })
+
+  // A hardlinked marker is not acceptable ownership proof either: even the
+  // ORIGINAL root loses its provable identity while the extra link exists,
+  // so the discard fails closed and leaves the root to OS temp hygiene.
+  const shared = bootstrapTest.ephemeralSourcePackRoot(context)
+  const hardlink = join(scratch, 'marker-hardlink')
+  linkSync(join(shared.root, bootstrapTest.EPHEMERAL_MARKER_NAME), hardlink)
+  assert.equal(bootstrapTest.ephemeralMarkerIdentity(shared.root), undefined, 'a hardlinked marker must not prove ownership')
+  bootstrapTest.discardOwnedEphemeralRoot(shared)
+  assert.equal(existsSync(shared.root), true, 'a root whose marker is hardlinked must survive (fail closed)')
+  rmSync(hardlink)
+
+  // The intact generation with matching root and marker identities is
+  // discarded.
+  const intact = bootstrapTest.ephemeralSourcePackRoot(context)
+  bootstrapTest.discardOwnedEphemeralRoot(intact)
+  assert.equal(existsSync(intact.root), false, 'an owned, identity-matching root must be discarded')
+})
+
+test('removePinnedDirectory removes only the exact directory created by this process', (t) => {
+  const life = testLifecycle(t)
+  const { context } = sourceFixture(life)
+  const owned = bootstrapTest.ephemeralSourcePackRoot(context)
+  // A replaced root (a different directory now at the path) is never
+  // recursively removed, even with the original identity pinned.
+  rmSync(owned.root, { recursive: true, force: true })
+  mkdirSync(owned.root)
+  writeFileSync(join(owned.root, 'not-ours.txt'), 'keep me')
+  bootstrapTest.removePinnedDirectory(owned.root, owned.rootIdentity, 'test root')
+  assert.equal(existsSync(join(owned.root, 'not-ours.txt')), true, 'a replaced root must never be recursively removed')
+  rmSync(owned.root, { recursive: true, force: true })
+
+  // The intact root with the matching identity is removed recursively.
+  const intact = bootstrapTest.ephemeralSourcePackRoot(context)
+  writeFileSync(join(intact.root, 'marker-adjacent.txt'), 'inside')
+  bootstrapTest.removePinnedDirectory(intact.root, intact.rootIdentity, 'test root')
+  assert.equal(existsSync(intact.root), false, 'an owned, identity-matching root must be removed recursively')
+})
+
+test('reclaimEphemeralRoot revalidates the ownership contract before removal', async (t) => {
+  const life = testLifecycle(t)
+  const { context } = sourceFixture(life)
+  const { root: generation } = bootstrapTest.ephemeralSourcePackRoot(context)
+  commitEphemeralState(context, generation)
+  assert.equal(bootstrapTest.reclaimableEphemeralRoot(context), generation)
+  // The candidate is replaced between the reclaim decision and the removal
+  // (a foreign directory with a foreign marker now sits at the path): with
+  // the dev context supplied, the revalidation must refuse the removal.
+  rmSync(generation, { recursive: true, force: true })
+  mkdirSync(generation)
+  writeFileSync(join(generation, 'not-ours.txt'), 'keep me')
+  bootstrapTest.reclaimEphemeralRoot(generation, join(scratchDir(life), 'pack'), context)
+  assert.equal(existsSync(join(generation, 'not-ours.txt')), true, 'a replaced candidate must never be reclaimed')
+  // Without a context the historical two-argument behavior is unchanged
+  // (unit-level removal used by the condition-11 test).
+  bootstrapTest.reclaimEphemeralRoot(generation, join(scratchDir(life), 'pack'))
+  assert.equal(existsSync(generation), false, 'the two-argument form keeps removing the candidate')
+})
+
+test('reclaimEphemeralRoot validation failures are non-fatal', { skip: !chmodEnforced && 'chmod permission enforcement unavailable' }, async (t) => {
+  const life = testLifecycle(t)
+  const { context } = sourceFixture(life)
+  const { root: generation } = bootstrapTest.ephemeralSourcePackRoot(context)
+  commitEphemeralState(context, generation)
+  // An unreadable generation root makes the ownership revalidation throw
+  // EACCES: the reclaim must warn and return — never throw — so a
+  // successful bootstrap is not turned into a failure by its cleanup.
+  chmodSync(generation, 0o000)
+  try {
+    assert.doesNotThrow(() => bootstrapTest.reclaimEphemeralRoot(generation, join(scratchDir(life), 'pack'), context))
+  } finally {
+    chmodSync(generation, 0o700)
+  }
+  assert.equal(existsSync(generation), true, 'an unverifiable candidate must survive (fail closed)')
+})
+
+test('discardOwnedEphemeralRoot validation failures are non-fatal', { skip: !chmodEnforced && 'chmod permission enforcement unavailable' }, async (t) => {
+  const life = testLifecycle(t)
+  const { context } = sourceFixture(life)
+  const owned = bootstrapTest.ephemeralSourcePackRoot(context)
+  // An unreadable generation root makes the identity revalidation throw
+  // EACCES: the discard must warn and return — never throw — so the
+  // original bootstrap error is preserved.
+  chmodSync(owned.root, 0o000)
+  try {
+    assert.doesNotThrow(() => bootstrapTest.discardOwnedEphemeralRoot(owned))
+  } finally {
+    chmodSync(owned.root, 0o700)
+  }
+  assert.equal(existsSync(owned.root), true, 'an unverifiable root must survive (fail closed)')
 })
 
 test('commitDevelopmentState keeps the new env on success', async (t) => {
@@ -593,6 +851,10 @@ if (args.includes('install')) {
   // it untouched so the source identity stays clean. Only the prepare
   // script's install (temporary package.json with file: deps) materializes.
   if (Object.keys(deps).length === 0) process.exit(0)
+  // Failure injection for the "pack succeeded, then the install failed"
+  // regression: the prepare script's install runs in the worktree with
+  // non-empty file: dependencies.
+  if (process.env.DSH_FAKE_FAIL_INSTALL === '1') process.exit(9)
   for (const name of Object.keys(deps)) {
     const packageDirectory = join(process.cwd(), 'node_modules', '.pnpm', name.replaceAll('/', '+') + '@file+distribution+dsh.tgz', 'node_modules', ...name.split('/'))
     mkdirSync(packageDirectory, { recursive: true })
@@ -648,15 +910,30 @@ function sourceBootstrapFixture(life) {
   return { root, config, context, harness }
 }
 
-test('Case A: a successful source-mode bootstrap reclaims the previous ephemeral generation', { skip: process.platform === 'win32' }, async (t) => {
-  const life = testLifecycle(t)
-  const { root, config, context, harness } = sourceBootstrapFixture(life)
+/**
+ * Every ephemeral generation root currently living directly in the OS temp
+ * root (the exact leak surface of the P1 regressions below).
+ */
+function ephemeralRootsInTmpdir() {
+  return readdirSync(tmpdir(), { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && entry.name.startsWith(bootstrapTest.EPHEMERAL_ROOT_PREFIX))
+    .map(entry => join(tmpdir(), entry.name))
+    .sort()
+}
+
+/** Run a hermetic source bootstrap; extraEnv injects failure switches. */
+function sourceBootstrapRunner(life, { root, config, harness }) {
   const pnpm = fakePackPnpm(life)
-  const runBootstrap = () => withPnpmExecutable(pnpm, async () => {
-    const previousPackages = process.env.DSH_FAKE_PACKAGES
-    const previousVersion = process.env.DSH_FAKE_VERSION
-    process.env.DSH_FAKE_PACKAGES = JSON.stringify(['@deepseek-ai/dsh'])
-    process.env.DSH_FAKE_VERSION = VERSION
+  return (extraEnv = {}) => withPnpmExecutable(pnpm, async () => {
+    const saved = {}
+    const setEnv = (name, value) => {
+      saved[name] = process.env[name]
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+    setEnv('DSH_FAKE_PACKAGES', JSON.stringify(['@deepseek-ai/dsh']))
+    setEnv('DSH_FAKE_VERSION', VERSION)
+    for (const [name, value] of Object.entries(extraEnv)) setEnv(name, value)
     try {
       return await bootstrapDevelopmentEnvironment({
         root,
@@ -666,12 +943,18 @@ test('Case A: a successful source-mode bootstrap reclaims the previous ephemeral
         environment: { XDG_CACHE_HOME: join(root, 'cache') },
       })
     } finally {
-      if (previousPackages === undefined) delete process.env.DSH_FAKE_PACKAGES
-      else process.env.DSH_FAKE_PACKAGES = previousPackages
-      if (previousVersion === undefined) delete process.env.DSH_FAKE_VERSION
-      else process.env.DSH_FAKE_VERSION = previousVersion
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
     }
   })
+}
+
+test('Case A: a successful source-mode bootstrap reclaims the previous ephemeral generation', { skip: process.platform === 'win32' }, async (t) => {
+  const life = testLifecycle(t)
+  const { root, config, context, harness } = sourceBootstrapFixture(life)
+  const runBootstrap = sourceBootstrapRunner(life, { root, config, harness })
 
   const first = await runBootstrap()
   const generationA = dirname(first.distributionPath)
@@ -689,4 +972,53 @@ test('Case A: a successful source-mode bootstrap reclaims the previous ephemeral
   assert.equal(state.ephemeral, true, 'the committed state must stay ephemeral')
   const env = readFileSync(context.envPath, 'utf8')
   assert.ok(env.includes(second.distributionPath), 'the env must point at B')
+})
+
+test('pack success then a materialization failure discards the uncommitted generation (A survives)', { skip: process.platform === 'win32' }, async (t) => {
+  const life = testLifecycle(t)
+  const { root, config, harness } = sourceBootstrapFixture(life)
+  const runBootstrap = sourceBootstrapRunner(life, { root, config, harness })
+
+  const first = await runBootstrap()
+  const generationA = dirname(first.distributionPath)
+  const stateAfterFirst = readFileSync(join(root, DEV_STATE_FILE), 'utf8')
+
+  // The second bootstrap builds a fresh pack B successfully, then the
+  // worktree install fails: B was never committed, so it must be discarded
+  // by the same run instead of leaking into the OS temp root.
+  const before = ephemeralRootsInTmpdir()
+  await assert.rejects(
+    () => runBootstrap({ DSH_FAKE_FAIL_INSTALL: '1' }),
+    /materialize DSH source distribution/u,
+  )
+  assert.equal(existsSync(generationA), true, 'the committed generation A must survive the failed bootstrap')
+  const leaked = ephemeralRootsInTmpdir().filter(path => !before.includes(path))
+  assert.deepEqual(leaked, [], 'the uncommitted generation B must be discarded, not leaked')
+  assert.equal(readFileSync(join(root, DEV_STATE_FILE), 'utf8'), stateAfterFirst, 'the committed state must still point at A')
+})
+
+test('pack success then a state commit failure discards the uncommitted generation (A survives)', { skip: process.platform === 'win32' }, async (t) => {
+  const life = testLifecycle(t)
+  const { root, config, context, harness } = sourceBootstrapFixture(life)
+  const runBootstrap = sourceBootstrapRunner(life, { root, config, harness })
+
+  const first = await runBootstrap()
+  const generationA = dirname(first.distributionPath)
+  const stateAfterFirst = readFileSync(join(root, DEV_STATE_FILE), 'utf8')
+
+  // Fail exactly the second half of the env+state checkpoint: writeState()
+  // requires pnpm-lock.yaml, so its absence fails the commit after the pack
+  // and the install both succeeded (source installs run --lockfile=false,
+  // so nothing earlier needs the file).
+  rmSync(join(root, 'pnpm-lock.yaml'))
+  const before = ephemeralRootsInTmpdir()
+  await assert.rejects(
+    () => runBootstrap(),
+    /cannot write local state/u,
+  )
+  assert.equal(existsSync(generationA), true, 'the committed generation A must survive the failed commit')
+  const leaked = ephemeralRootsInTmpdir().filter(path => !before.includes(path))
+  assert.deepEqual(leaked, [], 'the uncommitted generation B must be discarded, not leaked')
+  assert.equal(readFileSync(join(root, DEV_STATE_FILE), 'utf8'), stateAfterFirst, 'the committed state must still point at A')
+  assert.ok(readFileSync(context.envPath, 'utf8').includes(generationA), 'the rolled-back env must still point at A')
 })
