@@ -148,7 +148,9 @@ describe("wrapTextWithAnsi", () => {
 			const wrapped = wrapTextWithAnsi(text, 40);
 
 			assert.strictEqual(wrapped.length, 2);
-			assert.strictEqual(wrapped[0], `${red}This is an example 中文汉字测试段落内容`);
+			// The pushed line closes the open foreground at its end; the final
+			// line carries the source's own full reset. (dsh-pi-tui divergence X021.)
+			assert.strictEqual(wrapped[0], `${red}This is an example 中文汉字测试段落内容\x1b[39m`);
 			assert.strictEqual(wrapped[1], `${red}中文汉字测试段落内容.${reset}`);
 			for (const line of wrapped) {
 				assert.ok(visibleWidth(line) <= 40);
@@ -190,6 +192,65 @@ describe("wrapTextWithAnsi", () => {
 			// Middle lines should not end with full reset
 			for (let i = 0; i < wrapped.length - 1; i++) {
 				assert.strictEqual(wrapped[i].endsWith("\x1b[0m"), false);
+			}
+		});
+
+		it("should close foreground color at the end of every wrapped line", () => {
+			// A long unbroken colored run (no trailing reset in the source).
+			const fgBlue = "\x1b[34m";
+			const text = `${fgBlue}${"a".repeat(35)}`;
+
+			const wrapped = wrapTextWithAnsi(text, 10);
+
+			assert.ok(wrapped.length > 1);
+			for (const line of wrapped) {
+				// Every emitted line is foreground-balanced: the open color is
+				// closed before the line ends, so content appended after the
+				// wrap (cell padding, table borders) cannot inherit it.
+				// (dsh-pi-tui divergence X021.)
+				assert.strictEqual(
+					line.endsWith("\x1b[39m"),
+					true,
+					`Line not foreground-closed: ${JSON.stringify(line)}`,
+				);
+				// A full reset would be acceptable for fg-only text, but the
+				// point of this assertion is the targeted fg close.
+				assert.strictEqual(line.endsWith("\x1b[0m"), false);
+			}
+			// Continuation lines re-open the color at their start.
+			for (let i = 1; i < wrapped.length; i++) {
+				assert.strictEqual(wrapped[i].startsWith(fgBlue), true);
+			}
+		});
+
+		it("should close foreground at line end while preserving background", () => {
+			const bgRed = "\x1b[41m";
+			const fgWhite = "\x1b[97m";
+			const text = `${bgRed}${fgWhite}${"x".repeat(35)}`;
+
+			const wrapped = wrapTextWithAnsi(text, 10);
+
+			assert.ok(wrapped.length > 1);
+			for (const line of wrapped) {
+				// Background stays open on every line (padding must keep it)...
+				const hasBg = line.includes("[41m") || line.includes(";41m") || line.includes("[41;");
+				assert.ok(hasBg, `Line lost background: ${JSON.stringify(line)}`);
+				// ...but the foreground is closed before the line ends.
+				assert.strictEqual(
+					line.endsWith("\x1b[39m"),
+					true,
+					`Line not foreground-closed: ${JSON.stringify(line)}`,
+				);
+				// A full reset would also kill the background — never used here.
+				assert.strictEqual(line.endsWith("\x1b[0m"), false);
+			}
+			// Continuation lines re-open the active state at their start
+			// (combined into one SGR sequence by the tracker).
+			for (let i = 1; i < wrapped.length; i++) {
+				assert.ok(
+					wrapped[i]!.startsWith("\x1b[97;41m") || wrapped[i]!.startsWith(`${bgRed}${fgWhite}`),
+					`Continuation line does not re-open state: ${JSON.stringify(wrapped[i])}`,
+				);
 			}
 		});
 	});

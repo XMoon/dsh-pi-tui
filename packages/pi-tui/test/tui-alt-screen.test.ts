@@ -1507,4 +1507,328 @@ describe("TuiAltScreen", () => {
 		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript")));
 		tui.stop();
 	});
+
+	it("notifies the host when dragging the primary scrollbar to an edge", async () => {
+		const terminal = new RecordingTerminal(10, 5);
+		const boundaries: Array<[-1 | 1, "wheel" | "page" | "scrollbar"]> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onScrollBoundary: (direction, source) => {
+				boundaries.push([direction, source]);
+				return true;
+			},
+		});
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "auto" },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+
+		// A wheel event reveals the scrollbar and leaves its thumb at the top.
+		terminal.sendInput("\x1b[<65;10;1M");
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;10;1M");
+		terminal.sendInput("\x1b[<32;10;5M");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(boundaries, [[1, "scrollbar"]]);
+		tui.stop();
+	});
+
+	it("keeps the scrollbar column selectable while the thumb is hidden", async () => {
+		const terminal = new RecordingTerminal(10, 2);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(new Text("123456789A\nabcdefghij\nmore\nlines", 0, 0), {
+			scrollbar: "auto",
+		});
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.isScrollbarVisible, false);
+
+		terminal.sendInput("\x1b[<0;10;1M");
+		terminal.sendInput("\x1b[<32;10;2M");
+		terminal.sendInput("\x1b[<0;10;2m");
+		await terminal.waitForRender();
+
+		const expected = `\x1b]52;c;${Buffer.from("A\nabcdefghij").toString("base64")}\x07`;
+		assert.ok(
+			terminal.events.some((event) => event.type === "write" && event.data.includes(expected)),
+			JSON.stringify(terminal.events.filter((event) => event.type === "write" && event.data.includes("\x1b]52;c;"))),
+		);
+		tui.stop();
+	});
+
+	it("chains unused wheel delta to an outer scroll view", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { wheelScrollLines: 3 });
+		const inner = new ScrollView(new Text("i1\ni2\ni3\ni4\ni5\ni6", 0, 0));
+		const outer = new ScrollView(
+			new VStack([{ component: inner, basis: 2 }, new Text("tail1\ntail2\ntail3\ntail4\ntail5", 0, 0)]),
+			{ primary: true },
+		);
+		tui.setLayoutRoot(outer);
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<65;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(inner.scrollTop, 3);
+		assert.strictEqual(outer.scrollTop, 0);
+
+		terminal.sendInput("\x1b[<65;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(inner.scrollTop, 4);
+		assert.strictEqual(outer.scrollTop, 2);
+		tui.stop();
+	});
+
+
+	it("notifies the host when PageUp and wheel reach viewport boundaries", async () => {
+		const terminal = new VirtualTerminal(20, 8);
+		const boundaries: Array<[-1 | 1, "wheel" | "page"]> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onScrollBoundary: (direction, source) => {
+				boundaries.push([direction, source]);
+				return true;
+			},
+		});
+		tui.addChild(new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		for (let press = 0; press < 4; press += 1) {
+			terminal.sendInput("\x1b[57421u");
+			await terminal.waitForRender();
+		}
+		assert.deepStrictEqual(boundaries, [[-1, "page"]]);
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(boundaries, [[-1, "page"], [-1, "wheel"]]);
+		tui.stop();
+	});
+
+	it("supports configurable keyboard viewport navigation with four rows of page overlap", async () => {
+		const terminal = new VirtualTerminal(20, 8);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[57421u");
+		terminal.sendInput("\x1b[57421;1:3u");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
+		);
+
+		terminal.sendInput("\x1b[57422u");
+		terminal.sendInput("\x1b[57422;1:3u");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
+		);
+
+		terminal.sendInput("\x1bOH");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
+		);
+
+		terminal.sendInput("\x1bOF");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
+		);
+
+		tui.stop();
+	});
+
+
+	it("host semantic viewport actions can clear built-in transcript search", async () => {
+		const terminal = new RecordingTerminal(60, 8);
+		let claimed = false;
+		let tui!: TuiAltScreen;
+		tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onBeforeViewportInput: (data) => {
+				if (data !== "\x1b[1;5F") return false;
+				claimed = tui.clearSearch();
+				return claimed;
+			},
+		});
+		tui.addChild(new Text("needle in the transcript", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[102;6u");
+		terminal.sendInput("needle");
+		await terminal.waitForRender();
+		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript")));
+
+		terminal.sendInput("\x1b[1;5F");
+		await terminal.waitForRender();
+		assert.strictEqual(claimed, true);
+		assert.ok(!terminal.getViewport().some((line) => line.includes("Find transcript")));
+		tui.stop();
+	});
+
+	it("scrolls the transcript by half a page with custom bindings", async () => {
+		const originalKeybindings = getKeybindings();
+		const terminal = new VirtualTerminal(20, 10);
+		const tui = new TuiAltScreen(terminal);
+		setKeybindings(
+			new KeybindingsManager(TUI_KEYBINDINGS, {
+				"tui.altScreen.halfPageUp": "ctrl+u",
+				"tui.altScreen.halfPageDown": "ctrl+d",
+			}),
+		);
+		try {
+			tui.addChild(new Text(Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportTop, 20);
+
+			terminal.sendInput("\x15");
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportTop, 15);
+
+			terminal.sendInput("\x04");
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportTop, 20);
+		} finally {
+			tui.stop();
+			setKeybindings(originalKeybindings);
+		}
+	});
+
+
+	it("lets viewport navigation keys reach the focused component when nothing can scroll", async () => {
+		const terminal = new VirtualTerminal(20, 10);
+		const tui = new TuiAltScreen(terminal);
+		// Content fits the viewport: the primary scroll view cannot scroll, so
+		// navigation keys belong to the focused component (e.g. a full-screen
+		// viewer mounted as the layout root with its own scrolling).
+		const transcript = new ScrollView(new Text("fits", 0, 0), { follow: "end", primary: true });
+		const editorInputs: string[] = [];
+		const editor = {
+			focused: false,
+			render: () => ["editor"],
+			invalidate: () => {},
+			handleInput: (data: string) => editorInputs.push(data),
+		};
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: editor, basis: 1, shrink: 0 },
+			]),
+		);
+		tui.setFocus(editor);
+		tui.start();
+		await terminal.waitForRender();
+
+		const inputs = ["\x1b[5~", "\x1b[6~", "\x1b[H", "\x1b[F"];
+		for (const input of inputs) terminal.sendInput(input);
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.scrollTop, 0);
+		assert.deepStrictEqual(editorInputs, inputs);
+
+		tui.stop();
+	});
+
+
+	it("fires onCellClick for a same-cell primary press+release without a drag", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const clicks: Array<{ x: number; y: number }> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onCellClick: (x, y) => clicks.push({ x, y }),
+		});
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;5;3M"); // primary press (SGR 1-based)
+		terminal.sendInput("\x1b[<0;5;3m"); // release at the same cell
+		await terminal.waitForRender();
+		// The callback receives 0-based screen coordinates.
+		assert.deepStrictEqual(clicks, [{ x: 4, y: 2 }]);
+		tui.stop();
+	});
+
+	it("does not fire onCellClick for a drag, a wheel, or a secondary button", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const clicks: Array<{ x: number; y: number }> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onCellClick: (x, y) => clicks.push({ x, y }),
+		});
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;5;3M"); // press
+		terminal.sendInput("\x1b[<0;9;3m"); // release elsewhere = a drag
+		terminal.sendInput("\x1b[<64;5;3M"); // wheel up
+		terminal.sendInput("\x1b[<2;5;3M"); // secondary press
+		terminal.sendInput("\x1b[<2;5;3m"); // secondary release
+		await terminal.waitForRender();
+		assert.deepStrictEqual(clicks, []);
+		tui.stop();
+	});
+});
+
+
+	it("copies line-head selections without the emoji-column indent", async () => {
+		const terminal = new RecordingTerminal(20, 5);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("🐋  first line\n   second line\n    indented\nlast line", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		// Drag from (col 1, row 1) to (col 1, row 4): the selection covers
+		// all four rows from their line heads. Continuation lines carry the
+		// emoji-column padding (3 spaces) — those must be dropped, while a
+		// 4+ space content indent (the code-block case) keeps its extra.
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;1;4M");
+		terminal.sendInput("\x1b[<0;1;4m");
+		await terminal.waitForRender();
+
+		const expectedClipboard = Buffer.from("🐋  first line\nsecond line\n indented\nl").toString("base64");
+		const clipboardWrites = terminal.events.filter(
+			(event) => event.type === "write" && event.data.includes("\x1b]52;c;"),
+		);
+		assert.ok(
+			clipboardWrites.some((event) => event.type === "write" && event.data.includes(`\x1b]52;c;${expectedClipboard}\x07`)),
+			JSON.stringify(clipboardWrites),
+		);
+		tui.stop();
+	});
+
+	it("keeps leading spaces when the selection starts mid-line", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("aa   second line", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		// Drag from (col 4, row 1) to (col 10, row 1): the selection starts
+		// INSIDE the line — its leading spaces are content, not the emoji
+		// column, and must be copied verbatim.
+		terminal.sendInput("\x1b[<0;4;1M");
+		terminal.sendInput("\x1b[<32;10;1M");
+		terminal.sendInput("\x1b[<0;10;1m");
+		await terminal.waitForRender();
+
+		const expectedClipboard = Buffer.from("  secon").toString("base64");
+		const clipboardWrites = terminal.events.filter(
+			(event) => event.type === "write" && event.data.includes("\x1b]52;c;"),
+		);
+		assert.ok(
+			clipboardWrites.some((event) => event.type === "write" && event.data.includes(`\x1b]52;c;${expectedClipboard}\x07`)),
+			JSON.stringify(clipboardWrites),
+		);
+		tui.stop();
+
 });

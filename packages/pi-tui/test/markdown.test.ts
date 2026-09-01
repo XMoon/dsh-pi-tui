@@ -26,6 +26,49 @@ function stripAnsi(line: string): string {
 	return line.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+function fgOpenAfterSgr(prev: boolean, params: string): boolean {
+	if (params === "" || params === "0") {
+		return false;
+	}
+	let open = prev;
+	for (const part of params.split(";")) {
+		const code = Number.parseInt(part, 10);
+		if (code === 39) {
+			open = false;
+		} else if (code === 38 || (code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+			open = true; // 38;5;N / 38;2;R;G;B or standard 30-37 / bright 90-97
+		}
+	}
+	return open;
+}
+
+/** Assert no box-drawing character is rendered while a foreground color is open. (dsh-pi-tui divergence X021.) */
+function assertNoBordersInOpenFgColor(lines: string[]): void {
+	const borderChar = /[│┌┐└┘├┤┬┴─]/;
+	const sgrRegex = /\x1b\[([0-9;]*)m/g;
+	for (const line of lines) {
+		if (!borderChar.test(line)) {
+			continue;
+		}
+		let fgOpen = false;
+		let lastIndex = 0;
+		let match: RegExpExecArray | null;
+		sgrRegex.lastIndex = 0;
+		while ((match = sgrRegex.exec(line)) !== null) {
+			const plain = line.slice(lastIndex, match.index);
+			if (fgOpen && borderChar.test(plain)) {
+				assert.fail(`Border char rendered inside an open foreground color: ${JSON.stringify(line)}`);
+			}
+			lastIndex = sgrRegex.lastIndex;
+			fgOpen = fgOpenAfterSgr(fgOpen, match[1]!);
+		}
+		const tail = line.slice(lastIndex);
+		if (fgOpen && borderChar.test(tail)) {
+			assert.fail(`Border char rendered inside an open foreground color: ${JSON.stringify(line)}`);
+		}
+	}
+}
+
 describe("Markdown component", () => {
 	describe("Transforms", () => {
 		it("caches transformed Markdown by source and available width", () => {
@@ -566,6 +609,28 @@ describe("Markdown component", () => {
 				tui.stop();
 				resetCapabilitiesCache();
 			}
+		});
+
+		it("should not leak wrapped inline-code color into table borders", () => {
+			const markdown = new Markdown(
+				`| a | b |
+| --- | --- |
+| x | \`aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\` |
+| y | z |`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			const width = 40;
+			const lines = markdown.render(width);
+
+			// The long inline-code token wraps across several physical rows;
+			// none of the `│`/`─` border characters may be rendered while the
+			// code's foreground color is still open (regression: the wrap left
+			// the color unclosed on split lines, so the borders turned colored).
+			// (dsh-pi-tui divergence X021.)
+			assertNoBordersInOpenFgColor(lines);
 		});
 
 		it("should wrap long cell content to multiple lines", () => {
@@ -1756,5 +1821,99 @@ bar`,
 
 			assert.strictEqual(partial.render(80).length, complete.render(80).length);
 		});
+	});
+});
+
+describe("CJK punctuation after bare URLs (dsh-pi-tui divergence X031)", () => {
+	it("should not absorb CJK punctuation after bare URLs into the link", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		const markdown = new Markdown(
+			"PR 已开：https://example.com/app/pull/232（本地 main 已退回 origin/main 保持干净）。",
+			0,
+			0,
+			defaultMarkdownTheme,
+		);
+
+		const lines = markdown.render(80);
+		const joined = lines.join("");
+
+		// The hyperlink target must stop at the CJK boundary…
+		assert.ok(
+			joined.includes("\x1b]8;;https://example.com/app/pull/232\x1b\\"),
+			"OSC 8 target should end at the URL, before the full-width parenthesis",
+		);
+		// …and the CJK text must not be part of any hyperlink target.
+		assert.ok(!joined.includes("%EF%BC%88"), "OSC 8 target should not contain encoded CJK");
+		assert.ok(!/\x1b\]8;;[^\x1b]*（/.test(joined), "No hyperlink target should contain CJK characters");
+		// The full source text still renders visibly.
+		const rawPlain = lines.map((line) =>
+			line.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, ""),
+		);
+		assert.ok(
+			rawPlain.join("").includes("https://example.com/app/pull/232（本地 main 已退回"),
+			"URL and following CJK text should both render",
+		);
+	});
+
+	it("should strip a trailing full-width parenthesis after a bare URL", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		const markdown = new Markdown("看这个（https://example.com/page）就知道", 0, 0, defaultMarkdownTheme);
+
+		const lines = markdown.render(80);
+		const joined = lines.join("");
+
+		assert.ok(
+			joined.includes("\x1b]8;;https://example.com/page\x1b\\"),
+			"OSC 8 target should exclude the wrapping full-width parenthesis",
+		);
+	});
+
+	it("should keep CJK characters inside the URL path", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		const markdown = new Markdown("见 https://example.com/wiki/测试页面 的说明", 0, 0, defaultMarkdownTheme);
+
+		const lines = markdown.render(80);
+		const joined = lines.join("");
+
+		assert.ok(
+			joined.includes("\x1b]8;;https://example.com/wiki/测试页面\x1b\\"),
+			"CJK path characters remain part of the hyperlink target",
+		);
+	});
+
+	it("should keep balanced full-width parentheses inside the URL path", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		const markdown = new Markdown(
+			"见 https://example.com/wiki/中华人民共和国（1949年） 的说明",
+			0,
+			0,
+			defaultMarkdownTheme,
+		);
+
+		const lines = markdown.render(80);
+		const joined = lines.join("");
+
+		assert.ok(
+			joined.includes("\x1b]8;;https://example.com/wiki/中华人民共和国（1949年）\x1b\\"),
+			"Balanced full-width parens remain part of the hyperlink target",
+		);
+	});
+
+	it("should keep CJK punctuation inside balanced full-width parentheses", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		const markdown = new Markdown(
+			"见 https://example.com/wiki/中华人民共和国（北京，1949年） 的说明",
+			0,
+			0,
+			defaultMarkdownTheme,
+		);
+
+		const lines = markdown.render(80);
+		const joined = lines.join("");
+
+		assert.ok(
+			joined.includes("\x1b]8;;https://example.com/wiki/中华人民共和国（北京，1949年）\x1b\\"),
+			"Punctuation inside balanced full-width parens remains part of the hyperlink target",
+		);
 	});
 });

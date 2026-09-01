@@ -285,6 +285,164 @@ describe("Editor component", () => {
 		});
 	});
 
+	describe("history filter", () => {
+		it("visits all entries when no filter is set", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("first");
+			editor.addToHistory("second");
+
+			editor.handleInput("\x1b[A"); // Up - "second"
+			assert.strictEqual(editor.getText(), "second");
+			editor.handleInput("\x1b[A"); // Up - "first"
+			assert.strictEqual(editor.getText(), "first");
+		});
+
+		it("skips entries that do not pass the filter on Up", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("prompt-a");
+			editor.addToHistory("!cmd-b");
+			editor.addToHistory("prompt-c");
+			// history: ["prompt-c", "!cmd-b", "prompt-a"]
+			editor.setHistoryFilter((entry) => entry.startsWith("!"));
+
+			editor.handleInput("\x1b[A"); // Up - "!cmd-b" (skips "prompt-c")
+			assert.strictEqual(editor.getText(), "!cmd-b");
+
+			editor.handleInput("\x1b[A"); // Up - no more shell entries, stays
+			assert.strictEqual(editor.getText(), "!cmd-b");
+		});
+
+		it("skips entries that do not pass the filter on Down", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("!cmd-a");
+			editor.addToHistory("prompt-b");
+			editor.addToHistory("!cmd-c");
+			// history: ["!cmd-c", "prompt-b", "!cmd-a"]
+			editor.setHistoryFilter((entry) => entry.startsWith("!"));
+
+			editor.handleInput("\x1b[A"); // Up - "!cmd-c"
+			assert.strictEqual(editor.getText(), "!cmd-c");
+			editor.handleInput("\x1b[A"); // Up - "!cmd-a" (skips "prompt-b")
+			assert.strictEqual(editor.getText(), "!cmd-a");
+			editor.handleInput("\x1b[B"); // Down - "!cmd-c" (skips "prompt-b")
+			assert.strictEqual(editor.getText(), "!cmd-c");
+		});
+
+		it("does nothing on Up when no entry passes the filter", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("prompt-a");
+			editor.addToHistory("prompt-b");
+			editor.setHistoryFilter((entry) => entry.startsWith("!"));
+
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "");
+		});
+
+		it("still restores the draft with a filter active", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("!cmd");
+			editor.setHistoryFilter((entry) => entry.startsWith("!"));
+			editor.setText("draft");
+			editor.handleInput("\x1b[D");
+			editor.handleInput("\x1b[D");
+
+			editor.handleInput("\x1b[A"); // to line start
+			editor.handleInput("\x1b[A"); // recall "!cmd"
+			assert.strictEqual(editor.getText(), "!cmd");
+
+			editor.handleInput("\x1b[B"); // restore draft
+			assert.strictEqual(editor.getText(), "draft");
+		});
+	});
+
+
+	describe("onRecall", () => {
+		it("uses the returned text instead of the stored entry", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("!cmd");
+			editor.onRecall = (entry) => (entry.startsWith("!") ? entry.slice(1) : undefined);
+
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "cmd");
+		});
+
+		it("uses the stored entry when onRecall returns undefined", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("prompt");
+			editor.onRecall = () => undefined;
+
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "prompt");
+		});
+
+		it("passes the navigation direction to onRecall", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("a");
+			editor.addToHistory("b");
+			const directions: Array<1 | -1> = [];
+			editor.onRecall = (_entry, direction) => {
+				directions.push(direction);
+				return undefined;
+			};
+
+			editor.handleInput("\x1b[A"); // Up -> "b" (-1)
+			editor.handleInput("\x1b[A"); // Up -> "a" (-1)
+			editor.handleInput("\x1b[B"); // Down -> "b" (1)
+			assert.deepStrictEqual(directions, [-1, -1, 1]);
+		});
+	});
+
+
+	describe("history draft host state", () => {
+		it("saves host state on entering browse and restores it on draft return", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("entry");
+			let restored: unknown;
+			editor.onHistoryDraftSave = () => "prompt-mode";
+			editor.onHistoryDraftRestore = (state) => {
+				restored = state;
+			};
+
+			editor.handleInput("\x1b[A"); // Up - recall "entry", saves host state
+			assert.strictEqual(editor.getText(), "entry");
+			assert.strictEqual(restored, undefined);
+
+			editor.handleInput("\x1b[B"); // Down - restore draft
+			assert.strictEqual(editor.getText(), "");
+			assert.strictEqual(restored, "prompt-mode");
+		});
+
+		it("does not restore host state when leaving browse by typing", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("entry");
+			let restored = false;
+			editor.onHistoryDraftSave = () => "state";
+			editor.onHistoryDraftRestore = () => {
+				restored = true;
+			};
+
+			editor.handleInput("\x1b[A"); // recall "entry"
+			editor.handleInput("x"); // type - exits browse without restoring draft
+			assert.strictEqual(restored, false);
+		});
+
+		it("saves and restores host state across multiple browse sessions", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("entry");
+			let count = 0;
+			editor.onHistoryDraftSave = () => "state";
+			editor.onHistoryDraftRestore = () => {
+				count++;
+			};
+
+			editor.handleInput("\x1b[A"); // recall
+			editor.handleInput("\x1b[B"); // restore draft (count=1)
+			editor.handleInput("\x1b[A"); // recall again
+			editor.handleInput("\x1b[B"); // restore draft again (count=2)
+			assert.strictEqual(count, 2);
+		});
+	});
+
 	describe("public state accessors", () => {
 		it("returns cursor position", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
@@ -299,6 +457,68 @@ describe("Editor component", () => {
 
 			editor.handleInput("\x1b[D"); // Left
 			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 2 });
+		});
+
+
+		it("sets and clamps the cursor without firing onChange", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let changes = 0;
+			editor.onChange = () => { changes++; };
+			editor.setText("ab\n界‍👩x");
+			changes = 0;
+			editor.setCursor({ line: 1, col: 1 });
+			assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 0 });
+			assert.strictEqual(changes, 0);
+			editor.setCursor({ line: 99, col: 99 });
+			assert.deepStrictEqual(editor.getCursor(), { line: 1, col: "界‍👩x".length });
+		});
+
+		it("stages text and cursor with normalized line endings and tabs", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setTextAndCursor("a\r\nb\tc", { line: 1, col: 2 });
+			assert.strictEqual(editor.getText(), "a\nb    c");
+			assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 2 });
+		});
+
+		it("stages text and cursor without resetting transient editor state", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let changes = 0;
+			editor.onChange = () => { changes++; };
+			editor.addToHistory("older");
+			editor.addToHistory("newer");
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "newer");
+			const changesBeforeStage = changes;
+			const staged = "one\n界👩‍💻x";
+			editor.setTextAndCursor(staged, { line: 1, col: "界👩‍💻".length });
+			assert.strictEqual(editor.getText(), staged);
+			assert.deepStrictEqual(editor.getCursor(), { line: 1, col: "界👩‍💻".length });
+			assert.strictEqual(changes, changesBeforeStage, "staging must not fire onChange");
+			// The history index remains live even though the staged text is now the
+			// visible draft; a subsequent Up continues from the current entry.
+			editor.setTextAndCursor("draft", { line: 0, col: 0 });
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "older", "staging must preserve history navigation state");
+
+			// A valid large-paste marker proves that staging does not clear the
+			// paste registry, and the second undo proves staging added no snapshot.
+			let submitted = "";
+			editor.onSubmit = (text) => { submitted = text; };
+			editor.setText("");
+			const paste = Array.from({ length: 20 }, (_, index) => `alpha${index}`).join("\n");
+			editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			const marker = editor.getText();
+			editor.setTextAndCursor(marker, { line: 0, col: marker.length });
+			editor.handleInput("\x7f");
+			assert.strictEqual(editor.getText(), "");
+			editor.handleInput("\x1b[45;5u");
+			assert.strictEqual(editor.getText(), marker, "staging must preserve paste-marker state");
+			editor.handleInput("\x1b[45;5u");
+			assert.strictEqual(editor.getText(), "", "staging must not add an undo snapshot");
+			editor.setTextAndCursor(marker, { line: 0, col: marker.length });
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, marker, "staging must preserve paste-marker text for the host submit path");
 		});
 
 		it("returns lines as a defensive copy", () => {
@@ -4150,3 +4370,33 @@ describe("Editor component", () => {
 		});
 	});
 });
+
+describe("Oversized paste and undo snapshot isolation", () => {
+	it("expands pastes beyond the storage cap inline instead of markers", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		const big = "x".repeat(300 * 1024); // > MAX_PASTE_STORED_CHARS
+		editor.handleInput(`\x1b[200~${big}\x1b[201~`);
+		const text = editor.getText();
+		assert.strictEqual(text, big);
+		assert.ok(!text.includes("[paste #"), "oversized paste must not use a marker");
+	});
+
+	it("undo snapshots survive in-place splices after undo", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.handleInput("a");
+		editor.handleInput("\n");
+		editor.handleInput("b");
+		editor.handleInput("\x1f"); // undo -> "a\n"
+		assert.strictEqual(editor.getText(), "a\n");
+		// Splice-heavy edits after undo (new lines) must not corrupt the
+		// snapshot chain: each later undo still restores its own document.
+		editor.handleInput("x");
+		editor.handleInput("\n");
+		editor.handleInput("y");
+		editor.handleInput("\x1f");
+		assert.strictEqual(editor.getText(), "a\nx\n");
+		editor.handleInput("\x1f");
+		assert.strictEqual(editor.getText(), "a\nx");
+	});
+});
+
