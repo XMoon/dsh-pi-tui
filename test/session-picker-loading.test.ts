@@ -39,6 +39,7 @@ interface Harness {
   vt: VirtualTerminal
   app: TuiApp
   runSessions: () => Promise<unknown>
+  runResume: (rawInput: string) => Promise<unknown>
   view: () => string
   switched: string[]
 }
@@ -132,17 +133,21 @@ function harness(sessionReader: unknown): Harness {
   registerTuiCommands(runner)
   const def = defs.find(entry => entry.name === 'sessions')
   assert.ok(def?.handler !== undefined, 'sessions handler missing')
-  const runSessions = () =>
-    (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => Promise<unknown>)({
+  // /resume registers as its own command carrying the alias handler.
+  const resumeDef = defs.find(entry => entry.name === 'resume')
+  assert.ok(resumeDef?.handler !== undefined, 'resume alias handler missing')
+  const invoke = (handler: unknown, rawInput: string) =>
+    (handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => Promise<unknown>)({
       commandId: CommandId('cmd-test-1'),
       agent: undefined as never,
-      rawInput: '',
+      rawInput,
       signal: new AbortController().signal,
     })
   return {
     vt,
     app,
-    runSessions,
+    runSessions: () => invoke(def!.handler, ''),
+    runResume: (rawInput: string) => invoke(resumeDef!.handler, rawInput),
     view: () => vt.getViewport().join('\n'),
     switched,
   }
@@ -337,4 +342,89 @@ test('progressive title enrichment preserves the live search query', async (t) =
   await waitUntil(() => h.view().includes('the fixed title'))
   const view = h.view()
   assert.ok(!view.includes('other'), 'the search query must survive the progressive refresh')
+})
+
+test('/resume <arg> is input-first: the overlay opens while list() pends forever', async (t) => {
+  const h = harness({
+    list: pendingList,
+    search: async () => [],
+    projectionBatch: async () => new Map(),
+    measureContext: () => undefined,
+    readExportData: async () => ({ kind: 'none' }),
+  })
+  t.after(() => h.app.stop())
+
+  // The handler awaits the shared listing OUTCOME (old synchronous switch
+  // semantics), so fire it without awaiting: the overlay must be visible
+  // while it pends.
+  const resultPromise = h.runResume('abc')
+  await h.vt.waitForRender()
+  // The overlay owns the input immediately; the prefilled argument ('abc')
+  // filters the loading row out, so the chrome + query are the markers.
+  const view = h.view()
+  assert.ok(view.includes('resume · Current directory'), `the overlay must be open without list() settling:\n${view}`)
+  assert.ok(view.includes('abc'), `the argument must prefill the search immediately:\n${view}`)
+
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('resume · Current directory'), 'Esc must close the pending /resume picker immediately')
+  const result = await resultPromise
+  assert.deepEqual(result, { kind: 'error', text: 'resume cancelled' }, 'Esc during the pending listing cancels the resume')
+})
+
+test('/resume <arg> with NO match lists exactly once and keeps the argument as the query', async (t) => {
+  const rows = [
+    { id: 'session-needle1', createdAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', createdAt: 10, cwd: '/ws', live: false },
+  ]
+  let listCalls = 0
+  const h = harness({
+    list: async () => {
+      listCalls += 1
+      return rows
+    },
+    search: async () => [],
+    projectionBatch: async () => new Map(),
+    measureContext: () => undefined,
+    readExportData: async () => ({ kind: 'none' }),
+  })
+  t.after(() => h.app.stop())
+
+  // 'eed' is a SUBSTRING of the row label but not an id/prefix match, so
+  // the direct fast path finds nothing and the same picker fills in.
+  await h.runResume('eed')
+  await waitUntil(() => h.view().includes('needle1'))
+  assert.equal(listCalls, 1, 'an unmatched argument must fall back to the SAME picker, never a second listing')
+  const view = h.view()
+  assert.ok(!view.includes('other'), 'the argument stays as the live search query (non-matching rows filtered)')
+
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Current directory'), 'Esc closes the filtered picker')
+})
+
+test('/resume <arg> with a unique match switches after exactly one listing', async (t) => {
+  const rows = [
+    { id: 'session-target', createdAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', createdAt: 10, cwd: '/ws', live: false },
+  ]
+  let listCalls = 0
+  const h = harness({
+    list: async () => {
+      listCalls += 1
+      return rows
+    },
+    search: async () => [],
+    projectionBatch: async () => new Map(),
+    measureContext: () => undefined,
+    readExportData: async () => ({ kind: 'none' }),
+  })
+  t.after(() => h.app.stop())
+
+  await h.runResume('target')
+  await waitUntil(() => h.switched.length === 1)
+  assert.deepEqual(h.switched, ['session-target'])
+  assert.equal(listCalls, 1, 'the direct fast path resolves against the ONE shared input-first listing')
+  await waitUntil(() => !h.view().includes('Current directory'), 3000)
+  assert.deepEqual(h.switched, ['session-target'], 'no further switch may fire after the picker closes')
 })
