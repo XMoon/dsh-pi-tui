@@ -415,31 +415,48 @@ test('P2: /status forces ONE measurement through the coordinator, never a duplic
   }
 })
 
-test('P2: the deferred initial measure skips a session an earlier force already measured', () => {
+test('the deferred initial measure binds the captured session FIRST, then skips only an already-measured one', () => {
   const coordinator = new ContextMeasurementCoordinator()
   const counting = countingReader(50_000)
-  coordinator.bind('session-a')
-  // The runner's deferred-callback shape (deferInitialContextMeasure run):
-  // skip when an earlier measurement already succeeded for this session.
-  const deferredRun = (): void => {
+  // The runner's deferred-callback shape (deferInitialContextMeasure run),
+  // verbatim: bind the captured session BEFORE the dirty guard — an
+  // UNBOUND coordinator (cold resume) or a coordinator still bound to the
+  // PREVIOUS session (switch) reads as not dirty, and guarding before the
+  // bind would make the initial measure a permanent no-op (round-10
+  // finding).
+  const deferredRun = (sessionId: string): void => {
+    coordinator.bind(sessionId)
     if (!coordinator.isDirty()) return
     coordinator.markDirty()
-    coordinator.measure('session-a', counting.reader)
+    coordinator.measure(sessionId, counting.reader)
   }
-  // An explicit /status force runs BEFORE the deferred setImmediate
-  // callback: one measurement, dirty cleared.
-  coordinator.markDirty()
-  coordinator.measure('session-a', counting.reader)
-  assert.equal(counting.measureCalls, 1)
-  deferredRun()
-  assert.equal(counting.measureCalls, 1, 'the deferred measure must not double-measure after an explicit force')
+  // Cold resume: the coordinator is UNBOUND when the deferred callback
+  // runs — the measure must still happen once.
+  deferredRun('session-cold')
+  assert.equal(counting.measureCalls, 1, 'the cold-resume deferred measure must run')
+  assert.equal(coordinator.valueFor('session-cold'), 50_000)
+  // A second deferral for the same already-measured session is a no-op
+  // (the round-9 force-then-deferred dedupe).
+  deferredRun('session-cold')
+  assert.equal(counting.measureCalls, 1, 'no re-measure for an already-measured session')
   // A FAILED earlier attempt keeps the last-good value AND stays dirty:
   // the deferred callback retries.
   coordinator.markDirty()
-  assert.equal(coordinator.measure('session-a', () => undefined), 50_000, 'a failed measure keeps the last-good value')
+  assert.equal(coordinator.measure('session-cold', () => undefined), 50_000, 'a failed measure keeps the last-good value')
   assert.equal(coordinator.isDirty(), true, 'a failed measure stays dirty')
-  deferredRun()
+  deferredRun('session-cold')
   assert.equal(counting.measureCalls, 2, 'a failed attempt is retried by the deferred callback')
+  // Session switch: the coordinator is still bound to the OLD session when
+  // the NEW session's deferred callback runs — binding the new id clears
+  // the old value and arms exactly one fresh measure.
+  coordinator.bind('session-old')
+  coordinator.markDirty()
+  coordinator.measure('session-old', counting.reader)
+  const afterSwitchMeasure = counting.measureCalls
+  deferredRun('session-new')
+  assert.equal(counting.measureCalls, afterSwitchMeasure + 1, 'the switched session measures exactly once')
+  assert.equal(coordinator.valueFor('session-new'), 50_000)
+  assert.equal(coordinator.valueFor('session-old'), undefined, 'the old session value is cleared by the bind')
 })
 
 test('D2 structural gate: the runner source keeps measurement out of cheap refreshes', () => {
