@@ -75,9 +75,17 @@ export function steppedSearchOverlayState(
     return { matches: refreshed.matches, current: -1, revision: refreshed.revision, changed: refreshed.changed }
   }
   const count = refreshed.matches.length
-  // A fresh list with no current item starts stepping from the first
-  // match (Next) / last match (Prev), mirroring the query-flow semantics.
-  const base = refreshed.current < 0 ? 0 : refreshed.current
-  const current = (base + direction + count) % count
+  let current: number
+  if (state.current < 0) {
+    // The overlay had NO current match before this step (an empty search
+    // that gained matches while open): the step is the ENTRY into the
+    // fresh list — Next lands on the FIRST match, Prev on the LAST.
+    // Stepping from a synthetic 0 would skip the first newly discovered
+    // match (round-12 finding).
+    current = direction === 1 ? 0 : count - 1
+  } else {
+    const base = refreshed.current < 0 ? 0 : refreshed.current
+    current = (base + direction + count) % count
+  }
   return { matches: refreshed.matches, current, revision: refreshed.revision, changed: refreshed.changed }
 }
