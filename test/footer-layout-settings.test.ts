@@ -126,13 +126,16 @@ test('the custom layout renders the screenshot-like acceptance fixture', async (
   // The plan's screenshot-like line: model │ cwd │ context │ cache │
   // tokens │ performance │ version ... focus. The M2 items render the
   // structured facts (the plan's exact token spellings are formatter
-  // choices — the pi vocabulary applies, so 2000ms renders `2s`).
+  // choices — the pi vocabulary applies, so 2000ms renders `2s`). The
+  // row is width-pressured at 100 columns, so the low-importance
+  // performance item renders its compact form (`2s 40t/s`) — both recent
+  // facts (TTFB + throughput) survive.
   assert.ok(view.includes('deepseek-v4-flash'), `model missing:\n${view}`)
   assert.ok(view.includes('space4'), `project cwd missing:\n${view}`)
   assert.ok(view.includes('160k/1.0M (16%)'), `context missing:\n${view}`)
   assert.ok(view.includes('C 91.9%'), `cache-hit missing:\n${view}`)
   assert.ok(view.includes('2579/5507'), `token-usage missing:\n${view}`)
-  assert.ok(view.includes('2s 40 tok/s'), `performance missing:\n${view}`)
+  assert.ok(view.includes('2s 40t/s'), `performance missing:\n${view}`)
   assert.ok(view.includes('v0.3.3'), `version missing:\n${view}`)
   assert.ok(view.includes('focus'), `focus-mode missing:\n${view}`)
   app.stop()

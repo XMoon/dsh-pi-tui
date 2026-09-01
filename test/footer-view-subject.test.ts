@@ -48,7 +48,7 @@ function enterViewer(snap: StatusSnapshot, mode: 'one-shot' | 'continuable', act
   mutable.workspace = { cwd: '/child/ws', project: 'ws' }
   mutable.usage = {
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+    performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
     turns: 3,
     steps: 5,
   }
@@ -63,7 +63,7 @@ test('the viewer footer composes the SAME preset with the child data (one-shot)'
   assert.ok(text.includes('inactive'), `activity missing:\n${text}`)
   assert.ok(text.includes('ws'), `child cwd missing:\n${text}`)
   assert.ok(text.includes('t3/s5'), `child counters missing:\n${text}`)
-  assert.ok(text.includes('LLM 12.3s'), `child stats line missing:\n${text}`)
+  assert.ok(text.includes('TTFB 12.3s'), `child stats line missing:\n${text}`)
   // The parent's main-only facts never leak in.
   assert.ok(!text.includes('parent'), `the parent model must not leak:\n${text}`)
   assert.ok(!text.includes('[yolo]'), `the parent permission must not leak:\n${text}`)
@@ -86,7 +86,7 @@ test('the compact preset drops the child stats row while viewing', () => {
   enterViewer(snap, 'one-shot', 'inactive')
   const text = composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
   assert.ok(text.includes('[subagent · one-shot]'), `viewer badge missing:\n${text}`)
-  assert.ok(!text.includes('LLM 12.3s'), `compact must drop the stats line:\n${text}`)
+  assert.ok(!text.includes('TTFB 12.3s'), `compact must drop the stats line:\n${text}`)
 })
 
 test('returning to the main subject restores the parent footer', () => {

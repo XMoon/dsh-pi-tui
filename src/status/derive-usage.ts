@@ -33,6 +33,8 @@ export function usageFromStats(stats: SessionStats, contextTokens?: number): Usa
     },
     ...stats.cacheReadTokens > 0 || stats.cacheWriteTokens > 0 ? { cacheHitPct: stats.cacheHitPct } : {},
     performance: {
+      // llmMs stays the session LIFETIME wall; the two status performance
+      // metrics are the RECENT (last-5) averages folded by StatsFolder.
       llmMs: stats.llmMs,
       firstTokenMs: stats.firstTokenMsAvg,
       tokensPerSec: stats.tokensPerSec,

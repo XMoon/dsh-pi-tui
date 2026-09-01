@@ -95,17 +95,19 @@ const ROW2_LAYOUT = {
 
 test('Row2 = stats-line + turns-steps compacts BEFORE dropping at moderate narrow widths', () => {
   const snap = richSnapshot()
-  // Moderate narrow (30): the full stats line cannot fit the 2-line row
+  // Moderate narrow (28): the full stats line cannot fit the 2-line row
   // budget, but the COMPACT stats line + the counters can. The pre-fix
   // behavior dropped stats-line here because its compact render was a
   // no-op — the row collapsed to `t4/s191`.
-  const text = composer.render({ snapshot: snap, layout: ROW2_LAYOUT, width: 30, context: CONTEXT })
+  const text = composer.render({ snapshot: snap, layout: ROW2_LAYOUT, width: 28, context: CONTEXT })
   const lines = plain(text).split('\n')
   assert.ok(lines.some(line => line.includes('↑34k')), `compact stats must survive:\n${plain(text)}`)
   assert.ok(lines.some(line => line.includes('t4/s191')), `the counters must survive:\n${plain(text)}`)
-  assert.ok(!plain(text).includes('TTFB'), `the full stats form must not survive at this width:\n${plain(text)}`)
+  // The compact form carries the recent TTFB; the FULL form's '|' group
+  // separator is what must not survive at this width.
+  assert.ok(!plain(text).includes('|'), `the full stats form must not survive at this width:\n${plain(text)}`)
   assert.ok(lines.length <= 4, `the whole footer stays inside the hard capacity:\n${plain(text)}`)
-  for (const line of lines) assert.ok(visibleWidth(line) <= 30, `overflow:\n${plain(text)}`)
+  for (const line of lines) assert.ok(visibleWidth(line) <= 28, `overflow:\n${plain(text)}`)
   // Extreme narrow (15): importance drop still wins (stats-line 10 <
   // turns-steps 45) — compact is a space-saving step, never a priority
   // redefinition.
@@ -148,24 +150,20 @@ test('responsive items: compact is never wider than preferred (every declared fo
   }
 })
 
-test('performance compact never exceeds a shorter persisted style (speed/latency)', () => {
+test('performance compact shortens EVERY persisted style (full/speed/latency)', () => {
   const snap = richSnapshot()
-  // The latency style is already minimal: the compact both-facts form
-  // (`138.8s 659t/s`) is WIDER, so the item must fall back to the
-  // preferred form — a legitimate no-op, never a wider compact.
+  // Latency: the TTFB marker drops under pressure (`TTFB 2.6s` → `2.6s`).
   const latencyRef: FooterItemRef = { id: 'performance', format: 'latency' }
-  assert.equal(renderDensity('performance', snap, latencyRef, 'preferred'), '2.6s')
-  assert.equal(renderDensity('performance', snap, latencyRef, 'compact'),
-    renderDensity('performance', snap, latencyRef, 'preferred'),
-    'latency compact must be a no-op (the style is already shorter)')
-  // Same for the speed style.
+  assert.equal(renderDensity('performance', snap, latencyRef, 'preferred'), 'TTFB 2.6s')
+  assert.equal(renderDensity('performance', snap, latencyRef, 'compact'), '2.6s')
+  // Speed: the tok/s unit shortens (`659 tok/s` → `659t/s`).
   const speedRef: FooterItemRef = { id: 'performance', format: 'speed' }
   assert.equal(renderDensity('performance', snap, speedRef, 'preferred'), '659 tok/s')
-  assert.equal(renderDensity('performance', snap, speedRef, 'compact'),
-    renderDensity('performance', snap, speedRef, 'preferred'),
-    'speed compact must be a no-op (the style is already shorter)')
-  // The full style still gets the strictly shorter both-facts compact.
-  assert.equal(renderDensity('performance', snap, { id: 'performance', format: 'full' }, 'compact'), '138.8s 659t/s')
+  assert.equal(renderDensity('performance', snap, speedRef, 'compact'), '659t/s')
+  // The full style keeps BOTH facts with the shortened units — it never
+  // degrades to a single-fact style.
+  assert.equal(renderDensity('performance', snap, { id: 'performance', format: 'full' }, 'preferred'), 'TTFB 2.6s · 659 tok/s')
+  assert.equal(renderDensity('performance', snap, { id: 'performance', format: 'full' }, 'compact'), '2.6s 659t/s')
 })
 
 test('token-usage compact never exceeds a shorter persisted io style (cache-heavy)', () => {
@@ -196,8 +194,8 @@ test('B-class compact presentations match the agreed golden strings', () => {
     ['queue', 'q3'],
     ['agents', 'a2'],
     ['todo', 'td3'],
-    ['performance', '138.8s 659t/s'],
-    ['stats-line', '↑34k ↓8.1k · LLM 138.8s · 659t/s'],
+    ['performance', '2.6s 659t/s'],
+    ['stats-line', '↑34k ↓8.1k · TTFB 2.6s · 659t/s'],
   ]
   for (const [id, expected] of cases) {
     assert.equal(renderDensity(id, snap, { id }, 'compact'), expected, `${id} compact golden`)
@@ -267,13 +265,15 @@ test('the width matrix locks preferred → compact → importance-drop → trunc
   const snap = richSnapshot()
   const at = (width: number): string =>
     plain(composer.render({ snapshot: snap, layout: ROW2_LAYOUT, width, context: CONTEXT }))
-  // Wide: the full stats line renders (preferred).
+  // Wide: the full stats line renders (preferred) — recent TTFB and the
+  // effective throughput, no lifetime LLM wall.
   const wide = at(120)
-  assert.ok(wide.includes('LLM 138.8s') && wide.includes('tok/s'), `wide must keep the full stats:\n${wide}`)
+  assert.ok(wide.includes('TTFB 2.6s') && wide.includes('tok/s'), `wide must keep the full stats:\n${wide}`)
+  assert.ok(!wide.includes('LLM'), `the lifetime LLM wall never renders:\n${wide}`)
   // Moderate narrow: compact stats + counters (never a straight drop).
-  const moderate = at(30)
+  const moderate = at(28)
   assert.ok(moderate.includes('↑34k') && moderate.includes('t4/s191'), `moderate must compact first:\n${moderate}`)
-  assert.ok(!moderate.includes('TTFB'), `moderate must not keep the full stats:\n${moderate}`)
+  assert.ok(!moderate.includes('|'), `moderate must not keep the full stats:\n${moderate}`)
   // Narrower: importance drop (stats-line 10 < turns-steps 45).
   const narrow = at(15)
   assert.ok(narrow.includes('t4/s191') && !narrow.includes('↑'), `narrow must drop by importance:\n${narrow}`)

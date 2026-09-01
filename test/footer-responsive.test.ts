@@ -11,6 +11,7 @@ import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { FooterComposer } from '../src/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
 
 const composer = new FooterComposer(createBuiltinFooterRegistry())
@@ -217,6 +218,63 @@ test('extreme narrow widths never crash and never produce negative padding', () 
     assert.equal(typeof text, 'string')
     for (const row of text.split('\n')) {
       assert.ok(visibleWidth(row) <= Math.max(1, width), `row overflows at ${width}`)
+    }
+  }
+})
+
+test('the default stats row drops cache-hit, then TTFB, then speed — usage survives longest', () => {
+  // The default row-2 per-ref importance overrides define the drop order
+  // (plan §3.3): cache-hit(30) → performance:latency(40) →
+  // performance:speed(45) → token-usage(55). At moderate widths the row
+  // WRAPS first (the preferred form fits 1..2 physical lines); the
+  // compact → drop cascade engages below that.
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.usage = {
+    tokens: { input: 34_000, output: 8_100, cacheRead: 520_000, cacheWrite: 12_000 },
+    cacheHitPct: 93.9,
+    performance: { llmMs: 138_800, firstTokenMs: 2_600, tokensPerSec: 659 },
+    turns: 4,
+    steps: 191,
+  }
+  const at = (width: number): string => composer
+    .render({ snapshot: snap as StatusSnapshot, layout: DEFAULT_FOOTER_LAYOUT, width, context: CONTEXT })
+    .replace(/\x1b\[[0-9;]*m/g, '')
+
+  // Wide: the full preferred row renders every placement.
+  const wide = at(60)
+  assert.ok(wide.includes('↑34k ↓8.1k R520k W12k'), `usage preferred:\n${wide}`)
+  assert.ok(wide.includes('CH93.9%') && wide.includes('TTFB 2.6s') && wide.includes('659 tok/s'), `full row:\n${wide}`)
+
+  // Moderate: the compact pass shortens cache-hit FIRST (CH93.9% → 93.9%)
+  // — the lowest-importance placement is always the first victim.
+  const moderate = at(30)
+  assert.ok(!moderate.includes('CH'), `cache-hit compacts first:\n${moderate}`)
+  assert.ok(moderate.includes('93.9%'), `the compact cache form survives:\n${moderate}`)
+
+  // Narrower: the compact cascade reaches the TTFB marker (TTFB 2.6s →
+  // 2.6s) and the io pair drops its cache detail (↑34k ↓8.1k).
+  const narrow = at(22)
+  assert.ok(!narrow.includes('TTFB'), `latency compacts next:\n${narrow}`)
+  assert.ok(narrow.includes('2.6s'), `the compact latency value survives:\n${narrow}`)
+
+  // Extreme: the DROPS start — cache-hit goes first (93.9% gone), TTFB
+  // second (2.6s gone); the session usage + the speed signal are the last
+  // meaningful pair on the row.
+  const extreme = at(12)
+  assert.ok(!extreme.includes('93.9%'), `cache-hit drops first:\n${extreme}`)
+  assert.ok(!extreme.includes('2.6s'), `the TTFB placement drops second:\n${extreme}`)
+  assert.ok(extreme.includes('↑34k'), `session usage survives:\n${extreme}`)
+  assert.ok(extreme.includes('659t/s'), `a recent speed signal survives:\n${extreme}`)
+
+  // Degenerate: only the usage pair remains — it outlives the speed
+  // signal (usage is the highest-importance placement on the row).
+  const degenerate = at(8)
+  assert.ok(degenerate.includes('↑34k'), `usage is the last survivor:\n${degenerate}`)
+  assert.ok(!degenerate.includes('659'), `speed drops before usage:\n${degenerate}`)
+  for (const width of [60, 40, 30, 22, 14, 12, 8]) {
+    const text = composer.render({ snapshot: snap as StatusSnapshot, layout: DEFAULT_FOOTER_LAYOUT, width, context: CONTEXT })
+    for (const line of text.split('\n')) {
+      assert.ok(visibleWidth(line) <= Math.max(1, width), `overflow at ${width}: ${JSON.stringify(line)}`)
     }
   }
 })

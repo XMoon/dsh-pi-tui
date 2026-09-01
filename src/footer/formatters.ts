@@ -126,6 +126,11 @@ export function formatContextPercent(percent: number): string {
   return `ctx ${percent}%`
 }
 
+/** Cache-hit share, pi vocabulary: `CH93.9%`. */
+export function formatCacheHitPi(pct: number): string {
+  return `CH${pct.toFixed(1)}%`
+}
+
 /** Cache-hit share: `C 91.9%`. */
 export function formatCacheHit(pct: number): string {
   return `C ${pct.toFixed(1)}%`
@@ -141,6 +146,23 @@ export function formatTokenUsageIo(input: number, output: number): string {
   return `${input}/${output}`
 }
 
+/** Token usage, pi vocabulary: `↑34k ↓8.1k R520k W12k` — the session
+ * cumulative usage; the cache-read/write terms hide while zero. */
+export function formatTokenUsagePi(input: number, output: number, cacheRead: number, cacheWrite: number): string {
+  return [
+    `↑${formatTokens(input)}`,
+    `↓${formatTokens(output)}`,
+    cacheRead > 0 ? `R${formatTokens(cacheRead)}` : '',
+    cacheWrite > 0 ? `W${formatTokens(cacheWrite)}` : '',
+  ].filter(part => part !== '').join(' ')
+}
+
+/** Token usage, pi vocabulary under width pressure: `↑34k ↓8.1k` — the
+ * cumulative input/output pair survives, the cache detail drops. */
+export function formatTokenUsagePiCompact(input: number, output: number): string {
+  return `↑${formatTokens(input)} ↓${formatTokens(output)}`
+}
+
 /** Token usage, total form: `8.1k tokens` (all billed token classes). */
 export function formatTokenUsageTotal(input: number, output: number, cacheRead: number, cacheWrite: number): string {
   return `${formatTokens(input + output + cacheRead + cacheWrite)} tokens`
@@ -151,25 +173,40 @@ export function formatTokenUsageCompact(input: number, output: number, cacheRead
   return formatTokens(input + output + cacheRead + cacheWrite)
 }
 
-/** Performance, full form: `2.0s 40 tok/s`. */
-export function formatPerformanceFull(llmMs: number, tokensPerSec: number): string {
-  return `${formatSeconds(llmMs)} ${tokensPerSec} tok/s`
+/** Performance, full form: `TTFB 2.6s · 51 tok/s` — the RECENT average
+ * time-to-first-token and the RECENT effective throughput. The lifetime
+ * `LLM` wall is no longer a footer fact (it still accumulates in
+ * SessionStats.llmMs for /stats and session analysis). */
+export function formatPerformanceFull(firstTokenMs: number, tokensPerSec: number): string {
+  return `${formatPerformanceLatency(firstTokenMs)} · ${formatPerformanceSpeed(tokensPerSec)}`
 }
 
-/** Performance, compact pressure form: `2.0s 40t/s` — the full form's
- * `tok/s` unit shortened under width pressure (the composite item keeps
- * BOTH facts; it never degrades to a speed-only or latency-only style). */
-export function formatPerformanceCompact(llmMs: number, tokensPerSec: number): string {
-  return `${formatSeconds(llmMs)} ${tokensPerSec}t/s`
+/** Performance, compact pressure form: `2.6s 51t/s` — the full form's
+ * facts with the shortened units (the composite item keeps BOTH facts; it
+ * never degrades to a speed-only or latency-only style). */
+export function formatPerformanceCompact(firstTokenMs: number, tokensPerSec: number): string {
+  return `${formatPerformanceLatencyCompact(firstTokenMs)} ${formatPerformanceSpeedCompact(tokensPerSec)}`
 }
 
-/** Performance, speed-only form: `40 tok/s`. */
+/** Performance, speed-only form: `51 tok/s` — the recent effective
+ * throughput. */
 export function formatPerformanceSpeed(tokensPerSec: number): string {
   return `${tokensPerSec} tok/s`
 }
 
-/** Performance, average time-to-first-token form: `2.0s`. */
+/** Performance, speed-only compact form: `51t/s`. */
+export function formatPerformanceSpeedCompact(tokensPerSec: number): string {
+  return `${tokensPerSec}t/s`
+}
+
+/** Performance, latency-only form: `TTFB 2.6s` — the recent average
+ * time-to-first-token. */
 export function formatPerformanceLatency(firstTokenMs: number): string {
+  return `TTFB ${formatSeconds(firstTokenMs)}`
+}
+
+/** Performance, latency-only compact form: `2.6s`. */
+export function formatPerformanceLatencyCompact(firstTokenMs: number): string {
   return formatSeconds(firstTokenMs)
 }
 
@@ -187,8 +224,10 @@ export function formatTurnsSteps(turns: number, steps: number, format = 'both'):
 }
 
 /** The pi-vocabulary stats line (the legacy line-2 format), derived from
- * the STRUCTURED usage facts: `↑34k ↓8.1k R520k CH93.9% | LLM 138.8s ·
- * TTFB 2.6s · 659 tok/s`. Mirrors formatStats exactly (guarded by a
+ * the STRUCTURED usage facts: `↑34k ↓8.1k R520k CH93.9% | TTFB 2.6s ·
+ * 51 tok/s`. The performance tail carries the RECENT metrics only — the
+ * lifetime `LLM` wall left the line so a legacy composite never mixes
+ * lifetime and recent windows. Mirrors formatStats exactly (guarded by a
  * source-consistency test). */
 export function formatStatsLine(usage: UsageStatus): string {
   const piParts = [
@@ -199,7 +238,6 @@ export function formatStatsLine(usage: UsageStatus): string {
     usage.tokens.cacheRead > 0 || usage.tokens.cacheWrite > 0 ? `CH${(usage.cacheHitPct ?? 0).toFixed(1)}%` : '',
   ].filter(part => part !== '')
   const ownParts = [
-    `LLM ${formatSeconds(usage.performance.llmMs)}`,
     `TTFB ${formatSeconds(usage.performance.firstTokenMs)}`,
     `${usage.performance.tokensPerSec} tok/s`,
   ]
@@ -207,17 +245,17 @@ export function formatStatsLine(usage: UsageStatus): string {
 }
 
 /** The pi-vocabulary stats line, compact pressure form:
- * `↑34k ↓8.1k · LLM 138.8s · 659t/s` — input/output, ONE time indicator
- * and the throughput survive; the cache (R/W/CH) and TTFB facts are
- * omitted under width pressure. The structured UsageStatus is untouched
- * and the legacy formatStatsLine contract is unchanged. */
+ * `↑34k ↓8.1k · TTFB 2.6s · 659t/s` — input/output, ONE (recent) time
+ * indicator and the (recent) throughput survive; the cache (R/W/CH)
+ * facts are omitted under width pressure. The structured UsageStatus is
+ * untouched and the legacy formatStatsLine contract is unchanged. */
 export function formatStatsLineCompact(usage: UsageStatus): string {
   const piParts = [
     `↑${formatTokens(usage.tokens.input)}`,
     `↓${formatTokens(usage.tokens.output)}`,
   ]
   const ownParts = [
-    `LLM ${formatSeconds(usage.performance.llmMs)}`,
+    `TTFB ${formatSeconds(usage.performance.firstTokenMs)}`,
     `${usage.performance.tokensPerSec}t/s`,
   ]
   return `${piParts.join(' ')} · ${ownParts.join(' · ')}`

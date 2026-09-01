@@ -35,7 +35,7 @@ const RICH_STATUS: StatusData = {
   contextWindow: 10000,
   usage: {
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+    performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
     turns: 3,
     steps: 7,
   },
@@ -169,7 +169,7 @@ test('the armed Ctrl+C instruction never pushes the footer out of a narrow fulls
     const view = lines.join('\n')
     assert.ok(view.includes('Press Ctrl+C again to exit'), `the exit hint must stay visible:\n${view}`)
     assert.ok(view.includes('workspace-write') || view.includes('ww'), `the status row must survive beside the hint:\n${view}`)
-    assert.ok(view.includes('LLM 12.3s'), `the stats row must survive beside the hint:\n${view}`)
+    assert.ok(view.includes('TTFB 12.3s'), `the stats row must survive beside the hint:\n${view}`)
     const footerLines = [...app.footerRenderRowsForTest()]
     assert.equal(footerLines.length, 3, `the footer with its instruction must stay inside the effective budget:\n${view}`)
     assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+C again'), `the hint must be the footer's last line:\n${view}`)

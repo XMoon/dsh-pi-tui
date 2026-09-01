@@ -171,7 +171,10 @@ test('stats-line renders the pi vocabulary from the structured usage', () => {
     snap.usage.tokens = { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 }
     snap.usage.performance = { llmMs: 8100, firstTokenMs: 0, tokensPerSec: 0 }
   }))
-  assert.equal(text, '↑1.2k ↓3.4k | LLM 8.1s · TTFB 0s · 0 tok/s')
+  // The performance tail is recent-only — the lifetime LLM wall never
+  // appears in the display line.
+  assert.equal(text, '↑1.2k ↓3.4k | TTFB 0s · 0 tok/s')
+  assert.ok(!text.includes('LLM'))
 })
 
 test('view-scope renders the legacy viewer identity block', () => {
@@ -257,15 +260,24 @@ test('builtin styles render meaningful golden variants without changing defaults
     },
     {
       id: 'token-usage',
-      formats: [['io', '1200/3400'], ['total', '6.7k tokens'], ['compact', '6.7k']],
+      formats: [
+        ['pi', '↑1.2k ↓3.4k R2.0k W100'],
+        ['io', '1200/3400'],
+        ['total', '6.7k tokens'],
+        ['compact', '6.7k'],
+      ],
     },
     {
       id: 'cache-hit',
-      formats: [['full', 'C 91.9%'], ['compact', '91.9%']],
+      formats: [['pi', 'CH91.9%'], ['full', 'C 91.9%'], ['compact', '91.9%']],
     },
     {
       id: 'performance',
-      formats: [['full', '1104s 40 tok/s'], ['speed', '40 tok/s'], ['latency', '1.8s']],
+      formats: [
+        ['full', 'TTFB 1.8s · 40 tok/s'],
+        ['speed', '40 tok/s'],
+        ['latency', 'TTFB 1.8s'],
+      ],
     },
     {
       id: 'turns-steps',
@@ -307,7 +319,7 @@ test('builtin styles render meaningful golden variants without changing defaults
   assert.equal(render('context', snap), '[███░░░░░░░░░] 25%')
   assert.equal(render('token-usage', snap), '1200/3400')
   assert.equal(render('cache-hit', snap), 'C 91.9%')
-  assert.equal(render('performance', snap), '1104s 40 tok/s')
+  assert.equal(render('performance', snap), 'TTFB 1.8s · 40 tok/s')
   assert.equal(render('turns-steps', snap), 't3/s7')
 })
 
@@ -335,14 +347,15 @@ test('new builtin styles fall back to the unchanged default formatter', () => {
   assert.equal(render('turns-steps', snap, { id: 'turns-steps', format: 'unknown' }), 't0/s0')
   assert.equal(render('cache-hit', snap, { id: 'cache-hit', format: 'unknown' }), 'C 50.0%')
   assert.equal(render('token-usage', snap, { id: 'token-usage', format: 'unknown' }), '1200/3400')
-  assert.equal(render('performance', snap, { id: 'performance', format: 'unknown' }), '8.1s 40 tok/s')
+  assert.equal(render('performance', snap, { id: 'performance', format: 'unknown' }), 'TTFB 0s · 40 tok/s')
   assert.equal(render('version', snap, { id: 'version', format: 'unknown' }), 'v0.0.0')
   // `plain` (turns) and `compact` (performance) appeared in older custom
   // documents even though they were never declared meaningful styles. They
   // still degrade to the same effective legacy defaults instead of changing
-  // old layouts on load.
+  // old layouts on load (performance's legacy 'compact' fallback is the
+  // full style — now the recent TTFB + throughput pair).
   assert.equal(render('turns-steps', snap, { id: 'turns-steps', format: 'plain' }), 't0/s0')
-  assert.equal(render('performance', snap, { id: 'performance', format: 'compact' }), '8.1s 40 tok/s')
+  assert.equal(render('performance', snap, { id: 'performance', format: 'compact' }), 'TTFB 0s · 40 tok/s')
 })
 
 test('unknown persisted formats survive parsing and fail soft in the real composer', () => {
@@ -373,7 +386,8 @@ test('unknown persisted formats survive parsing and fail soft in the real compos
     assert.ok(visibleWidth(row) <= 40, `composer output overflows: ${JSON.stringify(row)}`)
   }
   const text = plain(output)
-  assert.ok(text.includes('8.1s 40 tok/s'), `performance must use its default: ${text}`)
+  assert.ok(text.includes('TTFB 0s · 40 tok/s'), `performance must use its default: ${text}`)
+  assert.ok(!text.includes('LLM'), `no lifetime LLM wall in the performance tail: ${text}`)
   assert.ok(text.includes('C 50.0%'), `cache hit must use its default: ${text}`)
   assert.ok(text.includes('1200/3400'), `token usage must use its default: ${text}`)
 })
@@ -398,6 +412,53 @@ test('an unknown format string degrades to the item default, never throws', () =
     snap.usage.context = { usedTokens: 25000, windowTokens: 100000, percent: 25 }
   }), { id: 'x', format: 'zzz' })
   assert.equal(context, '[███░░░░░░░░░] 25%', 'the unknown context format must fall back to the default bar')
+})
+
+test('the split performance styles render distinct preferred/compact forms', () => {
+  const snap = snapshotWith(snap => {
+    snap.usage.performance = { llmMs: 138_800, firstTokenMs: 2_600, tokensPerSec: 659 }
+  })
+  const def = registry.get('performance')!
+  const renderAt = (format: string, density: 'preferred' | 'compact'): string => {
+    const segment = def.render(snap, { id: 'performance', format }, density, CONTEXT)
+    return segment === null ? '' : plain(renderSpans(segment.spans))
+  }
+  // preferred: latency carries the TTFB marker, speed the tok/s unit.
+  assert.equal(renderAt('latency', 'preferred'), 'TTFB 2.6s')
+  assert.equal(renderAt('speed', 'preferred'), '659 tok/s')
+  assert.equal(renderAt('full', 'preferred'), 'TTFB 2.6s · 659 tok/s')
+  // compact: shortened forms (the Row Editor's two placements still read
+  // distinctly through their style column).
+  assert.equal(renderAt('latency', 'compact'), '2.6s')
+  assert.equal(renderAt('speed', 'compact'), '659t/s')
+  assert.equal(renderAt('full', 'compact'), '2.6s 659t/s')
+  // The lifetime LLM wall is gone from every form.
+  for (const format of ['full', 'speed', 'latency']) {
+    for (const density of ['preferred', 'compact'] as const) {
+      assert.ok(!renderAt(format, density).includes('138.8'), `${format}/${density} must not show llmMs`)
+    }
+  }
+})
+
+test('token-usage:pi and cache-hit:pi render the pi vocabulary with compact pressure forms', () => {
+  const snap = snapshotWith(snap => {
+    snap.usage.tokens = { input: 114_000_000, output: 54_000, cacheRead: 520_000, cacheWrite: 12_000 }
+    snap.usage.cacheHitPct = 93.9
+  })
+  // Zero-valued cache terms hide (the plan's preferred example).
+  const noCache = snapshotWith(snap => {
+    snap.usage.tokens = { input: 114_000_000, output: 54_000, cacheRead: 0, cacheWrite: 0 }
+  })
+  assert.equal(render('token-usage', noCache, { id: 'token-usage', format: 'pi' }), '↑114M ↓54k')
+  assert.equal(render('token-usage', snap, { id: 'token-usage', format: 'pi' }), '↑114M ↓54k R520k W12k')
+  assert.equal(render('cache-hit', snap, { id: 'cache-hit', format: 'pi' }), 'CH93.9%')
+  // Compact pressure keeps the io pair and drops the cache detail.
+  const def = registry.get('token-usage')!
+  const segment = def.render(snap, { id: 'token-usage', format: 'pi' }, 'compact', CONTEXT)
+  assert.equal(segment === null ? '' : plain(renderSpans(segment.spans)), '↑114M ↓54k')
+  const cacheDef = registry.get('cache-hit')!
+  const cacheSegment = cacheDef.render(snap, { id: 'cache-hit', format: 'pi' }, 'compact', CONTEXT)
+  assert.equal(cacheSegment === null ? '' : plain(renderSpans(cacheSegment.spans)), '93.9%')
 })
 
 test('formatStatsLine is source-consistent with the legacy formatStats (guarded)', async () => {

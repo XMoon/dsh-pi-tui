@@ -37,7 +37,7 @@ test('footer shows model, cwd, branch, counters, context bar, and stats', async 
     // facts (the legacy statsLine string is no longer a footer input).
     usage: {
       tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
-      performance: { llmMs: 8100, firstTokenMs: 0, tokensPerSec: 0 },
+      performance: { llmMs: 8100, firstTokenMs: 8_100, tokensPerSec: 0 },
       turns: 2,
       steps: 5,
     },
@@ -49,7 +49,7 @@ test('footer shows model, cwd, branch, counters, context bar, and stats', async 
   assert.ok(view.includes(' main '), `branch missing:\n${view}`)
   assert.ok(view.includes('t2/s5'), `counters missing:\n${view}`)
   assert.ok(view.includes('] 25%'), `context bar missing:\n${view}`)
-  assert.ok(view.includes('↑1.2k ↓3.4k | LLM 8.1s'), `stats line missing:\n${view}`)
+  assert.ok(view.includes('↑1.2k ↓3.4k · TTFB 8.1s · 0 tok/s'), `stats line missing:\n${view}`)
 })
 
 test('plan mode shows badges in header and footer and tints the editor border', async () => {

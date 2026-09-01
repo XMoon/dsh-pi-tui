@@ -228,6 +228,37 @@ test('A opens the Add picker; typing filters; Enter adds and closes', async () =
   app.stop()
 })
 
+test('the Row Editor distinguishes the default row\'s two Performance placements by style', async () => {
+  const { vt, app } = startApp()
+  app.setStatus({
+    model: 'deepseek/flash',
+    cwd: '/home/x/proj',
+    usage: {
+      tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
+      performance: { llmMs: 8100, firstTokenMs: 2_600, tokensPerSec: 40 },
+      turns: 2,
+      steps: 5,
+    },
+  })
+  const model = openDefault(app)
+  await vt.waitForRender()
+  // Enter the DEFAULT stats row (Row 2): its duplicate performance
+  // placements must be distinguishable through the existing style column
+  // — same label, different Style (Latency vs Speed).
+  vt.sendInput('\x1b[B') // Row 2
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  const rowEditor = view.split('\n').filter(line => line.includes('Performance'))
+  assert.equal(rowEditor.length, 2, `two Performance placements must be listed:\n${view}`)
+  assert.ok(rowEditor.some(line => line.includes('Latency')), `the latency placement must show its style:\n${view}`)
+  assert.ok(rowEditor.some(line => line.includes('Speed')), `the speed placement must show its style:\n${view}`)
+  // The draft kept both placements (the duplicate id is legal data).
+  assert.equal(model.preview().rows[1]!.left.filter(ref => ref.id === 'performance').length, 2)
+  app.stop()
+})
+
 test('the Item Editor edits style/tone; the picker renders live examples', async () => {
   const { vt, app } = startApp()
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
