@@ -782,6 +782,25 @@ test('stale overlay edge: an EMPTIED result set clamps to -1 (the 0/0 counter) (
   assert.equal(next.matches.length, 0)
 })
 
+test('stale overlay edge: Next enters the fresh list at the FIRST match, Prev at the LAST (P2)', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'alpha only'), turnEnd(2, 0)])
+  const empty = folder.search('needle-new')
+  assert.equal(empty.length, 0)
+  const state = { matches: empty, current: -1, query: 'needle-new', revision: folder.searchRevision(), folder }
+  // TWO matching messages arrive while the overlay stays open.
+  folder.apply([
+    turnStart(3, 1), userMessage(4, 'one needle-new live message', 1), turnEnd(5, 1),
+    turnStart(6, 2), userMessage(7, 'two needle-new live messages', 2), turnEnd(8, 2),
+  ])
+  const next = steppedSearchOverlayState(state, folder, 1)
+  assert.equal(next.matches.length, 2)
+  assert.equal(next.current, 0, 'Next must enter the fresh list at the FIRST match, never skip it (round-12 finding)')
+  const prev = steppedSearchOverlayState(state, folder, -1)
+  assert.equal(prev.matches.length, 2)
+  assert.equal(prev.current, 1, 'Prev enters the fresh list at the LAST match')
+})
+
 test('transcriptSearchText is the single corpus source (tool = name args result)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
