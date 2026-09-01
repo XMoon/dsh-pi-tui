@@ -1444,7 +1444,8 @@ export class TranscriptFolder {
     if (maxTurns === undefined || maxTurns <= 0) return this.groupedMessages()
     // The indexed path is group-aware, including cross-turn read cards, and
     // falls back only for genuinely non-monotonic/corrupt logs. Full history
-    // remains available through the no-maxTurns call used by search.
+    // remains available through the no-maxTurns call (search uses the
+    // lightweight projection instead — it never materializes this list).
     return this.window({ maxTurns, ...options }).messages
   }
 
@@ -2170,16 +2171,6 @@ export class TranscriptFolder {
         break
     }
   }
-}
-
-/** Search the complete folded transcript, never a bounded presentation window. */
-export function searchTranscript(folder: TranscriptFolder, query: string): TranscriptMessage[] {
-  const needle = query.trim().toLowerCase()
-  if (needle === '') return []
-  return folder.messages().filter(message => {
-    const text = message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}` : message.text
-    return text.toLowerCase().includes(needle)
-  })
 }
 
 /**

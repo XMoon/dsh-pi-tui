@@ -18,7 +18,7 @@ import { color, currentPalette, darkColors, lightColors, setTheme } from '../src
 import { iconFor } from '../src/icons.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent, type TranscriptViewportAnchor } from '../src/tui-app.ts'
 import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
-import { searchTranscript, TranscriptFolder, type TurnActivity } from '../src/transcript.ts'
+import { TranscriptFolder, type TurnActivity } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
 import { Text, visibleWidth, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -1386,13 +1386,12 @@ test('fullscreen Ctrl+F and Ctrl+Shift+F search the full folder and re-window to
     onSubmit: () => {},
     onExit: () => {},
     onSearchQuery: (query) => {
-      const matches = searchTranscript(folder, query)
+      const matches = folder.search(query)
       if (matches.length === 0) return
       const match = matches[0]
-      if (match === undefined || !('turn' in match)) return
-      const turn = match.turn
-      controller.anchorAt(turn)
-      hostMatches.push(turn)
+      if (match === undefined) return
+      controller.anchorAt(match.turn)
+      hostMatches.push(match.turn)
       renderWindow()
     },
     onSearchClose: () => {
