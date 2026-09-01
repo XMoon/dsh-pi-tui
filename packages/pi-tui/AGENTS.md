@@ -25,7 +25,12 @@ matches upstream; the only remaining divergences are listed in
 - **Package shell contract:** name stays `@xmoon76/pi-tui`, `private: true`,
   tsdown build producing `dist/index.mjs` + `dist/index.d.mts`. Do not
   switch to the upstream tsgo contract. Native prebuilds are deliberately NOT
-  vendored; loading degrades gracefully without them.
+  vendored (supported surface: Linux/WSL/SSH into Linux). "Degrade" is
+  input-capability loss, not a crash: without the prebuilds Shift+Tab is
+  indistinguishable from Tab and the Windows/Apple Terminal Shift+Enter
+  modifier fallback is unavailable — `terminal.ts` falls back to sequence
+  heuristics only. If Windows/macOS become supported platforms, vendor the
+  matching `native/` prebuilds from the pinned upstream tarball.
 - **When an upstream file conflicts with a local divergence, the Earendil
   file is the base** — re-apply the necessary patch on top. Never go the
   other direction (local file as base, cherry-picking upstream code back).

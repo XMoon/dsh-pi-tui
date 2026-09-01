@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Post-re-vendor follow-up audit fixes (X037–X045; 4x P1, 10x P2, several P3; review-round hardening included)
+
+A full sweep after PR #68 (the Earendil v0.84.4 rebase) merged,
+cross-checked against the original kimi fork, the upstream 0.84.4 tarball,
+and the pre-rebase snapshot; the audit record lives at
+`temp/1.2-new/dsh-pi-tui-revendor-0.84.4-followup-audit-and-fixes.md`.
+
+- **P1 fixes**:
+  - **PasteBurst restored (X038)** — an editor-internal terminal-input
+    bugfix wrongly removed as "no host consumer" (when a terminal loses
+    bracketed-paste markers, the Enter trailing a rapid character stream
+    must insert a newline instead of submitting a half-pasted draft).
+    Restored in the full kimi form (including the `disablePasteBurst`
+    escape hatch); the lesson is recorded in the ledger: "no host
+    consumer" is only a valid removal criterion for Host-API patches.
+  - **SelectList filter state split (X041)** — `setFilter()` narrowed
+    `filteredItems` while `getFilter()`/`setItems()` kept reading the
+    search box, silently dropping programmatic filters on the next
+    keystroke/refresh; the filter query is now one canonical source of
+    truth.
+  - **Large paste + Ctrl+G external editor lost content** — `$EDITOR`
+    saw only the `[paste #N …]` marker and the registry was cleared on
+    restore; the seat abstraction gains optional `getExpandedText?()`
+    (an upstream-native API the host never used); the external-editor
+    round-trip and subagent draft mirroring use the expanded text.
+  - **Outbound draft paths expand paste markers everywhere (round-2
+    review)** — steer / submit / queue / getDraft / viewer submission and
+    seat handoffs previously still used getText() (literal markers on the
+    wire); centralized through expandedSeatWireDraft() plus the new fork
+    seam getExpandedCursor() (X045 — handoff cursors map through the
+    expansion), the Windows `cmd /c start` URL launch quotes the URL as a
+    single token (cmd metacharacter injection guard), and the
+    external-editor suspend failure path gained a best-effort rollback.
+  - **Editor submit remap polluted every vendored Input (X037)** — new
+    dedicated binding `tui.editor.submit` (Editor-only);
+    `tui.input.submit` always keeps its default Enter, so question
+    free-text and search boxes no longer submit on `submit: ctrl+x`-style
+    configs.
+- **P2 fixes**: X007 dispose contract completed (Box/SettingsList/overlay
+  hide via opt-in `disposeOnHide`, remountable leases exempt, host-side
+  redundant compensations removed); Ctrl+G now suspends through
+  `suspendForExternalEditor()/resumeFromExternalEditor()` (fullscreen and
+  the surface generation survive, using upstream-native `preserveScreen`);
+  IME Focusable propagation (X042 + the host's FocusForwardingFrame);
+  fullscreen Ctrl+Up/Down owned by host turn navigation (the fork's OSC133
+  scan is a permanent no-op on DSH transcripts); fullscreen OSC 8 link
+  clicks and the Windows right-click paste wired (`open-url.ts` +
+  `readClipboardText`, both upstream-native seams); X023 paste-registry
+  prune; the autocomplete seam promoted to protected (X044, replacing
+  private casts); `Input.setValue` cursor semantics (X040 — typing after
+  a prefill appends instead of prepending); fullscreen raw-input
+  precedence (X043 — deferred viewport-listener registration plus a mouse
+  pass-through in the host key ladder).
+- **P3/records**: `WIDTH_CACHE_SIZE` back to 4096 (X039); LaTeX rendering
+  off everywhere (the kimi choice, `HOST_MARKDOWN_OPTIONS`); native
+  prebuild docs state the real degrade impact and supported surface; X028
+  records `canScroll`; fullscreen ScrollView `basis: 0`; the
+  `REMOVED_UNUSED` list rewritten with per-category criteria.
+- **Verification**: fork suite 1017 tests (+39; round 5 adds the stale-submenu-callback guard), the full bundle suite,
+  pi-surface-compat 8/8, typecheck, and build all green.
 ### Development temp-file hygiene (/tmp hygiene)
 
 - **Test-fixture temp directories now have a test-owned lifecycle**:

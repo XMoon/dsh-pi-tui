@@ -56,5 +56,5 @@
 	"engines": {
 		"node": ">=22.19.0"
 	},
-	"//native": "native/ (darwin/win32 modifier-key prebuilds) is deliberately not vendored; loading degrades gracefully without it. See AGENTS.md."
+	"//native": "native/ (darwin/win32 modifier-key prebuilds) is deliberately not vendored. Without it the TUI still runs, but platform input degrades: on Windows/Apple Terminal Shift+Tab is indistinguishable from Tab and the native Shift+Enter modifier fallback is unavailable (terminal.ts falls back to sequence heuristics). Supported surface: Linux/WSL/SSH into Linux. See AGENTS.md."
 }
