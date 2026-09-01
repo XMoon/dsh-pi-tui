@@ -30,6 +30,25 @@ import {
 const SHA = 'a'.repeat(40)
 const VERSION = '0.1.2-alpha.1'
 
+// Git repository-local environment variables. When this test file runs
+// inside a git-invoked context (a pre-push hook) or a CI job that exports
+// them, they leak into EVERY spawned `git` command — including the ones
+// scripts/ spawn internally and the worker subprocesses — and redirect
+// them to the OUTER repository instead of the fixture. The fixture must
+// be hermetic: strip them process-wide so `git -C <fixture>` always
+// operates on the fixture alone.
+const GIT_REPO_LOCAL_ENV = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_PREFIX',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_NAMESPACE',
+  'GIT_COMMON_DIR',
+]
+for (const name of GIT_REPO_LOCAL_ENV) delete process.env[name]
+
 function packageJson() {
   return {
     name: 'dev-environment-fixture',
@@ -59,7 +78,9 @@ function fixture({ source = false } = {}) {
 }
 
 function git(cwd, args) {
-  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' })
+  const env = { ...process.env }
+  for (const name of GIT_REPO_LOCAL_ENV) delete env[name]
+  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env })
   assert.equal(result.status, 0, `${args.join(' ')} failed: ${result.stderr}`)
   return result.stdout.trim()
 }
@@ -98,7 +119,7 @@ test('root dependency verification warns while source environments override it',
   assert.equal(official.pnpm_config_verify_deps_before_run, 'false')
 
   const root = fixture()
-  const context = resolveDshDevContext({ root, mode: 'npm' })
+  const context = resolveDshDevContext({ root, mode: 'npm', environment: {} })
   bootstrapTest.writeDevelopmentEnvironment(context)
   const generated = readFileSync(context.envPath, 'utf8')
   assert.match(generated, /export DSH_DEV_ROOT=/u)
@@ -154,7 +175,7 @@ test('source mode is selected by an exact source config and can be explicitly ov
   assert.equal(source.source.expectedVersion, VERSION)
   assert.equal(source.sourcePack, join(root, 'cache', 'dsh-pi-tui', 'source-packs', SHA))
 
-  const npm = resolveDshDevContext({ root, mode: 'npm', config: join(root, 'missing.json') })
+  const npm = resolveDshDevContext({ root, mode: 'npm', config: join(root, 'missing.json'), environment: {} })
   assert.equal(npm.mode, 'npm')
   assert.equal(npm.source, undefined)
 
@@ -353,7 +374,7 @@ test('doctor rejects a partial local state instead of treating it as ready', asy
 
 test('source environment is a warning independent from materialization status', () => {
   const root = fixture({ source: true })
-  const context = resolveDshDevContext({ root, config: join(root, 'test-compat-dsh-source.json') })
+  const context = resolveDshDevContext({ root, config: join(root, 'test-compat-dsh-source.json'), environment: {} })
   const environment = doctorTest.sourceEnvironmentStatus(context, {})
   assert.equal(environment.ok, false)
   assert.match(environment.message, /not loaded/u)
@@ -362,7 +383,7 @@ test('source environment is a warning independent from materialization status', 
 
 test('source state marked ephemeral is never accepted as durable READY state', () => {
   const root = fixture({ source: true })
-  const context = resolveDshDevContext({ root, config: join(root, 'test-compat-dsh-source.json') })
+  const context = resolveDshDevContext({ root, config: join(root, 'test-compat-dsh-source.json'), environment: {} })
   const state = {
     schemaVersion: 1,
     mode: 'source',
@@ -391,6 +412,7 @@ test('source state marked ephemeral is never accepted as durable READY state', (
     root,
     config: join(root, 'test-compat-dsh-source.json'),
     distribution: context.sourcePack,
+    environment: {},
   })
   const explicitResult = doctorTest.stateMatches(explicitContext, { ...state, ephemeral: false }, context.sourcePack, '11.7.0')
   assert.equal(explicitResult.status, 'STALE')

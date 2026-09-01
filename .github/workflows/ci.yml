@@ -174,9 +174,11 @@ jobs:
   #   - clean:fork
   #   - build
   #   - typecheck:bundle
-  #   - test:bundle
+  #   - test:product
   #
-  # So this job only checks the remaining source contracts.
+  # So this job only checks the remaining source contracts, plus the
+  # development-tooling suite (dev-environment, pre-push policy, DSH
+  # distribution gates) that must NOT run inside the artifact lifecycle.
   # ---------------------------------------------------------------------------
   source-checks:
     name: Source checks
@@ -255,6 +257,12 @@ jobs:
       - name: Test documentation
         run: pnpm test:docs
 
+      # Development-tooling suite: dev-environment fixtures, pre-push policy,
+      # DSH distribution gates. Kept OUT of prepack so the artifact lifecycle
+      # never depends on the developer git/CI environment.
+      - name: Test development tooling
+        run: pnpm test:tooling
+
       - name: Build vendored pi-tui for compatibility contract
         run: pnpm build:fork
 
@@ -274,7 +282,7 @@ jobs:
   #   clean:fork
   #   build
   #   typecheck:bundle
-  #   test:bundle
+  #   test:product
   #
   # postpack:
   #   tarball-smoke

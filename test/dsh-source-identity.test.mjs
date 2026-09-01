@@ -28,8 +28,28 @@ import {
 
 const VERSION = '0.1.2-alpha.1'
 
+// Git repository-local environment variables. When this test file runs
+// inside a git-invoked context (a pre-push hook) or a CI job that exports
+// them, they leak into every spawned `git` command and redirect it to the
+// OUTER repository instead of the fixture. The fixture must be hermetic:
+// strip them process-wide so `git -C <fixture>` always operates on the
+// fixture alone.
+const GIT_REPO_LOCAL_ENV = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_PREFIX',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_NAMESPACE',
+  'GIT_COMMON_DIR',
+]
+for (const name of GIT_REPO_LOCAL_ENV) delete process.env[name]
+
 function git(directory, ...args) {
-  const result = spawnSync('git', ['-C', directory, ...args], { encoding: 'utf8' })
+  const env = { ...process.env }
+  for (const name of GIT_REPO_LOCAL_ENV) delete env[name]
+  const result = spawnSync('git', ['-C', directory, ...args], { encoding: 'utf8', env })
   assert.equal(result.status, 0, result.stderr)
   return result.stdout.trim()
 }
