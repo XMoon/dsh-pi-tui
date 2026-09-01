@@ -67,6 +67,33 @@ test('a non-zero exit falls back', async () => {
   assert.equal(rows, undefined)
 })
 
+test('an instant-exit child cannot crash the runner with an unhandled stdin EPIPE (round-3 finding)', async () => {
+  // `true` via the shell exits BEFORE the JSON payload flushes: the async
+  // EPIPE on the parent's stdin stream used to be an unhandled 'error'
+  // event and crashed the whole process (the same class as the clipboard
+  // helper's round-3 finding — the try/catch around write() only catches
+  // SYNCHRONOUS throws). The runner must settle every run to the native
+  // fallback and survive the batch; with the bug, the process dies with
+  // an uncaughtException and this test fails.
+  for (let run = 0; run < 60; run += 1) {
+    const rows = await new Promise<string[] | undefined>((resolve) => {
+      const runner = new FooterCommandRunner({
+        config: { ...CONFIG, command: 'true', timeoutMs: 10000 },
+        snapshot: () => emptyStatusSnapshot(),
+        width: () => 100,
+        height: () => 30,
+        onOutput: (result) => {
+          runner.dispose()
+          resolve(result)
+        },
+        signal: new AbortController().signal,
+      })
+      runner.requestRefresh()
+    })
+    assert.equal(rows, undefined, `run ${run} must settle to the native fallback`)
+  }
+})
+
 test('a timeout kills the child and falls back', async () => {
   const rows = await runOnce({ ...CONFIG, timeoutMs: 100 }, 'setTimeout(() => process.stdout.write("late"), 5000)')
   assert.equal(rows, undefined)
