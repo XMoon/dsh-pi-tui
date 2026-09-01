@@ -7,6 +7,31 @@
 
 ## [Unreleased]
 
+### Vendored fork 重定基到 Earendil v0.84.4
+
+- **`packages/pi-tui` 从 kimi-code 快照（44a6c70e / v0.84.3）重定基到原版
+  Earendil `v0.84.4`**（b79e4cc8，见 `packages/pi-tui/UPSTREAM.json`），
+  并按新的 divergence ledger（`packages/pi-tui/DIVERGENCES.md`，X001–X036）
+  重新应用宿主必需的本地差异。kimi-only 且无宿主消费者的代码
+  （PasteBurst、inline slash、`WIDTH_CACHE_SIZE` 4096 等）不再保留。
+- **PR review 修复**：
+  - X016 —— `ProcessTerminal.start()` 恢复"先移除旧 resize listener 再赋新
+    handler"的顺序（迁移时顺序曾被意外颠倒，旧 listener 每次重启都会泄漏），
+    并新增回归测试。
+  - 全屏 FOCUS_IN/FOCUS_OUT 重新透传给 app-level input listener（迁移时被
+    误判为无消费者而删除；通知/剪贴板焦点跟踪依赖该通道），恢复对应回归
+    测试（ledger X036）。
+  - TuiMainScreen 每帧 processed-line 复用缓存恢复（ledger X035）：迁移时
+    被删后实测长会话稳态帧成本从 ~0.1–1.6 ms/帧 涨到 29–377 ms/帧
+    （1k–10k 行、仅尾部 spinner 变化）；宿主的 reference-stable 组件缓存
+    正是围绕该契约构建。新增守护测试与基准脚本
+    （`packages/pi-tui/test/render-preprocess-bench.ts`）。
+  - X013（`setIndicator` 不复活已停止的 Loader）经核实无任何消费者，回退
+    upstream 行为；X025 补记 native 模块自引用随包重命名
+    （`@xmoon76/pi-tui`）。
+- **验证**：fork 套件 978 项、bundle 套件、docs、pi-surface-compat、
+  typecheck、build 全绿；divergence ledger 与实现逐条核对一致。
+
 ## [0.4.0-alpha.1] - 2026-09-01
 
 ### 安装与版本对应
