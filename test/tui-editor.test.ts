@@ -8,25 +8,25 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { TuiApp } from '../src/tui-app.ts'
 import { suggestPathArgument } from '../src/mentions.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** A throwaway workspace with one directory + a file inside it. */
-function fixtureWorkspace(): string {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-tui-editor-'))
+function fixtureWorkspace(life: TestLifecycle): string {
+  const root = life.tempDir('dsh-tui-editor-')
   mkdirSync(join(root, 'src'))
   writeFileSync(join(root, 'src', 'deep-nested.ts'), 'deep')
   return root
 }
 
 /** A workspace with image-named fixtures for the /image argument tests. */
-function imageWorkspace(): string {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-tui-editor-img-'))
+function imageWorkspace(life: TestLifecycle): string {
+  const root = life.tempDir('dsh-tui-editor-img-')
   writeFileSync(join(root, 'shot.png'), 'x')
   writeFileSync(join(root, 'notes.txt'), 'x')
   mkdirSync(join(root, 'subdir'))
@@ -36,8 +36,8 @@ function imageWorkspace(): string {
 
 /** A quoted-path fixture: accepting the spaced directory must keep the quote
  * open at the cursor so the shared directory-reopen path can continue. */
-function spacedImageWorkspace(): string {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-tui-editor-spaced-'))
+function spacedImageWorkspace(life: TestLifecycle): string {
+  const root = life.tempDir('dsh-tui-editor-spaced-')
   mkdirSync(join(root, 'sub dir'))
   writeFileSync(join(root, 'sub dir', 'deep.png'), 'x')
   return root
@@ -105,9 +105,11 @@ async function waitForNoDropdownRow(vt: VirtualTerminal, needle: string, label: 
   }
 }
 
-test('Tab-accepting a directory reopens the dropdown at its children', async () => {
-  const root = fixtureWorkspace()
+test('Tab-accepting a directory reopens the dropdown at its children', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const { vt, app } = startApp(root)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('@src')
   await waitForDropdownRow(vt, 'src/', 'dropdown after typing @src')
@@ -117,12 +119,13 @@ test('Tab-accepting a directory reopens the dropdown at its children', async () 
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), '@src/', 'Tab must accept the directory mention')
   await waitForDropdownRow(vt, 'deep-nested.ts', 'children after Tab accept')
-  app.stop()
 })
 
-test('Esc while the dropdown is open closes it WITHOUT re-triggering', async () => {
-  const root = fixtureWorkspace()
+test('Esc while the dropdown is open closes it WITHOUT re-triggering', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const { vt, app, cancels } = startApp(root)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('@src/')
   await waitForDropdownRow(vt, 'deep-nested.ts', 'dropdown after typing @src/')
@@ -136,11 +139,11 @@ test('Esc while the dropdown is open closes it WITHOUT re-triggering', async () 
   assert.ok(!view.includes('deep-nested.ts'), `Esc must not re-trigger the dropdown:\n${view}`)
   assert.equal(app.seatTextForTest(), '@src/', 'Esc must not alter the draft')
   assert.equal(cancels, 0, 'closing the dropdown must not fire the app cancel')
-  app.stop()
 })
 
-test('non-whitespace mention boundaries trigger natural completion', async () => {
-  const root = fixtureWorkspace()
+test('non-whitespace mention boundaries trigger natural completion', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const { vt, app } = startApp(root)
   await vt.waitForRender()
   sendKeyByKey(vt, '看看@src')
@@ -148,15 +151,17 @@ test('non-whitespace mention boundaries trigger natural completion', async () =>
   app.stop()
 
   const second = startApp(root)
+  life.defer(() => second.app.stop())
   await second.vt.waitForRender()
   sendKeyByKey(second.vt, 'key=@src')
   await waitForDropdownRow(second.vt, 'deep-nested.ts', 'equals-delimited mention completion')
-  second.app.stop()
 })
 
-test('a non-mention trailing slash does not reopen the dropdown', async () => {
-  const root = fixtureWorkspace()
+test('a non-mention trailing slash does not reopen the dropdown', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const { vt, app } = startApp(root)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // Plain text with a trailing slash (e.g. a path): NOT an @ mention —
   // pressing Tab accepts nothing and the dropdown must stay closed.
@@ -167,26 +172,28 @@ test('a non-mention trailing slash does not reopen the dropdown', async () => {
   await new Promise(resolve => setTimeout(resolve, 80))
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('deep-nested.ts'), `plain path must not open the dropdown:\n${view}`)
-  app.stop()
 })
 
 // ── /image path-argument completion (tab + natural typing) ────────────────
 
-test('/image natural typing completes the path argument', async () => {
-  const root = imageWorkspace()
+test('/image natural typing completes the path argument', async (t) => {
+  const life = testLifecycle(t)
+  const root = imageWorkspace(life)
   const { vt, app } = startImageApp(root)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // The fork's command-argument branch (getArgumentCompletions) answers the
   // editor's per-letter natural trigger: the dropdown appears while typing.
   vt.sendInput('/image sh')
   await waitForDropdownRow(vt, 'shot.png', 'dropdown after typing /image sh')
   assert.ok(!app.seatTextForTest().includes('shot.png'), 'typing alone must not apply anything')
-  app.stop()
 })
 
-test('Tab on an empty /image argument lists the cwd', async () => {
-  const root = imageWorkspace()
+test('Tab on an empty /image argument lists the cwd', async (t) => {
+  const life = testLifecycle(t)
+  const root = imageWorkspace(life)
   const { vt, app } = startImageApp(root)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('/image ')
   await vt.waitForRender()
@@ -195,12 +202,13 @@ test('Tab on an empty /image argument lists the cwd', async () => {
   // overrides that for argument positions.
   vt.sendInput('\t')
   await waitForDropdownRow(vt, 'subdir/', 'Tab on /image  lists the cwd')
-  app.stop()
 })
 
-test('Tab-accepting a /image directory reopens the dropdown at its children', async () => {
-  const root = imageWorkspace()
+test('Tab-accepting a /image directory reopens the dropdown at its children', async (t) => {
+  const life = testLifecycle(t)
+  const root = imageWorkspace(life)
   const { vt, app } = startImageApp(root)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('/image sub')
   await waitForDropdownRow(vt, 'subdir/', 'dropdown after typing /image sub')
@@ -211,12 +219,13 @@ test('Tab-accepting a /image directory reopens the dropdown at its children', as
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), '/image subdir/', 'Tab must accept the directory argument')
   await waitForDropdownRow(vt, 'deep.png', 'children after Tab accept')
-  app.stop()
 })
 
-test('quoted @ directory acceptance keeps the quote open for child completion', async () => {
-  const root = spacedImageWorkspace()
+test('quoted @ directory acceptance keeps the quote open for child completion', async (t) => {
+  const life = testLifecycle(t)
+  const root = spacedImageWorkspace(life)
   const { vt, app } = startApp(root)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   sendKeyByKey(vt, '@"sub dir')
   await waitForDropdownRow(vt, 'sub dir/', 'quoted mention directory')
@@ -225,12 +234,13 @@ test('quoted @ directory acceptance keeps the quote open for child completion', 
   assert.equal(app.seatTextForTest(), '@"sub dir/"', 'the accepted value keeps balanced quote text')
   assert.equal(app.seatEditorForTest().getCursor(), '@"sub dir/'.length, 'the cursor remains inside the open quote')
   await waitForDropdownRow(vt, 'deep.png', 'quoted mention children after Tab')
-  app.stop()
 })
 
-test('quoted /image directory acceptance keeps the quote open for child completion', async () => {
-  const root = spacedImageWorkspace()
+test('quoted /image directory acceptance keeps the quote open for child completion', async (t) => {
+  const life = testLifecycle(t)
+  const root = spacedImageWorkspace(life)
   const { vt, app } = startImageApp(root)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   sendKeyByKey(vt, '/image "sub dir')
   await waitForDropdownRow(vt, 'sub dir/', 'quoted image directory')
@@ -239,12 +249,13 @@ test('quoted /image directory acceptance keeps the quote open for child completi
   assert.equal(app.seatTextForTest(), '/image "sub dir/"', 'the accepted value keeps balanced quote text')
   assert.equal(app.seatEditorForTest().getCursor(), '/image "sub dir/'.length, 'the cursor remains inside the open quote')
   await waitForDropdownRow(vt, 'deep.png', 'quoted image children after Tab')
-  app.stop()
 })
 
-test('a Windows-style backslash directory continuation reopens /image children', async () => {
-  const root = imageWorkspace()
+test('a Windows-style backslash directory continuation reopens /image children', async (t) => {
+  const life = testLifecycle(t)
+  const root = imageWorkspace(life)
   const { vt, app } = startImageApp(root)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.setEditorText('/image subdir\\')
   // A handled cursor key runs the same post-input reopen hook. The provider
@@ -252,12 +263,13 @@ test('a Windows-style backslash directory continuation reopens /image children',
   // the presentation dialect.
   vt.sendInput('\x1b[C')
   await waitForDropdownRow(vt, 'deep.png', 'backslash directory continuation')
-  app.stop()
 })
 
-test('a multi-space (tab-expanded) /image directory also reopens the dropdown at its children', async () => {
-  const root = imageWorkspace()
+test('a multi-space (tab-expanded) /image directory also reopens the dropdown at its children', async (t) => {
+  const life = testLifecycle(t)
+  const root = imageWorkspace(life)
   const { vt, app } = startImageApp(root)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // Tabs never reach the editor document (the fork normalizes them to four
   // spaces), so the REAL separator-whitespace case is multi-space — a
@@ -270,5 +282,4 @@ test('a multi-space (tab-expanded) /image directory also reopens the dropdown at
   // moves nothing but is itself handled.
   vt.sendInput('\x1b[C')
   await waitForDropdownRow(vt, 'deep.png', 'children after a multi-space directory accept')
-  app.stop()
 })

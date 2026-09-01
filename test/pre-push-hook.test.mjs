@@ -1,10 +1,10 @@
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, writeFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const HOOK = join(ROOT, '.husky', 'pre-push')
@@ -21,8 +21,8 @@ function runHook(refs, env) {
   return { code: r.status, out: r.stdout + r.stderr }
 }
 
-function nodeStageShim() {
-  const directory = mkdtempSync(join(tmpdir(), 'pre-push-node-shim-'))
+function nodeStageShim(life) {
+  const directory = life.tempDir('pre-push-node-shim-')
   const node = join(directory, 'node')
   const marker = join(directory, 'derived-stage-ran')
   writeFileSync(node, `#!/bin/sh
@@ -139,41 +139,35 @@ test('pre-push hook: PUSH_GATE_STAGES ignored without PUSH_GATE_TEST_MODE', () =
   assert.match(out, /verification skipped/)
 })
 
-test('pre-push hook: non-test stage override cannot replace a release gate', () => {
-  const shim = nodeStageShim()
-  try {
-    const { code, out } = runHook(RELEASE_TAG, {
-      PATH: `${shim.directory}:${process.env.PATH}`,
-      PUSH_GATE_TEST_MODE: '0',
-      PUSH_GATE_STAGES: 'echo fake-stage-should-not-run',
-    })
-    assert.equal(code, 0, out)
-    assert.match(out, /pre-push gate: verify:prepush \(1 stage\)/)
-    assert.ok(existsSync(shim.marker), 'the derived stage must execute')
-    assert.ok(!out.includes('fake-stage-should-not-run'), out)
-  } finally {
-    rmSync(shim.directory, { recursive: true, force: true })
-  }
+test('pre-push hook: non-test stage override cannot replace a release gate', (t) => {
+  const life = testLifecycle(t)
+  const shim = nodeStageShim(life)
+  const { code, out } = runHook(RELEASE_TAG, {
+    PATH: `${shim.directory}:${process.env.PATH}`,
+    PUSH_GATE_TEST_MODE: '0',
+    PUSH_GATE_STAGES: 'echo fake-stage-should-not-run',
+  })
+  assert.equal(code, 0, out)
+  assert.match(out, /pre-push gate: verify:prepush \(1 stage\)/)
+  assert.ok(existsSync(shim.marker), 'the derived stage must execute')
+  assert.ok(!out.includes('fake-stage-should-not-run'), out)
 })
 
-test('pre-push hook: non-test stage override cannot replace the clean release gate', () => {
-  const shim = nodeStageShim()
+test('pre-push hook: non-test stage override cannot replace the clean release gate', (t) => {
+  const life = testLifecycle(t)
+  const shim = nodeStageShim(life)
   const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim()
-  try {
-    const { code, out } = runHook([
-      `refs/tags/v-clean ${head} refs/tags/v-clean ${head}`,
-    ], {
-      PATH: `${shim.directory}:${process.env.PATH}`,
-      PUSH_GATE_TEST_MODE: '0',
-      PUSH_GATE_STAGES: 'echo fake-stage-should-not-run',
-    })
-    assert.equal(code, 0, out)
-    assert.match(out, /pre-push gate: verify:prepush:nofork \(1 stage\)/)
-    assert.ok(existsSync(shim.marker), 'the derived stage must execute')
-    assert.ok(!out.includes('fake-stage-should-not-run'), out)
-  } finally {
-    rmSync(shim.directory, { recursive: true, force: true })
-  }
+  const { code, out } = runHook([
+    `refs/tags/v-clean ${head} refs/tags/v-clean ${head}`,
+  ], {
+    PATH: `${shim.directory}:${process.env.PATH}`,
+    PUSH_GATE_TEST_MODE: '0',
+    PUSH_GATE_STAGES: 'echo fake-stage-should-not-run',
+  })
+  assert.equal(code, 0, out)
+  assert.match(out, /pre-push gate: verify:prepush:nofork \(1 stage\)/)
+  assert.ok(existsSync(shim.marker), 'the derived stage must execute')
+  assert.ok(!out.includes('fake-stage-should-not-run'), out)
 })
 
 test('pre-push hook: failing stage reports and exits 1', () => {

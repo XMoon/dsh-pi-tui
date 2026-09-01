@@ -25,10 +25,11 @@ import {
   scanZstdLayout,
 } from '../scripts/repair-core.mjs'
 import { writeArtifact, verifyArtifactFile, parseArgs } from '../scripts/repair-session.mjs'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, symlinkSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const HEADER = '{"type":"session","version":0,"id":"session-test","createdAt":1,"cwd":"/work","delegationDepth":0,"agentPreset":"standard"}'
 
@@ -326,8 +327,8 @@ const REPAIR_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scrip
 /** A minimal fake dsh install: a package.json named @deepseek-ai/dsh plus a
  * symlinked @deepseek-ai/dsh-session, so `--dsh-dir` resolves the real
  * storage decoder without touching the machine's dsh. */
-function makeDshStub() {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-stub-'))
+function makeDshStub(life) {
+  const dir = life.tempDir('dsh-stub-')
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.0.0' }))
   const modules = join(dir, 'node_modules', '@deepseek-ai')
   mkdirSync(modules, { recursive: true })
@@ -337,8 +338,8 @@ function makeDshStub() {
 }
 
 /** A fake dsh home with one session artifact. */
-function makeFakeHome(artifactBytes) {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-home-'))
+function makeFakeHome(life, artifactBytes) {
+  const home = life.tempDir('dsh-home-')
   const dir = join(home, 'sessions', 'proj', 'sess-1')
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'session.jsonl.zstd'), artifactBytes)
@@ -418,23 +419,21 @@ test('CLI --help still prints usage and exits 0', () => {
   assert.match(result.stdout, /usage:/)
 })
 
-test('CLI --help executes through a package-manager symlink', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-repair-link-'))
+test('CLI --help executes through a package-manager symlink', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-repair-link-')
   const link = join(dir, 'repair-session.mjs')
-  try {
-    symlinkSync(REPAIR_SCRIPT, link)
-    const result = spawnSync(process.execPath, [link, '--help'], { encoding: 'utf8' })
-    assert.equal(result.status, 0, result.stderr)
-    assert.match(result.stdout, /usage:/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  symlinkSync(REPAIR_SCRIPT, link)
+  const result = spawnSync(process.execPath, [link, '--help'], { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /usage:/)
 })
 
-test('CLI --scan reports a torn tail with byte accounting, never healthy', () => {
-  const stub = makeDshStub()
+test('CLI --scan reports a torn tail with byte accounting, never healthy', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
-  const home = makeFakeHome(torn)
+  const home = makeFakeHome(life, torn)
   const result = runCli(['--scan', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 1)
   assert.match(result.stdout, /CORRUPT sess-1:/)
@@ -444,10 +443,11 @@ test('CLI --scan reports a torn tail with byte accounting, never healthy', () =>
   assert.ok(!result.stdout.includes('no damaged sessions'))
 })
 
-test('CLI reports a torn tail for a single session without touching the file', () => {
-  const stub = makeDshStub()
+test('CLI reports a torn tail for a single session without touching the file', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
-  const home = makeFakeHome(torn)
+  const home = makeFakeHome(life, torn)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const before = readFileSync(path)
   const result = runCli(['sess-1', '--dsh-dir', stub, '--dsh-home', home])
@@ -483,10 +483,11 @@ function readLikeHarness(path) {
   return { header: JSON.parse(lines[0]), events }
 }
 
-test('CLI dry run reports keep/discard bytes and unknown loss; writes nothing', () => {
-  const stub = makeDshStub()
+test('CLI dry run reports keep/discard bytes and unknown loss; writes nothing', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
-  const home = makeFakeHome(torn)
+  const home = makeFakeHome(life, torn)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const before = readFileSync(path)
   const result = runCli(['sess-1', '--dsh-dir', stub, '--dsh-home', home])
@@ -497,10 +498,11 @@ test('CLI dry run reports keep/discard bytes and unknown loss; writes nothing', 
   assert.deepEqual(readFileSync(path), before, 'dry run must not modify the file')
 })
 
-test('CLI --yes truncates at the complete frame boundary, backs up first, writes 0600', () => {
-  const stub = makeDshStub()
+test('CLI --yes truncates at the complete frame boundary, backs up first, writes 0600', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
-  const home = makeFakeHome(torn)
+  const home = makeFakeHome(life, torn)
   const dir = join(home, 'sessions', 'proj', 'sess-1')
   const path = join(dir, 'session.jsonl.zstd')
   const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
@@ -532,9 +534,10 @@ test('CLI --yes truncates at the complete frame boundary, backs up first, writes
   assert.match(rescan.stdout, /nothing to repair/)
 })
 
-test('CLI refuses a torn tail with no salvageable prefix (damage at byte 0)', () => {
-  const stub = makeDshStub()
-  const home = makeFakeHome(Buffer.from([0x28, 0xb5]))
+test('CLI refuses a torn tail with no salvageable prefix (damage at byte 0)', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
+  const home = makeFakeHome(life, Buffer.from([0x28, 0xb5]))
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 1)
@@ -543,8 +546,9 @@ test('CLI refuses a torn tail with no salvageable prefix (damage at byte 0)', ()
   assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup for a refused repair')
 })
 
-test('writeArtifact verifies the tmp BEFORE the replace: a failing verify leaves the target untouched', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'repair-write-'))
+test('writeArtifact verifies the tmp BEFORE the replace: a failing verify leaves the target untouched', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('repair-write-')
   const path = join(dir, 'session.jsonl')
   const original = `${HEADER}\n`
   writeFileSync(path, original)
@@ -562,8 +566,9 @@ test('writeArtifact verifies the tmp BEFORE the replace: a failing verify leaves
   assert.deepEqual(leftovers, [], 'the tmp file must be removed on failure')
 })
 
-test('writeArtifact replaces atomically on success: 0600 target, backup kept, no tmp leftovers', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'repair-write-'))
+test('writeArtifact replaces atomically on success: 0600 target, backup kept, no tmp leftovers', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('repair-write-')
   const path = join(dir, 'session.jsonl')
   writeFileSync(path, 'old content\n')
   const good = `${HEADER}\n{"type":"user/message","seq":0,"time":1,"data":{}}\n`
@@ -579,8 +584,9 @@ test('writeArtifact replaces atomically on success: 0600 target, backup kept, no
   assert.equal(verifyArtifactFile(path, 'none', () => []), undefined)
 })
 
-test('writeArtifact verifies the zstd layout of the tmp before the replace', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'repair-write-'))
+test('writeArtifact verifies the zstd layout of the tmp before the replace', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('repair-write-')
   const path = join(dir, 'session.jsonl.zstd')
   const original = compressLog(encodeLog(HEADER, buildEvents([0, 1])), zstdCompressSync)
   writeFileSync(path, original)
@@ -596,11 +602,12 @@ test('writeArtifact verifies the zstd layout of the tmp before the replace', () 
   assert.equal(verifyArtifactFile(path, 'zstd', decodeStorageRecord), undefined)
 })
 
-test('CLI repair result passes the real dsh reader on a duplicate-seq log', () => {
-  const stub = makeDshStub()
+test('CLI repair result passes the real dsh reader on a duplicate-seq log', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = buildEvents([0, 1, 2, 2, 3])
   const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
-  const home = makeFakeHome(buffer)
+  const home = makeFakeHome(life, buffer)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 0, result.stdout + result.stderr)
@@ -789,12 +796,13 @@ test('explicit strategies are stable and repeatable', () => {
   assert.equal(encodeLog(HEADER, first.events), encodeLog(HEADER, second.events))
 })
 
-test('CLI refuses an ambiguous duplicate-seq log by default without writing', () => {
-  const stub = makeDshStub()
+test('CLI refuses an ambiguous duplicate-seq log by default without writing', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = buildEvents([0, 1, 2, 2, 3])
   events[4].data = { sourceEventSeqs: [2] }
   const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
-  const home = makeFakeHome(buffer)
+  const home = makeFakeHome(life, buffer)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const before = readFileSync(path)
   const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
@@ -806,12 +814,13 @@ test('CLI refuses an ambiguous duplicate-seq log by default without writing', ()
   assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup for a refused repair')
 })
 
-test('CLI --duplicate-reference first applies the strategy and prints the plan', () => {
-  const stub = makeDshStub()
+test('CLI --duplicate-reference first applies the strategy and prints the plan', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = buildEvents([0, 1, 2, 2, 3])
   events[4].data = { sourceEventSeqs: [2] }
   const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
-  const home = makeFakeHome(buffer)
+  const home = makeFakeHome(life, buffer)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const result = runCli(['sess-1', '--yes', '--duplicate-reference', 'first', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 0, result.stdout + result.stderr)
@@ -826,12 +835,13 @@ test('CLI --duplicate-reference first applies the strategy and prints the plan',
   assert.match(rescan.stdout, /nothing to repair/)
 })
 
-test('CLI accepts the README = form (--duplicate-reference=first)', () => {
-  const stub = makeDshStub()
+test('CLI accepts the README = form (--duplicate-reference=first)', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = buildEvents([0, 1, 2, 2, 3])
   events[4].data = { sourceEventSeqs: [2] }
   const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
-  const home = makeFakeHome(buffer)
+  const home = makeFakeHome(life, buffer)
   const result = runCli(['sess-1', '--yes', '--duplicate-reference=first', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 0, result.stdout + result.stderr)
   assert.match(result.stdout, /resolved as first/)
@@ -839,16 +849,17 @@ test('CLI accepts the README = form (--duplicate-reference=first)', () => {
   assert.equal(read.events.length, 5)
 })
 
-test('CLI --duplicate-reference=segment refuses a same-frame conflict and reports it', () => {
+test('CLI --duplicate-reference=segment refuses a same-frame conflict and reports it', (t) => {
   // compressLog produces ONE content frame: every event shares the writer
   // segment, so both occurrences of seq 2 sit in the referencing event's
   // frame — the segment binding cannot be unique and the CLI must refuse
   // with the same-frame conflict report, never guess.
-  const stub = makeDshStub()
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = buildEvents([0, 1, 2, 2, 3])
   events[4].data = { sourceEventSeqs: [2] }
   const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
-  const home = makeFakeHome(buffer)
+  const home = makeFakeHome(life, buffer)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const before = readFileSync(path)
   const result = runCli(['sess-1', '--yes', '--duplicate-reference', 'segment', '--dsh-dir', stub, '--dsh-home', home])
@@ -907,14 +918,15 @@ test('ignorable event: duplicate-seq renumber preserves the marker and corrects 
   assertIgnorableIntact(again.events[4], 4)
 })
 
-test('ignorable event: CLI re-frame keeps the marker and the repaired artifact re-scans clean', () => {
-  const stub = makeDshStub()
+test('ignorable event: CLI re-frame keeps the marker and the repaired artifact re-scans clean', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = [...buildEvents([0, 1]), ignorableEvent(2, 1002)]
   // Whole-log single frame: structurally valid zstd, rejected by the dsh
   // layout (first frame must be exactly one header line) — the repair
   // re-frames it into the dsh layout.
   const singleFrame = zstdCompressSync(Buffer.from(encodeLog(HEADER, events), 'utf8'))
-  const home = makeFakeHome(singleFrame)
+  const home = makeFakeHome(life, singleFrame)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 0, result.stdout + result.stderr)
@@ -924,8 +936,9 @@ test('ignorable event: CLI re-frame keeps the marker and the repaired artifact r
   assertIgnorableIntact(read.events[2], 2)
 })
 
-test('ignorable event: CLI torn-tail repair keeps the marker on the salvaged prefix', () => {
-  const stub = makeDshStub()
+test('ignorable event: CLI torn-tail repair keeps the marker on the salvaged prefix', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = [...buildEvents([0, 1]), ignorableEvent(2, 1002), ...buildEvents([3, 4])]
   const text = encodeLog(HEADER, events)
   const lines = text.trimEnd().split('\n')
@@ -938,7 +951,7 @@ test('ignorable event: CLI torn-tail repair keeps the marker on the salvaged pre
   ])
   const layout = scanFrameLayout(buffer, zstdDecompressSync)
   assert.equal(layout.status, 'torn-tail')
-  const home = makeFakeHome(buffer)
+  const home = makeFakeHome(life, buffer)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 0, result.stdout + result.stderr)

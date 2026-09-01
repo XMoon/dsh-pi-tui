@@ -7,10 +7,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { getEventListeners } from 'node:events'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { FooterCommandRunner, KILL_GRACE_MS, type FooterCommandConfig } from '../src/footer/command-runner.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
@@ -154,13 +154,14 @@ test('a NUL byte in the command degrades to the fallback — requestRefresh neve
   }
 })
 
-test('a TERM-resistant child is HARD-killed after the grace period (no detached orphan)', async () => {
+test('a TERM-resistant child is HARD-killed after the grace period (no detached orphan)', async (t) => {
   // The child traps TERM and would run forever: a plain SIGTERM (the old
   // killChild) leaves it running as a detached orphan — the runner must
   // escalate to SIGKILL within KILL_GRACE_MS. The child records its own
   // pid (the detached group leader) so the test can PROVE the process is
   // actually gone — this assertion fails against the old implementation.
-  const dir = mkdtempSync(join(tmpdir(), 'footer-kill-'))
+  const life = testLifecycle(t)
+  const dir = life.tempDir('footer-kill-')
   const marker = join(dir, 'child.pid')
   const rows = await new Promise<string[] | undefined>((resolve) => {
     const runner = new FooterCommandRunner({
@@ -207,15 +208,15 @@ test('a TERM-resistant child is HARD-killed after the grace period (no detached 
     }
   }
   assert.ok(dead, `the TERM-resistant child must be hard-killed (no orphan), pid ${pid} still alive`)
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('repeated TERM-resistant children are each hard-killed (the termination ledger cleans up between cycles)', async () => {
+test('repeated TERM-resistant children are each hard-killed (the termination ledger cleans up between cycles)', async (t) => {
   // The round-2 review catch: the terminating set never removed closed
   // children. Behaviourally: a SECOND TERM-resistant child must still be
   // escalated and killed after the first one completed its cycle — the
   // ledger entry of the first child must not block or leak into the next.
-  const dir = mkdtempSync(join(tmpdir(), 'footer-kill-loop-'))
+  const life = testLifecycle(t)
+  const dir = life.tempDir('footer-kill-loop-')
   // A DISTINCT marker per cycle: a stale first-cycle pid must never be
   // mistaken for the second child's (the round-3 review catch).
   let pid = -1
@@ -276,17 +277,17 @@ test('repeated TERM-resistant children are each hard-killed (the termination led
     }
     assert.ok(dead, `cycle child pid ${victim} must be hard-killed (no orphan, no ledger leak)`)
   }
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('a TERM-resistant DESCENDANT is hard-killed even when the group LEADER exits on TERM (group-scoped escalation)', async () => {
+test('a TERM-resistant DESCENDANT is hard-killed even when the group LEADER exits on TERM (group-scoped escalation)', async (t) => {
   // The review's P1b scenario: the command starts a BACKGROUND descendant
   // that traps TERM and redirects its stdio; the OUTER shell (the group
   // leader) receives TERM and exits NORMALLY — Node's 'close' fires — but
   // the descendant keeps the process group alive. A leader-bound
   // escalation would be cancelled by that close and leak the descendant;
   // the escalation must probe the WHOLE GROUP.
-  const dir = mkdtempSync(join(tmpdir(), 'footer-desc-'))
+  const life = testLifecycle(t)
+  const dir = life.tempDir('footer-desc-')
   const leaderMarker = join(dir, 'leader.pid')
   const descendantMarker = join(dir, 'descendant.pid')
   const rows = await new Promise<string[] | undefined>((resolve) => {
@@ -341,7 +342,6 @@ test('a TERM-resistant DESCENDANT is hard-killed even when the group LEADER exit
     }
     assert.ok(dead, `pid ${victim} must be dead (no descendant orphan): leader=${leader} descendant=${descendant}`)
   }
-  rmSync(dir, { recursive: true, force: true })
 })
 
 test('huge stdout is capped at 16 KiB', async () => {

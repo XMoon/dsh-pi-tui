@@ -14,8 +14,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -27,6 +26,7 @@ import type { HeaderBadge } from '../src/extension/public-types.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const settle = async (): Promise<void> => {
@@ -235,10 +235,11 @@ test('P0-1: a plugin following the README example registers BEFORE any surface e
   }
 })
 
-test('the version badge shows the dsh version first, then the tui- bundle version', async () => {
+test('the version badge shows the dsh version first, then the tui- bundle version', async (t) => {
+  const life = testLifecycle(t)
   // Point the launcher at a fabricated @deepseek-ai/dsh package so the
   // shared dshVersion() resolves: bin → ../../package.json named dsh.
-  const root = mkdtempSync(join(tmpdir(), 'dsh-version-badge-'))
+  const root = life.tempDir('dsh-version-badge-')
   const dshDir = join(root, 'node_modules', '@deepseek-ai', 'dsh')
   mkdirSync(join(dshDir, 'bin'), { recursive: true })
   writeFileSync(join(dshDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.2-alpha.1' }))
@@ -257,6 +258,7 @@ test('the version badge shows the dsh version first, then the tui- bundle versio
       const vt = new VirtualTerminal(90, 24)
       const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
       app.start()
+      life.defer(() => app.stop())
       await vt.waitForRender()
       host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
         surfaceId: host.surfaceId, generation: 1, width: 90, height: 24, fullscreen: false,
@@ -270,7 +272,6 @@ test('the version badge shows the dsh version first, then the tui- bundle versio
         /\[dsh-0\.1\.2-alpha\.1 · tui-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\]/.test(view),
         `dsh-first badge missing:\n${view}`,
       )
-      app.stop()
     } finally {
       for (const runtime of [...ctx.registry.values()]) {
         for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())

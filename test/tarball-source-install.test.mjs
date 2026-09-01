@@ -3,15 +3,15 @@ import { once } from 'node:events'
 import { spawn, spawnSync } from 'node:child_process'
 import {
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SMOKE = join(ROOT, 'scripts', 'tarball-smoke.mjs')
@@ -58,8 +58,8 @@ function candidateFiles() {
   }
 }
 
-function makeFixture({ includePresets = true, candidatePeers = { [DSH_CLI]: `>=${VERSION}` }, schemaVersion = 1 } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'tarball-source-install-'))
+function makeFixture(life, { includePresets = true, candidatePeers = { [DSH_CLI]: `>=${VERSION}` }, schemaVersion = 1 } = {}) {
+  const root = life.tempDir('tarball-source-install-')
   const distribution = join(root, 'distribution')
   mkdirSync(distribution, { recursive: true })
   const packages = {}
@@ -136,8 +136,10 @@ function runSourceSmoke(fixture, { cliDistribution = fixture.distribution, envDi
   if (envDistribution !== undefined) env.DSH_SOURCE_DISTRIBUTION = envDistribution
   const args = [SMOKE, fixture.candidate]
   if (cliDistribution !== undefined) args.push('--dsh-distribution', cliDistribution)
+  const cwd = join(fixture.root, 'clean-cwd')
+  mkdirSync(cwd, { recursive: true })
   return spawnSync(process.execPath, args, {
-    cwd: mkdtempSync(join(fixture.root, 'clean-cwd-')),
+    cwd,
     env,
     encoding: 'utf8',
   })
@@ -146,8 +148,10 @@ function runSourceSmoke(fixture, { cliDistribution = fixture.distribution, envDi
 function runNpmSmoke(fixture) {
   const env = smokeEnvironment(fixture)
   delete env.TARBALL_SMOKE_SKIP_INSTALL
+  const cwd = join(fixture.root, 'clean-cwd')
+  mkdirSync(cwd, { recursive: true })
   return spawnSync(process.execPath, [SMOKE, fixture.candidate], {
-    cwd: mkdtempSync(join(fixture.root, 'clean-cwd-')),
+    cwd,
     env,
     encoding: 'utf8',
   })
@@ -220,103 +224,81 @@ async function stopRegistry(registry) {
   await once(registry.child, 'exit')
 }
 
-test('source mode installs a fresh candidate and proves local DSH provenance', () => {
-  const fixture = makeFixture()
-  try {
-    const result = runSourceSmoke(fixture)
-    const output = outputOf(result)
-    assert.equal(result.status, 0, output)
-    assert.match(output, /source distribution fresh install \(pnpm\)/)
-    assert.match(output, /all reachable DSH packages resolve from local tarballs/)
-    assert.match(output, /installed package contains dist/)
-    assert.match(output, /all exports entries import/)
-    assert.match(output, /DSH source SHA\s+: a{40}/)
-    assert.match(output, /package count\s+: 2/)
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true })
-  }
+test('source mode installs a fresh candidate and proves local DSH provenance', (t) => {
+  const life = testLifecycle(t)
+  const fixture = makeFixture(life)
+  const result = runSourceSmoke(fixture)
+  const output = outputOf(result)
+  assert.equal(result.status, 0, output)
+  assert.match(output, /source distribution fresh install \(pnpm\)/)
+  assert.match(output, /all reachable DSH packages resolve from local tarballs/)
+  assert.match(output, /installed package contains dist/)
+  assert.match(output, /all exports entries import/)
+  assert.match(output, /DSH source SHA\s+: a{40}/)
+  assert.match(output, /package count\s+: 2/)
 })
 
-test('source mode accepts DSH_SOURCE_DISTRIBUTION without a CLI argument', () => {
-  const fixture = makeFixture()
-  try {
-    const result = runSourceSmoke(fixture, {
-      cliDistribution: undefined,
-      envDistribution: fixture.distribution,
-    })
-    const output = outputOf(result)
-    assert.equal(result.status, 0, output)
-    assert.match(output, /source distribution fresh install \(pnpm\)/)
-    assert.match(output, /all reachable DSH packages resolve from local tarballs/)
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true })
-  }
+test('source mode accepts DSH_SOURCE_DISTRIBUTION without a CLI argument', (t) => {
+  const life = testLifecycle(t)
+  const fixture = makeFixture(life)
+  const result = runSourceSmoke(fixture, {
+    cliDistribution: undefined,
+    envDistribution: fixture.distribution,
+  })
+  const output = outputOf(result)
+  assert.equal(result.status, 0, output)
+  assert.match(output, /source distribution fresh install \(pnpm\)/)
+  assert.match(output, /all reachable DSH packages resolve from local tarballs/)
 })
 
-test('source distribution CLI argument takes precedence over its environment fallback', () => {
-  const fixture = makeFixture()
-  const wrongDistribution = makeFixture({ schemaVersion: 2 })
-  try {
-    const result = runSourceSmoke(fixture, { envDistribution: wrongDistribution.distribution })
-    const output = outputOf(result)
-    assert.equal(result.status, 0, output)
-    assert.match(output, /DSH source SHA\s+: a{40}/)
-    assert.match(output, /package count\s+: 2/)
-  } finally {
-    rmSync(wrongDistribution.root, { recursive: true, force: true })
-    rmSync(fixture.root, { recursive: true, force: true })
-  }
+test('source distribution CLI argument takes precedence over its environment fallback', (t) => {
+  const life = testLifecycle(t)
+  const fixture = makeFixture(life)
+  const wrongDistribution = makeFixture(life, { schemaVersion: 2 })
+  const result = runSourceSmoke(fixture, { envDistribution: wrongDistribution.distribution })
+  const output = outputOf(result)
+  assert.equal(result.status, 0, output)
+  assert.match(output, /DSH source SHA\s+: a{40}/)
+  assert.match(output, /package count\s+: 2/)
 })
 
-test('source mode rejects a skip-install override instead of bypassing fresh install', () => {
-  const fixture = makeFixture()
-  try {
-    const result = runSourceSmoke(fixture, { skipInstall: true })
-    const output = outputOf(result)
-    assert.notEqual(result.status, 0, output)
-    assert.match(output, /TARBALL_SMOKE_SKIP_INSTALL=1 cannot be combined with a DSH source distribution/)
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true })
-  }
+test('source mode rejects a skip-install override instead of bypassing fresh install', (t) => {
+  const life = testLifecycle(t)
+  const fixture = makeFixture(life)
+  const result = runSourceSmoke(fixture, { skipInstall: true })
+  const output = outputOf(result)
+  assert.notEqual(result.status, 0, output)
+  assert.match(output, /TARBALL_SMOKE_SKIP_INSTALL=1 cannot be combined with a DSH source distribution/)
 })
 
-test('source mode rejects a missing reachable DSH package without registry fallback', async () => {
-  const fixture = makeFixture({ includePresets: false })
+test('source mode rejects a missing reachable DSH package without registry fallback', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = makeFixture(life, { includePresets: false })
   const registry = await startRegistry(fixture)
-  try {
-    const result = runSourceSmoke(fixture, { registry: registry.url })
-    const output = outputOf(result)
-    assert.notEqual(result.status, 0, output)
-    assert.match(output, /@deepseek-ai\/dsh references DSH package @deepseek-ai\/dsh-agent-presets/)
-    assert.doesNotMatch(output, /source distribution fresh install \(pnpm\).*ok/u)
-    assert.equal(readFileSync(registry.requestLog, 'utf8'), '', 'source preflight must prevent registry fallback requests')
-  } finally {
-    await stopRegistry(registry)
-    rmSync(fixture.root, { recursive: true, force: true })
-  }
+  life.defer(() => stopRegistry(registry))
+  const result = runSourceSmoke(fixture, { registry: registry.url })
+  const output = outputOf(result)
+  assert.notEqual(result.status, 0, output)
+  assert.match(output, /@deepseek-ai\/dsh references DSH package @deepseek-ai\/dsh-agent-presets/)
+  assert.doesNotMatch(output, /source distribution fresh install \(pnpm\).*ok/u)
+  assert.equal(readFileSync(registry.requestLog, 'utf8'), '', 'source preflight must prevent registry fallback requests')
 })
 
-test('source mode rejects a malformed distribution', () => {
-  const fixture = makeFixture({ schemaVersion: 2 })
-  try {
-    const result = runSourceSmoke(fixture)
-    const output = outputOf(result)
-    assert.notEqual(result.status, 0, output)
-    assert.match(output, /schemaVersion must be 1/)
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true })
-  }
+test('source mode rejects a malformed distribution', (t) => {
+  const life = testLifecycle(t)
+  const fixture = makeFixture(life, { schemaVersion: 2 })
+  const result = runSourceSmoke(fixture)
+  const output = outputOf(result)
+  assert.notEqual(result.status, 0, output)
+  assert.match(output, /schemaVersion must be 1/)
 })
 
-test('npm mode without a distribution keeps the existing fresh npm install path', () => {
-  const fixture = makeFixture({ candidatePeers: {} })
-  try {
-    const result = runNpmSmoke(fixture)
-    const output = outputOf(result)
-    assert.equal(result.status, 0, output)
-    assert.match(output, /tarball installs standalone \(npm install --omit=dev\)/)
-    assert.match(output, /all exports entries import/)
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true })
-  }
+test('npm mode without a distribution keeps the existing fresh npm install path', (t) => {
+  const life = testLifecycle(t)
+  const fixture = makeFixture(life, { candidatePeers: {} })
+  const result = runNpmSmoke(fixture)
+  const output = outputOf(result)
+  assert.equal(result.status, 0, output)
+  assert.match(output, /tarball installs standalone \(npm install --omit=dev\)/)
+  assert.match(output, /all exports entries import/)
 })

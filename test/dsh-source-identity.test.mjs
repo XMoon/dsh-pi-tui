@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import {
   DshDistributionError,
   requiredDshPackages,
@@ -54,8 +55,8 @@ function git(directory, ...args) {
   return result.stdout.trim()
 }
 
-function sourceCheckout() {
-  const directory = mkdtempSync(join(tmpdir(), 'dsh-identity-test-'))
+function sourceCheckout(life) {
+  const directory = life.tempDir('dsh-identity-test-')
   mkdirSync(join(directory, 'apps', 'cli'), { recursive: true })
   writeFileSync(join(directory, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-root', version: VERSION }))
   writeFileSync(join(directory, 'apps', 'cli', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: VERSION }))
@@ -85,8 +86,7 @@ function fakePnpmScript() {
   return `#!/usr/bin/env node
 import { appendFileSync, cpSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 const args = process.argv.slice(2)
 const command = args[0]
@@ -116,7 +116,10 @@ if (process.env.DSH_FAKE_INVALID === '1') {
   process.exit(0)
 }
 for (const name of JSON.parse(process.env.DSH_FAKE_PACKAGES)) {
-  const temporary = mkdtempSync(join(tmpdir(), 'dsh-source-pack-fixture-'))
+  // Stage BESIDE the final output (like the real dsh-source-pack.mjs), so
+  // even a crashed child only ever leaves files inside the test-owned
+  // fixture root — never scattered dsh-* directories in the system /tmp.
+  const temporary = mkdtempSync(join(dirname(output), '.dsh-source-pack-fixture-'))
   const packageDirectory = join(temporary, 'package')
   mkdirSync(packageDirectory)
   writeFileSync(join(packageDirectory, 'package.json'), JSON.stringify({ name, version: process.env.DSH_FAKE_VERSION }))
@@ -133,9 +136,9 @@ if (process.env.DSH_FAKE_CREATE_FINAL !== undefined) {
 `
 }
 
-function runSourcePackFixture({ invalid = false, outputAppears = false, replaceStaging = false, replaceOutputParent = false } = {}) {
-  const source = sourceCheckout()
-  const root = mkdtempSync(join(tmpdir(), 'dsh-source-pack-main-test-'))
+function runSourcePackFixture(life, { invalid = false, outputAppears = false, replaceStaging = false, replaceOutputParent = false } = {}) {
+  const source = sourceCheckout(life)
+  const root = life.tempDir('dsh-source-pack-main-test-')
   const configPath = join(root, 'source.json')
   const outputParent = join(root, 'final')
   const output = join(outputParent, 'pack')
@@ -169,87 +172,67 @@ function runSourcePackFixture({ invalid = false, outputAppears = false, replaceS
   return { result, root, source, output, outputParent, trace }
 }
 
-test('source pack main validates in same-filesystem staging before atomic publish', () => {
-  const fixture = runSourcePackFixture()
-  try {
-    assert.equal(fixture.result.status, 0, fixture.result.stderr)
-    assert.equal(existsSync(fixture.output), true)
-    const manifest = JSON.parse(readFileSync(join(fixture.output, 'dsh-source-distribution.json'), 'utf8'))
-    assert.equal(Object.keys(manifest.packages).length, REQUIRED_PACKAGES.length)
-    assert.equal(manifest.mode, 'source-pack')
-    const release = readFileSync(fixture.trace, 'utf8').trim().split('\n')
-      .map(line => JSON.parse(line))
-      .find(entry => entry.command === 'release:pack')
-    assert.ok(release)
-    assert.equal(dirname(dirname(release.args[release.args.indexOf('--out') + 1])), fixture.outputParent)
-    assert.equal(readdirSync(fixture.outputParent).some(name => name.startsWith('.dsh-source-pack-')), false)
+test('source pack main validates in same-filesystem staging before atomic publish', (t) => {
+  const life = testLifecycle(t)
+  const fixture = runSourcePackFixture(life)
+  assert.equal(fixture.result.status, 0, fixture.result.stderr)
+  assert.equal(existsSync(fixture.output), true)
+  const manifest = JSON.parse(readFileSync(join(fixture.output, 'dsh-source-distribution.json'), 'utf8'))
+  assert.equal(Object.keys(manifest.packages).length, REQUIRED_PACKAGES.length)
+  assert.equal(manifest.mode, 'source-pack')
+  const release = readFileSync(fixture.trace, 'utf8').trim().split('\n')
+    .map(line => JSON.parse(line))
+    .find(entry => entry.command === 'release:pack')
+  assert.ok(release)
+  assert.equal(dirname(dirname(release.args[release.args.indexOf('--out') + 1])), fixture.outputParent)
+  assert.equal(readdirSync(fixture.outputParent).some(name => name.startsWith('.dsh-source-pack-')), false)
 
-    const sourcePack = readFileSync(SOURCE_PACK_SCRIPT, 'utf8')
-    assert.match(sourcePack, /const staging = sourcePackStaging\(dirname\(output\)\)/u)
-    assert.match(sourcePack, /renameSync\(stageOutput, output\)/u)
-    assert.doesNotMatch(sourcePack, /claimSourcePack|copyOwnedFile|outputOwner|openDirectoryHandle|birthtime/u)
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true })
-    rmSync(fixture.source, { recursive: true, force: true })
-  }
+  const sourcePack = readFileSync(SOURCE_PACK_SCRIPT, 'utf8')
+  assert.match(sourcePack, /const staging = sourcePackStaging\(dirname\(output\)\)/u)
+  assert.match(sourcePack, /renameSync\(stageOutput, output\)/u)
+  assert.doesNotMatch(sourcePack, /claimSourcePack|copyOwnedFile|outputOwner|openDirectoryHandle|birthtime/u)
 })
 
-test('source pack failure leaves final output absent and only cleans staging', () => {
-  const fixture = runSourcePackFixture({ invalid: true })
-  try {
-    assert.notEqual(fixture.result.status, 0)
-    assert.match(fixture.result.stderr, /unknown entry/u)
-    assert.equal(existsSync(fixture.output), false)
-    assert.equal(readdirSync(fixture.outputParent).some(name => name.startsWith('.dsh-source-pack-')), false)
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true })
-    rmSync(fixture.source, { recursive: true, force: true })
-  }
+test('source pack failure leaves final output absent and only cleans staging', (t) => {
+  const life = testLifecycle(t)
+  const fixture = runSourcePackFixture(life, { invalid: true })
+  assert.notEqual(fixture.result.status, 0)
+  assert.match(fixture.result.stderr, /unknown entry/u)
+  assert.equal(existsSync(fixture.output), false)
+  assert.equal(readdirSync(fixture.outputParent).some(name => name.startsWith('.dsh-source-pack-')), false)
 })
 
-test('source pack cleanup leaves a replaced staging directory intact', () => {
-  const fixture = runSourcePackFixture({ replaceStaging: true })
-  try {
-    assert.notEqual(fixture.result.status, 0)
-    const release = readFileSync(fixture.trace, 'utf8').trim().split('\n')
-      .map(line => JSON.parse(line))
-      .find(entry => entry.command === 'release:pack')
-    assert.ok(release)
-    const stageOutput = release.args[release.args.indexOf('--out') + 1]
-    assert.equal(readFileSync(join(dirname(stageOutput), 'sentinel.txt'), 'utf8'), 'replacement staging must survive')
-    assert.equal(existsSync(fixture.output), false)
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true })
-    rmSync(fixture.source, { recursive: true, force: true })
-  }
+test('source pack cleanup leaves a replaced staging directory intact', (t) => {
+  const life = testLifecycle(t)
+  const fixture = runSourcePackFixture(life, { replaceStaging: true })
+  assert.notEqual(fixture.result.status, 0)
+  const release = readFileSync(fixture.trace, 'utf8').trim().split('\n')
+    .map(line => JSON.parse(line))
+    .find(entry => entry.command === 'release:pack')
+  assert.ok(release)
+  const stageOutput = release.args[release.args.indexOf('--out') + 1]
+  assert.equal(readFileSync(join(dirname(stageOutput), 'sentinel.txt'), 'utf8'), 'replacement staging must survive')
+  assert.equal(existsSync(fixture.output), false)
 })
 
-test('source pack refuses an output parent replacement before publication', () => {
-  const fixture = runSourcePackFixture({ replaceOutputParent: true })
-  try {
-    assert.notEqual(fixture.result.status, 0)
-    assert.match(fixture.result.stderr, /output parent changed before atomic publish/u)
-    const replacementParent = lstatSync(fixture.outputParent)
-    assert.equal(replacementParent.isDirectory(), true)
-    assert.equal(replacementParent.isSymbolicLink(), false)
-    assert.equal(existsSync(fixture.output), false)
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true })
-    rmSync(fixture.source, { recursive: true, force: true })
-  }
+test('source pack refuses an output parent replacement before publication', (t) => {
+  const life = testLifecycle(t)
+  const fixture = runSourcePackFixture(life, { replaceOutputParent: true })
+  assert.notEqual(fixture.result.status, 0)
+  assert.match(fixture.result.stderr, /output parent changed before atomic publish/u)
+  const replacementParent = lstatSync(fixture.outputParent)
+  assert.equal(replacementParent.isDirectory(), true)
+  assert.equal(replacementParent.isSymbolicLink(), false)
+  assert.equal(existsSync(fixture.output), false)
 })
 
-test('source pack refuses a final path that appears before publication', () => {
-  const fixture = runSourcePackFixture({ outputAppears: true })
-  try {
-    assert.notEqual(fixture.result.status, 0)
-    assert.match(fixture.result.stderr, /appeared before atomic publish/u)
-    assert.equal(readFileSync(join(fixture.output, 'sentinel.txt'), 'utf8'), 'raced output must survive')
-    assert.equal(readdirSync(fixture.outputParent).some(name => name.startsWith('.dsh-source-pack-')), false)
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true })
-    rmSync(fixture.source, { recursive: true, force: true })
-  }
+test('source pack refuses a final path that appears before publication', (t) => {
+  const life = testLifecycle(t)
+  const fixture = runSourcePackFixture(life, { outputAppears: true })
+  assert.notEqual(fixture.result.status, 0)
+  assert.match(fixture.result.stderr, /appeared before atomic publish/u)
+  assert.equal(readFileSync(join(fixture.output, 'sentinel.txt'), 'utf8'), 'raced output must survive')
+  assert.equal(readdirSync(fixture.outputParent).some(name => name.startsWith('.dsh-source-pack-')), false)
 })
 
 test('source verification delegates packing to the dedicated pack script', () => {
@@ -301,17 +284,14 @@ test('source dependency preparation disables pnpm verification and self-manageme
   assert.equal(environment.DSH_TEST_SENTINEL, 'preserved')
 })
 
-test('source verification rejects a symlinked candidate tarball', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'dsh-source-candidate-test-'))
-  try {
-    const target = join(directory, 'external.tgz')
-    const candidate = join(directory, 'xmoon76-dsh-pi-tui-0.4.0.tgz')
-    writeFileSync(target, 'not a tarball')
-    symlinkSync(target, candidate)
-    assert.throws(() => sourceVerifyCandidateTarball(directory), /expected one TUI candidate/u)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
+test('source verification rejects a symlinked candidate tarball', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('dsh-source-candidate-test-')
+  const target = join(directory, 'external.tgz')
+  const candidate = join(directory, 'xmoon76-dsh-pi-tui-0.4.0.tgz')
+  writeFileSync(target, 'not a tarball')
+  symlinkSync(target, candidate)
+  assert.throws(() => sourceVerifyCandidateTarball(directory), /expected one TUI candidate/u)
 })
 
 test('source verification fails once for a missing checkout instead of recursively spawning', () => {
@@ -326,29 +306,25 @@ test('source verification fails once for a missing checkout instead of recursive
   assert.match(output, /DSH source checkout is missing/u)
 })
 
-test('source verification removes a generated pack after official packing fails', () => {
-  const checkout = sourceCheckout()
-  const container = mkdtempSync(join(tmpdir(), 'dsh-source-pack-failure-test-'))
+test('source verification removes a generated pack after official packing fails', (t) => {
+  const life = testLifecycle(t)
+  const checkout = sourceCheckout(life)
+  const container = life.tempDir('dsh-source-pack-failure-test-')
   const output = join(container, 'pack')
   const script = fileURLToPath(new URL('../scripts/dsh-source-verify.mjs', import.meta.url))
   const configPath = fileURLToPath(new URL('../test/compat/dsh-source.json', import.meta.url))
-  try {
-    const head = git(checkout, 'rev-parse', 'HEAD')
-    const result = spawnSync(process.execPath, [
-      script,
-      '--dsh-dir', checkout,
-      '--ref', head,
-      '--expected-version', VERSION,
-      '--config', configPath,
-      '--out', output,
-    ], { encoding: 'utf8', timeout: 10_000 })
-    assert.equal(result.status, 1, result.stderr)
-    assert.match(`${result.stdout}${result.stderr}`, /official DSH source pack/u)
-    assert.equal(existsSync(output), false)
-  } finally {
-    rmSync(checkout, { recursive: true, force: true })
-    rmSync(container, { recursive: true, force: true })
-  }
+  const head = git(checkout, 'rev-parse', 'HEAD')
+  const result = spawnSync(process.execPath, [
+    script,
+    '--dsh-dir', checkout,
+    '--ref', head,
+    '--expected-version', VERSION,
+    '--config', configPath,
+    '--out', output,
+  ], { encoding: 'utf8', timeout: 10_000 })
+  assert.equal(result.status, 1, result.stderr)
+  assert.match(`${result.stdout}${result.stderr}`, /official DSH source pack/u)
+  assert.equal(existsSync(output), false)
 })
 
 test('distribution-only source verification does not require a checkout argument', () => {
@@ -362,22 +338,19 @@ test('distribution-only source verification does not require a checkout argument
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, /--dsh-dir is required/u)
 })
 
-test('source verify resolves relative paths before invoking child workspaces', () => {
-  const invocation = mkdtempSync(join(tmpdir(), 'dsh-source-verify-cwd-test-'))
-  try {
-    const paths = resolveSourceVerifyPaths({
-      config: 'config/dsh-source.json',
-      'dsh-dir': '../deepseek-harness',
-      distribution: 'artifacts/source-pack',
-      out: 'artifacts/next-pack',
-    }, invocation)
-    assert.equal(paths.config, resolve(invocation, 'config/dsh-source.json'))
-    assert.equal(paths['dsh-dir'], resolve(invocation, '../deepseek-harness'))
-    assert.equal(paths.distribution, resolve(invocation, 'artifacts/source-pack'))
-    assert.equal(paths.out, resolve(invocation, 'artifacts/next-pack'))
-  } finally {
-    rmSync(invocation, { recursive: true, force: true })
-  }
+test('source verify resolves relative paths before invoking child workspaces', (t) => {
+  const life = testLifecycle(t)
+  const invocation = life.tempDir('dsh-source-verify-cwd-test-')
+  const paths = resolveSourceVerifyPaths({
+    config: 'config/dsh-source.json',
+    'dsh-dir': '../deepseek-harness',
+    distribution: 'artifacts/source-pack',
+    out: 'artifacts/next-pack',
+  }, invocation)
+  assert.equal(paths.config, resolve(invocation, 'config/dsh-source.json'))
+  assert.equal(paths['dsh-dir'], resolve(invocation, '../deepseek-harness'))
+  assert.equal(paths.distribution, resolve(invocation, 'artifacts/source-pack'))
+  assert.equal(paths.out, resolve(invocation, 'artifacts/next-pack'))
 })
 
 test('official source commands disable pnpm verification and self-management', () => {
@@ -389,86 +362,74 @@ test('official source commands disable pnpm verification and self-management', (
   assert.equal(env.pnpm_config_manage_package_manager_versions, 'false')
 })
 
-test('source pack refuses destructive output directories', () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-output-test-'))
+test('source pack refuses destructive output directories', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-output-test-')
   const checkout = join(root, 'checkout')
   const arbitrary = join(root, 'arbitrary')
   const prior = join(root, 'prior-pack')
-  try {
-    mkdirSync(checkout)
-    mkdirSync(arbitrary)
-    writeFileSync(join(arbitrary, 'sentinel.txt'), 'do not delete')
-    assert.throws(() => validateSourcePackOutput(arbitrary, checkout), /already exists/u)
-    assert.equal(readFileSync(join(arbitrary, 'sentinel.txt'), 'utf8'), 'do not delete')
-    const empty = join(root, 'empty')
-    mkdirSync(empty)
-    assert.throws(() => validateSourcePackOutput(empty, checkout), /already exists/u)
-    assert.throws(() => validateSourcePackOutput(join(fileURLToPath(new URL('../', import.meta.url)), 'dsh-source-pack-test-output'), checkout), /TUI checkout/u)
-    symlinkSync(checkout, join(root, 'checkout-link'), 'dir')
-    assert.throws(() => validateSourcePackOutput(join(root, 'checkout-link', 'out'), checkout), /DSH checkout/u)
-    assert.doesNotThrow(() => validateSourcePackOutput(join(root, 'new-pack'), checkout))
+  mkdirSync(checkout)
+  mkdirSync(arbitrary)
+  writeFileSync(join(arbitrary, 'sentinel.txt'), 'do not delete')
+  assert.throws(() => validateSourcePackOutput(arbitrary, checkout), /already exists/u)
+  assert.equal(readFileSync(join(arbitrary, 'sentinel.txt'), 'utf8'), 'do not delete')
+  const empty = join(root, 'empty')
+  mkdirSync(empty)
+  assert.throws(() => validateSourcePackOutput(empty, checkout), /already exists/u)
+  assert.throws(() => validateSourcePackOutput(join(fileURLToPath(new URL('../', import.meta.url)), 'dsh-source-pack-test-output'), checkout), /TUI checkout/u)
+  symlinkSync(checkout, join(root, 'checkout-link'), 'dir')
+  assert.throws(() => validateSourcePackOutput(join(root, 'checkout-link', 'out'), checkout), /DSH checkout/u)
+  assert.doesNotThrow(() => validateSourcePackOutput(join(root, 'new-pack'), checkout))
 
-    mkdirSync(prior)
-    writeFileSync(join(prior, 'dsh-source-distribution.json'), JSON.stringify({ schemaVersion: 1, mode: 'source-pack' }))
-    assert.throws(() => validateSourcePackOutput(prior, checkout), /already exists/u)
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+  mkdirSync(prior)
+  writeFileSync(join(prior, 'dsh-source-distribution.json'), JSON.stringify({ schemaVersion: 1, mode: 'source-pack' }))
+  assert.throws(() => validateSourcePackOutput(prior, checkout), /already exists/u)
 })
 
-test('source verification workspace cleanup preserves a replaced root', () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-source-workspace-owner-test-'))
-  try {
-    const owner = temporaryWorkspaceOwner(root)
-    rmSync(root, { recursive: true, force: true })
-    mkdirSync(root)
-    writeFileSync(join(root, 'sentinel.txt'), 'replacement must survive')
-    assert.equal(removeTemporaryWorkspace(owner), false)
-    assert.equal(readFileSync(join(root, 'sentinel.txt'), 'utf8'), 'replacement must survive')
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+test('source verification workspace cleanup preserves a replaced root', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-source-workspace-owner-test-')
+  const owner = temporaryWorkspaceOwner(root)
+  rmSync(root, { recursive: true, force: true })
+  mkdirSync(root)
+  writeFileSync(join(root, 'sentinel.txt'), 'replacement must survive')
+  assert.equal(removeTemporaryWorkspace(owner), false)
+  assert.equal(readFileSync(join(root, 'sentinel.txt'), 'utf8'), 'replacement must survive')
 })
 
-test('source verification cleanup refuses a parent replacement before quarantine rename', () => {
-  const container = mkdtempSync(join(tmpdir(), 'dsh-source-workspace-parent-race-test-'))
+test('source verification cleanup refuses a parent replacement before quarantine rename', (t) => {
+  const life = testLifecycle(t)
+  const container = life.tempDir('dsh-source-workspace-parent-race-test-')
   const parent = join(container, 'parent')
   const movedParent = join(container, 'moved-parent')
   const root = join(parent, 'workspace')
   mkdirSync(root, { recursive: true })
-  try {
-    const owner = temporaryWorkspaceOwner(root)
-    assert.equal(removeTemporaryWorkspace(owner, {
-      afterParentValidation() {
-        renameSync(parent, movedParent)
-        mkdirSync(parent)
-      },
-    }), false)
-    assert.equal(existsSync(join(movedParent, 'workspace')), true)
-    assert.equal(existsSync(join(parent, 'workspace')), false)
-  } finally {
-    rmSync(container, { recursive: true, force: true })
-  }
+  const owner = temporaryWorkspaceOwner(root)
+  assert.equal(removeTemporaryWorkspace(owner, {
+    afterParentValidation() {
+      renameSync(parent, movedParent)
+      mkdirSync(parent)
+    },
+  }), false)
+  assert.equal(existsSync(join(movedParent, 'workspace')), true)
+  assert.equal(existsSync(join(parent, 'workspace')), false)
 })
 
-test('source verification cleanup leaves a post-validation quarantine replacement intact', () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-source-workspace-quarantine-test-'))
-  try {
-    const owner = temporaryWorkspaceOwner(root)
-    let replacement
-    assert.equal(removeTemporaryWorkspace(owner, {
-      afterQuarantineValidation(quarantine) {
-        replacement = quarantine
-        rmSync(quarantine, { recursive: true, force: true })
-        mkdirSync(quarantine)
-        writeFileSync(join(quarantine, 'sentinel.txt'), 'replacement must survive')
-      },
-    }), false)
-    assert.ok(replacement)
-    assert.equal(readFileSync(join(replacement, 'sentinel.txt'), 'utf8'), 'replacement must survive')
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+test('source verification cleanup leaves a post-validation quarantine replacement intact', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-source-workspace-quarantine-test-')
+  const owner = temporaryWorkspaceOwner(root)
+  let replacement
+  assert.equal(removeTemporaryWorkspace(owner, {
+    afterQuarantineValidation(quarantine) {
+      replacement = quarantine
+      rmSync(quarantine, { recursive: true, force: true })
+      mkdirSync(quarantine)
+      writeFileSync(join(quarantine, 'sentinel.txt'), 'replacement must survive')
+    },
+  }), false)
+  assert.ok(replacement)
+  assert.equal(readFileSync(join(replacement, 'sentinel.txt'), 'utf8'), 'replacement must survive')
 })
 
 test('source pack declares its Windows publication boundary', () => {
@@ -477,54 +438,45 @@ test('source pack declares its Windows publication boundary', () => {
   assert.equal(sourcePackPlatformSupported('darwin'), true)
 })
 
-test('source identity validates exact checkout SHA and both package versions', () => {
-  const directory = sourceCheckout()
-  try {
-    const head = git(directory, 'rev-parse', 'HEAD')
-    const result = validateSourceIdentity(directory, config(head), { ci: true })
-    assert.equal(result.head, head)
-    assert.equal(result.dirty, false)
-    assert.equal(result.reproducible, true)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
+test('source identity validates exact checkout SHA and both package versions', (t) => {
+  const life = testLifecycle(t)
+  const directory = sourceCheckout(life)
+  const head = git(directory, 'rev-parse', 'HEAD')
+  const result = validateSourceIdentity(directory, config(head), { ci: true })
+  assert.equal(result.head, head)
+  assert.equal(result.dirty, false)
+  assert.equal(result.reproducible, true)
 })
 
-test('source identity rejects a branch/short/mismatched ref and version mismatch', () => {
-  const directory = sourceCheckout()
-  try {
-    const head = git(directory, 'rev-parse', 'HEAD')
-    assert.throws(() => config('master'), /full 40-character/u)
-    assert.throws(() => validateSourceIdentity(directory, config('b'.repeat(40)), { ci: true }), /SHA mismatch/u)
-    writeFileSync(join(directory, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-root', version: '0.1.3' }))
-    assert.throws(() => validateSourceIdentity(directory, config(head), { ci: true }), /root version mismatch/u)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
+test('source identity rejects a branch/short/mismatched ref and version mismatch', (t) => {
+  const life = testLifecycle(t)
+  const directory = sourceCheckout(life)
+  const head = git(directory, 'rev-parse', 'HEAD')
+  assert.throws(() => config('master'), /full 40-character/u)
+  assert.throws(() => validateSourceIdentity(directory, config('b'.repeat(40)), { ci: true }), /SHA mismatch/u)
+  writeFileSync(join(directory, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-root', version: '0.1.3' }))
+  assert.throws(() => validateSourceIdentity(directory, config(head), { ci: true }), /root version mismatch/u)
 })
 
-test('dirty source is a warning locally but a CI failure', () => {
-  const directory = sourceCheckout()
+test('dirty source is a warning locally but a CI failure', (t) => {
+  const life = testLifecycle(t)
+  const directory = sourceCheckout(life)
+  const head = git(directory, 'rev-parse', 'HEAD')
+  writeFileSync(join(directory, 'local-build.log'), 'dirty')
+  assert.throws(() => validateSourceIdentity(directory, config(head), { ci: true }), error => error instanceof DshDistributionError && /dirty/u.test(error.message))
+  const previousCi = process.env.CI
+  const previousActions = process.env.GITHUB_ACTIONS
+  delete process.env.CI
+  delete process.env.GITHUB_ACTIONS
+  let local
   try {
-    const head = git(directory, 'rev-parse', 'HEAD')
-    writeFileSync(join(directory, 'local-build.log'), 'dirty')
-    assert.throws(() => validateSourceIdentity(directory, config(head), { ci: true }), error => error instanceof DshDistributionError && /dirty/u.test(error.message))
-    const previousCi = process.env.CI
-    const previousActions = process.env.GITHUB_ACTIONS
-    delete process.env.CI
-    delete process.env.GITHUB_ACTIONS
-    let local
-    try {
-      local = validateSourceIdentity(directory, config(head), { ci: false })
-    } finally {
-      if (previousCi === undefined) delete process.env.CI
-      else process.env.CI = previousCi
-      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS
-      else process.env.GITHUB_ACTIONS = previousActions
-    }
-    assert.equal(local.dirty, true)
-    assert.equal(local.reproducible, false)
+    local = validateSourceIdentity(directory, config(head), { ci: false })
   } finally {
-    rmSync(directory, { recursive: true, force: true })
+    if (previousCi === undefined) delete process.env.CI
+    else process.env.CI = previousCi
+    if (previousActions === undefined) delete process.env.GITHUB_ACTIONS
+    else process.env.GITHUB_ACTIONS = previousActions
   }
+  assert.equal(local.dirty, true)
+  assert.equal(local.reproducible, false)
 })

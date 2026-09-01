@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict'
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
-function createFixture({ version, englishDate = '2026-08-28', chineseDate = englishDate, guidance = '' }) {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-release-notes-'))
+function createFixture(life, { version, englishDate = '2026-08-28', chineseDate = englishDate, guidance = '' }) {
+  const root = life.tempDir('dsh-pi-tui-release-notes-')
   const output = join(root, 'release-notes.md')
   const packageJson = join(root, 'package.json')
   const chinese = join(root, 'CHANGELOG.md')
@@ -31,30 +32,19 @@ function run(fixture, input) {
   )
 }
 
-function cleanup(fixture) {
-  rmSync(fixture.root, { recursive: true, force: true })
-}
+test('release-notes accepts stable v tags and next-v prerelease tags', (t) => {
+  const life = testLifecycle(t)
+  const stable = createFixture(life, { version: '1.2.3' })
+  const result = run(stable, 'v1.2.3')
+  assert.equal(result.status, 0, result.stderr)
+  const body = readFileSync(stable.output, 'utf8')
+  assert.match(body, /^## 中文/m)
+  assert.match(body, /^## English/m)
 
-test('release-notes accepts stable v tags and next-v prerelease tags', () => {
-  const stable = createFixture({ version: '1.2.3' })
-  try {
-    const result = run(stable, 'v1.2.3')
-    assert.equal(result.status, 0, result.stderr)
-    const body = readFileSync(stable.output, 'utf8')
-    assert.match(body, /^## 中文/m)
-    assert.match(body, /^## English/m)
-  } finally {
-    cleanup(stable)
-  }
-
-  const next = createFixture({ version: '1.2.3-alpha.1' })
-  try {
-    const result = run(next, 'next-v1.2.3-alpha.1')
-    assert.equal(result.status, 0, result.stderr)
-    assert.match(readFileSync(next.output, 'utf8'), /English migration note\./)
-  } finally {
-    cleanup(next)
-  }
+  const next = createFixture(life, { version: '1.2.3-alpha.1' })
+  const nextResult = run(next, 'next-v1.2.3-alpha.1')
+  assert.equal(nextResult.status, 0, nextResult.stderr)
+  assert.match(readFileSync(next.output, 'utf8'), /English migration note\./)
 })
 
 test('current 0.4 release body carries the DSH/TUI install pairing', () => {
@@ -79,60 +69,44 @@ test('current 0.4 release body carries the DSH/TUI install pairing', () => {
   }
 })
 
-test('0.4 release guidance follows the stable or next tag channel', () => {
+test('0.4 release guidance follows the stable or next tag channel', (t) => {
+  const life = testLifecycle(t)
   const prereleaseGuidance = '\n- @deepseek-ai/dsh@0.1.2-alpha.3\n- @xmoon76/dsh-pi-tui@next\n- @xmoon76/dsh-pi-tui@0.3'
-  const stableWithPrereleaseGuidance = createFixture({ version: '0.4.0', guidance: prereleaseGuidance })
-  try {
-    const result = run(stableWithPrereleaseGuidance, 'v0.4.0')
-    assert.notEqual(result.status, 0)
-    assert.match(result.stderr, /@deepseek-ai\/dsh@0\.1\.2/u)
-  } finally {
-    cleanup(stableWithPrereleaseGuidance)
-  }
+  const stableWithPrereleaseGuidance = createFixture(life, { version: '0.4.0', guidance: prereleaseGuidance })
+  const result = run(stableWithPrereleaseGuidance, 'v0.4.0')
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /@deepseek-ai\/dsh@0\.1\.2/u)
 
   const stableGuidance = '\n- @deepseek-ai/dsh@0.1.2\n- @xmoon76/dsh-pi-tui@latest\n- @xmoon76/dsh-pi-tui@0.3'
-  const stable = createFixture({ version: '0.4.0', guidance: stableGuidance })
-  try {
-    const result = run(stable, 'v0.4.0')
-    assert.equal(result.status, 0, result.stderr)
-  } finally {
-    cleanup(stable)
-  }
+  const stable = createFixture(life, { version: '0.4.0', guidance: stableGuidance })
+  const stableResult = run(stable, 'v0.4.0')
+  assert.equal(stableResult.status, 0, stableResult.stderr)
 })
 
-test('release-notes guidance matching rejects near-miss package versions', () => {
-  const fixture = createFixture({
+test('release-notes guidance matching rejects near-miss package versions', (t) => {
+  const life = testLifecycle(t)
+  const fixture = createFixture(life, {
     version: '0.4.0-alpha.1',
     guidance: '\n- @deepseek-ai/dsh@0x1.2-alpha.1\n- @xmoon76/dsh-pi-tui@next\n- @xmoon76/dsh-pi-tui@0.3',
   })
-  try {
-    const result = run(fixture, 'next-v0.4.0-alpha.1')
-    assert.notEqual(result.status, 0)
-    assert.match(result.stderr, /must document @deepseek-ai\/dsh@0\.1\.2-alpha\.3/u)
-  } finally {
-    cleanup(fixture)
-  }
+  const result = run(fixture, 'next-v0.4.0-alpha.1')
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /must document @deepseek-ai\/dsh@0\.1\.2-alpha\.3/u)
 })
 
-test('release-notes rejects bilingual heading/date mismatch', () => {
-  const fixture = createFixture({ version: '1.2.3', chineseDate: '2026-08-28', englishDate: '2026-08-29' })
-  try {
-    const result = run(fixture, 'v1.2.3')
-    assert.notEqual(result.status, 0)
-    assert.match(result.stderr, /Changelog headings do not match/)
-  } finally {
-    cleanup(fixture)
-  }
+test('release-notes rejects bilingual heading/date mismatch', (t) => {
+  const life = testLifecycle(t)
+  const fixture = createFixture(life, { version: '1.2.3', chineseDate: '2026-08-28', englishDate: '2026-08-29' })
+  const result = run(fixture, 'v1.2.3')
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /Changelog headings do not match/)
 })
 
-test('release-notes rejects malformed or channel-inconsistent tags', () => {
-  const fixture = createFixture({ version: '1.2.3' })
-  try {
-    for (const input of ['next-v1.2.3', 'v1.2.3-alpha.1', 'release-v1.2.3']) {
-      const result = run(fixture, input)
-      assert.notEqual(result.status, 0, `${input} unexpectedly passed`)
-    }
-  } finally {
-    cleanup(fixture)
+test('release-notes rejects malformed or channel-inconsistent tags', (t) => {
+  const life = testLifecycle(t)
+  const fixture = createFixture(life, { version: '1.2.3' })
+  for (const input of ['next-v1.2.3', 'v1.2.3-alpha.1', 'release-v1.2.3']) {
+    const result = run(fixture, input)
+    assert.notEqual(result.status, 0, `${input} unexpectedly passed`)
   }
 })

@@ -367,13 +367,14 @@ test('acquire: a flapping lock (repeated read-ENOENT) is bounded, never infinite
 
 // ── review round 7: a FRESH session's lock exists BEFORE its log ───────────
 
-import { existsSync, mkdirSync as fsMkdirSync, mkdtempSync, rmdirSync as fsRmdirSync, writeFileSync as fsWriteFileSync, readFileSync as fsReadFileSync, unlinkSync as fsUnlinkSync } from 'node:fs'
+import { existsSync, mkdirSync as fsMkdirSync, rmdirSync as fsRmdirSync, writeFileSync as fsWriteFileSync, readFileSync as fsReadFileSync, unlinkSync as fsUnlinkSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
-test('review round 7: a fresh session\'s lock is acquired BEFORE its log exists (pre-created dir)', () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-lock-fresh-'))
+test('review round 7: a fresh session\'s lock is acquired BEFORE its log exists (pre-created dir)', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-lock-fresh-')
   const id = `session-${randomUUID()}`
   const sessionDir = join(root, id)
   const logPath = join(sessionDir, 'session.jsonl.zstd')
@@ -412,8 +413,6 @@ test('review round 7: a fresh session\'s lock is acquired BEFORE its log exists 
   assert.equal(existsSync(join(sessionDir, 'session.jsonl.zstd.owner.lock')), false, 'release removes the lock')
   assert.equal(existsSync(sessionDir), false, 'an empty pre-created fresh dir is removed (best-effort)')
   assert.equal(existsSync(root), true, 'the parent root is never removed')
-  // Cleanup the temp root.
-  fsRmdirSync(root)
 })
 
 test('review round 12: a persistently-ENOENT fs with mkdir pre-creation fails ONCE, never loops', () => {

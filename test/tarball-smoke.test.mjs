@@ -10,10 +10,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const SMOKE = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'tarball-smoke.mjs')
 // The repository root IS the package root after the root-package migration:
@@ -21,8 +21,8 @@ const SMOKE = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'ta
 const ROOT = join(SMOKE, '..', '..')
 
 /** Build a minimal tarball whose dist/index.mjs carries `leakText`. */
-function leakTarball(leakText) {
-  const dir = mkdtempSync(join(tmpdir(), 'smoke-leak-'))
+function leakTarball(life, leakText) {
+  const dir = life.tempDir('smoke-leak-')
   const pkgDir = join(dir, 'package')
   mkdirSync(join(pkgDir, 'dist'), { recursive: true })
   writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({
@@ -50,46 +50,34 @@ function runSmoke(tarball) {
   })
 }
 
-test("tarball smoke flags THIS checkout's realpath wherever it lives", () => {
-  const { dir, tarball } = leakTarball(realpathSync(ROOT))
-  try {
-    const result = runSmoke(tarball)
-    assert.notEqual(result.status, 0, result.stdout)
-    assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test("tarball smoke flags THIS checkout's realpath wherever it lives", (t) => {
+  const life = testLifecycle(t)
+  const { tarball } = leakTarball(life, realpathSync(ROOT))
+  const result = runSmoke(tarball)
+  assert.notEqual(result.status, 0, result.stdout)
+  assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
 })
 
-test('tarball smoke flags another machine\'s Unix home path (never seen on this host)', () => {
-  const { dir, tarball } = leakTarball('see /home/someone/else/file for details')
-  try {
-    const result = runSmoke(tarball)
-    assert.notEqual(result.status, 0, result.stdout)
-    assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('tarball smoke flags another machine\'s Unix home path (never seen on this host)', (t) => {
+  const life = testLifecycle(t)
+  const { tarball } = leakTarball(life, 'see /home/someone/else/file for details')
+  const result = runSmoke(tarball)
+  assert.notEqual(result.status, 0, result.stdout)
+  assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
 })
 
-test('tarball smoke flags a CI workspace path', () => {
-  const { dir, tarball } = leakTarball('/home/runner/work/dsh-pi-tui/dsh-pi-tui/dist/index.mjs')
-  try {
-    const result = runSmoke(tarball)
-    assert.notEqual(result.status, 0, result.stdout)
-    assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('tarball smoke flags a CI workspace path', (t) => {
+  const life = testLifecycle(t)
+  const { tarball } = leakTarball(life, '/home/runner/work/dsh-pi-tui/dsh-pi-tui/dist/index.mjs')
+  const result = runSmoke(tarball)
+  assert.notEqual(result.status, 0, result.stdout)
+  assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
 })
 
-test('tarball smoke flags a Windows drive path', () => {
-  const { dir, tarball } = leakTarball('C:\\Users\\dev\\project\\dist\\index.mjs')
-  try {
-    const result = runSmoke(tarball)
-    assert.notEqual(result.status, 0, result.stdout)
-    assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('tarball smoke flags a Windows drive path', (t) => {
+  const life = testLifecycle(t)
+  const { tarball } = leakTarball(life, 'C:\\Users\\dev\\project\\dist\\index.mjs')
+  const result = runSmoke(tarball)
+  assert.notEqual(result.status, 0, result.stdout)
+  assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
 })

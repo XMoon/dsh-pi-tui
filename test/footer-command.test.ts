@@ -8,9 +8,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { TuiApp } from '../src/tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
@@ -1120,8 +1120,9 @@ test('/footer save failures notify exactly once (validation and write failures)'
   app.stop()
 })
 
-test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Keep Editing, Discard)', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-noexec-'))
+test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Keep Editing, Discard)', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-noexec-')
   const marker = join(dir, 'pwn')
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 30)
@@ -1230,12 +1231,12 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
   } finally {
     runtime.dispose()
     app.stop()
-    rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('PR D: a FAILED save never executes the new command (draft preserved, marker absent)', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-noexec-fail-'))
+test('PR D: a FAILED save never executes the new command (draft preserved, marker absent)', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-noexec-fail-')
   const marker = join(dir, 'pwn')
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 30)
@@ -1335,12 +1336,12 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
   } finally {
     runtime.dispose()
     app.stop()
-    rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears only after save)', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-noexec-ok-'))
+test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears only after save)', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-noexec-ok-')
   const marker = join(dir, 'pwn')
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 30)
@@ -1445,6 +1446,5 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
   } finally {
     runtime.dispose()
     app.stop()
-    rmSync(dir, { recursive: true, force: true })
   }
 })

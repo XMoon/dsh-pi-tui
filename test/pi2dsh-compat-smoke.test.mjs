@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import test from 'node:test'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import {
   assertNoCompatibilityFailures,
   assertOfficialPresetHeader,
@@ -54,17 +55,14 @@ test('pi2dsh smoke isolates credential-bearing parent environment variables', ()
   }
 })
 
-test('pi2dsh smoke rejects a symlinked candidate tarball', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'dsh-pi2dsh-candidate-link-'))
-  try {
-    const target = join(directory, 'external.tgz')
-    const candidate = join(directory, 'candidate.tgz')
-    writeFileSync(target, 'not a tarball')
-    symlinkSync(target, candidate)
-    assert.throws(() => resolveTarball(candidate), /candidate tarball not found/u)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
+test('pi2dsh smoke rejects a symlinked candidate tarball', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('dsh-pi2dsh-candidate-link-')
+  const target = join(directory, 'external.tgz')
+  const candidate = join(directory, 'candidate.tgz')
+  writeFileSync(target, 'not a tarball')
+  symlinkSync(target, candidate)
+  assert.throws(() => resolveTarball(candidate), /candidate tarball not found/u)
 })
 
 test('pi2dsh smoke accepts pnpm separator arguments and enforces installed versions', () => {
@@ -249,25 +247,22 @@ test('pi2dsh preset degradation diagnostics never count as a healthy mount', () 
   )
 })
 
-test('pi2dsh preset smoke requires a durable canonical session header', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'pi2dsh-compat-header-'))
+test('pi2dsh preset smoke requires a durable canonical session header', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('pi2dsh-compat-header-')
   const evidencePath = join(directory, 'header.json')
-  try {
-    writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'minimal' }))
-    assert.doesNotThrow(() => assertOfficialPresetHeader('minimal', evidencePath))
-    writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'standard' }))
-    assert.throws(
-      () => assertOfficialPresetHeader('minimal', evidencePath),
-      error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header mismatch'),
-    )
-    writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', error: 'inspect failed' }))
-    assert.throws(
-      () => assertOfficialPresetHeader('minimal', evidencePath),
-      error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header probe failed'),
-    )
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
+  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'minimal' }))
+  assert.doesNotThrow(() => assertOfficialPresetHeader('minimal', evidencePath))
+  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'standard' }))
+  assert.throws(
+    () => assertOfficialPresetHeader('minimal', evidencePath),
+    error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header mismatch'),
+  )
+  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', error: 'inspect failed' }))
+  assert.throws(
+    () => assertOfficialPresetHeader('minimal', evidencePath),
+    error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header probe failed'),
+  )
 })
 
 test('pi2dsh smoke classifies resize failures as surface failures', () => {
@@ -366,20 +361,17 @@ test('pi2dsh smoke detects published fallback diagnostics without false positive
   assert.ok(compatibilityFailureLine('surface degraded to inert') !== undefined, 'explicit surface inert degradation must fail the gate')
 })
 
-test('pi2dsh smoke rechecks late lifecycle diagnostics', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'pi2dsh-compat-diagnostics-'))
+test('pi2dsh smoke rechecks late lifecycle diagnostics', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('pi2dsh-compat-diagnostics-')
   const logPath = join(directory, 'tui.log')
-  try {
-    for (const phase of ['raw input', 'resize', 'dispose']) {
-      writeFileSync(logPath, `${phase}: surface degraded to inert\n`)
-      assert.throws(
-        () => assertNoCompatibilityFailures(logPath, { capturePane: () => '' }),
-        error => error?.phase === 'COMPAT_BOOT_FAILURE',
-        `${phase} diagnostics must fail the compatibility check`,
-      )
-    }
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
+  for (const phase of ['raw input', 'resize', 'dispose']) {
+    writeFileSync(logPath, `${phase}: surface degraded to inert\n`)
+    assert.throws(
+      () => assertNoCompatibilityFailures(logPath, { capturePane: () => '' }),
+      error => error?.phase === 'COMPAT_BOOT_FAILURE',
+      `${phase} diagnostics must fail the compatibility check`,
+    )
   }
 })
 
@@ -389,46 +381,43 @@ test('pi2dsh smoke bounds a hung subprocess', () => {
   assert.equal(result.error?.code, 'ETIMEDOUT', 'a hung child must be classified as a timeout')
 })
 
-test('pi2dsh smoke terminates descendants of a timed-out subprocess', { skip: process.platform === 'win32' }, async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'pi2dsh-compat-process-'))
+test('pi2dsh smoke terminates descendants of a timed-out subprocess', { skip: process.platform === 'win32' }, async (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('pi2dsh-compat-process-')
   const childPidPath = join(directory, 'child.pid')
   let childPid
-  try {
-    const childCode = [
-      "const { spawn } = require('node:child_process')",
-      "const { writeFileSync } = require('node:fs')",
-      "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], { stdio: 'ignore' })",
-      'writeFileSync(process.argv[1], String(child.pid))',
-      'setInterval(() => {}, 10000)',
-    ].join(';')
-    const result = run(process.execPath, ['-e', childCode, childPidPath], { timeout: 500 })
-    assert.equal(result.error?.code, 'ETIMEDOUT', 'the parent process must time out')
-    childPid = Number(readFileSync(childPidPath, 'utf8'))
-    assert.ok(Number.isInteger(childPid) && childPid > 0, 'the timed-out child must have started a descendant')
+  const childCode = [
+    "const { spawn } = require('node:child_process')",
+    "const { writeFileSync } = require('node:fs')",
+    "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], { stdio: 'ignore' })",
+    'writeFileSync(process.argv[1], String(child.pid))',
+    'setInterval(() => {}, 10000)',
+  ].join(';')
+  const result = run(process.execPath, ['-e', childCode, childPidPath], { timeout: 500 })
+  assert.equal(result.error?.code, 'ETIMEDOUT', 'the parent process must time out')
+  childPid = Number(readFileSync(childPidPath, 'utf8'))
+  life.defer(() => {
+    try {
+      process.kill(childPid, 'SIGKILL')
+    } catch {
+      // The descendant was already terminated by the process-group cleanup.
+    }
+  })
+  assert.ok(Number.isInteger(childPid) && childPid > 0, 'the timed-out child must have started a descendant')
 
-    const deadline = Date.now() + 2_000
-    let alive = true
-    while (Date.now() < deadline) {
-      try {
-        process.kill(childPid, 0)
-      } catch (error) {
-        if (error?.code === 'ESRCH') {
-          alive = false
-          break
-        }
-        throw error
+  const deadline = Date.now() + 2_000
+  let alive = true
+  while (Date.now() < deadline) {
+    try {
+      process.kill(childPid, 0)
+    } catch (error) {
+      if (error?.code === 'ESRCH') {
+        alive = false
+        break
       }
-      await new Promise(resolve => setTimeout(resolve, 10))
+      throw error
     }
-    assert.equal(alive, false, 'a timed-out process group must not leave its descendant running')
-  } finally {
-    if (childPid !== undefined) {
-      try {
-        process.kill(childPid, 'SIGKILL')
-      } catch {
-        // The descendant was already terminated by the process-group cleanup.
-      }
-    }
-    rmSync(directory, { recursive: true, force: true })
+    await new Promise(resolve => setTimeout(resolve, 10))
   }
+  assert.equal(alive, false, 'a timed-out process group must not leave its descendant running')
 })

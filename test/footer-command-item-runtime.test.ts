@@ -11,14 +11,14 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from '../src/footer/dynamic-item-runtime.ts'
 import { customCommandConfigOf, DEFAULT_CUSTOM_COMMAND_REFRESH_MS, effectiveCustomCommandRefreshMs, effectiveCustomCommandTimeoutMs, type FooterCustomCommandItemSettings } from '../src/footer/custom-items.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import type { FooterLayoutV1 } from '../src/footer/types.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 /** A command item whose command runs one node script. */
 function item(id: string, script: string, extra: Partial<FooterCustomCommandItemSettings> = {}): FooterCustomCommandItemSettings {
@@ -314,282 +314,258 @@ test('empty output and failures are fail-soft: the item becomes unavailable, nev
   }
 })
 
-test('a trusted definition NOT referenced by the layout never spawns', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-item-'))
+test('a trusted definition NOT referenced by the layout never spawns', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-item-')
   const marker = join(dir, 'ran')
-  try {
-    const { runtime } = harness()
-    runtime.sync([item('user:clock', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)], new Set())
-    await spin(300)
-    assert.equal(existsSync(marker), false, 'an unreferenced definition must never spawn')
-    runtime.dispose()
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  const { runtime } = harness()
+  life.defer(() => runtime.dispose())
+  runtime.sync([item('user:clock', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)], new Set())
+  await spin(300)
+  assert.equal(existsSync(marker), false, 'an unreferenced definition must never spawn')
 })
 
-test('a project-only command definition never spawns (the trust gate, plan §11.2 attack shape)', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-trust-'))
+test('a project-only command definition never spawns (the trust gate, plan §11.2 attack shape)', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-trust-')
   const marker = join(dir, 'pwn')
-  try {
-    // The ATTACK SHAPE: the USER layer has no user:clock command; the
-    // PROJECT layer supplies one; the merged layout references user:clock.
-    const projectCommand = item('user:clock', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
-    const port = new DirectConfigPort({
-      get: () => ({ describe: () => [{
-        ns: 'dsh-pi-tui',
-        value: { footerCustomItems: [projectCommand] },
-        user: { footerCustomItems: [] },
-      }] }),
-    } as never, undefined, () => undefined)
-    // The runtime receives ONLY the USER-layer trusted projection — the
-    // project command can never reach a spawn, and the item stays
-    // unavailable even though the layout references the id.
-    const trusted = port.footerCustomItems.get().items
-    assert.equal(trusted.length, 0, 'the USER-layer projection must exclude the project command')
-    const { runtime, values } = harness()
-    runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), new Set(['user:clock']))
-    await spin(300)
-    assert.equal(existsSync(marker), false, 'the project command must never run')
-    assert.equal(values.get('user:clock'), undefined, 'the item must stay unavailable')
-    runtime.dispose()
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  // The ATTACK SHAPE: the USER layer has no user:clock command; the
+  // PROJECT layer supplies one; the merged layout references user:clock.
+  const projectCommand = item('user:clock', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
+  const port = new DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footerCustomItems: [projectCommand] },
+      user: { footerCustomItems: [] },
+    }] }),
+  } as never, undefined, () => undefined)
+  // The runtime receives ONLY the USER-layer trusted projection — the
+  // project command can never reach a spawn, and the item stays
+  // unavailable even though the layout references the id.
+  const trusted = port.footerCustomItems.get().items
+  assert.equal(trusted.length, 0, 'the USER-layer projection must exclude the project command')
+  const { runtime, values } = harness()
+  life.defer(() => runtime.dispose())
+  runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), new Set(['user:clock']))
+  await spin(300)
+  assert.equal(existsSync(marker), false, 'the project command must never run')
+  assert.equal(values.get('user:clock'), undefined, 'the item must stay unavailable')
 })
 
-test('P1 regression: a PROJECT merged layout can never activate a dormant USER command', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-activation-'))
+test('P1 regression: a PROJECT merged layout can never activate a dormant USER command', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-activation-')
   const marker = join(dir, 'pwn')
-  try {
-    // The ATTACK SHAPE: the USER layer defines user:deploy (a real,
-    // trusted command) but its own layout does NOT reference it — the
-    // command is DORMANT. The PROJECT layer supplies footer: custom +
-    // a merged layout that references user:deploy.
-    const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
-    const projectLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
-    const port = new DirectConfigPort({
-      get: () => ({ describe: () => [{
-        ns: 'dsh-pi-tui',
-        value: { footer: 'custom', footerLayout: projectLayout, footerCustomItems: [userCommand] },
-        user: { footer: 'default', footerCustomItems: [userCommand] },
-      }] }),
-    } as never, undefined, () => undefined)
-    const trusted = port.footerCustomItems.get().items
-    assert.equal(trusted.length, 1, 'the USER command definition itself is trusted')
-    // The USER layer declares footer: default → the mode-gated
-    // authorization is EMPTY — the PROJECT merged layout's user:deploy
-    // ref can never arm the dormant command.
-    const authorized = port.footerCommandTrust.userCommandItemActivationIds
-    assert.equal(authorized.size, 0, 'footer: default authorizes no command items')
-    const { runtime, values } = harness()
-    const executable = executableCommandItemIds(
-      trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
-      authorized,
-      projectLayout,
-    )
-    runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
-    await spin(300)
-    assert.equal(existsSync(marker), false, 'a PROJECT layout must never activate a dormant USER command')
-    assert.equal(values.get('user:deploy'), undefined, 'the runner must not arm')
-    runtime.dispose()
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  // The ATTACK SHAPE: the USER layer defines user:deploy (a real,
+  // trusted command) but its own layout does NOT reference it — the
+  // command is DORMANT. The PROJECT layer supplies footer: custom +
+  // a merged layout that references user:deploy.
+  const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
+  const projectLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
+  const port = new DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'custom', footerLayout: projectLayout, footerCustomItems: [userCommand] },
+      user: { footer: 'default', footerCustomItems: [userCommand] },
+    }] }),
+  } as never, undefined, () => undefined)
+  const trusted = port.footerCustomItems.get().items
+  assert.equal(trusted.length, 1, 'the USER command definition itself is trusted')
+  // The USER layer declares footer: default → the mode-gated
+  // authorization is EMPTY — the PROJECT merged layout's user:deploy
+  // ref can never arm the dormant command.
+  const authorized = port.footerCommandTrust.userCommandItemActivationIds
+  assert.equal(authorized.size, 0, 'footer: default authorizes no command items')
+  const { runtime, values } = harness()
+  life.defer(() => runtime.dispose())
+  const executable = executableCommandItemIds(
+    trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
+    authorized,
+    projectLayout,
+  )
+  runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
+  await spin(300)
+  assert.equal(existsSync(marker), false, 'a PROJECT layout must never activate a dormant USER command')
+  assert.equal(values.get('user:deploy'), undefined, 'the runner must not arm')
 })
 
-test('P1 regression: a STALE USER layout under footer: default authorizes nothing (mode gate)', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-stale-'))
+test('P1 regression: a STALE USER layout under footer: default authorizes nothing (mode gate)', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-stale-')
   const marker = join(dir, 'pwn')
-  try {
-    // The REALISTIC attack shape: the USER previously used a custom
-    // layout referencing user:deploy, then switched to footer: default —
-    // the /settings switch deliberately KEEPS the old footerLayout. The
-    // stale layout remains in the USER layer. The PROJECT layer flips
-    // the MERGED mode to custom with a layout referencing user:deploy.
-    const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
-    const staleLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
-    const port = new DirectConfigPort({
-      get: () => ({ describe: () => [{
-        ns: 'dsh-pi-tui',
-        value: { footer: 'custom', footerLayout: staleLayout, footerCustomItems: [userCommand] },
-        user: { footer: 'default', footerLayout: staleLayout, footerCustomItems: [userCommand] },
-      }] }),
-    } as never, undefined, () => undefined)
-    const trusted = port.footerCustomItems.get().items
-    assert.equal(trusted.length, 1, 'the USER command definition itself is trusted')
-    // The USER layer declares footer: default — the stale leftover layout
-    // must NOT authorize anything, even though it is present and valid.
-    const authorized = port.footerCommandTrust.userCommandItemActivationIds
-    assert.equal(authorized.size, 0, 'a stale layout under footer: default must authorize nothing')
-    const { runtime, values } = harness()
-    const executable = executableCommandItemIds(
-      trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
-      authorized,
-      staleLayout,
-    )
-    runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
-    await spin(300)
-    assert.equal(existsSync(marker), false, 'a stale USER layout must never resurrect a dormant command')
-    assert.equal(values.get('user:deploy'), undefined, 'the runner must not arm')
-    runtime.dispose()
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  // The REALISTIC attack shape: the USER previously used a custom
+  // layout referencing user:deploy, then switched to footer: default —
+  // the /settings switch deliberately KEEPS the old footerLayout. The
+  // stale layout remains in the USER layer. The PROJECT layer flips
+  // the MERGED mode to custom with a layout referencing user:deploy.
+  const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
+  const staleLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
+  const port = new DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'custom', footerLayout: staleLayout, footerCustomItems: [userCommand] },
+      user: { footer: 'default', footerLayout: staleLayout, footerCustomItems: [userCommand] },
+    }] }),
+  } as never, undefined, () => undefined)
+  const trusted = port.footerCustomItems.get().items
+  assert.equal(trusted.length, 1, 'the USER command definition itself is trusted')
+  // The USER layer declares footer: default — the stale leftover layout
+  // must NOT authorize anything, even though it is present and valid.
+  const authorized = port.footerCommandTrust.userCommandItemActivationIds
+  assert.equal(authorized.size, 0, 'a stale layout under footer: default must authorize nothing')
+  const { runtime, values } = harness()
+  life.defer(() => runtime.dispose())
+  const executable = executableCommandItemIds(
+    trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
+    authorized,
+    staleLayout,
+  )
+  runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
+  await spin(300)
+  assert.equal(existsSync(marker), false, 'a stale USER layout must never resurrect a dormant command')
+  assert.equal(values.get('user:deploy'), undefined, 'the runner must not arm')
 })
 
-test('P1 regression: a command hidden by the rendered layout does not keep running in the background', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-hidden-'))
+test('P1 regression: a command hidden by the rendered layout does not keep running in the background', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-hidden-')
   const marker = join(dir, 'pwn')
-  try {
-    // The USER authorizes user:deploy (footer: custom + its layout), but
-    // the PROJECT merged layout HIDES it (does not reference it). The
-    // rendered intersection must stop the command: executable = trusted ∩
-    // authorized ∩ rendered = ∅.
-    const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
-    const userLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
-    const hidingLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'model' }], right: [] }] }
-    const port = new DirectConfigPort({
-      get: () => ({ describe: () => [{
-        ns: 'dsh-pi-tui',
-        value: { footer: 'custom', footerLayout: hidingLayout, footerCustomItems: [userCommand] },
-        user: { footer: 'custom', footerLayout: userLayout, footerCustomItems: [userCommand] },
-      }] }),
-    } as never, undefined, () => undefined)
-    const trusted = port.footerCustomItems.get().items
-    const authorized = port.footerCommandTrust.userCommandItemActivationIds
-    assert.ok(authorized.has('user:deploy'), 'the USER authorizes user:deploy')
-    const executable = executableCommandItemIds(
-      trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
-      authorized,
-      hidingLayout,
-    )
-    assert.equal(executable.has('user:deploy'), false, 'a hidden command must not be executable')
-    const { runtime, values } = harness()
-    runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
-    await spin(300)
-    assert.equal(existsSync(marker), false, 'a command hidden by the rendered layout must not run in the background')
-    assert.equal(values.get('user:deploy'), undefined)
-    runtime.dispose()
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  // The USER authorizes user:deploy (footer: custom + its layout), but
+  // the PROJECT merged layout HIDES it (does not reference it). The
+  // rendered intersection must stop the command: executable = trusted ∩
+  // authorized ∩ rendered = ∅.
+  const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
+  const userLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
+  const hidingLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'model' }], right: [] }] }
+  const port = new DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'custom', footerLayout: hidingLayout, footerCustomItems: [userCommand] },
+      user: { footer: 'custom', footerLayout: userLayout, footerCustomItems: [userCommand] },
+    }] }),
+  } as never, undefined, () => undefined)
+  const trusted = port.footerCustomItems.get().items
+  const authorized = port.footerCommandTrust.userCommandItemActivationIds
+  assert.ok(authorized.has('user:deploy'), 'the USER authorizes user:deploy')
+  const executable = executableCommandItemIds(
+    trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
+    authorized,
+    hidingLayout,
+  )
+  assert.equal(executable.has('user:deploy'), false, 'a hidden command must not be executable')
+  const { runtime, values } = harness()
+  life.defer(() => runtime.dispose())
+  runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
+  await spin(300)
+  assert.equal(existsSync(marker), false, 'a command hidden by the rendered layout must not run in the background')
+  assert.equal(values.get('user:deploy'), undefined)
 })
 
-test('P1 positive: a USER-declared custom layout DOES activate its command items', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-activation-ok-'))
+test('P1 positive: a USER-declared custom layout DOES activate its command items', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-activation-ok-')
   const marker = join(dir, 'pwn')
-  try {
-    const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
-    const userLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
-    const port = new DirectConfigPort({
-      get: () => ({ describe: () => [{
-        ns: 'dsh-pi-tui',
-        value: { footer: 'custom', footerLayout: userLayout, footerCustomItems: [userCommand] },
-        user: { footer: 'custom', footerLayout: userLayout, footerCustomItems: [userCommand] },
-      }] }),
-    } as never, undefined, () => undefined)
-    const trusted = port.footerCustomItems.get().items
-    const authorized = port.footerCommandTrust.userCommandItemActivationIds
-    assert.ok(authorized.has('user:deploy'), 'the USER layer authorizes user:deploy')
-    const { runtime } = harness()
-    const executable = executableCommandItemIds(
-      trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
-      authorized,
-      userLayout,
-    )
-    runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
-    const deadline = Date.now() + 8000
-    while (!existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
-    assert.equal(existsSync(marker), true, 'a USER-declared layout must activate its command items')
-    runtime.dispose()
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
+  const userLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
+  const port = new DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'custom', footerLayout: userLayout, footerCustomItems: [userCommand] },
+      user: { footer: 'custom', footerLayout: userLayout, footerCustomItems: [userCommand] },
+    }] }),
+  } as never, undefined, () => undefined)
+  const trusted = port.footerCustomItems.get().items
+  const authorized = port.footerCommandTrust.userCommandItemActivationIds
+  assert.ok(authorized.has('user:deploy'), 'the USER layer authorizes user:deploy')
+  const { runtime } = harness()
+  life.defer(() => runtime.dispose())
+  const executable = executableCommandItemIds(
+    trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
+    authorized,
+    userLayout,
+  )
+  runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
+  const deadline = Date.now() + 8000
+  while (!existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(existsSync(marker), true, 'a USER-declared layout must activate its command items')
 })
 
-test('P1 regression: a PROJECT-forced command mode cannot turn stale fallback metadata into execution authorization', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-fallback-'))
+test('P1 regression: a PROJECT-forced command mode cannot turn stale fallback metadata into execution authorization', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-fallback-')
   const marker = join(dir, 'pwn')
-  try {
-    // The ATTACK SHAPE: the USER never opted into command mode
-    // (footer: default) but a STALE footerFallbackMode: custom and a
-    // stale custom layout referencing user:deploy remain in the USER
-    // layer. The PROJECT forces the merged footer: command with a custom
-    // fallback referencing user:deploy.
-    const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
-    const staleLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
-    const port = new DirectConfigPort({
-      get: () => ({ describe: () => [{
-        ns: 'dsh-pi-tui',
-        value: { footer: 'command', footerFallbackMode: 'custom', footerLayout: staleLayout, footerCustomItems: [userCommand] },
-        user: { footer: 'default', footerFallbackMode: 'custom', footerLayout: staleLayout, footerCustomItems: [userCommand] },
-      }] }),
-    } as never, undefined, () => undefined)
-    const trusted = port.footerCustomItems.get().items
-    assert.equal(trusted.length, 1, 'the USER command definition itself is trusted')
-    // The untrusted whole-footer branch selects the authorization by the
-    // USER's CURRENT mode: footer: default → the current-mode set
-    // (empty), NEVER the fallback set — stale fallback metadata must not
-    // become execution authorization.
-    const userMode = port.footerCommandTrust.userFooterMode
-    const authorized = userMode === 'command'
-      ? port.footerCommandTrust.userCommandItemFallbackActivationIds
-      : port.footerCommandTrust.userCommandItemActivationIds
-    assert.equal(userMode, 'default')
-    assert.equal(authorized.size, 0, 'a default-mode USER must not authorize via stale fallback metadata')
-    const { runtime, values } = harness()
-    const executable = executableCommandItemIds(
-      trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
-      authorized,
-      staleLayout, // the rendered fallback layout
-    )
-    runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
-    await spin(300)
-    assert.equal(existsSync(marker), false, 'a PROJECT-forced command mode must never execute a default-mode USER command')
-    assert.equal(values.get('user:deploy'), undefined, 'the runner must not arm')
-    runtime.dispose()
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  // The ATTACK SHAPE: the USER never opted into command mode
+  // (footer: default) but a STALE footerFallbackMode: custom and a
+  // stale custom layout referencing user:deploy remain in the USER
+  // layer. The PROJECT forces the merged footer: command with a custom
+  // fallback referencing user:deploy.
+  const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
+  const staleLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
+  const port = new DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'command', footerFallbackMode: 'custom', footerLayout: staleLayout, footerCustomItems: [userCommand] },
+      user: { footer: 'default', footerFallbackMode: 'custom', footerLayout: staleLayout, footerCustomItems: [userCommand] },
+    }] }),
+  } as never, undefined, () => undefined)
+  const trusted = port.footerCustomItems.get().items
+  assert.equal(trusted.length, 1, 'the USER command definition itself is trusted')
+  // The untrusted whole-footer branch selects the authorization by the
+  // USER's CURRENT mode: footer: default → the current-mode set
+  // (empty), NEVER the fallback set — stale fallback metadata must not
+  // become execution authorization.
+  const userMode = port.footerCommandTrust.userFooterMode
+  const authorized = userMode === 'command'
+    ? port.footerCommandTrust.userCommandItemFallbackActivationIds
+    : port.footerCommandTrust.userCommandItemActivationIds
+  assert.equal(userMode, 'default')
+  assert.equal(authorized.size, 0, 'a default-mode USER must not authorize via stale fallback metadata')
+  const { runtime, values } = harness()
+  life.defer(() => runtime.dispose())
+  const executable = executableCommandItemIds(
+    trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
+    authorized,
+    staleLayout, // the rendered fallback layout
+  )
+  runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
+  await spin(300)
+  assert.equal(existsSync(marker), false, 'a PROJECT-forced command mode must never execute a default-mode USER command')
+  assert.equal(values.get('user:deploy'), undefined, 'the runner must not arm')
 })
 
-test('P1 positive: a command-mode USER with a custom fallback DOES run its fallback per-item commands', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-tui-fallback-ok-'))
+test('P1 positive: a command-mode USER with a custom fallback DOES run its fallback per-item commands', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-fallback-ok-')
   const marker = join(dir, 'pwn')
-  try {
-    // The USER opted into command mode (footer: command) with a custom
-    // fallback; the whole-footer command itself is untrusted (no USER
-    // footerCommand), so the native fallback applies — the USER's own
-    // fallback declaration authorizes the per-item command.
-    const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
-    const fallbackLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
-    const port = new DirectConfigPort({
-      get: () => ({ describe: () => [{
-        ns: 'dsh-pi-tui',
-        value: { footer: 'command', footerFallbackMode: 'custom', footerLayout: fallbackLayout, footerCustomItems: [userCommand] },
-        user: { footer: 'command', footerFallbackMode: 'custom', footerLayout: fallbackLayout, footerCustomItems: [userCommand] },
-      }] }),
-    } as never, undefined, () => undefined)
-    const trusted = port.footerCustomItems.get().items
-    const userMode = port.footerCommandTrust.userFooterMode
-    const authorized = userMode === 'command'
-      ? port.footerCommandTrust.userCommandItemFallbackActivationIds
-      : port.footerCommandTrust.userCommandItemActivationIds
-    assert.equal(userMode, 'command')
-    assert.ok(authorized.has('user:deploy'), 'a command-mode USER with a custom fallback authorizes its fallback layout')
-    const { runtime } = harness()
-    const executable = executableCommandItemIds(
-      trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
-      authorized,
-      fallbackLayout,
-    )
-    runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
-    const deadline = Date.now() + 8000
-    while (!existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
-    assert.equal(existsSync(marker), true, 'the fallback per-item command must run for a command-mode USER')
-    runtime.dispose()
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  // The USER opted into command mode (footer: command) with a custom
+  // fallback; the whole-footer command itself is untrusted (no USER
+  // footerCommand), so the native fallback applies — the USER's own
+  // fallback declaration authorizes the per-item command.
+  const userCommand = item('user:deploy', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
+  const fallbackLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
+  const port = new DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'command', footerFallbackMode: 'custom', footerLayout: fallbackLayout, footerCustomItems: [userCommand] },
+      user: { footer: 'command', footerFallbackMode: 'custom', footerLayout: fallbackLayout, footerCustomItems: [userCommand] },
+    }] }),
+  } as never, undefined, () => undefined)
+  const trusted = port.footerCustomItems.get().items
+  const userMode = port.footerCommandTrust.userFooterMode
+  const authorized = userMode === 'command'
+    ? port.footerCommandTrust.userCommandItemFallbackActivationIds
+    : port.footerCommandTrust.userCommandItemActivationIds
+  assert.equal(userMode, 'command')
+  assert.ok(authorized.has('user:deploy'), 'a command-mode USER with a custom fallback authorizes its fallback layout')
+  const { runtime } = harness()
+  life.defer(() => runtime.dispose())
+  const executable = executableCommandItemIds(
+    trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'),
+    authorized,
+    fallbackLayout,
+  )
+  runtime.sync(trusted.filter((entry): entry is FooterCustomCommandItemSettings => entry.kind === 'command'), executable)
+  const deadline = Date.now() + 8000
+  while (!existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(existsSync(marker), true, 'the fallback per-item command must run for a command-mode USER')
 })

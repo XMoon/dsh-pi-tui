@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import test from 'node:test'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 import {
   candidateTarball as npmVerifyCandidateTarball,
@@ -74,15 +74,12 @@ test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2d
   assert.match(ecosystem, /Run pi2dsh compatibility smoke/u)
 })
 
-test('npm verification rejects a symlinked candidate tarball', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'dsh-npm-candidate-test-'))
-  try {
-    const target = join(directory, 'external.tgz')
-    const candidate = join(directory, 'xmoon76-dsh-pi-tui-0.4.0.tgz')
-    writeFileSync(target, 'not a tarball')
-    symlinkSync(target, candidate)
-    assert.throws(() => npmVerifyCandidateTarball(directory), /expected one TUI candidate/u)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
+test('npm verification rejects a symlinked candidate tarball', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('dsh-npm-candidate-test-')
+  const target = join(directory, 'external.tgz')
+  const candidate = join(directory, 'xmoon76-dsh-pi-tui-0.4.0.tgz')
+  writeFileSync(target, 'not a tarball')
+  symlinkSync(target, candidate)
+  assert.throws(() => npmVerifyCandidateTarball(directory), /expected one TUI candidate/u)
 })

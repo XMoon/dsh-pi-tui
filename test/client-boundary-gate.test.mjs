@@ -11,10 +11,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { scanTree, findNewDebt, loadBaseline, HOST_SERVICES } from '../scripts/client-boundary-gate.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -31,29 +31,26 @@ test('baseline matches the current src/ tree (no drift, no new debt)', () => {
   )
 })
 
-test('scanTree ignores comment lines and non-Host services', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'client-boundary-'))
-  try {
-    writeFileSync(
-      join(dir, 'sample.ts'),
-      [
-        '// ctx.get(\'agents\') — comment must be ignored',
-        '/* ctx.get(\'sessions\') */',
-        ' * ctx.get(\'subagents\')',
-        'const a = ctx.get(\'agents\')',
-        'const b = ctx.get(\'loader\') // Cordis process service, not a pattern',
-        'const c = ctx.get(\'appExit\')',
-        "import type { Agent } from '@deepseek-ai/dsh-agent'",
-        'const d = ctx.sessions.list()',
-      ].join('\n'),
-    )
-    const scanned = scanTree(dir)
-    assert.deepEqual(scanned, {
-      'sample.ts': ['agents', 'import:dsh-agent', 'sessions'],
-    })
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('scanTree ignores comment lines and non-Host services', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('client-boundary-')
+  writeFileSync(
+    join(dir, 'sample.ts'),
+    [
+      '// ctx.get(\'agents\') — comment must be ignored',
+      '/* ctx.get(\'sessions\') */',
+      ' * ctx.get(\'subagents\')',
+      'const a = ctx.get(\'agents\')',
+      'const b = ctx.get(\'loader\') // Cordis process service, not a pattern',
+      'const c = ctx.get(\'appExit\')',
+      "import type { Agent } from '@deepseek-ai/dsh-agent'",
+      'const d = ctx.sessions.list()',
+    ].join('\n'),
+  )
+  const scanned = scanTree(dir)
+  assert.deepEqual(scanned, {
+    'sample.ts': ['agents', 'import:dsh-agent', 'sessions'],
+  })
 })
 
 test('findNewDebt reports only pairs missing from the baseline', () => {
