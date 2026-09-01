@@ -43,7 +43,7 @@ sleep 5                                            # wait for startup
 tmux capture-pane -t demo -p > /tmp/pane.txt
 tmux capture-pane -t demo -e -p > /tmp/pane.ansi
 
-# send a command: same two-step rhythm (see the PasteBurst trap)
+# send a command: same two-step rhythm (see the batched-Enter trap)
 tmux send-keys -t demo -l "/settings"
 sleep 0.4
 tmux send-keys -t demo Enter
@@ -141,10 +141,14 @@ tasks-browser.ts.
 
 ## Trap list (every item hit in real testing)
 
-1. **PasteBurst turns Enter into a newline**: `send-keys 'text' Enter`
-   delivers a batch fast enough for the editor's paste heuristic (≥8 plain
-   chars within 8ms) to treat it as a paste and suppress Enter for 120ms.
-   Always `send-keys -l 'text'` → `sleep 0.3+` → `send-keys Enter`.
+1. **Batched text+Enter used to lose the Enter**: `send-keys 'text' Enter`
+   delivers text and Enter in one input batch. The fork's old PasteBurst
+   heuristic (≥8 plain chars within 8ms → treated as a paste, Enter
+   suppressed 120ms) made this actively drop the Enter; it was removed with
+   the kimi baseline in the Earendil re-vendor (DIVERGENCES.md removed
+   list), so a batch Enter submits normally again. Keep the two-step
+   rhythm anyway — it is the deterministic way to drive the editor from
+   tmux: `send-keys -l 'text'` → `sleep 0.3+` → `send-keys Enter`.
 2. **zsh treats `;` as a command separator**: `COLORFGBG=15;0 dsh …` runs
    `0`. Quote the env value (`COLORFGBG='15;0' dsh …`) and mind nested quotes
    in scripts (wrap the whole thing in double quotes).
