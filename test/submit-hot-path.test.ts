@@ -11,8 +11,6 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
@@ -23,6 +21,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, type Config } from '../src/index.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 process.env.NO_COLOR = ''
@@ -389,261 +388,247 @@ test('event fixtures carry surfaceOp exactly on the surface-eligible types (revi
   }
 })
 
-test('Enter: a submit reaches followup with ZERO sessionPersistence work (steady state)', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+test('Enter: a submit reaches followup with ZERO sessionPersistence work (steady state)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
-  let context: Context | undefined
-  try {
-    const harness = makeHarness(home, { id: 'submit-session-a', events: sessionEvents('resumed answer') })
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-a' })
-
-    mounted.app.setDraft('hello world')
-    harness.counting.arm()
-    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-    await waitForDelivery(harness.host, 'submit')
-    harness.counting.disarm()
-
-    assert.equal(harness.counting.accesses(), 0,
-      'a steady-state submit must not touch sessionPersistence (no locate/stat/readFrom/inspect)')
-    assert.equal(harness.host.followedUp.length, 1, 'exactly one followup for one submit')
-    const message = harness.host.followedUp[0] as { content: { type: string; text: string }[] }
-    assert.equal(message.content[0]?.type, 'text')
-    assert.equal(message.content[0]?.text, 'hello world')
-  } finally {
-    if (context !== undefined) await disposeContext(context)
+  life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
-  }
+  })
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-a', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-a' })
+
+  mounted.app.setDraft('hello world')
+  harness.counting.arm()
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'submit')
+  harness.counting.disarm()
+
+  assert.equal(harness.counting.accesses(), 0,
+    'a steady-state submit must not touch sessionPersistence (no locate/stat/readFrom/inspect)')
+  assert.equal(harness.host.followedUp.length, 1, 'exactly one followup for one submit')
+  const message = harness.host.followedUp[0] as { content: { type: string; text: string }[] }
+  assert.equal(message.content[0]?.type, 'text')
+  assert.equal(message.content[0]?.text, 'hello world')
 })
 
-test('Ctrl+S: a steer delivers without sessionPersistence work', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+test('Ctrl+S: a steer delivers without sessionPersistence work', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
-  let context: Context | undefined
-  try {
-    const harness = makeHarness(home, { id: 'submit-session-b', events: sessionEvents('resumed answer') })
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-b' })
-    harness.host.status = 'idle' // an idle Ctrl+S starts a regular turn (followup)
-    mounted.app.setDraft('steer me')
-    harness.counting.arm()
-    const dispatched = (mounted.app as unknown as {
-      actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
-    }).actionDispatcher.dispatch('app.input.steer')
-    await waitForDelivery(harness.host, 'steer')
-    harness.counting.disarm()
-    assert.equal(dispatched, true, 'the steer action must be dispatched')
-    assert.equal(harness.counting.accesses(), 0,
-      'a Ctrl+S steer must not touch sessionPersistence (no locate/stat/readFrom)')
-    assert.equal(harness.host.followedUp.length, 1, 'an idle agent takes the draft as a followup')
-  } finally {
-    if (context !== undefined) await disposeContext(context)
+  life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
-  }
+  })
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-b', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-b' })
+  harness.host.status = 'idle' // an idle Ctrl+S starts a regular turn (followup)
+  mounted.app.setDraft('steer me')
+  harness.counting.arm()
+  const dispatched = (mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  await waitForDelivery(harness.host, 'steer')
+  harness.counting.disarm()
+  assert.equal(dispatched, true, 'the steer action must be dispatched')
+  assert.equal(harness.counting.accesses(), 0,
+    'a Ctrl+S steer must not touch sessionPersistence (no locate/stat/readFrom)')
+  assert.equal(harness.host.followedUp.length, 1, 'an idle agent takes the draft as a followup')
 })
 
-test('submit work does not scale with session history length', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+test('submit work does not scale with session history length', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
-  let context: Context | undefined
-  try {
-    // A LONG session: 1,000 turns = 6k log events. The submit path's
-    // persistence work must stay ZERO — never proportional to history.
-    const harness = makeHarness(home, { id: 'submit-session-long', events: longSessionEvents(1_000) })
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-long' })
-    mounted.app.setDraft('one more')
-    harness.counting.arm()
-    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-    await waitForDelivery(harness.host, 'long-session submit')
-    harness.counting.disarm()
-    assert.equal(harness.counting.accesses(), 0,
-      `submit work must not grow with the session history (accessed: ${harness.counting.accessed().join(', ') || 'none'})`)
-    assert.equal(harness.host.followedUp.length, 1)
-  } finally {
-    if (context !== undefined) await disposeContext(context)
+  life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
-  }
+  })
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  // A LONG session: 1,000 turns = 6k log events. The submit path's
+  // persistence work must stay ZERO — never proportional to history.
+  const harness = makeHarness(home, { id: 'submit-session-long', events: longSessionEvents(1_000) })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-long' })
+  mounted.app.setDraft('one more')
+  harness.counting.arm()
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'long-session submit')
+  harness.counting.disarm()
+  assert.equal(harness.counting.accesses(), 0,
+    `submit work must not grow with the session history (accessed: ${harness.counting.accessed().join(', ') || 'none'})`)
+  assert.equal(harness.host.followedUp.length, 1)
 })
 
-test('the local submit ack appears with the gesture and settles on the first authoritative event', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+test('the local submit ack appears with the gesture and settles on the first authoritative event', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
   const vt = new VirtualTerminal(100, 24)
   const restoreTerminal = installVirtualProcessTerminal(vt)
-  let context: Context | undefined
-  try {
-    const harness = makeHarness(home, { id: 'submit-session-c', events: sessionEvents('resumed answer') })
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-c' })
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-c', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-c' })
 
-    mounted.app.setDraft('hello again')
-    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-    await waitForRenderView(vt)
-    const pending = vt.getViewport().join('\n')
-    assert.ok(pending.includes('Submitting…'), `the ack row must appear with the gesture:\n${pending}`)
+  mounted.app.setDraft('hello again')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForRenderView(vt)
+  const pending = vt.getViewport().join('\n')
+  assert.ok(pending.includes('Submitting…'), `the ack row must appear with the gesture:\n${pending}`)
 
-    // The FIRST authoritative event settles the row (agent/inbox/spliced
-    // arrives as soon as the inbox accepted the followup).
-    context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
-      target: 'next-turn',
-      start: 0,
-      inserted: [],
-    }, 100) as never)
-    await waitForRenderView(vt)
-    const settled = vt.getViewport().join('\n')
-    assert.ok(!settled.includes('Submitting…'), `the ack row must clear on the authoritative event:\n${settled}`)
-  } finally {
-    if (context !== undefined) await disposeContext(context)
-    restoreTerminal()
-    if (previousHome === undefined) delete process.env.DSH_HOME
-    else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
-  }
+  // The FIRST authoritative event settles the row (agent/inbox/spliced
+  // arrives as soon as the inbox accepted the followup).
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-turn',
+    start: 0,
+    inserted: [],
+  }, 100) as never)
+  await waitForRenderView(vt)
+  const settled = vt.getViewport().join('\n')
+  assert.ok(!settled.includes('Submitting…'), `the ack row must clear on the authoritative event:\n${settled}`)
 })
 
-test('a context `!` submit shows the ack DURING the run and settles on the authoritative event', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+test('a context `!` submit shows the ack DURING the run and settles on the authoritative event', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
-  const vt = new VirtualTerminal(100, 24)
-  const restoreTerminal = installVirtualProcessTerminal(vt)
-  let context: Context | undefined
-  try {
-    const harness = makeHarness(home, { id: 'submit-session-c', events: sessionEvents('resumed answer') })
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-c' })
-
-    // A context `!` line: the ack must appear AT THE GESTURE (while the
-    // command still runs), not only after it settles.
-    mounted.app.setDraft('!true')
-    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-    await waitForRenderView(vt)
-    const during = vt.getViewport().join('\n')
-    assert.ok(during.includes('Submitting…'), `the ack row must appear during the run:\n${during}`)
-
-    // The command settles and the submit delivers; the row STAYS (never
-    // cleared at delivery).
-    await waitForDelivery(harness.host, 'shell submit')
-    await waitForRenderView(vt)
-    const delivered = vt.getViewport().join('\n')
-    assert.ok(delivered.includes('Submitting…'), `the ack row must survive the delivery:\n${delivered}`)
-    assert.equal(harness.host.followedUp.length, 1, 'the run output reached the session')
-
-    // The authoritative inbox event ends the wait.
-    context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
-      target: 'next-turn',
-      start: 0,
-      inserted: [],
-    }, 100) as never)
-    await waitForRenderView(vt)
-    const settled = vt.getViewport().join('\n')
-    assert.ok(!settled.includes('Submitting…'), `the ack row must clear on the event:\n${settled}`)
-  } finally {
-    if (context !== undefined) await disposeContext(context)
-    restoreTerminal()
+  life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
-  }
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-c', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-c' })
+
+  // A context `!` line: the ack must appear AT THE GESTURE (while the
+  // command still runs), not only after it settles.
+  mounted.app.setDraft('!true')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForRenderView(vt)
+  const during = vt.getViewport().join('\n')
+  assert.ok(during.includes('Submitting…'), `the ack row must appear during the run:\n${during}`)
+
+  // The command settles and the submit delivers; the row STAYS (never
+  // cleared at delivery).
+  await waitForDelivery(harness.host, 'shell submit')
+  await waitForRenderView(vt)
+  const delivered = vt.getViewport().join('\n')
+  assert.ok(delivered.includes('Submitting…'), `the ack row must survive the delivery:\n${delivered}`)
+  assert.equal(harness.host.followedUp.length, 1, 'the run output reached the session')
+
+  // The authoritative inbox event ends the wait.
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-turn',
+    start: 0,
+    inserted: [],
+  }, 100) as never)
+  await waitForRenderView(vt)
+  const settled = vt.getViewport().join('\n')
+  assert.ok(!settled.includes('Submitting…'), `the ack row must clear on the event:\n${settled}`)
 })
 
-test('a cancelled `!` run ends the ack (no submit happens) — never stuck pending', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+test('a cancelled `!` run ends the ack (no submit happens) — never stuck pending', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
-  const vt = new VirtualTerminal(100, 24)
-  const restoreTerminal = installVirtualProcessTerminal(vt)
-  let context: Context | undefined
-  try {
-    const harness = makeHarness(home, { id: 'submit-session-c', events: sessionEvents('resumed answer') })
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-c' })
-
-    // A slow context `!` run: the ack row shows during the run. The agent
-    // is RUNNING so a single Esc fires the cancel directly (idle Esc only
-    // arms the exit window).
-    harness.host.status = 'running'
-    mounted.app.setDraft('!sleep 0.3')
-    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-    await waitForRenderView(vt)
-    assert.ok(vt.getViewport().join('\n').includes('Queued…'),
-      'the ack row must be armed while the command runs (running: Queued…)')
-
-    // The user cancels (Esc → app.agent.interrupt): the aborted gate
-    // suppresses submitResult, and the abort must TERMINATE the ack row
-    // (otherwise the pending "Submitting…" outlives the gesture forever).
-    const dispatched = (mounted.app as unknown as {
-      actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
-    }).actionDispatcher.dispatch('app.agent.interrupt')
-    assert.equal(dispatched, true, 'the interrupt action must be dispatched')
-    for (let round = 0; round < 60; round += 1) {
-      await waitForRenderView(vt)
-      if (!vt.getViewport().join('\n').includes('Submitting…')) break
-      // The child exits on its own (sleep 0.3); drain deterministically
-      // while the terminal settle propagates through the render loop.
-      for (let index = 0; index < 50; index += 1) await Promise.resolve()
-      await new Promise<void>(resolve => process.nextTick(resolve))
-    }
-    const settled = vt.getViewport().join('\n')
-    assert.ok(!settled.includes('Submitting…'),
-      `the cancelled run must clear the ack row (never stuck pending):\n${settled}`)
-    assert.equal(harness.host.followedUp.length, 0,
-      'an aborted run never submits its output')
-  } finally {
-    if (context !== undefined) await disposeContext(context)
-    restoreTerminal()
+  life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-c', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-c' })
+
+  // A slow context `!` run: the ack row shows during the run. The agent
+  // is RUNNING so a single Esc fires the cancel directly (idle Esc only
+  // arms the exit window).
+  harness.host.status = 'running'
+  mounted.app.setDraft('!sleep 0.3')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('Queued…'),
+    'the ack row must be armed while the command runs (running: Queued…)')
+
+  // The user cancels (Esc → app.agent.interrupt): the aborted gate
+  // suppresses submitResult, and the abort must TERMINATE the ack row
+  // (otherwise the pending "Submitting…" outlives the gesture forever).
+  const dispatched = (mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.agent.interrupt')
+  assert.equal(dispatched, true, 'the interrupt action must be dispatched')
+  for (let round = 0; round < 60; round += 1) {
+    await waitForRenderView(vt)
+    if (!vt.getViewport().join('\n').includes('Submitting…')) break
+    // The child exits on its own (sleep 0.3); drain deterministically
+    // while the terminal settle propagates through the render loop.
+    for (let index = 0; index < 50; index += 1) await Promise.resolve()
+    await new Promise<void>(resolve => process.nextTick(resolve))
   }
+  const settled = vt.getViewport().join('\n')
+  assert.ok(!settled.includes('Submitting…'),
+    `the cancelled run must clear the ack row (never stuck pending):\n${settled}`)
+  assert.equal(harness.host.followedUp.length, 0,
+    'an aborted run never submits its output')
 })
 
-test('a DEFERRED context `!` submit arms the ack BEFORE the session exists', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+test('a DEFERRED context `!` submit arms the ack BEFORE the session exists', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
-  const vt = new VirtualTerminal(100, 24)
-  const restoreTerminal = installVirtualProcessTerminal(vt)
-  let context: Context | undefined
-  try {
-    const harness = makeHarness(home) // NO initial session: a deferred start
-    harness.armCreateGate() // session create resolves ONLY when released
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, {})
-
-    mounted.app.setDraft('!true')
-    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-    await waitForRenderView(vt)
-    // While ensureSession still awaits the (gated) create, the ack row
-    // MUST already be visible — the deferred create is part of the
-    // no-feedback window the local ack exists to cover (plan D).
-    const during = vt.getViewport().join('\n')
-    assert.ok(during.includes('Submitting…'),
-      `the ack row must appear before the slow session create resolves:\n${during}`)
-    assert.equal(harness.host.followedUp.length, 0, 'nothing delivered yet')
-
-    // Release the create: the run executes and the submit delivers.
-    harness.releaseCreateGate()
-    await waitForDelivery(harness.host, 'deferred shell submit')
-    assert.equal(harness.host.followedUp.length, 1)
-  } finally {
-    if (context !== undefined) await disposeContext(context)
-    restoreTerminal()
+  life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
-  }
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home) // NO initial session: a deferred start
+  harness.armCreateGate() // session create resolves ONLY when released
+  const mounted = await mountRunner(context, home, harness, {})
+
+  mounted.app.setDraft('!true')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForRenderView(vt)
+  // While ensureSession still awaits the (gated) create, the ack row
+  // MUST already be visible — the deferred create is part of the
+  // no-feedback window the local ack exists to cover (plan D).
+  const during = vt.getViewport().join('\n')
+  assert.ok(during.includes('Submitting…'),
+    `the ack row must appear before the slow session create resolves:\n${during}`)
+  assert.equal(harness.host.followedUp.length, 0, 'nothing delivered yet')
+
+  // Release the create: the run executes and the submit delivers.
+  harness.releaseCreateGate()
+  await waitForDelivery(harness.host, 'deferred shell submit')
+  assert.equal(harness.host.followedUp.length, 1)
 })
 
 /** Wait for one render pass through the virtual terminal. */
@@ -651,193 +636,183 @@ async function waitForRenderView(vt: VirtualTerminal): Promise<void> {
   await vt.waitForRender()
 }
 
-test('a Ctrl+S steer shows the ack until the authoritative event (never cleared at delivery)', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+test('a Ctrl+S steer shows the ack until the authoritative event (never cleared at delivery)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
-  const vt = new VirtualTerminal(100, 24)
-  const restoreTerminal = installVirtualProcessTerminal(vt)
-  let context: Context | undefined
-  try {
-    const harness = makeHarness(home, { id: 'submit-session-d', events: sessionEvents('resumed answer') })
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-d' })
-    mounted.app.setDraft('steer ack')
-    ;(mounted.app as unknown as {
-      actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
-    }).actionDispatcher.dispatch('app.input.steer')
-    await waitForDelivery(harness.host, 'steer ack')
-    await waitForRenderView(vt)
-    const pending = vt.getViewport().join('\n')
-    assert.ok(pending.includes('Submitting…'),
-      `the steer ack must stay visible after the delivery until the event:\n${pending}`)
-    // The authoritative inbox event ends the wait.
-    context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
-      target: 'next-turn',
-      start: 0,
-      inserted: [],
-    }, 100) as never)
-    await waitForRenderView(vt)
-    const settled = vt.getViewport().join('\n')
-    assert.ok(!settled.includes('Submitting…'), `the steer ack must clear on the event:\n${settled}`)
-  } finally {
-    if (context !== undefined) await disposeContext(context)
-    restoreTerminal()
+  life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
-  }
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-d', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-d' })
+  mounted.app.setDraft('steer ack')
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  await waitForDelivery(harness.host, 'steer ack')
+  await waitForRenderView(vt)
+  const pending = vt.getViewport().join('\n')
+  assert.ok(pending.includes('Submitting…'),
+    `the steer ack must stay visible after the delivery until the event:\n${pending}`)
+  // The authoritative inbox event ends the wait.
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-turn',
+    start: 0,
+    inserted: [],
+  }, 100) as never)
+  await waitForRenderView(vt)
+  const settled = vt.getViewport().join('\n')
+  assert.ok(!settled.includes('Submitting…'), `the steer ack must clear on the event:\n${settled}`)
 })
 
-test('a session switch settles the ack: old-session pending never leaks', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+test('a session switch settles the ack: old-session pending never leaks', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
-  const vt = new VirtualTerminal(100, 24)
-  const restoreTerminal = installVirtualProcessTerminal(vt)
-  let context: Context | undefined
-  try {
-    const harness = makeHarness(home, { id: 'submit-session-e', events: sessionEvents('resumed answer') })
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-e' })
-    mounted.app.setDraft('hello switch')
-    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-    await waitForRenderView(vt)
-    assert.ok(vt.getViewport().join('\n').includes('Submitting…'),
-      'the ack row must be pending before the switch')
-    // An ACTUAL session switch (transition commit) settles the old
-    // session's pending row — it must never leak into the new session.
-    const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
-    assert.ok(newHandler, 'the runner must register the /new transition command')
-    await (newHandler as () => Promise<void>)()
-    await waitForRenderView(vt)
-    const settled = vt.getViewport().join('\n')
-    assert.ok(!settled.includes('Submitting…'), `old pending must clear on the switch:\n${settled}`)
-  } finally {
-    if (context !== undefined) await disposeContext(context)
-    restoreTerminal()
+  life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
-  }
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-e', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-e' })
+  mounted.app.setDraft('hello switch')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('Submitting…'),
+    'the ack row must be pending before the switch')
+  // An ACTUAL session switch (transition commit) settles the old
+  // session's pending row — it must never leak into the new session.
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the runner must register the /new transition command')
+  await (newHandler as () => Promise<void>)()
+  await waitForRenderView(vt)
+  const settled = vt.getViewport().join('\n')
+  assert.ok(!settled.includes('Submitting…'), `old pending must clear on the switch:\n${settled}`)
 })
 
-test('a failed submit clears the pending row and surfaces the error', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+test('a failed submit clears the pending row and surfaces the error', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
-  const vt = new VirtualTerminal(100, 24)
-  const restoreTerminal = installVirtualProcessTerminal(vt)
-  let context: Context | undefined
-  try {
-    const harness = makeHarness(home, { id: 'submit-session-f', events: sessionEvents('resumed answer') })
-    harness.host.failFollowup = true // the write itself rejects
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-f' })
-    mounted.app.setDraft('hello boom')
-    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-    for (let round = 0; round < 40; round += 1) {
-      await waitForRenderView(vt)
-      if (!vt.getViewport().join('\n').includes('Submitting…')) break
-      for (let index = 0; index < 50; index += 1) await Promise.resolve()
-      await new Promise<void>(resolve => process.nextTick(resolve))
-    }
-    const settled = vt.getViewport().join('\n')
-    assert.ok(!settled.includes('Submitting…'), `the failed submit must clear the ack row:\n${settled}`)
-    assert.ok(settled.includes('submission failed'), `the failure must be surfaced:\n${settled}`)
-  } finally {
-    if (context !== undefined) await disposeContext(context)
-    restoreTerminal()
+  life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-f', events: sessionEvents('resumed answer') })
+  harness.host.failFollowup = true // the write itself rejects
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-f' })
+  mounted.app.setDraft('hello boom')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40; round += 1) {
+    await waitForRenderView(vt)
+    if (!vt.getViewport().join('\n').includes('Submitting…')) break
+    for (let index = 0; index < 50; index += 1) await Promise.resolve()
+    await new Promise<void>(resolve => process.nextTick(resolve))
   }
+  const settled = vt.getViewport().join('\n')
+  assert.ok(!settled.includes('Submitting…'), `the failed submit must clear the ack row:\n${settled}`)
+  assert.ok(settled.includes('submission failed'), `the failure must be surfaced:\n${settled}`)
 })
 
-test('the review repro: an older `!` run dying late NEVER clears the newer pending', async () => {
+test('the review repro: an older `!` run dying late NEVER clears the newer pending', async (t) => {
   // A = `!sleep 0.4` (slow run, ack armed under token A); B = `!echo done`
   // — starting B aborts A's controller, so A's killed child settles LATE
   // with a TERMINAL ack settle carrying token A. That settle must be
   // ignored: B's pending row survives until B's own authoritative event.
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
-  const vt = new VirtualTerminal(100, 24)
-  const restoreTerminal = installVirtualProcessTerminal(vt)
-  let context: Context | undefined
-  try {
-    const harness = makeHarness(home, { id: 'submit-session-h', events: sessionEvents('resumed answer') })
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-h' })
-
-    mounted.app.setDraft('!sleep 0.4')
-    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-    // B immediately: its runLocalShell aborts A's controller.
-    mounted.app.setDraft('!echo done')
-    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-    await waitForDelivery(harness.host, 'the newer `!echo` submit')
-    assert.equal(harness.host.followedUp.length, 1, 'only B\'s output is submitted')
-    // A's child was killed and its late terminal settle (token A) fired or
-    // will fire — EITHER WAY the row must still be pending for B.
-    await waitForRenderView(vt)
-    for (let round = 0; round < 30; round += 1) {
-      for (let index = 0; index < 50; index += 1) await Promise.resolve()
-      await new Promise<void>(resolve => setImmediate(resolve))
-    }
-    await waitForRenderView(vt)
-    const during = vt.getViewport().join('\n')
-    assert.ok(during.includes('Submitting…'),
-      `the NEWER submission's pending row must survive the older run dying:\n${during}`)
-
-    // B's authoritative inbox event settles the row.
-    context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
-      target: 'next-turn',
-      start: 0,
-      inserted: [],
-    }, 100) as never)
-    await waitForRenderView(vt)
-    const settled = vt.getViewport().join('\n')
-    assert.ok(!settled.includes('Submitting…'), `the row must clear on B's event:\n${settled}`)
-  } finally {
-    if (context !== undefined) await disposeContext(context)
-    restoreTerminal()
+  life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-h', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-h' })
+
+  mounted.app.setDraft('!sleep 0.4')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  // B immediately: its runLocalShell aborts A's controller.
+  mounted.app.setDraft('!echo done')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'the newer `!echo` submit')
+  assert.equal(harness.host.followedUp.length, 1, 'only B\'s output is submitted')
+  // A's child was killed and its late terminal settle (token A) fired or
+  // will fire — EITHER WAY the row must still be pending for B.
+  await waitForRenderView(vt)
+  for (let round = 0; round < 30; round += 1) {
+    for (let index = 0; index < 50; index += 1) await Promise.resolve()
+    await new Promise<void>(resolve => setImmediate(resolve))
   }
+  await waitForRenderView(vt)
+  const during = vt.getViewport().join('\n')
+  assert.ok(during.includes('Submitting…'),
+    `the NEWER submission's pending row must survive the older run dying:\n${during}`)
+
+  // B's authoritative inbox event settles the row.
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-turn',
+    start: 0,
+    inserted: [],
+  }, 100) as never)
+  await waitForRenderView(vt)
+  const settled = vt.getViewport().join('\n')
+  assert.ok(!settled.includes('Submitting…'), `the row must clear on B's event:\n${settled}`)
 })
 
-test('a CANCELLED submit ends the ack through the onCancel sink (never stuck, no error notice)', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-submit-hot-'))
+test('a CANCELLED submit ends the ack through the onCancel sink (never stuck, no error notice)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
-  const vt = new VirtualTerminal(100, 24)
-  const restoreTerminal = installVirtualProcessTerminal(vt)
-  let context: Context | undefined
-  try {
-    const harness = makeHarness(home, { id: 'submit-session-g', events: sessionEvents('resumed answer') })
-    harness.host.failFollowupAbort = true // the write rejects CANCELLATION-shaped
-    context = new Context()
-    const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-g' })
-    mounted.app.setDraft('hello cancel')
-    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-    for (let round = 0; round < 60; round += 1) {
-      await waitForRenderView(vt)
-      if (!vt.getViewport().join('\n').includes('Submitting…')) break
-      for (let index = 0; index < 50; index += 1) await Promise.resolve()
-      await new Promise<void>(resolve => process.nextTick(resolve))
-    }
-    const settled = vt.getViewport().join('\n')
-    assert.ok(!settled.includes('Submitting…'),
-      `the cancelled submit must clear the ack row (never stuck pending):\n${settled}`)
-    assert.ok(!settled.includes('submission failed'),
-      'a CANCELLATION must not surface as a failure notice (runOwned routes it to onCancel only)')
-    assert.equal(harness.host.followedUp.length, 0, 'nothing was written')
-  } finally {
-    if (context !== undefined) await disposeContext(context)
-    restoreTerminal()
+  life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-g', events: sessionEvents('resumed answer') })
+  harness.host.failFollowupAbort = true // the write rejects CANCELLATION-shaped
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-g' })
+  mounted.app.setDraft('hello cancel')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 60; round += 1) {
+    await waitForRenderView(vt)
+    if (!vt.getViewport().join('\n').includes('Submitting…')) break
+    for (let index = 0; index < 50; index += 1) await Promise.resolve()
+    await new Promise<void>(resolve => process.nextTick(resolve))
   }
+  const settled = vt.getViewport().join('\n')
+  assert.ok(!settled.includes('Submitting…'),
+    `the cancelled submit must clear the ack row (never stuck pending):\n${settled}`)
+  assert.ok(!settled.includes('submission failed'),
+    'a CANCELLATION must not surface as a failure notice (runOwned routes it to onCancel only)')
+  assert.equal(harness.host.followedUp.length, 0, 'nothing was written')
 })

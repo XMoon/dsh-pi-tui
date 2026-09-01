@@ -11,17 +11,18 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { apply as applyStartup, TUI_STARTUP_SERVICE, HARNESS_COMPAT, bundleVersionLabel, harnessCompatEntryFor, incompatibleHarnessMessage } from '../src/startup.ts'
 import { versionAtLeast } from '../src/dsh-version.ts'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** Point process.argv[1] at a fabricated @deepseek-ai/dsh package whose
  * version the launcher walk resolves. */
-function fakeLauncher(version: string): { restore: () => void } {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-startup-gate-'))
+function fakeLauncher(life: TestLifecycle, version: string): { restore: () => void } {
+  const root = life.tempDir('dsh-startup-gate-')
   const dshDir = join(root, 'node_modules', '@deepseek-ai', 'dsh')
   mkdirSync(join(dshDir, 'bin'), { recursive: true })
   writeFileSync(join(dshDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version }))
@@ -73,8 +74,9 @@ test('versionAtLeast compares prerelease identifiers the semver way', () => {
 
 // ── the gate itself ────────────────────────────────────────────────────────
 
-test('an older harness gets actionable guidance without a hard Loader-ordering throw', () => {
-  const launcher = fakeLauncher('0.1.0-rc.8')
+test('an older harness gets actionable guidance without a hard Loader-ordering throw', (t) => {
+  const life = testLifecycle(t)
+  const launcher = fakeLauncher(life, '0.1.0-rc.8')
   const stderr = captureStderr()
   try {
     const ctx = new Context()
@@ -92,8 +94,9 @@ test('an older harness gets actionable guidance without a hard Loader-ordering t
   }
 })
 
-test('the minimum harness version starts normally and provides the service', () => {
-  const launcher = fakeLauncher('0.1.2-alpha.2')
+test('the minimum harness version starts normally and provides the service', (t) => {
+  const life = testLifecycle(t)
+  const launcher = fakeLauncher(life, '0.1.2-alpha.2')
   const stderr = captureStderr()
   try {
     const ctx = mountStartup(['--session', 's1'])
@@ -106,12 +109,13 @@ test('the minimum harness version starts normally and provides the service', () 
   }
 })
 
-test('the previous alpha.1 floor is rejected by the minimum gate', () => {
+test('the previous alpha.1 floor is rejected by the minimum gate', (t) => {
+  const life = testLifecycle(t)
   // The 0.4 minimum is >=0.1.2-alpha.2: alpha.1 is below the floor and must
   // be refused (the exact minimum-boundary regression — a future code drift
   // that silently uses alpha.3-only APIs is easier to spot when the floor
   // contract is pinned on both sides).
-  const launcher = fakeLauncher('0.1.2-alpha.1')
+  const launcher = fakeLauncher(life, '0.1.2-alpha.1')
   const stderr = captureStderr()
   try {
     const ctx = mountStartup(['--session', 's1'])
@@ -126,9 +130,10 @@ test('the previous alpha.1 floor is rejected by the minimum gate', () => {
   }
 })
 
-test('the later alpha and 0.1.2 release line starts normally', () => {
+test('the later alpha and 0.1.2 release line starts normally', (t) => {
   for (const version of ['0.1.2-alpha.2', '0.1.2-alpha.3', '0.1.2', '0.1.3']) {
-    const launcher = fakeLauncher(version)
+    const life = testLifecycle(t)
+    const launcher = fakeLauncher(life, version)
     try {
       const ctx = mountStartup([])
       assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, `${version} should be supported`)

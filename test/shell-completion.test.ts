@@ -9,11 +9,12 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
+import { writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MentionProvider } from '../src/mentions.ts'
 import { shellCompletionContext, suggestShellCompletion } from '../src/shell-completion.ts'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 const abort = new AbortController().signal
 const cwd = tmpdir()
@@ -98,32 +99,35 @@ test('a PATH without bash degrades to null (missing shell)', async () => {
 
 // --- MentionProvider integration ---
 
-function fixtureWorkspace(): string {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-shell-completion-'))
+function fixtureWorkspace(life: TestLifecycle): string {
+  const root = life.tempDir('dsh-shell-completion-')
   mkdirSync(join(root, 'src'))
   writeFileSync(join(root, 'src', 'deep-nested.ts'), 'deep')
   writeFileSync(join(root, 'top.txt'), 'top')
   return root
 }
 
-test('MentionProvider completes shell command words on ! lines', async () => {
-  const root = fixtureWorkspace()
+test('MentionProvider completes shell command words on ! lines', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   const suggestions = await provider.getSuggestions(['!gi'], 0, 3, { signal: abort })
   assert.ok(suggestions !== null, 'command-name completion must run through the provider')
   assert.ok(suggestions.items.some(item => item.value === 'git'), 'git must be suggested')
 })
 
-test('MentionProvider still completes paths on ! lines (path positions reach the fork)', async () => {
-  const root = fixtureWorkspace()
+test('MentionProvider still completes paths on ! lines (path positions reach the fork)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   const suggestions = await provider.getSuggestions(['!cat src/de'], 0, 11, { signal: abort })
   assert.ok(suggestions !== null, 'a path position on a ! line must reach the fork provider')
   assert.ok(suggestions.items.some(item => item.value.includes('deep-nested.ts')), `deep-nested.ts missing from ${JSON.stringify(suggestions.items.slice(0, 5))}`)
 })
 
-test('MentionProvider applies a shell item as a plain word replacement', async () => {
-  const root = fixtureWorkspace()
+test('MentionProvider applies a shell item as a plain word replacement', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   const applied = provider.applyCompletion(['!gi'], 0, 3, { value: 'git', label: 'git' }, 'gi')
   assert.deepEqual(applied, { lines: ['!git '], cursorLine: 0, cursorCol: 5 })
@@ -143,8 +147,9 @@ function modeSource(initial: 'prompt' | 'shell-context' | 'shell-local'): {
   return { source: () => mode, set: (next) => { mode = next } }
 }
 
-test('MentionProvider completes shell words on the bare body via the virtual prefix', async () => {
-  const root = fixtureWorkspace()
+test('MentionProvider completes shell words on the bare body via the virtual prefix', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const { source } = modeSource('shell-context')
   const provider = new MentionProvider([], root, null, source)
   // The buffer holds `gi` (no `!`); the provider synthesizes `!gi`.
@@ -154,8 +159,9 @@ test('MentionProvider completes shell words on the bare body via the virtual pre
   assert.equal(suggestions.prefix, 'gi', 'the suggestion prefix must be the REAL word (no synthetic !)')
 })
 
-test('MentionProvider applies a shell item without ever writing the synthetic prefix', async () => {
-  const root = fixtureWorkspace()
+test('MentionProvider applies a shell item without ever writing the synthetic prefix', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const { source } = modeSource('shell-local')
   const provider = new MentionProvider([], root, null, source)
   const applied = provider.applyCompletion(['git che'], 0, 7, { value: 'checkout', label: 'checkout' }, 'che')
@@ -163,8 +169,9 @@ test('MentionProvider applies a shell item without ever writing the synthetic pr
     'the applied line must be the bare body — the !! prefix never enters the buffer')
 })
 
-test('MentionProvider still completes paths on a shell-mode body (path positions reach the fork)', async () => {
-  const root = fixtureWorkspace()
+test('MentionProvider still completes paths on a shell-mode body (path positions reach the fork)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const { source } = modeSource('shell-context')
   const provider = new MentionProvider([], root, null, source)
   const suggestions = await provider.getSuggestions(['cat src/de'], 0, 10, { signal: abort })
@@ -172,8 +179,9 @@ test('MentionProvider still completes paths on a shell-mode body (path positions
   assert.ok(suggestions.items.some(item => item.value.includes('deep-nested.ts')), `deep-nested.ts missing from ${JSON.stringify(suggestions.items.slice(0, 5))}`)
 })
 
-test('a natural trigger on a leading / in a shell mode stays quiet (never slash commands)', async () => {
-  const root = fixtureWorkspace()
+test('a natural trigger on a leading / in a shell mode stays quiet (never slash commands)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const { source } = modeSource('shell-context')
   const provider = new MentionProvider([{ name: 'image', description: 'Attach an image file' }], root, null, source)
   // The fork's slash-command branch would list `image` for a natural
@@ -185,8 +193,9 @@ test('a natural trigger on a leading / in a shell mode stays quiet (never slash 
   assert.ok(forced !== null && forced.items.length > 0, 'Tab on a shell-mode path must complete the path')
 })
 
-test('shouldTriggerFileCompletion allows Tab on a leading / in a shell mode', async () => {
-  const root = fixtureWorkspace()
+test('shouldTriggerFileCompletion allows Tab on a leading / in a shell mode', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const { source } = modeSource('shell-context')
   const provider = new MentionProvider([], root, null, source)
   // The fork's bare-slash-command block would return false for `/usr/lo`

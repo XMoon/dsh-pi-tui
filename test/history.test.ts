@@ -12,8 +12,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   HISTORY_RECALL_LIMIT,
@@ -29,8 +29,8 @@ import {
   recallHistoryForSession,
 } from '../src/history.ts'
 
-function tempHome(): string {
-  return mkdtempSync(join(tmpdir(), 'pi-tui-history-'))
+function tempHome(life: TestLifecycle): string {
+  return life.tempDir('pi-tui-history-')
 }
 
 test('historyFilePath derives a stable md5(cwd) JSON-lines path under the home', () => {
@@ -100,109 +100,91 @@ test('parseHistoryRecords skips corrupt rows without aborting the file', () => {
   assert.deepEqual(records.map(record => record.content), ['ok', '?'])
 })
 
-test('loadHistoryFile returns [] for an absent file and never throws', () => {
-  const home = tempHome()
-  try {
-    assert.deepEqual(loadHistoryFile(historyFilePath(home, '/no/such/cwd')), [])
-    assert.deepEqual(loadHistoryRecords(historyFilePath(home, '/no/such/cwd')), [])
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
+test('loadHistoryFile returns [] for an absent file and never throws', (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  assert.deepEqual(loadHistoryFile(historyFilePath(home, '/no/such/cwd')), [])
+  assert.deepEqual(loadHistoryRecords(historyFilePath(home, '/no/such/cwd')), [])
 })
 
-test('appendHistoryRecord and loadHistoryRecords round-trip v2 metadata in file order', () => {
-  const home = tempHome()
-  try {
-    const file = historyFilePath(home, '/work/alpha')
-    assert.equal(appendHistoryRecord(file, { v: 2, content: 'first', cwd: '/work/alpha', ts: 42 }, undefined), true)
-    assert.equal(appendHistoryRecord(file, { v: 2, content: 'second', cwd: '/work/alpha', ts: 43, sessionId: 'ses_1' }, 'first'), true)
-    // Empty and consecutive repeats are skipped.
-    assert.equal(appendHistoryRecord(file, { v: 2, content: '   ', cwd: '/work/alpha', ts: 44 }, 'second'), false)
-    assert.equal(appendHistoryRecord(file, { v: 2, content: 'second', cwd: '/work/alpha', ts: 45 }, 'second'), false)
-    // Non-consecutive repeats are legal history.
-    assert.equal(appendHistoryRecord(file, { v: 2, content: 'first', cwd: '/work/alpha', ts: 46 }, 'second'), true)
-    const records = loadHistoryRecords(file)
-    assert.deepEqual(records, [
-      { content: 'first', cwd: '/work/alpha', ts: 42, version: 2 },
-      { content: 'second', cwd: '/work/alpha', ts: 43, sessionId: 'ses_1', version: 2 },
-      { content: 'first', cwd: '/work/alpha', ts: 46, version: 2 },
-    ])
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
+test('appendHistoryRecord and loadHistoryRecords round-trip v2 metadata in file order', (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const file = historyFilePath(home, '/work/alpha')
+  assert.equal(appendHistoryRecord(file, { v: 2, content: 'first', cwd: '/work/alpha', ts: 42 }, undefined), true)
+  assert.equal(appendHistoryRecord(file, { v: 2, content: 'second', cwd: '/work/alpha', ts: 43, sessionId: 'ses_1' }, 'first'), true)
+  // Empty and consecutive repeats are skipped.
+  assert.equal(appendHistoryRecord(file, { v: 2, content: '   ', cwd: '/work/alpha', ts: 44 }, 'second'), false)
+  assert.equal(appendHistoryRecord(file, { v: 2, content: 'second', cwd: '/work/alpha', ts: 45 }, 'second'), false)
+  // Non-consecutive repeats are legal history.
+  assert.equal(appendHistoryRecord(file, { v: 2, content: 'first', cwd: '/work/alpha', ts: 46 }, 'second'), true)
+  const records = loadHistoryRecords(file)
+  assert.deepEqual(records, [
+    { content: 'first', cwd: '/work/alpha', ts: 42, version: 2 },
+    { content: 'second', cwd: '/work/alpha', ts: 43, sessionId: 'ses_1', version: 2 },
+    { content: 'first', cwd: '/work/alpha', ts: 46, version: 2 },
+  ])
 })
 
-test('loadHistoryFile reads v2 rows as recall content and never rewrites the file', () => {
-  const home = tempHome()
-  try {
-    const file = historyFilePath(home, '/work/alpha')
-    appendHistoryRecord(file, { v: 2, content: 'v2 row', cwd: '/work/alpha', ts: 42 }, undefined)
-    appendHistoryLine(file, 'legacy row', undefined)
-    assert.deepEqual(loadHistoryFile(file), ['v2 row', 'legacy row'])
-    // The file still holds BOTH rows (v2 + v1) — reading never rewrites.
-    assert.equal(loadHistoryRecords(file).length, 2)
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
+test('loadHistoryFile reads v2 rows as recall content and never rewrites the file', (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const file = historyFilePath(home, '/work/alpha')
+  appendHistoryRecord(file, { v: 2, content: 'v2 row', cwd: '/work/alpha', ts: 42 }, undefined)
+  appendHistoryLine(file, 'legacy row', undefined)
+  assert.deepEqual(loadHistoryFile(file), ['v2 row', 'legacy row'])
+  // The file still holds BOTH rows (v2 + v1) — reading never rewrites.
+  assert.equal(loadHistoryRecords(file).length, 2)
 })
 
-test('appendHistoryLine and loadHistoryFile round-trip in file order', () => {
-  const home = tempHome()
-  try {
-    const file = historyFilePath(home, '/work/alpha')
-    assert.equal(appendHistoryLine(file, 'first', undefined), true)
-    assert.equal(appendHistoryLine(file, 'second', 'first'), true)
-    // Empty and consecutive repeats are skipped.
-    assert.equal(appendHistoryLine(file, '   ', 'second'), false)
-    assert.equal(appendHistoryLine(file, 'second', 'second'), false)
-    // Non-consecutive repeats are legal history.
-    assert.equal(appendHistoryLine(file, 'first', 'second'), true)
-    assert.deepEqual(loadHistoryFile(file), ['first', 'second', 'first'])
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
+test('appendHistoryLine and loadHistoryFile round-trip in file order', (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const file = historyFilePath(home, '/work/alpha')
+  assert.equal(appendHistoryLine(file, 'first', undefined), true)
+  assert.equal(appendHistoryLine(file, 'second', 'first'), true)
+  // Empty and consecutive repeats are skipped.
+  assert.equal(appendHistoryLine(file, '   ', 'second'), false)
+  assert.equal(appendHistoryLine(file, 'second', 'second'), false)
+  // Non-consecutive repeats are legal history.
+  assert.equal(appendHistoryLine(file, 'first', 'second'), true)
+  assert.deepEqual(loadHistoryFile(file), ['first', 'second', 'first'])
 })
 
-test('read over HISTORY_RECALL_LIMIT caps the recall to the newest entries WITHOUT truncating the file', () => {
-  const home = tempHome()
-  try {
-    const file = join(home, 'user-history', 'big.jsonl')
-    for (let index = 0; index < HISTORY_RECALL_LIMIT + 20; index += 1) {
-      appendHistoryLine(file, `entry ${index}`, undefined)
-    }
-    const recalled = loadRecallHistory(file)
-    assert.equal(recalled.length, HISTORY_RECALL_LIMIT)
-    // Empty-query recall is newest-first for the editor's reverse; the
-    // store itself returns oldest-first of the KEPT tail.
-    assert.equal(recalled[0], 'entry 20')
-    assert.equal(recalled[recalled.length - 1], `entry ${HISTORY_RECALL_LIMIT + 19}`)
-    // The canonical file still holds EVERY row — a read must never trim
-    // it (that trim used to destroy the >100-rows a Ctrl+R search needs).
-    const lines = loadHistoryRecords(file)
-    assert.equal(lines.length, HISTORY_RECALL_LIMIT + 20)
-    assert.equal(lines[0]?.content, 'entry 0')
-    const statBefore = statSync(file)
-    // And a second read leaves the file byte-identical (no rewrite at all).
-    loadHistoryFile(file)
-    const statAfter = statSync(file)
-    assert.equal(statAfter.size, statBefore.size)
-    assert.equal(statAfter.mtimeMs, statBefore.mtimeMs)
-  } finally {
-    rmSync(home, { recursive: true, force: true })
+test('read over HISTORY_RECALL_LIMIT caps the recall to the newest entries WITHOUT truncating the file', (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const file = join(home, 'user-history', 'big.jsonl')
+  for (let index = 0; index < HISTORY_RECALL_LIMIT + 20; index += 1) {
+    appendHistoryLine(file, `entry ${index}`, undefined)
   }
+  const recalled = loadRecallHistory(file)
+  assert.equal(recalled.length, HISTORY_RECALL_LIMIT)
+  // Empty-query recall is newest-first for the editor's reverse; the
+  // store itself returns oldest-first of the KEPT tail.
+  assert.equal(recalled[0], 'entry 20')
+  assert.equal(recalled[recalled.length - 1], `entry ${HISTORY_RECALL_LIMIT + 19}`)
+  // The canonical file still holds EVERY row — a read must never trim
+  // it (that trim used to destroy the >100-rows a Ctrl+R search needs).
+  const lines = loadHistoryRecords(file)
+  assert.equal(lines.length, HISTORY_RECALL_LIMIT + 20)
+  assert.equal(lines[0]?.content, 'entry 0')
+  const statBefore = statSync(file)
+  // And a second read leaves the file byte-identical (no rewrite at all).
+  loadHistoryFile(file)
+  const statAfter = statSync(file)
+  assert.equal(statAfter.size, statBefore.size)
+  assert.equal(statAfter.mtimeMs, statBefore.mtimeMs)
 })
 
-test('appendHistoryLine creates the user-history directory on demand', () => {
-  const home = tempHome()
-  try {
-    const file = historyFilePath(home, '/fresh/cwd')
-    assert.ok(!existsSync(file))
-    assert.equal(appendHistoryLine(file, 'first', undefined), true)
-    assert.ok(existsSync(file), 'file must be materialized by the append')
-    assert.deepEqual(loadHistoryFile(file), ['first'])
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
+test('appendHistoryLine creates the user-history directory on demand', (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const file = historyFilePath(home, '/fresh/cwd')
+  assert.ok(!existsSync(file))
+  assert.equal(appendHistoryLine(file, 'first', undefined), true)
+  assert.ok(existsSync(file), 'file must be materialized by the append')
+  assert.deepEqual(loadHistoryFile(file), ['first'])
 })
 // ── session-scoped editor recall (recallHistoryForSession) ────────────────
 

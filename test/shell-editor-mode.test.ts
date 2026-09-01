@@ -10,8 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
 import { EditorRegistry } from '../src/editor-registry.ts'
@@ -24,6 +23,7 @@ import { resetCommandCacheForTest, setCompgenRunnerForTest } from '../src/shell-
 import { MentionProvider } from '../src/mentions.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** The owned-task entry the runner wires in production (real runOwned,
  * silent capture diag). */
@@ -36,13 +36,13 @@ const owned = <T>(label: string, task: () => T | Promise<T>, options: Omit<Owned
 const abort = new AbortController().signal
 
 /** A throwaway workspace (completion fixtures live under the cwd). */
-function fixtureWorkspace(): string {
-  return mkdtempSync(join(tmpdir(), 'dsh-shell-mode-'))
+function fixtureWorkspace(life: TestLifecycle): string {
+  return life.tempDir('dsh-shell-mode-')
 }
 
 /** A workspace with one file (Tab completion dropdowns need candidates). */
-function fixtureWithFiles(): string {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-shell-mode-files-'))
+function fixtureWithFiles(life: TestLifecycle): string {
+  const root = life.tempDir('dsh-shell-mode-files-')
   writeFileSync(join(root, 'notes.txt'), 'x')
   mkdirSync(join(root, 'src'))
   writeFileSync(join(root, 'src', 'deep.ts'), 'x')
@@ -140,8 +140,10 @@ async function waitForNoDropdownRow(vt: VirtualTerminal, needle: string, label: 
 
 // ── mode transitions (plan §4.1–4.4, §5.2) ───────────────────────────────
 
-test('an empty prompt + ! enters shell-context; a second ! enters shell-local', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('an empty prompt + ! enters shell-context; a second ! enters shell-local', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   await vt.waitForRender()
@@ -151,11 +153,12 @@ test('an empty prompt + ! enters shell-context; a second ! enters shell-local', 
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-local')
   assert.equal(app.seatTextForTest(), '', 'the second prefix must never enter the buffer')
-  app.stop()
 })
 
-test('Backspace on an empty shell body steps the mode back: !! -> ! -> prompt', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('Backspace on an empty shell body steps the mode back: !! -> ! -> prompt', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('!')
@@ -169,11 +172,12 @@ test('Backspace on an empty shell body steps the mode back: !! -> ! -> prompt', 
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'prompt')
   assert.equal(app.seatTextForTest(), '')
-  app.stop()
 })
 
-test('Esc on an empty shell body returns directly to the prompt (no cancel)', async () => {
-  const surface = startApp(fixtureWorkspace())
+test('Esc on an empty shell body returns directly to the prompt (no cancel)', async (t) => {
+  const life = testLifecycle(t)
+  const surface = startApp(fixtureWorkspace(life))
+  life.defer(() => surface.app.stop())
   const { vt, app } = surface
   await vt.waitForRender()
   vt.sendInput('!')
@@ -191,11 +195,12 @@ test('Esc on an empty shell body returns directly to the prompt (no cancel)', as
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'prompt')
   assert.equal(surface.cancels, 0)
-  app.stop()
 })
 
-test('! after command text is an ordinary body character', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('! after command text is an ordinary body character', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('ls')
@@ -214,11 +219,12 @@ test('! after command text is an ordinary body character', async () => {
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-local')
   assert.equal(app.seatTextForTest(), 'ls!')
-  app.stop()
 })
 
-test('a ! typed in shell-local with an empty body is a literal body character', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('a ! typed in shell-local with an empty body is a literal body character', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('!')
@@ -226,43 +232,47 @@ test('a ! typed in shell-local with an empty body is a literal body character', 
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-local', 'no fourth mode is invented')
   assert.equal(app.seatTextForTest(), '!', 'the third ! is ordinary body text')
-  app.stop()
 })
 
 // ── paste normalization (plan §7.6, §12.4) ───────────────────────────────
 
-test('pasting a ! line into an empty prompt enters shell-context', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('pasting a ! line into an empty prompt enters shell-context', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('\x1b[200~!git status\x1b[201~')
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-context')
   assert.equal(app.seatTextForTest(), 'git status')
-  app.stop()
 })
 
-test('pasting a !! line into an empty prompt enters shell-local', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('pasting a !! line into an empty prompt enters shell-local', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('\x1b[200~!!git status\x1b[201~')
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-local')
   assert.equal(app.seatTextForTest(), 'git status')
-  app.stop()
 })
 
-test('pasting plain text into an empty prompt stays in prompt mode', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('pasting plain text into an empty prompt stays in prompt mode', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('\x1b[200~hello\x1b[201~')
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'prompt')
   assert.equal(app.seatTextForTest(), 'hello')
-  app.stop()
 })
 
-test('a paste beginning with ! into a NON-empty editor is never reinterpreted', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('a paste beginning with ! into a NON-empty editor is never reinterpreted', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('echo ')
   await vt.waitForRender()
@@ -270,11 +280,12 @@ test('a paste beginning with ! into a NON-empty editor is never reinterpreted', 
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'prompt', 'a non-empty editor keeps prompt mode')
   assert.equal(app.seatTextForTest(), 'echo !x', 'the pasted ! stays literal text')
-  app.stop()
 })
 
-test('a paste beginning with ! into an EMPTY shell mode is literal body text', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('a paste beginning with ! into an EMPTY shell mode is literal body text', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!') // shell-context, empty body
   await vt.waitForRender()
@@ -292,13 +303,14 @@ test('a paste beginning with ! into an EMPTY shell mode is literal body text', a
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-local')
   assert.equal(app.seatTextForTest(), '!!echo', 'the pasted !! is body text in shell-local')
-  app.stop()
 })
 
 // ── submission serialization (plan §8.1, §8.3, §12.5) ─────────────────────
 
-test('submission serializes the mode back into the exact wire form', async () => {
-  const { vt, app, submitted } = startApp(fixtureWorkspace())
+test('submission serializes the mode back into the exact wire form', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app, submitted } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('hello')
   vt.sendInput('\r')
@@ -315,11 +327,12 @@ test('submission serializes the mode back into the exact wire form', async () =>
   vt.sendInput('\r')
   assert.deepEqual(submitted, ['hello', '!pwd', '!!pwd'])
   assert.equal(app.inputModeForTest(), 'prompt')
-  app.stop()
 })
 
-test('a BARE ! / !! (empty body) is a serialized PAYLOAD, never an empty guard victim (plan §7.6)', async () => {
-  const { vt, app, submitted } = startApp(fixtureWorkspace())
+test('a BARE ! / !! (empty body) is a serialized PAYLOAD, never an empty guard victim (plan §7.6)', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app, submitted } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // Shell-context with an empty body: the wire form is '!' — payload.
   vt.sendInput('!')
@@ -331,17 +344,18 @@ test('a BARE ! / !! (empty body) is a serialized PAYLOAD, never an empty guard v
   vt.sendInput('\r')
   assert.deepEqual(submitted, ['!', '!!'], 'a bare !! must submit')
   assert.equal(app.inputModeForTest(), 'prompt')
-  app.stop()
 })
 
-test('a rejected submission restores the serialized text AND the mode', async () => {
-  const { vt, app, submitted } = startApp(fixtureWorkspace(), {
+test('a rejected submission restores the serialized text AND the mode', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app, submitted } = startApp(fixtureWorkspace(life), {
     onSubmit: (text) => {
       // Simulate the runner's synchronous rejection restore: the draft
       // comes back through setEditorText with the serialized wire form.
       app.setEditorText(text)
     },
   })
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('pwd')
@@ -349,13 +363,14 @@ test('a rejected submission restores the serialized text AND the mode', async ()
   assert.deepEqual(submitted, ['!pwd'])
   assert.equal(app.inputModeForTest(), 'shell-context', 'the rejected shell draft keeps its mode')
   assert.equal(app.seatTextForTest(), 'pwd')
-  app.stop()
 })
 
 // ── history (plan §8.4–8.6, §12.7) ────────────────────────────────────────
 
-test('history recall decodes serialized entries into mode + body', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('history recall decodes serialized entries into mode + body', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.seedInputHistory(['!!pwd', '!pwd', 'hello'])
   vt.sendInput('\x1b[A') // ↑: most recent entry
@@ -370,11 +385,12 @@ test('history recall decodes serialized entries into mode + body', async () => {
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'prompt')
   assert.equal(app.seatTextForTest(), 'hello')
-  app.stop()
 })
 
-test('history draft restore returns the ORIGINAL mode with the draft', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('history draft restore returns the ORIGINAL mode with the draft', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.seedInputHistory(['!!pwd', '!pwd'])
   vt.sendInput('hello')
@@ -390,11 +406,12 @@ test('history draft restore returns the ORIGINAL mode with the draft', async () 
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'prompt', 'the prompt draft must not come back in shell mode')
   assert.equal(app.seatTextForTest(), 'hello')
-  app.stop()
 })
 
-test('a shell draft restores its shell mode after history browsing', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('a shell draft restores its shell mode after history browsing', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.seedInputHistory(['!!pwd'])
   vt.sendInput('!')
@@ -409,13 +426,14 @@ test('a shell draft restores its shell mode after history browsing', async () =>
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-context', 'the shell draft keeps its mode')
   assert.equal(app.seatTextForTest(), 'git st')
-  app.stop()
 })
 
 // ── completion (plan §9, §12.8) ───────────────────────────────────────────
 
-test('shell command completion works in both shell modes and never writes the prefix', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('shell command completion works in both shell modes and never writes the prefix', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('gi')
@@ -437,13 +455,14 @@ test('shell command completion works in both shell modes and never writes the pr
   await vt.waitForRender()
   assert.ok(app.seatTextForTest().startsWith('git'))
   assert.ok(!app.seatTextForTest().includes('!'))
-  app.stop()
 })
 
-test('a leading / in a shell mode is a PATH, never a slash command', async () => {
-  const { vt, app } = startApp(fixtureWorkspace(), {
+test('a leading / in a shell mode is a PATH, never a slash command', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life), {
     commands: [{ name: 'image', description: 'Attach an image file' }],
   })
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   // Natural typing of a path: the slash-command list must NOT appear
@@ -455,17 +474,17 @@ test('a leading / in a shell mode is a PATH, never a slash command', async () =>
   // Tab completes the path instead.
   vt.sendInput('\t')
   await waitForDropdownRow(vt, 'local', 'path completion for /usr/lo in shell mode')
-  app.stop()
 })
 
-test('prompt-mode slash completion is unchanged', async () => {
-  const { vt, app } = startApp(fixtureWorkspace(), {
+test('prompt-mode slash completion is unchanged', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life), {
     commands: [{ name: 'image', description: 'Attach an image file' }],
   })
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('/im')
   await waitForDropdownRow(vt, 'image', 'slash-command completion in prompt mode')
-  app.stop()
 })
 
 // ── rendering (plan §10, §12.9) ───────────────────────────────────────────
@@ -485,8 +504,10 @@ function editorContentRow(vt: VirtualTerminal): number {
   assert.fail(`editor content row not found:\n${lines.join('\n')}`)
 }
 
-test('the mode prompt renders as ❯ / ! / !! with the right colors', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('the mode prompt renders as ❯ / ! / !! with the right colors', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   const promptRow = editorContentRow(vt)
   let view = vt.getViewport()
@@ -502,11 +523,12 @@ test('the mode prompt renders as ❯ / ! / !! with the right colors', async () =
   view = vt.getViewport()
   assert.ok(view[promptRow]!.startsWith('!!'), `shell-local must render !!:\n${view.join('\n')}`)
   assert.equal(vt.getCellFgRgb(promptRow, 0), 0xbd93f9, 'the !! must use the shellMode color')
-  app.stop()
 })
 
-test('the shell border uses the shellMode color; the prompt border the normal one', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('the shell border uses the shellMode color; the prompt border the normal one', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   const promptRow = editorContentRow(vt)
   const borderRow = promptRow - 1
@@ -514,11 +536,12 @@ test('the shell border uses the shellMode color; the prompt border the normal on
   vt.sendInput('!')
   await vt.waitForRender()
   assert.equal(vt.getCellFgRgb(borderRow, 0), 0xbd93f9, 'shell-mode border uses the shellMode color')
-  app.stop()
 })
 
-test('no duplicate prefix is ever rendered', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('no duplicate prefix is ever rendered', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('ls')
@@ -526,13 +549,14 @@ test('no duplicate prefix is ever rendered', async () => {
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('! !ls'), `no duplicated prefix:\n${view}`)
   assert.ok(!view.includes('❯ !ls'), `no prompt-plus-shell marker:\n${view}`)
-  app.stop()
 })
 
 // ── Esc / autocomplete priority (plan §4.4, §12.10) ───────────────────────
 
-test('Esc closes the autocomplete menu first and keeps the shell mode', async () => {
-  const surface = startApp(fixtureWorkspace())
+test('Esc closes the autocomplete menu first and keeps the shell mode', async (t) => {
+  const life = testLifecycle(t)
+  const surface = startApp(fixtureWorkspace(life))
+  life.defer(() => surface.app.stop())
   const { vt, app } = surface
   await vt.waitForRender()
   vt.sendInput('!')
@@ -545,13 +569,14 @@ test('Esc closes the autocomplete menu first and keeps the shell mode', async ()
   assert.equal(app.inputModeForTest(), 'shell-context', 'Esc must not exit the shell mode while the menu was open')
   assert.equal(app.seatTextForTest(), 'gi', 'Esc must not alter the body')
   assert.equal(surface.cancels, 0, 'closing the dropdown must not fire the host cancel')
-  app.stop()
 })
 
 // ── review round 1 regressions ────────────────────────────────────────────
 
-test('a busy Esc keeps its Host-owned cancel priority over the shell-mode exit', async () => {
-  const surface = startApp(fixtureWorkspace())
+test('a busy Esc keeps its Host-owned cancel priority over the shell-mode exit', async (t) => {
+  const life = testLifecycle(t)
+  const surface = startApp(fixtureWorkspace(life))
+  life.defer(() => surface.app.stop())
   const { vt, app } = surface
   await vt.waitForRender()
   vt.sendInput('!')
@@ -562,36 +587,39 @@ test('a busy Esc keeps its Host-owned cancel priority over the shell-mode exit',
   assert.equal(surface.cancels, 1, 'a busy Esc must cancel the running activity')
   assert.equal(app.inputModeForTest(), 'shell-context', 'the busy cancel must not exit the shell mode')
   app.setBusy(false)
-  app.stop()
 })
 
-test('a bare ! reaches the queue protocol via Ctrl+Enter', async () => {
-  const { vt, app, queued } = startApp(fixtureWorkspace())
+test('a bare ! reaches the queue protocol via Ctrl+Enter', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app, queued } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   await vt.waitForRender()
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter: queue submit
   assert.deepEqual(queued, ['!'], 'a bare ! shell mode must queue its wire form')
   assert.equal(app.inputModeForTest(), 'prompt', 'mode resets after the queue submit')
-  app.stop()
 })
 
-test('a bare ! reaches the submit protocol via submitDraft', async () => {
-  const { vt, app, submitted } = startApp(fixtureWorkspace())
+test('a bare ! reaches the submit protocol via submitDraft', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app, submitted } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   await vt.waitForRender()
   app.submitDraft(false)
   assert.deepEqual(submitted, ['!'], 'a bare ! shell mode must submit its wire form')
   assert.equal(app.inputModeForTest(), 'prompt')
-  app.stop()
 })
 
-test('a bare ! reaches the child via the subagent submit path', async () => {
+test('a bare ! reaches the child via the subagent submit path', async (t) => {
+  const life = testLifecycle(t)
   const childSubmits: { parentSessionId: string; childSessionId: string; text: string }[] = []
-  const { vt, app } = startApp(fixtureWorkspace(), {
+  const { vt, app } = startApp(fixtureWorkspace(life), {
     onSubagentSubmit: (request) => { childSubmits.push(request) },
   })
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.setViewerMode(continuableViewer())
   await vt.waitForRender()
@@ -601,7 +629,6 @@ test('a bare ! reaches the child via the subagent submit path', async () => {
   assert.equal(childSubmits.length, 1, 'a bare ! in the viewer must submit to the child')
   assert.equal(childSubmits[0]!.text, '!', 'the child receives the serialized wire form')
   assert.equal(app.inputModeForTest(), 'prompt', 'mode resets after the child submit')
-  app.stop()
 })
 
 // ── review round 3: plugin handoff (the wire form round-trips) ────────────
@@ -629,13 +656,15 @@ function pluginEditor(initial = ''): ExtensionEditor & {
   }
 }
 
-test('a shell-mode draft round-trips through a plugin editor handoff with its mode', async () => {
+test('a shell-mode draft round-trips through a plugin editor handoff with its mode', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('pwd')
@@ -664,16 +693,17 @@ test('a shell-mode draft round-trips through a plugin editor handoff with its mo
   assert.equal(app.seatTextForTest(), 'pwd')
   vt.sendInput('\r')
   assert.deepEqual(submitted, ['!pwd'], 'the restored shell draft submits its wire form')
-  app.stop()
 })
 
-test('a plugin draft without a shell prefix restores in PROMPT mode (no stale !)', async () => {
+test('a plugin draft without a shell prefix restores in PROMPT mode (no stale !)', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // Enter shell mode, then let the plugin take over and REPLACE the draft
   // with plain prose.
@@ -702,10 +732,10 @@ test('a plugin draft without a shell prefix restores in PROMPT mode (no stale !)
   assert.equal(app.seatTextForTest(), 'echo')
   vt.sendInput('\r')
   assert.deepEqual(submitted, ['echo'], 'the plugin draft submits as plain text')
-  app.stop()
 })
 
-test('task-browser routing and the footer hint follow the VISIBLE seat editor, not the hidden host mode', async () => {
+test('task-browser routing and the footer hint follow the VISIBLE seat editor, not the hidden host mode', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   let opened = 0
@@ -714,8 +744,9 @@ test('task-browser routing and the footer hint follow the VISIBLE seat editor, n
     onExit: () => {},
     onOpenTasks: () => { opened += 1; app.requestRender() },
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // Enter shell mode, then hand the seat to a plugin editor (the hidden
   // host keeps its shell mode).
@@ -747,10 +778,10 @@ test('task-browser routing and the footer hint follow the VISIBLE seat editor, n
   assert.equal(opened, 1, 'the visible prompt-mode editor must open the task browser')
   handle.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })
 
-test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the review regression)', async () => {
+test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the review regression)', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   let opened = 0
@@ -759,8 +790,9 @@ test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the 
     onExit: () => {},
     onOpenTasks: () => { opened += 1; app.requestRender() },
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
@@ -806,12 +838,12 @@ test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the 
   assert.ok(view.includes('↓ view'), `an emptied plugin editor must advertise ↓ again:\n${view}`)
   handle.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })
 
 // ── review round 5: sink steer serialization + adapter fallback ──────────
 
-test('the plugin action sink steers the wire form and clears the editor', async () => {
+test('the plugin action sink steers the wire form and clears the editor', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const steered: string[] = []
@@ -820,8 +852,9 @@ test('the plugin action sink steers the wire form and clears the editor', async 
     onExit: () => {},
     onSteer: (text) => steered.push(text),
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // A plugin editor whose document is the wire form dispatches steer.
   let pluginHost: EditorHost | undefined
@@ -846,7 +879,6 @@ test('the plugin action sink steers the wire form and clears the editor', async 
   assert.equal(created[0]!.getText(), '', 'the steer clears the plugin document')
   handle.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })
 
 test('a host adapter without setSerializedInput still receives the handoff draft (setText fallback)', () => {
@@ -888,7 +920,8 @@ test('a host adapter without setSerializedInput still receives the handoff draft
 
 // ── review round 6: busy-Esc vs plugin editors; cursor restoration ───────
 
-test('a busy Esc cancels BEFORE a consuming plugin editor sees it', async () => {
+test('a busy Esc cancels BEFORE a consuming plugin editor sees it', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   let cancels = 0
@@ -898,8 +931,9 @@ test('a busy Esc cancels BEFORE a consuming plugin editor sees it', async () => 
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // A plugin editor whose handleInput CONSUMES every event (vim-like).
   const handle = registry.register({
@@ -932,7 +966,6 @@ test('a busy Esc cancels BEFORE a consuming plugin editor sees it', async () => 
   assert.equal(cancels, 1, 'an idle plugin Esc must not cancel')
   handle.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })
 
 test('a legacy host restore keeps the cursor in WIRE coordinates (raw ! stays in the text)', () => {
@@ -1051,7 +1084,8 @@ test('a host prompt-mode literal ! is a document character (never shifted on han
 
 // ── review round 7: a DECLINED plugin Esc reaches the host fallback ───────
 
-test('a plugin editor that DECLINES Esc still arms the host double-Esc cancel', async () => {
+test('a plugin editor that DECLINES Esc still arms the host double-Esc cancel', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   let cancels = 0
@@ -1060,8 +1094,9 @@ test('a plugin editor that DECLINES Esc still arms the host double-Esc cancel', 
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // A vim-like plugin that DECLINES Esc (returns false — it has no modal
   // state to enter).
@@ -1092,12 +1127,12 @@ test('a plugin editor that DECLINES Esc still arms the host double-Esc cancel', 
   assert.equal(cancels, 1, 'a declined plugin Esc must not swallow the host cancel')
   handle.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })
 
 // ── review round 8: a CONSUMED Esc disarms the pending double-Esc window ──
 
-test('a consumed plugin Esc disarms a window armed by a prior declined Esc', async () => {
+test('a consumed plugin Esc disarms a window armed by a prior declined Esc', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   let cancels = 0
@@ -1106,8 +1141,9 @@ test('a consumed plugin Esc disarms a window armed by a prior declined Esc', asy
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // A plugin that DECLINES the first Esc (arming the host window) and
   // CONSUMES every later one (vim entering normal mode).
@@ -1140,10 +1176,10 @@ test('a consumed plugin Esc disarms a window armed by a prior declined Esc', asy
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(cancels, 0, 'a consumed Esc must disarm the stale window')
-  app.stop()
 })
 
-test('a consumed onSingleEscape disarms the pending double-Esc window', async () => {
+test('a consumed onSingleEscape disarms the pending double-Esc window', async (t) => {
+  const life = testLifecycle(t)
   const vt = new VirtualTerminal(100, 24)
   let cancels = 0
   let escCount = 0
@@ -1155,8 +1191,9 @@ test('a consumed onSingleEscape disarms the pending double-Esc window', async ()
     // that opened between the presses).
     onSingleEscape: () => { escCount += 1; return escCount === 2 },
   })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('\x1b') // not consumed → the host window arms
   await vt.waitForRender()
@@ -1165,12 +1202,12 @@ test('a consumed onSingleEscape disarms the pending double-Esc window', async ()
   vt.sendInput('\x1b') // not consumed again → must ARM, never cancel
   await vt.waitForRender()
   assert.equal(cancels, 0, 'a consumed onSingleEscape must disarm the stale window')
-  app.stop()
 })
 
 // ── PR review round: external editor wire boundary ─────────────────────────
 
-test('the external editor round-trips the WIRE form (shell modes switchable in $EDITOR)', async () => {
+test('the external editor round-trips the WIRE form (shell modes switchable in $EDITOR)', async (t) => {
+  const life = testLifecycle(t)
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
   let seenDraft = ''
@@ -1180,8 +1217,9 @@ test('the external editor round-trips the WIRE form (shell modes switchable in $
     openExternalEditor: async (draft) => { seenDraft = draft; return '!!pwd' },
     runOwned: owned,
   })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('pwd')
@@ -1194,10 +1232,10 @@ test('the external editor round-trips the WIRE form (shell modes switchable in $
   assert.equal(app.seatTextForTest(), 'pwd')
   vt.sendInput('\r')
   assert.deepEqual(submitted, ['!!pwd'], 'the edited wire form submits with its new mode')
-  app.stop()
 })
 
-test('a prompt-mode draft edited into a shell line in $EDITOR comes back as shell mode', async () => {
+test('a prompt-mode draft edited into a shell line in $EDITOR comes back as shell mode', async (t) => {
+  const life = testLifecycle(t)
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, {
@@ -1206,8 +1244,9 @@ test('a prompt-mode draft edited into a shell line in $EDITOR comes back as shel
     openExternalEditor: async () => '!pwd',
     runOwned: owned,
   })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('hello')
   await vt.waitForRender()
@@ -1217,13 +1256,14 @@ test('a prompt-mode draft edited into a shell line in $EDITOR comes back as shel
   assert.equal(app.seatTextForTest(), 'pwd')
   vt.sendInput('\r')
   assert.deepEqual(submitted, ['!pwd'], 'the shell line submits as a shell command')
-  app.stop()
 })
 
 // ── PR review round: paste/undo invariant ─────────────────────────────────
 
-test('undo after a normalized paste never resurrects the raw prefix in the document', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('undo after a normalized paste never resurrects the raw prefix in the document', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('\x1b[200~!!git status\x1b[201~')
   await vt.waitForRender()
@@ -1236,11 +1276,12 @@ test('undo after a normalized paste never resurrects the raw prefix in the docum
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), '', 'undo restores the pre-paste document')
   assert.ok(!app.seatTextForTest().includes('!!'), 'the raw prefix must never re-enter the document')
-  app.stop()
 })
 
-test('a large shell paste (>10 lines) enters the shell mode through the paste registry', async () => {
-  const { vt, app, submitted } = startApp(fixtureWorkspace())
+test('a large shell paste (>10 lines) enters the shell mode through the paste registry', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app, submitted } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   const lines = Array.from({ length: 12 }, (_, index) => `git log ${index}`)
   vt.sendInput(`\x1b[200~!!${lines.join('\n')}\x1b[201~`)
@@ -1254,15 +1295,16 @@ test('a large shell paste (>10 lines) enters the shell mode through the paste re
   assert.ok(submitted[0]!.startsWith('!!'), 'the submitted wire form keeps the shell prefix')
   assert.ok(submitted[0]!.includes('git log 0'), 'the expanded paste body is the stripped command text')
   assert.ok(!submitted[0]!.includes('\n!!'), 'no raw prefix survives inside the expanded body')
-  app.stop()
 })
 
 // ── PR review round: mode transitions cancel the open dropdown ────────────
 
-test('a prompt-mode dropdown closes when ! enters shell mode', async () => {
-  const { vt, app } = startApp(fixtureWithFiles(), {
+test('a prompt-mode dropdown closes when ! enters shell mode', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWithFiles(life), {
     fileReferences: new DirectHostFilePort(() => undefined, null),
   })
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('@notes') // prompt-mode mention: the ONLY prompt-mode file context
   await waitForDropdownRow(vt, 'notes.txt', 'file completion in prompt mode')
@@ -1280,11 +1322,12 @@ test('a prompt-mode dropdown closes when ! enters shell mode', async () => {
   vt.sendInput('!')
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-context', 'the mode still transitions from a closed dropdown')
-  app.stop()
 })
 
-test('a shell-mode dropdown closes when Backspace returns to the prompt', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('a shell-mode dropdown closes when Backspace returns to the prompt', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // Deterministic command list (the empty-prefix list is capped at 50 and
   // locale-sorted — a fixed fake keeps the dropdown content stable).
@@ -1305,13 +1348,14 @@ test('a shell-mode dropdown closes when Backspace returns to the prompt', async 
     setCompgenRunnerForTest(undefined)
     resetCommandCacheForTest()
   }
-  app.stop()
 })
 
 // ── PR review round: one-shot viewer mode ─────────────────────────────────
 
-test('a one-shot viewer resets the host editor to prompt mode and restores the shell draft on exit', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('a one-shot viewer resets the host editor to prompt mode and restores the shell draft on exit', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('git status')
@@ -1325,20 +1369,21 @@ test('a one-shot viewer resets the host editor to prompt mode and restores the s
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-context', 'the preserved serialized main draft restores the shell mode')
   assert.equal(app.seatTextForTest(), 'git status')
-  app.stop()
 })
 
 // ── PR review round: Stable autocomplete query keeps the wire document ────
 
-test('the Stable autocomplete extension query keeps the WIRE document in shell modes', async () => {
+test('the Stable autocomplete extension query keeps the WIRE document in shell modes', async (t) => {
+  const life = testLifecycle(t)
   const queries: { lines: readonly string[]; cursorCol: number }[] = []
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.setCommandCompletions([], fixtureWorkspace(), null, async (query) => {
+  app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines], cursorCol: query.cursorCol })
     return null
   })
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // Force the host provider to return null (a failed compgen run), so the
   // plugin chain is consulted.
@@ -1373,13 +1418,14 @@ test('the Stable autocomplete extension query keeps the WIRE document in shell m
     setCompgenRunnerForTest(undefined)
     resetCommandCacheForTest()
   }
-  app.stop()
 })
 
 // ── review round: paste chunk boundaries + autocomplete reopen ────────────
 
-test('input before the opening marker in the same chunk enters the shell mode first', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('input before the opening marker in the same chunk enters the shell mode first', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // `!` and the paste arrive in ONE chunk: the `!` must go through the
   // interception chain (enter shell-context) BEFORE the paste lands.
@@ -1387,11 +1433,12 @@ test('input before the opening marker in the same chunk enters the shell mode fi
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-context', 'the leading ! must enter the shell mode')
   assert.equal(app.seatTextForTest(), 'cmd', 'the paste lands as the shell body')
-  app.stop()
 })
 
-test('trailing keys after the closing marker go through the full interception chain', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('trailing keys after the closing marker go through the full interception chain', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('\x1b[200~!git status\x1b[201~x')
   await vt.waitForRender()
@@ -1404,11 +1451,12 @@ test('trailing keys after the closing marker go through the full interception ch
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-context')
   assert.equal(app.seatTextForTest(), 'echo!', 'a trailing ! after the paste is a literal body character')
-  app.stop()
 })
 
-test('a paste opening marker split across chunks is stitched back together', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('a paste opening marker split across chunks is stitched back together', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('\x1b[20') // first half of \x1b[200~
   await vt.waitForRender()
@@ -1416,11 +1464,12 @@ test('a paste opening marker split across chunks is stitched back together', asy
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-context', 'the split opening marker must still open the paste')
   assert.equal(app.seatTextForTest(), 'git status')
-  app.stop()
 })
 
-test('a paste closing marker split across chunks is stitched back together', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('a paste closing marker split across chunks is stitched back together', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('\x1b[200~!git status\x1b[201') // closing marker without its final ~
   await vt.waitForRender()
@@ -1428,30 +1477,32 @@ test('a paste closing marker split across chunks is stitched back together', asy
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-context', 'the split closing marker must still close the paste')
   assert.equal(app.seatTextForTest(), 'git status')
-  app.stop()
 })
 
-test('a pasted @dir/ path reopens the mention dropdown like ordinary input', async () => {
-  const root = fixtureWithFiles()
+test('a pasted @dir/ path reopens the mention dropdown like ordinary input', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWithFiles(life)
   // The mention dropdown is Host-file-port-backed (migration M1.10): the
   // Direct adapter in FALLBACK mode (no fd binary) serves the directory
   // children, exactly like the pre-migration fd/fallback path.
   const { vt, app } = startApp(root, {
     fileReferences: new DirectHostFilePort(() => undefined, null),
   })
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // Paste `@src/`: the reopen runs AFTER the paste landed, so the
   // dropdown shows the directory children exactly like typed input.
   vt.sendInput('\x1b[200~@src/\x1b[201~')
   await waitForDropdownRow(vt, 'deep.ts', 'mention dropdown after a pasted @dir/')
   assert.equal(app.seatTextForTest(), '@src/')
-  app.stop()
 })
 
 // ── review round: split markers at every boundary; iterative drain ────────
 
-test('a paste marker split at ANY prefix boundary is stitched back together', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('a paste marker split at ANY prefix boundary is stitched back together', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // The marker `\x1b[200~` split after `\x1b[` / `\x1b[2` / `\x1b[20` /
   // `\x1b[200` — each boundary gets its own two-chunk paste with the
@@ -1482,31 +1533,33 @@ test('a paste marker split at ANY prefix boundary is stitched back together', as
   await vt.waitForRender()
   assert.equal(app.inputModeForTest(), 'shell-context')
   assert.equal(app.seatTextForTest(), 'git status final')
-  app.stop()
 })
 
-test('a chunk with MANY paste segments drains iteratively (no stack overflow)', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('a chunk with MANY paste segments drains iteratively (no stack overflow)', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   const segments = Array.from({ length: 200 }, (_, index) => `\x1b[200~git ${index}\x1b[201~`)
   vt.sendInput(segments.join(''))
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), Array.from({ length: 200 }, (_, index) => `git ${index}`).join(''),
     'every segment lands, in order — the drain is iterative, never a stack overflow')
-  app.stop()
 })
 
 // ── review round: multiline wire adaptation ───────────────────────────────
 
-test('the Stable autocomplete extension query keeps the wire document on MULTILINE drafts', async () => {
+test('the Stable autocomplete extension query keeps the wire document on MULTILINE drafts', async (t) => {
+  const life = testLifecycle(t)
   const queries: { lines: readonly string[]; cursorLine: number; cursorCol: number }[] = []
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.setCommandCompletions([], fixtureWorkspace(), null, async (query) => {
+  app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines], cursorLine: query.cursorLine, cursorCol: query.cursorCol })
     return null
   })
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
   try {
@@ -1527,11 +1580,11 @@ test('the Stable autocomplete extension query keeps the wire document on MULTILI
     setCompgenRunnerForTest(undefined)
     resetCommandCacheForTest()
   }
-  app.stop()
 })
 
-test('MentionProvider completes a multiline shell draft with the wire line-0 prefix only', async () => {
-  const root = fixtureWorkspace()
+test('MentionProvider completes a multiline shell draft with the wire line-0 prefix only', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   let mode: 'prompt' | 'shell-context' | 'shell-local' = 'shell-context'
   const source = (): 'prompt' | 'shell-context' | 'shell-local' => mode
   const provider = new MentionProvider([], root, null, source)
@@ -1550,8 +1603,10 @@ test('MentionProvider completes a multiline shell draft with the wire line-0 pre
 
 // ── review round: Ctrl+C clears the shell mode with the body ──────────────
 
-test('Ctrl+C clears BOTH the shell body and the mode (prompt returns)', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('Ctrl+C clears BOTH the shell body and the mode (prompt returns)', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('pwd')
@@ -1561,18 +1616,19 @@ test('Ctrl+C clears BOTH the shell body and the mode (prompt returns)', async ()
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), '', 'the body clears')
   assert.equal(app.inputModeForTest(), 'prompt', 'the shell mode clears with the body — no stale `! ` prompt')
-  app.stop()
 })
 
-test('Ctrl+C on a BARE ! (empty body, shell mode) clears the mode and arms the exit window', async () => {
+test('Ctrl+C on a BARE ! (empty body, shell mode) clears the mode and arms the exit window', async (t) => {
+  const life = testLifecycle(t)
   const vt = new VirtualTerminal(100, 24)
   let exits = 0
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => { exits += 1 },
   })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   await vt.waitForRender()
@@ -1584,17 +1640,18 @@ test('Ctrl+C on a BARE ! (empty body, shell mode) clears the mode and arms the e
   vt.sendInput('\x03') // second press within the window: exit
   await vt.waitForRender()
   assert.equal(exits, 1, 'the second press exits')
-  app.stop()
 })
 
 // ── PR review round 2: declined-input fallback wire coordinate ────────────
 
-test('a plugin DECLINED ! round-trips through the host shell mode into the wire document', async () => {
+test('a plugin DECLINED ! round-trips through the host shell mode into the wire document', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []
   const handle = registry.register({
@@ -1631,13 +1688,14 @@ test('a plugin DECLINED ! round-trips through the host shell mode into the wire 
   assert.equal(plugin.getText(), '', 'a declined Backspace on ! returns the empty wire document')
   handle.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })
 
 // ── PR review round 2: symmetric wire apply ───────────────────────────────
 
-test('accepting an absolute-path completion in a shell mode never doubles the slash', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('accepting an absolute-path completion in a shell mode never doubles the slash', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // shell-context: `/u` → Tab → accept `/usr/` — the fork's line-start
   // judgment runs on the VIRTUAL wire line (`!/u`), so the absolute path
@@ -1660,14 +1718,14 @@ test('accepting an absolute-path completion in a shell mode never doubles the sl
   vt.sendInput('\t')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), '/usr/', 'shell-local accepts the absolute path without a doubled slash')
-  app.stop()
 })
 
-test('a Stable extension suggestion applies through the wire adapter symmetrically', async () => {
+test('a Stable extension suggestion applies through the wire adapter symmetrically', async (t) => {
+  const life = testLifecycle(t)
   const vt = new VirtualTerminal(100, 24)
   let queries = 0
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.setCommandCompletions([], fixtureWorkspace(), null, async () => {
+  app.setCommandCompletions([], fixtureWorkspace(life), null, async () => {
     queries += 1
     // TWO suggestions: a single one would be auto-applied by the fork on
     // the first Tab, so the dropdown opens and the accept path runs.
@@ -1680,6 +1738,7 @@ test('a Stable extension suggestion applies through the wire adapter symmetrical
     }
   })
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // Natural typing of the path must NOT consult the plugin chain (the
   // shell-mode leading-/ suppression stays host-owned): no dropdown may
@@ -1696,7 +1755,6 @@ test('a Stable extension suggestion applies through the wire adapter symmetrical
   vt.sendInput('\t') // accept
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), '/zzz-no-such-dir/', 'the extension apply lands in the bare body without a doubled slash')
-  app.stop()
 })
 
 // ── review round: capability-gated mode setter in the fallback ────────────
@@ -1746,8 +1804,10 @@ test('a host adapter with setSerializedInput but WITHOUT setInputMode falls back
 
 // ── review round: getDraft/setDraft wire symmetry ─────────────────────────
 
-test('getDraft returns the WIRE form, symmetric with setDraft (shell mode survives read/merge/restore)', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('getDraft returns the WIRE form, symmetric with setDraft (shell mode survives read/merge/restore)', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.setDraft('!pwd')
   await vt.waitForRender()
@@ -1766,21 +1826,22 @@ test('getDraft returns the WIRE form, symmetric with setDraft (shell mode surviv
   app.setDraft('plain text')
   await vt.waitForRender()
   assert.equal(app.getDraft(), 'plain text')
-  app.stop()
 })
 
 // ── review round: wire-prefixed extension prefixes ────────────────────────
 
-test('a Stable extension prefix computed on the WIRE line applies without corruption', async () => {
+test('a Stable extension prefix computed on the WIRE line applies without corruption', async (t) => {
+  const life = testLifecycle(t)
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.setCommandCompletions([], fixtureWorkspace(), null, async () => ({
+  app.setCommandCompletions([], fixtureWorkspace(life), null, async () => ({
     // The plugin computed this prefix on the WIRE line `!ch` — it
     // legitimately includes the synthetic `!`.
     items: [{ value: 'checkout', label: 'checkout' }],
     prefix: '!ch',
   }))
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // Force the host provider to return null (a failed compgen run) so the
   // plugin chain is consulted. ONE item is auto-applied by the fork on
@@ -1797,15 +1858,15 @@ test('a Stable extension prefix computed on the WIRE line applies without corrup
     setCompgenRunnerForTest(undefined)
     resetCommandCacheForTest()
   }
-  app.stop()
 })
 
 // ── review round: prefix normalization never strips a mid-body ! ──────────
 
-test('a mid-body ! completion token (echo !ch) keeps its literal !', async () => {
+test('a mid-body ! completion token (echo !ch) keeps its literal !', async (t) => {
+  const life = testLifecycle(t)
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.setCommandCompletions([], fixtureWorkspace(), null, async () => ({
+  app.setCommandCompletions([], fixtureWorkspace(life), null, async () => ({
     // The word being completed is `!ch` — the `!` is a LITERAL body
     // character (the synthetic prefix sits at the wire line start), so
     // the extension prefix includes it and it must survive the apply.
@@ -1813,6 +1874,7 @@ test('a mid-body ! completion token (echo !ch) keeps its literal !', async () =>
     prefix: '!ch',
   }))
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
   try {
@@ -1826,11 +1888,12 @@ test('a mid-body ! completion token (echo !ch) keeps its literal !', async () =>
     setCompgenRunnerForTest(undefined)
     resetCommandCacheForTest()
   }
-  app.stop()
 })
 
-test('an incomplete CSI tail buffers without loss and stitches a split sequence', async () => {
-  const { vt, app } = startApp(fixtureWorkspace())
+test('an incomplete CSI tail buffers without loss and stitches a split sequence', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // A lone incomplete CSI tail: buffered, never rendered, never crashes.
   vt.sendInput('\x1b[')
@@ -1841,15 +1904,16 @@ test('an incomplete CSI tail buffers without loss and stitches a split sequence'
   vt.sendInput('A')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), '', 'a stitched split CSI is handled as the key, never as text')
-  app.stop()
 })
 
 // ── PR review round 3: multiline shell continuation lines are shell-owned ─
 
-test('a continuation-line /u in shell-context is a PATH (no slash commands, no doubled slash)', async () => {
-  const { vt, app } = startApp(fixtureWorkspace(), {
+test('a continuation-line /u in shell-context is a PATH (no slash commands, no doubled slash)', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life), {
     commands: [{ name: 'image', description: 'Attach an image file' }],
   })
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('git status')
@@ -1866,13 +1930,14 @@ test('a continuation-line /u in shell-context is a PATH (no slash commands, no d
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), 'git status\n/usr/',
     'the accepted path must not double the slash on a continuation line')
-  app.stop()
 })
 
-test('a continuation-line /u in shell-local is a PATH (no slash commands, no doubled slash)', async () => {
-  const { vt, app } = startApp(fixtureWorkspace(), {
+test('a continuation-line /u in shell-local is a PATH (no slash commands, no doubled slash)', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = startApp(fixtureWorkspace(life), {
     commands: [{ name: 'image', description: 'Attach an image file' }],
   })
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('!')
@@ -1887,11 +1952,11 @@ test('a continuation-line /u in shell-local is a PATH (no slash commands, no dou
   vt.sendInput('\t')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), 'git status\n/usr/', 'shell-local accepts the path without a doubled slash')
-  app.stop()
 })
 
-test('provider-level: a continuation-line /u applies as a path on any shell line', async () => {
-  const root = fixtureWorkspace()
+test('provider-level: a continuation-line /u applies as a path on any shell line', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider([], root, null, () => 'shell-context' as const)
   const applied = provider.applyCompletion(['git status', '/u'], 1, 2, { value: '/usr/', label: 'usr' }, '/u')
   assert.deepEqual(applied, { lines: ['git status', '/usr/'], cursorLine: 1, cursorCol: 5 },
@@ -1905,11 +1970,12 @@ test('provider-level: a continuation-line /u applies as a path on any shell line
 
 // ── review round: extension suppression covers continuation lines ─────────
 
-test('the extension chain is NOT consulted on a continuation-line natural / trigger (only Tab)', async () => {
+test('the extension chain is NOT consulted on a continuation-line natural / trigger (only Tab)', async (t) => {
+  const life = testLifecycle(t)
   const vt = new VirtualTerminal(100, 24)
   let queries = 0
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.setCommandCompletions([], fixtureWorkspace(), null, async () => {
+  app.setCommandCompletions([], fixtureWorkspace(life), null, async () => {
     queries += 1
     return {
       items: [
@@ -1920,6 +1986,7 @@ test('the extension chain is NOT consulted on a continuation-line natural / trig
     }
   })
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
   try {
@@ -1940,7 +2007,6 @@ test('the extension chain is NOT consulted on a continuation-line natural / trig
     setCompgenRunnerForTest(undefined)
     resetCommandCacheForTest()
   }
-  app.stop()
 })
 
 // ── review round: plugin-consumed input notifies seat subscribers ─────────
@@ -1992,16 +2058,18 @@ test('a plugin editor consuming input notifies seat subscribers (fresh snapshot)
 
 // ── review round: completion mode reads the VISIBLE seat, not the hidden host ──
 
-test('completion uses the VISIBLE seat mode — a hidden host shell mode never leaks', async () => {
+test('completion uses the VISIBLE seat mode — a hidden host shell mode never leaks', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const queries: { lines: readonly string[] }[] = []
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null, async (query) => {
+  app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines] })
     return null
   })
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
   let handle: { dispose(): void } | undefined
@@ -2035,13 +2103,14 @@ test('completion uses the VISIBLE seat mode — a hidden host shell mode never l
   }
   handle?.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })
 
 // ── review round: advanced editor controls honor the shell boundary ───────
 
-test('advanced editor controls replace a shell-mode draft through the wire boundary', async () => {
-  const { vt, app, submitted } = startApp(fixtureWorkspace())
+test('advanced editor controls replace a shell-mode draft through the wire boundary', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app, submitted } = startApp(fixtureWorkspace(life))
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   vt.sendInput('pwd')
@@ -2062,7 +2131,6 @@ test('advanced editor controls replace a shell-mode draft through the wire bound
   assert.equal(app.seatTextForTest(), 'pwd')
   vt.sendInput('\r')
   assert.deepEqual(submitted, ['plain prose', '!pwd'])
-  app.stop()
 })
 
 // ── review round: replacement-editor HOST EXECUTION MODE ───────────────────
@@ -2074,13 +2142,15 @@ test('advanced editor controls replace a shell-mode draft through the wire bound
 // submit by the VISIBLE seat mode would collapse `!!pwd` into a plain
 // `pwd` — a local-only command degrading into a model prompt.
 
-test('a replacement editor submit keeps the shell wire form through the host fallback', async () => {
+test('a replacement editor submit keeps the shell wire form through the host fallback', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []
   const handle = registry.register({
@@ -2122,19 +2192,20 @@ test('a replacement editor submit keeps the shell wire form through the host fal
   assert.equal(plugin.getText(), '', 'a successful submit clears the plugin seat (accepted-control)')
   handle.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })
 
-test('a replacement plugin Tab runs the shell completion grammar of the wire document', async () => {
+test('a replacement plugin Tab runs the shell completion grammar of the wire document', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const queries: { lines: readonly string[]; cursorCol: number }[] = []
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null, async (query) => {
+  app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines], cursorCol: query.cursorCol })
     return null
   })
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []
   const handle = registry.register({
@@ -2196,15 +2267,16 @@ test('a replacement plugin Tab runs the shell completion grammar of the wire doc
   }
   handle.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })
 
-test('a text change after a declined Tab cancels the stale dropdown (no stale accept)', async () => {
+test('a text change after a declined Tab cancels the stale dropdown (no stale accept)', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []
   const handle = registry.register({
@@ -2263,15 +2335,16 @@ test('a text change after a declined Tab cancels the stale dropdown (no stale ac
   }
   handle.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })
 
-test('a declined pageUp/pageDown keeps the open dropdown alive (fork parity)', async () => {
+test('a declined pageUp/pageDown keeps the open dropdown alive (fork parity)', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []
   const handle = registry.register({
@@ -2318,7 +2391,6 @@ test('a declined pageUp/pageDown keeps the open dropdown alive (fork parity)', a
   }
   handle.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })
 
 // ── review round: synchronous rejection restore survives the fallback ──────
@@ -2331,7 +2403,8 @@ test('a declined pageUp/pageDown keeps the open dropdown alive (fork parity)', a
 // external touched the seat" from "explicitly rewritten", even when the
 // restored text equals the pre-dispatch document.
 
-test('a synchronous rejection restore survives the fallback sync-back', async () => {
+test('a synchronous rejection restore survives the fallback sync-back', async (t) => {
+  const life = testLifecycle(t)
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
@@ -2345,8 +2418,9 @@ test('a synchronous rejection restore survives the fallback sync-back', async ()
     },
     onExit: () => {},
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []
   const handle = registry.register({
@@ -2374,5 +2448,4 @@ test('a synchronous rejection restore survives the fallback sync-back', async ()
     'the synchronous rejection restore must survive the fallback sync-back (the post-submit empty host state must not clobber it)')
   handle.dispose()
   app.reconcileEditorNow()
-  app.stop()
 })

@@ -7,8 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
@@ -16,6 +15,7 @@ import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { consumeDraftImages, pruneUnreferencedDrafts } from '../src/image/submit.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
@@ -147,88 +147,79 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void
   }
 }
 
-test('/image stages the file into the draft store and inserts its placeholder', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-image-command-'))
-  try {
-    const file = join(dir, 'shot.png')
-    writeFileSync(file, pngBytes())
-    const { app, imageStore, imageHandler } = setup()
-    const result = await imageHandler({ rawInput: file })
-    assert.deepEqual(result, { kind: 'success' })
-    await waitFor(() => imageStore.size() === 1)
-    assert.equal(imageStore.size(), 1)
-    const draft = imageStore.values()[0]!
-    assert.equal(draft.placeholder, '[image #1 (1×1)]')
-    assert.ok(app.getDraft().includes(draft.placeholder), 'placeholder inserted into the editor')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('/image stages the file into the draft store and inserts its placeholder', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-image-command-')
+  const file = join(dir, 'shot.png')
+  writeFileSync(file, pngBytes())
+  const { app, imageStore, imageHandler } = setup()
+  const result = await imageHandler({ rawInput: file })
+  assert.deepEqual(result, { kind: 'success' })
+  await waitFor(() => imageStore.size() === 1)
+  assert.equal(imageStore.size(), 1)
+  const draft = imageStore.values()[0]!
+  assert.equal(draft.placeholder, '[image #1 (1×1)]')
+  assert.ok(app.getDraft().includes(draft.placeholder), 'placeholder inserted into the editor')
 })
 
-test('/image prunes drafts whose placeholder left the editor while the intake was in flight', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-image-command-'))
-  try {
-    const file = join(dir, 'new.png')
-    writeFileSync(file, pngBytes())
-    const { app, imageStore, imageHandler } = setup()
-    // A stale draft whose placeholder is still in the editor text.
-    const stale = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
-    app.setDraft(`look at ${stale.placeholder}`)
-    const pending = imageHandler({ rawInput: file })
-    // While the async intake reads the file, the user Ctrl+C-clears the
-    // editor: the stale draft's placeholder is gone from the text. The
-    // post-read prune must remove the stale draft; only the new attach
-    // survives (predicate waits for the PRUNE, not just size — the store
-    // already holds the stale draft when the intake starts).
-    app.setEditorText('')
-    await pending
-    await waitFor(() => imageStore.get(stale.id) === undefined)
-    assert.equal(imageStore.get(stale.id), undefined, 'the deleted placeholder\'s draft is pruned after the read')
-    assert.equal(imageStore.size(), 1, 'only the new attach remains')
-    assert.equal(imageStore.values()[0]!.source.type, 'path', 'the new attach is the path intake')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('/image prunes drafts whose placeholder left the editor while the intake was in flight', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-image-command-')
+  const file = join(dir, 'new.png')
+  writeFileSync(file, pngBytes())
+  const { app, imageStore, imageHandler } = setup()
+  // A stale draft whose placeholder is still in the editor text.
+  const stale = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  app.setDraft(`look at ${stale.placeholder}`)
+  const pending = imageHandler({ rawInput: file })
+  // While the async intake reads the file, the user Ctrl+C-clears the
+  // editor: the stale draft's placeholder is gone from the text. The
+  // post-read prune must remove the stale draft; only the new attach
+  // survives (predicate waits for the PRUNE, not just size — the store
+  // already holds the stale draft when the intake starts).
+  app.setEditorText('')
+  await pending
+  await waitFor(() => imageStore.get(stale.id) === undefined)
+  assert.equal(imageStore.get(stale.id), undefined, 'the deleted placeholder\'s draft is pruned after the read')
+  assert.equal(imageStore.size(), 1, 'only the new attach remains')
+  assert.equal(imageStore.values()[0]!.source.type, 'path', 'the new attach is the path intake')
 })
 
 
-test('failed submission restores BEFORE unpinning: placeholders keep their backing draft through concurrent attaches (review finding)', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-image-race-'))
-  try {
-    const file2 = join(dir, 'second.png')
-    writeFileSync(file2, pngBytes())
-    const { app, imageStore, imageHandler } = setup()
-    // Stage image #1 and submit a multimodal draft (the editor text).
-    const draft1 = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
-    const submitted = `look at ${draft1.placeholder}`
-    app.setEditorText(submitted)
-    // The submission pins SYNCHRONOUSLY (same call stack that left the
-    // editor) and the editor clears.
-    const release = imageStore.pinReferenced(submitted)
-    app.setEditorText('')
-    // While the async prepare is blocked, the user attaches a SECOND
-    // image: its attach-time prunes (pre/post-read) see the empty editor
-    // but must keep the PINNED in-flight draft #1.
-    const result = await imageHandler({ rawInput: file2 })
-    assert.deepEqual(result, { kind: 'success' })
-    await waitFor(() => imageStore.size() >= 2)
-    assert.equal(imageStore.get(draft1.id), draft1, 'the in-flight draft survives the concurrent attach')
-    // The submission FAILS: the task catch restores the editor BEFORE the
-    // pin releases (the exact ordering this fix enforces).
-    restoreIntoEditor(app, submitted)
-    assert.ok(app.getDraft().includes(draft1.placeholder), 'the restored editor references draft #1')
-    release()
-    assert.equal(imageStore.isPinned(draft1.id), false, 'the pin released after the restore')
-    // A later /image runs a post-read prune against the RESTORED editor:
-    // draft #1 is referenced by the text, so it survives the prune even
-    // though its pin is gone.
-    await imageHandler({ rawInput: file2 })
-    await waitFor(() => imageStore.size() >= 3)
-    assert.equal(imageStore.get(draft1.id), draft1, 'the restored placeholder keeps its backing draft')
-    assert.ok(app.getDraft().includes(draft1.placeholder), 'the placeholder stays in the editor')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('failed submission restores BEFORE unpinning: placeholders keep their backing draft through concurrent attaches (review finding)', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-image-race-')
+  const file2 = join(dir, 'second.png')
+  writeFileSync(file2, pngBytes())
+  const { app, imageStore, imageHandler } = setup()
+  // Stage image #1 and submit a multimodal draft (the editor text).
+  const draft1 = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  const submitted = `look at ${draft1.placeholder}`
+  app.setEditorText(submitted)
+  // The submission pins SYNCHRONOUSLY (same call stack that left the
+  // editor) and the editor clears.
+  const release = imageStore.pinReferenced(submitted)
+  app.setEditorText('')
+  // While the async prepare is blocked, the user attaches a SECOND
+  // image: its attach-time prunes (pre/post-read) see the empty editor
+  // but must keep the PINNED in-flight draft #1.
+  const result = await imageHandler({ rawInput: file2 })
+  assert.deepEqual(result, { kind: 'success' })
+  await waitFor(() => imageStore.size() >= 2)
+  assert.equal(imageStore.get(draft1.id), draft1, 'the in-flight draft survives the concurrent attach')
+  // The submission FAILS: the task catch restores the editor BEFORE the
+  // pin releases (the exact ordering this fix enforces).
+  restoreIntoEditor(app, submitted)
+  assert.ok(app.getDraft().includes(draft1.placeholder), 'the restored editor references draft #1')
+  release()
+  assert.equal(imageStore.isPinned(draft1.id), false, 'the pin released after the restore')
+  // A later /image runs a post-read prune against the RESTORED editor:
+  // draft #1 is referenced by the text, so it survives the prune even
+  // though its pin is gone.
+  await imageHandler({ rawInput: file2 })
+  await waitFor(() => imageStore.size() >= 3)
+  assert.equal(imageStore.get(draft1.id), draft1, 'the restored placeholder keeps its backing draft')
+  assert.ok(app.getDraft().includes(draft1.placeholder), 'the placeholder stays in the editor')
 })
 
 /** The restore half of the failure path (restoreSubmissionDraft semantics). */
@@ -236,57 +227,54 @@ function restoreIntoEditor(app: TuiApp, draft: string): void {
   app.setEditorText([app.getDraft(), draft].filter(part => part.trim() !== '').join('\n\n') || draft)
 }
 
-test('orchestration: a real submit flow restores BEFORE unpin and survives a concurrent /image prune', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-image-orch-'))
-  try {
-    const file2 = join(dir, 'second.png')
-    writeFileSync(file2, pngBytes())
-    const { app, imageStore, imageHandler } = setup()
-    const { runReservedSubmit } = await import('../src/image/submit-flow.ts')
-    // Stage #1; the user submits a multimodal draft (the editor carries
-    // the text).
-    const draft1 = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
-    const submitted = `look at ${draft1.placeholder}`
-    app.setEditorText(submitted)
-    // The REAL submit flow: reserve synchronously (same call stack) →
-    // async run → on failure restore → release. The run body mirrors the
-    // dispatchViaSession shape; the simulated async admission lets the
-    // concurrent /image attach interleave.
-    const failing = runReservedSubmit({
-      reserve: (t) => imageStore.pinReferenced(t),
-      run: async () => {
-        await new Promise(resolve => setTimeout(resolve, 10))
-        throw new Error('admission failed (simulated)')
-      },
-      restore: (t) => {
-        app.setEditorText([app.getDraft(), t].filter(part => part.trim() !== '').join('\n\n') || t)
-      },
-    }, submitted)
-    // Attach the rejection assertion IMMEDIATELY: the async run settles on a
-    // 10ms timer, and under full-suite load a later handler leaves an
-    // unhandled-rejection window (the observed flake) — assert.rejects is
-    // awaited at the end, but its handler is live from here on.
-    const rejection = assert.rejects(failing, /admission failed/)
-    // The editor was cleared before dispatch (submit semantics); while the
-    // async run is blocked, the user attaches a second image — its prunes
-    // see the empty editor but must keep the PINNED draft #1.
-    app.setEditorText('')
-    const attachResult = imageHandler({ rawInput: file2 })
-    assert.deepEqual(attachResult, { kind: 'success' })
-    await new Promise(resolve => setTimeout(resolve, 5))
-    assert.equal(imageStore.get(draft1.id), draft1, 'the in-flight draft survives the concurrent attach')
-    // The submission fails: the flow restores the editor BEFORE releasing
-    // the reservation (the ordering contract under test).
-    await rejection
-    assert.equal(imageStore.isPinned(draft1.id), false, 'the reservation released after the restore')
-    assert.ok(app.getDraft().includes(draft1.placeholder), 'the restored editor references draft #1')
-    // The concurrent attach settles (its post-read prune sees the restored
-    // editor): draft #1 stays referenced and alive.
-    await waitFor(() => imageStore.size() >= 2)
-    assert.equal(imageStore.get(draft1.id), draft1, 'the restored placeholder keeps its backing draft after the prune')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('orchestration: a real submit flow restores BEFORE unpin and survives a concurrent /image prune', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-image-orch-')
+  const file2 = join(dir, 'second.png')
+  writeFileSync(file2, pngBytes())
+  const { app, imageStore, imageHandler } = setup()
+  const { runReservedSubmit } = await import('../src/image/submit-flow.ts')
+  // Stage #1; the user submits a multimodal draft (the editor carries
+  // the text).
+  const draft1 = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  const submitted = `look at ${draft1.placeholder}`
+  app.setEditorText(submitted)
+  // The REAL submit flow: reserve synchronously (same call stack) →
+  // async run → on failure restore → release. The run body mirrors the
+  // dispatchViaSession shape; the simulated async admission lets the
+  // concurrent /image attach interleave.
+  const failing = runReservedSubmit({
+    reserve: (t) => imageStore.pinReferenced(t),
+    run: async () => {
+      await new Promise(resolve => setTimeout(resolve, 10))
+      throw new Error('admission failed (simulated)')
+    },
+    restore: (t) => {
+      app.setEditorText([app.getDraft(), t].filter(part => part.trim() !== '').join('\n\n') || t)
+    },
+  }, submitted)
+  // Attach the rejection assertion IMMEDIATELY: the async run settles on a
+  // 10ms timer, and under full-suite load a later handler leaves an
+  // unhandled-rejection window (the observed flake) — assert.rejects is
+  // awaited at the end, but its handler is live from here on.
+  const rejection = assert.rejects(failing, /admission failed/)
+  // The editor was cleared before dispatch (submit semantics); while the
+  // async run is blocked, the user attaches a second image — its prunes
+  // see the empty editor but must keep the PINNED draft #1.
+  app.setEditorText('')
+  const attachResult = imageHandler({ rawInput: file2 })
+  assert.deepEqual(attachResult, { kind: 'success' })
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(imageStore.get(draft1.id), draft1, 'the in-flight draft survives the concurrent attach')
+  // The submission fails: the flow restores the editor BEFORE releasing
+  // the reservation (the ordering contract under test).
+  await rejection
+  assert.equal(imageStore.isPinned(draft1.id), false, 'the reservation released after the restore')
+  assert.ok(app.getDraft().includes(draft1.placeholder), 'the restored editor references draft #1')
+  // The concurrent attach settles (its post-read prune sees the restored
+  // editor): draft #1 stays referenced and alive.
+  await waitFor(() => imageStore.size() >= 2)
+  assert.equal(imageStore.get(draft1.id), draft1, 'the restored placeholder keeps its backing draft after the prune')
 })
 
 test('command fallback SUCCESS: the handoff pin transfers and releases exactly once', async () => {

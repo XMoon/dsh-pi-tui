@@ -6,15 +6,16 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { chmodSync, existsSync, mkdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join, win32 } from 'node:path'
 import { expandFileMentionsForSubmit, extractAtPrefix, findFileMentions, MentionProvider, resolveMentionCandidate, resolvePathSearch, suggestPathArgument } from '../src/mentions.ts'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** A throwaway workspace with known files. */
-function fixtureWorkspace(): string {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-mentions-'))
+function fixtureWorkspace(life: TestLifecycle): string {
+  const root = life.tempDir('dsh-mentions-')
   writeFileSync(join(root, 'file-one.txt'), 'one')
   writeFileSync(join(root, 'file-two.ts'), 'two')
   writeFileSync(join(root, 'my file.txt'), 'spaced')
@@ -63,10 +64,11 @@ test('extractAtPrefix finds @ tokens at token boundaries only', () => {
   assert.equal(extractAtPrefix('see @fi more'), null, 'the cursor is past the @ token')
 })
 
-test('resolveFdPath finds an executable fd on PATH and returns null otherwise', () => {
+test('resolveFdPath finds an executable fd on PATH and returns null otherwise', (t) => {
+  const life = testLifecycle(t)
   const saved = process.env.PATH
   try {
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-fd-'))
+    const dir = life.tempDir('dsh-fd-')
     const fd = join(dir, 'fd')
     writeFileSync(fd, '#!/bin/sh\nexit 0\n')
     chmodSync(fd, 0o755)
@@ -80,11 +82,12 @@ test('resolveFdPath finds an executable fd on PATH and returns null otherwise', 
   }
 })
 
-test('resolveFdPath honors PATHEXT-style executable suffixes', () => {
+test('resolveFdPath honors PATHEXT-style executable suffixes', (t) => {
+  const life = testLifecycle(t)
   const savedPath = process.env.PATH
   const savedPathExt = process.env.PATHEXT
   try {
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-fd-ext-'))
+    const dir = life.tempDir('dsh-fd-ext-')
     const fd = join(dir, 'fd.exe')
     writeFileSync(fd, '#!/bin/sh\nexit 0\n')
     chmodSync(fd, 0o755)
@@ -101,8 +104,9 @@ test('resolveFdPath honors PATHEXT-style executable suffixes', () => {
   }
 })
 
-test('the fallback completes @ mentions from anywhere in the tree', async () => {
-  const root = fixtureWorkspace()
+test('the fallback completes @ mentions from anywhere in the tree', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider([], root, fallbackSeam())
   // Prefix match on the basename (cursor at the end of '@file').
   const file = await provider.getSuggestions(['look at @file'], 0, 13, { signal: abort })
@@ -123,8 +127,9 @@ test('the fallback completes @ mentions from anywhere in the tree', async () => 
   assert.equal(none, null, 'no match must return null')
 })
 
-test('the provider completes the QUOTED @ form through the port (quoted values)', async () => {
-  const root = fixtureWorkspace()
+test('the provider completes the QUOTED @ form through the port (quoted values)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider([], root, fallbackSeam())
   const result = await provider.getSuggestions(['@"my'], 0, 4, { signal: abort })
   assert.ok(result !== null, `@"my must suggest:\n${JSON.stringify(result)}`)
@@ -132,8 +137,9 @@ test('the provider completes the QUOTED @ form through the port (quoted values)'
   assert.ok(result.items.some(item => item.value === '@"my file.txt"'), `quoted value must stay quoted:\n${JSON.stringify(result.items)}`)
 })
 
-test('the provider completes a CJK-glued @ mention (the findFileMentions grammar)', async () => {
-  const root = fixtureWorkspace()
+test('the provider completes a CJK-glued @ mention (the findFileMentions grammar)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider([], root, fallbackSeam())
   const result = await provider.getSuggestions(['看看@file'], 0, 7, { signal: abort })
   assert.ok(result !== null, `看看@file must suggest:\n${JSON.stringify(result)}`)
@@ -141,8 +147,9 @@ test('the provider completes a CJK-glued @ mention (the findFileMentions grammar
   assert.ok(result.items.some(item => item.value === '@file-one.txt'), `CJK-glued completion missing:\n${JSON.stringify(result.items)}`)
 })
 
-test('the fallback quotes mention values that contain spaces', async () => {
-  const root = fixtureWorkspace()
+test('the fallback quotes mention values that contain spaces', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider([], root, fallbackSeam())
   // A space-free query matching a file whose NAME has a space must produce a
   // quoted value (`@"my file.txt"`) so the submitted mention stays one token.
@@ -151,8 +158,9 @@ test('the fallback quotes mention values that contain spaces', async () => {
   assert.ok(result.items.some(item => item.value === '@"my file.txt"'), `spaced value must be quoted:\n${JSON.stringify(result.items)}`)
 })
 
-test('the provider delegates indented slash-command completion without losing indentation', async () => {
-  const root = fixtureWorkspace()
+test('the provider delegates indented slash-command completion without losing indentation', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider(
     [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
     root,
@@ -165,8 +173,9 @@ test('the provider delegates indented slash-command completion without losing in
   assert.equal(applied.lines[0], '  /exit ', 'the command apply must preserve indentation')
 })
 
-test('the provider delegates slash-command completion to the inner provider', async () => {
-  const root = fixtureWorkspace()
+test('the provider delegates slash-command completion to the inner provider', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider(
     [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
     root,
@@ -179,8 +188,9 @@ test('the provider delegates slash-command completion to the inner provider', as
 
 // ── slash-command path-argument completion (`/image <path>`) ──────────────
 
-test('a late port result is dropped when the request was aborted; a port rejection degrades to null', async () => {
-  const root = fixtureWorkspace()
+test('a late port result is dropped when the request was aborted; a port rejection degrades to null', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   let release: (() => void) | undefined
   const gate = new Promise<void>((resolve) => { release = resolve })
   const controller = new AbortController()
@@ -211,8 +221,9 @@ test('a late port result is dropped when the request was aborted; a port rejecti
   )
 })
 
-test('suggestPathArgument completes a bare prefix in the cwd', async () => {
-  const root = fixtureWorkspace()
+test('suggestPathArgument completes a bare prefix in the cwd', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const items = await suggestPathArgument('fi', root)
   assert.ok(items !== null, `'fi' must suggest:\n${JSON.stringify(items)}`)
   assert.ok(items.some(item => item.value === 'file-one.txt'), `file-one missing:\n${JSON.stringify(items)}`)
@@ -224,8 +235,9 @@ test('suggestPathArgument completes a bare prefix in the cwd', async () => {
   assert.equal(dirs[0]!.label, 'src/')
 })
 
-test('suggestPathArgument completes directory continuations', async () => {
-  const root = fixtureWorkspace()
+test('suggestPathArgument completes directory continuations', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const contents = await suggestPathArgument('src/', root)
   assert.ok(contents !== null, `'src/' must suggest:\n${JSON.stringify(contents)}`)
   assert.ok(contents.some(item => item.value === 'src/deep-nested.ts'), `nested file missing:\n${JSON.stringify(contents)}`)
@@ -235,12 +247,13 @@ test('suggestPathArgument completes directory continuations', async () => {
   assert.ok(partial.some(item => item.value === 'src/deep-nested.ts'), `prefixed value missing:\n${JSON.stringify(partial)}`)
 })
 
-test('suggestPathArgument handles absolute and ~ forms', async () => {
-  const root = fixtureWorkspace()
+test('suggestPathArgument handles absolute and ~ forms', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const absolute = await suggestPathArgument(`${root}/file`, root)
   assert.ok(absolute !== null, `absolute must suggest:\n${JSON.stringify(absolute)}`)
   assert.ok(absolute.some(item => item.value === `${root}/file-one.txt`), `absolute value missing:\n${JSON.stringify(absolute)}`)
-  const home = mkdtempSync(join(tmpdir(), 'dsh-mentions-home-'))
+  const home = life.tempDir('dsh-mentions-home-')
   const savedHome = process.env.HOME
   try {
     process.env.HOME = home
@@ -255,8 +268,9 @@ test('suggestPathArgument handles absolute and ~ forms', async () => {
   }
 })
 
-test('suggestPathArgument tolerates leading separator whitespace (multi-space / tab-expanded)', async () => {
-  const root = fixtureWorkspace()
+test('suggestPathArgument tolerates leading separator whitespace (multi-space / tab-expanded)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   // The fork's argument branch passes everything after the FIRST space, so
   // a multi-space separator yields leading whitespace in the argument; the
   // completed VALUE keeps it so the fork's apply never glues the path to
@@ -290,16 +304,18 @@ test('POSIX and Windows ROOT partials keep their separator as the search dir', (
   assert.deepEqual(resolvePathSearch('sub/fi', '/ws', 'sub/fi'), { searchDir: join('/ws', 'sub'), searchPrefix: 'fi', winAbsolute: false })
 })
 
-test('a POSIX root partial completes from `/` (fs level, when /tmp exists)', async () => {
+test('a POSIX root partial completes from `/` (fs level, when /tmp exists)', async (t) => {
+  const life = testLifecycle(t)
   if (!existsSync('/tmp')) return // the machine has no /tmp to complete
-  const root = fixtureWorkspace()
+  const root = fixtureWorkspace(life)
   const items = await suggestPathArgument('/tm', root)
   assert.ok(items !== null && items.length > 0, `'/tm' must list root entries:\n${JSON.stringify(items)}`)
   assert.ok(items.some(item => item.value.startsWith('/tmp')), `the root completion stays absolute:\n${JSON.stringify(items)}`)
 })
 
-test('suggestPathArgument treats Windows drive and UNC tokens as absolute', async () => {
-  const root = fixtureWorkspace()
+test('suggestPathArgument treats Windows drive and UNC tokens as absolute', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const savedCwd = process.cwd()
   try {
     // win32-absolute tokens resolve against the process CWD on POSIX (a
@@ -326,13 +342,14 @@ test('suggestPathArgument treats Windows drive and UNC tokens as absolute', asyn
   }
 })
 
-test('a drive ROOT keeps `C:\\` — never degrades to the drive-relative `C:`', async () => {
+test('a drive ROOT keeps `C:\\` — never degrades to the drive-relative `C:`', async (t) => {
+  const life = testLifecycle(t)
   // `C:\` is the drive root; `C:` is the drive-relative current directory
   // — different directories on Windows. win32.dirname('C:\\Wi') returns
   // `C:\\`, and the search target must stay `C:\\` (the earlier
   // unconditional strip turned it into `C:` and read the wrong place).
   assert.equal(win32.dirname('C:\\Wi'), 'C:\\', 'the win32 dirname root form')
-  const root = fixtureWorkspace()
+  const root = fixtureWorkspace(life)
   const savedCwd = process.cwd()
   try {
     process.chdir(root)
@@ -347,8 +364,9 @@ test('a drive ROOT keeps `C:\\` — never degrades to the drive-relative `C:`', 
   }
 })
 
-test('suggestPathArgument quotes values with spaces and stays quiet otherwise', async () => {
-  const root = fixtureWorkspace()
+test('suggestPathArgument quotes values with spaces and stays quiet otherwise', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const spaced = await suggestPathArgument('my', root)
   assert.ok(spaced !== null, `'my' must suggest:\n${JSON.stringify(spaced)}`)
   assert.ok(spaced.some(item => item.value === '"my file.txt"'), `spaced value must be quoted:\n${JSON.stringify(spaced)}`)
@@ -357,8 +375,9 @@ test('suggestPathArgument quotes values with spaces and stays quiet otherwise', 
   assert.equal(await suggestPathArgument('no/such/dir', root), null, 'an unreadable directory stays quiet')
 })
 
-test('the provider completes /image arguments through the fork command branch', async () => {
-  const root = fixtureWorkspace()
+test('the provider completes /image arguments through the fork command branch', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider(
     [{ name: 'image', description: 'Attach', getArgumentCompletions: (arg) => suggestPathArgument(arg, root) }],
     root,
@@ -370,8 +389,9 @@ test('the provider completes /image arguments through the fork command branch', 
   assert.ok(result.items.some(item => item.value === 'file-one.txt'), `file missing:\n${JSON.stringify(result.items)}`)
 })
 
-test('the provider lets Tab file-complete an explicit PATH argument only (plan §2.1)', () => {
-  const root = fixtureWorkspace()
+test('the provider lets Tab file-complete an explicit PATH argument only (plan §2.1)', (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const provider = new MentionProvider(
     [
       { name: 'image', description: 'Attach', getArgumentCompletions: () => null },
@@ -442,11 +462,12 @@ test('findFileMentions stops at CJK sentence punctuation and strips ASCII traili
     'the punctuation must stay OUTSIDE the replaced span')
 })
 
-test('expandFileMentionsForSubmit keeps stripped ASCII punctuation as text', async () => {
+test('expandFileMentionsForSubmit keeps stripped ASCII punctuation as text', async (t) => {
+  const life = testLifecycle(t)
   // Round-1 review finding: `@file.ts,` must become `@/abs/file.ts,` — the
   // trailing comma is sentence punctuation, never part of the path, and the
   // rewrite must not eat it.
-  const root = fixtureWorkspace()
+  const root = fixtureWorkspace(life)
   assert.equal(
     await expandFileMentionsForSubmit('see @file-one.txt, then do X', root, exists),
     `see @${join(root, 'file-one.txt')}, then do X`,
@@ -457,8 +478,9 @@ test('expandFileMentionsForSubmit keeps stripped ASCII punctuation as text', asy
   )
 })
 
-test('expandFileMentionsForSubmit canonicalizes a mention inside a CJK sentence', async () => {
-  const root = fixtureWorkspace()
+test('expandFileMentionsForSubmit canonicalizes a mention inside a CJK sentence', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   assert.equal(
     await expandFileMentionsForSubmit('看看@src/deep-nested.ts，然后继续', root, exists),
     `看看@${join(root, 'src', 'deep-nested.ts')}，然后继续`,
@@ -466,8 +488,9 @@ test('expandFileMentionsForSubmit canonicalizes a mention inside a CJK sentence'
   )
 })
 
-test('expandFileMentionsForSubmit canonicalizes relative, ./ and ../ mentions', async () => {
-  const root = fixtureWorkspace()
+test('expandFileMentionsForSubmit canonicalizes relative, ./ and ../ mentions', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   assert.equal(
     await expandFileMentionsForSubmit(`please look at @file-one.txt`, root, exists),
     `please look at @${join(root, 'file-one.txt')}`,
@@ -478,7 +501,7 @@ test('expandFileMentionsForSubmit canonicalizes relative, ./ and ../ mentions', 
   )
   // A ../ mention resolves OUTSIDE the workspace root: build a dedicated
   // parent/child pair so the parent file really exists.
-  const parent = mkdtempSync(join(tmpdir(), 'dsh-mentions-parent-'))
+  const parent = life.tempDir('dsh-mentions-parent-')
   const child = join(parent, 'child')
   mkdirSync(child)
   writeFileSync(join(parent, 'sibling.txt'), 'sib')
@@ -488,8 +511,9 @@ test('expandFileMentionsForSubmit canonicalizes relative, ./ and ../ mentions', 
   )
 })
 
-test('expandFileMentionsForSubmit keeps absolute forms and expands ~ to the homedir', async () => {
-  const root = fixtureWorkspace()
+test('expandFileMentionsForSubmit keeps absolute forms and expands ~ to the homedir', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const absolute = join(root, 'file-one.txt')
   // Absolute: unchanged (already canonical).
   assert.equal(await expandFileMentionsForSubmit(`abs @${absolute}`, root, exists), `abs @${absolute}`)
@@ -511,14 +535,16 @@ test('expandFileMentionsForSubmit keeps absolute forms and expands ~ to the home
   }
 })
 
-test('bare ~ mention canonicalization targets HOME rather than cwd/~', () => {
-  const root = fixtureWorkspace()
+test('bare ~ mention canonicalization targets HOME rather than cwd/~', (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   assert.equal(resolveMentionCandidate('~', root), homedir())
   assert.equal(resolveMentionCandidate('~\\pics', root), join(homedir(), 'pics'))
 })
 
-test('expandFileMentionsForSubmit leaves nonexistent paths verbatim', async () => {
-  const root = fixtureWorkspace()
+test('expandFileMentionsForSubmit leaves nonexistent paths verbatim', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   assert.equal(
     await expandFileMentionsForSubmit('see @missing-file.ts and @src/missing.ts', root, exists),
     'see @missing-file.ts and @src/missing.ts',
@@ -528,16 +554,18 @@ test('expandFileMentionsForSubmit leaves nonexistent paths verbatim', async () =
   assert.equal(await expandFileMentionsForSubmit('see @missin.ts, ok', root, exists), 'see @missin.ts, ok')
 })
 
-test('expandFileMentionsForSubmit absolutizes a symlink without realpath-ing it', async () => {
-  const root = fixtureWorkspace()
+test('expandFileMentionsForSubmit absolutizes a symlink without realpath-ing it', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const link = join(root, 'link.ts')
   symlinkSync('file-one.txt', link)
   const out = await expandFileMentionsForSubmit('see @link.ts', root, exists)
   assert.equal(out, `see @${link}`, 'the link path itself is the canonical form (never the target)')
 })
 
-test('expandFileMentionsForSubmit keeps quotes for spaced paths and never touches emails', async () => {
-  const root = fixtureWorkspace()
+test('expandFileMentionsForSubmit keeps quotes for spaced paths and never touches emails', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   assert.equal(
     await expandFileMentionsForSubmit(`see @"my file.txt"`, root, exists),
     `see @"${join(root, 'my file.txt')}"`,
@@ -550,8 +578,9 @@ test('expandFileMentionsForSubmit keeps quotes for spaced paths and never touche
   )
 })
 
-test('expandFileMentionsForSubmit rewrites MULTIPLE mentions in one line', async () => {
-  const root = fixtureWorkspace()
+test('expandFileMentionsForSubmit rewrites MULTIPLE mentions in one line', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const out = await expandFileMentionsForSubmit('a @file-one.txt b @src/deep-nested.ts c', root, exists)
   assert.equal(out, `a @${join(root, 'file-one.txt')} b @${join(root, 'src', 'deep-nested.ts')} c`)
 })
@@ -563,13 +592,14 @@ test('findFileMentions stops at an unterminated quote and keeps later text safe'
   assert.equal(await expandFileMentionsForSubmit(text, '/ws', exists), text)
 })
 
-test('the completion scope is resolved at SUGGESTION time, so a session switch needs no reinstall', async () => {
+test('the completion scope is resolved at SUGGESTION time, so a session switch needs no reinstall', async (t) => {
+  const life = testLifecycle(t)
   // The reviewer repro (rebase review round 1): the provider is installed
   // while session A is live, then the runner switches to session B. A
   // scope captured at INSTALL time would keep resolving A (stale session,
   // fail-closed empty discovery after the switch); a LIVE scope source
   // resolves the CURRENT session on the very next suggestion.
-  const root = fixtureWorkspace()
+  const root = fixtureWorkspace(life)
   const scopes: import('../src/runtime/host-file-port.ts').HostFileScope[] = []
   const seam: import('../src/runtime/host-file-port.ts').HostFilePort = {
     listReferences: async (scope) => {
@@ -598,13 +628,14 @@ test('the completion scope is resolved at SUGGESTION time, so a session switch n
   assert.deepEqual(scopes[2], { kind: 'workspace', cwd: root }, 'the sessionless fallback resolves the workspace')
 })
 
-test('a scope switch MID-FLIGHT drops the in-flight candidate list (no cross-session commit)', async () => {
+test('a scope switch MID-FLIGHT drops the in-flight candidate list (no cross-session commit)', async (t) => {
+  const life = testLifecycle(t)
   // The reviewer repro (rebase review round 3): a discovery started under
   // session A settles AFTER the live agent moved to B. The request is NOT
   // aborted (a session switch does not cancel editor completion), so the
   // port's own abort check cannot help — the provider must re-verify the
   // scope identity after the await and drop A's candidates.
-  const root = fixtureWorkspace()
+  const root = fixtureWorkspace(life)
   let release: (() => void) | undefined
   const gate = new Promise<void>((resolve) => { release = resolve })
   const seam: import('../src/runtime/host-file-port.ts').HostFilePort = {
