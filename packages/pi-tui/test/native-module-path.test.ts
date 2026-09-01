@@ -6,7 +6,7 @@ import { getNativeModuleCandidates } from "../src/native-module-path.ts";
 
 describe("getNativeModuleCandidates", () => {
 	it("resolves native helpers from the installed TUI package when the module is bundled elsewhere", () => {
-		const packageRoot = resolve("virtual", "node_modules", "@earendil-works", "pi-tui");
+		const packageRoot = resolve("virtual", "node_modules", "@xmoon76", "pi-tui");
 		const bundledModule = resolve("virtual", "pi-coding-agent", "dist", "bundle", "chunks", "chunk.js");
 		const nativePath = join("native", "win32", "prebuilds", "win32-arm64", "win32-console-mode.node");
 
@@ -14,7 +14,9 @@ describe("getNativeModuleCandidates", () => {
 			moduleUrl: pathToFileURL(bundledModule).href,
 			execPath: resolve("virtual", "node", "node.exe"),
 			resolvePackage: (specifier) => {
-				assert.equal(specifier, "@earendil-works/pi-tui");
+				// The self-reference must be THIS package's real name — the
+				// vendor shell renames it from the upstream scope (X025).
+				assert.equal(specifier, "@xmoon76/pi-tui");
 				return join(packageRoot, "dist", "index.js");
 			},
 		});
