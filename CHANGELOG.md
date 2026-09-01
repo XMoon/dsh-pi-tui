@@ -7,6 +7,52 @@
 
 ## [Unreleased]
 
+### Re-vendor 后续审计修复（X037–X045，P1×4 + P2×10 + P3 若干；含 review 轮加固）
+
+对 PR #68（Earendil v0.84.4 重定基）合并后的全面复扫，交叉对照 kimi
+原始 fork、上游 0.84.4 tarball 与重定基前快照；审计记录见
+`temp/1.2-new/dsh-pi-tui-revendor-0.84.4-followup-audit-and-fixes.md`。
+
+- **P1 修复**：
+  - **PasteBurst 恢复（X038）**——重定基时以"无宿主消费者"为由误删的
+    editor 内部 terminal-input bugfix（iTerm2/tmux 丢 bracketed-paste
+    marker 时，快速字符流后的 Enter 应换行而非提交半截 paste）。按 kimi
+    完整形态恢复（含 `disablePasteBurst` 逃生开关）；教训已写入 ledger：
+    "no host consumer" 只对 Host-API patch 有效。
+  - **SelectList filter 状态分裂（X041）**——`setFilter()` 只改
+    `filteredItems`，`getFilter()`/`setItems()` 读搜索框，程序化过滤器
+    会被下一次按键/刷新静默丢弃；改为 canonical `filterQuery` 单一事实源。
+  - **大 paste → Ctrl+G 外部编辑器丢内容**——`$EDITOR` 只见
+    `[paste #N …]` marker 且返回后 registry 被清；seat 抽象新增
+    `getExpandedText?()`（上游原生 API，宿主此前未用），外部编辑器与
+    subagent 草稿镜像改用展开文本。
+  - **出站草稿路径全面展开 paste marker（round-2 review）**——steer /
+    submit / queue / getDraft / viewer 提交与 seat handoff 此前仍走
+    `getText()`（字面 marker 泄漏到 wire）；集中经 `expandedSeatWireDraft()`
+    + 新 fork seam `getExpandedCursor()`（X045，handoff 光标随扩展映射），
+    `cmd /c start` 打开 URL 改为引号包裹单 token（防 cmd 元字符注入），
+    external editor 的 suspend 失败路径增加 best-effort 回滚。
+  - **editor submit remap 污染全部 vendored Input（X037)**——新增独立
+    binding `tui.editor.submit`（仅 Editor 消费）；`tui.input.submit` 永远
+    保持默认 Enter，question/搜索框不再被 `submit: ctrl+x` 之类配置误提交。
+- **P2 修复**：X007 dispose 契约补齐（Box/SettingsList/overlay hide 经
+  opt-in `disposeOnHide`，remountable 租约豁免，宿主冗余补偿清理）；
+  Ctrl+G 改经 `suspendForExternalEditor()/resumeFromExternalEditor()`
+  挂起（fullscreen 与 surface generation 得以保留，上游原生
+  `preserveScreen`）；IME Focusable 下传（X042 + 宿主
+  FocusForwardingFrame）；fullscreen Ctrl+Up/Down 由宿主 turn 导航接管
+  （fork 的 OSC133 扫描在 DSH transcript 上是永久 no-op）；fullscreen
+  OSC8 链接点击与 Windows 右键 paste 接线（`open-url.ts` +
+  `readClipboardText`，均上游原生 seam）；X023 paste registry prune；
+  autocomplete seam 提升 protected（X044，替代 private cast）；
+  `Input.setValue` 光标语义（X040，预填后续输入不再前插）；fullscreen
+  raw-input precedence（X043，viewport listener 延迟注册 + mouse 直通）。
+- **P3/记录**：`WIDTH_CACHE_SIZE` 恢复 4096（X039）；LaTeX 渲染全站关闭
+  （kimi 方案，`HOST_MARKDOWN_OPTIONS`）；native prebuild 文档如实写明
+  降级影响与支持面；X028 补记 `canScroll`；fullscreen ScrollView
+  `basis: 0`；`REMOVED_UNUSED` 清单按四类标准重写理由。
+- **验证**：fork 套件 1017 项（+39，round-5 补 stale-callback 守卫）、bundle 全量、pi-surface-compat 8/8、
+  typecheck、build 全绿。
 ### 开发环境临时文件卫生（/tmp hygiene）
 
 - **单测 fixture 临时目录改为 test-owned 生命周期**：新增

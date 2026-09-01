@@ -43,6 +43,8 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
   PageUp/PageDown page navigation, and substring search over
   value+label+description. `setFilter` is redefined to the same
   case-insensitive substring filter (upstream prefix-matched value only).
+  The filter query's canonical single-source-of-truth (getFilter/setItems
+  stay in sync with setFilter) is X041 — re-apply both together.
   Upstream 0.84.4 still has none of these.
 - Consumer: host `/sessions` picker, model picker, category picker,
   autocomplete compact picker, dynamic title enrichment.
@@ -151,11 +153,29 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 ### X007 — Component `dispose()` lifecycle (was #7)
 
 - Category: `HARD_HOST_API` / `PUBLIC_COMPONENT_CONTRACT`
-- Files: `src/tui.ts`, `src/components/scroll-view.ts`, `src/components/text.ts`, `src/components/loader.ts`
+- Files: `src/tui.ts`, `src/components/scroll-view.ts`, `src/components/text.ts`, `src/components/loader.ts`, `src/components/box.ts`, `src/components/settings-list.ts`
 - Reason: `Component` gains an optional `dispose()`; `Container.removeChild`/
   `clear`/`dispose` release child resources; `ScrollView` disposes its hide
   timer and render callback; `Text` gets a no-op `dispose()`; `Loader`
   disposes its animation timer. Upstream 0.84.4 has no `dispose` anywhere.
+  COMPLETED in the 2026-09 follow-up audit so the contract covers EVERY
+  ownership path, not just Container/ScrollView:
+  - `Box.removeChild`/`clear` dispose removed children (Box had its own
+    override that silently skipped dispose);
+  - `SettingsList` owns its submenu slot — `closeSubmenu`, submenu
+    replacement and `dispose()` release the component (dispose bypasses the
+    navigateAfterClose resurrection);
+  - `OverlayHandle.hide()`/`hideOverlay()` dispose the removed component
+    ONLY with the new opt-in `OverlayOptions.disposeOnHide` — default false
+    (upstream behavior) because hide()+re-mount is a legitimate screen-
+    migration pattern; the host opts IN for every overlay entry it owns
+    (panels behind an owning FocusForwardingFrame) and opts OUT for the
+    remountable extension/advanced/unstable leases.
+- Ownership map after the completion: Container removal → dispose;
+  Stack removal → dispose; ScrollView disposal → child dispose;
+  Box removal → dispose; SettingsList submenu slot → dispose;
+  Overlay hide (disposeOnHide) → dispose; overlay hide (default) → caller
+  owns.
 - Consumer: host pi-surface-compat gate (`test/pi-component-compat.test.ts`:
   close idempotent, dispose exactly once, surface disposal invalidates old
   leases, fullscreen migration keeps one live adapter) and the extension
@@ -379,6 +399,10 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
   endings/tabs, replaces the document and cursor without firing `onChange`,
   cancelling autocomplete, leaving history browsing, pushing undo, or
   clearing the paste registry. Upstream 0.84.4 has no such method.
+  TIGHTENED in the 2026-09 follow-up audit: the paste registry is PRUNED to
+  the markers that survive in the staged text (neither "keep all" — a
+  replaced document orphaned multi-hundred-KB entries — nor "clear all" —
+  surviving markers must keep expanding).
 - Consumer: host `editor-seat-holder` declined-key replacement fallback.
 - Upstream status: absent.
 - Tests: public staging/normalization tests in `test/editor.test.ts` and the
@@ -457,12 +481,20 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 ### X028 — Fullscreen viewport boundary, pre-input, and search-reset seams (was #28)
 
 - Category: `HARD_HOST_API`
-- Files: `src/tui-alt-screen.ts`
+- Files: `src/tui-alt-screen.ts`, `src/components/scroll-view.ts`
 - Reason: `onScrollBoundary` reports final unconsumed wheel/page/primary-
   scrollbar edge attempts, `onBeforeViewportInput` lets a host claim semantic
   viewport keys before built-in Home/End/Page handling, and `clearSearch()`
   lets a host reset the built-in fullscreen transcript search. Upstream
-  0.84.4 has none of these.
+  0.84.4 has none of these. ALSO PART OF THIS ENTRY (2026-09 audit): the
+  `ScrollView.canScroll` getter — it drives the navigation fall-through (a
+  non-scrollable primary viewport must let PageUp/Home/End fall through to
+  the focused component instead of consuming them). `canScroll` lives in
+  scroll-view.ts; losing it on a future re-vendor would silently consume
+  navigation keys on short transcripts. The HOST additionally claims the
+  fork's `previousPrompt`/`nextPrompt` keys (Ctrl+Up/Ctrl+Down) through
+  `onBeforeViewportInput` for its own turn navigation — the fork's built-in
+  OSC 133 scan finds nothing in DSH transcripts (permanent no-op).
 - Consumer: host virtual transcript (page older/newer), Home/End ownership,
   host search (`app.transcript.jumpLatest`, `app.transcript.search`),
   `clearSearch` on jump-latest.
@@ -640,6 +672,189 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - Migration action: re-apply (passthrough AFTER the FOCUS_OUT selection
   cleanup; keep the cleanup).
 
+### X037 — Editor-owned submit binding `tui.editor.submit` (2026-09 follow-up audit)
+
+- Category: `HARD_HOST_API` / `PUBLIC_COMPONENT_CONTRACT`
+- Files: `src/keybindings.ts`, `src/components/editor.ts`
+- Reason: the editor's submit check consults a DEDICATED `tui.editor.submit`
+  binding (default `enter`) instead of `tui.input.submit`. Keybindings are
+  process-global: the host remaps the editor's submission by writing the
+  binding, and sharing it with `tui.input.submit` leaked the remap into
+  every plain `Input` (question free-text, task/history search, picker
+  search boxes) — a `submit: ctrl+x` config made plain Inputs submit on
+  ctrl+x. `tui.input.submit` stays the plain-Input binding (always `enter`
+  at the host) and is never remapped. `shouldSubmitOnBackslashEnter` reads
+  the editor binding too.
+- Consumer: host `onEditorSubmitSync` (keybindings/manager.ts), the
+  dispose-time default restore, the `editorAccepts` inventory
+  (src/tui-app.ts).
+- Upstream status: absent (upstream has only `tui.input.submit`).
+- Tests: "editor submit binding split (X037)" in `test/editor.test.ts`;
+  bundle: the anti-pollution tests in `test/keybinding-integration.test.ts`.
+- Migration action: re-apply BOTH halves — the binding definition AND the
+  two editor.ts call sites — or the split silently reverts.
+
+### X038 — PasteBurst non-bracketed paste fallback RESTORED (was wrongly REMOVED_UNUSED)
+
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Files: `src/paste-burst.ts`, `src/components/editor.ts`
+- Reason: terminals that lose bracketed-paste markers (iTerm2/tmux) deliver
+  pastes as rapid plain-character streams; the trailing Enter must insert a
+  newline instead of submitting a half-pasted draft. The 2026-09 re-vendor
+  deleted it as "no host consumer" — a WRONG criterion for an
+  editor-internal terminal-input bugfix (it needs no host consumer by
+  design). Restored in the kimi form: `PasteBurst` class (≥8 chars at ≤8ms
+  intervals, 30ms active window, 120ms Enter-suppress window),
+  `disablePasteBurst` constructor option + `setDisablePasteBurst()` (tests
+  and integrations opting out), kimi-exact SINGLE-char tracking — a
+  multi-char chunk RESETS the burst (multi-char reads are typed-ahead text
+  or whole-line injections, not a terminal dribbling a paste; this also
+  keeps synchronous whole-string test input submitting normally).
+- Consumer: host editor paste path (every remap/SSH/tmux session without
+  bracketed paste).
+- Upstream status: absent.
+- Tests: "paste-burst fallback (X038)" describes in `test/editor.test.ts`.
+- Migration action: re-apply `paste-burst.ts` verbatim + the editor
+  integration (tracking block after the bracketed-paste section, the
+  submit-branch check, the two insert-point feeds, the option/setter).
+  LESSON: "no host consumer" is only a valid removal criterion for
+  Host-API patches — internal bugfixes, perf contracts and product
+  behaviors need their own criteria (see the removed-code section below).
+
+### X039 — `WIDTH_CACHE_SIZE` 4096 restored (kimi-era perf contract)
+
+- Category: `PERF_HOST_DEPENDENT`
+- Files: `src/utils.ts`
+- Reason: the non-ASCII width cache holds 4096 entries (upstream 512). The
+  host renders CJK-heavy transcripts; width changes, theme invalidations
+  and cold renders re-measure many non-ASCII lines and a 512-entry FIFO
+  thrashes. X035 bounds the STEADY frame; this bounds the burst paths.
+  Deliberately restored after the re-vendor briefly took upstream's 512
+  (the old ledger had listed 4096 as removable "kimi tweak" — the removal
+  criterion for a perf contract is the measured benefit, not host imports).
+- Consumer: every `visibleWidth` caller.
+- Upstream status: absent (upstream 512).
+- Tests: covered by the wrap/layout suites (no dedicated test — a size
+  constant).
+- Migration action: keep 4096 unless a benchmark says otherwise.
+
+### X040 — `Input.setValue` cursor placement
+
+- Category: `PUBLIC_COMPONENT_CONTRACT`
+- Files: `src/components/input.ts`
+- Reason: `setValue(value, { cursor })` places the cursor at the END of the
+  new value by default — every caller pre-fills a query/draft the user
+  continues typing, and the historical clamp left a fresh Input's cursor at
+  0, so `setValue("foo")` + typing "x" produced "xfoo" (SelectList
+  initialQuery, task/history panels, question draft restore).
+  `{ cursor: "preserve" }` keeps the clamped-cursor behavior for mid-edit
+  replacements.
+- Consumer: host pickers/panels via X001 `initialQuery`; question flow
+  draft restore.
+- Upstream status: absent (upstream and the kimi snapshot clamp only).
+- Tests: "setValue cursor semantics (X040)" in `test/input.test.ts`.
+- Migration action: re-apply with X041 (setFilter depends on it).
+
+### X041 — SelectList canonical filter query
+
+- Category: `HARD_HOST_API` (extends X001/X002)
+- Files: `src/components/select-list.ts`
+- Reason: the filter query has ONE source of truth (`filterQuery`, written
+  by every `applyFilter` call). Previously `setFilter()` narrowed
+  `filteredItems` while `getFilter()`/`setItems()` kept reading the search
+  box — a programmatic filter (`/sessions <query>`) desynced from the
+  rendered box, was silently DROPPED by the next keystroke, lost across
+  category switches and `setItems` refreshes, and `getFilter()` lied (empty)
+  with search disabled. `setFilter()` now syncs the search box (cursor at
+  the end via X040) before applying; `getFilter()` returns the canonical
+  query; `setItems()` re-applies it.
+- Consumer: host `/sessions` picker prefill, categorized picker Tab cycle,
+  MarqueeFilterAdapter, dynamic row enrichment.
+- Upstream status: absent (upstream has no search).
+- Tests: "canonical filter state (X041)" in `test/select-list.test.ts`.
+- Migration action: re-apply together with X001/X002 (same file, same
+  feature).
+
+### X042 — Focusable propagation on Input-owning lists
+
+- Category: `PUBLIC_COMPONENT_CONTRACT`
+- Files: `src/components/select-list.ts`, `src/components/settings-list.ts`
+- Reason: `SelectList`/`SettingsList` implement `Focusable`: the focused
+  flag propagates to the input the user actually types into (SelectList's
+  search Input; SettingsList's search Input AND the open submenu
+  component). Without it a focused list never emitted the hardware
+  `CURSOR_MARKER` and the IME candidate window mispositioned — the kimi
+  package README states the wrapper contract ("every wrapper owning an
+  Input/Editor must implement Focusable") but the kimi list components
+  themselves did not implement it either; the host compensates with its
+  FocusForwardingFrame for the Frame layer.
+- Consumer: host pickers/settings overlays (mounted behind frames).
+- Upstream status: absent.
+- Tests: fork lifecycle/X041 suites assert the focused flag shape; the
+  host-side wiring is covered by the bundle suites.
+- Migration action: re-apply (getter/setter pair + SettingsList
+  propagateFocus on submenu open).
+
+### X043 — Deferred viewport input listener registration (alt screen)
+
+- Category: `HARD_HOST_API`
+- Files: `src/tui-alt-screen.ts`
+- Reason: `TuiAltScreenOptions.deferViewportListener` skips the constructor
+  registration of the viewport input listener; `installViewportListener()`
+  (idempotent) registers it later. Input listeners dispatch in REGISTRATION
+  order, and the constructor registered the viewport listener FIRST — every
+  host listener installed afterwards (the app's single router, the
+  unstable raw-capture stage) only saw a chunk AFTER the viewport had
+  already consumed wheel/mouse events and semantic scroll keys, breaking
+  the host's "a raw capture sees/consumes/rewrites ANY chunk" contract in
+  fullscreen and diverging from the main screen's routing. The host
+  installs its router first, then the viewport listener.
+- Consumer: host `setFullscreen` (src/tui-app.ts) — router first, viewport
+  second; `onBeforeViewportInput` (X028) still runs inside the viewport
+  listener before its built-in keys.
+- Upstream status: absent (upstream always registers in the constructor).
+- Tests: "viewport listener registration order (X043)" in
+  `test/tui-alt-screen.test.ts`.
+- Migration action: re-apply the option + method pair; the default
+  (constructor registration) preserves upstream behavior.
+
+### X045 — Editor expanded-cursor mapping `getExpandedCursor()` (round-2 review)
+
+- Category: `HARD_HOST_API`
+- Files: `src/components/editor.ts`
+- Reason: `getExpandedCursor()` maps the cursor offset into
+  `getExpandedText()`'s coordinate space (every paste marker before the
+  cursor grows the offset by its content length; the editor's start-snap
+  keeps inside-marker cursors at the marker's start). getExpandedText is
+  upstream-native but gives no cursor pairing — draft HANDOFFS (seat
+  transfers via wireCursorOf) need both the text and the cursor to
+  survive marker expansion, or the transferred cursor lands at the wrong
+  visual position.
+- Consumer: host `src/editor-seat-holder.ts` (wireCursorOf),
+  HostEditorAdapter/SeatEditor optional `getExpandedCursor?()`.
+- Upstream status: absent.
+- Tests: "expanded cursor mapping (X045)" in `test/editor.test.ts`.
+- Migration action: re-apply together with the host's expanded-draft
+  wiring (round-2 P1: steer/submit/getDraft/viewer wires and seat
+  handoffs all carry expanded text).
+
+### X044 — Protected autocomplete seam
+
+- Category: `HARD_HOST_API`
+- Files: `src/components/editor.ts`
+- Reason: `requestAutocomplete`/`cancelAutocomplete` are `protected` (were
+  private): the host's TuiEditor subclass drives explicit/context-gated
+  completion and stale-dropdown cancellation through them. A private method
+  forced the host into `as unknown as` casts that keep COMPILING through
+  upstream signature changes and explode at runtime — exactly the class of
+  silent breakage the re-vendor gates exist to prevent.
+- Consumer: host `src/tui-editor.ts` (six former cast sites).
+- Upstream status: absent (upstream keeps them private).
+- Tests: "protected autocomplete seam (X044)" in `test/editor.test.ts`
+  (subclass compilation + no-throw with no provider).
+- Migration action: visibility change only; re-apply if upstream reverts
+  it.
+
 ## Host-side relocation audit (2026-09)
 
 Which divergences could move into the host bundle (`src/`) instead of
@@ -683,25 +898,61 @@ consumer actually changes.
 
 ## Removed kimi-only code (do NOT re-apply)
 
-These were part of the kimi-code snapshot but have no host consumer and are
-not in the upstream baseline. They are intentionally dropped by the Earendil
-re-vendor:
+These were part of the kimi-code snapshot and are not in the upstream
+baseline. REMOVAL CRITERIA (2026-09 audit lesson, from the PasteBurst
+regression): "no host consumer" is only valid for Host-API patches.
+Editor-internal bugfixes need terminal-environment coverage arguments, perf
+contracts need measurements, product behaviors need explicit product
+decisions. Each removal below names its criterion:
 
-- `PasteBurst` + `disablePasteBurst`/`setDisablePasteBurst` (editor) — no host consumer.
-- `inlineSlashTrigger` + inline-slash helpers (editor) — no host consumer.
-- `setHistoryFilter` (editor) — no host consumer.
-- `setText(text, { preservePasteRegistry })` (editor) — no host consumer.
-- `AutocompleteProvider` `additionalBasePaths` + multi-root fan-out — no host consumer.
-- `data?.["inlineSkill"]` Enter-non-submit carve-out (editor) — no host consumer.
-- `getLayoutRoot()` (alt screen) — no consumer.
-- `WIDTH_CACHE_SIZE = 4096` (utils) — kimi tweak; upstream 512 is retained.
-  With X035's reuse fast path the cold-path width measurements are bounded
-  to changed lines, so the larger FIFO is not needed.
+- ~~`PasteBurst`~~ — REMOVED as "no host consumer", RE-APPLIED as X038:
+  the criterion was wrong for an editor-internal terminal-input bugfix.
+- `inlineSlashTrigger` + inline-slash helpers (editor) — PRODUCT DECISION:
+  the host chose explicit, context-gated Tab completion over kimi's
+  opt-in inline `/` dropdown (default-off in kimi too).
+- `setHistoryFilter` (editor) — PRODUCT DECISION (parity enhancement):
+  kimi's shell-mode ↑ filters history by mode; DSH recall is mode-agnostic
+  by design. Revisit only as an explicit parity feature.
+- `setText(text, { preservePasteRegistry })` (editor) — SUPERSEDED: X023's
+  `setTextAndCursor` prune keeps surviving markers' entries and releases
+  vanished ones — a strictly better contract than the manual opt-in flag.
+- `AutocompleteProvider` `additionalBasePaths` + multi-root fan-out —
+  HOST API with no consumer (verified): the host's MentionProvider owns
+  multi-root fan-out itself.
+- `data?.["inlineSkill"]` Enter-non-submit carve-out (editor) — PRODUCT
+  DECISION: DSH has no mid-prompt inline-skill token concept; slash
+  commands submit on Enter by design (same as kimi's non-inlineSkill
+  path).
+- `getLayoutRoot()` (alt screen) — no consumer (verified).
+- ~~`WIDTH_CACHE_SIZE = 4096` (utils)~~ — REMOVED as a "kimi tweak", then
+  RESTORED as X039 (PERF_HOST_DEPENDENT): a perf contract's removal
+  criterion is the measured benefit, not the absence of host imports;
+  CJK-heavy burst re-measurement thrashes a 512-entry FIFO.
 - Negative-width `repeat()` guards (text/truncated-text/markdown/editor) —
   upstream baseline retained; X032's clamp protects the entry point. The
   one `Math.max(0, end - start)` padding guard in `layout.ts`
   (`targetText`) is also a local defensive keep alongside X032 (upstream
   0.84.4 pads without the clamp).
+
+## Final status after the 2026-09 follow-up audit (post-PR-#68 sweep)
+
+- NEW divergences: X037 (editor submit split), X038 (PasteBurst restored),
+  X039 (width cache 4096 restored), X040 (setValue cursor), X041 (canonical
+  filter query), X042 (Focusable lists), X043 (deferred viewport listener),
+  X044 (protected autocomplete seam), X045 (expanded-cursor mapping,
+  round-2 review).
+- UPDATED: X007 (dispose completed across Box/SettingsList/overlay hide via
+  opt-in disposeOnHide), X023 (paste registry prune), X028 (canScroll +
+  host prompt-nav claim), X001/X002 (see X041).
+- Host-side fixes that need NO fork divergence (upstream-native seams the
+  host failed to use): `getExpandedText` for the external-editor round-trip
+  and draft snapshots; `TuiStopOptions.preserveScreen` for the
+  external-editor suspend/resume (fullscreen preserved);
+  `openUrl`/`onRightClickPaste` fullscreen wiring; `renderLatex: false`
+  (product decision, kimi parity); `basis: 0` on the fullscreen scroll
+  entry.
+- REMOVAL CRITERIA recorded in the removed-code section: "no host consumer"
+  applies to Host-API patches only.
 
 ## Acceptance after syncing from upstream
 
@@ -712,7 +963,9 @@ re-vendor:
 
 ## Final status after the v0.84.4 re-vendor (2026-09)
 
-- `KEEP` (re-applied on the Earendil v0.84.4 base): X001, X002,
+- `KEEP` (re-applied on the Earendil v0.84.4 base; the 2026-09
+  follow-up audit ADDS X037–X045 — see its own status section above):
+  X001, X002,
   X004A, X004B, X005, X006, X007, X008, X009, X010, X011, X012,
   X014 (measurement cache ONLY — the scrollbar thumb clamp is already in
   upstream 0.84.4, see the entry's scope note), X016, X018, X019, X020,
@@ -728,11 +981,15 @@ re-vendor:
 - `PACKAGING_ONLY`: X025 (tsdown config — XMoon shell kept).
 - `REMOVED_UNUSED` (no host consumer; X003 is a code-unit/grapheme
   mismatch defect and X013 is unconsumed — see their entries): X003,
-  X013, PasteBurst,
-  inlineSlashTrigger, setHistoryFilter, preservePasteRegistry,
-  additionalBasePaths, inlineSkill data, getLayoutRoot,
-  WIDTH_CACHE_SIZE 4096. (Defensive negative-width `repeat()` guards are
-  dropped in text/truncated-text/markdown/editor; `layout.ts` retains one
-  local `Math.max(0, end - start)` `targetText` padding guard alongside
+  X013, inlineSlashTrigger, setHistoryFilter, preservePasteRegistry,
+  additionalBasePaths, inlineSkill data, getLayoutRoot. NOTE
+  (2026-09 follow-up audit): PasteBurst and `WIDTH_CACHE_SIZE = 4096`
+  were initially listed here and are NO LONGER REMOVED — PasteBurst is
+  restored as X038 and the width cache as X039 (the "no host consumer"
+  criterion was wrong for an internal bugfix and a perf contract; see the
+  removed-code section above for the per-category criteria). (Defensive
+  negative-width `repeat()` guards are dropped in
+  text/truncated-text/markdown/editor; `layout.ts` retains one local
+  `Math.max(0, end - start)` `targetText` padding guard alongside
   X032's entry-point clamp — the scrollbar thumb clamp itself is upstream
   baseline.)
