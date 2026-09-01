@@ -17,11 +17,12 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { dirname, basename, isAbsolute, join, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -39,6 +40,12 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const SOURCE_PACK_SCRIPT = 'scripts/dsh-source-pack.mjs'
 const SOURCE_PREPARE_SCRIPT = 'scripts/prepare-dsh-test-environment.mjs'
 const SOURCE_HELPER = 'scripts/lib/dsh-distribution.mjs'
+// Ephemeral source-pack generation identity: the root basename prefix and
+// the owner marker that together prove a superseded generation belongs to
+// THIS worktree before it is reclaimed (Phase F of the tmp hygiene plan).
+const EPHEMERAL_ROOT_PREFIX = 'dsh-pi-tui-source-'
+const EPHEMERAL_MARKER_NAME = '.dsh-pi-tui-ephemeral.json'
+const EPHEMERAL_MARKER_KIND = 'dsh-pi-tui-source-pack'
 const LOCK_WAIT_MS = 15 * 60 * 1000
 const LOCK_STALE_MS = 10 * 60 * 1000
 const TIMEOUTS = {
@@ -679,16 +686,107 @@ async function buildCachedSourcePack(helper, context) {
   }
 }
 
-function ephemeralSourcePackRoot() {
+function ephemeralSourcePackRoot(context) {
   // Provided/dirty builds must not be durable cache entries. Keep the output
   // in the OS temporary area so the current shell can use it, while normal OS
-  // cleanup supplies the lifetime boundary.
-  return mkdtempSync(join(tmpdir(), 'dsh-pi-tui-source-'))
+  // cleanup supplies the lifetime boundary. The owner marker lets a later
+  // bootstrap of the SAME worktree prove ownership before reclaiming the
+  // superseded generation (never a global /tmp sweep).
+  const root = mkdtempSync(join(tmpdir(), EPHEMERAL_ROOT_PREFIX))
+  const markerPath = join(root, EPHEMERAL_MARKER_NAME)
+  try {
+    writeFileSync(markerPath, `${JSON.stringify({
+      schemaVersion: 1,
+      kind: EPHEMERAL_MARKER_KIND,
+      workspaceRoot: context.root,
+      createdAt: new Date().toISOString(),
+      pid: process.pid,
+    }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  } catch (error) {
+    // A generation without its owner marker is unclaimable garbage: remove
+    // the empty root instead of leaving it for OS temp hygiene.
+    try {
+      rmSync(root, { recursive: true, force: true })
+    } catch {
+      // Best effort; the root is empty and harmless.
+    }
+    throw error
+  }
+  const markerInfo = existingPathInfo(markerPath)
+  if (markerInfo === undefined || !markerInfo.isFile() || markerInfo.isSymbolicLink()) {
+    fail(`ephemeral source pack owner marker must be a regular file: ${markerPath}`)
+  }
+  return root
+}
+
+/**
+ * Canonical identity for ownership comparisons: realpath when the path
+ * exists (so a worktree reached through a symlinked path still matches
+ * its own marker), lexical resolve as a safe fallback.
+ */
+function canonicalPath(path) {
+  try {
+    return realpathSync(path)
+  } catch {
+    return resolve(path)
+  }
+}
+
+/**
+ * The previous generation this worktree may reclaim, proven by the committed
+ * dev state plus the owner marker inside the candidate root. Returns the
+ * resolved candidate root, or undefined when anything is off-spec (wrong
+ * mode, non-ephemeral, outside tmpdir, wrong basename shape, symlinked
+ * root/marker, foreign worktree marker, ...). Never scans /tmp broadly.
+ */
+function reclaimableEphemeralRoot(context) {
+  const state = readState(context)
+  if (state === undefined || state.mode !== 'source' || state.ephemeral !== true) return undefined
+  const distribution = state.distribution
+  if (typeof distribution !== 'string' || !isAbsolute(distribution)) return undefined
+  if (basename(distribution) !== 'pack') return undefined
+  const candidateRoot = resolve(dirname(distribution))
+  if (dirname(candidateRoot) !== resolve(tmpdir())) return undefined
+  if (!basename(candidateRoot).startsWith(EPHEMERAL_ROOT_PREFIX)) return undefined
+  const rootInfo = existingPathInfo(candidateRoot)
+  if (rootInfo === undefined || !rootInfo.isDirectory() || rootInfo.isSymbolicLink()) return undefined
+  const markerPath = join(candidateRoot, EPHEMERAL_MARKER_NAME)
+  const markerInfo = existingPathInfo(markerPath)
+  if (markerInfo === undefined || !markerInfo.isFile() || markerInfo.isSymbolicLink()) return undefined
+  // The marker contract is an owner-only ordinary file: a forged mode or a
+  // hardlink (nlink > 1) is not acceptable proof of ownership.
+  if (markerInfo.nlink !== 1 || (markerInfo.mode & 0o777) !== 0o600) return undefined
+  let marker
+  try {
+    marker = JSON.parse(readFileSync(markerPath, 'utf8'))
+  } catch {
+    return undefined
+  }
+  if (marker === null || typeof marker !== 'object' || Array.isArray(marker)) return undefined
+  if (marker.schemaVersion !== 1 || marker.kind !== EPHEMERAL_MARKER_KIND) return undefined
+  if (typeof marker.workspaceRoot !== 'string' || canonicalPath(marker.workspaceRoot) !== canonicalPath(context.root)) return undefined
+  return candidateRoot
+}
+
+/**
+ * Remove a superseded ephemeral generation — only after the new state/env
+ * committed successfully. A failure to remove must never fail the bootstrap:
+ * the directory then simply stays for OS temp hygiene.
+ */
+function reclaimEphemeralRoot(candidateRoot, activeDistributionPath = undefined) {
+  if (candidateRoot === undefined) return
+  if (typeof activeDistributionPath === 'string' && resolve(dirname(activeDistributionPath)) === candidateRoot) return
+  try {
+    rmSync(candidateRoot, { recursive: true, force: true })
+    console.log(`Reclaimed superseded ephemeral source pack: ${candidateRoot}`)
+  } catch (error) {
+    console.warn(`Could not reclaim superseded ephemeral source pack ${candidateRoot}: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 async function buildProvidedSourcePack(helper, context, requestedDirectory) {
   const dshDirectory = await ensureHarnessCheckout(context, requestedDirectory)
-  const outputRoot = ephemeralSourcePackRoot()
+  const outputRoot = ephemeralSourcePackRoot(context)
   const output = join(outputRoot, 'pack')
   try {
     const distribution = await runSourcePack(helper, context, dshDirectory, output, {
@@ -742,6 +840,72 @@ function sourceMaterialized(helper, context, distribution) {
   }
 }
 
+/**
+ * Snapshot a path for rollback WITHOUT ever reading through a symlink: a
+ * symlink (or any non-regular file) at the path is recorded as `unsafe`,
+ * so a later rollback removes it instead of copying whatever it points at.
+ */
+function snapshotRegularFile(path) {
+  const info = existingPathInfo(path)
+  if (info === undefined) return undefined
+  if (info.isSymbolicLink() || !info.isFile()) return { unsafe: true }
+  return { content: readFileSync(path, 'utf8') }
+}
+
+/**
+ * Restore a path to its snapshot, fail-closed and never destructive:
+ * - a swapped-in symlink is removed (never followed) and the previous
+ *   content is written in its place;
+ * - an unexpected DIRECTORY at the path is never recursively deleted —
+ *   rollback throws so the failure is reported instead of silently
+ *   destroying data;
+ * - a regular file is replaced with the previous content, or removed when
+ *   there was no previous regular file.
+ */
+function rollbackPath(path, snapshot) {
+  const current = existingPathInfo(path)
+  if (current === undefined) {
+    if (snapshot !== undefined && !snapshot.unsafe) writeAtomic(path, snapshot.content)
+    return
+  }
+  if (current.isSymbolicLink()) {
+    rmSync(path, { force: true })
+    if (snapshot !== undefined && !snapshot.unsafe) writeAtomic(path, snapshot.content)
+    return
+  }
+  if (current.isDirectory()) {
+    throw new Error(`refusing to remove unexpected directory at ${path} during rollback`)
+  }
+  if (snapshot === undefined || snapshot.unsafe) rmSync(path, { force: true })
+  else writeAtomic(path, snapshot.content)
+}
+
+function commitDevelopmentState(context, writeEnvironment, writeStateFn) {
+  // The env file, the .envrc, and the state file are one logical
+  // checkpoint: a shell sources the env file (and direnv sources .envrc),
+  // but every durable decision (mode, generation, distribution) is read
+  // back from the state file. If ANY write fails after the env files were
+  // replaced, roll BOTH back so no shell ever inherits a generation the
+  // committed state does not reference. The state file stays
+  // authoritative: a failed commit leaves everything pointing at the
+  // previous generation, which is also why reclaimEphemeralRoot is only
+  // reached after this returns.
+  const previousEnv = snapshotRegularFile(context.envPath)
+  const previousEnvrc = snapshotRegularFile(join(context.root, '.envrc'))
+  try {
+    writeEnvironment()
+    writeStateFn()
+  } catch (error) {
+    try {
+      rollbackPath(context.envPath, previousEnv)
+      rollbackPath(join(context.root, '.envrc'), previousEnvrc)
+    } catch (rollbackError) {
+      console.warn(`could not roll back the dev environment after state commit failure: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`)
+    }
+    throw error
+  }
+}
+
 async function materializeSource(helper, context, distribution, distributionPath, force, provided) {
   const pnpmCommand = configuredPnpm()
   const pnpm = currentPnpmVersion(pnpmCommand, context.root)
@@ -773,8 +937,11 @@ async function materializeSource(helper, context, distribution, distributionPath
   const required = helper.sourceInstallPackages(distribution, context.packageJson)
   helper.assertSourceResolution(context.root, distribution, required)
   const ephemeral = provided === true || resolve(distributionPath) !== resolve(context.sourcePack)
-  writeDevelopmentEnvironment(context, distributionPath, { ephemeral })
-  writeState(context, pnpm, distributionPath, { ephemeral })
+  commitDevelopmentState(
+    context,
+    () => writeDevelopmentEnvironment(context, distributionPath, { ephemeral }),
+    () => writeState(context, pnpm, distributionPath, { ephemeral }),
+  )
 }
 
 function npmMaterialized(context, pnpm, force) {
@@ -797,8 +964,11 @@ async function materializeNpm(context, force) {
     console.log('Workspace npm dependencies: already materialized')
   }
   assertIndependentNodeModules(context.root)
-  writeDevelopmentEnvironment(context)
-  writeState(context, pnpm)
+  commitDevelopmentState(
+    context,
+    () => writeDevelopmentEnvironment(context),
+    () => writeState(context, pnpm),
+  )
 }
 
 function parseCli() {
@@ -835,25 +1005,40 @@ export const _test = {
   ensureHarnessWorktree,
   runCommand,
   commandEnvironment,
+  ephemeralSourcePackRoot,
+  reclaimableEphemeralRoot,
+  reclaimEphemeralRoot,
+  commitDevelopmentState,
+  EPHEMERAL_ROOT_PREFIX,
+  EPHEMERAL_MARKER_NAME,
+  EPHEMERAL_MARKER_KIND,
 }
 
 export async function bootstrapDevelopmentEnvironment(options = {}) {
   const context = resolveDshDevContext(options)
   const force = options.force === true
+  // Captured BEFORE any state mutation: the ephemeral generation this
+  // worktree still references. It stays untouched until the new generation
+  // has committed, so a failed bootstrap leaves the previous one usable.
+  const previousEphemeralRoot = reclaimableEphemeralRoot(context)
+  let result
   if (context.mode === 'npm') {
     await materializeNpm(context, force)
-    return { context, distribution: undefined, cacheHit: undefined }
+    result = { context, distribution: undefined, cacheHit: undefined }
+  } else {
+    if (process.platform === 'win32') fail('source mode requires POSIX directory operations and is unsupported on Windows')
+    const helper = await distributionHelper(context)
+    const selected = await sourceDistribution(helper, context, options)
+    await materializeSource(helper, context, selected.distribution, selected.path, force, selected.provided)
+    result = {
+      context,
+      distribution: selected.distribution,
+      distributionPath: selected.path,
+      cacheHit: selected.cacheHit,
+    }
   }
-  if (process.platform === 'win32') fail('source mode requires POSIX directory operations and is unsupported on Windows')
-  const helper = await distributionHelper(context)
-  const selected = await sourceDistribution(helper, context, options)
-  await materializeSource(helper, context, selected.distribution, selected.path, force, selected.provided)
-  return {
-    context,
-    distribution: selected.distribution,
-    distributionPath: selected.path,
-    cacheHit: selected.cacheHit,
-  }
+  reclaimEphemeralRoot(previousEphemeralRoot, result.distributionPath)
+  return result
 }
 
 async function main() {
