@@ -222,14 +222,16 @@ function latestSamples<T extends { ordinal: number }>(samples: readonly T[]): T[
   return [...samples].sort((a, b) => a.ordinal - b.ordinal).slice(-RECENT_PERFORMANCE_SAMPLE_LIMIT)
 }
 
-/** The performance route key of a settled message: provider + model. A
+/** The performance route key of a settled message: the (provider, model)
+ * TUPLE, encoded unambiguously — plain '/' concatenation would collide
+ * `("a/b", "c")` with `("a", "b/c")` and miss a real route change. A
  * message without a clear model-source identity yields undefined — the
  * window never resets on a missing key (fail-soft). */
 function routeKeyOf(message: { source?: unknown }): string | undefined {
   const source = (message as { source?: { kind?: unknown; provider?: unknown; model?: unknown } }).source
   if (source?.kind !== 'model') return undefined
   if (typeof source.provider !== 'string' || typeof source.model !== 'string') return undefined
-  return `${source.provider}/${source.model}`
+  return JSON.stringify([source.provider, source.model])
 }
 
 /** Advance the late-replay fence and clear the previous turn once. */
