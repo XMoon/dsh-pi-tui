@@ -644,4 +644,32 @@ describe("Input component", () => {
 			assert.strictEqual(input.getValue(), "");
 		});
 	});
+	describe("setValue cursor semantics (X040)", () => {
+		it("places the cursor at the END of the prefilled value by default", () => {
+			const input = new Input();
+			input.setValue("foo");
+			input.handleInput("x");
+
+			assert.strictEqual(input.getValue(), "foox", "typing after a prefill must append");
+		});
+
+		it("keeps the clamped-cursor behavior with cursor: 'preserve'", () => {
+			const input = new Input();
+			input.setValue("foo", { cursor: "preserve" });
+			input.handleInput("x");
+
+			assert.strictEqual(input.getValue(), "xfoo", "preserve keeps the historical cursor-0 semantics");
+		});
+
+		it("preserve clamps a mid-edit cursor to the new length", () => {
+			const input = new Input();
+			input.handleInput("a");
+			input.handleInput("b");
+			input.handleInput("c"); // cursor at 3
+			input.setValue("ab", { cursor: "preserve" });
+
+			input.handleInput("!");
+			assert.strictEqual(input.getValue(), "ab!", "cursor clamps to the shorter value's end");
+		});
+	});
 });

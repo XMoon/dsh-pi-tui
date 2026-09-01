@@ -189,6 +189,17 @@ export interface TuiAltScreenOptions {
 	 * divergence X018.)
 	 */
 	onCellClick?: (x: number, y: number) => void;
+	/**
+	 * Defer the viewport input listener's registration out of the
+	 * constructor (dsh-pi-tui divergence X043). Input listeners run in
+	 * REGISTRATION order, and the constructor registers the viewport
+	 * listener FIRST — so every later host listener (the app's single
+	 * router, raw-capture stages) sees a chunk only AFTER the viewport has
+	 * already consumed wheel/mouse events and semantic scroll keys. With
+	 * this option the host installs its own listeners first, then calls
+	 * {@link TuiAltScreen.installViewportListener} exactly once.
+	 */
+	deferViewportListener?: boolean;
 }
 
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
@@ -261,8 +272,26 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.onCellClick = options.onCellClick;
 		this.onScrollBoundary = options.onScrollBoundary;
 		this.onBeforeViewportInput = options.onBeforeViewportInput;
+		if (options.deferViewportListener !== true) {
+			this.viewportListenerInstalled = true;
+			this.addInputListener((data) => this.handleViewportInput(data));
+		}
+	}
+
+	/**
+	 * Register the viewport input listener explicitly — only valid with the
+	 * {@link TuiAltScreenOptions.deferViewportListener} constructor option,
+	 * idempotent afterwards (subsequent calls are no-ops). Registration
+	 * order IS dispatch order: call this AFTER every host listener that
+	 * must see raw chunks first. (dsh-pi-tui divergence X043.)
+	 */
+	installViewportListener(): void {
+		if (this.viewportListenerInstalled) return;
+		this.viewportListenerInstalled = true;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
+
+	private viewportListenerInstalled = false;
 
 	get viewportTop(): number {
 		return this.getPrimaryScrollView().scrollTop;

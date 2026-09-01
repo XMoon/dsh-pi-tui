@@ -1,6 +1,6 @@
 import { fuzzyFilter } from "../fuzzy.ts";
 import { getKeybindings } from "../keybindings.ts";
-import type { Component } from "../tui.ts";
+import type { Component, Focusable } from "../tui.ts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 import { Input } from "./input.ts";
 
@@ -35,7 +35,7 @@ export interface SettingsListOptions {
 	enableSearch?: boolean;
 }
 
-export class SettingsList implements Component {
+export class SettingsList implements Component, Focusable {
 	private items: SettingItem[];
 	private filteredItems: SettingItem[];
 	private theme: SettingsListTheme;
@@ -50,6 +50,40 @@ export class SettingsList implements Component {
 	private submenuComponent: Component | null = null;
 	private submenuItemIndex: number | null = null;
 	private navigateAfterClose: string | null = null;
+	/**
+	 * Submenu generation token (round-5 review P2): every submenu factory
+	 * callback captures the generation at OPEN time; a callback that fires
+	 * after the submenu was closed, REPLACED or the list disposed is stale
+	 * and must be a no-op — otherwise a delayed `done()` could resurrect
+	 * navigation on a disposed list.
+	 */
+	private submenuGeneration = 0;
+
+	/**
+	 * Focusable (dsh-pi-tui divergence X042): the focused flag propagates to
+	 * the input the user is actually typing into — the search Input on the
+	 * main list, the open submenu component while it is active — so it
+	 * emits the hardware CURSOR_MARKER for IME candidate-window positioning.
+	 * The wrapper contract: every component owning an Input/Editor must
+	 * forward focus; a plain Component swallows the flag and the IME
+	 * misplaces its candidate window.
+	 */
+	private _focused = false;
+	get focused(): boolean {
+		return this._focused;
+	}
+	set focused(value: boolean) {
+		this._focused = value;
+		this.propagateFocus();
+	}
+
+	private propagateFocus(): void {
+		if (this.searchInput !== undefined) this.searchInput.focused = this._focused;
+		const submenu = this.submenuComponent;
+		if (submenu !== null && "focused" in submenu) {
+			(submenu as Focusable).focused = this._focused;
+		}
+	}
 
 	constructor(
 		items: SettingItem[],
@@ -90,6 +124,19 @@ export class SettingsList implements Component {
 
 	invalidate(): void {
 		this.submenuComponent?.invalidate?.();
+	}
+
+	/**
+	 * Release owned resources: the open submenu component (its slot owns
+	 * the lifecycle). Raw release — deliberately NOT closeSubmenu(), whose
+	 * navigateAfterClose handling would resurrect a FOLLOW-UP submenu
+	 * during disposal. Idempotent. (dsh-pi-tui divergence X007.)
+	 */
+	dispose(): void {
+		this.navigateAfterClose = null;
+		this.submenuGeneration++;
+		this.submenuComponent?.dispose?.();
+		this.submenuComponent = null;
 	}
 
 	render(width: number): string[] {
@@ -216,9 +263,17 @@ export class SettingsList implements Component {
 		if (item.submenu) {
 			// Open submenu, passing current value so it can pre-select correctly
 			this.submenuItemIndex = this.selectedIndex;
+			// Replacing an open submenu ends its ownership: dispose the old
+			// component before the new one takes over (dsh-pi-tui divergence
+			// X007 — the submenu slot owns the component's lifecycle).
+			this.submenuComponent?.dispose?.();
+			const generation = ++this.submenuGeneration;
 			this.submenuComponent = item.submenu(
 				item.currentValue,
 				(selectedValue?: string, options?: { navigateTo?: string }) => {
+					// A callback from a CLOSED/REPLACED/DISPOSED submenu is
+					// stale: it must never resurrect navigation (round-5 P2).
+					if (generation !== this.submenuGeneration) return;
 					if (selectedValue !== undefined) {
 						item.currentValue = selectedValue;
 						this.onChange(item.id, selectedValue);
@@ -229,6 +284,11 @@ export class SettingsList implements Component {
 					this.closeSubmenu();
 				},
 			);
+			// The freshly opened submenu becomes the input the user types
+			// into: forward the current focus state so its CURSOR_MARKER
+			// (IME positioning) matches the list's focus (dsh-pi-tui
+			// divergence).
+			this.propagateFocus();
 		} else if (item.values && item.values.length > 0) {
 			// Cycle through values
 			const currentIndex = item.values.indexOf(item.currentValue);
@@ -240,6 +300,11 @@ export class SettingsList implements Component {
 	}
 
 	private closeSubmenu(): void {
+		// Closing the submenu ends its ownership: release the component's
+		// resources (dsh-pi-tui divergence X007) and invalidate every
+		// outstanding submenu callback (round-5 P2).
+		this.submenuGeneration++;
+		this.submenuComponent?.dispose?.();
 		this.submenuComponent = null;
 		if (this.navigateAfterClose !== null) {
 			const id = this.navigateAfterClose;

@@ -1780,3 +1780,63 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 
 });
+
+describe("TuiAltScreen viewport listener registration order (X043)", () => {
+	it("registers the viewport listener in the constructor by default (host listeners see consumed scroll keys last)", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		const seen: string[] = [];
+		tui.addInputListener((data) => {
+			seen.push(data);
+			return undefined;
+		});
+		const text = new Text(Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join("\n"), 0, 0);
+		tui.setLayoutRoot(new VStack([{ component: new ScrollView(text, { follow: "end", primary: true }), basis: 0, grow: 1 }]));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<64;1;1M"); // wheel up — the viewport consumes it
+		await terminal.waitForRender();
+		assert.strictEqual(seen.length, 0, "with the default order the viewport listener consumes wheel events before later host listeners");
+		assert.ok(tui.viewportTop < 6, "the viewport actually scrolled");
+		tui.stop();
+	});
+
+	it("deferViewportListener lets the host install its router FIRST", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { deferViewportListener: true });
+		const seen: string[] = [];
+		tui.addInputListener((data) => {
+			seen.push(data);
+			return undefined;
+		});
+		tui.installViewportListener();
+		const text = new Text(Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join("\n"), 0, 0);
+		tui.setLayoutRoot(new VStack([{ component: new ScrollView(text, { follow: "end", primary: true }), basis: 0, grow: 1 }]));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<64;1;1M"); // wheel up — the host listener now sees it first
+		await terminal.waitForRender();
+		assert.deepStrictEqual(seen, ["\x1b[<64;1;1M"], "the host router must see raw chunks before the viewport consumes them");
+		assert.ok(tui.viewportTop < 6, "the unconsumed chunk still reaches the viewport and scrolls");
+		tui.stop();
+	});
+
+	it("installViewportListener is idempotent", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { deferViewportListener: true });
+		tui.installViewportListener();
+		tui.installViewportListener();
+		const text = new Text(Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join("\n"), 0, 0);
+		tui.setLayoutRoot(new VStack([{ component: new ScrollView(text, { follow: "end", primary: true }), basis: 0, grow: 1 }]));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		// A duplicated viewport listener would scroll TWICE per wheel event.
+		assert.strictEqual(tui.viewportTop, 5, "one wheel event must scroll exactly one line-step (no double listener)");
+		tui.stop();
+	});
+});

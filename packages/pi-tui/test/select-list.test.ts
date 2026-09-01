@@ -319,4 +319,56 @@ describe("SelectList", () => {
 			assert.equal(list.getSelectedItem()?.value, "7");
 		});
 	});
+	describe("canonical filter state (X041)", () => {
+		const items = [
+			{ value: "session-a", label: "alpha", description: "first" },
+			{ value: "session-b", label: "zulu", description: "second" },
+			{ value: "session-c", label: "mike", description: "third" },
+		];
+
+		it("setFilter updates getFilter() and the rendered search box", () => {
+			const list = new SelectList(items, 5, testTheme, {}, { enableSearch: true });
+			list.setFilter("al");
+
+			assert.equal(list.getFilter(), "al", "getFilter must reflect the programmatic filter");
+			const rendered = list.render(80);
+			assert.ok(rendered.some((line) => line.includes("al")), "search box must show the programmatic query");
+			assert.equal(list.getSelectedItem()?.value, "session-a");
+		});
+
+		it("user typing APPENDS to a programmatic filter instead of replacing it", () => {
+			const list = new SelectList(items, 5, testTheme, {}, { enableSearch: true });
+			list.setFilter("alp");
+			list.handleInput("h");
+
+			assert.equal(list.getFilter(), "alph", "the typed char must extend the programmatic query");
+			assert.equal(list.getSelectedItem()?.value, "session-a");
+		});
+
+		it("a programmatic filter survives setItems() refreshes", () => {
+			const list = new SelectList(items, 5, testTheme, {}, { enableSearch: true });
+			list.setFilter("zu");
+			list.setItems(items.map((item) => ({ ...item, description: "refreshed" })));
+
+			assert.equal(list.getFilter(), "zu", "setItems must re-apply the canonical query");
+			assert.equal(list.getSelectedItem()?.value, "session-b");
+		});
+
+		it("getFilter() reports the programmatic query with search disabled too", () => {
+			const list = new SelectList(items, 5, testTheme);
+			list.setFilter("mi");
+
+			assert.equal(list.getFilter(), "mi");
+			assert.equal(list.getSelectedItem()?.value, "session-c");
+		});
+
+		it("initialQuery prefill leaves the cursor at the end (typing appends)", () => {
+			const list = new SelectList(items, 5, testTheme, {}, { enableSearch: true, initialQuery: "al" });
+			assert.equal(list.getFilter(), "al");
+			list.handleInput("p");
+
+			assert.equal(list.getFilter(), "alp", "the first keystroke must append, not prepend");
+			assert.equal(list.getSelectedItem()?.value, "session-a");
+		});
+	});
 });
