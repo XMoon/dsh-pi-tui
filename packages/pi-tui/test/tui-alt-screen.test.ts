@@ -317,8 +317,6 @@ describe("TuiAltScreen", () => {
 	});
 
 
-
-
 	it("searches normalized rendered transcript text across rows", () => {
 		assert.deepStrictEqual(findAltScreenSearchMatches(["alpha QUICK", "brown fox"], "quick brown"), [
 			{

@@ -946,4 +946,36 @@ describe("TUI overwide line handling (dsh-pi-tui divergence X033)", () => {
 
 		tui.stop();
 	});
+
+	it("appends the segment reset AFTER the truncation slice (styled leak regression)", async () => {
+		// sliceByColumn drops trailing zero-width codes at the cut column,
+		// so the truncation must run BEFORE applyLineResets — otherwise the
+		// open foreground of a truncated styled line leaks into the rows
+		// below. (dsh-pi-tui divergence X033.)
+		const terminal = new LoggingVirtualTerminal(4, 10);
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		component.lines = ["\x1b[31mxxxxxxxxxx\x1b[0m"];
+		tui.addChild(component);
+		tui.start();
+		await terminal.waitForRender();
+		terminal.clearWrites();
+		component.lines = ["\x1b[31myyyyyyyyyy\x1b[0m"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const writes = terminal.getWrites();
+		const truncatedStyled = "\x1b[31myyyy";
+		assert.ok(writes.includes(truncatedStyled), `missing truncated styled line in writes: ${JSON.stringify(writes)}`);
+		// The full segment reset (\x1b[0m + OSC 8 close) must immediately
+		// follow the truncated content — never the open foreground.
+		const idx = writes.indexOf(truncatedStyled);
+		assert.strictEqual(
+			writes.slice(idx + truncatedStyled.length, idx + truncatedStyled.length + "\x1b[0m\x1b]8;;\x07".length),
+			"\x1b[0m\x1b]8;;\x07",
+			"the truncated line must carry its segment reset",
+		);
+
+		tui.stop();
+	});
 });

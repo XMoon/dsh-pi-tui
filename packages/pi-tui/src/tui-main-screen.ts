@@ -273,17 +273,19 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Extract cursor position before applying line resets (marker must be found first)
 		const cursorPos = this.extractCursorPosition(newLines, height);
 
-		newLines = this.applyLineResets(newLines);
-
 		// Never write a line wider than the terminal: truncate defensively
 		// instead of crashing. Extremely narrow terminals can make components
 		// overflow by a column (e.g. wide graphemes at width 1). Image lines
-		// are exempt (their payload is not cell content). The trailing
-		// segment reset survives the slice (zero-width codes), so truncated
-		// lines cannot leak styles. (dsh-pi-tui divergence X033.)
+		// are exempt (their payload is not cell content). This runs BEFORE
+		// applyLineResets so the segment reset is appended AFTER the slice —
+		// sliceByColumn drops trailing zero-width codes at the cut column,
+		// so truncating after the resets would leak the open style into
+		// subsequent rows. (dsh-pi-tui divergence X033.)
 		newLines = newLines.map((line) =>
 			isImageLine(line) || visibleWidth(line) <= width ? line : sliceByColumn(line, 0, width, true),
 		);
+
+		newLines = this.applyLineResets(newLines);
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
