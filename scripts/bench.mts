@@ -26,6 +26,7 @@ import xterm from '@xterm/headless'
 import { TuiApp } from '../src/tui-app.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { StatsFolder } from '../src/stats.ts'
+import { TranscriptWindowController } from '../src/transcript-window.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TranscriptMessage } from '../src/transcript.ts'
 
@@ -269,6 +270,51 @@ function buildTextHeavyEvents(turns: number, assistantChars: number, resultChars
         id: `text-heavy-result-${turn}`,
         role: 'user',
         content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: repeatedText(resultChars) }] }],
+        source: { kind: 'tool', callId },
+      },
+    })
+    pushEvent(events, 'turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  return events
+}
+
+/** Build a search-focused log: every turn hits a COMMON needle, one early
+ * turn holds a RARE needle, and no turn holds the MISS needle. */
+function buildSearchEvents(turns: number): SessionEvent[] {
+  const events: SessionEvent[] = []
+  for (let turn = 0; turn < turns; turn += 1) {
+    pushEvent(events, 'turn/start', { turn })
+    pushEvent(events, 'user/message', {
+      id: `search-user-${turn}`,
+      role: 'user',
+      content: [{ type: 'text', text: `user prompt ${turn} with needle ${turn} and filler text` }],
+      source: { kind: 'user' },
+    })
+    pushEvent(events, 'assistant/message', {
+      turn,
+      step: 0,
+      message: {
+        id: `search-answer-${turn}`,
+        role: 'assistant',
+        content: [{ type: 'text', text: `assistant answer ${turn} with a common needle phrase and ${turn === 0 ? 'the-rare-needle sits here' : 'ordinary tail'}` }],
+        source: { kind: 'model', provider: 'bench', model: 'bench' },
+      },
+    })
+    const callId = `search-tool-${turn}`
+    pushEvent(events, 'tool/call', {
+      turn,
+      step: 0,
+      callId,
+      name: 'read',
+      arguments: JSON.stringify({ file: `src/file-${turn}.ts` }),
+    })
+    pushEvent(events, 'tool/result', {
+      turn,
+      step: 0,
+      message: {
+        id: `search-result-${turn}`,
+        role: 'user',
+        content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: `read output for turn ${turn} with needle payload` }] }],
         source: { kind: 'tool', callId },
       },
     })
@@ -576,6 +622,75 @@ async function main(): Promise<void> {
   for (let index = 0; index < 100; index += 1) batcher.invalidate()
   await Promise.resolve()
   row('invalidation burst coalescing (100 in one tick)', `${flushCount} flush(es)`)
+
+  // 6. PR D1 — indexed full-history search: cold index build (allowed
+  //    O(history)), then query classes over the LIGHTWEIGHT projection
+  //    (never messages()/grouping/materialization), plus the incremental
+  //    typing sequence with refinement. The structural counters prove the
+  //    query path does not rebuild projection work.
+  {
+    const SEARCH_SAMPLES = FAST ? 100 : 400
+    for (const turns of [100, 1000, 10_000]) {
+      const folder = new TranscriptFolder()
+      folder.hydrate(buildSearchEvents(turns))
+      const messages = folder.messages()
+      const diag = folder.searchDiagnosticsForTest()
+      const cold = timeIt(1, () => {
+        const candidate = new TranscriptFolder()
+        candidate.hydrate(buildSearchEvents(turns))
+      })
+      const q = (query: string): number[] => timeIt(SEARCH_SAMPLES, () => { folder.search(query) })
+      const miss = q('unlikely-needle-not-present')
+      const common = q('needle')
+      const rare = q('the-rare-needle')
+      const afterQueries = folder.searchDiagnosticsForTest()
+      row(`search ${turns} turns (${messages.length} logical messages, ${afterQueries.entries} entries)`, `common hits ${folder.search('needle').length} · fullScans ${afterQueries.fullScans - diag.fullScans}`)
+      row('  cold hydrate + index build', fmtMs(cold[0]!))
+      row(`  query miss ×${SEARCH_SAMPLES}`, fmt(stats(miss)))
+      row(`  query common ×${SEARCH_SAMPLES}`, fmt(stats(common)))
+      row(`  query rare ×${SEARCH_SAMPLES}`, fmt(stats(rare)))
+      row(`  normalized text recomputes during queries`, `${afterQueries.normalizedRefreshes - diag.normalizedRefreshes} (must stay 0)`)
+    }
+    // Incremental typing with prefix refinement: n -> ne -> nee -> need ->
+    // needle. Full scans happen once per corpus; every extension refines.
+    for (const turns of [1000, 10_000]) {
+      const folder = new TranscriptFolder()
+      folder.hydrate(buildSearchEvents(turns))
+      const diag = folder.searchDiagnosticsForTest()
+      let matches = folder.search('n')
+      let revision = folder.searchRevision()
+      const sequence = timeIt(FAST ? 10 : 20, () => {
+        for (const partial of ['ne', 'nee', 'need', 'needle']) {
+          matches = folder.search(partial, { previousQuery: partial.slice(0, -1), previousMatches: matches, revision })
+          revision = folder.searchRevision()
+        }
+      })
+      const after = folder.searchDiagnosticsForTest()
+      row(`incremental typing ${turns} turns (5 queries, refined)`, `${fmt(stats(sequence))} · fullScans ${after.fullScans - diag.fullScans} · refinedScans ${after.refinedScans - diag.refinedScans}`)
+    }
+  }
+
+  // 7. PR C navigation baseline (unchanged by D1/D2 — recorded so a
+  //    regression in grouped/window indexes or a D2 measurement leak into
+  //    navigation stays visible): moveOlder ×50 + moveNewer ×50.
+  {
+    const NAV_SAMPLES = FAST ? 20 : 50
+    for (const turns of [100, 1000, 10_000]) {
+      const folder = new TranscriptFolder()
+      folder.hydrate(buildEvents(turns))
+      const controller = new TranscriptWindowController({ turns: folder.groupedTurns() })
+      const older = timeIt(NAV_SAMPLES, () => {
+        const c = new TranscriptWindowController({ turns: folder.groupedTurns() })
+        for (let i = 0; i < 50; i += 1) c.moveOlder()
+      })
+      const newer = timeIt(NAV_SAMPLES, () => {
+        const c = new TranscriptWindowController({ turns: folder.groupedTurns() })
+        for (let i = 0; i < 50; i += 1) c.moveNewer()
+      })
+      void controller
+      row(`window nav ×50 older / ×50 newer @${turns} turns`, `older ${fmt(stats(older))} · newer ${fmt(stats(newer))}`)
+    }
+  }
 
   console.log(rows.join('\n'))
 }

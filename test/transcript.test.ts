@@ -10,7 +10,7 @@ import test from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { foldTranscript, searchTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
+import { foldTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
 
 /** Build a minimal event envelope for tests. */
@@ -565,10 +565,10 @@ test('non-monotonic raw turn indexes retain every turn for search navigation', (
 
   assert.deepEqual(folder.turns(), [1, 3, 2], 'the raw index must retain a lower turn discovered after monotonicity breaks')
   assert.deepEqual(folder.groupedTurns(), [1, 2, 3])
-  const match = searchTranscript(folder, 'turn 2')
+  const match = folder.search('turn 2')
   assert.equal(match.length, 1)
   const matchMessage = match[0]
-  assert.ok(matchMessage !== undefined && 'turn' in matchMessage)
+  assert.ok(matchMessage !== undefined)
   const controller = new TranscriptWindowController({ windowTurns: 1, stepTurns: 1, turns: folder.turns() })
   assert.equal(controller.anchorAt(matchMessage.turn), true, 'search must anchor a retained non-monotonic turn')
   assert.equal(controller.endTurn(), 2)

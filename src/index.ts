@@ -86,7 +86,7 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from './present.ts'
-import { childOwnEvents, searchTranscript, textOf, TranscriptFolder } from './transcript.ts'
+import { childOwnEvents, textOf, TranscriptFolder, type TranscriptSearchMatch } from './transcript.ts'
 import type { TranscriptMessage, TranscriptWindow } from './transcript.ts'
 import { TranscriptWindowController } from './transcript-window.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
@@ -3317,10 +3317,29 @@ export function apply(ctx: Context, config: Config): void {
     // The in-flight compaction's id (paired start/end in the firehose): a
     // stale end must never clear a NEWER compaction's footer/busy state.
     let compactingId: string | undefined
-    // Transcript-search state (see the onSearch* events below).
-    let searchMatches: TranscriptMessage[] = []
+    // Transcript-search state (see the onSearch* events below). Matches are
+    // LIGHTWEIGHT stable identities ({id, turn} — never full message
+    // objects): the full-history search runs over the folder's incremental
+    // projection, so a query change never materializes the grouped
+    // transcript nor re-lowercases history.
+    let searchMatches: TranscriptSearchMatch[] = []
     let searchCurrent = -1
      let searchOrigin: { controller: TranscriptWindowController; state: TranscriptWindowState } | undefined
+    // Query-refinement state (D1): the previous query's matches are reused
+    // only when the new query PREFIX-extends the previous one on the SAME
+    // folder with an UNCHANGED projection revision (the folder validates
+    // both; the folder identity guard keeps a subagent viewer's matches
+    // from ever being reused for the parent session or vice versa).
+    let lastSearchQuery = ''
+    let lastSearchRevision = 0
+    let lastSearchFolder: TranscriptFolder | undefined
+    const resetSearchState = (): void => {
+      searchMatches = []
+      searchCurrent = -1
+      lastSearchQuery = ''
+      lastSearchRevision = 0
+      lastSearchFolder = undefined
+    }
     // Monotonic session generation: bumped on EVERY session swap (switch,
     // resume, deferred creation). Late async work (the skill command
     // catalog refresh, model-menu info, title folds) captures the
@@ -3339,8 +3358,7 @@ export function apply(ctx: Context, config: Config): void {
       // and dead callId→child maps would silently disable the auto-pop.
       pendingSubagentCalls.length = 0
       viewCallToChild.clear()
-      searchMatches = []
-      searchCurrent = -1
+      resetSearchState()
       searchOrigin = undefined
       windowController.latest()
       windowController.setTurns(folder.groupedTurns())
@@ -3395,15 +3413,14 @@ export function apply(ctx: Context, config: Config): void {
     const jumpToSearchMatch = (): void => {
       const match = searchMatches[searchCurrent]
       if (match === undefined) return
-      const turn = 'turn' in match ? match.turn : undefined
       // ONE fold snapshot: the anchored message window and the activities
       // come from the same folder call (plan §19 — a jump must never
       // combine a fresh window with stale activity data).
       const folder = activeFolder()
       const controller = activeWindow()
-       if (turn !== undefined) controller.anchorAt(turn)
-       repaint(app, folder, controller)
-       app.scrollToBottom({ disableFollow: !controller.isLatest() })
+      controller.anchorAt(match.turn)
+      repaint(app, folder, controller)
+      app.scrollToBottom({ disableFollow: !controller.isLatest() })
 
       // Focus Mode: the search hits the FULL transcript (hidden process
       // rows included — plan §23), so a jump into a collapsed turn must
@@ -3411,9 +3428,13 @@ export function apply(ctx: Context, config: Config): void {
       // SECONDARY card must full-reveal that card (plan §28; the compact
       // timeline is a FULLSCREEN property — regular Focus full-reveals
       // any expanded root anyway). The disclosure is not reverted when
-      // search closes.
-      if (turn !== undefined && app.isFocusModeEnabled()) {
-        app.revealSearchMatch(match)
+      // search closes. The match resolves to its CURRENT visible card: a
+      // group reflow after the query may have replaced the card object —
+      // resolving by stable id fails soft (the turn jump above already
+      // landed the window; only the exact-card reveal is skipped).
+      if (app.isFocusModeEnabled()) {
+        const message = folder.resolveSearchMatch(match)
+        if (message !== undefined) app.revealSearchMatch(message)
       }
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
@@ -4878,8 +4899,7 @@ export function apply(ctx: Context, config: Config): void {
         // the search origin before closing the overlay so its close callback
         // cannot restore the historical anchor we are explicitly leaving.
         searchOrigin = undefined
-        searchMatches = []
-        searchCurrent = -1
+        resetSearchState()
         const closedSearch = app.closeTranscriptSearch()
         const controller = activeWindow()
         const changed = controller.latest()
@@ -4903,14 +4923,25 @@ export function apply(ctx: Context, config: Config): void {
         }
       },
       // Transcript search: matches run over the FULL folded
-      // transcript; each jump re-windows the view so the matched turn is
-      // visible (older turns collapse above it into the summary entry).
+      // transcript (lightweight indexed projection — never a full
+      // materialization); each jump re-windows the view so the matched turn
+      // is visible (older turns collapse above it into the summary entry).
       onSearchOpen: () => {
         const controller = activeWindow()
         searchOrigin = { controller, state: controller.state() }
       },
       onSearchQuery: (query) => {
-        searchMatches = searchTranscript(activeFolder(), query)
+        const folder = activeFolder()
+        // Prefix refinement reuses the previous candidate set only when the
+        // query EXTENDS it on the SAME folder; the folder itself also
+        // requires an unchanged projection revision (a live append or group
+        // reflow between queries invalidates the candidates).
+        searchMatches = folder.search(query, lastSearchQuery !== '' && folder === lastSearchFolder
+          ? { previousQuery: lastSearchQuery, previousMatches: searchMatches, revision: lastSearchRevision }
+          : undefined)
+        lastSearchQuery = query
+        lastSearchRevision = folder.searchRevision()
+        lastSearchFolder = folder
         searchCurrent = searchMatches.length > 0 ? 0 : -1
         app.setSearchResult(searchCurrent + 1, searchMatches.length)
         if (searchCurrent >= 0) jumpToSearchMatch()
@@ -4926,8 +4957,7 @@ export function apply(ctx: Context, config: Config): void {
         jumpToSearchMatch()
       },
       onSearchClose: () => {
-        searchMatches = []
-        searchCurrent = -1
+        resetSearchState()
         const origin = searchOrigin
         searchOrigin = undefined
         const controller = activeWindow()
