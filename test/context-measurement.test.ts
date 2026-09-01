@@ -1,0 +1,266 @@
+/**
+ * Context-measurement coordinator tests (PR D2): the cheap status refresh
+ * must NEVER trigger a measurement (UI-only events keep measureCalls at 0),
+ * model-visible lifecycle events trigger bounded measurements through the
+ * semantic reader seam, session switches never leak an old session's value,
+ * failures keep last-good semantics, and the deferred initial measure runs
+ * only after the first usable paint and only for the session that was
+ * captured (generation fence).
+ *
+ * The coordinator + defer helper ARE the production seam the runner drives
+ * (the same pattern as settleCompactionSurface / foldCompactionEvent).
+ * @module @xmoon76/dsh-pi-tui/context-measurement.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import {
+  ContextMeasurementCoordinator,
+  deferInitialContextMeasure,
+  type ContextMeasureReason,
+} from '../src/status/context-measurement.ts'
+
+/** A counting reader standing in for SessionReader.measureContext. */
+function countingReader(initial = 42_000): {
+  measureCalls: number
+  value: number
+  reader: (sessionId: string) => number | undefined
+} {
+  const state = { measureCalls: 0, value: initial }
+  return {
+    get measureCalls() { return state.measureCalls },
+    set value(next: number) { state.value = next },
+    reader: (_sessionId: string) => {
+      state.measureCalls += 1
+      return state.value
+    },
+  }
+}
+
+/** The runner's exact UI-only pattern: a cheap refresh cycle. */
+function cheapRefresh(coordinator: ContextMeasurementCoordinator, sessionId: string | undefined): number | undefined {
+  return coordinator.valueFor(sessionId)
+}
+
+/** The runner's exact model-visible pattern: mark dirty, then measure. */
+function measuredRefresh(
+  coordinator: ContextMeasurementCoordinator,
+  sessionId: string,
+  reader: (sessionId: string) => number | undefined,
+): number | undefined {
+  coordinator.markDirty()
+  return coordinator.measure(sessionId, reader)
+}
+
+test('initial measure happens once; the value is cached for cheap refreshes', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(50_000)
+  coordinator.bind('session-a')
+  assert.equal(coordinator.isDirty(), true, 'a fresh session starts dirty')
+  const first = coordinator.measure('session-a', counting.reader)
+  assert.equal(first, 50_000)
+  assert.equal(counting.measureCalls, 1)
+  assert.equal(coordinator.isDirty(), false, 'a successful measure clears dirty')
+  // Cheap refreshes read the cache: no reader call.
+  for (let i = 0; i < 100; i += 1) {
+    assert.equal(cheapRefresh(coordinator, 'session-a'), 50_000)
+  }
+  assert.equal(counting.measureCalls, 1, '100 cheap refreshes never measure')
+})
+
+test('19.2 hard gate: 100 UI-only refresh cycles -> measureCalls stays 0', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(42_000)
+  coordinator.bind('session-a')
+  // UI-only events repaint from the cache; they never mark dirty.
+  for (let i = 0; i < 100; i += 1) {
+    cheapRefresh(coordinator, 'session-a')
+    coordinator.valueFor(undefined)
+  }
+  assert.equal(counting.measureCalls, 0, 'UI-only refreshes never reach the reader')
+  assert.equal(coordinator.valueFor('session-a'), undefined, 'no measurement was ever made')
+})
+
+test('19.3 long-session independence: cheap refresh cost never touches the reader', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  // The reader's cost grows with session length — but it must never run
+  // for cheap refreshes, so the cost is irrelevant.
+  let measuredTurns = 0
+  const expensiveReader = (_sessionId: string): number => {
+    measuredTurns += 1
+    return 10_000 + measuredTurns
+  }
+  coordinator.bind('session-a')
+  for (let i = 0; i < 10_000; i += 1) cheapRefresh(coordinator, 'session-a')
+  assert.equal(measuredTurns, 0, '10k cheap refreshes produce zero measurements, any session length')
+})
+
+test('lifecycle trigger matrix: bounded measurements per model-visible event', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(40_000)
+  coordinator.bind('session-a')
+  // initial
+  coordinator.measure('session-a', counting.reader)
+  assert.equal(counting.measureCalls, 1, 'initial post-paint measure: 1')
+  // UI-only interlude
+  for (let i = 0; i < 20; i += 1) cheapRefresh(coordinator, 'session-a')
+  assert.equal(counting.measureCalls, 1, 'UI-only events after the initial measure: 0 growth')
+  // step/start
+  measuredRefresh(coordinator, 'session-a', counting.reader)
+  assert.equal(counting.measureCalls, 2, 'step/start: bounded +1')
+  // turn/end
+  measuredRefresh(coordinator, 'session-a', counting.reader)
+  assert.equal(counting.measureCalls, 3, 'turn/end: bounded +1 when dirty')
+  // compaction/end
+  measuredRefresh(coordinator, 'session-a', counting.reader)
+  assert.equal(counting.measureCalls, 4, 'compaction/end: +1')
+  // keybinding/theme/focus (UI-only) again
+  cheapRefresh(coordinator, 'session-a')
+  cheapRefresh(coordinator, 'session-a')
+  assert.equal(counting.measureCalls, 4, 'keybinding/theme/focus-style refreshes: 0')
+  // same-sync-chain dedupe: a second measure with NO dirty mark skips.
+  coordinator.measure('session-a', counting.reader)
+  assert.equal(counting.measureCalls, 4, 'a clean cache skips the reader (dirty=false -> skip)')
+})
+
+test('session switch: the old session value never leaks into the new session', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(100_000)
+  coordinator.bind('session-old')
+  coordinator.measure('session-old', counting.reader)
+  assert.equal(coordinator.valueFor('session-old'), 100_000)
+  // Switch: bind the new identity — the old value is gone.
+  coordinator.bind('session-new')
+  assert.equal(coordinator.snapshot().value, undefined, 'bind clears the old value')
+  assert.equal(coordinator.valueFor('session-new'), undefined, 'the new session starts unmeasured')
+  assert.equal(coordinator.valueFor('session-old'), undefined, 'the old session id reads nothing after the switch')
+  // The new session measures once.
+  measuredRefresh(coordinator, 'session-new', counting.reader)
+  assert.equal(counting.measureCalls, 2)
+  assert.equal(coordinator.valueFor('session-new'), 100_000)
+  assert.equal(coordinator.valueFor('session-old'), undefined, 'old-session reads stay empty forever')
+})
+
+test('a stale/foreign session id is refused: no measurement can commit under the wrong identity', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(7_000)
+  coordinator.bind('session-current')
+  const stale = coordinator.measure('session-old', counting.reader)
+  assert.equal(stale, undefined)
+  assert.equal(counting.measureCalls, 0, 'a foreign session id never reaches the reader')
+  assert.equal(coordinator.snapshot().sessionId, 'session-current', 'the bound identity never changed')
+})
+
+test('19.6 failure regression: undefined and throwing readers keep last-good, recover later', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  let calls = 0
+  let fail = true
+  const flaky = (_sessionId: string): number | undefined => {
+    calls += 1
+    if (fail) return undefined
+    return 66_000
+  }
+  coordinator.bind('session-a')
+  const first = coordinator.measure('session-a', flaky)
+  assert.equal(first, undefined, 'measurement failure falls back to no context')
+  assert.equal(calls, 1)
+  assert.equal(coordinator.isDirty(), true, 'a failed measure stays dirty for the next trigger')
+  // Subsequent triggers retry — still failing, still not crashing.
+  assert.equal(coordinator.measure('session-a', flaky), undefined)
+  assert.equal(calls, 2)
+  // Success recovers.
+  fail = false
+  assert.equal(coordinator.measure('session-a', flaky), 66_000)
+  assert.equal(coordinator.isDirty(), false)
+  assert.equal(coordinator.valueFor('session-a'), 66_000)
+
+  // A THROWING reader: swallowed, last-good stays, dirty stays.
+  const throwing = new ContextMeasurementCoordinator()
+  const counting = countingReader(9_000)
+  throwing.bind('session-a')
+  throwing.measure('session-a', counting.reader)
+  assert.equal(throwing.valueFor('session-a'), 9_000)
+  throwing.markDirty()
+  const afterThrow = throwing.measure('session-a', () => { throw new Error('backend exploded') })
+  assert.equal(afterThrow, 9_000, 'a throwing reader keeps the last-good value')
+  assert.equal(throwing.isDirty(), true, 'the dirty flag survives the throw (retry armed)')
+})
+
+test('19.5 first-paint ordering: the deferred measure runs AFTER the paint turn, fenced', () => {
+  const order: string[] = []
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(30_000)
+  coordinator.bind('session-a')
+
+  // The runner paints + cheap-refreshes FIRST, then defers the measure.
+  let scheduled: (() => void) | undefined
+  const cancel = deferInitialContextMeasure(
+    (callback) => { scheduled = callback; return { cancel: () => { scheduled = undefined } } },
+    () => true,
+    () => {
+      order.push('measure')
+      measuredRefresh(coordinator, 'session-a', counting.reader)
+    },
+  )
+  order.push('paint')
+  order.push('cheap-status')
+  assert.ok(typeof scheduled === 'function', 'the deferral is scheduled, not run inline')
+  assert.deepEqual(order, ['paint', 'cheap-status'], 'nothing measured before the deferred turn')
+  scheduled!()
+  assert.deepEqual(order, ['paint', 'cheap-status', 'measure'], 'the measure runs in its own turn')
+  assert.equal(counting.measureCalls, 1)
+  cancel()
+})
+
+test('deferred initial measure is a no-op when the session changed before it ran', () => {
+  const order: string[] = []
+  let generation = 1
+  let liveSession = 'session-a'
+  // The runner captures generation + session id and fences against both.
+  const capturedGeneration = generation
+  const capturedSession = liveSession
+  let scheduled: (() => void) | undefined
+  const cancel = deferInitialContextMeasure(
+    (callback) => { scheduled = callback; return { cancel: () => { scheduled = undefined } } },
+    () => capturedGeneration === generation && liveSession === capturedSession,
+    () => { order.push('measure-ran') },
+  )
+  // Session switch BEFORE the deferred callback fires.
+  generation += 1
+  liveSession = 'session-b'
+  scheduled!()
+  assert.deepEqual(order, [], 'a stale deferred measure never commits')
+  cancel()
+})
+
+test('defer cancel clears the pending callback (dispose path)', () => {
+  let scheduled: (() => void) | undefined
+  let cancelled = false
+  const cancel = deferInitialContextMeasure(
+    (callback) => { scheduled = callback; return { cancel: () => { cancelled = true } } },
+    () => true,
+    () => { throw new Error('must never run after cancel') },
+  )
+  cancel()
+  assert.equal(cancelled, true)
+})
+
+test('bind(undefined) clears everything (deferred start, no live session)', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(0)
+  coordinator.bind('session-a')
+  coordinator.measure('session-a', counting.reader)
+  assert.equal(coordinator.valueFor('session-a'), 0)
+  coordinator.bind(undefined)
+  assert.equal(coordinator.snapshot().value, undefined)
+  assert.equal(coordinator.measure('session-a', counting.reader), undefined, 'no session -> no measure')
+  assert.equal(counting.measureCalls, 1, 'the cleared coordinator never reaches the reader')
+})
+
+test('reason names are the documented model-visible triggers', () => {
+  const reasons: ContextMeasureReason[] = [
+    'initial', 'step-start', 'turn-end', 'compaction-end', 'explicit-status', 'session-switch',
+  ]
+  assert.equal(reasons.length, 6)
+  assert.ok(reasons.includes('step-start') && reasons.includes('compaction-end'))
+})

@@ -27,8 +27,11 @@ import { TuiApp } from '../src/tui-app.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { StatsFolder } from '../src/stats.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
+import { ContextMeasurementCoordinator } from '../src/status/context-measurement.ts'
+import { usageFromStats } from '../src/status/derive-usage.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TranscriptMessage } from '../src/transcript.ts'
+import type { SessionStats } from '../src/stats.ts'
 
 const XtermTerminal = xterm.Terminal
 
@@ -690,6 +693,61 @@ async function main(): Promise<void> {
       void controller
       row(`window nav ×50 older / ×50 newer @${turns} turns`, `older ${fmt(stats(older))} · newer ${fmt(stats(newer))}`)
     }
+  }
+
+  // 8. PR D2 — status/context measurement decoupling: cheap status refresh
+  //    (cached facts + usage projection) must NEVER call the measurement
+  //    reader; lifecycle triggers measure a bounded number of times; the
+  //    explicit measurement cost is exposed separately (it is real work —
+  //    the point is that UI-only refreshes no longer pay it).
+  {
+    const CHEAP_SAMPLES = FAST ? 200 : 1000
+    const sessionStats: SessionStats = {
+      turns: 5000,
+      steps: 12_000,
+      llmMs: 900_000,
+      firstTokenMsAvg: 2100,
+      tokensPerSec: 14,
+      cacheHitPct: 62,
+      inputTokens: 48_000_000,
+      outputTokens: 2_100_000,
+      cacheReadTokens: 30_000_000,
+      cacheWriteTokens: 9_000_000,
+      contextWindow: 128_000,
+    }
+    const coordinator = new ContextMeasurementCoordinator()
+    coordinator.bind('bench-session')
+    let measureCalls = 0
+    const reader = (_sessionId: string): number => {
+      measureCalls += 1
+      // The tokenMeter scan walks live session requests: model it as real
+      // work proportional to the historical context.
+      return 81_000
+    }
+    // Cheap-only phase: measure once (initial), then 1000 UI-only refreshes.
+    coordinator.measure('bench-session', reader)
+    const cheap = timeIt(CHEAP_SAMPLES, () => {
+      usageFromStats(sessionStats, coordinator.valueFor('bench-session'))
+    })
+    row(`cheap status refresh ×${CHEAP_SAMPLES} (cached measurement)`, `${fmt(stats(cheap))} · measureContextCalls ${measureCalls - 1} (must stay 0)`)
+    // Mixed realistic loop: 100 UI-only refreshes + 10 lifecycle triggers.
+    const lifecycle = new ContextMeasurementCoordinator()
+    lifecycle.bind('bench-session')
+    let mixedMeasureCalls = 0
+    for (let i = 0; i < 100; i += 1) {
+      usageFromStats(sessionStats, lifecycle.valueFor('bench-session'))
+      if (i % 10 === 0) {
+        lifecycle.markDirty()
+        lifecycle.measure('bench-session', () => { mixedMeasureCalls += 1; return 82_000 })
+      }
+    }
+    row('mixed loop (100 UI-only + 10 lifecycle refreshes)', `measureContextCalls ${mixedMeasureCalls} (expect 10, never 110)`)
+    // Explicit measurement cost, exposed separately (the Direct reader scan).
+    const explicit = timeIt(FAST ? 20 : 50, () => {
+      coordinator.markDirty()
+      coordinator.measure('bench-session', reader)
+    })
+    row(`explicit measureContext ×${FAST ? 20 : 50} (dirty each call)`, fmt(stats(explicit)))
   }
 
   console.log(rows.join('\n'))
