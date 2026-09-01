@@ -17,8 +17,8 @@
  */
 
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-import { isUnsupportedSessionFormatError, type SessionEventSearchDocumentLike } from '../../sessions.ts'
+import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
+import { isUnsupportedSessionFormatError } from '../../sessions.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { projectionBatch, type SessionQueryObservationLike, type SessionReaderDiagLike } from './session-projection-direct.ts'
 import { sessionPresetOf } from './session-preset-direct.ts'
@@ -48,6 +48,16 @@ export interface SessionQueryLike {
 /** The public session-query text filter used by the semantic search. */
 export interface SessionEventResultFilterLike {
   readonly kind: 'text'
+  readonly text: string
+}
+
+/** The semantic event document returned by `sessionQuery.filterEvents`. */
+export interface SessionEventSearchDocumentLike {
+  readonly sessionId: SessionId
+  readonly seq: number
+  readonly type: string
+  readonly time: number
+  readonly surface: 'current' | 'shadowed' | 'log-only'
   readonly text: string
 }
 
