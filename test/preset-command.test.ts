@@ -142,7 +142,7 @@ function stubRunner(options: {
     sessionReader: {
       list: async () => [],
       search: async () => [],
-      titles: async () => new Map(),
+      projectionBatch: async () => new Map(),
       measureContext: () => undefined,
       readExportData: async () => ({ kind: 'none' }),
        ...options.sessionReader,
@@ -418,16 +418,15 @@ test('/new resolves an absent legacy code default as canonical ptc', async () =>
 
 test('/sessions opens its first picker frame before cold preset enrichment settles', async () => {
   let started = false
-  let resolveBatch!: (value: Map<string, string>) => void
-  const batch = new Promise<Map<string, string>>(resolve => { resolveBatch = resolve })
+  let resolveBatch!: (value: Map<string, { title?: string; preset?: string }>) => void
+  const batch = new Promise<Map<string, { title?: string; preset?: string }>>(resolve => { resolveBatch = resolve })
   const t = setup({
     sessionReader: {
       list: async () => [{ id: 'session-cold', createdAt: 10, cwd: '/ws', live: false }],
-      presetBatch: async () => {
+      projectionBatch: async () => {
         started = true
         return batch
       },
-      titles: async () => new Map(),
     },
   })
   const result = await t.runCommand('sessions')
@@ -436,7 +435,7 @@ test('/sessions opens its first picker frame before cold preset enrichment settl
   const initial = await t.view()
   assert.ok(initial.includes('cold'), `initial picker frame is missing the session row:\n${initial}`)
   assert.ok(!initial.includes('preset:standard'), 'the initial frame must not wait for an effective preset')
-  resolveBatch(new Map([['session-cold', 'standard']]))
+  resolveBatch(new Map([['session-cold', { preset: 'standard' }]]))
   await new Promise<void>(resolve => setImmediate(resolve))
   const enriched = await t.view()
   assert.ok(enriched.includes('preset:standard'), `preset enrichment did not refresh the picker:\n${enriched}`)

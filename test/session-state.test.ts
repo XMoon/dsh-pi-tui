@@ -131,7 +131,7 @@ function stubRunner(
     sessionReader: {
       list: async () => [],
       search: async () => [],
-      titles: async () => new Map(),
+      projectionBatch: async () => new Map(),
       measureContext: () => undefined,
       readExportData: async () => ({ kind: 'none' }),
     },

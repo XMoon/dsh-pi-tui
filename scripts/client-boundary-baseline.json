@@ -66,6 +66,12 @@
   "import:dsh-session",
   "sessionQuery"
  ],
+ "runtime/direct/session-projection-direct.ts": [
+  "agentPresets",
+  "import:dsh-agent",
+  "import:dsh-session",
+  "sessionQuery"
+ ],
  "runtime/direct/session-lifecycle-direct.ts": [
   "agents",
   "import:dsh-agent",

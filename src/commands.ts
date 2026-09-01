@@ -2098,34 +2098,30 @@ export function registerTuiCommands(
         marquee: { labelPartsOf: sessionLabelParts },
       },
     )
-    // Enrich rows with titles as they load (progressive: the first
-    // TITLE_FIRST_BATCH rows land immediately so the visible window fills,
-    // then TITLE_BATCH_SIZE chunks refresh behind it — the picker's own
-    // factory re-reads the shared title map). The local cache under
-    // $DSH_HOME skips the expensive full-log reads while the log files are
-    // unchanged. Cancellations (TUI quit, the abort signal) are debug-level
-    // through the unified entry; a real batch failure lands in diagnostics
-    // instead of being swallowed.
+    // Enrich rows with titles and presets as they load (progressive: the
+    // first TITLE_FIRST_BATCH rows land immediately so the visible window
+    // fills, then TITLE_BATCH_SIZE chunks refresh behind it — the picker's
+    // own factory re-reads the shared maps). Each row's title and preset
+    // arrive TOGETHER from the combined DSH projection batch (one cold read
+    // per session, never one scan per field). Cancellations (TUI quit, the
+    // abort signal) are debug-level through the unified entry; a real batch
+    // failure lands in diagnostics instead of being swallowed.
     //
     // The batches cover MAIN rows only (the categories never show subagents)
     // and the FULL main-row set — NOT the `shown` window: the category scopes
     // see every main session (round-1 review finding), so a session beyond
     // MAX_PICKER_SESSIONS that IS displayed (e.g. an old session in the
-    // "Current directory" scope) would otherwise never get a title read and
-    // would show a bare short id forever.
+    // "Current directory" scope) would otherwise never be enriched and would
+    // show a bare short id forever.
     const mainRows = rows.filter(row => row.origin !== 'subagent')
-    if (runner.sessionReader.presetBatch !== undefined) {
-      detach('session presets', async () => {
-        const presets = await runner.sessionReader.presetBatch!(mainRows, signal)
-        for (const [id, preset] of presets) presetsById.set(id, preset)
-        if (presets.size > 0) picker.refresh?.()
-      })
-    }
-    detach('session titles', async () => {
+    detach('session projections', async () => {
       const loadBatch = async (batch: SessionPickerRow[]): Promise<void> => {
-        const titles = await runner.sessionReader.titles(batch, signal)
-        if (titles.size === 0) return
-        for (const [id, title] of titles) titlesById.set(id, title)
+        const projections = await runner.sessionReader.projectionBatch(batch, signal)
+        if (projections.size === 0) return
+        for (const [id, projection] of projections) {
+          if (projection.title !== undefined) titlesById.set(id, projection.title)
+          if (projection.preset !== undefined) presetsById.set(id, projection.preset)
+        }
         picker.refresh?.()
       }
       await loadBatch(mainRows.slice(0, TITLE_FIRST_BATCH))
