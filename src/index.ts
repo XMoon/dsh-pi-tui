@@ -2850,6 +2850,13 @@ export function apply(ctx: Context, config: Config): void {
         (callback) => setImmediate(callback),
         () => generation === sessionGeneration && liveAgent?.session.id === sessionId,
         () => {
+          // A measurement that already SUCCEEDED for this session (an
+          // explicit /status force, a compaction settle, or a lifecycle
+          // trigger before the deferred callback ran) cleared the dirty
+          // flag — the deferred initial measure is then redundant and must
+          // NOT re-measure (round-9 finding). A FAILED earlier attempt
+          // stays dirty, so the deferred callback retries it.
+          if (!contextMeasurement.isDirty()) return
           markContextDirty()
           refreshContextMeasurement('initial')
         },

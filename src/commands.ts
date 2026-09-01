@@ -3303,7 +3303,17 @@ export function registerTuiCommands(
       // the coordinator fall back to a direct session-read port read
       // (best-effort, migration M1.11): unavailable/unmeasurable → the
       // panel falls back to unmeasured — never a crash.
-      const contextTokens = runner.forceContextMeasurement?.() ?? runner.sessionReader.measureContext(liveAgent.session.id)
+      // Explicit status: measure NOW through the runner's context
+      // coordinator — the panel and the cached footer value share ONE
+      // measurement (no duplicate reads, no stale footer). The direct
+      // session-read port is used ONLY when the coordinator is absent
+      // (stubs): an explicit presence check, never a `??` fallback — a
+      // force returning undefined (no live session / measurement failure)
+      // must not trigger a second, uncached measurement (round-9 finding).
+      const forceContext = runner.forceContextMeasurement
+      const contextTokens = forceContext === undefined
+        ? runner.sessionReader.measureContext(liveAgent.session.id)
+        : forceContext()
       app.openSettings(
         [
           {

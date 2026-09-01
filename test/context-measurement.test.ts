@@ -373,38 +373,73 @@ test('P2: /status forces ONE measurement through the coordinator, never a duplic
     execute: async () => undefined,
   } as never)
   const agent = { session: { id: 'session-b', events: [], header: { cwd: '/ws' } } } as unknown as Agent
-  let forceCalls = 0
-  let directReads = 0
-  const runner = {
-    ctx,
-    app,
-    cwd: '/ws',
-    signal: new AbortController().signal,
-    diag: { warn: () => {}, error: () => {}, info: () => {} },
-    commandRegistry: ctx.get('commands'),
-    recordExtensionError: () => {},
-    clearExtensionError: () => {},
-    captureExtensionHealthRef: () => {},
-    ensureSession: async () => {},
-    sessionCwd: () => '/ws',
-    get liveAgent() { return agent },
-    extensions: undefined,
-    forceContextMeasurement: () => { forceCalls += 1; return 42_000 },
-    sessionReader: {
-      measureContext: () => { directReads += 1; return 99_000 },
-      list: async () => [], search: async () => [], titles: async () => new Map(), readExportData: async () => ({ kind: 'none' }),
-    },
-  } as unknown as TuiCommandRunner
   try {
-    registerTuiCommands(runner)
-    const statusDef = defs.find(entry => entry.name === 'status')
-    assert.ok(statusDef?.handler, 'the /status command is registered')
-    await (statusDef.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
-    assert.equal(forceCalls, 1, 'the explicit status forces exactly one measurement through the coordinator')
-    assert.equal(directReads, 0, 'the direct reader is never called when the coordinator is available (no duplicate measurement)')
+    // Run the handler under BOTH force outcomes: a measured value AND an
+    // undefined force (no live session / measurement failure). The direct
+    // reader must NEVER run while the coordinator is present — the old
+    // `??` fallback triggered a second, uncached measurement when the
+    // force returned undefined (round-9 finding).
+    for (const forceValue of [42_000, undefined]) {
+      defs.length = 0 // re-register per round so the fresh handler is found
+      let forceCalls = 0
+      let directReads = 0
+      const runner = {
+        ctx,
+        app,
+        cwd: '/ws',
+        signal: new AbortController().signal,
+        diag: { warn: () => {}, error: () => {}, info: () => {} },
+        commandRegistry: ctx.get('commands'),
+        recordExtensionError: () => {},
+        clearExtensionError: () => {},
+        captureExtensionHealthRef: () => {},
+        ensureSession: async () => {},
+        sessionCwd: () => '/ws',
+        get liveAgent() { return agent },
+        extensions: undefined,
+        forceContextMeasurement: () => { forceCalls += 1; return forceValue },
+        sessionReader: {
+          measureContext: () => { directReads += 1; return 99_000 },
+          list: async () => [], search: async () => [], titles: async () => new Map(), readExportData: async () => ({ kind: 'none' }),
+        },
+      } as unknown as TuiCommandRunner
+      registerTuiCommands(runner)
+      const statusDef = defs.find(entry => entry.name === 'status')
+      assert.ok(statusDef?.handler, 'the /status command is registered')
+      await (statusDef.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+      assert.equal(forceCalls, 1, 'the explicit status forces exactly one measurement through the coordinator')
+      assert.equal(directReads, 0, `the direct reader is never called while the coordinator is present (force returned ${String(forceValue)})`)
+    }
   } finally {
     app.stop()
   }
+})
+
+test('P2: the deferred initial measure skips a session an earlier force already measured', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(50_000)
+  coordinator.bind('session-a')
+  // The runner's deferred-callback shape (deferInitialContextMeasure run):
+  // skip when an earlier measurement already succeeded for this session.
+  const deferredRun = (): void => {
+    if (!coordinator.isDirty()) return
+    coordinator.markDirty()
+    coordinator.measure('session-a', counting.reader)
+  }
+  // An explicit /status force runs BEFORE the deferred setImmediate
+  // callback: one measurement, dirty cleared.
+  coordinator.markDirty()
+  coordinator.measure('session-a', counting.reader)
+  assert.equal(counting.measureCalls, 1)
+  deferredRun()
+  assert.equal(counting.measureCalls, 1, 'the deferred measure must not double-measure after an explicit force')
+  // A FAILED earlier attempt keeps the last-good value AND stays dirty:
+  // the deferred callback retries.
+  coordinator.markDirty()
+  assert.equal(coordinator.measure('session-a', () => undefined), 50_000, 'a failed measure keeps the last-good value')
+  assert.equal(coordinator.isDirty(), true, 'a failed measure stays dirty')
+  deferredRun()
+  assert.equal(counting.measureCalls, 2, 'a failed attempt is retried by the deferred callback')
 })
 
 test('D2 structural gate: the runner source keeps measurement out of cheap refreshes', () => {
@@ -429,4 +464,12 @@ test('D2 structural gate: the runner source keeps measurement out of cheap refre
   // previous session's context on the new session's first frames.
   assert.ok(cheapBlock.includes('contextTokens,'), 'setStatus must always carry the contextTokens field (undefined clears)')
   assert.ok(cheapBlock.includes('contextWindow: contextTokens === undefined ? undefined :'), 'an unmeasured session must clear the window too')
+  // P2: the deferred initial measure must skip a session that an earlier
+  // force/lifecycle measurement already succeeded for — the callback first
+  // checks the coordinator's dirty flag instead of re-measuring blindly.
+  const deferStart = stripped.indexOf('const scheduleInitialContextMeasure =')
+  const deferEnd = stripped.indexOf('let app: TuiApp')
+  assert.ok(deferStart !== -1 && deferEnd > deferStart, 'the deferred-measure scheduler exists')
+  const deferBlock = stripped.slice(deferStart, deferEnd)
+  assert.ok(deferBlock.includes('.isDirty()'), 'the deferred initial measure must skip an already-measured session')
 })
