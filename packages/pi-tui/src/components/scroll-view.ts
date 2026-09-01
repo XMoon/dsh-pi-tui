@@ -36,6 +36,11 @@ export class ScrollView extends Container {
 	private scrollbarActive = false;
 	private scrollbarHideTimer: NodeJS.Timeout | undefined;
 
+	/** Whether the content currently exceeds the viewport (scrolling is possible). (dsh-pi-tui divergence X028.) */
+	get canScroll(): boolean {
+		return this.contentHeight > this.currentViewportHeight;
+	}
+
 	constructor(component: Component, options: ScrollViewOptions = {}) {
 		super();
 		if (options.axis !== undefined && options.axis !== "vertical") {
