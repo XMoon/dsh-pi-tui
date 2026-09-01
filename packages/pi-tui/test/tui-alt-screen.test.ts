@@ -1564,6 +1564,47 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+
+	it("lets a focused overlay keep a host-claimed viewport key (X028 defer priority)", async () => {
+		const terminal = new RecordingTerminal(60, 8);
+		let claimed = false;
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onBeforeViewportInput: (data) => {
+				if (data !== "\x1b[1;5F") return false; // Ctrl+End
+				claimed = true;
+				return true;
+			},
+		});
+		tui.addChild(new Text("transcript", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		// Without an overlay the seam claims the key.
+		terminal.sendInput("\x1b[1;5F");
+		await terminal.waitForRender();
+		assert.strictEqual(claimed, true);
+
+		// With a focused non-search overlay the SAME key must fall through
+		// to the overlay (upstream shouldDeferViewportInputToOverlay
+		// priority), never to the host seam.
+		claimed = false;
+		const received: string[] = [];
+		const overlay = {
+			render: () => ["OVERLAY"],
+			handleInput: (data: string) => {
+				received.push(data);
+			},
+			invalidate: () => {},
+		};
+		tui.showOverlay(overlay);
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[1;5F");
+		await terminal.waitForRender();
+		assert.strictEqual(claimed, false, "the host seam must not claim a key while a non-search overlay is focused");
+		assert.deepStrictEqual(received, ["\x1b[1;5F"], "the focused overlay must receive the key");
+		tui.stop();
+	});
+
 	it("scrolls the transcript by half a page with custom bindings", async () => {
 		const originalKeybindings = getKeybindings();
 		const terminal = new VirtualTerminal(20, 10);

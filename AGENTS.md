@@ -67,11 +67,12 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
 ## Repository layout
 
 ```
-packages/pi-tui/    Vendored @earendil-works/pi-tui fork (see UPSTREAM.json). The vendored version
+packages/pi-tui/    Vendored @earendil-works/pi-tui fork. The vendored version
                     and upstream commit live in ONE place —
-                    packages/pi-tui/package.json `repository.note` (see
-                    that field, never a copy in this file or README). Its
-                    own AGENTS.md (kept from the fork) is the source of
+                    packages/pi-tui/UPSTREAM.json (see that file, never a
+                    copy in this file or README; the package.json
+                    `repository.note` defers to it). Its own AGENTS.md is
+                    the source of
                     record for the local divergence fixes and their
                     guarding tests; re-verify every entry on each
                     re-vendor. native/ prebuilds are NOT vendored; loading
@@ -103,7 +104,7 @@ packages/pi-tui/    Vendored @earendil-works/pi-tui fork (see UPSTREAM.json). Th
    consider flipping the default. Remote attach is a planned capability, but
    it must not bypass DSH's security model or make ordinary local use depend on
    a TCP listener.
-2. **Vendored fork, not npm dependency.** `@earendil-works/pi-tui` is vendored (pinned to v0.84.4, commit `b79e4cc8` — see `packages/pi-tui/UPSTREAM.json`, the single source of truth). The re-vendor (2026-02) replaced the earlier kimi-code `44a6c70e` snapshot with the pristine Earendil baseline and re-applied only the host-required divergences (ledger X001–X034 in `packages/pi-tui/DIVERGENCES.md`); kimi-only code (PasteBurst, inline slash, per-frame reuse, etc.) was dropped. `packages/pi-tui/DIVERGENCES.md` is the source of record for every divergence and its guarding tests — re-verify each entry on every re-vendor.
+2. **Vendored fork, not npm dependency.** `@earendil-works/pi-tui` is vendored (pinned to v0.84.4 — see `packages/pi-tui/UPSTREAM.json`, the single source of truth). The re-vendor (2026-02) replaced the earlier kimi-code `44a6c70e` snapshot with the pristine Earendil baseline and re-applied only the host-required divergences (ledger X001–X034 in `packages/pi-tui/DIVERGENCES.md`); kimi-only code (PasteBurst, inline slash, per-frame reuse, etc.) was dropped. `packages/pi-tui/DIVERGENCES.md` is the source of record for every divergence and its guarding tests — re-verify each entry on every re-vendor.
 3. **`TuiMainScreen`, not `TUI`.** In this fork the constructible entry is `TuiMainScreen` (main screen + scrollback, `mode: "regular"`); the README's `new TUI(...)` is stale upstream docs. `TuiAltScreen` is the alternative.
 4. **Source exports, built artifacts.** The root bundle and the fork both build with tsdown (`dist/`); the root package bundles the vendored pi-tui fork (`deps.onlyBundle: ['@xmoon76/pi-tui']`, the kimi-code pattern) so the published tarball is self-contained. `exports` point at built files; neither `dist/` is committed — build before installing into a profile. Node 26 refuses type-stripping inside `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so a `.ts`-exporting package cannot load from a profile's node_modules.
 5. **No native prebuilds.** darwin/win32 modifier-key addons are optional; the loader returns `undefined` on other platforms without attempting a load. Revisit only if modifier detection matters on macOS/Windows.
@@ -501,7 +502,7 @@ gitignored):
 ## Reusable flow (worth repeating for the next capability)
 
 1. **Read both sides before designing**: the dsh bundle shape (`packages/bundle/web-app`: startup.ts commander row + index.ts glue + `cordis.patch.yml` with `dsh.bundle.patch`), and the library's real API (check `src/index.ts` exports, not the README).
-2. **Vendor**: `rsync -a --exclude native --exclude CHANGELOG.md --exclude node_modules` from the fork; rescope the package name; keep LICENSE + the fork's AGENTS.md; record the upstream commit in `repository.note` (the single source of truth — do not copy the version/commit into root docs); run the fork's own test suite unchanged as the sync gate.
+2. **Vendor**: `rsync -a --exclude native --exclude CHANGELOG.md --exclude node_modules` from the fork; rescope the package name; keep LICENSE + the fork's AGENTS.md; record the upstream commit in `packages/pi-tui/UPSTREAM.json` (the single source of truth — do not copy the version/commit into root docs); run the fork's own test suite unchanged as the sync gate.
 3. **Bundle skeleton**: package with `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`; patch inserts a `*-startup` row (commander via `@deepseek-ai/dsh-cmdline`'s `parseCmdline`, provides a service) and a runner row injecting that service; exports `./startup` and `./cordis.patch.yml`.
 4. **Testable core**: inject the terminal (`Terminal` interface) so tests drive a `VirtualTerminal`; keep the process entry (`ProcessTerminal`) as a thin wrapper.
 5. **Verification matrix** (all passed in the P0 spike): fork's own tests; headless render/input/exit; the full import chain under the tsx ESM hook (dsh source-launch contract, incl. `@deepseek-ai/dsh-cmdline` + commander); non-TTY stdin guard (`setRawMode` existence check); native graceful fallback.

@@ -146,7 +146,7 @@ PANE2="$TMUX_SESSION:0.1"
 title_of() { tmux display-message -t "$1" -p '#{pane_title}' 2>/dev/null || true; }
 now_ms() { date +%s%3N; }
 LAST_ENTER_MS=0
-send_cmd() { # send_cmd <pane> <text> — paced to dodge the PasteBurst trap
+send_cmd() { # send_cmd <pane> <text> — paced two-step rhythm (see the tmux trap note in AGENTS.md)
   tmux send-keys -t "$1" -l "$2"
   sleep 0.2
   tmux send-keys -t "$1" Enter

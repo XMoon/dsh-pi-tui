@@ -51,8 +51,9 @@ export interface SelectListLayoutOptions {
 export interface SelectListOptions {
 	/**
 	 * Show a search input above the list. Typing filters items by a
-	 * case-insensitive substring over value, label, and description (the
-	 * plain `setFilter` prefix match is kept for callers that want it).
+	 * case-insensitive substring over value, label, and description.
+	 * Note: `setFilter` is redefined to the same substring filter (it no
+	 * longer prefix-matches value only — upstream semantics).
 	 * (dsh-pi-tui extension.)
 	 */
 	enableSearch?: boolean;
