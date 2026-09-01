@@ -997,7 +997,9 @@ export interface SubagentViewerTarget {
 }
 
 /** A semantic follow-up submit from the interactive subagent viewer: the
- * runner's write path is `ctx.subagents.followup(exactParent, …)`, NEVER
+ * runner's write path is the official `ctx.subagents.prompt(…)` human
+ * prompt (a distinct FIFO turn in the child's inbox), NEVER
+ * `ctx.subagents.sendMessage` (the Agent-authored Steer path) and never
  * the main-session submit/steer/queue path. */
 export interface SubagentViewerSubmit {
   readonly parentSessionId: string
@@ -1097,10 +1099,11 @@ export interface TuiAppEventsBase {
   /**
    * A follow-up submit from the INTERACTIVE subagent viewer (Enter while
    * viewing a `continuable` child): the runner delivers the text through
-   * `ctx.subagents.followup(exactLiveParent, childId, …)` — never the
-   * main-session submit/steer/queue path. The draft has ALREADY been
-   * cleared by the app; the runner restores it (merged) when the delivery
-   * is rejected, through the app's viewer-draft API. Optional.
+   * the official `ctx.subagents.prompt(…)` human prompt — never
+   * `subagents.sendMessage` and never the main-session submit/steer/queue
+   * path. The draft has ALREADY been cleared by the app; the runner
+   * restores it (merged) when the delivery is rejected, through the app's
+   * viewer-draft API. Optional.
    */
   onSubagentSubmit?: (request: SubagentViewerSubmit) => void
   /** Fullscreen mode changed (a fullscreen toggle or a settings-panel

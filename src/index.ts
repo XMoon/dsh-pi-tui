@@ -49,7 +49,6 @@ import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
 // The approval/request waterfall merge: the TUI is the interactive answerer.
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 // The commands service merge: ctx.commands typing for execute()/register().
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -153,9 +152,8 @@ import { mergeDraft, refuseByTransitionFence, steerAll, steerHasPayload, session
 import {
   resolveSubagentSettleTarget,
   viewerCanonicalizeScope,
-  type SubagentFollowupOutcome,
-  type SubagentFollowupReject,
-  type SubagentParentLike,
+  type SubagentPromptOutcome,
+  type SubagentPromptReject,
   type SubagentViewerSubmitRequest,
 } from './subagent-viewer-submit.ts'
 import { createDirectBackend } from './runtime/backend.ts'
@@ -168,7 +166,6 @@ import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from './runtime/direct/config-direct.ts'
 import { serializeTuiSettingsMutation } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
-import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
 import { directAgentOf, ownerHandleOf, type CreateSessionRequest, type ResumeSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
@@ -1363,7 +1360,7 @@ export async function recordedPreset(ctx: Context, sessionId: string): Promise<s
 /** The session surface {@link recomposeBlank} needs: its log and the append seam. */
 export interface RecomposableSession {
   readonly id: string
-  readonly events: readonly SessionEvent[]
+  snapshotEvents(): readonly SessionEvent[]
   append(type: 'agent-preset/selected', data: { agentPreset: string }): unknown
 }
 
@@ -1390,7 +1387,7 @@ export async function recomposeBlank(
 ): Promise<RecomposeOutcome> {
   const presets = ctx.get('agentPresets')
   if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
-  if (agent.session.events.some(event => event.type === 'turn/start')) return { kind: 'locked' }
+  if (agent.session.snapshotEvents().some(event => event.type === 'turn/start')) return { kind: 'locked' }
   const preset = await presets.recompose(agent.ctx, id)
   agent.session.append('agent-preset/selected', { agentPreset: preset.id })
   return { kind: 'switched', preset: preset.id }
@@ -2005,7 +2002,7 @@ export function apply(ctx: Context, config: Config): void {
         startupStatus.clear()
         diag.info('resume ok', {
           session: sessionId,
-          seq: (handle.direct!.agent as Agent).session.events.length,
+          seq: Number((handle.direct!.agent as Agent).session.seq),
           preset: launchComposition.agentPreset ?? 'default',
         })
         // A launch-time preset may still apply while the session is blank;
@@ -2285,7 +2282,7 @@ export function apply(ctx: Context, config: Config): void {
             // durable model history (pending intent or a usable request
             // header): malformed events are not durable history, and the
             // fold is null-safe, so a hostile log can never throw here.
-            const folded = foldPendingModelSelection(target.session.events)
+            const folded = foldPendingModelSelection(target.session.snapshotEvents())
             if (folded.lastUsed === undefined && folded.pending === undefined) {
               modelSelections.selectForNextRequest(target, steps.inheritSelection)
             }
@@ -2386,7 +2383,7 @@ export function apply(ctx: Context, config: Config): void {
           if (retired.length > 0) {
             diag.error('transition retire failed (child committed)', { to: (directAgentOf(next) as Agent).session.id, failures: retired })
           }
-          diag.info('switch ok', { from: from ?? '(none)', to: (directAgentOf(next) as Agent).session.id, seq: (directAgentOf(next) as Agent).session.events.length })
+          diag.info('switch ok', { from: from ?? '(none)', to: (directAgentOf(next) as Agent).session.id, seq: Number((directAgentOf(next) as Agent).session.seq) })
         },
         recordFailure: (phase, error) => {
           diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
@@ -2598,31 +2595,6 @@ export function apply(ctx: Context, config: Config): void {
       ...dshVersion() === undefined ? {} : { dshVersion: dshVersion() },
       tuiVersion: bundleVersion(),
     })
-    /** The sandbox fold (dsh-sandbox-policy's effectiveSandboxMode),
-     * capability-detected: the VALUE import must not break module load on
-     * a Harness whose dsh-sandbox-policy lacks the export — the derive
-     * degrades to the sandboxPolicy service or an absent fact. The
-     * detection is detached (a bare promise would violate the failure
-     * model); the fold is resolved before the first refresh in practice
-     * and re-read on every status projection. */
-    let sandboxFold: ((events: readonly unknown[]) => string | undefined) | undefined
-    const resolveSandboxFold = async (): Promise<void> => {
-      try {
-        const mod = await import('@deepseek-ai/dsh-sandbox-policy')
-        const fold = (mod as { effectiveSandboxMode?: (events: readonly unknown[]) => string | undefined }).effectiveSandboxMode
-        sandboxFold = typeof fold === 'function' ? fold : undefined
-      } catch {
-        sandboxFold = undefined
-      }
-      // The fold settled (resolved OR definitively absent): repaint the
-      // status once so a first projection that ran before the probe
-      // settled picks up the sandbox fact (review round 25). SKIPPED
-      // when the runner is already torn down (the detached task outlives
-      // the surface — a stale refresh would touch disposed state).
-      if (signal.aborted) return
-      refreshStatusCheap()
-    }
-    runDetached('sandbox fold probe', resolveSandboxFold, { diag })
     // PR D2: the session-bound context-measurement cache. The coordinator
     // owns the value/dirty/session identity; the runner owns the event
     // classification (which events mark dirty, which only repaint cheaply).
@@ -2657,7 +2629,6 @@ export function apply(ctx: Context, config: Config): void {
       // SUBJECT's facts feed the sections — while the subagent viewer is
       // open that is the viewed child's own fold and workspace, so the
       // footer layout never changes, only the data source.
-      const events = liveAgent?.session.events ?? []
       const displayCwd = viewing?.cwd ?? liveCwd
       // While the subagent viewer is open the DISPLAY SUBJECT is the
       // viewed CHILD: the parent's session-owned sections (composition/
@@ -2678,10 +2649,8 @@ export function apply(ctx: Context, config: Config): void {
             {
               permissionPresets: permission,
               sandboxPolicy: ctx.get('sandboxPolicy'),
-              approvalFold: effectiveApprovalPolicy,
-              sandboxFold: sandboxFold,
+              approval: ctx.get('approval'),
             },
-            events,
             liveAgent?.session,
           )
         : {}
@@ -3378,7 +3347,7 @@ export function apply(ctx: Context, config: Config): void {
     // P7d: subagent viewer — while set, the transcript shows another live
     // session's log and Esc returns to the parent session. The target is
     // MODE-AWARE: a continuable child's viewer is INTERACTIVE (the editor
-    // submits follow-ups through ctx.subagents.followup), a one-shot
+    // submits human prompts through ctx.subagents.prompt), a one-shot
     // child's viewer stays read-only. The parent session id is pinned at
     // open time — follow-ups require the exact live direct parent, and
     // the viewer never guesses it from the current live agent.
@@ -3640,7 +3609,7 @@ export function apply(ctx: Context, config: Config): void {
       // notices included — must never render as the child's transcript.
       const child = sessions.get(childId)
       if (child !== undefined) {
-        const own = childOwnEvents(child.events)
+        const own = childOwnEvents(child.snapshotEvents())
         childFolder.hydrate(own)
         childStats.hydrate(own)
         // The live child's session header carries its workspace (the child
@@ -5253,20 +5222,27 @@ export function apply(ctx: Context, config: Config): void {
       // pattern; the old /subagents SettingsList-submenu panel is gone).
       onOpenTasks: () => openTasksBrowser(),
       // Enter in an INTERACTIVE (continuable) subagent viewer: deliver the
-      // follow-up through ctx.subagents.followup — the continuation
-      // manager's child inbox (enqueue while running, wake while waiting,
-      // cold resume when absent). NEVER the parent's submit/steer/queue
-      // path. The app already cleared the child draft; a rejection
-      // restores it (merged) into the child's own draft slot.
-      onSubagentSubmit: (request) => {
+      // human prompt through the OFFICIAL ctx.subagents.prompt control
+      // API — the child inbox (a distinct FIFO turn: enqueue while
+      // running, wake while waiting, cold resume when absent), with Host
+      // authority over the exact live parent and official user
+      // provenance/requestId. NEVER `subagents.sendMessage` (the
+      // Agent-authored Steer path) and never the parent's
+      // submit/steer/queue path. The app already cleared the child draft;
+      // a rejection restores it (merged) into the child's own draft slot.
+      onSubagentSubmit: (submit) => {
         const viewerGeneration = app.getViewerGeneration()
-        runOwned('subagent followup', () => backend.subagent.followup(request, {
-          // The exact live direct parent: read at SEND time so a session
-          // switch / /new / /resume that landed while the user typed is a
-          // hard reject (never route the text to a different main Agent).
-          currentParent: () => liveAgent as SubagentParentLike | undefined,
+        // The viewer editor's text becomes the prompt's content parts at
+        // the client boundary (text today; image parts join with the
+        // viewer's image intake).
+        const request: SubagentViewerSubmitRequest = {
+          parentSessionId: submit.parentSessionId,
+          childSessionId: submit.childSessionId,
+          content: [{ type: 'text', text: submit.text }],
+        }
+        runOwned('subagent prompt', () => backend.subagent.prompt(request, {
           // The caller signal owns lookup/materialization/admission only
-          // until inbox acceptance (the DSH continuation contract): a TUI
+          // until inbox acceptance (the official prompt contract): a TUI
           // cleanup / exit, OR the viewer session ending (Esc / child
           // switch / session swap — viewerSessionAbort) cancels a send
           // that has NOT been accepted yet; once accepted the child owns
@@ -5275,9 +5251,6 @@ export function apply(ctx: Context, config: Config): void {
           makeSignal: () => viewerSessionAbort === undefined
             ? lifecycleController.signal
             : AbortSignal.any([lifecycleController.signal, viewerSessionAbort.signal]),
-          // Durable attribution: a plain user-sourced message (the same
-          // source the main editor's messages carry).
-          makeSource: () => ({ kind: 'user' }),
           // Same `@`-file mention canonicalization as the main session's
           // submissions (the editor keeps `@src/foo.ts`, the child model
           // receives the absolute path). The scope is the VIEWED CHILD's
@@ -5292,9 +5265,10 @@ export function apply(ctx: Context, config: Config): void {
         }), {
           diag,
           sessionId: () => liveAgent?.session.id,
-          onResult: (outcome) => settleSubagentSubmit(request, outcome, viewerGeneration),
+          onResult: (outcome) => settleSubagentSubmit(request, submit.text, outcome, viewerGeneration),
           onError: (error) => settleSubagentSubmit(
             request,
+            submit.text,
             { kind: 'rejected', reason: { kind: 'error', message: safeErrorMessage(error) } },
             viewerGeneration,
           ),
@@ -5457,7 +5431,8 @@ export function apply(ctx: Context, config: Config): void {
      */
     const settleSubagentSubmit = (
       request: SubagentViewerSubmitRequest,
-      outcome: SubagentFollowupOutcome,
+      text: string,
+      outcome: SubagentPromptOutcome,
       viewerGeneration: number,
     ): void => {
       // The viewer target is CURRENT only while the SAME child is still
@@ -5487,22 +5462,22 @@ export function apply(ctx: Context, config: Config): void {
         // stale viewer (closed/switched/reopened): map-only (never the
         // current surface).
         if (settleTarget.kind === 'current') {
-          app.setEditorText(mergeDraft(app.getDraft(), request.text))
+          app.setEditorText(mergeDraft(app.getDraft(), text))
         } else {
-          app.restoreSubagentDraft(request.childSessionId, request.text)
+          app.restoreSubagentDraft(request.childSessionId, text)
         }
         return
       }
       if (settleTarget.kind === 'stale') {
-        app.restoreSubagentDraft(request.childSessionId, request.text)
+        app.restoreSubagentDraft(request.childSessionId, text)
         return
       }
-      app.setEditorText(mergeDraft(app.getDraft(), request.text))
-      app.notify(subagentFollowupNotice(reason, settleTarget.label), 'error')
+      app.setEditorText(mergeDraft(app.getDraft(), text))
+      app.notify(subagentPromptNotice(reason, settleTarget.label), 'error')
     }
 
     /** The user-facing reason for a rejected follow-up (plan §18). */
-    const subagentFollowupNotice = (reason: SubagentFollowupReject, label: string): string => {
+    const subagentPromptNotice = (reason: SubagentPromptReject, label: string): string => {
       switch (reason.kind) {
         case 'parent-unavailable': return 'Cannot send: parent session is no longer active'
         case 'stale-child': return 'Cannot continue this subagent'
@@ -6364,7 +6339,7 @@ export function apply(ctx: Context, config: Config): void {
       // the all-directory search): a legacy-only history file in this cwd
       // becomes recoverable immediately, even if it predates this process.
       rememberHistoryCwd(agent.session.header.cwd ?? '')
-      const events = agent.session.events
+      const events = agent.session.snapshotEvents()
       // This is the single cold-hydration path for a live session. Do not
       // pre-apply the same event log during runner wiring: a resumed session
       // otherwise pays for two full transcript and stats replays before its
@@ -6697,7 +6672,7 @@ export function apply(ctx: Context, config: Config): void {
         app.notify('clear the current draft before rewinding', 'info')
         return
       }
-      const candidates = collectRewindCandidates(source.session.events)
+      const candidates = collectRewindCandidates(source.session.snapshotEvents())
       if (candidates.length === 0) {
         app.notify('no completed user turn to rewind', 'info')
         return
@@ -7171,7 +7146,7 @@ export function apply(ctx: Context, config: Config): void {
         // Compaction rewrites the model-visible surface: re-measure NOW
         // (the footer would otherwise show stale pressure until the next
         // step/start or turn/end).
-        settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(liveAgent.session.events))
+        settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(liveAgent.session.snapshotEvents()))
       }
       if (compacted.notify !== undefined) app.notify(compacted.notify.text, compacted.notify.kind)
       // PR D2: route the context re-measure decision through the single
