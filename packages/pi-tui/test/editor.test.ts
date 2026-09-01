@@ -2001,7 +2001,6 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
 		});
 
-
 		it("places the cursor at the code-unit end after a multi-line insert ending in a supplementary-plane grapheme", () => {
 			// Regression: the old X003 write used a GRAPHEME COUNT, but
 			// cursorCol is a code-unit offset — a ZWJ family emoji at the
@@ -2613,6 +2612,45 @@ describe("Editor component", () => {
 
 			assert.strictEqual(suggestionCalls, 0);
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
+		});
+
+
+		it("latest-wins: a never-settling provider cannot stall the newer request (X005)", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let calls = 0;
+
+			const neverSettling: AutocompleteProvider = {
+				getSuggestions: async (_lines, _cursorLine, _cursorCol, _options) => {
+					calls += 1;
+					if (calls === 1) {
+						// Request 1 NEVER settles and ignores the AbortSignal —
+						// under the old serial task chain every later request
+						// waited behind it forever.
+						return await new Promise(() => {});
+					}
+					return { items: [{ value: "@main.ts", label: "main.ts" }], prefix: "@ma" };
+				},
+				applyCompletion,
+			};
+
+			editor.setAutocompleteProvider(neverSettling);
+
+			editor.handleInput("@");
+			editor.handleInput("m");
+			// Past the 20 ms attachment debounce: request 1 is now in flight
+			// (and never settles).
+			await new Promise((resolve) => setTimeout(resolve, 40));
+			editor.handleInput("a");
+			// Past the debounce for the second token: request 2 starts.
+			await new Promise((resolve) => setTimeout(resolve, 40));
+			await flushAutocomplete();
+
+			assert.strictEqual(calls, 2, "the newer keystroke must start its own request");
+			assert.strictEqual(
+				editor.isShowingAutocomplete(),
+				true,
+				"the newer request must land even though the first request never settled",
+			);
 		});
 
 		it("aborts active @ autocomplete when typing continues", async () => {
