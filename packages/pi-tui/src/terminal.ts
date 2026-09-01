@@ -159,6 +159,13 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	start(onInput: (data: string) => void, onResize: () => void): void {
+		// A repeated start() must not stack resize listeners: stop() can only
+		// remove the CURRENT reference, so remove any listener registered by a
+		// previous start() BEFORE overwriting it, or the old one leaks.
+		// (dsh-pi-tui divergence X016.)
+		if (this.resizeHandler) {
+			process.stdout.removeListener("resize", this.resizeHandler);
+		}
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
 
@@ -174,12 +181,6 @@ export class ProcessTerminal implements Terminal {
 		process.stdout.write("\x1b[?2004h");
 
 		// Set up resize handler immediately
-		// A repeated start() must not stack resize listeners: stop() can only
-		// remove the CURRENT reference, so any earlier listener would leak.
-		// (dsh-pi-tui divergence X016.)
-		if (this.resizeHandler) {
-			process.stdout.removeListener("resize", this.resizeHandler);
-		}
 		process.stdout.on("resize", this.resizeHandler);
 
 		// Refresh terminal dimensions - they may be stale after suspend/resume

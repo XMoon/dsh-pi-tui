@@ -8,11 +8,12 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 
 - Upstream: `earendil-works/pi`, package `packages/tui`
 - Tag: `v0.84.4`, commit `b79e4cc834970cca69daebffab7df1da7d1e52c4`
-- Previous baseline (history): kimi-code fork snapshot `44a6c70e` (v0.84.3).
-  The 2025-11 re-vendor audit removed eight entries from the old ledger that
-  were part of the kimi snapshot itself, not XMoon changes. With the Earendil
-  v0.84.4 baseline those kimi-code behaviors are divergences again where the
-  host still depends on them; they are re-entered below with their real
+- Previous baseline (history): kimi-code fork snapshot `44a6c70e` (v0.84.3),
+  vendored at the initial scaffold (`54d6c22`, 2026-08). A 2026-08-22 sync
+  audit (`d8b11ca`) pruned eight old-ledger entries that were part of the
+  kimi snapshot itself, not XMoon changes. With the Earendil v0.84.4
+  baseline those kimi-code behaviors are divergences again where the host
+  still depends on them; they are re-entered below with their real
   provenance (X029–X032).
 
 ## Categories
@@ -21,6 +22,9 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - `PUBLIC_COMPONENT_CONTRACT` — public component behavior the host's extension surface relies on.
 - `LOCAL_UX` — host-facing UX behavior.
 - `BUGFIX_MISSING_UPSTREAM` — a real bugfix upstream has not absorbed.
+- `PERF_HOST_DEPENDENT` — performance divergence the host's render
+  architecture is built around; dropping it is a measurable regression
+  even though nothing fails functionally.
 - `PACKAGING` — package/build shell owned by XMoon.
 - `ABSORBED_UPSTREAM` — upstream now provides an equivalent; do NOT re-apply.
 - `STALE_LEDGER` — ledger entry that no longer matches reality; fixed in place.
@@ -239,18 +243,24 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - Tests: none dedicated.
 - Migration action: re-apply.
 
-### X014 — Scrollbar thumb pad clamped; measured line widths cached (was #14)
+### X014 — Measured line widths cached (was #14, scope corrected)
 
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Files: `src/layout.ts`
-- Reason: the scrollbar thumb never renders negative or overlong, and
-  measured line widths are cached per (component, width).
-  Upstream 0.84.4 re-measures every call and can render a negative/overlong
-  thumb.
-- Consumer: host scrollbars (transcript, fullscreen).
-- Upstream status: absent.
-- Tests: scrollbar describes in `test/layout.test.ts`.
-- Migration action: re-apply.
+- Reason: `measureWidth` caches the max visible line width per
+  (component, width) in the layout context, so a frame measures each
+  component once instead of re-running `visibleWidth` over its lines at
+  every call site. Upstream 0.84.4 re-measures on every call.
+  Scope note: the old #14 also claimed a scrollbar thumb pad clamp. That
+  clamp (`thumbHeight = Math.max(...)`, `maxThumbTop`) SHIPPED in upstream
+  0.84.4 — it is upstream baseline, not a local divergence; do not
+  re-apply or double-count it.
+- Consumer: host layouts that call measureWidth repeatedly per frame
+  (transcript, fullscreen).
+- Upstream status: absent (cache only).
+- Tests: scrollbar/measure describes in `test/layout.test.ts`.
+- Migration action: re-apply ONLY the `maxWidthCache` field + `measureWidth`
+  cache lookup; keep the upstream thumb clamp verbatim.
 
 ### X015 — Dead `_lastEventType` state (was #15)
 
@@ -266,12 +276,18 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Files: `src/terminal.ts`
 - Reason: restarting `ProcessTerminal` re-registers the resize handler only
-  once (the old listener is removed first). Upstream 0.84.4 stacks listeners
-  on restart.
+  once (the PREVIOUS start()'s listener is removed BEFORE the new handler is
+  assigned — `stop()` can only remove the current reference). Upstream
+  0.84.4 stacks listeners on restart.
 - Consumer: host surface restart (fullscreen toggle re-starts the terminal).
 - Upstream status: absent.
-- Tests: none dedicated (terminal describes cover input rewriting).
-- Migration action: re-apply.
+- Tests: "repeated start() calls swap the resize listener instead of
+  stacking it" in `test/terminal.test.ts` (X016 regression: two consecutive
+  `start()` calls must leave exactly one listener and fire only the second
+  handler).
+- Migration action: re-apply; keep the remove-before-assign ORDER (assigning
+  the new handler first silently reverts the fix — the removed listener is
+  then the new one and the old listener leaks).
 
 ### X017 — Regular mode owns no mouse (was #17)
 
@@ -500,37 +516,6 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
   plus the bundle suite's narrow-width renders.
 - Migration action: re-apply (3-line patch).
 
-## Removed kimi-only code (do NOT re-apply)
-
-These were part of the kimi-code snapshot but have no host consumer and are
-not in the upstream baseline. They are intentionally dropped by the Earendil
-re-vendor:
-
-- `PasteBurst` + `disablePasteBurst`/`setDisablePasteBurst` (editor) — no host consumer.
-- `inlineSlashTrigger` + inline-slash helpers (editor) — no host consumer.
-- `setHistoryFilter` (editor) — no host consumer.
-- `setText(text, { preservePasteRegistry })` (editor) — no host consumer.
-- `AutocompleteProvider` `additionalBasePaths` + multi-root fan-out — no host consumer.
-- `data?.["inlineSkill"]` Enter-non-submit carve-out (editor) — no host consumer.
-- `getLayoutRoot()` (alt screen) — no consumer.
-- Per-frame processed-line reuse + `asciiVisibleWidth` (main screen) — kimi
-  perf work; upstream 0.84.4's `BoundedTerminalWriter` (1 MiB chunked writes)
-  is the retained large-render fix.
-- FOCUS_IN/FOCUS_OUT passthrough (alt screen) — no host consumer.
-- `WIDTH_CACHE_SIZE = 4096` (utils) — kimi tweak; upstream 512 is retained.
-- Negative-width `repeat()` guards (text/truncated-text/markdown/editor/
-  layout) — upstream baseline retained; X032's clamp protects the entry
-  point.
-
-
-## Acceptance after syncing from upstream
-
-- `pnpm --filter @xmoon76/pi-tui test` must pass in full; any failure among
-  the guarding tests above means a local divergence was overwritten and lost.
-- `pnpm gate:pi-surface-compat` (bundle) must pass — the re-vendor
-  compatibility gate for the component lifecycle contract.
-
-
 ### X033 — Overwide rendered lines are truncated, not fatal (kimi-code, host-dependent)
 
 - Category: `BUGFIX_MISSING_UPSTREAM`
@@ -540,11 +525,11 @@ re-vendor:
   column in narrow terminals (wide graphemes at small widths, defensive
   host layouts), and a throw stops the whole TUI. The main screen
   truncates overwide non-image lines to the terminal width instead.
-  IMPORTANT ordering detail: the truncation runs BEFORE applyLineResets —
-  sliceByColumn drops trailing zero-width codes at the cut column, so the
-  segment reset must be appended AFTER the slice or a truncated styled
-  line leaks its open style into subsequent rows. Kimi-code provenance;
-  upstream 0.84.4 (and 0.84.3) throws.
+  IMPORTANT ordering detail: the truncation runs BEFORE the segment reset
+  is appended — sliceByColumn drops trailing zero-width codes at the cut
+  column, so the reset must be appended AFTER the slice or a truncated
+  styled line leaks its open style into subsequent rows. Kimi-code
+  provenance; upstream 0.84.4 (and 0.84.3) throws.
 - Consumer: host narrow-terminal support (40-column minimum) and defensive
   host layouts.
 - Upstream status: absent (upstream throws).
@@ -554,9 +539,9 @@ re-vendor:
   lines at width 4 must truncate, not throw; truncated styled lines must
   carry their full segment reset) plus the bundle suite's narrow-width
   renders.
-- Migration action: re-applied (truncation pass BEFORE applyLineResets so
-  the segment reset is appended after the slice).
-
+- Migration action: re-applied; with X035 the truncation lives in the
+  per-line processing pass (slice, then reset) so the ordering holds for
+  both the cold path and the reuse fast path.
 
 ### X034 — wordWrapLine single-grapheme overwide guard (kimi-code, host-dependent)
 
@@ -577,13 +562,108 @@ re-vendor:
   text at widths 1-8, ZWJ family emoji, TUI at 5 columns).
 - Migration action: re-applied (sub-grapheme check before the recursion).
 
-## Final status after the v0.84.4 re-vendor (2026-02)
+### X035 — Per-frame processed-line reuse (main screen, host render contract)
+
+- Category: `PERF_HOST_DEPENDENT`
+- Files: `src/tui-main-screen.ts`, `src/utils.ts`, `src/tui.ts`
+  (`SEGMENT_RESET` export)
+- Reason: the main screen keeps the previous frame's RAW lines and
+  per-line kitty image ids. A line whose raw string is reference-identical
+  to the previous frame reuses its processed output verbatim (truncate →
+  normalize → segment reset, image-id scan), so a steady frame costs
+  O(#changed lines) instead of re-normalizing, re-measuring
+  (`visibleWidth`), and re-scanning the whole transcript. The cold path
+  measures width through the `asciiVisibleWidth` fast path (ANSI-aware
+  ASCII scan with early exit past the limit) before falling back to
+  `visibleWidth`. The HOST is built around this contract: the bundle's
+  `BulletedComponent` and `ThinkingCompactComponent` keep their rendered
+  output REFERENCE-STABLE precisely so this cache keeps hitting on steady
+  frames (see their doc comments in `src/tui-app.ts`). Provenance: in the
+  fork since the initial kimi-code snapshot vendoring (`54d6c22`); the
+  2026-08 transcript perf work (virtual window, lazy dirty projection)
+  hardened the same contract. Upstream 0.84.4 reprocesses every line every
+  frame (`map` truncate + `applyLineResets` + full kitty re-scan): measured
+  ~30-370 ms CPU per frame at 1k-10k rendered lines with only the trailing
+  spinner line changing, vs ~0.1-1.6 ms with the cache
+  (`test/render-preprocess-bench.ts`). Upstream's `BoundedTerminalWriter`
+  solves a DIFFERENT problem (never forming a >1 MiB output string) and
+  does not replace this cache; both are retained.
+- Consumer: host main-screen transcript rendering (long sessions,
+  streaming, spinner frames).
+- Upstream status: absent.
+- Tests: "Per-frame processed-line reuse (dsh-pi-tui divergence X035)" in
+  `test/tui-render.test.ts` (steady frames stay near-constant — generous
+  time budget that only an order-of-magnitude regression can fail; and a
+  reference-identical frame writes nothing).
+- Migration action: re-apply (processing pass + `previousRawLines` /
+  `previousLineImageIds` caches + `asciiVisibleWidth`; the width-change
+  path must invalidate reuse; `restoreRenderState`/`resetRenderState`
+  clear the caches).
+
+### X036 — FOCUS_IN/FOCUS_OUT reach app-level input listeners (alt screen)
+
+- Category: `HARD_HOST_API`
+- Files: `src/tui-alt-screen.ts`
+- Reason: the fullscreen viewport input handler performs its own selection
+  cleanup on FOCUS_OUT but does NOT consume the focus report
+  (`return undefined`), and FOCUS_IN passes through as well — app-level
+  input listeners installed via `addInputListener` (the host's
+  `routeInput`→`handleInput` seam) still receive `\x1b[O` / `\x1b[I`.
+  The main-screen renderer lets focus reports through, and terminal
+  focus tracking (notification suppression, clipboard-image hints)
+  depends on that fan-out. Upstream 0.84.4 consumes both events in the
+  viewport handler, so they never reach app-level listeners on the alt
+  screen (an input-listener parity break between the two screens).
+- Consumer: host app-level input listeners (`TuiApp.routeInput` on every
+  screen; focus-report based notification/clipboard tracking).
+- Upstream status: absent (upstream consumes).
+- Tests: "lets focus reports reach app-level input listeners" in
+  `test/tui-alt-screen.test.ts` (an app-level listener must observe both
+  `\x1b[O` and `\x1b[I`); the selection-cleanup behavior on focus loss is
+  covered by the neighboring focus describes.
+- Migration action: re-apply (passthrough AFTER the FOCUS_OUT selection
+  cleanup; keep the cleanup).
+
+## Removed kimi-only code (do NOT re-apply)
+
+These were part of the kimi-code snapshot but have no host consumer and are
+not in the upstream baseline. They are intentionally dropped by the Earendil
+re-vendor:
+
+- `PasteBurst` + `disablePasteBurst`/`setDisablePasteBurst` (editor) — no host consumer.
+- `inlineSlashTrigger` + inline-slash helpers (editor) — no host consumer.
+- `setHistoryFilter` (editor) — no host consumer.
+- `setText(text, { preservePasteRegistry })` (editor) — no host consumer.
+- `AutocompleteProvider` `additionalBasePaths` + multi-root fan-out — no host consumer.
+- `data?.["inlineSkill"]` Enter-non-submit carve-out (editor) — no host consumer.
+- `getLayoutRoot()` (alt screen) — no consumer.
+- `WIDTH_CACHE_SIZE = 4096` (utils) — kimi tweak; upstream 512 is retained.
+  With X035's reuse fast path the cold-path width measurements are bounded
+  to changed lines, so the larger FIFO is not needed.
+- Negative-width `repeat()` guards (text/truncated-text/markdown/editor) —
+  upstream baseline retained; X032's clamp protects the entry point. The
+  one `Math.max(0, end - start)` padding guard in `layout.ts`
+  (`targetText`) is also a local defensive keep alongside X032 (upstream
+  0.84.4 pads without the clamp).
+
+## Acceptance after syncing from upstream
+
+- `pnpm --filter @xmoon76/pi-tui test` must pass in full; any failure among
+  the guarding tests above means a local divergence was overwritten and lost.
+- `pnpm gate:pi-surface-compat` (bundle) must pass — the re-vendor
+  compatibility gate for the component lifecycle contract.
+
+## Final status after the v0.84.4 re-vendor (2026-09)
 
 - `KEEP` (re-applied on the Earendil v0.84.4 base): X001, X002,
   X004A, X004B, X005, X006, X007, X008, X009, X010, X011, X012, X013,
-  X014 (measurement cache only — the scrollbar thumb clamp is already in
-  upstream 0.84.4), X016, X018, X019, X020, X021, X022, X023, X024, X027,
-  X028, X029, X030, X031, X032, X033, X034.
+  X014 (measurement cache ONLY — the scrollbar thumb clamp is already in
+  upstream 0.84.4, see the entry's scope note), X016, X018, X019, X020,
+  X021, X022, X023, X024, X027, X028, X029, X030, X031, X032, X033, X034,
+  X035 (per-frame processed-line reuse — restored after the PR-review
+  benchmark showed a 100-500x per-frame regression without it), X036
+  (FOCUS passthrough — restored; app-level listeners are a live host
+  seam, not a kimi-only leftover).
 - `ABSORBED_UPSTREAM`: X015 (dead `_lastEventType` — upstream baseline
   restored), X017 (regular mode owns no mouse — upstream baseline),
   X026 (copySelection/copyOnSelect — upstream 0.84.4 native).
@@ -592,9 +672,9 @@ re-vendor:
   because the old "fix" was a code-unit/grapheme mismatch defect — see the
   entry): PasteBurst,
   inlineSlashTrigger, setHistoryFilter, preservePasteRegistry,
-  additionalBasePaths, inlineSkill data, getLayoutRoot, per-frame
-  processed-line reuse + asciiVisibleWidth, FOCUS passthrough,
+  additionalBasePaths, inlineSkill data, getLayoutRoot,
   WIDTH_CACHE_SIZE 4096. (Defensive negative-width `repeat()` guards are
-  dropped in text/truncated-text/markdown/editor; layout.ts retains one
-  `Math.max(0, ...)` padding guard as part of X014's scrollbar safety —
-  upstream 0.84.4 has the rest.)
+  dropped in text/truncated-text/markdown/editor; `layout.ts` retains one
+  local `Math.max(0, end - start)` `targetText` padding guard alongside
+  X032's entry-point clamp — the scrollbar thumb clamp itself is upstream
+  baseline.)
