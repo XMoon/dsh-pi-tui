@@ -1564,7 +1564,6 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-
 	it("lets a focused overlay keep a host-claimed viewport key (X028 defer priority)", async () => {
 		const terminal = new RecordingTerminal(60, 8);
 		let claimed = false;

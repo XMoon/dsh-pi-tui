@@ -2001,6 +2001,21 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
 		});
 
+
+		it("places the cursor at the code-unit end after a multi-line insert ending in a supplementary-plane grapheme", () => {
+			// Regression: the old X003 write used a GRAPHEME COUNT, but
+			// cursorCol is a code-unit offset — a ZWJ family emoji at the
+			// end of the last inserted line landed the cursor MID-grapheme
+			// and the next keystroke split the surrogate pair.
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.handleInput(`\x1b[200~multi\n👨‍👩‍👧‍👦\x1b[201~`);
+			assert.strictEqual(editor.getText(), "multi\n👨‍👩‍👧‍👦");
+			assert.deepStrictEqual(editor.getCursor(), { line: 1, col: "👨‍👩‍👧‍👦".length }, "cursor must sit at the code-unit end");
+
+			editor.handleInput("x");
+			assert.strictEqual(editor.getText(), "multi\n👨‍👩‍👧‍👦x", "typing after the insert must preserve the emoji");
+		});
+
 		it("undoes multi-line paste atomically", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 

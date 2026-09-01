@@ -1230,10 +1230,16 @@ export class Editor implements Component, Focusable {
 			];
 
 			this.state.cursorLine += insertedLines.length - 1;
-			// Cursor columns are grapheme indices, not code units: an emoji or
-			// combining sequence at the end of the last inserted line must not
-			// land the cursor mid-grapheme. (dsh-pi-tui divergence X003.)
-			this.setCursorCol([...this.segment(insertedLines[insertedLines.length - 1] || "", "grapheme")].length);
+			// Note: the old X003 divergence wrote a GRAPHEME COUNT here, but
+			// cursorCol is a code-unit offset everywhere else in the editor
+			// (line.slice(0, cursorCol) etc.) — a supplementary-plane
+			// grapheme at the end of the last inserted line (ZWJ family
+			// emoji, combining sequence) landed the cursor MID-grapheme and
+			// the next keystroke split the surrogate pair. Upstream's
+			// code-unit end is correct: the line end is always a grapheme
+			// boundary. (dsh-pi-tui divergence X003 removed — see the
+			// ledger.)
+			this.setCursorCol((insertedLines[insertedLines.length - 1] || "").length);
 		}
 
 		if (this.onChange) {

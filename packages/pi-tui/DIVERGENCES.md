@@ -57,17 +57,27 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - Tests: `setItems` and search describes in `test/select-list.test.ts`.
 - Migration action: re-apply with X001.
 
-### X003 — Editor multi-line insert cursor by grapheme (was #3)
+### X003 — Editor multi-line insert cursor (was #3, REMOVED as a defect)
 
-- Category: `BUGFIX_MISSING_UPSTREAM`
+- Category: `REMOVED_UNUSED` (was billed as a bugfix; the re-vendor
+  re-verify gate found it to be a defect)
 - Files: `src/components/editor.ts`
-- Reason: inserting multi-line text (paste) places the cursor by grapheme
-  count, not code units, so CJK/ZWJ content lands on the right cell.
-  Upstream 0.84.4 still uses `.length` (code units).
-- Consumer: host editor paste path (CJK/emoji drafts).
-- Upstream status: absent.
-- Tests: grapheme-cursor describes in `test/editor.test.ts`.
-- Migration action: re-apply.
+- Reason: the old divergence wrote a GRAPHEME COUNT into `cursorCol`, but
+  the editor treats `cursorCol` as a CODE-UNIT offset everywhere else
+  (`line.slice(0, cursorCol)` etc.). It worked only for BMP CJK by
+  accident (1 code unit == 1 grapheme); a supplementary-plane grapheme at
+  the end of the last inserted line (ZWJ family emoji, combining
+  sequence) landed the cursor MID-grapheme and the next keystroke split
+  the surrogate pair (document corruption). Upstream's code-unit end is
+  correct — the line end is always a grapheme boundary. The old "Right
+  arrow moves one grapheme" behavior is provided by the editor's
+  grapheme-aware cursor MOVEMENT, not by the insert cursor.
+- Consumer: none (the old behavior was harmful).
+- Upstream status: upstream behavior retained.
+- Tests: "places the cursor at the code-unit end after a multi-line
+  insert ending in a supplementary-plane grapheme" in
+  `test/editor.test.ts` (ZWJ family emoji preserved after typing).
+- Migration action: NOT re-applied; upstream `.length` restored.
 
 ### X004A — Editor bounded paste registry (was #4a)
 
@@ -553,7 +563,7 @@ re-vendor:
 
 ## Final status after the v0.84.4 re-vendor (2026-02)
 
-- `KEEP` (re-applied on the Earendil v0.84.4 base): X001, X002, X003,
+- `KEEP` (re-applied on the Earendil v0.84.4 base): X001, X002,
   X004A, X004B, X005, X006, X007, X008, X009, X010, X011, X012, X013,
   X014 (measurement cache only — the scrollbar thumb clamp is already in
   upstream 0.84.4), X016, X018, X019, X020, X021, X022, X023, X024, X027,
@@ -562,7 +572,9 @@ re-vendor:
   restored), X017 (regular mode owns no mouse — upstream baseline),
   X026 (copySelection/copyOnSelect — upstream 0.84.4 native).
 - `PACKAGING_ONLY`: X025 (tsdown config — XMoon shell kept).
-- `REMOVED_UNUSED` (kimi-only, no host consumer): PasteBurst,
+- `REMOVED_UNUSED` (kimi-only, no host consumer; X003 is removed
+  because the old "fix" was a code-unit/grapheme mismatch defect — see the
+  entry): PasteBurst,
   inlineSlashTrigger, setHistoryFilter, preservePasteRegistry,
   additionalBasePaths, inlineSkill data, getLayoutRoot, per-frame
   processed-line reuse + asciiVisibleWidth, FOCUS passthrough,
