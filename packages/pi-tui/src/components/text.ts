@@ -42,6 +42,9 @@ export class Text implements Component {
 		this.cachedLines = undefined;
 	}
 
+	/** No-op lifecycle hook; subclasses (e.g. Loader) may override it. (dsh-pi-tui divergence X019.) */
+	dispose(): void {}
+
 	render(width: number): string[] {
 		// Check cache
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
