@@ -168,6 +168,20 @@ export function resolveDshDevContext({ root = process.cwd(), mode, config, distr
     && environmentDistribution !== undefined
     && sourcePack !== undefined
     && resolve(directory, environmentDistribution) === resolve(sourcePack)
+  // A shell that sourced an ephemeral generation keeps inheriting its path
+  // after another shell's bootstrap reclaimed that generation. Such an
+  // inherited distribution is stale and must self-heal: drop it and fall
+  // back to the normal resolution (committed state / canonical cache)
+  // instead of hard-loading a path that no longer exists. Explicit
+  // distribution arguments are never second-guessed.
+  const staleEphemeralDistribution = distribution === undefined
+    && generatedEnvBelongsHere
+    && environment.DSH_DEV_EPHEMERAL === '1'
+    && environmentDistribution !== undefined
+    && !existsSync(resolve(directory, environmentDistribution))
+  if (staleEphemeralDistribution) {
+    console.warn(`DSH dev: ignoring stale inherited DSH_SOURCE_DISTRIBUTION=${environmentDistribution} (ephemeral generation no longer exists); run pnpm dev:bootstrap to refresh this shell`)
+  }
   return {
     schemaVersion: 1,
     root: directory,
@@ -182,7 +196,7 @@ export function resolveDshDevContext({ root = process.cwd(), mode, config, distr
     harnessWorktreeRoot: source === undefined ? undefined : join(cache, 'harness-worktrees'),
     harnessCheckout: source === undefined ? undefined : join(cache, 'harness-worktrees', source.ref),
     sourcePack,
-    distribution: generatedDurableDistribution ? undefined : environmentDistribution,
+    distribution: generatedDurableDistribution || staleEphemeralDistribution ? undefined : environmentDistribution,
     statePath: join(directory, DEV_STATE_FILE),
     envPath: join(directory, DEV_ENV_FILE),
     requiredDshPackages: requiredDshPackages(packageJson.value),

@@ -200,6 +200,10 @@ test('generated source environment variables cannot cross worktrees', (t) => {
     config: nextConfig,
     environment: { XDG_CACHE_HOME: join(nextRoot, 'cache') },
   })
+  // The inherited ephemeral generation must actually exist: a shell whose
+  // generation was reclaimed by another bootstrap self-heals instead of
+  // hard-loading the stale path (see the stale-distribution test below).
+  mkdirSync(next.sourcePack, { recursive: true })
   const generated = {
     DSH_DEV_ROOT: nextRoot,
     DSH_DEV_MODE: 'source',
@@ -224,6 +228,51 @@ test('generated source environment variables cannot cross worktrees', (t) => {
   assert.equal(owned.mode, 'source')
   assert.equal(owned.sourceConfigPath, nextConfig)
   assert.equal(owned.distribution, next.sourcePack)
+})
+
+test('a stale inherited ephemeral distribution self-heals to normal resolution', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life, { source: true })
+  const config = join(root, 'test-compat-dsh-source.json')
+  const cacheHome = join(root, 'cache')
+  const base = {
+    XDG_CACHE_HOME: cacheHome,
+    DSH_DEV_ROOT: root,
+    DSH_DEV_MODE: 'source',
+    DSH_SOURCE_CONFIG: config,
+    DSH_DEV_EPHEMERAL: '1',
+  }
+  // A long-lived shell still exports the generation another shell's
+  // bootstrap reclaimed: the stale path must be dropped (falling back to
+  // the committed state / canonical cache) instead of being hard-loaded.
+  const stalePath = join(cacheHome, 'gone-generation', 'pack')
+  const stale = resolveDshDevContext({
+    root,
+    config,
+    environment: { ...base, DSH_SOURCE_DISTRIBUTION: stalePath },
+  })
+  assert.equal(stale.distribution, undefined, 'a reclaimed ephemeral generation must not be hard-loaded')
+  assert.equal(stale.sourcePack, join(cacheHome, 'dsh-pi-tui', 'source-packs', SHA))
+
+  // An explicit --distribution argument stays authoritative even when the
+  // path does not exist — the operator asked for exactly that path.
+  const explicit = resolveDshDevContext({
+    root,
+    config,
+    distribution: stalePath,
+    environment: { XDG_CACHE_HOME: cacheHome },
+  })
+  assert.equal(explicit.distribution, stalePath)
+
+  // An inherited ephemeral generation that still exists stays provided.
+  const liveRoot = join(cacheHome, 'live-generation')
+  mkdirSync(liveRoot, { recursive: true })
+  const live = resolveDshDevContext({
+    root,
+    config,
+    environment: { ...base, DSH_SOURCE_DISTRIBUTION: liveRoot },
+  })
+  assert.equal(live.distribution, liveRoot)
 })
 
 test('generated durable source environments keep the canonical cache durable', (t) => {
@@ -253,6 +302,9 @@ test('generated durable source environments keep the canonical cache durable', (
   assert.equal(loaded.distribution, undefined)
   assert.equal(loaded.sourcePack, context.sourcePack)
 
+  // An ephemeral-flagged environment keeps its distribution provided — but
+  // only while that generation actually exists on disk.
+  mkdirSync(context.sourcePack, { recursive: true })
   const explicit = resolveDshDevContext({
     root,
     config,
