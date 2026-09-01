@@ -2175,7 +2175,11 @@ export function registerTuiCommands(
         enableSearch: true,
         header: categories[0]!.header,
         noMatchText: '  no matching sessions',
-        initialQuery: invocation.rawInput.trim(),
+        // The command argument is applied AFTER the rows land (below), not
+        // as initialQuery: a prefilled filter would hide the STATUS rows
+        // (loading / refusal / already-on) behind "no matching sessions"
+        // while the scan is still running.
+        initialQuery: '',
         width: 76,
         maxHeight: 26,
         showHint: true,
@@ -2240,9 +2244,12 @@ export function registerTuiCommands(
         const match = findSessionMatch(listed, directMatchQuery)
         if (match !== undefined) {
           if (match.id === currentId) {
-            statusRow = { value: '', label: 'already on this session', description: '', group: '' }
-            picker.refresh?.()
+            // Nothing to switch and nothing to browse: close the overlay —
+            // the error result is the whole feedback (a status row would
+            // linger behind the argument filter).
             settleOnce({ kind: 'refused', text: 'already on this session' })
+            controller.abort()
+            picker.close()
             return
           }
           settleOnce({ kind: 'switched' })
@@ -2258,6 +2265,13 @@ export function registerTuiCommands(
       // placeholder for the real rows on the next refresh.
       rows.push(...listed)
       picker.refresh?.()
+      // NOW the command argument becomes the live filter — real rows are
+      // in, so it narrows sessions instead of hiding the status phase. A
+      // query the USER typed during the load is never clobbered.
+      const pendingQuery = invocation.rawInput.trim()
+      if (pendingQuery !== '' && picker.getFilter?.() === '') {
+        picker.setFilter?.(pendingQuery)
+      }
 
       // Progressive combined projection batches: the first
       // PROJECTION_FIRST_BATCH rows fill the visible window, then

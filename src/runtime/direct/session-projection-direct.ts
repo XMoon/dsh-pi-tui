@@ -27,7 +27,9 @@
  * Everything is bounded (one worker pool per batch) and cancellable (an
  * aborted signal rejects the whole batch; per-row corruption — including a
  * throwing live composition read or a broken preset resolver on the cache
- * path — is isolated with a diagnostic instead of hiding the picker).
+ * path — is isolated instead of hiding the picker: log-backed reads land an
+ * info diagnostic, while a live teardown race fail-softs silently to the
+ * other field — a dying composition is not worth polluting INFO).
  *
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-projection-direct
  */

@@ -359,11 +359,12 @@ test('/resume <arg> is input-first: the overlay opens while list() pends forever
   // while it pends.
   const resultPromise = h.runResume('abc')
   await h.vt.waitForRender()
-  // The overlay owns the input immediately; the prefilled argument ('abc')
-  // filters the loading row out, so the chrome + query are the markers.
+  // The overlay owns the input immediately. The argument must NOT prefill
+  // the filter yet — the true Loading row stays visible (never "no
+  // matching sessions" while the scan still runs).
   const view = h.view()
   assert.ok(view.includes('resume · Current directory'), `the overlay must be open without list() settling:\n${view}`)
-  assert.ok(view.includes('abc'), `the argument must prefill the search immediately:\n${view}`)
+  assert.ok(view.includes('Loading sessions…'), `the loading row must be visible behind an unresolved argument:\n${view}`)
 
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
