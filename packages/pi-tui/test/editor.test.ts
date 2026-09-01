@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.ts";
 import { Editor, wordWrapLine } from "../src/components/editor.ts";
+import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "../src/keybindings.ts";
 import type { TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { visibleWidth } from "../src/utils.ts";
@@ -4514,5 +4515,248 @@ describe("Oversized paste and undo snapshot isolation", () => {
 		assert.strictEqual(editor.getText(), "a\nx\n");
 		editor.handleInput("\x1f");
 		assert.strictEqual(editor.getText(), "a\nx");
+	});
+});
+
+describe("paste-burst fallback (X038)", () => {
+	it("inserts a newline instead of submitting when Enter follows a rapid character stream", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted: string | undefined;
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+
+		for (const ch of "hello world pasted") editor.handleInput(ch);
+		editor.handleInput("\r");
+
+		assert.strictEqual(submitted, undefined, "the trailing Enter of a lost-marker paste must not submit");
+		assert.strictEqual(editor.getText(), "hello world pasted\n");
+	});
+
+	it("keeps converting Enter to newline across consecutive paste lines", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted: string | undefined;
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+
+		for (const ch of "first line!!") editor.handleInput(ch);
+		editor.handleInput("\r"); // paste line 1 end -> newline
+		for (const ch of "second") editor.handleInput(ch); // paste dribbles one char per chunk
+		editor.handleInput("\r"); // still inside the paste window -> newline
+
+		assert.strictEqual(submitted, undefined);
+		assert.strictEqual(editor.getText(), "first line!!\nsecond\n");
+	});
+
+	it("submits normally when the input is slow (not a burst)", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted: string | undefined;
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+
+		// Fewer than the 8-char burst minimum
+		editor.handleInput("h");
+		editor.handleInput("i");
+		editor.handleInput("\r");
+
+		assert.strictEqual(submitted, "hi");
+	});
+
+	it("resets the burst on a non-printable key between chars and Enter", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted: string | undefined;
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+
+		for (const ch of "hello world pasted") editor.handleInput(ch);
+		editor.handleInput("\x1b[D"); // Left arrow breaks the burst
+		editor.handleInput("\x1b[C"); // Right arrow restores the cursor
+		editor.handleInput("\r");
+
+		assert.strictEqual(submitted, "hello world pasted", "an intervening navigation key must end the burst");
+	});
+
+	it("a multi-char chunk resets the burst (kimi-exact semantics)", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted: string | undefined;
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			for (const ch of "hello world pasted") editor.handleInput(ch);
+			editor.handleInput("tail"); // one multi-char read: typed-ahead text, not a dribbled paste
+			editor.handleInput("\r");
+
+			assert.strictEqual(submitted, "hello world pastedtail");
+		});
+
+		it("disablePasteBurst option opts out (submits the burst)", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme, { disablePasteBurst: true });
+		let submitted: string | undefined;
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+
+		for (const ch of "hello world pasted") editor.handleInput(ch);
+		editor.handleInput("\r");
+
+		assert.strictEqual(submitted, "hello world pasted");
+	});
+
+	it("setDisablePasteBurst toggles the fallback at runtime", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted: string | undefined;
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+
+		editor.setDisablePasteBurst(true);
+		for (const ch of "hello world pasted") editor.handleInput(ch);
+		editor.handleInput("\r");
+		assert.strictEqual(submitted, "hello world pasted");
+
+		submitted = undefined;
+		editor.setDisablePasteBurst(false);
+		for (const ch of "again a burst") editor.handleInput(ch);
+		editor.handleInput("\r");
+		assert.strictEqual(submitted, undefined, "re-enabling must restore the fallback");
+	});
+});
+
+describe("editor submit binding split (X037)", () => {
+	it("the editor submits on tui.editor.submit, not tui.input.submit", () => {
+		setKeybindings(
+			new KeybindingsManager(TUI_KEYBINDINGS, {
+				"tui.input.submit": "ctrl+x",
+				"tui.editor.submit": [],
+			}),
+		);
+		try {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted: string | undefined;
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			editor.handleInput("h");
+			editor.handleInput("\r"); // plain Enter: tui.editor.submit is empty -> newline path? no: \r is not \n, not submit -> nothing
+			assert.strictEqual(submitted, undefined, "an emptied editor binding must not submit");
+
+			setKeybindings(
+				new KeybindingsManager(TUI_KEYBINDINGS, {
+					"tui.input.submit": "ctrl+x",
+					"tui.editor.submit": "ctrl+enter",
+				}),
+			);
+			editor.handleInput("\x1b[13;5u"); // ctrl+enter
+			assert.strictEqual(submitted, "h", "the editor follows its own binding");
+		} finally {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+		}
+	});
+});
+
+describe("setTextAndCursor paste registry prune (X023 tightening)", () => {
+	it("prunes registry entries whose markers vanished from the staged text", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		// Two large bracketed pastes -> two markers stored in the registry
+		const bigA = Array.from({ length: 12 }, (_, i) => `A-line-${i}`).join("\n");
+		const bigB = Array.from({ length: 12 }, (_, i) => `B-line-${i}`).join("\n");
+		editor.handleInput("\x1b[200~" + bigA + "\x1b[201~");
+		editor.handleInput("\x1b[200~" + bigB + "\x1b[201~");
+
+		const pastes = (editor as unknown as { pastes: Map<number, string> }).pastes;
+		assert.ok(pastes.size >= 2, "both pastes must be registered");
+
+		// Stage a replacement document that keeps ONLY the first marker
+		const markerA = editor.getText().match(/\[paste #\d+[^\]]*\]/g)![0]!;
+		editor.setTextAndCursor("kept " + markerA, { line: 0, col: 0 });
+
+		assert.strictEqual(pastes.size, 1, "vanished paste entries must be pruned");
+		assert.ok(editor.getExpandedText().includes(bigA), "surviving marker must still expand");
+		assert.ok(!editor.getExpandedText().includes(bigB));
+	});
+
+	it("keeps the registry intact when every marker survives", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		const big = Array.from({ length: 12 }, (_, i) => `C-line-${i}`).join("\n");
+		editor.handleInput("\x1b[200~" + big + "\x1b[201~");
+		const marker = editor.getText().match(/\[paste #\d+[^\]]*\]/g)![0]!;
+		const pastes = (editor as unknown as { pastes: Map<number, string> }).pastes;
+		const before = pastes.size;
+
+		editor.setTextAndCursor("x " + marker + " y", { line: 0, col: 0 });
+
+		assert.strictEqual(pastes.size, before, "surviving markers keep their entries");
+	});
+});
+
+describe("expanded cursor mapping (X045)", () => {
+	function pasteLarge(editor: Editor): string {
+		const pasted = Array.from({ length: 12 }, (_, i) => `L${i}`).join("\n");
+		editor.handleInput(`\x1b[200~${pasted}\x1b[201~`);
+		return pasted;
+	}
+
+	it("maps a cursor AFTER a marker through the expansion", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		const pasted = pasteLarge(editor);
+		editor.handleInput("x"); // cursor after the marker
+		const expanded = editor.getExpandedText();
+		const cursor = editor.getExpandedCursor();
+		assert.strictEqual(expanded.slice(0, cursor), pasted + "x", "the expanded cursor must point after the expanded content");
+	});
+
+	it("maps a cursor BEFORE any marker unchanged", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.handleInput("a");
+		editor.handleInput("b");
+		const pasted = pasteLarge(editor);
+		// The paste moved the cursor after the marker; stage it back at 2
+		// (before the marker) explicitly.
+		editor.setTextAndCursor(editor.getText(), { line: 0, col: 2 });
+		assert.strictEqual(editor.getExpandedCursor(), 2, "a cursor before every marker keeps its offset");
+		assert.ok(editor.getExpandedText().startsWith("ab" + pasted));
+	});
+
+	it("maps the editor's start-snapped cursor to the expansion start", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		const pasted = pasteLarge(editor);
+		const marker = editor.getText().match(/\[paste #\d+[^\]]*\]/g)![0]!;
+		const markerStart = editor.getText().indexOf(marker);
+		// The EDITOR snaps a cursor staged inside an atomic marker to the
+		// marker's START (snappedFromCursorCol); the mapping must place it
+		// at the same offset in expanded space — right before the content.
+		editor.setTextAndCursor(editor.getText(), { line: 0, col: markerStart + 3 });
+		assert.strictEqual(editor.getCursor().col, markerStart, "precondition: the editor start-snapped the cursor");
+		assert.strictEqual(
+			editor.getExpandedCursor(),
+			markerStart,
+			"a start-snapped cursor maps to the expansion's start",
+		);
+		assert.ok(editor.getExpandedText().startsWith(editor.getText().slice(0, markerStart) + pasted));
+	});
+});
+
+describe("protected autocomplete seam (X044)", () => {
+	it("a subclass can cancel and request autocomplete through the protected seam", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		class SubEditor extends Editor {
+			exposedCancel(): void {
+				this.cancelAutocomplete();
+			}
+			exposedRequest(): void {
+				this.requestAutocomplete({ force: true, explicitTab: true });
+			}
+		}
+		const sub = new SubEditor(createTestTUI(), defaultEditorTheme);
+		// No provider: request must be a safe no-op, cancel must not throw
+		sub.exposedRequest();
+		sub.exposedCancel();
+		assert.strictEqual(sub.isShowingAutocomplete(), false);
+		assert.ok(editor instanceof Editor);
 	});
 });

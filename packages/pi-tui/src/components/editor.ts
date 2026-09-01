@@ -2,6 +2,7 @@ import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocompl
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
+import { PasteBurst } from "../paste-burst.ts";
 import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
 import {
@@ -254,6 +255,16 @@ export interface EditorTheme {
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
+	/**
+	 * Disable the non-bracketed paste-burst fallback (dsh-pi-tui divergence
+	 * X038). Default false (the fallback is ON): terminals that lose
+	 * bracketed-paste markers (iTerm2/tmux) deliver pastes as rapid plain
+	 * character streams, and the trailing Enter must insert a newline
+	 * instead of submitting the half-pasted draft. Exposed as an option so
+	 * tests and integrations that legitimately type fast sequences followed
+	 * by Enter can opt out.
+	 */
+	disablePasteBurst?: boolean;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -378,14 +389,28 @@ export class Editor implements Component, Focusable {
 	// Undo support
 	private undoStack = new UndoStack<EditorSnapshot>();
 
+	// Non-bracketed paste-burst fallback (dsh-pi-tui divergence X038)
+	private pasteBurst = new PasteBurst();
+	private disablePasteBurst = false;
+
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
 	public disableSubmit: boolean = false;
+
+	/**
+	 * Toggle the non-bracketed paste-burst fallback at runtime
+	 * (dsh-pi-tui divergence X038). Default: enabled.
+	 */
+	setDisablePasteBurst(disabled: boolean): void {
+		this.disablePasteBurst = disabled;
+		if (disabled) this.pasteBurst.reset();
+	}
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
 		this.tui = tui;
 		this.theme = theme;
 		this.borderColor = theme.borderColor;
+		this.disablePasteBurst = options.disablePasteBurst ?? false;
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
@@ -728,6 +753,22 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
+		// Non-bracketed paste-burst tracking (dsh-pi-tui divergence X038,
+		// kimi-exact semantics): a rapid stream of SINGLE plain characters
+		// followed by Enter is treated as a lost-marker paste. Enter itself
+		// keeps the burst alive; a single printable character feeds it; any
+		// other input (multi-char chunks, arrows, chords, escapes) breaks
+		// it — multi-char reads are ordinary typed-ahead text or an explicit
+		// whole-line injection, not a terminal dribbling a paste one
+		// character at a time. Disabled integrations skip the tracking
+		// entirely.
+		const isEnterKey = data !== "\n" && kb.matches(data, "tui.editor.submit");
+		const burstChar = decodePrintableKey(data)
+			?? (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) !== 0x7f ? data : undefined);
+		if (!this.disablePasteBurst && !isEnterKey && burstChar === undefined) {
+			this.pasteBurst.reset();
+		}
+
 		// Ctrl+C - let parent handle (exit/clear)
 		if (kb.matches(data, "tui.input.copy")) {
 			return;
@@ -890,8 +931,10 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		// Submit (Enter)
-		if (kb.matches(data, "tui.input.submit")) {
+		// Submit (Enter) — the editor consults its OWN submit binding
+		// (tui.editor.submit, X037): a host remap of the editor's
+		// submission must not change what every plain Input submits on.
+		if (kb.matches(data, "tui.editor.submit")) {
 			if (this.disableSubmit) return;
 
 			// Workaround for terminals without Shift+Enter support:
@@ -900,6 +943,17 @@ export class Editor implements Component, Focusable {
 			if (this.state.cursorCol > 0 && currentLine[this.state.cursorCol - 1] === "\\") {
 				this.handleBackspace();
 				this.addNewLine();
+				return;
+			}
+
+			// Paste-burst fallback (dsh-pi-tui divergence X038): this Enter
+			// directly follows a rapid plain-character stream — a lost-marker
+			// paste's trailing Enter. Insert a newline instead of submitting
+			// the half-pasted draft (and keep the window open: a multi-line
+			// paste ends with several Enter-delimited lines).
+			if (!this.disablePasteBurst && this.pasteBurst.shouldInsertNewlineInsteadOfSubmit(Date.now())) {
+				this.addNewLine();
+				this.pasteBurst.extendWindow(Date.now());
 				return;
 			}
 
@@ -970,12 +1024,14 @@ export class Editor implements Component, Focusable {
 
 		const printable = decodePrintableKey(data);
 		if (printable !== undefined) {
+			if (!this.disablePasteBurst) this.pasteBurst.onPlainChar(Date.now());
 			this.insertCharacter(printable);
 			return;
 		}
 
 		// Regular characters
 		if (data.charCodeAt(0) >= 32) {
+			if (!this.disablePasteBurst) this.pasteBurst.onPlainChar(Date.now());
 			this.insertCharacter(data);
 		}
 	}
@@ -1089,6 +1145,42 @@ export class Editor implements Component, Focusable {
 		return this.expandPasteMarkers(this.state.lines.join("\n"));
 	}
 
+	/**
+	 * The cursor offset mapped into getExpandedText()'s coordinate space
+	 * (dsh-pi-tui divergence X045): every paste marker before the cursor
+	 * grows the offset by its content length; a cursor inside an atomic
+	 * marker snaps to that marker's end first. Pairs with
+	 * getExpandedText() for draft HANDOFFS (seat transfers), where both
+	 * the text and the cursor must survive marker expansion.
+	 */
+	getExpandedCursor(): number {
+		let rawCursor = 0;
+		for (let line = 0; line < this.state.cursorLine; line++) {
+			rawCursor += (this.state.lines[line] ?? "").length + 1;
+		}
+		rawCursor += this.state.cursorCol;
+		let delta = 0;
+		let lineStart = 0;
+		for (const text of this.state.lines) {
+			for (const match of (text ?? "").matchAll(PASTE_MARKER_REGEX)) {
+				const content = this.pastes.get(Number.parseInt(match[1]!, 10));
+				if (content === undefined) continue;
+				const markerStart = lineStart + match.index!;
+				const markerEnd = markerStart + match[0].length;
+				if (rawCursor >= markerEnd) {
+					delta += content.length - match[0].length;
+				} else if (rawCursor > markerStart) {
+					// The cursor sits inside an atomic marker: snap to its
+					// end, then account for the expansion.
+					rawCursor = markerEnd;
+					delta += content.length - match[0].length;
+				}
+			}
+			lineStart += (text ?? "").length + 1;
+		}
+		return rawCursor + delta;
+	}
+
 	getLines(): string[] {
 		return [...this.state.lines];
 	}
@@ -1164,6 +1256,20 @@ export class Editor implements Component, Focusable {
 		this.state.cursorLine = line;
 		this.setCursorCol(col);
 		this.scrollOffset = 0;
+		// The whole document is replaced: PRUNE the paste registry to the
+		// markers that actually survive in the new text. Staged replacement
+		// text (a plugin editor's document) otherwise leaves orphaned
+		// multi-hundred-KB paste entries that can never be expanded again
+		// (dsh-pi-tui divergence X023 tightening — neither "keep all" nor
+		// "clear all": surviving markers keep their content, vanished ones
+		// release theirs).
+		const survivingPasteIds = new Set<number>();
+		for (const match of normalized.matchAll(PASTE_MARKER_REGEX)) {
+			survivingPasteIds.add(Number.parseInt(match[1]!, 10));
+		}
+		for (const pasteId of this.pastes.keys()) {
+			if (!survivingPasteIds.has(pasteId)) this.pastes.delete(pasteId);
+		}
 		this.tui.requestRender();
 	}
 
@@ -1404,7 +1510,7 @@ export class Editor implements Component, Focusable {
 	private shouldSubmitOnBackslashEnter(data: string, kb: ReturnType<typeof getKeybindings>): boolean {
 		if (this.disableSubmit) return false;
 		if (!matchesKey(data, "enter")) return false;
-		const submitKeys = kb.getKeys("tui.input.submit");
+		const submitKeys = kb.getKeys("tui.editor.submit");
 		const hasShiftEnter = submitKeys.includes("shift+enter") || submitKeys.includes("shift+return");
 		if (!hasShiftEnter) return false;
 
@@ -2336,7 +2442,14 @@ export class Editor implements Component, Focusable {
 		this.requestAutocomplete({ force: true, explicitTab });
 	}
 
-	private requestAutocomplete(options: { force: boolean; explicitTab: boolean }): void {
+	/**
+	 * Request an autocomplete round. PROTECTED (dsh-pi-tui divergence X044):
+	 * a subclass (the host's TuiEditor) drives explicit/context-gated
+	 * completion triggers through this seam — a private method forced the
+	 * host into `as unknown as` casts that survive upstream signature
+	 * changes at runtime instead of failing to compile.
+	 */
+	protected requestAutocomplete(options: { force: boolean; explicitTab: boolean }): void {
 		if (!this.autocompleteProvider) return;
 
 		if (options.force) {
@@ -2526,7 +2639,14 @@ export class Editor implements Component, Focusable {
 		this.autocompletePrefix = "";
 	}
 
-	private cancelAutocomplete(): void {
+	/**
+	 * Close any open autocomplete UI and abort the pending request.
+	 * PROTECTED (dsh-pi-tui divergence X044): a subclass (the host's
+	 * TuiEditor) cancels stale dropdowns on mode switches and Esc; same
+	 * rationale as requestAutocomplete — the host must not reach internals
+	 * through casts.
+	 */
+	protected cancelAutocomplete(): void {
 		this.cancelAutocompleteRequest();
 		this.clearAutocompleteUi();
 	}
