@@ -26,6 +26,13 @@ const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 
 /**
+ * A never-terminating ESC prefix (corrupt stream, oversized paste) must not
+ * reslice the buffer once per byte — cap the scan and degrade the ESC to a
+ * plain character instead. (dsh-pi-tui divergence X010.)
+ */
+const MAX_ESCAPE_SEQUENCE_LENGTH = 1024;
+
+/**
  * Check if a string is a complete escape sequence or needs more data
  */
 function isCompleteSequence(data: string): "complete" | "incomplete" | "not-escape" {
@@ -235,6 +242,15 @@ function extractCompleteSequences(buffer: string): { sequences: string[]; remain
 					break;
 				} else if (status === "incomplete") {
 					seqEnd++;
+					// Degrade a pathologically long ESC prefix to a plain
+					// character instead of scanning the rest of the buffer
+					// byte-by-byte (O(n²) on corrupt/oversized input).
+					// (dsh-pi-tui divergence X010.)
+					if (seqEnd > MAX_ESCAPE_SEQUENCE_LENGTH) {
+						sequences.push(ESC);
+						pos += 1;
+						break;
+					}
 				} else {
 					// Should not happen when starting with ESC
 					sequences.push(candidate);

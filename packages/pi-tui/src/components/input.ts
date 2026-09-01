@@ -3,7 +3,7 @@ import { decodeKittyPrintable } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
-import { getGraphemeSegmenter, isWhitespaceChar, sliceByColumn, visibleWidth } from "../utils.ts";
+import { getGraphemeSegmenter, isWhitespaceChar, sliceByColumn, truncateToWidth, visibleWidth } from "../utils.ts";
 import { findWordBackward, findWordForward } from "../word-navigation.ts";
 
 const segmenter = getGraphemeSegmenter();
@@ -381,7 +381,10 @@ export class Input implements Component, Focusable {
 		const availableWidth = width - prompt.length;
 
 		if (availableWidth <= 0) {
-			return [prompt];
+			// Extremely narrow: clip the prompt itself instead of emitting a
+			// line wider than the terminal (the frame's truncation would
+			// otherwise hide the input entirely). (dsh-pi-tui divergence X011.)
+			return [truncateToWidth(prompt, Math.max(1, width), "")];
 		}
 
 		let visibleText = "";

@@ -246,6 +246,10 @@ export class Container implements Component {
 	}
 
 	render(width: number): string[] {
+		// Extremely narrow terminals can report tiny or even non-positive
+		// column counts; never propagate a width below 1 into components.
+		// (dsh-pi-tui divergence X032.)
+		width = Math.max(1, width);
 		const lines: string[] = [];
 		for (const child of this.children) {
 			const childLines = child.render(width);
@@ -915,12 +919,15 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	private consumeOsc11BackgroundResponse(data: string): boolean {
-		if (this.pendingOsc11BackgroundReplies <= 0) {
+		// A reply that arrives after its query timed out must still be
+		// swallowed: it is a terminal protocol response, never editor input.
+		// (dsh-pi-tui divergence X008.)
+		if (!isOsc11BackgroundColorResponse(data)) {
 			return false;
 		}
 
-		if (!isOsc11BackgroundColorResponse(data)) {
-			return false;
+		if (this.pendingOsc11BackgroundReplies <= 0) {
+			return true;
 		}
 
 		const rgb = parseOsc11BackgroundColor(data);
@@ -1240,6 +1247,16 @@ export abstract class TuiBase extends Container implements TUI {
 				query.timer = undefined;
 				query.resolve?.(undefined);
 				query.resolve = undefined;
+				// The reply may still arrive late. Drop the query from the queue so
+				// the pending counter stays in sync: without this, every timed-out
+				// query leaked +1 into pendingOsc11BackgroundReplies, which made
+				// later unrelated input get consumed as replies and shifted the
+				// queue/counter pair out of alignment. (dsh-pi-tui divergence X008.)
+				const index = this.pendingOsc11BackgroundQueries.indexOf(query);
+				if (index !== -1) {
+					this.pendingOsc11BackgroundQueries.splice(index, 1);
+					this.pendingOsc11BackgroundReplies -= 1;
+				}
 			}, timeoutMs);
 			this.pendingOsc11BackgroundQueries.push(query);
 			this.pendingOsc11BackgroundReplies += 1;

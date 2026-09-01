@@ -174,6 +174,12 @@ export class ProcessTerminal implements Terminal {
 		process.stdout.write("\x1b[?2004h");
 
 		// Set up resize handler immediately
+		// A repeated start() must not stack resize listeners: stop() can only
+		// remove the CURRENT reference, so any earlier listener would leak.
+		// (dsh-pi-tui divergence X016.)
+		if (this.resizeHandler) {
+			process.stdout.removeListener("resize", this.resizeHandler);
+		}
 		process.stdout.on("resize", this.resizeHandler);
 
 		// Refresh terminal dimensions - they may be stale after suspend/resume

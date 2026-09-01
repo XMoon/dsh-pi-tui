@@ -110,7 +110,7 @@ export function fuzzyFilter<T>(items: T[], query: string, getText: (item: T) => 
 		return items;
 	}
 
-	const results: { item: T; totalScore: number }[] = [];
+	const results: { item: T; totalScore: number; index: number }[] = [];
 
 	for (const item of items) {
 		const text = getText(item);
@@ -128,10 +128,14 @@ export function fuzzyFilter<T>(items: T[], query: string, getText: (item: T) => 
 		}
 
 		if (allMatch) {
-			results.push({ item, totalScore });
+			results.push({ item, totalScore, index: results.length });
 		}
 	}
 
-	results.sort((a, b) => a.totalScore - b.totalScore);
+	// Scores accumulate fractional parts (i * 0.1), so ties can occur even
+	// between genuinely different matches; the original index tie-break makes
+	// the order deterministic instead of depending on sort engine internals.
+	// (dsh-pi-tui divergence X012.)
+	results.sort((a, b) => a.totalScore - b.totalScore || a.index - b.index);
 	return results.map((r) => r.item);
 }
