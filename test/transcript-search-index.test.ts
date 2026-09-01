@@ -16,7 +16,7 @@ import test from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptSearchText, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
-import { refreshedSearchState, steppedSearchOverlayState } from '../src/index.ts'
+import { refreshedSearchState, steppedSearchOverlayState } from '../src/search-overlay.ts'
 
 /** Build a minimal event envelope for tests. */
 function event<K extends SessionEvent['type']>(
