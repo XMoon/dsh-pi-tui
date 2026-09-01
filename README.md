@@ -182,118 +182,25 @@ TUI 使用 DSH 提供的模型和设置服务。
 
 ### Footer 自定义
 
-状态行是一个**可组合表面**——常见场景无需插件或 shell。
+`/footer` 提供交互式 Footer 编辑器。你可以组合内置状态条目，调整左右位置、顺序、Style、Tone、Prefix/Suffix 和 Importance，也可以创建自己的 Footer 条目。
 
-`/settings` → Status line(或 `dsh-pi-tui` 设置文档中的 `footer` 键)
-选择预设:
+支持四类条目：
 
-| 值 | 含义 |
-|---|---|
-| `default`(旧名 `full`) | 经典两行 Footer(状态 + 统计) |
-| `compact` | 仅状态行(隐藏统计行) |
-| `custom` | 版本化 `footerLayout`(见下) |
-| `command` | 用户配置的命令渲染状态表面(见下) |
+- **Builtin Item**：Model、Context、Token、Tasks、Git branch 等内置状态；
+- **Custom Text**：用户创建的固定文本；
+- **Custom Command Item**：用户创建的动态命令输出，可和其他条目一起排列；
+- **Extension Item**：插件通过 Stable Extension API 提供的 Footer 条目。
 
-前三个值可在 `/settings` 面板选择;`command` **不在面板中**——它只能
-通过 USER 层设置文档(`footer: "command"` + `footerCommand`)启用,
-`/settings` 的 Status line 行只有 `default / compact / custom` 三个选项。
+在窄终端中，支持 compact 的内置条目会先自动缩短；空间仍不足时再按 Importance 隐藏低优先级内容。运行时 compact 不会修改你保存的 Style。
 
-`/footer` 是层级式交互配置器:先选行(Row Selector),再编辑该行的
-条目——`↑/↓` 在整行条目间顺序移动(Left/Right 只是视觉分组),
-`←/→` 左右换侧,`Space` 移除,`A` 打开可搜索的 Add Picker(按
-label / id / 描述过滤,选中项下方显示描述),`M` 进入 Move Mode
-排序,`Enter` 打开 Item Editor(Style 候选以条目的真实渲染作示例;
-Tone 语义色;Advanced 编辑 prefix / suffix / importance 并可一键
-Reset)。预览由真实 Footer 引擎合成,与 contextual help 一起固定在
-面板顶部,任何终端尺寸下都不会随列表滚动消失。Row Selector 页 `S`
-保存(持久化),`Esc` 逐页返回、在首页关闭且不影响当前生效布局。存在未保存改动时，
-`Esc` 会先显示 Save & Exit、Discard & Exit 或 Keep Editing；保存会等待设置写入成功。
-无会话时也可使用。
+`/footer` 的 Custom Command Item 和 `footer: command` 是两种不同能力：前者只是一个可以与 Model、Context 等混排的动态条目；后者把整个 Footer 状态表面交给一个用户命令。
 
-Add Picker 的末尾还可以选择 `+ Create Custom Text`,创建用户自定义的静态文本条目。创建后可编辑文本、默认语义色、显示名称,也可以删除;条目定义只从 USER 层读取并持久化。定义 Tone 与布局中的放置 Tone 分开,条目仍可在 `/footer` 中显示/隐藏、移动和排序。
+完整的 `/footer` 使用方法、Custom Text / Command、YAML 配置、安全模型和排错说明见：
 
-`footerLayout` 是嵌套设置对象(schemaVersion 1,1–2 行,左/右区域,
-分隔符,有限 formatter,语义 tone,prefix/suffix,importance)。
-`/footer` 配置器可交互地构建它;YAML 形状如下:
+- [Footer 自定义完整指南](docs/footer-customization.md)
+- [Extension API（插件作者）](docs/extension-api.md)
 
-```yaml
-footer: custom
-footerLayout:
-  schemaVersion: 1
-  rows:
-    - left:
-        - id: agent-preset
-          format: compact
-        - id: model
-        - id: project
-        - id: context
-          format: full
-        - id: cache-hit
-        - id: token-usage
-          format: io
-        - id: performance
-          format: speed
-        - id: version
-          format: tui
-      right:
-        - id: focus-mode
-      separator:
-        text: " │ "
-        tone: textDim
-```
-
-内置 format 是有限集合,继续使用现有的 `format` 字段(不新增第二套
-style schema):Model 为 `badge` / `plain` / `compact`;Permission preset
-为 `badge` / `plain` / `compact`;Plan state 为 `badge` / `plain`;Working
-directory 为 `short` / `basename` / `full`;Git branch 为 `plain` / `label`;
-Context 为 `bar` / `percent` / `full`;Token usage 为 `io` / `total` /
-`compact`;Cache hit 为 `full` / `compact`;Performance 为 `full` / `speed` /
-`latency`(平均首 token 时间);Turns/steps 为 `both` / `turns` / `steps`;
-Version 保留 `tui` / `dsh` / `both`。省略 `format` 时仍使用各条目的旧默认值。
-
-内置条目 id:`agent-preset`、`model`、`reasoning`、
-`permission-preset`、`sandbox-mode`、`approval-policy`、`plan-state`、
-`focus-mode`、`focused-seat`、`view-scope`、`cwd`、`project`、
-`git-branch`、`run-state`、`queue`、`tasks`、`agents`、`todo`、
-`context`、`cache-hit`、`token-usage`、`performance`、`turns-steps`、
-`stats-line`、`version`、`ext:*`(旧扩展段)。非法的 `footerLayout`
-会警告一次并回退到默认布局——TUI 始终能启动。
-
-`footer: command` 把状态表面交给用户配置的命令(Claude/Kimi 风格):
-当前状态快照以 JSON 序列化到命令的 stdin(schemaVersion 1——不含
-secret、凭据、提示词),命令的 stdout(经过净化:仅保留 SGR 颜色与
-OSC 8 超链接)渲染状态表面。Host 的指令表面(如 Ctrl+C 退出提示)
-始终叠加在最上层。
-
-```yaml
-footer: command
-footerCommand:
-  schemaVersion: 1
-  command: "~/.config/dsh/statusline.sh"
-  timeoutMs: 300        # 默认 300,最大 1000
-  refreshIntervalMs: 1000  # 最小 1000
-  maxRows: 1            # 1..2
-```
-
-**安全:** 只有当命令位于你的设置文档的 USER 层时才会被执行。
-仓库/项目提供的 `footerCommand` 永远不会被执行——命令模式被禁用并
-回退到原生布局。命令按 `refreshIntervalMs` 周期刷新,每次最多输出 2 行;失败(空输出、非零退出、超时)自动回退到原生布局。
-
-### 扩展 Footer 条目
-
-插件可以通过 Stable 扩展 API(`@xmoon76/dsh-pi-tui/extensions`)贡献
-**可配置的 Footer 条目**:在 `chrome.footer.item` 槽位注册一个
-`FooterItemContribution`——包含 label 与纯数据 `segment`(带样式的
-span;Host 会剥离任何终端控制序列,插件永远不能直接给终端上样式)。
-用户可在 `/footer` 中像内置条目一样开关、排序、左右放置。注册前请
-先 feature-detect `slot.chrome.footer.item` 能力(该能力在任何 surface
-存在之前就已声明)。条目的配置身份是规范键 `ext:<owner>/<id>`,其中
-owner 是插件的稳定名称——**跨 HMR 稳定**:引用已卸载插件条目的布局
-保留引用,插件重载后自动恢复。npm scoped 插件名(`@scope/name`)合法:
-其 `/` 在键中按 `encodeURIComponent` 百分号编码(`ext:%40scope%2Fname/<id>`);
-id 本身不得包含 `/`。旧的 `chrome.footer.status` 槽位不变:
-其 segment 聚合为单一的 `ext:*` 条目。完整作者指南:
-[docs/extension-api.md](docs/extension-api.md)。
+`/statusline` 是 `/footer` 的别名。
 
 ## 常用按键
 
