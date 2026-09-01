@@ -649,21 +649,23 @@ async function main(): Promise<void> {
       const afterQueries = folder.searchDiagnosticsForTest()
       row(`search ${turns} turns (${messages.length} logical messages, ${afterQueries.entries} entries)`, `common hits ${folder.search('needle').length} · fullScans ${afterQueries.fullScans - diag.fullScans}`)
       row('  cold hydrate + index build', fmtMs(cold[0]!))
-      // Plan §8.3 counters: the cold full projection count (logical
-      // messages), the one-time normalized rebuild work at hydrate, and the
-      // grouping rebuild count (all MUST stay flat across queries — the
-      // query rows above prove it).
-      row('  cold projection counters (fullProjectionCount / normalizedRebuilds / groupingRebuilds)', `${messages.length} / ${diag.normalizedRefreshes} / ${diag.groupingRebuilds}`)
+      // Plan §8.3 structural counters: the REAL full-projection size
+      // (search entries — one per raw item), the logical-card count, the
+      // one-time normalized rebuild work at hydrate, and the grouping
+      // rebuild count (all MUST stay flat across queries — the query rows
+      // above prove it).
+      row('  cold projection counters (fullProjectionEntries / logicalMessages / normalizedRebuilds / groupingRebuilds)', `${diag.entries} / ${messages.length} / ${diag.normalizedRefreshes} / ${diag.groupingRebuilds}`)
       row(`  query miss ×${SEARCH_SAMPLES}`, fmt(stats(miss)))
       row(`  query common ×${SEARCH_SAMPLES}`, fmt(stats(common)))
       row(`  query rare ×${SEARCH_SAMPLES}`, fmt(stats(rare)))
       row(`  normalized text recomputes during queries`, `${afterQueries.normalizedRefreshes - diag.normalizedRefreshes} (must stay 0)`)
     }
-    // Incremental typing with prefix refinement: n -> ne -> nee -> need ->
-    // needle. EACH sample starts from a FRESH 'n' full scan and refines the
-    // four extensions (a sample that carried the previous sample's needle
-    // candidates would measure a cheaper, unreal typing sequence — the
-    // candidates must always be the previous prefix's).
+    // Incremental typing with prefix refinement, the plan §8.2 sequence:
+    // n -> ne -> nee -> need -> needl -> needle. EACH sample starts from a
+    // FRESH 'n' full scan and refines the five extensions (a sample that
+    // carried the previous sample's final candidates would measure a
+    // cheaper, unreal typing sequence — the candidates must always be the
+    // previous prefix's).
     for (const turns of [1000, 10_000]) {
       const folder = new TranscriptFolder()
       folder.hydrate(buildSearchEvents(turns))
@@ -671,14 +673,14 @@ async function main(): Promise<void> {
       const sequence = timeIt(FAST ? 10 : 20, () => {
         let matches = folder.search('n')
         let revision = folder.searchRevision()
-        for (const partial of ['ne', 'nee', 'need', 'needle']) {
+        for (const partial of ['ne', 'nee', 'need', 'needl', 'needle']) {
           matches = folder.search(partial, { previousQuery: partial.slice(0, -1), previousMatches: matches, revision })
           revision = folder.searchRevision()
         }
       })
       const after = folder.searchDiagnosticsForTest()
       const samples = FAST ? 10 : 20
-      row(`incremental typing ${turns} turns (5 queries ×${samples} samples, refined)`, `${fmt(stats(sequence))} · fullScans ${after.fullScans - diag.fullScans} (${samples} fresh 'n' scans) · refinedScans ${after.refinedScans - diag.refinedScans}`)
+      row(`incremental typing ${turns} turns (6 queries ×${samples} samples, refined)`, `${fmt(stats(sequence))} · fullScans ${after.fullScans - diag.fullScans} (${samples} fresh 'n' scans) · refinedScans ${after.refinedScans - diag.refinedScans}`)
     }
   }
 
