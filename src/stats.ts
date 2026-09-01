@@ -182,6 +182,13 @@ class RecentPerformanceWindow {
     upsertSample(this.throughput, { key, ordinal, wallMs, outputTokens })
   }
 
+  /** Drop the step's throughput sample (an authoritative replacement that
+   * invalidates the sample — e.g. outputTokens corrected to 0 — must not
+   * leave the superseded value in the window). No-op when absent. */
+  removeThroughput(key: string): void {
+    this.throughput = this.throughput.filter(sample => sample.key !== key)
+  }
+
   /** The derived recent metrics (the ONE helper both folds share — plan
    * §6.4). No samples → 0, the established compat behavior. */
   derive(): { firstTokenMsAvg: number; tokensPerSec: number } {
@@ -479,7 +486,10 @@ function settleStep(
  * authoritative usage (assistant/message duplicate). The sample keeps its
  * original completion ordinal — it replaces, never appends; llmMs and
  * TTFB are never re-added; and a message belonging to a route the window
- * has moved past must not resurrect its sample into the current window. */
+ * has moved past must not resurrect its sample into the current window.
+ * A replacement that turns the sample INVALID (outputTokens corrected to
+ * 0) removes it: the superseded tokens must not keep feeding the recent
+ * rate. */
 function replaceRecentThroughput(
   key: string,
   timing: StepTiming,
@@ -492,7 +502,10 @@ function replaceRecentThroughput(
   const completed = timing.completed
   if (start === undefined || completed === undefined) return
   const wallMs = Math.max(0, completed - start)
-  if (usage.outputTokens <= 0 || wallMs <= 0) return
+  if (usage.outputTokens <= 0 || wallMs <= 0) {
+    recent.removeThroughput(key)
+    return
+  }
   recent.upsertThroughput(key, timing.completionOrdinal, wallMs, usage.outputTokens)
 }
 

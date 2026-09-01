@@ -7,23 +7,27 @@
  * @module @xmoon76/dsh-pi-tui/footer/presets
  */
 
-import type { FooterLayoutV1 } from './types.ts'
+import type { FooterItemRef, FooterLayoutV1 } from './types.ts'
 
-/** The default layout's first row: one status row. The view-scope item
- * leads: it renders nothing on the main subject and the viewer identity
- * block while viewing (the legacy viewer footer). */
-const STATUS_ROW_LEFT = [
-  { id: 'view-scope' },
-  { id: 'permission-preset' },
-  { id: 'plan-state' },
-  { id: 'model' },
-  { id: 'tasks' },
-  { id: 'cwd' },
-  { id: 'git-branch' },
-  { id: 'context' },
-  { id: 'turns-steps' },
-  { id: 'ext:*' },
-] as const
+/** Build the status row's placements, in order. The view-scope item leads:
+ * it renders nothing on the main subject and the viewer identity block
+ * while viewing (the legacy viewer footer). A FACTORY (never a shared
+ * object graph): each preset builds its own placement objects, so no
+ * consumer can mutate one preset's refs through another preset's alias. */
+function statusRowPlacements(): FooterItemRef[] {
+  return [
+    { id: 'view-scope' },
+    { id: 'permission-preset' },
+    { id: 'plan-state' },
+    { id: 'model' },
+    { id: 'tasks' },
+    { id: 'cwd' },
+    { id: 'git-branch' },
+    { id: 'context' },
+    { id: 'turns-steps' },
+    { id: 'ext:*' },
+  ]
+}
 
 /** The default layout's second row: semantic placements instead of the
  * legacy composite `stats-line`. Left group = session cumulative usage
@@ -38,7 +42,7 @@ export const DEFAULT_FOOTER_LAYOUT: FooterLayoutV1 = {
   schemaVersion: 1,
   rows: [
     {
-      left: [...STATUS_ROW_LEFT],
+      left: statusRowPlacements(),
       right: [],
     },
     {
@@ -59,7 +63,7 @@ export const COMPACT_FOOTER_LAYOUT: FooterLayoutV1 = {
   schemaVersion: 1,
   rows: [
     {
-      left: [...STATUS_ROW_LEFT],
+      left: statusRowPlacements(),
       right: [],
     },
   ],
