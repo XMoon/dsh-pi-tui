@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     have no consumer and reverted to upstream; X025 now records the
     native-module self-reference following the package rename
     (`@xmoon76/pi-tui`).
+  - Package `author` metadata switched from the kimi-era leftover
+    `Moonshot AI` to the pinned upstream's `Mario Zechner` (the LICENSE
+    already carried the correct upstream copyright).
 - **Verification**: fork suite 978 tests, bundle suite, docs,
   pi-surface-compat, typecheck, and build all green; the divergence
   ledger was re-verified entry by entry against the implementation.

@@ -29,6 +29,8 @@
   - X013（`setIndicator` 不复活已停止的 Loader）经核实无任何消费者，回退
     upstream 行为；X025 补记 native 模块自引用随包重命名
     （`@xmoon76/pi-tui`）。
+  - 包元数据 `author` 从 kimi 时代残留的 `Moonshot AI` 改为 pinned
+    upstream 的 `Mario Zechner`（LICENSE 本就已是正确的 upstream 版权）。
 - **验证**：fork 套件 978 项、bundle 套件、docs、pi-surface-compat、
   typecheck、build 全绿；divergence ledger 与实现逐条核对一致。
 
