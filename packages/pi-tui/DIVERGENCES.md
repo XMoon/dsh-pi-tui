@@ -76,7 +76,8 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
   ordinary multi-line text. Upstream 0.84.4 stores every paste.
 - Consumer: host editor paste path (multi-MB pastes must not multiply memory).
 - Upstream status: absent.
-- Tests: PasteBurst/undo describes in `test/editor.test.ts`.
+- Tests: "expands pastes beyond the storage cap inline instead of
+  markers" and the undo describes in `test/editor.test.ts`.
 - Migration action: re-apply.
 
 ### X004B — Editor shallow undo snapshots (was #4b, ledger corrected)
@@ -498,8 +499,7 @@ re-vendor:
 - Negative-width `repeat()` guards (text/truncated-text/markdown/editor/
   layout) — upstream baseline retained; X032's clamp protects the entry
   point.
-- Overwide-line truncation (main screen) — upstream 0.84.4 throws with a
-  crash log; the host's components truncate with `truncateToWidth`.
+
 
 ## Acceptance after syncing from upstream
 
@@ -528,13 +528,33 @@ re-vendor:
   truncate, not throw) plus the bundle suite's narrow-width renders.
 - Migration action: re-applied (truncation pass after applyLineResets).
 
+
+### X034 — wordWrapLine single-grapheme overwide guard (kimi-code, host-dependent)
+
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Files: `src/components/editor.ts`
+- Reason: a single atomic grapheme wider than maxWidth (a CJK character at
+  width 1, a ZWJ family emoji at narrow widths) cannot be split further;
+  re-wrapping it recurses forever (RangeError: Maximum call stack size
+  exceeded). The guard keeps the grapheme as its own chunk, letting it
+  overflow by one column — the main screen's X033 truncation then clips it.
+  (The editor's narrow-width rendering at 1-8 columns depends on it.)
+  Kimi-code provenance; upstream 0.84.4 recurses.
+- Consumer: host editor on narrow terminals (40-column minimum, shrunk
+  windows) with CJK/emoji drafts.
+- Upstream status: absent (upstream recurses).
+- Tests: "wordWrapLine narrow width" and "Editor narrow width rendering"
+  describes in `test/editor.test.ts` (wide grapheme at maxWidth 1, CJK
+  text at widths 1-8, ZWJ family emoji, TUI at 5 columns).
+- Migration action: re-applied (sub-grapheme check before the recursion).
+
 ## Final status after the v0.84.4 re-vendor (2026-02)
 
 - `KEEP` (re-applied on the Earendil v0.84.4 base): X001, X002, X003,
   X004A, X004B, X005, X006, X007, X008, X009, X010, X011, X012, X013,
   X014 (measurement cache only — the scrollbar thumb clamp is already in
   upstream 0.84.4), X016, X018, X019, X020, X021, X022, X023, X024, X027,
-  X028, X029, X030, X031, X032, X033.
+  X028, X029, X030, X031, X032, X033, X034.
 - `ABSORBED_UPSTREAM`: X015 (dead `_lastEventType` — upstream baseline
   restored), X017 (regular mode owns no mouse — upstream baseline),
   X026 (copySelection/copyOnSelect — upstream 0.84.4 native).
