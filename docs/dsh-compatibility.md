@@ -111,7 +111,15 @@ removed with the temporary validation workspace and must never be committed to
 - Gate B separately validates the published `pi2dsh` consumer metadata against
   the exact manifest DSH version and candidate TUI version. An unsupported peer
   declaration is an `ECOSYSTEM_CONTRACT_BLOCKER`, not a forced install or a
-  runtime-smoke pass.
+  runtime-smoke pass. **Temporarily disabled in CI (2026-09-02):** the
+  published `pi2dsh@0.24.0` bridge is runtime-incompatible with the
+  `0.1.2-alpha.4` baseline — its `^0.1.2-alpha.1` peers satisfy alpha.4
+  semver-wise (so the metadata preflight passes), but the bridge predates the
+  alpha.4 Session/subagent APIs and fails the real runtime smoke. The gate is
+  switched off (with a documented re-enable procedure in `.github/workflows/ci.yml`)
+  until a `pi2dsh` release declares and runs on DSH `>= 0.1.2-alpha.4`; the
+  official-preset gate above keeps the real preset coverage meanwhile. The
+  local driver (`pnpm smoke:pi2dsh`) remains available for manual runs.
 - The runtime-boundary smoke intentionally runs the 0.4 candidate against DSH
   0.1.1 and requires a nonzero unsupported-runtime outcome. Friendly startup
   guidance is asserted when emitted, but raw import failure is accepted because

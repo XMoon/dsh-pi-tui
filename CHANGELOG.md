@@ -77,6 +77,49 @@
   不动上一代；绝不触碰其他 worktree 的目录，也不做 `/tmp/dsh-*` 宽泛
   清扫。官方 `dsh-spill-*` / `dsh-subprocess-*` 的 retention 语义保持
   不变。
+### DSH 兼容基线升级到 0.1.2-alpha.4
+
+- **最低兼容 DSH 从 `0.1.2-alpha.2` 提升到 `0.1.2-alpha.4`**（peer 仍然只有
+  下限、无上限；开发/测试依赖与 Source Mode pin 同步到
+  `dsh-v0.1.2-alpha.4`，lockfile 重建）。低于 alpha.4 的运行时会收到启动
+  提示：alpha.2/alpha.3 回退到上一条 0.4 预发布线
+  （`@xmoon76/dsh-pi-tui@0.4.0-alpha.1`），更旧的运行时回退到 0.3。
+- **`Session.events` 迁移到 alpha.4 读取面**：公开 `events` getter 已被上游
+  移除，全部按用途迁移——计数热路径用 `session.seq`，单个事件用
+  `eventAt(SessionSeq)`，真正的全量 fold（transcript 导出、rewind/fork 种子、
+  冷启动水合）才用 `snapshotEvents()`；新增
+  `scripts/check-no-session-events.mjs` 静态门禁防止回退。
+- **权限读取改为官方 Session 形态**：`permissionPresets.current(session)`、
+  approval 读取改用官方 `approval.overrideOf(session)`（alpha.4 移除了
+  `effectiveApprovalPolicy` / `effectiveSandboxMode` 事件折叠导出），sandbox
+  fold 探测 shim 一并清理。
+- **Subagent Viewer 的人类输入改走官方 `subagents.prompt()`**：
+  `SubagentPort.followup` 更名为 `prompt`，Direct 适配层携带调用方生成的
+  `requestId`（每次提交一个 UUID），错误分类改用官方 RemoteError 词表
+  （`subagent/parent-unavailable` / `subagent/not-resumable` /
+  `subagent/unauthorized` / `subagent/delivery-unavailable` /
+  `gateway/cancelled`）；旧 `followup()` 调用、手工 source 构造和本地父权限
+  shim 全部删除，Viewer 的 stale-settle / draft 恢复守卫与 `@file` 语法
+  canonicalization 保持不变。Agent/model 发送消息的 Steer 路径
+  （`subagents.sendMessage`）与人类输入严格区分。
+- **官方 Subagent 模型选择设置面**：`/settings` 新增
+  “Subagent model selection” 开关与 “Subagent allowed models” 路由选择器，
+  直接读写官方 `subagent-model-selection` 设置 section（默认关闭；开启需要
+  至少一条路由；按新 Session 组合采样，不改写运行中的 Session）。不再另建
+  一套 TUI 自研 subagent 模型路由设置；外部 legacy 工具
+  （如 `subagent_route`）在 DSH >= 0.1.2-alpha.4 上优先使用官方能力。
+- **fork/rewind 创建对齐 alpha.4 seeded-session 契约**：头部 `seedLength`
+  字段已被上游拒绝，改为 `meta.isSeeded: true` + `inheritedEventCount`。
+- **版本门禁更新**：runtime-boundary 冒烟按 alpha.4 拒绝边界重写
+  （0.1.1-rc.2 与 alpha.2/alpha.3 两条回退路径分别断言），release-notes
+  预发布指引、pi2dsh 兼容清单同步 alpha.4。
+- **pi2dsh 生态门禁临时关闭**：已发布的 `pi2dsh@0.24.0` 桥与
+  `0.1.2-alpha.4` 基线运行时不兼容（其 `^0.1.2-alpha.1` peers 在 semver 上
+  覆盖 alpha.4，元数据预检会通过，但桥本身基于 alpha.1 时代的
+  Session/subagent API，真实运行时冒烟会失败）。CI 的
+  `ecosystem-compat` 任务已带恢复说明关闭，官方 preset 组装任务继续提供
+  真实 preset 覆盖；等 pi2dsh 发布声明并运行于 DSH `>= 0.1.2-alpha.4` 的
+  版本后按说明恢复。
 
 ### Vendored fork 重定基到 Earendil v0.84.4
 

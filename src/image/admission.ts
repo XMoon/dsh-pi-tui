@@ -7,7 +7,7 @@
  * service and maps the returned refs back onto ordered content blocks.
  * Structural types keep this module testable without the dsh runtime
  * (AGENTS.md decision 7); `ImageMediaType`/`ImageAttachmentRef`/`ContentBlock`
- * shapes are verified against `@deepseek-ai/dsh-attachment` 0.1.2-alpha.2.
+ * shapes are verified against `@deepseek-ai/dsh-attachment` 0.1.2-alpha.4.
  * @module @xmoon76/dsh-pi-tui/image/admission
  */
 

@@ -173,9 +173,10 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
   client-local UI over Host-owned settings** (the dsh-pi-tui settings
   document via the settings service).
 
-## Alpha.2 official seam mapping (DSH 0.1.2-alpha.2)
+## Official seam mapping (DSH 0.1.2-alpha.4) — history, skills, errors, diagnostics
 
-The M2/M3 Remote backend maps to the official alpha.2 seams below — it must
+The M2/M3 Remote backend maps to the official seams below (first shipped in
+the alpha.2 line and still current in alpha.4) — it must
 not copy Direct Host implementation or invent parallel protocols. The Direct
 backend already consumes the same seams in-process (the session-preset
 adapter reads cold sessions through `sessionQuery.observeSession()` and the
@@ -202,11 +203,45 @@ not reimplementation.
   only. It owns none of: history authority, transport cursor, gap repair
   protocol, projection fold, durability, or reconnect generation.
 
-## Alpha.3 official seam mapping (DSH 0.1.2-alpha.3)
+## Official seam mapping (DSH 0.1.2-alpha.4) — deep history, images, connection
 
-The M2/M3 Remote backend should additionally map to the alpha.3 seams below.
-The Direct backend keeps its current implementation; these are recorded as
-the official Remote opportunities, not as Direct-mode changes.
+The M2/M3 Remote backend should additionally map to the official seams below
+(most first shipped in the alpha.3/alpha.4 line). The Direct backend keeps
+its current implementation; these are recorded as the official Remote
+opportunities, not as Direct-mode changes.
+
+### Session log access (alpha.4)
+
+`Session.events` was REMOVED as a public getter in alpha.4. The official
+reads are `session.seq` (the next event's offset — the count without
+materializing the log), `session.eventAt(SessionSeq)` (one exact event), and
+`session.snapshotEvents(from?, toExclusive?)` (a cached immutable range
+snapshot; the TUI uses it only where a complete raw fold is genuinely
+needed — transcript export, rewind/fork seeds, cold hydration — never for a
+count or a last-event peek). A future Remote adapter maps these onto the
+official client session contract; nothing in the TUI may regress to a live
+`events` array (`scripts/check-no-session-events.mjs` gates `src/`).
+
+### Subagent human prompt (alpha.4)
+
+The interactive viewer's human prompt maps 1:1 onto the official
+`subagent.prompt` remote:
+
+```text
+viewer Enter
+  ↓ SubagentPort.prompt (client-semantic DTO)
+  ↓ Direct: ctx.subagents.prompt({ requestId, parentSessionId,
+      childSessionId, mode: 'continuable', content, clientTimeZone? })
+  ↓ child inbox — a distinct FIFO turn, user provenance
+```
+
+`requestId` is caller-minted (one UUID per human submit, before the call);
+failures classify through the official RemoteError vocabulary
+(`subagent/parent-unavailable`, `subagent/not-resumable`,
+`subagent/unauthorized`, `subagent/delivery-unavailable`,
+`gateway/cancelled`, …). Agent/model-authored messages are a DIFFERENT
+contract (`ctx.subagents.sendMessage` → Steer) and must never back the
+viewer's editor.
 
 ### Deep-history navigation
 
@@ -253,8 +288,9 @@ projection folding.
 
 ### Remote image submission
 
-A future Remote Adapter should submit images through the alpha.3 official
-`PromptContentPart[]` path:
+A future Remote Adapter should submit images through the official
+`PromptContentPart[]` path (the same part vocabulary alpha.4's subagent
+prompt accepts):
 
 ```text
 PromptContentPart[]
@@ -281,7 +317,8 @@ M2/M3 must not implement their own:
 - slow Host ready timeout,
 - reconnect-on-slow policy.
 
-These belong to the official DSH Connection. alpha.3 already improved it:
+These belong to the official DSH Connection. The alpha line already
+improved it:
 
 - heartbeat allows a short missed pong (a socket is terminated only after
   `MAX_MISSED_HEARTBEATS` consecutive misses, not on the first),

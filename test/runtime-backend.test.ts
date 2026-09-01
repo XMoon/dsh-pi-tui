@@ -28,7 +28,7 @@ test('the capability vocabulary covers the migration domains', () => {
 
 test('the Direct backend is the current production surface and serves EXACTLY the implemented capabilities', () => {
   const subagent: SubagentPort = {
-    followup: async () => ({ kind: 'rejected', reason: { kind: 'unavailable' } }),
+    prompt: async () => ({ kind: 'rejected', reason: { kind: 'unavailable' } }),
   }
   const sessionReader = {
     list: async () => [],
@@ -122,7 +122,13 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       presetNames: () => [],
       defaultPreset: () => undefined,
       setDefaultPreset: async () => {},
+      approvalOverrideOf: () => undefined,
       applyPermissionPreset: async () => ({ kind: 'applied' as const }),
+    },
+    subagentModelSelection: {
+      available: () => false,
+      get: () => ({ enabled: false, allowedModels: [] }),
+      set: async () => {},
     },
     presetDefault: {
       available: () => true,

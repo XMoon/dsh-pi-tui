@@ -18,7 +18,7 @@ dsh --profile pi-tui
 
 ## DSH compatibility and source validation
 
-The published package declares the lower-bound-only DSH peer contract `>=0.1.2-alpha.2`. Source validation does not change that contract or vendor DSH into this repository.
+The published package declares the lower-bound-only DSH peer contract `>=0.1.2-alpha.4`. Source validation does not change that contract or vendor DSH into this repository.
 
 When the target DSH version is not yet available from npm, validate against the official checkout pinned by commit SHA:
 
@@ -115,9 +115,16 @@ The browser distinguishes:
 
 Completed one-shot Subagents remain available for persisted Transcript inspection.
 
-A direct `continuable` Child can be opened in an interactive viewer and sent follow-up messages directly. The Child has its own Transcript, Draft, and runtime state, without modifying the main Session input.
+A direct `continuable` Child can be opened in an interactive viewer and sent follow-up messages directly (through DSH's official `subagents.prompt()` human channel — queued in order as the Child's own next turn, with user provenance). The Child has its own Transcript, Draft, and runtime state, without modifying the main Session input.
 
 Deeper nested Subagents are read-only by default.
+
+The official subagent model selection (the DSH `subagent-model-selection`
+setting) can be toggled and its allowlist maintained in `/settings`: once
+enabled, a NEW session's official `subagent` tool may pick the child
+provider/model per call (bounded by the allowlist). The setting is sampled at
+session composition and never rewrites the tools of an already-running
+session.
 
 ### Shell
 
@@ -312,18 +319,20 @@ dsh-pi-tui:
 
 | TUI package line | Matching DSH line | Notes |
 |---|---|---|
-| `0.4.0-alpha.1` (`@next`) | `>=0.1.2-alpha.2` | Current prerelease; each release validates its concrete DSH family |
+| `0.4.x-alpha` (`@next`) | `>=0.1.2-alpha.4` | Current prerelease; each release validates its concrete DSH family |
+| `0.4.0-alpha.1` (published) | `>=0.1.2-alpha.2` | Previous 0.4 prerelease; its releases validated the alpha.2/alpha.3 family |
 | `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
 
-Do not mix the two lines: DSH 0.1.1 is outside the 0.4 peer window and the
+Do not mix the lines: DSH 0.1.1 is outside the 0.4 peer window and the
 normal incompatible-runtime boundary will fail. The startup row prints upgrade
 and rollback guidance when concurrent Loader ordering allows it, but that
 friendly notice is best-effort rather than a startup-order guarantee. If you
-keep DSH 0.1.1, use the 0.3 TUI line. For the current `0.4.0-alpha.1`, install
-DSH first and then add the TUI to a profile:
+keep DSH 0.1.1, use the 0.3 TUI line; if you keep the alpha.2/alpha.3
+baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`. For the current 0.4
+prerelease, install DSH first and then add the TUI to a profile:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.3
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.4
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
@@ -336,7 +345,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 dsh --profile pi-tui
 ```
 
-The declared 0.4 support range is `>=0.1.2-alpha.2`; each release validates
+The current 0.4 line declares `>=0.1.2-alpha.4`; each release validates
 its concrete DSH family. Running only `npm install -g @xmoon76/dsh-pi-tui` does
 not install the plugin into a DSH profile; the `dsh plugin` command is still
 required.

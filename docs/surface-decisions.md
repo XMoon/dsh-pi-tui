@@ -142,9 +142,11 @@ The child viewer's interactivity is keyed SOLELY to the catalog mode carried
 through the whole chain (`SubagentListEntry.mode` → `TaskBrowserRow.mode` →
 `SubagentViewerTarget.mode`), never guessed from running/inactive state, and
 never re-derived inside the viewer. A `continuable` viewer's editor is LIVE:
-Enter delivers the text as the child's NEXT turn through
-`ctx.subagents.followup(exactLiveParent, childId, …)` — FIFO, no interrupt,
-no steer. Decisions a future change must not silently reverse:
+Enter delivers the text as the child's NEXT distinct FIFO turn through the
+OFFICIAL `ctx.subagents.prompt({ requestId, parentSessionId, childSessionId,
+mode: 'continuable', content }, signal)` control API (DSH 0.1.2-alpha.4) —
+user provenance, no interrupt, no steer; parent authority is validated by
+the Host itself. Decisions a future change must not silently reverse:
 
 - **The viewer editor is a PLAIN text editor.** Everything typed — including
   lines that start with `/` — is delivered to the child as text; slash
@@ -155,11 +157,17 @@ no steer. Decisions a future change must not silently reverse:
   Ctrl+V image intake) are consumed by the host BEFORE the ladder reaches
   the editor, so the viewer can never act on the parent session.
 - **The write path is exactly one**: the runner's `onSubagentSubmit` →
-  `submitSubagentFollowup` (src/subagent-viewer-submit.ts) → the exact live
-  direct parent check → `ctx.subagents.followup`. Never
-  `ctx.agents.get(childId).followup(...)` (bypasses the continuation
-  manager / cold resume / direct-parent authority), never the parent's
-  submit/steer/queue path.
+  `submitSubagentPrompt` (src/subagent-viewer-submit.ts) → the official
+  `ctx.subagents.prompt`. Never `ctx.subagents.sendMessage(...)` (that is
+  the Agent-authored Steer path — a human prompt must queue as its own
+  turn), never `ctx.agents.get(childId).followup(...)` (bypasses the
+  continuation manager / cold resume / direct-parent authority), never the
+  parent's submit/steer/queue path. The caller-minted `requestId` (one
+  UUID per human submit) is persisted on the accepted message; failures
+  classify through the official RemoteError vocabulary
+  (`subagent/parent-unavailable`, `subagent/not-resumable`,
+  `subagent/unauthorized`, `subagent/delivery-unavailable`,
+  `gateway/cancelled`, …).
 - **Viewer submissions never enter the shared editor history.** An ↑ recall
   in the MAIN editor must not resend a child-scoped follow-up to the
   parent. The fork editor's own per-editor recall is untouched.

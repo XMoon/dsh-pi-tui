@@ -40,7 +40,7 @@ test('runtime boundary rejects the previous alpha.1 floor with the same advisory
 
 test('runtime boundary rejects the alpha.2/alpha.3 baseline with the 0.4-alpha fallback', () => {
   const output = [
-    'dsh-pi-tui v0.4.0-alpha.2 requires DeepSeek Harness 0.1.2-alpha.4 or later,',
+    'dsh-pi-tui v0.4.0-alpha.1 requires DeepSeek Harness 0.1.2-alpha.4 or later,',
     'but this installation is running dsh 0.1.2-alpha.3.',
     'npm install -g @deepseek-ai/dsh@0.1.2-alpha.4',
     'npm install -g @xmoon76/dsh-pi-tui@0.4.0-alpha.1',

@@ -107,7 +107,7 @@ export interface HarnessCompatEntry {
   max?: string
   /** The bundle release line that first required this constraint. */
   since: string
-  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.2-alpha.2 or later`. */
+  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.2-alpha.4 or later`. */
   requires: string
   /** The target DSH version to install when the current runtime is too old. */
   upgradeDsh?: string
