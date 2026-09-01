@@ -69,8 +69,20 @@ recreate them as TUI-specific DTOs.
 
 ### Session query and raw export ownership
 
-Session list/title/search/filter semantics belong to the public DSH
-`sessionQuery` service. The Direct adapter may use its provider-independent
+Session list/projection/search/filter semantics belong to the public DSH
+`sessionQuery` + projection services. The picker's `title` and `agentPreset`
+values are Host-owned DSH projections read through ONE semantic port method,
+`SessionReader.projectionBatch()`: live rows via `sessionProjections.snapshot()`,
+cold rows via the zero-I/O `sessionProjectionCache.cachedSnapshot()` checkpoint
+keyed by the listing's header identity, and at most ONE bounded
+`sessionQuery.observeSession()` per cold cache miss, whose projection cut
+resolves BOTH fields together. A future Remote adapter maps this port method
+onto the official DSH client projection contract — it must not copy the Direct
+adapter's cache/observation ladder, and the TUI must never keep a second
+(private) persistence of session derived state (the retired
+`$DSH_HOME/cache/pi-tui-session-titles.json` title cache was exactly that).
+
+The Direct adapter may use the query engine's provider-independent
 `filterEvents` seam when the shipped SQLite full-text provider is disabled
 (`openAt: never`), and may retain a narrowly scoped raw-persistence fallback
 only when that semantic capability is absent or explicitly disabled. `readRaw()`

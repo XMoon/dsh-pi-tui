@@ -34,6 +34,25 @@
 - **验证**：fork 套件 978 项、bundle 套件、docs、pi-surface-compat、
   typecheck、build 全绿；divergence ledger 与实现逐条核对一致。
 
+### Session picker projection 对齐（性能）
+
+- **`/sessions` / `/resume` 改为输入优先（input-first）。** picker overlay
+  立即在 `Loading sessions…` 占位行上打开并接管输入（Esc / 方向键 / 搜索 /
+  Tab），Host 列表在真正的事件循环 yield 之后才开跑；列表失败时占位行换成
+  拒绝文案。loading 状态下按 Enter 绝不会触发 resume。
+- **每个 Session 只有一次合并投影读取。** 标题与 agent-preset 富化统一为
+  `SessionReader.projectionBatch()`：live 行读内存中的 DSH 投影快照，冷行读
+  持久 projection-cache checkpoint（零日志读取），只有真正的 cache miss 才
+  执行一次有并发上限的 `observeSession()`，其投影切面同时给出两个字段。
+  旧的两条独立路径（preset 重放 + 每个 Session 的全日志 title fold）和已退役
+  的 `readTitleSnapshots()` 批量读取全部删除。
+- **退役 TUI 私有 title cache。** `$DSH_HOME/cache/pi-tui-session-titles.json`
+  及其按日志 size/mtime 判失效的规则一并删除 —— session 派生状态归 DSH 所有，
+  只来自官方 projection 语义。
+- **可取消、有栅栏的渐进富化。** 渐进批次（先 20 行、其后每 50 行）在批次间
+  yield 事件循环；关闭 picker、退出程序或重新打开都会中止扫描，已关闭/被替换
+  picker 的迟到结果直接丢弃，不会刷新过期 UI。
+
 ## [0.4.0-alpha.1] - 2026-09-01
 
 ### 安装与版本对应

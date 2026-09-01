@@ -43,6 +43,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pi-surface-compat, typecheck, and build all green; the divergence
   ledger was re-verified entry by entry against the implementation.
 
+### Session picker projection alignment (performance)
+
+- **`/sessions` / `/resume` open input-first.** The picker overlay opens
+  immediately on a `Loading sessions…` row and owns the input (Esc, arrows,
+  search, Tab) while the Host listing runs behind a real event-loop yield;
+  a listing failure swaps the row for the refusal text. Enter while loading
+  can never resume.
+- **One combined projection read per session.** Title and agent-preset
+  enrichment are unified into `SessionReader.projectionBatch()`: live rows
+  read the in-memory DSH projection snapshot, cold rows read the durable
+  projection-cache checkpoint (zero log reads), and only genuine cache
+  misses perform one bounded `observeSession()` whose cut resolves BOTH
+  fields together. The old two-path fan-out (a preset replay plus an
+  independent full-log title fold per session) and the retired
+  `readTitleSnapshots()` batch are gone.
+- **The TUI-private title cache is retired.** `$DSH_HOME/cache/pi-tui-session-titles.json`
+  and its log size/mtime staleness rules are deleted — session derived state
+  is DSH-owned and comes exclusively from the official projection semantics.
+- **Cancellable, fenced enrichment.** Progressive batches (20 then 50 rows)
+  yield the event loop between chunks; closing the picker, quitting, or
+  re-opening aborts the scan, and late results from a closed or superseded
+  picker are dropped instead of refreshing stale UI.
+
 ## [0.4.0-alpha.1] - 2026-09-01
 
 ### Installation and version pairing
