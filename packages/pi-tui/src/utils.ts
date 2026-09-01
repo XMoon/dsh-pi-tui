@@ -47,8 +47,12 @@ const terminalSpacingMarkRegex =
 	/^(?:[\p{Spacing_Mark}--[\u1734\u302E\u302F]]|[\u065F\u0F7F\u102B\u102C\u1031\u1033-\u1035\u1038\u103A-\u103E])+$/v;
 const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
 
-// Cache for non-ASCII strings
-const WIDTH_CACHE_SIZE = 512;
+// Cache for non-ASCII strings. 4096 (dsh-pi-tui divergence X039, kimi-era
+// value): the host renders CJK-heavy transcripts where a 512-entry FIFO
+// thrashes on width changes / theme invalidations / cold renders that
+// re-measure many non-ASCII lines; the entry cost is a short string key.
+// (Upstream 0.84.4 uses 512.)
+const WIDTH_CACHE_SIZE = 4096;
 const widthCache = new Map<string, number>();
 
 export const cjkBreakRegex =

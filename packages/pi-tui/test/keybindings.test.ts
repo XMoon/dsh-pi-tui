@@ -79,3 +79,17 @@ describe("KeybindingsManager", () => {
 		assert.deepStrictEqual(keybindings.getKeys("tui.editor.cursorLeft"), ["left", "ctrl+b"]);
 	});
 });
+
+describe("editor submit binding split (X037)", () => {
+	it("tui.editor.submit defaults to Enter, independent of tui.input.submit", () => {
+		const kb = new KeybindingsManager(TUI_KEYBINDINGS);
+		assert.deepStrictEqual(kb.getKeys("tui.editor.submit"), ["enter"]);
+		assert.deepStrictEqual(kb.getKeys("tui.input.submit"), ["enter"]);
+
+		kb.setUserBindings({ "tui.input.submit": "ctrl+x" });
+		assert.deepStrictEqual(kb.getKeys("tui.editor.submit"), ["enter"], "input remap must not move the editor binding");
+
+		kb.setUserBindings({ "tui.editor.submit": ["ctrl+enter"] });
+		assert.deepStrictEqual(kb.getKeys("tui.editor.submit"), ["ctrl+enter"]);
+	});
+});
