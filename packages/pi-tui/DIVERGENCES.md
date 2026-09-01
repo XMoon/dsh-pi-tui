@@ -232,16 +232,21 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - Tests: ordering describes in `test/fuzzy.test.ts`.
 - Migration action: re-apply.
 
-### X013 — `setIndicator` never revives a stopped loader (was #13)
+### X013 — `setIndicator` never revives a stopped loader (was #13, REMOVED as unconsumed)
 
-- Category: `BUGFIX_MISSING_UPSTREAM`
+- Category: `REMOVED_UNUSED`
 - Files: `src/components/loader.ts`
-- Reason: setting the indicator on a stopped loader leaves it stopped.
-  Upstream 0.84.4 unconditionally restarts the animation.
-- Consumer: host busy indicator lifecycle.
-- Upstream status: absent.
-- Tests: none dedicated.
-- Migration action: re-apply.
+- Reason: the old divergence made `setIndicator` leave a stopped loader
+  stopped (upstream unconditionally restarts the animation). The 2026-09
+  relocation audit verified there is NO consumer: the host's busy
+  indicator is the host-side `WorkingIndicator` (src/), the host never
+  imports `Loader`/`CancellableLoader`/`setIndicator`, and no fork
+  internal constructs a `Loader`. The earlier ledger row claiming
+  "Consumer: host busy indicator lifecycle" was false.
+- Consumer: none (verified).
+- Upstream status: upstream behavior retained (setIndicator restarts).
+- Tests: none (nothing to guard).
+- Migration action: NOT re-applied; upstream baseline restored (2026-09).
 
 ### X014 — Measured line widths cached (was #14, scope corrected)
 
@@ -624,6 +629,47 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - Migration action: re-apply (passthrough AFTER the FOCUS_OUT selection
   cleanup; keep the cleanup).
 
+## Host-side relocation audit (2026-09)
+
+Which divergences could move into the host bundle (`src/`) instead of
+patching the vendored package, to ease future re-vendors. Verified
+per entry against actual consumers; re-run this audit only when a
+consumer actually changes.
+
+- DROPPED as unconsumed: X013 (see its entry).
+- Movable in principle, deliberately kept: X030 (a host-side copy of the
+  pure `decodePrintableKey` would zero the `index.ts` delta, but the
+  1-line re-export is the cheaper re-apply; the package `exports` map
+  only exposes the root entry, so the host cannot deep-import).
+- Movable in principle, deferred: X001/X002 (a host-owned searchable
+  picker component could replace the extended fork SelectList — the host
+  already wraps it heavily and upstream natively provides the
+  `truncatePrimary` seam). Deferred until upstream's direction is clear:
+  upstream has absorbed host-seam features before (X026
+  copySelection/copyOnSelect), and a host-owned picker permanently forks
+  the picker UX. Revisit if upstream rejects search/groups.
+- NOT movable (no host injection point — verified): X004A/X004B/X005/X020/
+  X022/X023 (editor + undo internals; no public API reaches them),
+  X006/X012/X027 (consumed inside fork-exported components/providers —
+  the host's `MentionProvider` wraps the fork's
+  `CombinedAutocompleteProvider`, whose fd classification and fuzzy
+  ordering live inside it), X007/X019 (fork-wide dispose contract;
+  ScrollView/Loader timers are unreachable host-side), X008/X010/X016/X018
+  (terminal/stdin and alt-screen mouse-routing internals), X009/X033/X035 (the processing happens
+  between component render and the terminal write), X011/X014/X021/X031/
+  X032/X034 (component/layout/wrap internals), X024 (the native
+  `copySelection` callback receives only the final text — the host
+  cannot tell a column-0 selection from a mid-line one without a fork
+  change at least as large), X036 (the viewport input listener registers
+  in the constructor, before any host listener, so the fork must let the
+  events through), X028/X029 (they ARE host seams; the plumbing must
+  exist fork-side).
+- Long-term upgrade lever: upstream the generic improvements (X005, X006,
+  X007, X008, X012, X014 cache, X016, X021, X033, X035 — all valuable to
+  any pi-tui consumer), then downgrade entries to ABSORBED_UPSTREAM as
+  they land.
+
+
 ## Removed kimi-only code (do NOT re-apply)
 
 These were part of the kimi-code snapshot but have no host consumer and are
@@ -656,21 +702,22 @@ re-vendor:
 ## Final status after the v0.84.4 re-vendor (2026-09)
 
 - `KEEP` (re-applied on the Earendil v0.84.4 base): X001, X002,
-  X004A, X004B, X005, X006, X007, X008, X009, X010, X011, X012, X013,
+  X004A, X004B, X005, X006, X007, X008, X009, X010, X011, X012,
   X014 (measurement cache ONLY — the scrollbar thumb clamp is already in
   upstream 0.84.4, see the entry's scope note), X016, X018, X019, X020,
   X021, X022, X023, X024, X027, X028, X029, X030, X031, X032, X033, X034,
   X035 (per-frame processed-line reuse — restored after the PR-review
-  benchmark showed a 100-500x per-frame regression without it), X036
+  benchmark showed a 100-500x per-frame regression without it; the host's
+  reference-stable component caches are built around it), X036
   (FOCUS passthrough — restored; app-level listeners are a live host
   seam, not a kimi-only leftover).
 - `ABSORBED_UPSTREAM`: X015 (dead `_lastEventType` — upstream baseline
   restored), X017 (regular mode owns no mouse — upstream baseline),
   X026 (copySelection/copyOnSelect — upstream 0.84.4 native).
 - `PACKAGING_ONLY`: X025 (tsdown config — XMoon shell kept).
-- `REMOVED_UNUSED` (kimi-only, no host consumer; X003 is removed
-  because the old "fix" was a code-unit/grapheme mismatch defect — see the
-  entry): PasteBurst,
+- `REMOVED_UNUSED` (no host consumer; X003 is a code-unit/grapheme
+  mismatch defect and X013 is unconsumed — see their entries): X003,
+  X013, PasteBurst,
   inlineSlashTrigger, setHistoryFilter, preservePasteRegistry,
   additionalBasePaths, inlineSkill data, getLayoutRoot,
   WIDTH_CACHE_SIZE 4096. (Defensive negative-width `repeat()` guards are
