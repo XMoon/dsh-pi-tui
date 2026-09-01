@@ -507,13 +507,32 @@ re-vendor:
 - `pnpm gate:pi-surface-compat` (bundle) must pass — the re-vendor
   compatibility gate for the component lifecycle contract.
 
+
+### X033 — Overwide rendered lines are truncated, not fatal (kimi-code, host-dependent)
+
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Files: `src/tui-main-screen.ts`
+- Reason: upstream 0.84.4 THROWS (with a crash log) when a rendered line
+  exceeds the terminal width. The host's components can overflow by a
+  column in narrow terminals (wide graphemes at small widths, defensive
+  host layouts), and a throw stops the whole TUI. The main screen
+  truncates overwide non-image lines to the terminal width instead; the
+  trailing segment reset survives the slice so truncated lines cannot
+  leak styles. Kimi-code provenance; upstream 0.84.4 (and 0.84.3) throws.
+- Consumer: host narrow-terminal support (40-column minimum) and defensive
+  host layouts.
+- Upstream status: absent (upstream throws).
+- Tests: bundle suite (shell-editor-mode, subagent-viewer-interactive and
+  other narrow-width renders must not crash).
+- Migration action: re-applied (truncation pass after applyLineResets).
+
 ## Final status after the v0.84.4 re-vendor (2026-02)
 
 - `KEEP` (re-applied on the Earendil v0.84.4 base): X001, X002, X003,
   X004A, X004B, X005, X006, X007, X008, X009, X010, X011, X012, X013,
   X014 (measurement cache only — the scrollbar thumb clamp is already in
   upstream 0.84.4), X016, X018, X019, X020, X021, X022, X023, X024, X027,
-  X028, X029, X030, X031, X032.
+  X028, X029, X030, X031, X032, X033.
 - `ABSORBED_UPSTREAM`: X015 (dead `_lastEventType` — upstream baseline
   restored), X017 (regular mode owns no mouse — upstream baseline),
   X026 (copySelection/copyOnSelect — upstream 0.84.4 native).
@@ -522,6 +541,4 @@ re-vendor:
   inlineSlashTrigger, setHistoryFilter, preservePasteRegistry,
   additionalBasePaths, inlineSkill data, getLayoutRoot, per-frame
   processed-line reuse + asciiVisibleWidth, FOCUS passthrough,
-  WIDTH_CACHE_SIZE 4096, negative-width repeat guards, overwide-line
-  truncation (upstream 0.84.4 throws with a crash log; host components
-  truncate with truncateToWidth).
+  WIDTH_CACHE_SIZE 4096, negative-width repeat guards.

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
 import { type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
-import { visibleWidth } from "./utils.ts";
+import { sliceByColumn, visibleWidth } from "./utils.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
@@ -274,6 +274,16 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		const cursorPos = this.extractCursorPosition(newLines, height);
 
 		newLines = this.applyLineResets(newLines);
+
+		// Never write a line wider than the terminal: truncate defensively
+		// instead of crashing. Extremely narrow terminals can make components
+		// overflow by a column (e.g. wide graphemes at width 1). Image lines
+		// are exempt (their payload is not cell content). The trailing
+		// segment reset survives the slice (zero-width codes), so truncated
+		// lines cannot leak styles. (dsh-pi-tui divergence X033.)
+		newLines = newLines.map((line) =>
+			isImageLine(line) || visibleWidth(line) <= width ? line : sliceByColumn(line, 0, width, true),
+		);
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
