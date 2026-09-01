@@ -3,7 +3,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const moduleRequire = createRequire(import.meta.url);
-const TUI_PACKAGE_NAME = "@earendil-works/pi-tui";
+// Upstream references its own published name; this package is renamed for
+// the XMoon vendor shell, so the self-reference must follow the rename or
+// the installed-package candidate can never resolve. (dsh-pi-tui
+// divergence X025 packaging shell.)
+const TUI_PACKAGE_NAME = "@xmoon76/pi-tui";
 
 export interface NativeModuleCandidateOptions {
 	moduleUrl?: string;

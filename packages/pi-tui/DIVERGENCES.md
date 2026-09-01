@@ -405,15 +405,22 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 ### X025 — Explicit tsdown build config (was #25)
 
 - Category: `PACKAGING`
-- Files: `tsdown.config.ts`
+- Files: `tsdown.config.ts`, `src/native-module-path.ts`
 - Reason: tsdown discovers configs by walking up from the CWD; the root
   bundle's `tsdown.config.ts` would shadow this package's build. The config
   reproduces the tsdown defaults (entry `src/index.ts`, ESM, `dist/`,
-  declarations).
+  declarations). The package is also RENAMED from the upstream scope
+  (`@earendil-works/pi-tui` → `@xmoon76/pi-tui`), so upstream's
+  self-referencing native-module lookup (`TUI_PACKAGE_NAME` in
+  `native-module-path.ts`) must follow the rename — otherwise the
+  installed-package candidate for `.node` prebuilds can never resolve
+  (round-2 review finding).
 - Consumer: package build (`pnpm --dir packages/pi-tui build` must produce
-  `dist/index.mjs` + `dist/index.d.mts`).
+  `dist/index.mjs` + `dist/index.d.mts`); native prebuild discovery
+  (native-modifiers / Windows VT input) if native assets are ever shipped.
 - Migration action: keep the XMoon shell; do NOT copy the upstream
-  package.json / tsgo contract.
+  package.json / tsgo contract; on re-vendor, re-apply the
+  `TUI_PACKAGE_NAME` rename to `@xmoon76/pi-tui`.
 
 ### X026 — Injectable selection clipboard handler (was #26)
 
