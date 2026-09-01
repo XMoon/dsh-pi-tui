@@ -326,7 +326,6 @@ export class Editor implements Component, Focusable {
 	private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 	private historyDraft: EditorState | null = null;
 	private hostHistoryDraft: unknown = undefined;
-	private historyFilter: ((entry: string) => boolean) | null = null;
 
 	/**
 	 * Called when a history entry is recalled, before it is put into the buffer.
@@ -457,35 +456,17 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 		if (this.history.length === 0) return;
 
-		// When entering browse, capture host state up front — before the filter
-		// runs — so the host's filter can read the browse-entry mode rather than a
-		// mode that changes as entries are recalled. The captured value is only
-		// committed to hostHistoryDraft once a matching entry is actually found.
+		// When entering browse, capture host state up front so the host's
+		// draft-save hook reads the browse-entry mode rather than a mode that
+		// changes as entries are recalled. The captured value is only
+		// committed to hostHistoryDraft once an entry is actually found.
 		const entering = this.historyIndex === -1;
 		const pendingHostDraft = entering ? this.onHistoryDraftSave?.() : undefined;
 
-		// Find the next index that passes the filter. Up(-1) increases index,
-		// Down(1) decreases. The draft (-1) is always reachable; stepping past
-		// either end is a no-op.
-		let newIndex = this.historyIndex;
-		let found = false;
-		while (true) {
-			newIndex = newIndex - direction;
-			if (newIndex === -1) {
-				found = true;
-				break;
-			}
-			if (newIndex < -1 || newIndex >= this.history.length) {
-				found = false;
-				break;
-			}
-			const candidate = this.history[newIndex];
-			if (!this.historyFilter || (candidate !== undefined && this.historyFilter(candidate))) {
-				found = true;
-				break;
-			}
-		}
-		if (!found) return;
+		// Up(-1) increases index, Down(1) decreases. The draft (-1) is always
+		// reachable; stepping past either end is a no-op.
+		const newIndex = this.historyIndex - direction;
+		if (newIndex < -1 || newIndex >= this.history.length) return;
 
 		// Capture state when first entering history browsing mode
 		if (entering && newIndex >= 0) {
@@ -533,24 +514,17 @@ export class Editor implements Component, Focusable {
 	}
 
 	/**
-	 * Limit which history entries ↑/↓ navigate. `null` (default) visits every
-	 * entry. The filter is evaluated against each stored entry as-is.
-	 * (dsh-pi-tui divergence X029.)
-	 */
-	setHistoryFilter(filter: ((entry: string) => boolean) | null): void {
-		this.historyFilter = filter;
-	}
-
-	/**
 	 * Drop every history entry (up/down recall) and leave browsing state.
 	 * Used by hosts that swap the whole history context (a session switch to
 	 * another workspace must not recall the previous workspace's inputs).
-	 * (dsh-pi-tui divergence X020.)
+	 * The captured host draft is dropped too, so a stale draft state can
+	 * never be restored into the new context. (dsh-pi-tui divergence X020.)
 	 */
 	clearHistory(): void {
 		this.history = [];
 		this.historyIndex = -1;
 		this.historyDraft = null;
+		this.hostHistoryDraft = undefined;
 	}
 
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
@@ -2405,7 +2379,13 @@ export class Editor implements Component, Focusable {
 			if (!controller.signal.aborted) {
 				console.error("autocomplete request failed", error);
 			}
-			this.autocompleteAbort = undefined;
+			// Only clear OUR controller: an older request's abort rejection can
+			// land after a newer request already installed its own controller
+			// (explicit-Tab/force path runs cancel + start in the same tick),
+			// and clearing that reference would orphan the newer request.
+			if (this.autocompleteAbort === controller) {
+				this.autocompleteAbort = undefined;
+			}
 		}
 	}
 

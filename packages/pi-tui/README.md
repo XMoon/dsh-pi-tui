@@ -1,5 +1,12 @@
 # @earendil-works/pi-tui
 
+> **Vendored fork.** This package is `@xmoon76/pi-tui`, a rescoped copy of
+> `@earendil-works/pi-tui` v0.84.4 (see `UPSTREAM.json` for the pinned
+> baseline; the divergence ledger with guarding tests lives in
+> `DIVERGENCES.md`). It is **not** published to npm; the package name in
+> the examples below is the upstream name — consumers of this fork import
+> from `@xmoon76/pi-tui`.
+
 Minimal terminal UI framework with differential rendering and synchronized output for flicker-free interactive CLI applications.
 
 ## Features

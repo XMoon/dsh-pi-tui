@@ -285,77 +285,6 @@ describe("Editor component", () => {
 		});
 	});
 
-	describe("history filter", () => {
-		it("visits all entries when no filter is set", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.addToHistory("first");
-			editor.addToHistory("second");
-
-			editor.handleInput("\x1b[A"); // Up - "second"
-			assert.strictEqual(editor.getText(), "second");
-			editor.handleInput("\x1b[A"); // Up - "first"
-			assert.strictEqual(editor.getText(), "first");
-		});
-
-		it("skips entries that do not pass the filter on Up", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.addToHistory("prompt-a");
-			editor.addToHistory("!cmd-b");
-			editor.addToHistory("prompt-c");
-			// history: ["prompt-c", "!cmd-b", "prompt-a"]
-			editor.setHistoryFilter((entry) => entry.startsWith("!"));
-
-			editor.handleInput("\x1b[A"); // Up - "!cmd-b" (skips "prompt-c")
-			assert.strictEqual(editor.getText(), "!cmd-b");
-
-			editor.handleInput("\x1b[A"); // Up - no more shell entries, stays
-			assert.strictEqual(editor.getText(), "!cmd-b");
-		});
-
-		it("skips entries that do not pass the filter on Down", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.addToHistory("!cmd-a");
-			editor.addToHistory("prompt-b");
-			editor.addToHistory("!cmd-c");
-			// history: ["!cmd-c", "prompt-b", "!cmd-a"]
-			editor.setHistoryFilter((entry) => entry.startsWith("!"));
-
-			editor.handleInput("\x1b[A"); // Up - "!cmd-c"
-			assert.strictEqual(editor.getText(), "!cmd-c");
-			editor.handleInput("\x1b[A"); // Up - "!cmd-a" (skips "prompt-b")
-			assert.strictEqual(editor.getText(), "!cmd-a");
-			editor.handleInput("\x1b[B"); // Down - "!cmd-c" (skips "prompt-b")
-			assert.strictEqual(editor.getText(), "!cmd-c");
-		});
-
-		it("does nothing on Up when no entry passes the filter", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.addToHistory("prompt-a");
-			editor.addToHistory("prompt-b");
-			editor.setHistoryFilter((entry) => entry.startsWith("!"));
-
-			editor.handleInput("\x1b[A");
-			assert.strictEqual(editor.getText(), "");
-		});
-
-		it("still restores the draft with a filter active", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.addToHistory("!cmd");
-			editor.setHistoryFilter((entry) => entry.startsWith("!"));
-			editor.setText("draft");
-			editor.handleInput("\x1b[D");
-			editor.handleInput("\x1b[D");
-
-			editor.handleInput("\x1b[A"); // to line start
-			editor.handleInput("\x1b[A"); // recall "!cmd"
-			assert.strictEqual(editor.getText(), "!cmd");
-
-			editor.handleInput("\x1b[B"); // restore draft
-			assert.strictEqual(editor.getText(), "draft");
-		});
-	});
-
-
 	describe("onRecall", () => {
 		it("uses the returned text instead of the stored entry", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
@@ -440,6 +369,27 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[A"); // recall again
 			editor.handleInput("\x1b[B"); // restore draft again (count=2)
 			assert.strictEqual(count, 2);
+		});
+
+		it("clearHistory drops entries, browsing state, AND the captured host draft", () => {
+			// X020 contract: a host swapping the whole history context must not
+			// recall the previous workspace's inputs, and the captured host
+			// draft must never be restored into the new context.
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let restored = 0;
+			editor.onHistoryDraftSave = () => "old-mode";
+			editor.onHistoryDraftRestore = () => {
+				restored++;
+			};
+			editor.addToHistory("old-entry");
+			editor.handleInput("\x1b[A"); // Up - browse: captures host draft + editor draft
+			assert.strictEqual(editor.getText(), "old-entry");
+
+			editor.clearHistory();
+			editor.handleInput("\x1b[A"); // no entries left: no-op
+			editor.handleInput("\x1b[B"); // Down - must NOT restore the stale host draft
+			assert.strictEqual(restored, 0, "clearHistory must drop the captured host draft");
+			assert.strictEqual(editor.getText(), "old-entry", "clearHistory must not change the editor text");
 		});
 	});
 

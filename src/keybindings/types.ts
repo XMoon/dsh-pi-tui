@@ -127,7 +127,7 @@ export interface AppKeybindingDefinition {
    * owner=editor rules, participate in conflict/shadow/winner selection,
    * but execution is deferred to the fork editor (the effective keys
    * sync into its `tui.input.submit` via onEditorSubmitSync), preserving
-   * paste-burst and backslash-newline semantics. */
+   * backslash-newline semantics. */
   readonly hostResolved?: boolean
 }
 
@@ -206,7 +206,7 @@ export type KeybindingSource = 'builtin' | 'plugin' | 'composition' | 'user'
  * carries the winner's owner so the caller can route execution: host →
  * the Host dispatcher, editor → the fork editor (via `onEditorSubmitSync`
  * + `hostResolves: false`), plugin → the plugin remainder. The editor
- * path preserves paste-burst and backslash-newline semantics. */
+ * path preserves backslash-newline semantics. */
 export type RuleOwner = 'host' | 'editor' | 'plugin'
 
 /** One compiled rule of the effective keymap (plan §7). */
