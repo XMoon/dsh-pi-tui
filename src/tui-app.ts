@@ -148,6 +148,7 @@ import {
 } from './local-shell-card.ts'
 import type { RendererRegistry } from './renderer-registry.ts'
 import { OverlayBroker } from './overlay-broker.ts'
+import { EditorSeatMount } from './editor-seat.ts'
 import { EditorSeatHolder } from './editor-seat-holder.ts'
 import { TuiEditor } from './tui-editor.ts'
 import { serializeEditorInput, serializedDraftHasPayload, shellPrefixForMode, type EditorInputMode } from './editor-input-mode.ts'
@@ -2605,10 +2606,18 @@ export class TuiApp {
       // Round-2 P1: a plugin editor's invalidate() recompiles its view and
       // swaps the child in the seat (the M4 compiler caches at
       // construction — a live plugin view needs a recompile to repaint).
+      // Re-vendor lifecycle follow-up P1: THE CAPTURE FENCE — while a
+      // question flow owns the seat, invalidate() may update the HOLDER's
+      // latest compiled component (state may update while captured) but
+      // must never touch the PHYSICAL seat (a remount would evict the
+      // QuestionFrame mid-flow; the latest component mounts on settle).
+      // An approval does NOT occupy the physical seat (it is a host
+      // overlay), so it is deliberately not fenced here — the ownership
+      // graph, not a blanket condition, decides (plan §2.4).
       viewSwap: (component) => {
         if (this.disposed) return
-        this.editorSeat.clear()
-        this.editorSeat.addChild(component)
+        if (this.activeQuestions !== undefined) return
+        this.editorSeat.replace(component)
         this.requestRender()
       },
       actionSink: (action) => {
@@ -2689,8 +2698,8 @@ export class TuiApp {
     // plugin can never touch the editor seat or the root layout.
     this.widgetsAbove = new Text('', 0, 0)
     this.widgetsBelow = new Text('', 0, 0)
-    this.editorSeat = new Container()
-    this.editorSeat.addChild(this.editor)
+    this.editorSeat = new EditorSeatMount()
+    this.editorSeat.replace(this.editor)
     // If a plugin editor already won the registry (registration before
     // the surface), hand off immediately. MUST run after editorSeat
     // exists — the handoff re-mounts the seat child (mountSeatChild
@@ -7479,9 +7488,17 @@ export class TuiApp {
    * restore their own focus.
    */
   private mountSeatChild(): void {
+    // Re-vendor lifecycle follow-up P1: the CAPTURE FENCE — while a
+    // question flow owns the seat, only the holder state may update (new
+    // winner / recompiled view); the PHYSICAL seat stays with the
+    // QuestionFrame until the flow settles and mounts the LATEST
+    // component. The state-may-update / physical-seat-may-not rule (plan
+    // §2.5). An approval does not occupy the physical seat (host overlay),
+    // so it stays unfenced here — the existing focus fence below already
+    // covers its capture.
+    if (this.activeQuestions !== undefined) return
     const component = this.seatEditor().component
-    this.editorSeat.clear()
-    this.editorSeat.addChild(component)
+    this.editorSeat.replace(component)
     // Focus follows the occupant: if the seat owns input right now (no
     // question/approval/overlay is capturing), the NEW component must be
     // the focused component — otherwise every key after a handoff still
@@ -11260,8 +11277,11 @@ export class TuiApp {
     }
     const frame = new QuestionFrame(state.flow, () => this.terminal.rows)
     state.frame = frame
-    this.editorSeat.clear()
-    this.editorSeat.addChild(frame)
+    // Re-vendor lifecycle follow-up P1: the flow only PROJECTS into the
+    // seat — the previous occupant (the editor's compiled component) stays
+    // ALIVE but detached; the non-owning replace() never disposes it (a
+    // disposed component tree would render empty after the round-trip).
+    this.editorSeat.replace(frame)
     const screen = this.fullscreen ?? this.tui
     screen.setFocus(frame)
     // The question flow owns the seat (follow-up P1).
@@ -11322,8 +11342,10 @@ export class TuiApp {
       state.suspendedOverlays = new Set()
       const frame = new QuestionFrame(next.flow, () => this.terminal.rows)
       next.frame = frame
-      this.editorSeat.clear()
-      this.editorSeat.addChild(frame)
+      // Re-vendor lifecycle follow-up P1: the next flow only PROJECTS into
+      // the seat — the settled flow's frame is simply unmounted (its
+      // lifetime belongs to the settled question state, never the seat).
+      this.editorSeat.replace(frame)
       this.activeQuestions = next
       const screen = this.fullscreen ?? this.tui
       screen.setFocus(frame)
@@ -11336,9 +11358,12 @@ export class TuiApp {
     // Final restoration: the editor FIRST, then the suspended overlays — a
     // restored capturing overlay focuses itself through setHidden(false),
     // so the editor must not be re-focused afterwards. M9: restore the
-    // CURRENT seat occupant (host default or plugin editor).
-    this.mountSeatChild()
+    // CURRENT seat occupant (host default or plugin editor). Re-vendor
+    // lifecycle follow-up P1: the flow releases the seat BEFORE the mount
+    // — mountSeatChild() fences a live question, so the release must
+    // precede it or the editor would never remount (plan §2.6).
     this.activeQuestions = undefined
+    this.mountSeatChild()
     const screen = this.fullscreen ?? this.tui
     // M9 (round-1 finding 5): focus the CURRENT seat occupant (the host
     // default or the plugin editor's component) — never a hardcoded host

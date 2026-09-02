@@ -425,6 +425,16 @@ export class EditorSeatHolder {
       this.currentHostLease = undefined
       this.current = host
       ++this.seatGeneration
+      // Re-vendor lifecycle follow-up P1: the non-owning seat mount never
+      // disposes — the holder is the ONLY lifecycle owner, so the handoff
+      // releases the superseded occupant's compiled component here (its
+      // editor teardown follows; see the plugin-commit branch below). The
+      // host adapter's component (the fork Editor) has no dispose — no-op.
+      try {
+        previous.component.dispose?.()
+      } catch (error) {
+        this.reportHostError(error)
+      }
       try {
         previous.dispose()
       } catch (error) {
@@ -513,6 +523,14 @@ export class EditorSeatHolder {
     // Mount + dispose old (atomic: everything succeeded). A throwing old
     // dispose is reported but cannot leave the new editor unowned.
     if (this.disposed || !lease.active) {
+      // The created editor never mounted: release its compiled component
+      // too (the non-owning seat mount never disposes — the holder owns
+      // every compiled view it produced).
+      try {
+        adapted.component.dispose?.()
+      } catch (error) {
+        this.reportEditorError(target.id, error)
+      }
       this.discardCreatedEditor(target.id, created, lease)
       return
     }
@@ -523,6 +541,16 @@ export class EditorSeatHolder {
     ++this.seatGeneration
     // The creating lease becomes the committed seat owner only here; any
     // create-time subscriptions retained their lease and now receive changes.
+    // Re-vendor lifecycle follow-up P1: the holder releases the superseded
+    // occupant's compiled component (the non-owning seat mount never
+    // disposes) BEFORE its editor teardown — a throwing plugin dispose
+    // cannot orphan a mounted-seat-then-detached compiled view. The host
+    // adapter's component (the fork Editor) has no dispose — no-op.
+    try {
+      previous.component.dispose?.()
+    } catch (error) {
+      this.reportEditorError(previous.id, error)
+    }
     try {
       previous.dispose()
     } catch (error) {
@@ -610,7 +638,16 @@ export class EditorSeatHolder {
           return
         }
         holder.clearEditorError(id)
+        // Re-vendor lifecycle follow-up P1: the holder owns every compiled
+        // view — the non-owning seat mount never disposes, so the REPLACED
+        // component is released here. It is no longer the seat occupant in
+        // either case: an unfenced swap already mounted `next`; a fenced
+        // swap (question capture) left the QuestionFrame mounted and this
+        // view detached earlier. The state update (component = next) is
+        // exactly what the question settle must mount (plan Risk B).
+        const previous = component
         component = next
+        previous.dispose?.()
       },
       addToHistory: () => {}, // the host default owns history recall
       clearHistory: () => {},
@@ -855,5 +892,27 @@ export class EditorSeatHolder {
     this.currentHostLease = undefined
     this.creatingHostLease = undefined
     this.changeListeners.clear()
+    // Re-vendor lifecycle follow-up P1: FINAL lifecycle — the holder is
+    // the ONLY owner of the current occupant (the non-owning seat mount
+    // never disposes, so no other path may release it). Release the
+    // occupant and its current compiled component EXACTLY once here: the
+    // host adapter's dispose is a no-op (the fork Editor has no owner to
+    // release), a plugin editor's dispose() runs, and a repeated dispose()
+    // is a no-op (guarded by `disposed` above). This is the ONLY place a
+    // mounted replacement can be disposed — the seat's detach/replace
+    // never is (plan §3 / Risk C).
+    const current = this.current
+    try {
+      current.dispose()
+    } catch (error) {
+      if (current.id === 'host') this.reportHostError(error)
+      else this.reportEditorError(current.id, error)
+    }
+    try {
+      current.component.dispose?.()
+    } catch (error) {
+      if (current.id === 'host') this.reportHostError(error)
+      else this.reportEditorError(current.id, error)
+    }
   }
 }
