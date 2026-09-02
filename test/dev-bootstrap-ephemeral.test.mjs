@@ -729,19 +729,24 @@ test('commitDevelopmentState keeps the new env on success', async (t) => {
   assert.equal(readFileSync(context.envPath, 'utf8'), 'NEW-ENV-MARKER\n')
 })
 
-test('bootstrap locks are keyed per worktree', (t) => {
+test('bootstrap locks are worktree-local and independent of the cache root', (t) => {
   const life = testLifecycle(t)
   const { root, config } = sourceFixture(life)
-  const cacheHome = join(root, 'cache')
-  const contextA = resolveDshDevContext({ root, mode: 'npm', config, environment: { XDG_CACHE_HOME: cacheHome } })
+  const contextA = resolveDshDevContext({ root, mode: 'npm', config, environment: { XDG_CACHE_HOME: join(root, 'cache-a') } })
+  // The same worktree under a DIFFERENT XDG_CACHE_HOME (two agents with
+  // different environments) must still share one lock: the lock lives
+  // inside the worktree root, not under the cache.
+  const contextB = resolveDshDevContext({ root, mode: 'npm', config, environment: { XDG_CACHE_HOME: join(root, 'cache-b') } })
+  assert.equal(bootstrapTest.bootstrapLockPath(contextA), join(root, '.dsh-dev-bootstrap.lock'),
+    'the lock must live inside the worktree root')
+  assert.equal(bootstrapTest.bootstrapLockPath(contextB), bootstrapTest.bootstrapLockPath(contextA),
+    'the same worktree must map to the same lock regardless of XDG_CACHE_HOME')
   const otherRoot = life.tempDir('dsh-ephemeral-other-')
   writeFileSync(join(otherRoot, 'package.json'), `${JSON.stringify({ name: 'other-fixture', private: true, packageManager: 'pnpm@11.7.0' }, null, 2)}\n`)
   writeFileSync(join(otherRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
-  const contextB = resolveDshDevContext({ root: otherRoot, mode: 'npm', config, environment: { XDG_CACHE_HOME: cacheHome } })
-  const lockA = bootstrapTest.bootstrapLockPath(contextA)
-  const lockB = bootstrapTest.bootstrapLockPath(contextB)
-  assert.notEqual(lockA, lockB, 'different worktrees must not share a bootstrap lock')
-  assert.equal(bootstrapTest.bootstrapLockPath(contextA), lockA, 'the same worktree maps to the same lock')
+  const contextC = resolveDshDevContext({ root: otherRoot, mode: 'npm', config, environment: { XDG_CACHE_HOME: join(root, 'cache-a') } })
+  assert.notEqual(bootstrapTest.bootstrapLockPath(contextC), bootstrapTest.bootstrapLockPath(contextA),
+    'different worktrees must not share a bootstrap lock')
 })
 
 test('acquireDirectoryLock honors a custom wait timeout', async (t) => {

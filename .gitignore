@@ -21,3 +21,4 @@ temp/
 .dsh-dev-state.json
 .dsh-dev-env
 .envrc
+.dsh-dev-bootstrap.lock/
