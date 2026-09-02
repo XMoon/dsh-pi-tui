@@ -7,12 +7,26 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { EditorRegistry } from '../src/editor-registry.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { HostKeybindingManager } from '../src/keybindings/manager.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 function startApp(
   overrides: Record<string, unknown> = {},
@@ -25,6 +39,7 @@ function startApp(
     ...overrides,
   })
   app.start()
+  startedApps.add(app)
   if (configure !== undefined) configure(app.keybindingsManager())
   return { vt, app }
 }
@@ -67,6 +82,7 @@ test('physical idle Escape keeps the Host lifecycle path ahead of an action bind
     onSingleEscape: () => { singleEscapes += 1; return true },
   })
   app.start()
+  startedApps.add(app)
   injectEscapeSteal(app.keybindingsManager())
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -84,6 +100,7 @@ test('physical busy Escape cancels before an action binding can dispatch', async
     onCancel: () => { cancels += 1 },
   })
   app.start()
+  startedApps.add(app)
   injectEscapeSteal(app.keybindingsManager())
   app.setBusy(true)
   vt.sendInput('\x1b')
@@ -121,6 +138,7 @@ test('physical Escape reaches a replacement editor before user action resolution
     onExit: () => {},
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   const handle = registry.register({
     id: 'escape-guard-plugin',
     priority: 0,
@@ -160,6 +178,7 @@ test('a declined replacement Escape is consumed once after the interrupt is rema
     onExit: () => {},
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   const handle = registry.register({
     id: 'declining-escape-plugin',
     priority: 0,
@@ -427,6 +446,7 @@ test('app.input.submit remap does NOT leak into question free-text Inputs (X037)
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
   await vt.waitForRender()
 
@@ -452,6 +472,7 @@ test('app.input.submit remap does NOT leak into the history search Input (X037)'
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
   await vt.waitForRender()
   // Ctrl+R opens the panel; a source must be wired for it to open at all.
@@ -474,6 +495,7 @@ test('app.input.submit remap: the NEW key submits and Enter no longer does (PR r
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
   await vt.waitForRender()
   app.setDraft('hello')
@@ -495,6 +517,7 @@ test('app.input.submit disabled: Enter never submits (PR review)', async () => {
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': false }))
   await vt.waitForRender()
   app.setDraft('keep me')
@@ -528,6 +551,7 @@ test('pasteMedia remapped: the OLD key is not swallowed by a stale reservation (
     onClipboardPaste: () => { pasted.push(1) },
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // Default: Ctrl+V fires pasteMedia.
   vt.sendInput('\x16')
@@ -551,6 +575,7 @@ test('exit multi-key binding: the footer hint advertises the Ctrl+C chord specif
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.exit.request': ['ctrl+x', 'ctrl+c'] }))
   await vt.waitForRender()
   // Arm the Ctrl+C exit chord: the footer must advertise Ctrl+C (the
@@ -570,6 +595,7 @@ test('a remapped submit key keeps the editor backslash-newline semantics (PR rev
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
   await vt.waitForRender()
   // A trailing backslash should insert a NEWLINE, not submit (the fork
@@ -592,6 +618,7 @@ test('a remapped submit does not leak into a NEW TuiApp instance (PR review P1)'
   const first: string[] = []
   const app1 = new TuiApp(vt1, { onSubmit: (text: string) => first.push(text), onExit: () => {} })
   app1.start()
+  startedApps.add(app1)
   app1.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': false }))
   await vt1.waitForRender()
   app1.setDraft('x')
@@ -607,6 +634,7 @@ test('a remapped submit does not leak into a NEW TuiApp instance (PR review P1)'
   const second: string[] = []
   const app2 = new TuiApp(vt2, { onSubmit: (text: string) => second.push(text), onExit: () => {} })
   app2.start()
+  startedApps.add(app2)
   await vt2.waitForRender()
   app2.setDraft('fresh')
   await vt2.waitForRender()
@@ -621,6 +649,7 @@ test('disposing the app with an armed leader prefix clears the pending timer (PR
   let tasksOpened = 0
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onOpenTasks: () => { tasksOpened += 1 } })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: { 'app.tasks.open': '<leader>t' },
@@ -646,6 +675,7 @@ test('a leader-only submit override: Enter does NOT submit (PR review P1)', asyn
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
   app.start()
+  startedApps.add(app)
   // app.input.submit: <leader>s — NO direct keys. Enter must not submit;
   // only the leader sequence does.
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
@@ -673,6 +703,7 @@ test('safe mode restores the default Enter submit even after a user disable (PR 
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
   app.start()
+  startedApps.add(app)
   // User disables submit, then SAFE MODE is enabled: the builtin default
   // must win — Enter submits again.
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': false }))
@@ -708,6 +739,7 @@ test('a plugin-only key is NOT host-reserved — it reaches the plugin dispatch 
     pluginActionFor: (key) => key.key === 'x' && key.ctrl && key.alt ? 'open-search' : undefined,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x1b\x18') // ctrl+alt+x
   await vt.waitForRender()
@@ -727,6 +759,7 @@ test('a plugin submit binding is ADDITIVE — the builtin Enter stays (PR review
     pluginActionFor: (key) => key.key === 'p' && key.ctrl ? 'submit-draft' : undefined,
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setPluginRules([{ id: 'plugin-submit', action: 'app.input.submit', key: 'ctrl+p' }])
   await vt.waitForRender()
   assert.deepEqual(app.keybindingsManager().editorSubmitKeysFor(), ['enter'], 'the builtin Enter survives a plugin submit binding')
@@ -760,6 +793,7 @@ test('read-only viewer: Esc ALWAYS closes it, even with interrupt remapped (PR r
     onSingleEscape: () => { singleEscapes += 1; return true },
   })
   app.start()
+  startedApps.add(app)
   // Remap interrupt away from Esc to Ctrl+X.
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' }))
   app.setViewerMode({
@@ -789,6 +823,7 @@ test('read-only viewer: a remapped interrupt key (Ctrl+X) is inert, never the pa
     onCancel: () => { cancels += 1 },
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' }))
   app.setViewerMode({
     parentSessionId: 'session-main',
@@ -844,6 +879,7 @@ test('closing a viewer with Esc disarms the main-session double-Esc window (PR r
     onRewind: () => { rewinds += 1 },
   })
   app.start()
+  startedApps.add(app)
   // Arm a double-Esc window in the main session: the first Esc returns
   // false (not consumed) → handleEscapeKey arms the window.
   vt.sendInput('\x1b')

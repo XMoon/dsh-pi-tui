@@ -6,7 +6,22 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 async function appWithHostState() {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
@@ -14,6 +29,7 @@ async function appWithHostState() {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   return { vt, app }
 }
@@ -80,6 +96,7 @@ test('host state: setTheme fires the runner handler for non-built-in names; dark
     onAdvancedSetTheme: (name) => { requested.push(name) },
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const host = app.advancedHostStateForTest()
   // A registered plugin theme name rides the event (the runner resolves).

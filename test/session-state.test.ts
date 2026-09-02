@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { TuiApp } from '../src/tui-app.ts'
@@ -24,6 +24,20 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectModelSelectionOwner } from '../src/runtime/direct/model-selection-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 // themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /
 // CI=true — CI runners export CI=true, which would short-circuit the
@@ -275,6 +289,7 @@ test('/settings working-directory row follows the live session cwd', async () =>
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const state = { agent: undefined, generation: 1 }
@@ -315,6 +330,7 @@ test('/tasks Enter opens the job detail through the shared openJobView', async (
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('jobs', {
@@ -349,6 +365,7 @@ test('a stale catalog refresh cannot install commands into a newer session', asy
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
@@ -397,6 +414,7 @@ test('/quit is a registered alias of /exit sharing its handler', () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const state = { agent: undefined, generation: 1 }
@@ -414,6 +432,7 @@ test('/subagents is a registered alias of /tasks sharing its handler', () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const state = { agent: undefined, generation: 1 }
@@ -431,6 +450,7 @@ test('/queue is fully removed: the name is no longer host-owned or registered', 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const state = { agent: fakeAgent('session-a'), generation: 1 }
@@ -447,6 +467,7 @@ test('/exit and /quit route through the runner requestExit, never their own tear
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const state = { agent: undefined, generation: 1 }
@@ -476,6 +497,7 @@ test('a failed global-default save keeps the durable Session choice and restores
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   // The runner's selection facade: the /model apply NEVER writes it directly
@@ -539,6 +561,7 @@ test('a late FAILED save never leaves the failed choice as the default intent', 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const selection = {
@@ -632,6 +655,7 @@ test('a failed save after a session switch restores the default intent, never an
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const selection = {
@@ -702,6 +726,7 @@ test('an older live /model completion never clears a newer pending default inten
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const selection = {
@@ -803,6 +828,7 @@ test('an older sessionless /model completion never clears a newer pending defaul
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const selection = {
@@ -903,6 +929,7 @@ test('a failed restore keeps the restored operation settle authority: both saves
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const selection = {
@@ -990,6 +1017,7 @@ test('a failed restore keeps the restored operation settle authority: the older 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const selection = {
@@ -1076,6 +1104,7 @@ test('an already-settled older operation is never restored as pending after a ne
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const selection = {
@@ -1162,6 +1191,7 @@ test('a three-layer rollback never resurrects an already-failed operation', asyn
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const selection = {
@@ -1257,6 +1287,7 @@ test('a three-layer rollback never resurrects an already-committed operation', a
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const selection = {
@@ -1352,6 +1383,7 @@ test('a failing skill catalog refresh degrades to a detached issue, never an unh
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
@@ -1443,6 +1475,7 @@ test('/rename is a registered alias of /title sharing its handler', () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('sessionTitle', fakeTitles().titles as never)
@@ -1460,6 +1493,7 @@ test('/title without an argument regenerates and overwrites the current title', 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const { titles, calls } = fakeTitles({
@@ -1488,6 +1522,7 @@ test('/rename without an argument behaves identically (regenerates)', async () =
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const { titles, calls } = fakeTitles({
@@ -1511,6 +1546,7 @@ test('/title without an argument on a blank session leaves the title as-is', asy
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const { titles, calls } = fakeTitles({ refresh: async () => undefined })
@@ -1532,6 +1568,7 @@ test('/title with an argument pins the title; an invalid title surfaces as an er
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const { titles, calls } = fakeTitles({
@@ -1567,6 +1604,7 @@ test('/title without an argument surfaces a failing refresh as an error result',
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const { titles } = fakeTitles({ refresh: async () => { throw new Error('provider quota exceeded') } })
@@ -1594,6 +1632,7 @@ test('/title and /rename degrade when the sessionTitle service is absent', async
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
@@ -1618,6 +1657,7 @@ test('/settings theme pick persists the BUILTIN choice too (review P1: the trans
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const userFooterCustomItems: unknown[] = [
@@ -1690,6 +1730,7 @@ test('/settings theme write aborts when USER custom storage is unavailable', asy
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
@@ -1744,6 +1785,7 @@ test('/settings theme STALE pick through the REAL handler rolls the row and the 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
@@ -1829,6 +1871,7 @@ test('/settings theme autodetect applies only while auto stays the latest choice
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))

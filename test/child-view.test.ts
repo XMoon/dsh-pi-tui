@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { childOwnEvents, TranscriptFolder } from '../src/transcript.ts'
 
@@ -90,10 +90,25 @@ test('the viewer transcript never shows a seeded parent completion notice', () =
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 test('entering the viewer clears the main session local cards', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // A main-session `!` shell card exists before the viewer opens.
   app.pushLocalMessage({ kind: 'tool', turn: 0, name: 'bash', args: '!ls', result: 'done', status: 'ok' })

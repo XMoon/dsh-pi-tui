@@ -6,12 +6,26 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { ImageLoader } from '../src/image/loader.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import type { ImageAttachmentRefLike } from '../src/image/admission.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 const IMAGE_REF: ImageAttachmentRefLike = {
   attachmentId: 'att-img-1',
@@ -127,6 +141,7 @@ function startAppWithLoader(): { vt: VirtualTerminal; app: TuiApp; loader: Image
     imageTheme: { fallbackColor: (text) => text },
   })
   app.start()
+  startedApps.add(app)
   return { vt, app, loader }
 }
 
@@ -214,6 +229,7 @@ test('a rebuild (resize) keeps the thumbnail loader subscription alive (non-owni
     imageTheme: { fallbackColor: (text) => text },
   })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([userMessageEvent([
     { type: 'text', text: 'check ' },

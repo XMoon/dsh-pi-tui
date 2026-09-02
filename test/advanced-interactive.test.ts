@@ -8,10 +8,25 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { AdvancedInputRegistry } from '../src/extension/internal/advanced-input.ts'
 import { normalizeInputEvent } from '../src/extension/internal/input-events.ts'
 import type { AdvancedInputEvent, AdvancedInteractiveComponent } from '../src/extension/advanced-types.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** A recording interactive component. */
 function interactiveComponent(options: {
@@ -71,6 +86,7 @@ async function appWithAdvancedRoute() {
     advancedInputRoute: (data) => registry.route(data, normalizeInputEvent),
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   return { vt, app, registry }
 }
@@ -81,6 +97,7 @@ test('interactive overlay: renders, forwards normalized input, fires focus/blur,
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const component = interactiveComponent({ text: () => 'hello interactive' })
   const lease = app.showAdvancedInteractiveOverlay(component)
@@ -128,6 +145,7 @@ test('interactive overlay: a throwing render/input callback is isolated (the hos
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const throwing = interactiveComponent({ throwOnRender: true, throwOnInput: true })
   const lease = app.showAdvancedInteractiveOverlay(throwing)
@@ -150,6 +168,7 @@ test('interactive overlay: the surface dispose closes every still-owned lease (i
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const component = interactiveComponent()
   const lease = app.showAdvancedInteractiveOverlay(component)
@@ -172,6 +191,7 @@ test('interactive overlay: a lease survives a fullscreen toggle (screen migratio
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const component = interactiveComponent({ text: () => 'fs interactive' })
   const lease = app.showAdvancedInteractiveOverlay(component)
@@ -216,6 +236,7 @@ test('advanced input route: a consuming capture preempts the editor; a passing o
     advancedInputRoute: (data) => registry.route(data, normalizeInputEvent),
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // A capture that consumes 'x' — the editor must never see it.
   registry.register({
@@ -247,6 +268,7 @@ test('advanced input route: reserved host lifecycle keys never reach a capture',
     advancedInputRoute: (data) => registry.route(data, normalizeInputEvent),
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const seen: string[] = []
   registry.register({

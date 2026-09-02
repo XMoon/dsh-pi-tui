@@ -10,17 +10,32 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -137,6 +152,7 @@ test('clicking an expanded SECONDARY body collapses only the secondary (plan §3
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(longThoughtTurn(0))
   app.setFocusMode(true)
@@ -216,6 +232,7 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(longThoughtTurn(0))
   app.setFocusMode(true)
@@ -308,6 +325,7 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
     imageTheme: { fallbackColor: (text) => text },
   })
   app.start()
+  startedApps.add(app)
   /** The alt screen treats a fast repeat at the same cell as a double-click
    * (word selection) — pause between attachment clicks like the existing
    * collapse test. */
@@ -467,6 +485,7 @@ test('resize keeps the click map aligned: secondary closes first, then the root 
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(longThoughtTurn(0))
   app.setFocusMode(true)

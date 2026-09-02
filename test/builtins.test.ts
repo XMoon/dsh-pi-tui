@@ -13,7 +13,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -28,6 +28,20 @@ import { TuiApp } from '../src/tui-app.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 const settle = async (): Promise<void> => {
   await Promise.resolve()
@@ -81,6 +95,7 @@ test('the builtins render into a live TuiApp and the turn/step counter tracks st
     const host = new SurfaceHost(service._ledger(), () => app.requestRender())
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
     host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
       surfaceId: 'tui', generation: 1, width: 80, height: 24, fullscreen: false,
@@ -217,6 +232,7 @@ test('P0-1: a plugin following the README example registers BEFORE any surface e
     const host = new SurfaceHost(service._ledger(), () => app.requestRender())
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
     host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
       surfaceId: host.surfaceId, generation: 1, width: 80, height: 24, fullscreen: false,
@@ -258,6 +274,7 @@ test('the version badge shows the dsh version first, then the tui- bundle versio
       const vt = new VirtualTerminal(90, 24)
       const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
       app.start()
+      startedApps.add(app)
       life.defer(() => app.stop())
       await vt.waitForRender()
       host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {

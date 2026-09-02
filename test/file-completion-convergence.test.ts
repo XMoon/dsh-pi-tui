@@ -11,7 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join, win32, sep } from 'node:path'
@@ -22,6 +22,21 @@ import { presentPathCandidate } from '../src/file-completion/presentation.ts'
 import { MentionProvider } from '../src/mentions.ts'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 
 const abort = new AbortController().signal
 
@@ -91,6 +106,7 @@ test('P1.1 headless: foo<Tab> opens no dropdown (isShowingAutocomplete stays fal
   const { root } = largeWorkspaceFixture(life)
   const { startApp } = await import('./support/app-harness.ts')
   const { vt, app } = startApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('foo')
@@ -309,6 +325,7 @@ test('P1.5 headless D: a quick Backspace over a mention leaves the draft intact'
   const { startApp } = await import('./support/app-harness.ts')
   const root = outsideCwdFixture(life).workspace
   const { vt, app } = startApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // Type a mention, then Backspace quickly — no crash, draft keeps the text.
@@ -785,6 +802,7 @@ test('§24 A: @src → dropdown → Tab → @src/ → children dropdown', async 
   const { startApp } = await import('./support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root
   const { vt, app } = startApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('@src')
@@ -801,6 +819,7 @@ test('§24 B: /image src → dropdown → Tab → /image src/ → children dropd
   const { startImageApp } = await import('./support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root
   const { vt, app } = startImageApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('/image src')
@@ -817,6 +836,7 @@ test('§24 C: hello ./src<Tab> opens no dropdown', async (t) => {
   const { startApp } = await import('./support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root
   const { vt, app } = startApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('hello ./src')
@@ -841,6 +861,7 @@ test('§24 E: sessionless @dir/ lists children through the app chain', async (t)
   const { startApp } = await import('./support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root
   const { vt, app } = startApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // No session was ever created: the workspace scope answers.

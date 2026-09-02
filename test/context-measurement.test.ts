@@ -13,7 +13,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -31,6 +31,20 @@ import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { contextRefreshKind } from '../src/index.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** A counting reader standing in for SessionReader.measureContext. */
 function countingReader(initial = 42_000): {
@@ -305,6 +319,7 @@ test('P1: a session switch never shows the OLD session context through the statu
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { statusStore: store })
   app.start()
+  startedApps.add(app)
   const stats = (inputTokens: number): SessionStats => ({
     turns: 5, steps: 9, llmMs: 100, firstTokenMsAvg: 50, tokensPerSec: 10, cacheHitPct: 0,
     inputTokens, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0, contextWindow: 128_000,
@@ -364,6 +379,7 @@ test('P2: /status forces ONE measurement through the coordinator, never a duplic
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const ctx = new Context()
   const defs: Array<{ name: string; handler?: unknown }> = []
   ctx.provide('commands', {

@@ -33,7 +33,7 @@ afterEach(() => {
   for (const app of [...startedApps]) {
     startedApps.delete(app)
     if (app.isDisposed()) continue
-    try { app.stop() } catch {}
+    try { app.dispose() } catch {}
   }
 })
 
@@ -270,10 +270,10 @@ test('the question dialog height cap tracks the terminal height', async () => {
     assert.ok(view.includes('more lines'), `truncation marker missing at ${rows} rows:\n${view}`)
     await vt.sendInput('\x1b')
     await assert.rejects(promise, /cancelled/)
-    // Re-vendor lifecycle follow-up P3: the single-live-TUI process slot
-    // is held by a LIVE surface — stop this iteration's app before the
-    // next case starts (see src/process-tui-slot.ts).
-    app.stop()
+    // Re-vendor lifecycle follow-up P3: the process slot is released only
+    // by the FINAL dispose — dispose this iteration's app before the next
+    // case starts (a stopped-but-alive app still owns the slot).
+    app.dispose()
   }
 })
 
@@ -350,10 +350,10 @@ test('the highlighted question option stays visible at narrow terminal widths', 
     }
     vt.sendInput('\x1b')
     await assert.rejects(promise, /cancelled/)
-    // Re-vendor lifecycle follow-up P3: the single-live-TUI process slot
-    // is held by a LIVE surface — stop this iteration's app before the
-    // next width starts (see src/process-tui-slot.ts).
-    app.stop()
+    // Re-vendor lifecycle follow-up P3: the process slot is released only
+    // by the FINAL dispose — dispose this iteration's app before the next
+    // width starts (a stopped-but-alive app still owns the slot).
+    app.dispose()
   }
 })
 

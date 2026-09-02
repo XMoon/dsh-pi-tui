@@ -6,11 +6,26 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { EditorRegistry } from '../src/editor-registry.ts'
 import { EditorSeatHolder } from '../src/editor-seat-holder.ts'
 import { Text } from '@xmoon76/pi-tui'
 import type { EditorHost, ExtensionEditor } from '../src/extension/public-types.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** A minimal plugin editor backed by a text state. */
 function pluginEditor(initial = ''): ExtensionEditor & { text: string; cursor: number; disposed: boolean } {
@@ -262,6 +277,7 @@ test('TuiApp: a plugin editor wins the seat through the atomic handoff; unload r
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // Type a draft through the host editor.
   app.setDraft('preserve me')
@@ -303,6 +319,7 @@ test('TuiApp: a creation throw keeps the current editor working (atomic handoff)
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('safe draft')
   await vt.waitForRender()
@@ -330,6 +347,7 @@ test('TuiApp: the editor host dispatch routes semantic actions through host path
     onExit: () => {},
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   let host: EditorHost | undefined
   // The host draft transfers into the plugin editor at the handoff.
@@ -370,6 +388,7 @@ test('TuiApp: a stale host captured BEFORE dispose is inert after it — no seat
     onExit: () => {},
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   let host: EditorHost | undefined
   registry.register({
@@ -404,6 +423,7 @@ test('TuiApp: setEditorText writes through the active replacement seat (P1-R9)',
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const editor = pluginEditor()
   registry.register({ id: 'public-set', priority: 0, create: () => editor }, 'plugin')
@@ -423,6 +443,7 @@ test('TuiApp: an old EditorHost is inert after a successful handoff (P1-R7/R8)',
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: text => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   let oldHost: EditorHost | undefined
   const first = registry.register({
@@ -465,6 +486,7 @@ test('TuiApp: EditorHost.replaceText notifies the current subscriber (P1-R8)', a
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   let host: EditorHost | undefined
   const snapshots: string[] = []
@@ -488,6 +510,7 @@ test('TuiApp: the EditorHost subscription is DRIVEN by host mutations (P1-11)', 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   let host: EditorHost | undefined
   let unsubscribe: (() => void) | undefined
@@ -534,6 +557,7 @@ test('TuiApp: a declined replacement key falls back into the active plugin draft
     // host fallback when the editor explicitly declines the key.
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('abcd')
   let text = ''
@@ -576,6 +600,7 @@ test('TuiApp: a declined replacement printable key uses the host fallback withou
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   let text = ''
   let cursor = 0
@@ -619,6 +644,7 @@ test('TuiApp: declined fallback preserves a multiline grapheme cursor (P1-R3)', 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('one\n界👩‍💻x')
   let text = ''
@@ -664,6 +690,7 @@ test('TuiApp: declined fallback normalizes CRLF and tabs before host editing', a
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   let text = ''
   let cursor = 0
@@ -698,6 +725,7 @@ test('TuiApp: declined fallback preserves autocomplete state for host completion
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setCommandCompletions([
     { name: 'alpha', description: 'Alpha' },
@@ -749,6 +777,7 @@ test('TuiApp: declined fallback isolates replacement input errors', async () => 
     onExtensionError: event => errors.push(String(event.error)),
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('draft')
   registry.register({
@@ -777,6 +806,7 @@ test('TuiApp: declined Enter preserves host autocomplete confirmation semantics'
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: text => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setCommandCompletions([{ name: 'alpha', description: 'Alpha' }], '/tmp')
   let text = ''
@@ -813,6 +843,7 @@ test('TuiApp: create-time EditorHost subscription survives the handoff commit', 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   let host: EditorHost | undefined
   const snapshots: string[] = []
@@ -840,6 +871,7 @@ test('TuiApp: repeated declined Up events continue host history navigation', asy
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('first')
   app.submitDraft(false)
@@ -888,6 +920,7 @@ test('TuiApp: a plugin editor with handleInput receives SEMANTIC events, never r
     pluginActionFor: () => undefined,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // A vim-like plugin editor: its OWN state machine owns every key. The
   // host routes editor events to handleInput as SEMANTIC events; the
@@ -966,6 +999,7 @@ test('TuiApp: terminal protocol normalization — legacy and CSI-u encodings rea
     pluginActionFor: () => undefined,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // The plugin editor records the NORMALIZED keys it receives.
   const received: string[] = []
@@ -1022,6 +1056,7 @@ test('TuiApp: display-only replacement editor never routes typing into the hidde
     pluginActionFor: () => undefined,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // A display-only plugin editor: NO handleInput hook. The public contract
   // (public-types.ts:811-812) says ordinary typing is NOT silently routed
@@ -1066,6 +1101,7 @@ test('TuiApp: the HOST seat still routes ordinary typing normally (P2-R5 guard)'
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   assert.equal(app.seatEditorForTest().id, 'host')
   vt.sendInput('a')
@@ -1084,6 +1120,7 @@ test('TuiApp: a TRANSFER throw disposes the newly created editor — no leak, cu
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('keep me')
   let createdDisposed = false
@@ -1115,6 +1152,7 @@ test('TuiApp: a COMPILE throw after transfer disposes the created editor too (P2
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('keep')
   let createdDisposed = false
@@ -1147,6 +1185,7 @@ test('TuiApp: a failed editor creation is retried after a same-id re-registratio
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // First registration: create() throws → the guard makes it inert.
   let failing = true
@@ -1189,6 +1228,7 @@ test('TuiApp: the editor host dispatch clears the plugin draft through the host 
     onExit: () => {},
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('plugin draft')
   let host: EditorHost | undefined
@@ -1219,6 +1259,7 @@ test('TuiApp: the subagent viewer covers a PLUGIN editor and restores its draft 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('plugin viewer draft')
   registry.register({ id: 'viewer-editor', priority: 0, create: () => pluginEditor() }, 'plugin')
@@ -1256,6 +1297,7 @@ test('TuiApp: a plugin editor survives a fullscreen toggle with focus intact (ro
     onExit: () => {},
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('fs plugin draft')
   registry.register({ id: 'fs-editor', priority: 0, create: () => pluginEditor() }, 'plugin')
@@ -1286,6 +1328,7 @@ test('TuiApp: a broken plugin view (compile throw) keeps the old editor working 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('still alive')
   // A plugin whose component view THROWS during compilation (the view's
@@ -1317,6 +1360,7 @@ test('TuiApp: a plugin editor view REPAINTS after setText + invalidate (round-2 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // A plugin editor whose VIEW reads the CURRENT state (a getter-backed
   // component) — the fixture pattern: the view object re-reads state.
@@ -1371,6 +1415,7 @@ test('TuiApp: a compile throw inside invalidate() is isolated — the host keeps
   const notices: string[] = []
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('before')
   let writes = 0

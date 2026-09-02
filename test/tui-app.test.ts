@@ -31,7 +31,7 @@ afterEach(() => {
   for (const app of [...startedApps]) {
     startedApps.delete(app)
     if (app.isDisposed()) continue
-    try { app.stop() } catch {}
+    try { app.dispose() } catch {}
   }
 })
 
@@ -1069,7 +1069,7 @@ test('fixed-width overlays fill the declared width: no border-external mask regi
       assert.equal(line[left + declared - 1], line[left] === '╭' ? '╮' : line[left] === '╰' ? '╯' : '│',
         `frame right edge must sit at column ${left + declared - 1} (declared ${declared}) at ${columns} cols:\n${box.join('\n')}`)
     }
-    app.stop()
+    app.dispose()
   }
   for (const cols of [40, 80, 120, 200]) await run(cols)
 })

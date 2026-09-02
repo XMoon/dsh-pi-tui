@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
@@ -21,6 +21,20 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** A minimal fake agent whose identity marks which session a refresh ran for.
  * Mirrors the real driver's wake semantics: steer/followup synchronously
@@ -189,6 +203,7 @@ test('an initial snapshot installs skill wrappers and claims SYNCHRONOUSLY with 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
@@ -215,6 +230,7 @@ test('without a snapshot no skill wrappers install and claims cover only the glo
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
@@ -231,6 +247,7 @@ test('a scoped override blocks a same-name skill wrapper; the effective command 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
@@ -257,6 +274,7 @@ test('a commands/change event re-merges completions without re-probing and witho
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
@@ -278,6 +296,7 @@ test('the revalidating transition keeps skill names as revalidating handlers and
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -318,6 +337,7 @@ test('loadSkill steers a RUNNING agent at the next step boundary instead of park
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -347,6 +367,7 @@ test('the explicit /skill <name> path steers the original line and injects the b
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -376,6 +397,7 @@ test('a missing agent status still delivers via steer+inject (no status branch)'
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -415,6 +437,7 @@ test('a model-only skill is refused by the explicit /skill <name> path and never
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -441,6 +464,7 @@ test('the /skill picker offers only human-invocable skills', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const agent = fakeAgent('session-a')
@@ -467,6 +491,7 @@ test('a direct skill wrapper re-checks the policy on the CURRENT agent at execut
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -496,6 +521,7 @@ test('a direct skill wrapper forwards /name args VERBATIM as the original line (
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -526,6 +552,7 @@ test('with a visible host skill loader the wrapper forwards the original line on
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   // The host's dsh-tool-skill registers the `skill` tool for this agent
@@ -569,6 +596,7 @@ test('the /skill command splits /skill <name> <args> and forwards the args verba
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -596,6 +624,7 @@ test('the /skill command normalizes a bare name to the /name line for the host g
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -623,6 +652,7 @@ test('the direct wrapper preserves leading/multiple whitespace in args', async (
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -650,6 +680,7 @@ test('the /skill command with args on a RUNNING agent steers the pair into the r
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -678,6 +709,7 @@ test('the wrappers tolerate an undefined invocation (defensive rawInput fallback
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -704,6 +736,7 @@ test('the fallback injection carries the official source fields and a provider d
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   // The fake agent records the FULL message, not just the text, so the
@@ -748,6 +781,7 @@ test('the fallback injection forwards the resource base hint', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -773,6 +807,7 @@ test('a tool merely NAMED skill without a loader shape is treated as no host loa
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   // A scoped shadow merely named `skill` (no execute): the host's gesture
@@ -805,6 +840,7 @@ test('a throwing skill steer releases the image pin (review finding)', async () 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const agent = fakeAgent('session-a')
@@ -838,6 +874,7 @@ test('the transition fence refuses a skill invocation mid-transition (zero write
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
@@ -865,6 +902,7 @@ test('the transition fence does NOT refuse skill invocations when no transition 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []

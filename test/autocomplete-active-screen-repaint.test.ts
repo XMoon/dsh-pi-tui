@@ -19,10 +19,25 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 
 /** Poll until the predicate is true (asserts after a 3s deadline). */
 async function pollUntil(predicate: () => boolean, label: string): Promise<void> {
@@ -75,6 +90,7 @@ test('fullscreen: accepting an @ directory repaints the children dropdown on the
   const { startApp } = await import('./support/app-harness.ts')
   const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
@@ -105,6 +121,7 @@ test('regular: accepting an @ directory repaints the children dropdown', async (
   const { startApp } = await import('./support/app-harness.ts')
   const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('@src')
@@ -125,6 +142,7 @@ test('fullscreen: Tab on the visible children dropdown accepts the highlighted c
   const { startApp } = await import('./support/app-harness.ts')
   const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
@@ -154,6 +172,7 @@ test('fullscreen: a filter keystroke updates the visible dropdown without forced
   const { startApp } = await import('./support/app-harness.ts')
   const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
@@ -182,6 +201,7 @@ test('fullscreen: accepting a /image directory repaints the children dropdown on
   const { startImageApp } = await import('./support/app-harness.ts')
   const root = dirFixture(life)
   const { vt, app } = startImageApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
@@ -205,6 +225,7 @@ test('regular: accepting a /image directory repaints the children dropdown', asy
   const { startImageApp } = await import('./support/app-harness.ts')
   const root = dirFixture(life)
   const { vt, app } = startImageApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('/image src')
@@ -227,6 +248,7 @@ test('regular -> fullscreen while a completion is in flight: children repaint on
   const { startApp } = await import('./support/app-harness.ts')
   const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // The request enters its 20ms debounce + async discovery HERE; the switch
@@ -244,6 +266,7 @@ test('fullscreen -> regular while a completion is in flight: children repaint on
   const { startApp } = await import('./support/app-harness.ts')
   const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
@@ -263,6 +286,7 @@ test('fullscreen: async slash-command suggestions paint the fresh list', async (
   const { startImageApp } = await import('./support/app-harness.ts')
   const root = dirFixture(life)
   const { vt, app } = startImageApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
@@ -283,6 +307,7 @@ test('regular: async slash-command suggestions paint the fresh list', async (t) 
   const { startImageApp } = await import('./support/app-harness.ts')
   const root = dirFixture(life)
   const { vt, app } = startImageApp(root)
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('/im')

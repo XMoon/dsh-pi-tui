@@ -18,12 +18,26 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Text } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** The snapshot surface slice (the focusedSeat field). */
 function seatOf(host: SurfaceHost): string {
@@ -40,6 +54,7 @@ function makeApp(ledger: ExtensionLedger): { vt: VirtualTerminal; app: TuiApp; h
   const host = new SurfaceHost(ledger, () => app.requestRender())
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
   app.start()
+  startedApps.add(app)
   return { vt, app, host }
 }
 

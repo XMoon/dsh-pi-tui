@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { TuiApp } from '../src/tui-app.ts'
@@ -15,6 +15,20 @@ import { suggestPathArgument } from '../src/mentions.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** A throwaway workspace with one directory + a file inside it. */
 function fixtureWorkspace(life: TestLifecycle): string {
@@ -53,6 +67,7 @@ function startApp(cwd: string): { vt: VirtualTerminal; app: TuiApp; cancels: num
   })
   app.setCommandCompletions([], cwd, new DirectHostFilePort(() => undefined, null))
   app.start()
+  startedApps.add(app)
   return { vt, app, get cancels() { return cancels } }
 }
 
@@ -71,6 +86,7 @@ function startImageApp(cwd: string): { vt: VirtualTerminal; app: TuiApp } {
     new DirectHostFilePort(() => undefined, null),
   )
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -148,7 +164,7 @@ test('non-whitespace mention boundaries trigger natural completion', async (t) =
   await vt.waitForRender()
   sendKeyByKey(vt, '看看@src')
   await waitForDropdownRow(vt, 'deep-nested.ts', 'CJK-glued mention completion')
-  app.stop()
+  app.dispose()
 
   const second = startApp(root)
   life.defer(() => second.app.stop())

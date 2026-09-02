@@ -14,7 +14,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
@@ -30,10 +30,25 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function startApp(width = 100, height = 30): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(width, height)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -505,6 +520,7 @@ function setupSettings() {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
   ctx.provide('commands', {
     register: (def: { name: string; handler?: unknown }): (() => void) => {
@@ -711,6 +727,7 @@ test('P1: an override on a Thinking card OUTSIDE the visible window is still cle
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setFullscreen(true)
   await vt.waitForRender()
   const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
@@ -768,6 +785,7 @@ test('P2a: a wide → narrow resize re-derives the compact Thinking rows (no sta
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview that must re-truncate' }])
   await vt.waitForRender()
   let lines = vt.getViewport()
@@ -798,6 +816,7 @@ test('P2b: a narrow → wide resize restores the untruncated preview', async () 
   const vt = new VirtualTerminal(8, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview line' }])
   await vt.waitForRender()
   let lines = vt.getViewport()
@@ -828,6 +847,7 @@ test('P2c: fullscreen resize keeps the compact rows stable and the click map ali
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setFullscreen(true)
   app.setTranscript([
     { kind: 'thinking', turn: 0, text: 'one\ntwo\nthree' },
@@ -900,6 +920,7 @@ test('P2: the compact Thinking card never wraps on a narrow terminal', async () 
   const vt = new VirtualTerminal(8, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a very long reasoning line that would wrap' }])
   await vt.waitForRender()
   const lines = vt.getViewport()
@@ -923,6 +944,7 @@ test('P2e: the compact card survives the 100 → 8 → 100 resize matrix inside 
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview line that must survive both resizes' }])
   await vt.waitForRender()
   const rowsOf = (): string[] => {
@@ -966,6 +988,7 @@ test('L3: an Alt+T expanded transition rebuilds the plugin-rendered component to
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'one\ntwo', running: true }])
   await vt.waitForRender()
   assert.ok(calls.length >= 1, 'the plugin renderer must run once')
