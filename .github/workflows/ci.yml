@@ -768,6 +768,15 @@ jobs:
           name: dsh-pi-tui-tarball
           path: tarball
 
+      # The smoke script runs from the repo root and imports devDependencies
+      # (semver since the alpha.4 baseline); every other CI job installs the
+      # workspace, this one must too or the import fails with
+      # ERR_MODULE_NOT_FOUND. The harness it drives is a separate isolated
+      # directory, so the workspace install does not affect the boundary
+      # semantics under test.
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Run expected-rejection smoke
         shell: bash
         run: |
