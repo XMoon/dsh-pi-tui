@@ -55,17 +55,25 @@ function listTsFiles(dir) {
   return out.sort()
 }
 
-/** Read the upstream blob for one src file at the pinned commit. */
-function upstreamBlob(repo, packageDir, commit, file) {
-  try {
-    return execFileSync('git', ['show', `${commit}:${packageDir}/src/${file}`], {
-      cwd: repo,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-  } catch {
-    return undefined // file does not exist upstream (local-only)
+/** Read the upstream blob for one src file at the pinned commit. A git
+ * checkout is read via `git show` (the checkout may sit at another
+ * commit); a tarball-fallback upstream is a plain extracted tree, so the
+ * file is read directly. */
+function upstreamBlob(repo, packageDir, commit, file, isGit) {
+  if (isGit) {
+    try {
+      return execFileSync('git', ['show', `${commit}:${packageDir}/src/${file}`], {
+        cwd: repo,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+    } catch {
+      return undefined // file does not exist upstream (local-only)
+    }
   }
+  const direct = path.join(repo, packageDir, 'src', file)
+  if (!existsSync(direct)) return undefined // file does not exist upstream (local-only)
+  return readFileSync(direct, 'utf8')
 }
 
 /** Resolve the upstream src directory; returns { repo, packageDir, commit } or throws. */
@@ -82,7 +90,7 @@ function resolveUpstream() {
     if (!existsSync(path.join(repo, '.git'))) continue
     try {
       execFileSync('git', ['cat-file', '-t', commit], { cwd: repo, stdio: 'ignore' })
-      return { repo, packageDir, commit, source: repo }
+      return { repo, packageDir, commit, source: repo, isGit: true }
     } catch {
       // checkout exists but the pinned commit is not present
     }
@@ -161,7 +169,7 @@ function main() {
     const unchanged = []
     for (const file of localFiles) {
       const local = readFileSync(path.join(FORK_SRC, file), 'utf8')
-      const upstreamContent = upstreamBlob(upstream.repo, upstream.packageDir, upstream.commit, file)
+      const upstreamContent = upstreamBlob(upstream.repo, upstream.packageDir, upstream.commit, file, upstream.isGit)
       if (upstreamContent === undefined || upstreamContent !== local) changed.push(file)
       else unchanged.push(file)
     }
