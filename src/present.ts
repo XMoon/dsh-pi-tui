@@ -278,7 +278,8 @@ export function sendMessageCallPresentation(argsRaw: string): SendMessageCallPre
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
   const args = parsed as Record<string, unknown>
   // The two currently known producers use agent_id and target respectively;
-  // nullish selection keeps a valid standard field authoritative.
+  // prefer the first non-blank field so malformed optional data cannot hide a
+  // valid Team target during replay.
   const target = nonBlankString(args.agent_id) ?? nonBlankString(args.target)
   if (target === undefined || typeof args.message !== 'string') return undefined
   return { target, message: args.message }
@@ -300,6 +301,8 @@ export function terminalSendCallPresentation(argsRaw: string): TerminalSendCallP
   const args = parsed as Record<string, unknown>
   const sessionId = nonBlankString(args.sessionId)
   if (sessionId === undefined || typeof args.text !== 'string') return undefined
+  if (args.submit !== undefined && typeof args.submit !== 'boolean') return undefined
+  if (args.run_in_background !== undefined && typeof args.run_in_background !== 'boolean') return undefined
   return { sessionId, text: args.text }
 }
 
