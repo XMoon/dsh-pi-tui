@@ -6,7 +6,9 @@
  * next follow the TRACKED branch-level mode policy
  * (test/compat/dsh-mode.json) — one line flips the whole branch between
  * the pinned source pack and the registry-backed npm distribution. All
- * other branches/PR bases use npm mode.
+ * other branches/PR bases use npm mode. The current validated DSH version
+ * comes from test/compat/dsh-source.json; the pi2dsh manifest is an external
+ * consumer pairing and is not a CI target-version source.
  *
  * @module dsh-ci-context
  */
@@ -20,7 +22,6 @@ import { DEFAULT_SOURCE_CONFIG, loadDshSourceConfig } from './lib/dsh-distributi
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(SCRIPT_DIR, '..')
-const PI2DSH_MANIFEST = join(ROOT, 'test', 'compat', 'pi2dsh.json')
 const MODE_CONFIG = join(ROOT, 'test', 'compat', 'dsh-mode.json')
 
 function fail(message) {
@@ -72,24 +73,13 @@ export function resolveDshMode({ eventName = '', ref = '', baseRef = '', forcedM
   return computed
 }
 
-function readTargetVersion() {
-  try {
-    const manifest = JSON.parse(readFileSync(PI2DSH_MANIFEST, 'utf8'))
-    if (typeof manifest.dshVersion === 'string' && manifest.dshVersion !== '') return manifest.dshVersion
-  } catch {
-    // The source pin remains the fallback if the optional consumer manifest is
-    // unavailable in a reduced checkout.
-  }
-  return undefined
-}
-
 /** Resolve and validate all context outputs. */
 export function resolveDshContext({ eventName, ref, baseRef, configPath = DEFAULT_SOURCE_CONFIG, forcedMode, modeConfigPath = MODE_CONFIG } = {}) {
   const config = loadDshSourceConfig(configPath)
   const mode = resolveDshMode({ eventName, ref, baseRef, forcedMode, modeConfigPath })
   return {
     mode,
-    version: readTargetVersion() ?? config.expectedVersion,
+    version: config.expectedVersion,
     sourceRef: mode === 'source' ? config.ref : '',
     sourceExpectedVersion: mode === 'source' ? config.expectedVersion : '',
     sourceConfig: config.path,

@@ -18,7 +18,10 @@ import {
   sourcePackPlatformSupported,
   validateSourcePackOutput,
 } from '../scripts/dsh-source-pack.mjs'
-import { sourceConfigForArgs } from '../scripts/official-presets-smoke.mjs'
+import {
+  currentValidatedDshVersion,
+  sourceConfigForArgs,
+} from '../scripts/official-presets-smoke.mjs'
 import { installEnvironment } from '../scripts/prepare-dsh-test-environment.mjs'
 import {
   candidateTarball as sourceVerifyCandidateTarball,
@@ -255,6 +258,10 @@ test('source verification delegates packing to the dedicated pack script', () =>
   const manifestLoad = sourceVerify.indexOf('const distribution = loadDshDistributionManifest(distributionDir')
   assert.ok(packCompletion >= 0 && packCompletion < ownerCapture && ownerCapture < manifestLoad, 'generated ownership must be captured before manifest loading')
   assert.doesNotMatch(sourceVerify, /const args = \[SCRIPT_PATH, '--dsh-dir'/u)
+})
+
+test('official preset npm target uses the current validated DSH version', () => {
+  assert.equal(currentValidatedDshVersion(), '0.1.2-alpha.5')
 })
 
 test('official preset source args retain effective source overrides', () => {

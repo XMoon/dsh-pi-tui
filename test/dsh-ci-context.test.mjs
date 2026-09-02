@@ -61,21 +61,24 @@ test('all release tags force npm mode, including next-v tags', () => {
   }
 })
 
-test('context exposes the tracked source pin only in source mode', (t) => {
+test('context uses the current DSH target in every mode and exposes the source pin only in source mode', (t) => {
   const life = testLifecycle(t)
   const npm = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next' })
   assert.equal(npm.mode, 'npm')
+  assert.equal(npm.version, '0.1.2-alpha.5')
   assert.equal(npm.sourceRef, '')
   assert.equal(npm.sourceExpectedVersion, '')
 
   const main = resolveDshContext({ eventName: 'push', ref: 'refs/heads/main' })
   assert.equal(main.mode, 'npm')
+  assert.equal(main.version, '0.1.2-alpha.5')
   assert.equal(main.sourceRef, '')
   assert.equal(main.sourceExpectedVersion, '')
 
   const { path } = tempModeConfig('source', life)
   const source = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: path })
   assert.equal(source.mode, 'source')
+  assert.equal(source.version, '0.1.2-alpha.5')
   assert.equal(source.sourceRef, nextSha)
   assert.equal(source.sourceExpectedVersion, '0.1.2-alpha.5')
 })
