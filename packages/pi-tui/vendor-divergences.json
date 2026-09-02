@@ -40,5 +40,6 @@
   "X042": ["src/components/select-list.ts", "src/components/settings-list.ts"],
   "X043": ["src/tui-alt-screen.ts"],
   "X044": ["src/components/editor.ts"],
-  "X045": ["src/components/editor.ts"]
+  "X045": ["src/components/editor.ts"],
+  "X046": ["src/tui.ts"]
 }

@@ -875,6 +875,15 @@ export abstract class TuiBase extends Container implements TUI {
 		if (this.consumeTerminalColorSchemeReport(data)) {
 			return;
 		}
+		// Consume terminal cell size responses BEFORE the input listeners
+		// (dsh-pi-tui divergence X046): every terminal-owned protocol reply
+		// is filtered before the host/raw listeners run, so a listener that
+		// consumes every chunk (a question/approval modal, an unstable raw
+		// capture) can never swallow the reply and leave the cell
+		// dimensions stale. Upstream consumes it after the listeners.
+		if (this.consumeCellSizeResponse(data)) {
+			return;
+		}
 
 		if (this.inputListeners.size > 0) {
 			let current = data;
@@ -891,11 +900,6 @@ export abstract class TuiBase extends Container implements TUI {
 				return;
 			}
 			data = current;
-		}
-
-		// Consume terminal cell size responses without blocking unrelated input.
-		if (this.consumeCellSizeResponse(data)) {
-			return;
 		}
 
 		// Global debug key handler (Shift+Ctrl+D)

@@ -347,16 +347,22 @@ sync with this file on every re-vendor.
   twice), the keyboard-negotiation buffer/timer is cleared, and the
   pre-raw `wasRaw` state is captured ONLY on the first start (a repeated
   start finds stdin already raw; re-capturing would make the eventual
-  stop() restore raw mode instead of the original cooked state).
+  stop() restore raw mode instead of the original cooked state). The
+  Kitty keyboard protocol is pushed (CSI > flags u) exactly ONCE per
+  start/stop cycle: a repeated start keeps the negotiated mode and does
+  not push again, so stop()'s single pop (CSI < u) restores the terminal
+  instead of leaving it in enhancement mode after exit.
 - Consumer: host surface restart (fullscreen toggle re-starts the terminal).
 - Upstream status: absent.
 - Tests: "repeated start() calls swap the resize listener instead of
   stacking it", "repeated start() calls swap the stdin data handler instead
-  of stacking it" and "repeated start() keeps the ORIGINAL raw state so
-  stop() restores cooked mode" in `test/terminal.test.ts` (X016 regression:
-  two consecutive `start()` calls must leave exactly one listener per
-  resource, deliver one stdin event exactly once, and restore the original
-  raw mode on stop).
+  of stacking it", "repeated start() keeps the ORIGINAL raw state so
+  stop() restores cooked mode" and "repeated start() pushes the Kitty
+  keyboard protocol exactly once" in `test/terminal.test.ts` (X016
+  regression: two consecutive `start()` calls must leave exactly one
+  listener per resource, deliver one stdin event exactly once, restore
+  the original raw mode on stop, and keep the keyboard-protocol
+  push/pop balanced).
 - Migration action: re-apply; keep the remove-before-assign ORDER (assigning
   the new handler first silently reverts the fix — the removed listener is
   then the new one and the old listener leaks).
@@ -899,13 +905,44 @@ sync with this file on every re-vendor.
   would be re-expanded — corrupting real text and desyncing the expanded
   cursor. Single-pass expansion never re-scans inserted content, and the
   text/cursor pair can never disagree about which markers expanded.
+  The cursor mapping compares the RAW cursor against RAW marker
+  coordinates throughout and accumulates the expansion delta separately —
+  an earlier draft compared an already-expanded cursor against later raw
+  marker ends, over-counting markers the cursor never passed (a cursor
+  between two markers jumped past the second one on handoff).
 - Tests: "expanded cursor mapping (X045)" in `test/editor.test.ts`,
   including the marker-collision test (a literal `[paste #N ...]` inside
   an earlier paste's content survives verbatim while the real marker still
-  expands, and the expanded cursor lands at the expanded end).
+  expands, and the expanded cursor lands at the expanded end) and the
+  every-raw-position mapping test (before the first marker, inside it,
+  between two markers, exactly at the second marker's start, inside it,
+  after every marker — the between-markers case fails under the mixed
+  raw/expanded algorithm).
 - Migration action: re-apply together with the host's expanded-draft
   wiring (round-2 P1: steer/submit/getDraft/viewer wires and seat
   handoffs all carry expanded text).
+
+### X046 — Cell-size replies consumed before input listeners
+
+- Category: `HARD_HOST_API`
+- Files: `src/tui.ts`
+- Reason: `TuiBase.handleTerminalInput()` now consumes the cell-size
+  response (CSI 6;H;W t) BEFORE the input listeners, alongside the OSC11
+  and color-scheme replies — every terminal-owned protocol reply is
+  filtered before the host/raw listeners run. Upstream consumes it AFTER
+  the listeners, so a listener that consumes every chunk (a
+  question/approval modal, an unstable raw capture) could swallow the
+  reply and leave the cell dimensions stale — which also made the
+  preHostInput contract's "capture cannot break terminal negotiation"
+  claim false for the cell-size query.
+- Consumer: host fullscreen image rendering (cell dimensions must update
+  even while a modal owns the input path).
+- Upstream status: absent (upstream consumes after the listeners).
+- Tests: "consumes cell size responses BEFORE input listeners — a
+  consume-everything listener cannot swallow them (X046)" in
+  `test/tui-cell-size-input.test.ts`.
+- Migration action: re-apply the ordering (cell-size consume before the
+  listener loop).
 
 ### X044 — Protected autocomplete seam
 

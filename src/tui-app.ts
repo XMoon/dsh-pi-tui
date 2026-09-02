@@ -2886,17 +2886,12 @@ export class TuiApp {
     this.approvalQueue.length = 0
     if (this.activeApproval !== undefined) this.settleApproval(this.activeApproval, 'cancelled')
     this.disposeTrackedKeybindingEditors()
-    this.stop()
-    this.generation += 1
-    this.clearNotify()
-    if (this.notifyTimer !== undefined) {
-      clearTimeout(this.notifyTimer)
-      this.notifyTimer = undefined
-    }
-    this.terminalSchemeListeners.clear()
-    this.expandedOverride.clear()
-    this.disposeMessageComponents()
-    this.localMessages.length = 0
+    // Every physical overlay unmount happens BEFORE stop(): removing the
+    // last overlay writes hideCursor, and stop() ends with showCursor —
+    // the reverse order would leave the user's cursor hidden after exit
+    // (the same discipline the approval settles above already follow).
+    // This covers the plugin/advanced/unstable lease closes, the
+    // imperative broker settles and the broker's final disposeAll.
     for (const lease of this.extensionOverlayLeases) lease.close()
     this.extensionOverlayLeases.clear()
     // Phase 2: close every still-owned ADVANCED interactive overlay lease
@@ -2925,6 +2920,17 @@ export class TuiApp {
     // forgetting the handles. A caller that never invoked its closer must
     // not leave a ref'd interval firing into the disposed surface.
     this.overlayBroker.disposeAll()
+    this.stop()
+    this.generation += 1
+    this.clearNotify()
+    if (this.notifyTimer !== undefined) {
+      clearTimeout(this.notifyTimer)
+      this.notifyTimer = undefined
+    }
+    this.terminalSchemeListeners.clear()
+    this.expandedOverride.clear()
+    this.disposeMessageComponents()
+    this.localMessages.length = 0
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
     this.searchOverlay = undefined

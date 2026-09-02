@@ -246,6 +246,25 @@ test('TuiApp: openOutputViewer after final dispose mints no refresh timer (round
   }
 })
 
+test('TuiApp: final dispose leaves the terminal cursor VISIBLE (every overlay unmount runs before stop)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  await vt.waitForRender()
+  // An open overlay whose physical hide() writes hideCursor when the
+  // last overlay leaves the stack.
+  app.openOutputViewer({ title: 'job output', initial: '', refresh: () => 'tick' })
+  await vt.waitForRender()
+  app.dispose()
+  // Removing the last overlay writes \x1b[?25l; stop() ends with
+  // showCursor (\x1b[?25h). If any overlay unmount ran AFTER stop, the
+  // final sequence would be the hide — leaving the user's shell cursor
+  // hidden after exit.
+  assert.equal(vt.cursorWrites.at(-1), '\x1b[?25h', 'the final cursor sequence must be SHOW')
+})
+
 test('TuiApp: a plugin overlay lease survives a fullscreen toggle (round-1 finding 2)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')

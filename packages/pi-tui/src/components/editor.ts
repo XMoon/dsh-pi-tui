@@ -1164,26 +1164,36 @@ export class Editor implements Component, Focusable {
 		rawCursor?: number,
 	): { text: string; cursor?: number } {
 		let result = "";
-		let cursor = rawCursor;
 		let lastIndex = 0;
+		// The cursor mapping compares the RAW cursor against RAW marker
+		// coordinates throughout and accumulates the expansion delta
+		// separately — mixing expanded and raw coordinates (comparing an
+		// already-expanded cursor against later raw marker ends) would
+		// over-count markers the cursor never passed (X045).
+		let delta = 0;
+		let snappedCursor: number | undefined;
 		for (const match of text.matchAll(PASTE_MARKER_REGEX)) {
 			const content = this.pastes.get(Number.parseInt(match[1]!, 10));
 			if (content === undefined) continue; // unknown id: leave the marker as-is
 			const markerStart = match.index!;
 			const markerEnd = markerStart + match[0].length;
 			result += text.slice(lastIndex, markerStart) + content;
-			if (cursor !== undefined) {
-				if (cursor >= markerEnd) {
-					cursor += content.length - match[0].length;
-				} else if (cursor > markerStart) {
-					// The cursor sits inside an atomic marker: snap to its
-					// end, then account for the expansion.
-					cursor = markerEnd + content.length - match[0].length;
+			if (rawCursor !== undefined && snappedCursor === undefined) {
+				if (rawCursor >= markerEnd) {
+					delta += content.length - match[0].length;
+				} else if (rawCursor > markerStart) {
+					// The cursor sits inside an atomic marker: snap to that
+					// marker's EXPANDED end (marker end + the delta accrued
+					// before it + the content length). Every later marker
+					// lies beyond it, so this is the final cursor.
+					snappedCursor = markerEnd + delta + content.length;
 				}
 			}
 			lastIndex = markerEnd;
 		}
 		result += text.slice(lastIndex);
+		const cursor =
+			rawCursor === undefined ? undefined : snappedCursor ?? rawCursor + delta;
 		return { text: result, cursor };
 	}
 

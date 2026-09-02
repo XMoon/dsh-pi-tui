@@ -14,6 +14,9 @@ export class VirtualTerminal implements Terminal {
 	private resizeHandler?: () => void;
 	private _columns: number;
 	private _rows: number;
+	/** Test hook: every cursor visibility sequence written (hide/show), in
+	 * order — asserts the FINAL cursor state after teardown. */
+	readonly cursorWrites: string[] = [];
 
 	constructor(columns = 80, rows = 24) {
 		this._columns = columns;
@@ -76,10 +79,12 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	hideCursor(): void {
+		this.cursorWrites.push("\x1b[?25l");
 		this.xterm.write("\x1b[?25l");
 	}
 
 	showCursor(): void {
+		this.cursorWrites.push("\x1b[?25h");
 		this.xterm.write("\x1b[?25h");
 	}
 
