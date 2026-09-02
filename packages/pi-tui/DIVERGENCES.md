@@ -31,6 +31,26 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - `REMOVED_UNUSED` — old kimi-only or defective divergence; do NOT re-apply
   (used by X003 and the removal notes).
 
+## Machine gate (do not skip)
+
+`pnpm gate:pi-vendor-diff` (scripts/pi-vendor-diff-gate.mjs) verifies the
+local `src/` against the PINNED upstream blobs (UPSTREAM.json) and the
+machine-readable manifest `vendor-divergences.json` (id → files, mirroring
+the `Files:` lines below; entries whose divergence was REMOVED/ABSORBED are
+intentionally absent — their files must match upstream):
+
+- FAIL — a local src file differs from the pinned upstream blob (or does
+  not exist upstream) without any manifest entry covering it: an
+  UNACCOUNTED divergence. The ledger must be updated (or the change
+  reverted) before the migration can be called settled.
+- WARN — a manifest entry whose src files ALL match upstream (stale
+  ledger: absorbed or accidentally reverted) or that lists a file which no
+  longer exists locally. `--strict` promotes warnings to failures.
+
+Upstream resolution: `$PI_UPSTREAM_REPO` → `~/project/pi` → GitHub
+codeload tarball of the pinned commit. Keep `vendor-divergences.json` in
+sync with this file on every re-vendor.
+
 ## Divergences
 
 ### X001 — SelectList searchable/grouped picker (was #1)
@@ -49,8 +69,14 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - Consumer: host `/sessions` picker, model picker, category picker,
   autocomplete compact picker, dynamic title enrichment.
 - Upstream status: open upstream PRs exist but are not part of the pinned baseline.
-- Tests: "search", "group headers", "page keys", and "setFilter without
-  search (X001 navigation bounds)" describes in `test/select-list.test.ts`.
+- 2026-09 audit hardening: zero-match navigation invariant — with
+  `displayItems.length === 0` every navigation key (up/down/pageUp/pageDown)
+  is a no-op, so `selectedIndex` stays 0 (a wrap on the empty list would
+  otherwise produce -1/1). Search keys still reach the search box (typing
+  refines the query), so the guard sits on the navigation branches only.
+- Tests: "search", "group headers", "page keys", "setFilter without
+  search (X001 navigation bounds)" and the zero-match navigation test in
+  `test/select-list.test.ts`.
 - Migration action: re-apply on top of Earendil 0.84.4 `select-list.ts`; keep
   upstream layout contract (`truncatePrimary`, description behavior).
 
@@ -176,13 +202,22 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
   Box removal → dispose; SettingsList submenu slot → dispose;
   Overlay hide (disposeOnHide) → dispose; overlay hide (default) → caller
   owns.
+- 2026-09 audit hardening: `Container.dispose()` is now IDEMPOTENT — the
+  children are detached BEFORE disposal (a repeated dispose is a no-op
+  instead of double-disposing the children). Deliberately NOT `this.clear()`
+  (ScrollView overrides clear() to throw). The host's final surface
+  teardown relies on exactly-once disposal: `OverlayBroker.disposeAll()`
+  physically unmounts every still-tracked overlay (running disposeOnHide)
+  WITHOUT restoring dependents, so a caller that never invoked its closer
+  (e.g. an open OutputViewer) still releases its panel-owned timers.
 - Consumer: host pi-surface-compat gate (`test/pi-component-compat.test.ts`:
   close idempotent, dispose exactly once, surface disposal invalidates old
   leases, fullscreen migration keeps one live adapter) and the extension
   lifecycle (unstable mounts, overlay leases).
 - Upstream status: absent.
 - Tests: `test/pi-component-compat.test.ts` (bundle), ScrollView/layout
-  describes in `test/layout.test.ts`.
+  describes in `test/layout.test.ts`, `Container.dispose`/`ScrollView.dispose`
+  idempotency in `test/dispose-lifecycle.test.ts`.
 - Migration action: re-apply on top of Earendil 0.84.4 `tui.ts`; do not
   break the upstream renderer lifecycle.
 
@@ -304,12 +339,24 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
   once (the PREVIOUS start()'s listener is removed BEFORE the new handler is
   assigned — `stop()` can only remove the current reference). Upstream
   0.84.4 stacks listeners on restart.
+- 2026-09 audit completion: a repeated start() now swaps EVERY owned
+  handler safely, not just the resize listener — the previous stdin "data"
+  handler is removed and the previous StdinBuffer destroyed before the new
+  ones are created (a stale StdinBuffer callback and a stale stdin listener
+  would both forward into the NEW inputHandler, delivering one stdin event
+  twice), the keyboard-negotiation buffer/timer is cleared, and the
+  pre-raw `wasRaw` state is captured ONLY on the first start (a repeated
+  start finds stdin already raw; re-capturing would make the eventual
+  stop() restore raw mode instead of the original cooked state).
 - Consumer: host surface restart (fullscreen toggle re-starts the terminal).
 - Upstream status: absent.
 - Tests: "repeated start() calls swap the resize listener instead of
-  stacking it" in `test/terminal.test.ts` (X016 regression: two consecutive
-  `start()` calls must leave exactly one listener and fire only the second
-  handler).
+  stacking it", "repeated start() calls swap the stdin data handler instead
+  of stacking it" and "repeated start() keeps the ORIGINAL raw state so
+  stop() restores cooked mode" in `test/terminal.test.ts` (X016 regression:
+  two consecutive `start()` calls must leave exactly one listener per
+  resource, deliver one stdin event exactly once, and restore the original
+  raw mode on stop).
 - Migration action: re-apply; keep the remove-before-assign ORDER (assigning
   the new handler first silently reverts the fix — the removed listener is
   then the new one and the old listener leaks).
@@ -713,7 +760,18 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - Consumer: host editor paste path (every remap/SSH/tmux session without
   bracketed paste).
 - Upstream status: absent.
-- Tests: "paste-burst fallback (X038)" describes in `test/editor.test.ts`.
+- 2026-09 audit cross-divergence (X037 × X038): the burst's Enter is the
+  PHYSICAL Enter that currently carries the submit binding
+  (`isPhysicalSubmitEnter` = physical Enter AND `tui.editor.submit` match).
+  A remapped submit chord (e.g. Ctrl+X) is a chord, not a paste's trailing
+  Enter: it resets the burst and submits even mid-burst — the suppression
+  never applies to it. Previously the "is Enter" test was the semantic
+  submit match alone, so a remapped submit key was suppressed into a
+  newline while the burst was active.
+- Tests: "paste-burst fallback (X038)" describes in `test/editor.test.ts`,
+  including the two X037 × X038 cross tests (remapped submit chord submits
+  mid-burst; a physical Enter under a remapped submit breaks the burst
+  instead of submitting).
 - Migration action: re-apply `paste-burst.ts` verbatim + the editor
   integration (tracking block after the bracketed-paste section, the
   submit-branch check, the two insert-point feeds, the option/setter).
@@ -833,7 +891,18 @@ each re-vendor (see `UPSTREAM.json` for the pinned baseline).
 - Consumer: host `src/editor-seat-holder.ts` (wireCursorOf),
   HostEditorAdapter/SeatEditor optional `getExpandedCursor?()`.
 - Upstream status: absent.
-- Tests: "expanded cursor mapping (X045)" in `test/editor.test.ts`.
+- 2026-09 audit robustness: `getExpandedText()` and `getExpandedCursor()`
+  now share ONE single-pass marker tokenizer
+  (`expandPasteMarkersSinglePass`) instead of two algorithms. The upstream
+  multi-round replace re-scans the output of earlier rounds, so a paste
+  whose CONTENT contains a literal marker string for a LATER paste id
+  would be re-expanded — corrupting real text and desyncing the expanded
+  cursor. Single-pass expansion never re-scans inserted content, and the
+  text/cursor pair can never disagree about which markers expanded.
+- Tests: "expanded cursor mapping (X045)" in `test/editor.test.ts`,
+  including the marker-collision test (a literal `[paste #N ...]` inside
+  an earlier paste's content survives verbatim while the real marker still
+  expands, and the expanded cursor lands at the expanded end).
 - Migration action: re-apply together with the host's expanded-draft
   wiring (round-2 P1: steer/submit/getDraft/viewer wires and seat
   handoffs all carry expanded text).
@@ -934,62 +1003,13 @@ decisions. Each removal below names its criterion:
   (`targetText`) is also a local defensive keep alongside X032 (upstream
   0.84.4 pads without the clamp).
 
-## Final status after the 2026-09 follow-up audit (post-PR-#68 sweep)
+## Acceptance (before declaring a re-vendor settled)
 
-- NEW divergences: X037 (editor submit split), X038 (PasteBurst restored),
-  X039 (width cache 4096 restored), X040 (setValue cursor), X041 (canonical
-  filter query), X042 (Focusable lists), X043 (deferred viewport listener),
-  X044 (protected autocomplete seam), X045 (expanded-cursor mapping,
-  round-2 review).
-- UPDATED: X007 (dispose completed across Box/SettingsList/overlay hide via
-  opt-in disposeOnHide), X023 (paste registry prune), X028 (canScroll +
-  host prompt-nav claim), X001/X002 (see X041).
-- Host-side fixes that need NO fork divergence (upstream-native seams the
-  host failed to use): `getExpandedText` for the external-editor round-trip
-  and draft snapshots; `TuiStopOptions.preserveScreen` for the
-  external-editor suspend/resume (fullscreen preserved);
-  `openUrl`/`onRightClickPaste` fullscreen wiring; `renderLatex: false`
-  (product decision, kimi parity); `basis: 0` on the fullscreen scroll
-  entry.
-- REMOVAL CRITERIA recorded in the removed-code section: "no host consumer"
-  applies to Host-API patches only.
-
-## Acceptance after syncing from upstream
-
-- `pnpm --filter @xmoon76/pi-tui test` must pass in full; any failure among
-  the guarding tests above means a local divergence was overwritten and lost.
+- `pnpm --filter @xmoon76/pi-tui test` must pass in full — any failure
+  among the guarding tests above means a local divergence was overwritten
+  and lost.
 - `pnpm gate:pi-surface-compat` (bundle) must pass — the re-vendor
   compatibility gate for the component lifecycle contract.
-
-## Final status after the v0.84.4 re-vendor (2026-09)
-
-- `KEEP` (re-applied on the Earendil v0.84.4 base; the 2026-09
-  follow-up audit ADDS X037–X045 — see its own status section above):
-  X001, X002,
-  X004A, X004B, X005, X006, X007, X008, X009, X010, X011, X012,
-  X014 (measurement cache ONLY — the scrollbar thumb clamp is already in
-  upstream 0.84.4, see the entry's scope note), X016, X018, X019, X020,
-  X021, X022, X023, X024, X027, X028, X029, X030, X031, X032, X033, X034,
-  X035 (per-frame processed-line reuse — restored after the PR-review
-  benchmark showed a 100-500x per-frame regression without it; the host's
-  reference-stable component caches are built around it), X036
-  (FOCUS passthrough — restored; app-level listeners are a live host
-  seam, not a kimi-only leftover).
-- `ABSORBED_UPSTREAM`: X015 (dead `_lastEventType` — upstream baseline
-  restored), X017 (regular mode owns no mouse — upstream baseline),
-  X026 (copySelection/copyOnSelect — upstream 0.84.4 native).
-- `PACKAGING_ONLY`: X025 (tsdown config — XMoon shell kept).
-- `REMOVED_UNUSED` (no host consumer; X003 is a code-unit/grapheme
-  mismatch defect and X013 is unconsumed — see their entries): X003,
-  X013, inlineSlashTrigger, setHistoryFilter, preservePasteRegistry,
-  additionalBasePaths, inlineSkill data, getLayoutRoot. NOTE
-  (2026-09 follow-up audit): PasteBurst and `WIDTH_CACHE_SIZE = 4096`
-  were initially listed here and are NO LONGER REMOVED — PasteBurst is
-  restored as X038 and the width cache as X039 (the "no host consumer"
-  criterion was wrong for an internal bugfix and a perf contract; see the
-  removed-code section above for the per-category criteria). (Defensive
-  negative-width `repeat()` guards are dropped in
-  text/truncated-text/markdown/editor; `layout.ts` retains one local
-  `Math.max(0, end - start)` `targetText` padding guard alongside
-  X032's entry-point clamp — the scrollbar thumb clamp itself is upstream
-  baseline.)
+- `pnpm gate:pi-vendor-diff` must pass — every local src change is covered
+  by `vendor-divergences.json` and no ledger entry is stale (see the
+  Machine gate section above).

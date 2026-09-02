@@ -207,6 +207,7 @@
     "prepare:dsh:test": "node scripts/prepare-dsh-test-environment.mjs",
     "gate:source-leak": "node scripts/dsh-source-leak-gate.mjs",
     "gate:temp-hygiene": "node scripts/temp-hygiene-gate.mjs",
+    "gate:pi-vendor-diff": "node scripts/pi-vendor-diff-gate.mjs",
     "smoke:vim": "node scripts/vim-plugin-smoke.mjs",
     "gate:pi-surface-compat": "node --test test/pi-component-compat.test.ts",
     "smoke:examples": "node scripts/examples-plugin-smoke.mjs",
