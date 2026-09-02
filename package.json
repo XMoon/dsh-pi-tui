@@ -172,7 +172,9 @@
     "@deepseek-ai/dsh-terminal": "0.1.2-alpha.4",
     "@deepseek-ai/dsh-fs-local": "0.1.2-alpha.4",
     "@deepseek-ai/dsh-tool-str-replace-editor": "0.1.2-alpha.4",
-    "@deepseek-ai/dsh-tool-cordis": "0.1.2-alpha.4"
+    "@deepseek-ai/dsh-tool-cordis": "0.1.2-alpha.4",
+    "@deepseek-ai/dsh-agent-loop-testkit": "0.1.2-alpha.4",
+    "@deepseek-ai/dsh-subagent-spawn-in-process": "0.1.2-alpha.4"
   },
   "engines": {
     "node": "^22.19.0 || >=24"
