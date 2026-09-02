@@ -19,21 +19,18 @@ const GATE = join(ROOT, 'scripts', 'pi-vendor-diff-gate.mjs')
 
 /** A test-owned env with the local-checkout candidates disabled (HOME
  * points at an empty dir, PI_UPSTREAM_REPO at a missing path), so the
- * gate can only resolve upstream through the tarball fallback. */
+ * gate can only resolve upstream through the tarball fallback. The
+ * fallback hooks are explicitly REMOVED from the inherited env: a stray
+ * PI_UPSTREAM_TARBALL/CURL would silently switch the branch under test. */
 function makeEnv(t, extra) {
   const life = testLifecycle(t)
   const root = life.tempDir('pi-vendor-diff-test-')
   const home = join(root, 'home')
   mkdirSync(home, { recursive: true })
-  return {
-    root,
-    env: {
-      ...process.env,
-      PI_UPSTREAM_REPO: join(root, 'no-such-repo'),
-      HOME: home,
-      ...extra,
-    },
-  }
+  const env = { ...process.env, PI_UPSTREAM_REPO: join(root, 'no-such-repo'), HOME: home }
+  delete env.PI_UPSTREAM_TARBALL
+  delete env.PI_UPSTREAM_CURL
+  return { root, env: { ...env, ...extra } }
 }
 
 function runGate(env) {
