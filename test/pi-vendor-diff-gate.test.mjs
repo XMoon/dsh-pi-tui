@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from './support/temp-lifecycle.ts'
@@ -38,23 +38,31 @@ function runGate(env) {
 }
 
 /** Build a fake upstream tarball (root name irrelevant — the gate peels
- * one level with --strip-components=1) and return its path. */
+ * one level with --strip-components=1) and return its path. It carries
+ * ONE file that matches a real local fork file (utils.ts, copied
+ * verbatim) so the comparison must report it as UNCHANGED — a fallback
+ * that cannot read the extracted tree (e.g. running `git show` in a
+ * non-git directory) would report every local file as local-only and
+ * fail the unchanged assertion. */
 function makeFakeUpstreamTarball(root) {
   const tree = join(root, 'pi-fake')
   mkdirSync(join(tree, 'packages', 'tui', 'src'), { recursive: true })
   writeFileSync(join(tree, 'packages', 'tui', 'src', 'foo.ts'), 'upstream foo\n')
+  const localUtils = readFileSync(join(ROOT, 'packages', 'pi-tui', 'src', 'utils.ts'), 'utf8')
+  writeFileSync(join(tree, 'packages', 'tui', 'src', 'utils.ts'), localUtils)
   const tarball = join(root, 'upstream.tar.gz')
   const packed = spawnSync('tar', ['-czf', tarball, '-C', root, 'pi-fake'])
   assert.equal(packed.status, 0, 'fixture tarball must be created')
   return tarball
 }
 
-/** The fake upstream covers none of the real fork's files, so the gate
- * must FAIL with unaccounted divergences (exit 1) — NOT with an
- * extraction error (exit 2). */
+/** The fake upstream covers all but one of the real fork's files, so the
+ * gate must FAIL with unaccounted divergences (exit 1) — NOT with an
+ * extraction error (exit 2) — and must report utils.ts as UNCHANGED. */
 function assertGateRanComparison(result) {
   assert.equal(result.status, 1, `expected unaccounted-diff failure, stderr: ${result.stderr}`)
   assert.ok(result.stdout.includes('UNACCOUNTED divergence'), 'the comparison must have run')
+  assert.ok(result.stdout.includes('unchanged: 1'), 'the matching utils.ts must be recognized as unchanged')
   assert.ok(!result.stderr.includes('failed to extract'), 'the tarball must extract cleanly')
 }
 
