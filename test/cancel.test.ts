@@ -11,13 +11,28 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import type { SettingItem } from '@xmoon76/pi-tui'
 import { interruptAgent } from '../src/index.ts'
 import type { SessionWriter } from '../src/runtime/session-writer-port.ts'
 import { rewindPickerItem } from '../src/rewind.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.stop() } catch {}
+  }
+})
+
 
 /** A writer stub that routes cancel to the agent's own cancel (the runner
  * wires the Direct adapter the same way). */
@@ -43,6 +58,7 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; cancels: number } {
   let cancels = 0
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => { cancels += 1 } })
   app.start()
+  startedApps.add(app)
   return { vt, app, get cancels() { return cancels } }
 }
 
@@ -58,6 +74,7 @@ function startAppWithRewind(): { vt: VirtualTerminal; app: TuiApp; cancels: numb
     onRewind: () => { rewinds += 1 },
   })
   app.start()
+  startedApps.add(app)
   return { vt, app, get cancels() { return cancels }, get rewinds() { return rewinds } }
 }
 
@@ -119,6 +136,7 @@ function startAppWithExits(options: { ctrlCExitWindowMs?: number } = {}): { vt: 
     onCancel: () => { cancels += 1 },
   }, options)
   app.start()
+  startedApps.add(app)
   return { vt, app, get cancels() { return cancels }, get exits() { return exits } }
 }
 
@@ -470,6 +488,8 @@ test('E10: the subagent viewer owns its Esc (exits, never rewinds)', async () =>
     onSingleEscape: () => { singleEscapes += 1; return true },
   })
   app.start()
+
+  startedApps.add(app)
   app.setViewerMode({
     parentSessionId: 'session-parent',
     childSessionId: 'session-child',
@@ -524,6 +544,8 @@ test('Esc Esc opens the rewind picker and Enter selects the turn (headless E2E)'
     },
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x1b')
   vt.sendInput('\x1b')
@@ -548,6 +570,8 @@ test('Esc Esc while busy never opens the rewind picker (plan §28 second half)',
     onRewind: () => { pickerOpened = true },
   })
   app.start()
+
+  startedApps.add(app)
   app.setBusy(true)
   await vt.waitForRender()
   vt.sendInput('\x1b')

@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { ToolCallId, MessageId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
@@ -21,6 +21,21 @@ import { TuiApp } from '../src/tui-app.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.stop() } catch {}
+  }
+})
+
+
 function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; get exits(): number } {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
@@ -30,6 +45,7 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; ge
     onExit: () => { exits += 1 },
   })
   app.start()
+  startedApps.add(app)
   // `exits` is a number: returning it by value would copy 0, so expose a getter.
   return { vt, app, submitted, get exits(): number { return exits } }
 }
@@ -144,6 +160,8 @@ test('notify is transient: cleared by its auto-clear timeout', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { notifyDurationMs: 200 })
   app.start()
+
+  startedApps.add(app)
   app.notify('transient note')
   await new Promise(resolve => setTimeout(resolve, 40))
   await vt.waitForRender()
@@ -257,6 +275,8 @@ test('tool cards present through the real registry: read shows the relativized p
       present: toolPresenterFrom(name => ctx.tools.get(name)),
     })
     app.start()
+
+    startedApps.add(app)
     life.defer(() => app.stop())
     app.setToolOutputExpanded(true)
     const folder = new TranscriptFolder()
@@ -302,6 +322,8 @@ test('shift+tab with no overlay cycles the permission through the host', async (
   let cycled = 0
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCyclePermission: () => { cycled += 1 } })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x1b[Z') // shift+tab
   await vt.waitForRender()
@@ -439,6 +461,8 @@ test('down opens the task browser only with active tasks and an empty editor; ct
     onOpenTasks: () => { opened += 1; app.requestRender() },
   })
   app.start()
+
+  startedApps.add(app)
   const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
   await vt.waitForRender()
   // No active tasks: ↓ is inert.
@@ -498,6 +522,8 @@ test('live continuable subagents arm the task browser trigger through setAgents'
     onOpenTasks: () => { opened += 1; app.requestRender() },
   })
   app.start()
+
+  startedApps.add(app)
   const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
   await vt.waitForRender()
   // No live agents: inert.
@@ -648,6 +674,8 @@ test('a tiny terminal clamps the todo click geometry to the visible screen', asy
   const vt = new VirtualTerminal(80, 6)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   const todos = Array.from({ length: 3 }, (_, i) => ({
     content: `todo item ${i}`,
@@ -916,6 +944,8 @@ test('alt+up with no overlay reaches the dequeue host', async () => {
   let dequeued = 0
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onDequeue: () => { dequeued += 1 } })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x1b[1;3A') // alt+up
   await vt.waitForRender()
@@ -1007,6 +1037,8 @@ test('fixed-width overlays fill the declared width: no border-external mask regi
     const vt = new VirtualTerminal(columns, 24)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
+
+    startedApps.add(app)
     app.openTaskBrowser(
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
       () => {},
@@ -1046,6 +1078,8 @@ test('a fixed-width overlay keeps its frame geometry across fullscreen, resize a
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const openBrowser = (): void => {
     app.openTaskBrowser(
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
@@ -1208,6 +1242,8 @@ test('a running edit card renders its call-time diff', async () => {
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-1')])
@@ -1224,6 +1260,8 @@ test('subagent-family tool cards show the model/provider line when the call carr
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   // A running subagent_route dispatch with an explicit model/provider.
   const args = JSON.stringify({ description: 'research', prompt: 'look it up', provider: 'ollama', model: 'deepseek-v4' })
@@ -1247,6 +1285,8 @@ test('subagent-family cards without an explicit model render unchanged (compatib
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   // The official subagent tool never carries model/provider in the args
   // (deployment config owns the route): no model line, no extra row.
@@ -1275,6 +1315,8 @@ test('a completed diff card renders the applied result diffs', async () => {
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-2'), diffResultEvent(1, 'call-diff-2', 'The file src/foo.ts has been updated successfully.')])
@@ -1301,6 +1343,8 @@ test('a completed diff card without a result view falls back to the call-time di
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-3'), diffResultEvent(1, 'call-diff-3', 'The file src/foo.ts has been updated successfully.')])
@@ -1328,6 +1372,8 @@ test('a big diff card caps in the default view with an expand hint', async () =>
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-4')])
@@ -1349,6 +1395,8 @@ test('the one-shot subagent viewer covers the editor, consumes input, and restor
     onSingleEscape: () => { singleEscapes += 1; return true },
   })
   app.start()
+
+  startedApps.add(app)
   const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
   app.setDraft('my precious draft')
   await vt.waitForRender()
@@ -1388,6 +1436,8 @@ test('ctrl+o still folds the viewed transcript while the viewer is up', async ()
     onExit: () => {},
   })
   app.start()
+
+  startedApps.add(app)
   app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'child-1', label: 'research', mode: 'one-shot', activity: 'running' })
   await vt.waitForRender()
   app.setToolOutputExpanded(false)
@@ -1562,6 +1612,8 @@ test('submitDraft with an empty draft and a staged image submits (image-only gat
     isImageDraft: () => true,
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   // The runner resolves the placeholders to image blocks (plan §11.1): an
   // empty-text draft with images is NOT empty.
@@ -1580,6 +1632,8 @@ test('submitDraft with an empty draft and no image stays a no-op even with the g
     isImageDraft: () => false,
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   app.submitDraft(false)
   await vt.waitForRender()
@@ -1596,6 +1650,8 @@ test('HOST EDITOR Enter with an image-only draft still submits (empty gate mirro
     isImageDraft: () => true,
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   // Physical Enter on the host editor with an empty body + staged images:
   // the empty guard must NOT swallow it — the image verdict is consulted
@@ -1616,6 +1672,8 @@ test('HOST EDITOR Enter with NO image and an empty body stays a no-op (isImageDr
     isImageDraft: () => false,
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -1632,6 +1690,8 @@ test('ctrl+v routes to onClipboardPaste and consumes the key', async () => {
     onClipboardPaste: () => { pasted += 1 },
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x16') // legacy Ctrl+V byte
   await vt.waitForRender()
@@ -1661,6 +1721,8 @@ test('a multimodal submission refused by shouldRememberInput never recalls (revi
     shouldRememberInput: (text) => !text.includes('[image #'),
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('分析 [image #1 (800×600)]')
   await vt.waitForRender()
@@ -1684,6 +1746,8 @@ test('a plain-text submission still recalls through the editor history', async (
     shouldRememberInput: (text) => !text.includes('[image #'),
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('plain prompt')
   await vt.waitForRender()
@@ -1704,6 +1768,8 @@ test('fullscreen drag selection copies through the host copySelection policy (is
     copySelection: async (text) => { copied.push(text); return true },
   })
   app.start()
+
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
@@ -1732,6 +1798,8 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
   const vt = new VirtualTerminal(60, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
@@ -1764,6 +1832,8 @@ test('applyPluginPalette records the live plugin-theme selection (the unload-fal
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   assert.equal(app.activePluginTheme(), undefined, 'no selection before any plugin theme applies')
   app.applyPluginPalette('Foo', {
     primary: '#000', accent: '#000', text: '#000', textStrong: '#000', textDim: '#000',

@@ -5,14 +5,30 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp, type ApprovalOutcome } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.stop() } catch {}
+  }
+})
+
 
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -181,6 +197,8 @@ test('editor input is blocked while a prompt is showing', async () => {
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const decision = app.showApprovalPrompt({ toolName: 'bash' })
   await viewport(vt)
   vt.sendInput('hello')
@@ -238,6 +256,8 @@ test('approval dialog fits narrow terminals: hints and bottom border survive', a
   const vt = new VirtualTerminal(62, 17)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const args = '{"content":"# dsh-pi-tui documentation\\n\\nThis directory is the home for everything that needs more than a paragraph:\\ndesign rationale, hard-won contracts, operational procedures, and measured\\ndata. The root `AGENTS.md` stays the *operati…'
   const decision = app.showApprovalPrompt({
     toolName: 'write',
@@ -261,6 +281,8 @@ test('approval dialog degrades gracefully on very small terminals', async () => 
   const vt = new VirtualTerminal(40, 12)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const decision = app.showApprovalPrompt({
     toolName: 'bash',
     arguments: 'rm -rf /tmp/whatever --force --recursive',
@@ -279,6 +301,8 @@ test('a long approval reason is capped so the key hints survive', async () => {
   const vt = new VirtualTerminal(62, 17)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const reason = Array.from({ length: 12 }, (_, i) => `reason line ${i}`).join('\n')
   const decision = app.showApprovalPrompt({ toolName: 'bash', reason })
   const view = await viewport(vt)
@@ -297,6 +321,8 @@ test('long single-line arguments cannot push the hints off a small terminal', as
   const vt = new VirtualTerminal(40, 12)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const lines = Array.from({ length: 3 }, () => 'x'.repeat(70)).join('\n')
   const decision = app.showApprovalPrompt({ toolName: 'bash', arguments: lines })
   const view = await viewport(vt)
@@ -314,6 +340,8 @@ test('a long single-line reason is wrap-cropped so the hints survive', async () 
   const vt = new VirtualTerminal(40, 12)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const reason = 'y'.repeat(200)
   const decision = app.showApprovalPrompt({ toolName: 'bash', reason })
   const view = await viewport(vt)
@@ -331,6 +359,8 @@ test('danger on a tiny terminal drops the reason, never the hints', async () => 
   const vt = new VirtualTerminal(40, 10)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'dangerous thing', danger: true })
   const view = await viewport(vt)
   assert.ok(view.includes('DANGEROUS'), `danger banner missing:\n${view}`)

@@ -8,11 +8,13 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import {
+
+
   MAX_PICKER_SESSIONS,
   findSessionMatch,
   formatSessionAge,
@@ -23,6 +25,19 @@ import {
   workspaceKey,
   type SessionPickerRow,
 } from '../src/sessions.ts'
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.stop() } catch {}
+  }
+})
 
 test('shortSessionId strips the prefix and keeps 8 characters', () => {
   assert.equal(shortSessionId('session-0123456789abcdef'), '01234567')
@@ -152,6 +167,7 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; picked: string[] } {
     onExit: () => {},
   })
   app.start()
+  startedApps.add(app)
   return { vt, app, picked }
 }
 

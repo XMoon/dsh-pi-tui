@@ -9,13 +9,28 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { ModelSubmenu } from '../src/model-menu.ts'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
 import { createDiag } from '../src/diag.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.stop() } catch {}
+  }
+})
+
 
 /** A promise the test resolves/rejects manually, to stage late completions. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
@@ -51,6 +66,7 @@ async function openModelFlow(
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const current = { provider: 'p', model: 'm0' } as ModelSelection
   // The real owned-task entry, with a capture diag (the runner wires
   // runOwned with its own diag in production).
@@ -292,6 +308,8 @@ test('applying an effort closes the whole overlay (web settleSelection parity)',
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const current = { provider: 'p', model: 'm0' } as ModelSelection
   const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
   const owned = <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>): void => {

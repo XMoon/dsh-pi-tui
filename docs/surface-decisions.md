@@ -434,3 +434,28 @@ mode (only `TuiAltScreen` wires `onCellClick`):
   never dismissed, the shell process is never cancelled (Esc owns that),
   no session event is deleted, and an already-submitted `!` context
   payload is untouched. `!!` stays local-only.
+
+## One live TUI per process (the vendored keybindings are process-global)
+
+The vendored fork's `getKeybindings()` is a PROCESS-GLOBAL singleton
+(upstream shape — deliberately NOT re-vendored into per-TUI dependency
+injection). A TuiApp mutates the shared `tui.editor.submit`, Home/End and
+alt-screen mappings while it runs, so two concurrently LIVE surfaces in one
+Node process would silently fight over one keybinding state — App A's
+submit remap would hijack App B's Enter. The product/CLI architecture is
+one process = one live TUI; the host enforces that invariant fail-fast
+(re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
+
+- `TuiApp.start()` CLAIMS the process slot; `TuiApp.stop()` releases it
+  (idempotent); `TuiApp.dispose()` releases through the same stop path;
+  a failed `start()` never leaks the claim.
+- A second surface that starts while another is LIVE rejects with a
+  deterministic error — never a silent keybinding collision.
+- The slot is a LIVE slot, deliberately not held across `stop()`: the
+  invariant the guard needs is "never two CONCURRENTLY live surfaces",
+  which is exactly what the process-global keybindings require. The
+  external-editor suspend/resume and ordinary stop/start cycles release
+  and re-claim without tripping; fullscreen main/alt-screen swaps stop/
+  start the SCREENS (not the app) and never touch the slot at all.
+- A stopped surface may be replaced by another surface (sequential, not
+  concurrent — still one live TUI at a time).

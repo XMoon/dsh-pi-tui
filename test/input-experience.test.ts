@@ -6,11 +6,26 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp, type TuiAppEvents, type TuiAppEventsBase } from '../src/tui-app.ts'
 import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
 import { createDiag } from '../src/diag.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.stop() } catch {}
+  }
+})
+
 
 /** The owned-task entry the runner wires in production; tests use the real
  * runOwned with a silent capture diag. */
@@ -28,6 +43,7 @@ function startApp(overrides: Partial<TuiAppEventsBase> = {}): { vt: VirtualTermi
     ...overrides,
   })
   app.start()
+  startedApps.add(app)
   return { vt, app, submitted }
 }
 
@@ -88,6 +104,8 @@ test('ctrl+s steers the draft and clears the editor', async () => {
     onSteer: (text) => steered.push(text),
   })
   app.start()
+
+  startedApps.add(app)
   vt.sendInput('do better')
   vt.sendInput('\x13') // ctrl+s
   await viewport(vt)
@@ -108,6 +126,8 @@ test('ctrl+s with an empty draft still fires onSteer (the runner decides)', asyn
     onSteer: (text) => steered.push(text),
   })
   app.start()
+
+  startedApps.add(app)
   vt.sendInput('\x13') // ctrl+s with an empty editor
   await viewport(vt)
   // The queue pane is the primary steer surface: with queued messages and an
@@ -126,6 +146,8 @@ test('ctrl+enter fires the queue-submit chord and clears the editor', async () =
     onQueueSubmit: (text) => queued.push(text),
   })
   app.start()
+
+  startedApps.add(app)
   vt.sendInput('queue me')
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
   await viewport(vt)
@@ -156,6 +178,8 @@ test('ctrl+enter on an empty draft does not fire the chord (no session-creating 
     onQueueSubmit: (text) => queued.push(text),
   })
   app.start()
+
+  startedApps.add(app)
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter with an empty editor
   await viewport(vt)
   assert.deepEqual(queued, [], 'an empty chord must not submit an empty followup')
@@ -171,6 +195,8 @@ test('Enter on a truly empty editor is a silent NO-OP — no submit event at all
     onExit: () => {},
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\r') // Enter on the empty editor
   await vt.waitForRender()
@@ -194,6 +220,8 @@ test('Enter after a REAL prompt still submits (the empty gate never eats a non-e
     onExit: () => {},
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('hello')
   vt.sendInput('\r')
@@ -212,6 +240,8 @@ test('ctrl+g opens the external editor and restores its content', async () => {
     runOwned: owned,
   })
   app.start()
+
+  startedApps.add(app)
   vt.sendInput('draft')
   vt.sendInput('\x07') // ctrl+g
   // The TUI stops and restarts around the external editor round-trip.
@@ -231,6 +261,8 @@ test('an external editor saving the draft unchanged does not touch the editor', 
     runOwned: owned,
   })
   app.start()
+
+  startedApps.add(app)
   vt.sendInput('draft text')
   await viewport(vt)
   vt.sendInput('\x07') // ctrl+g → editor round-trip returns the identical draft
@@ -260,6 +292,8 @@ test('an external editor launch failure is caught: no unhandled rejection, app r
   process.on('unhandledRejection', onUnhandled)
   try {
     app.start()
+
+    startedApps.add(app)
     vt.sendInput('draft')
     vt.sendInput('\x07') // ctrl+g → the editor promise rejects
     await new Promise(resolve => setTimeout(resolve, 30))
@@ -292,6 +326,8 @@ test('ctrl+g without an editor hook is a documented no-op, never a crash', async
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   vt.sendInput('draft text')
   await viewport(vt)
   vt.sendInput('\x07') // ctrl+g: no editor configured
@@ -319,6 +355,8 @@ test('two ctrl+g in one input batch start the external editor only once (single-
     runOwned: owned,
   })
   app.start()
+
+  startedApps.add(app)
   vt.sendInput('draft')
   await viewport(vt)
   // Both keys land while the first launch is still pending: the second must
@@ -350,6 +388,8 @@ test('the external editor round-trip EXPANDS paste markers (P1 large-paste loss)
     runOwned: owned,
   })
   app.start()
+
+  startedApps.add(app)
   // A large multi-line paste lands as a `[paste #N +12 lines]` marker in
   // the editor text; the registry holds the real content.
   const pasted = Array.from({ length: 12 }, (_, i) => `real line ${i + 1}`).join('\n')
@@ -371,6 +411,8 @@ test('the external editor round-trip preserves fullscreen and the surface genera
     runOwned: owned,
   })
   app.start()
+
+  startedApps.add(app)
   app.setFullscreen(true)
   await vt.waitForRender()
   assert.equal(app.isFullscreen(), true, 'fullscreen is up before the round-trip')
@@ -397,6 +439,8 @@ test('the editor single-flight latch releases after a failed launch', async () =
     runOwned: owned,
   })
   app.start()
+
+  startedApps.add(app)
   vt.sendInput('\x07')
   await new Promise(resolve => setTimeout(resolve, 30))
   assert.equal(calls, 1)
@@ -420,6 +464,8 @@ test('the editor latch releases even when the TUI restart (start) throws', async
     runOwned: owned,
   })
   app.start()
+
+  startedApps.add(app)
   const screen = (app as unknown as { tui: { start: () => void; stop: () => void } }).tui
   const originalStart = screen.start.bind(screen)
   // The first launch's resume (screen restart) throws: the failure lands
@@ -450,6 +496,8 @@ test('the editor latch releases even when the TUI stop throws', async () => {
     runOwned: owned,
   })
   app.start()
+
+  startedApps.add(app)
   const screen = (app as unknown as { tui: { start: () => void; stop: () => void } }).tui
   const originalStop = screen.stop.bind(screen)
   // The suspend seam stops the ACTIVE screen (suspendForExternalEditor),
@@ -467,6 +515,8 @@ test('app.stop is idempotent: repeated calls neither throw nor double-teardown',
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   vt.sendInput('hello')
   await viewport(vt)
   app.stop()
@@ -560,6 +610,8 @@ test('slash-command autocomplete paints the fresh list on the keystroke frame', 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   // Fullscreen: the alt screen renders while the main screen (which the
   // editor's own render requests target) is stopped — the exact condition
   // under which the fresh list used to never paint.
