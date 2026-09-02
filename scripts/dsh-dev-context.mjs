@@ -170,19 +170,22 @@ export function resolveDshDevContext({ root = process.cwd(), mode, config, distr
   const packageJson = readPackageJson(directory)
   const packageManager = packageManagerInfo(packageJson.value)
   const generatedEnvBelongsHere = generatedEnvironmentBelongsToRoot(directory, environment)
-  const environmentMode = generatedEnvBelongsHere
-    ? environment.DSH_DEV_MODE ?? environment.DSH_MODE
-    : undefined
-  const configuredMode = mode ?? environmentMode
+  const configuredMode = mode ?? (generatedEnvBelongsHere ? environment.DSH_MODE : undefined)
   const configPath = sourceConfigPath(directory, config, environment)
-  // Mode precedence: explicit option → environment override → the
+  // Mode precedence: explicit option → DSH_MODE (a USER override) → the
   // tracked branch-level mode policy (test/compat/dsh-mode.json) → the
-  // legacy fallback (a workspace carrying the source pin uses source
-  // mode; otherwise npm). The legacy fallback keeps older checkouts and
-  // main working without a mode file.
+  // legacy fallback (DSH_DEV_MODE, the state dev:bootstrap materialized
+  // into .dsh-dev-env, then the source-pin presence). DSH_DEV_MODE must
+  // NOT override the tracked policy: it is generated state, and letting
+  // it win would lock an existing worktree into its old mode after the
+  // branch flips (doctor/bootstrap would keep re-materializing the stale
+  // mode forever). The legacy fallback keeps older checkouts and main
+  // working without a mode file.
   const modeConfigPath = resolve(directory, MODE_CONFIG_RELATIVE)
+  const hasModePolicy = existsSync(modeConfigPath)
   const modeFromPolicy = configuredMode
-    ?? (existsSync(modeConfigPath) ? readModeConfig(modeConfigPath) : undefined)
+    ?? (hasModePolicy ? readModeConfig(modeConfigPath) : undefined)
+    ?? (generatedEnvBelongsHere ? environment.DSH_DEV_MODE : undefined)
     ?? (existsSync(configPath) ? 'source' : 'npm')
   if (modeFromPolicy !== 'source' && modeFromPolicy !== 'npm') {
     fail(`unsupported DSH development mode ${modeFromPolicy}; expected source or npm`)

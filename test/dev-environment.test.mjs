@@ -62,7 +62,7 @@ function packageJson() {
   }
 }
 
-function fixture(life, { source = false } = {}) {
+function fixture(life, { source = false, mode } = {}) {
   const root = life.tempDir('dsh-dev-environment-test-')
   writeFileSync(join(root, 'package.json'), `${JSON.stringify(packageJson(), null, 2)}\n`)
   writeFileSync(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
@@ -72,6 +72,16 @@ function fixture(life, { source = false } = {}) {
       repository: DSH_REPOSITORY,
       ref: SHA,
       expectedVersion: VERSION,
+    })}\n`)
+  }
+  if (mode !== undefined) {
+    // The resolver reads the mode policy at its tracked default path
+    // (test/compat/dsh-mode.json), unlike the source config which the
+    // tests pass explicitly.
+    mkdirSync(join(root, 'test', 'compat'), { recursive: true })
+    writeFileSync(join(root, 'test', 'compat', 'dsh-mode.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      mode,
     })}\n`)
   }
   return root
@@ -188,6 +198,55 @@ test('source mode is selected by an exact source config and can be explicitly ov
   })
   assert.equal(manual.mode, 'source')
   assert.equal(manual.sourceConfigPath, config)
+})
+
+test('the tracked mode policy beats a generated DSH_DEV_MODE (branch flip self-heals)', (t) => {
+  const life = testLifecycle(t)
+  // A worktree whose bootstrap previously materialized SOURCE state
+  // (DSH_DEV_MODE=source in .dsh-dev-env) after the branch flipped its
+  // tracked policy to npm: the generated state must NOT override the
+  // policy, or doctor/bootstrap would keep re-materializing the stale
+  // source mode forever.
+  const root = fixture(life, { source: true, mode: 'npm' })
+  const config = join(root, 'test-compat-dsh-source.json')
+  const generated = {
+    DSH_DEV_ROOT: root,
+    DSH_DEV_MODE: 'source',
+    DSH_SOURCE_CONFIG: config,
+  }
+  const context = resolveDshDevContext({ root, environment: generated })
+  assert.equal(context.mode, 'npm', 'the tracked npm policy must win over the generated source state')
+  assert.equal(context.source, undefined)
+
+  // The reverse flip: policy says source, generated state says npm.
+  const sourceRoot = fixture(life, { source: true, mode: 'source' })
+  const sourceConfig = join(sourceRoot, 'test-compat-dsh-source.json')
+  const source = resolveDshDevContext({
+    root: sourceRoot,
+    environment: { DSH_DEV_ROOT: sourceRoot, DSH_DEV_MODE: 'npm', DSH_SOURCE_CONFIG: sourceConfig },
+  })
+  assert.equal(source.mode, 'source', 'the tracked source policy must win over the generated npm state')
+  assert.equal(source.source.ref, SHA)
+
+  // A USER override (DSH_MODE) still beats the tracked policy.
+  const overridden = resolveDshDevContext({
+    root,
+    environment: { ...generated, DSH_MODE: 'source' },
+  })
+  assert.equal(overridden.mode, 'source', 'DSH_MODE is a user override and stays authoritative')
+})
+
+test('DSH_DEV_MODE still works as the legacy fallback without a mode policy', (t) => {
+  const life = testLifecycle(t)
+  // Older checkouts / main have no dsh-mode.json: the generated
+  // DSH_DEV_MODE keeps its historical meaning.
+  const root = fixture(life, { source: true })
+  const config = join(root, 'test-compat-dsh-source.json')
+  const context = resolveDshDevContext({
+    root,
+    environment: { DSH_DEV_ROOT: root, DSH_DEV_MODE: 'source', DSH_SOURCE_CONFIG: config },
+  })
+  assert.equal(context.mode, 'source', 'without a mode policy the generated state remains the fallback')
 })
 
 test('generated source environment variables cannot cross worktrees', (t) => {
