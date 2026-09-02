@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import {
   resolveDshContext,
   resolveDshMode,
@@ -13,9 +13,11 @@ const nextSha = '4e84901e6471b79ec0338099867ebb4606d12bb5'
 
 /** A temp mode-config file with the given mode (the tracked policy is
  * injectable so the source branch of the resolver is testable without
- * mutating the repository). */
-function tempModeConfig(mode) {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-mode-test-'))
+ * mutating the repository). The directory is owned by the TEST LIFECYCLE
+ * (temp-hygiene gate: no direct temp-dir creation in test files — the
+ * owning test disposes the directory at teardown). */
+function tempModeConfig(mode, life) {
+  const dir = life.tempDir('dsh-mode-test-')
   const path = join(dir, 'dsh-mode.json')
   writeFileSync(path, JSON.stringify({ schemaVersion: 1, mode }))
   return { dir, path }
@@ -32,30 +34,24 @@ test('DSH mode resolver follows the tracked policy for next, npm elsewhere', () 
   assert.equal(resolveDshMode({ eventName: 'schedule', ref: 'refs/heads/next' }), 'npm')
 })
 
-test('a tracked source policy flips next to source mode (one-line branch switch)', () => {
-  const { dir, path } = tempModeConfig('source')
-  try {
-    assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: path }), 'source')
-    assert.equal(
-      resolveDshMode({ eventName: 'pull_request', ref: 'refs/pull/1/merge', baseRef: 'next', modeConfigPath: path }),
-      'source',
-    )
-    // Non-next branches ignore the policy.
-    assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/main', modeConfigPath: path }), 'npm')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('a tracked source policy flips next to source mode (one-line branch switch)', (t) => {
+  const life = testLifecycle(t)
+  const { path } = tempModeConfig('source', life)
+  assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: path }), 'source')
+  assert.equal(
+    resolveDshMode({ eventName: 'pull_request', ref: 'refs/pull/1/merge', baseRef: 'next', modeConfigPath: path }),
+    'source',
+  )
+  // Non-next branches ignore the policy.
+  assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/main', modeConfigPath: path }), 'npm')
 })
 
-test('a missing or malformed mode policy is an explicit error on next', () => {
-  const { dir, path } = tempModeConfig('npm')
-  try {
-    assert.throws(() => resolveDshMode({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: join(dir, 'missing.json') }), /missing/u)
-    writeFileSync(path, JSON.stringify({ schemaVersion: 1, mode: 'bogus' }))
-    assert.throws(() => resolveDshMode({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: path }), /unsupported DSH mode/u)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('a missing or malformed mode policy is an explicit error on next', (t) => {
+  const life = testLifecycle(t)
+  const { dir, path } = tempModeConfig('npm', life)
+  assert.throws(() => resolveDshMode({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: join(dir, 'missing.json') }), /missing/u)
+  writeFileSync(path, JSON.stringify({ schemaVersion: 1, mode: 'bogus' }))
+  assert.throws(() => resolveDshMode({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: path }), /unsupported DSH mode/u)
 })
 
 test('all release tags force npm mode, including next-v tags', () => {
@@ -65,7 +61,8 @@ test('all release tags force npm mode, including next-v tags', () => {
   }
 })
 
-test('context exposes the tracked source pin only in source mode', () => {
+test('context exposes the tracked source pin only in source mode', (t) => {
+  const life = testLifecycle(t)
   const npm = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next' })
   assert.equal(npm.mode, 'npm')
   assert.equal(npm.sourceRef, '')
@@ -76,13 +73,9 @@ test('context exposes the tracked source pin only in source mode', () => {
   assert.equal(main.sourceRef, '')
   assert.equal(main.sourceExpectedVersion, '')
 
-  const { dir, path } = tempModeConfig('source')
-  try {
-    const source = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: path })
-    assert.equal(source.mode, 'source')
-    assert.equal(source.sourceRef, nextSha)
-    assert.equal(source.sourceExpectedVersion, '0.1.2-alpha.4')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  const { path } = tempModeConfig('source', life)
+  const source = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: path })
+  assert.equal(source.mode, 'source')
+  assert.equal(source.sourceRef, nextSha)
+  assert.equal(source.sourceExpectedVersion, '0.1.2-alpha.4')
 })
