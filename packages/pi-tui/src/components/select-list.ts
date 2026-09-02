@@ -160,7 +160,9 @@ export class SelectList implements Component, Focusable {
 		this.applyFilter(this.filterQuery, true);
 	}
 
-	/** The current search query (empty when search is disabled). */
+	/** The current search query (the CANONICAL query — X041: with search
+	 * disabled a programmatic setFilter() still narrows the list, so this
+	 * returns the canonical query, not "empty when search is disabled"). */
 	getFilter(): string {
 		return this.filterQuery;
 	}
@@ -266,6 +268,21 @@ export class SelectList implements Component, Focusable {
 		// the raw items would walk into invisible rows. (dsh-pi-tui
 		// divergence X001; upstream semantics restored.)
 		const displayItems = this.filteredItems;
+		// Zero-match invariant: with nothing to navigate, every navigation
+		// key is a no-op — selectedIndex must stay 0 (a wrap on an empty
+		// list would otherwise produce -1/1 and break the invariant).
+		// Search keys still reach the search box below (typing refines the
+		// query), so the guard sits on the navigation branches only.
+		if (displayItems.length === 0) {
+			if (
+				kb.matches(keyData, "tui.select.up") ||
+				kb.matches(keyData, "tui.select.down") ||
+				kb.matches(keyData, "tui.select.pageUp") ||
+				kb.matches(keyData, "tui.select.pageDown")
+			) {
+				return;
+			}
+		}
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.selectedIndex = this.selectedIndex === 0 ? displayItems.length - 1 : this.selectedIndex - 1;

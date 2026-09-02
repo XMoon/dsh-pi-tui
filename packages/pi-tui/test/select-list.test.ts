@@ -318,6 +318,30 @@ describe("SelectList", () => {
 			list.handleInput("\x1b[A"); // up
 			assert.equal(list.getSelectedItem()?.value, "7");
 		});
+
+		it("keeps selectedIndex at 0 when navigation keys arrive with ZERO matches", () => {
+			const items = [
+				{ value: "session-a", label: "alpha" },
+				{ value: "session-b", label: "beta" },
+			];
+			const list = new SelectList(items, 5, testTheme);
+			list.setFilter("zzz"); // zero matches
+			assert.equal(list.getSelectedItem(), null);
+			// Every navigation key must be a no-op: a wrap on the empty list
+			// would otherwise push selectedIndex to -1 (up/pageDown) or 1
+			// (down) and break the invariant.
+			list.handleInput("\x1b[A"); // up
+			list.handleInput("\x1b[B"); // down
+			list.handleInput("\x1b[5~"); // pageUp
+			list.handleInput("\x1b[6~"); // pageDown
+			assert.equal((list as unknown as { selectedIndex: number }).selectedIndex, 0);
+			assert.equal(list.getSelectedItem(), null, "confirm must stay inert on an empty list");
+			// A later filter that matches again must restore navigation.
+			list.setFilter("session-");
+			assert.equal(list.getSelectedItem()?.value, "session-a");
+			list.handleInput("\x1b[B");
+			assert.equal(list.getSelectedItem()?.value, "session-b");
+		});
 	});
 	describe("canonical filter state (X041)", () => {
 		const items = [

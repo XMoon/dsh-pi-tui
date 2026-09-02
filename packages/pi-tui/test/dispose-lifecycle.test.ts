@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Box } from "../src/components/box.ts";
+import { ScrollView } from "../src/components/scroll-view.ts";
 import { Container } from "../src/tui.ts";
 import { SettingsList } from "../src/components/settings-list.ts";
 import { Text } from "../src/components/text.ts";
@@ -130,6 +131,30 @@ describe("Component dispose lifecycle completeness (X007)", () => {
 			container.addChild(box2);
 			container.dispose();
 			assert.equal(child2.disposeCount, 1);
+		});
+
+		it("Container.dispose is idempotent (a repeated dispose is a no-op)", () => {
+			const container = new Container();
+			const child = new DisposeCounter();
+			container.addChild(child.toComponent());
+			container.dispose();
+			assert.equal(child.disposeCount, 1);
+			container.dispose();
+			assert.equal(child.disposeCount, 1, "a repeated dispose must not double-dispose the children");
+			// The container stays usable as a fresh container afterwards.
+			const second = new DisposeCounter();
+			container.addChild(second.toComponent());
+			container.dispose();
+			assert.equal(second.disposeCount, 1);
+		});
+
+		it("ScrollView.dispose is idempotent (inherits the Container hardening)", () => {
+			const child = new DisposeCounter();
+			const scroll = new ScrollView(child.toComponent());
+			scroll.dispose();
+			assert.equal(child.disposeCount, 1);
+			scroll.dispose();
+			assert.equal(child.disposeCount, 1, "ScrollView.dispose must not double-dispose its child");
 		});
 	});
 
