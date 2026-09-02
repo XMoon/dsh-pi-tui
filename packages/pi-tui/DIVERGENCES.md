@@ -181,7 +181,7 @@ Keep `vendor-divergences.json` in sync with this file on every re-vendor.
 ### X007 — Component `dispose()` lifecycle (was #7)
 
 - Category: `HARD_HOST_API` / `PUBLIC_COMPONENT_CONTRACT`
-- Files: `src/tui.ts`, `src/components/scroll-view.ts`, `src/components/text.ts`, `src/components/loader.ts`, `src/components/box.ts`, `src/components/settings-list.ts`
+- Files: `src/tui.ts`, `src/components/scroll-view.ts`, `src/components/text.ts`, `src/components/loader.ts`, `src/components/box.ts`, `src/components/settings-list.ts`, `src/components/stack.ts`
 - Reason: `Component` gains an optional `dispose()`; `Container.removeChild`/
   `clear`/`dispose` release child resources; `ScrollView` disposes its hide
   timer and render callback; `Text` gets a no-op `dispose()`; `Loader`
@@ -199,6 +199,11 @@ Keep `vendor-divergences.json` in sync with this file on every re-vendor.
     migration pattern; the host opts IN for every overlay entry it owns
     (panels behind an owning FocusForwardingFrame) and opts OUT for the
     remountable extension/advanced/unstable leases.
+  - `Stack` maintains a SECOND `entries` layout representation and
+    therefore must clear it on dispose together with Container.children —
+    without the override the fullscreen layout engine (which reads
+    `[LAYOUT_NODE]().entries`) would keep observing already-disposed
+    children after `Stack.dispose()` (re-vendor lifecycle follow-up P2).
 - Ownership map after the completion: Container removal → dispose;
   Stack removal → dispose; ScrollView disposal → child dispose;
   Box removal → dispose; SettingsList submenu slot → dispose;
@@ -219,7 +224,9 @@ Keep `vendor-divergences.json` in sync with this file on every re-vendor.
 - Upstream status: absent.
 - Tests: `test/pi-component-compat.test.ts` (bundle), ScrollView/layout
   describes in `test/layout.test.ts`, `Container.dispose`/`ScrollView.dispose`
-  idempotency in `test/dispose-lifecycle.test.ts`.
+  idempotency in `test/dispose-lifecycle.test.ts`, Stack dispose clears
+  entries and remains idempotent (VStack/HStack, repeated dispose, disposed
+  stack paints nothing through the layout engine) in `test/layout.test.ts`.
 - Migration action: re-apply on top of Earendil 0.84.4 `tui.ts`; do not
   break the upstream renderer lifecycle.
 

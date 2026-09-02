@@ -6,7 +6,7 @@
   "X004B": ["src/components/editor.ts", "src/undo-stack.ts"],
   "X005": ["src/components/editor.ts"],
   "X006": ["src/word-navigation.ts"],
-  "X007": ["src/tui.ts", "src/components/scroll-view.ts", "src/components/text.ts", "src/components/loader.ts", "src/components/box.ts", "src/components/settings-list.ts"],
+  "X007": ["src/tui.ts", "src/components/scroll-view.ts", "src/components/text.ts", "src/components/loader.ts", "src/components/box.ts", "src/components/settings-list.ts", "src/components/stack.ts"],
   "X008": ["src/tui.ts"],
   "X009": ["src/tui-main-screen.ts"],
   "X010": ["src/stdin-buffer.ts"],
