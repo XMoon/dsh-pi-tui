@@ -318,7 +318,7 @@ dsh-pi-tui:
 （先装 DSH，再把 TUI 装入 profile）：
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.4
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.5
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```

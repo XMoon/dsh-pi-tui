@@ -7,6 +7,15 @@
 
 ## [Unreleased]
 
+### DSH alpha.5 开发与验证依赖同步
+
+- **开发与测试依赖更新到 DSH `0.1.2-alpha.5`**，以纳入 DSH 自身的数据升级修复并重建
+  lockfile；发布包的 peer 下限仍保持 `>=0.1.2-alpha.4`，不会无意义地拒绝仍可工作的
+  alpha.4 环境。
+- **Source Mode pin 更新到官方 `dsh-v0.1.2-alpha.5`**；npm 安装指引和不兼容
+  运行时的升级提示改为推荐 alpha.5。TUI runtime、SessionPort、SubagentPort
+  和 resume 逻辑不变。
+
 ### Re-vendor 后续审计修复（X037–X045，P1×4 + P2×10 + P3 若干；含 review 轮加固）
 
 对 PR #68（Earendil v0.84.4 重定基）合并后的全面复扫，交叉对照 kimi

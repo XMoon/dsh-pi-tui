@@ -87,7 +87,7 @@ test('an older harness gets actionable guidance without a hard Loader-ordering t
     assert.equal((ctx.get(TUI_STARTUP_SERVICE) as { sessionId: string }).sessionId, 's1')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes(`running dsh 0.1.0-rc.8`), `stderr must name the installed version:\n${joined}`)
-    assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.4'), `stderr must give the upgrade path:\n${joined}`)
+    assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.5'), `stderr must give the upgrade path:\n${joined}`)
     assert.ok(joined.includes('npm install -g @xmoon76/dsh-pi-tui@0.3'), `stderr must give the rollback path:\n${joined}`)
   } finally {
     stderr.restore()
@@ -125,7 +125,7 @@ test('the previous alpha.3 floor is rejected by the minimum gate', (t) => {
     const joined = stderr.lines.join('')
     assert.ok(joined.includes('running dsh 0.1.2-alpha.3'), `stderr must name the installed version:\n${joined}`)
     assert.ok(joined.includes('DeepSeek Harness 0.1.2-alpha.4 or later'), `stderr must name the requirement:\n${joined}`)
-    assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.4'), `stderr must give the upgrade path:\n${joined}`)
+    assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.5'), `stderr must give the upgrade path:\n${joined}`)
     assert.ok(joined.includes('npm install -g @xmoon76/dsh-pi-tui@0.4.0-alpha.1'), `stderr must give the 0.4-alpha fallback:\n${joined}`)
   } finally {
     stderr.restore()
@@ -169,7 +169,7 @@ test('incompatibleHarnessMessage is actionable and names both versions', () => {
   assert.ok(message.includes(`dsh-pi-tui v${pkg.version}`), `must name the bundle version: ${message}`)
   assert.ok(message.includes('DeepSeek Harness 0.1.2-alpha.2 or later'), 'must name the requirement')
   assert.ok(message.includes('0.1.0-rc.8'), 'must name the installed version')
-  assert.ok(message.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.4'), 'must give the upgrade command')
+  assert.ok(message.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.5'), 'must give the upgrade command')
   assert.ok(message.includes('npm install -g @xmoon76/dsh-pi-tui@0.3'), 'must give the compatible TUI pin command')
 })
 
@@ -191,7 +191,7 @@ test('DSH peer ranges keep the lower-bound compatibility contract', () => {
   }
   for (const [name, version] of Object.entries(packageJson.devDependencies ?? {})) {
     if (name.startsWith('@deepseek-ai/dsh')) {
-      assert.equal(version, '0.1.2-alpha.4', `${name} dev dependency must stay exact`)
+      assert.equal(version, '0.1.2-alpha.5', `${name} dev dependency must stay exact`)
     }
   }
 })

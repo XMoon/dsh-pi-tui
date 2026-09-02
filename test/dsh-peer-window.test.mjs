@@ -30,6 +30,6 @@ test('all DSH development packages stay pinned to the exact target alpha', () =>
     .filter(([name]) => name.startsWith('@deepseek-ai/dsh'))
   assert.ok(dshDevEntries.length > 0, 'the bundle must have target DSH development packages')
   for (const [name, version] of dshDevEntries) {
-    assert.equal(version, '0.1.2-alpha.4', `${name} must stay exact`)
+    assert.equal(version, '0.1.2-alpha.5', `${name} must stay exact`)
   }
 })

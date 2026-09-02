@@ -132,14 +132,14 @@ export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
     max: '0.1.2-alpha.4',
     since: '0.4.0-alpha.2',
     requires: 'DeepSeek Harness 0.1.2-alpha.4 or later',
-    upgradeDsh: '0.1.2-alpha.4',
+    upgradeDsh: '0.1.2-alpha.5',
     fallbackTui: '0.4.0-alpha.1',
   },
   {
     max: '0.1.2-alpha.2',
     since: '0.4.0-alpha.1',
     requires: 'DeepSeek Harness 0.1.2-alpha.2 or later',
-    upgradeDsh: '0.1.2-alpha.4',
+    upgradeDsh: '0.1.2-alpha.5',
     fallbackTui: '0.3',
   },
 ]
