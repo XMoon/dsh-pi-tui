@@ -1455,16 +1455,12 @@ export function registerTuiCommands(
           // `subagent-model-selection` section): when enabled, a NEW
           // session's `subagent` tool may pick a child provider/model from
           // the allowlist below. Sampled at session composition — turning
-          // it on never rewrites an already-running session's tools.
+          // it on never rewrites an already-running session's tools. The
+          // ALLOWLIST row comes FIRST: the UI order expresses the setup
+          // dependency (configure allowed routes, then enable selection).
           ...(runner.config.subagentModelSelection.available() && runner.catalog.models.available()) ? (() => {
             const subagentSelection = runner.config.subagentModelSelection.get()
             return [{
-              id: 'subagent-model-selection',
-              label: 'Subagent model selection',
-              description: 'Let new sessions pick a child provider/model in the subagent tool (official DSH setting; needs at least one allowed route)',
-              currentValue: subagentSelection.enabled ? 'on' : 'off',
-              values: ['off', 'on'],
-            }, {
               id: 'subagent-model-allowlist',
               label: 'Subagent allowed models',
               description: 'The child LLM routes the official subagent tool may pick from',
@@ -1487,6 +1483,12 @@ export function registerTuiCommands(
                 allowlistMenu = menu
                 return menu
               },
+            }, {
+              id: 'subagent-model-selection',
+              label: 'Subagent model selection',
+              description: 'Let new sessions pick a child provider/model in the subagent tool (official DSH setting; needs at least one allowed route)',
+              currentValue: subagentSelection.enabled ? 'on' : 'off',
+              values: ['off', 'on'],
             }]
           })() : [],
           {
@@ -1636,7 +1638,7 @@ export function registerTuiCommands(
             ...(row.values.length > 0 ? { values: [...row.values] } : {}),
           })),
         ],
-        (id, value, revert) => {
+        (id, value, revert, navigate) => {
           if (id === 'approval') {
             if ((value === 'ask' || value === 'never') && liveAgent !== undefined) {
               runner.interaction.setApprovalPolicy(liveAgent.session.id, value)
@@ -1662,6 +1664,20 @@ export function registerTuiCommands(
               const current = runner.config.subagentModelSelection.get()
               const previous = current.enabled ? 'on' : 'off'
               const desired = value === 'on'
+              // EMPTY-ALLOWLIST UX GATE: enabling with no allowed routes
+              // is a SETUP PRECONDITION, not a write failure. Skip the
+              // official write entirely (no Host settings mutation), keep
+              // the row off, and guide the user to configure the allowlist
+              // first — the ConfigPort/Host validation stays as the
+              // fail-closed boundary for non-UI callers (the TUI never
+              // auto-fills the allowlist: it is the user's explicit grant
+              // of which child routes the subagent tool may use).
+              if (desired && current.allowedModels.length === 0) {
+                revert(previous)
+                app.notify('Select at least one Subagent allowed model before enabling model selection.', 'info')
+                navigate?.('subagent-model-allowlist')
+                return
+              }
               subagentModelWriteChain = subagentModelWriteChain
                 .then(() => runner.config.subagentModelSelection.set({
                   enabled: desired,

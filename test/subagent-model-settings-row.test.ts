@@ -236,6 +236,12 @@ test('the /settings panel exposes the official subagent model-selection rows', a
   const allowlist = items!.find(item => item.id === 'subagent-model-allowlist')
   assert.ok(allowlist !== undefined, 'the allowlist row must exist')
   assert.equal(allowlist!.currentValue, '0 routes')
+  // The UI order expresses the setup dependency: configure the allowed
+  // routes BEFORE enabling selection (the allowlist row comes first).
+  assert.ok(
+    items!.indexOf(allowlist!) < items!.indexOf(toggle!),
+    'the allowlist row must precede the selection toggle',
+  )
 })
 
 test('rapid toggles SERIALIZE: a slow earlier write never lands after a newer one', async () => {
@@ -257,18 +263,75 @@ test('rapid toggles SERIALIZE: a slow earlier write never lands after a newer on
   assert.equal(harness.settings.doc.enabled, false, 'the LAST toggle wins')
 })
 
-test('a rejected toggle rolls the row back and notifies', async () => {
+test('enabling with an EMPTY allowlist is a setup guide, not a write: no settings write, row stays off', async () => {
   const harness = makeHarness({ enabled: false, allowedModels: [] })
   await openSettingsPanel(harness)
   const change = harness.settingsChange!
   const reverted: string[] = []
-  // Enabling with an EMPTY allowlist is refused by the official rule.
-  change('subagent-model-selection', 'on', (previous) => { reverted.push(previous) })
+  const navigated: string[] = []
+  // Enabling with an EMPTY allowlist is a UI precondition: the toggle must
+  // NOT call the official section write at all (no Host settings mutation),
+  // keep the row off, and guide the user to the allowlist row.
+  change('subagent-model-selection', 'on', (previous) => { reverted.push(previous) }, (targetId) => { navigated.push(targetId) })
   for (let i = 0; i < 8; i += 1) await Promise.resolve()
+  assert.equal(harness.settings.writes.length, 0, 'no official section write may be produced')
   assert.equal(harness.settings.doc.enabled, false, 'the section stays off')
   assert.deepEqual(reverted, ['off'], 'the row display rolls back to the previous value')
-  assert.equal(harness.notices.at(-1)?.kind, 'error')
-  assert.match(harness.notices.at(-1)?.message ?? '', /requires at least one allowed model/u)
+  assert.deepEqual(navigated, ['subagent-model-allowlist'], 'the cursor moves to the allowlist row')
+  const notice = harness.notices.at(-1)
+  assert.equal(notice?.kind, 'info', 'the guidance is an info notice, not an error')
+  assert.match(notice?.message ?? '', /Select at least one Subagent allowed model/i)
+  assert.doesNotMatch(notice?.message ?? '', /write failed/i, 'a setup precondition must never surface as a write failure')
+})
+
+test('enabling with a NON-EMPTY allowlist writes the whole official section', async () => {
+  const harness = makeHarness({ enabled: false, allowedModels: [{ provider: 'p', model: 'm1' }] })
+  await openSettingsPanel(harness)
+  const change = harness.settingsChange!
+  const reverted: string[] = []
+  change('subagent-model-selection', 'on', (previous) => { reverted.push(previous) })
+  await settle(harness, 1)
+  assert.equal(harness.settings.writes.length, 1, 'the official section write must happen')
+  assert.deepEqual(harness.settings.writes[0], {
+    enabled: true,
+    allowedModels: [{ provider: 'p', model: 'm1' }],
+  }, 'the whole section rides along: enabled flips, the allowlist is preserved')
+  assert.equal(harness.settings.doc.enabled, true, 'the section commits enabled')
+  assert.deepEqual(reverted, ['on'], 'the row re-syncs to the committed state')
+  assert.equal(harness.notices.length, 0, 'a legal write produces no notice')
+})
+
+test('first-time setup happy path: add an allowed route, then enable selection', async () => {
+  // The complete first-configuration flow: 0 routes + off → open the
+  // allowlist submenu → pick provider p / model m1 → back to the settings
+  // list → toggle selection ON. The whole section must commit with the
+  // route the user just granted.
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  await openSettingsPanel(harness)
+  const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlistRow?.submenu !== undefined, 'the allowlist row must carry the submenu')
+  const dones: Array<string | undefined> = []
+  const menu = allowlistRow.submenu!('0 routes', (selected) => { dones.push(selected) }) as { handleInput(data: string): void }
+  menu.handleInput(ENTER) // open provider p's models
+  for (let i = 0; i < 8; i += 1) await Promise.resolve()
+  menu.handleInput(ENTER) // toggle m1 ON — commits the first route
+  await settle(harness, 1)
+  assert.deepEqual(harness.settings.doc.allowedModels, [{ provider: 'p', model: 'm1' }], 'the first route commits')
+  menu.handleInput('\x1b') // Esc: model list -> provider list
+  menu.handleInput('\x1b') // Esc: provider list -> close, report the summary
+  assert.deepEqual(dones.at(-1), '1 route', 'the outer row shows the fresh route count')
+  // Now the toggle may be enabled: the gate must NOT block a non-empty
+  // allowlist, and the write carries the committed routes.
+  const change = harness.settingsChange!
+  change('subagent-model-selection', 'on', () => {})
+  await settle(harness, 2)
+  assert.equal(harness.settings.writes.length, 2, 'the allowlist write plus the enable write')
+  assert.deepEqual(harness.settings.writes[1], {
+    enabled: true,
+    allowedModels: [{ provider: 'p', model: 'm1' }],
+  })
+  assert.equal(harness.settings.doc.enabled, true, 'selection commits enabled')
+  assert.equal(harness.notices.length, 0, 'the happy path produces no notice')
 })
 
 test('closing the WHOLE settings panel disposes the allowlist submenu (no late toast, row converges)', async () => {

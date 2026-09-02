@@ -10588,13 +10588,21 @@ export class TuiApp {
    * @param onChange - called with (id, newValue) on confirm. The third
    *   argument `revert` restores a row's DISPLAYED value (used by the M5
    *   plugin-settings path when the row's onChange rejects — the fork
-   *   optimistically mutates the row before the callback runs).
+   *   optimistically mutates the row before the callback runs). The
+   *   optional fourth argument `navigate` moves the list cursor to another
+   *   row (the fork's public `selectItem` seam — used to guide the user to
+   *   a prerequisite row instead of failing a write).
    * @param onCancel - called when the user closes without applying.
    * @returns a function that closes the overlay.
    */
   openSettings(
     items: SettingItem[],
-    onChange: (id: string, value: string, revert: (previousValue: string) => void) => void,
+    onChange: (
+      id: string,
+      value: string,
+      revert: (previousValue: string) => void,
+      navigate?: (targetId: string) => void,
+    ) => void,
     onCancel: () => void,
   ): () => void {
     // SettingsList fires onCancel on Esc/ctrl+c; the overlay must close too,
@@ -10611,7 +10619,11 @@ export class TuiApp {
       // panel must not keep the rejected value). The CALLER supplies the
       // previous value (the registry still holds it before apply commits).
       const revert = (previousValue: string): void => settings.updateValue(id, previousValue)
-      onChange(id, value, revert)
+      // The navigate callback rides the fork's PUBLIC selectItem seam (no
+      // private cursor access): a no-op when the target row is filtered out
+      // by an active search — the caller's notice still guides the user.
+      const navigate = (targetId: string): void => settings.selectItem(targetId)
+      onChange(id, value, revert, navigate)
     }, () => {
       handle?.hide()
       onCancel()
