@@ -2,16 +2,18 @@
  * The UnstableMountedComponentAdapter (Phase 3, plan §9 option A): the
  * Host-side wrapper that turns a plugin's {@link UnstableMountedComponent}
  * into a mountable pi-tui component. The plugin renders RAW lines and
- * receives RAW input — the Unstable contract deliberately bypasses the
- * Stable sanitization (the plugin author owns terminal behavior). The
- * Host still owns the physical mount, focus, stacking, fullscreen
- * migration and teardown.
+ * receives the normalized input sequence (the preHostInput contract —
+ * see UnstableRawInputEvent; never raw OS bytes) — the Unstable contract
+ * deliberately bypasses the Stable sanitization (the plugin author owns
+ * terminal behavior). The Host still owns the physical mount, focus,
+ * stacking, fullscreen migration and teardown.
  *
  * Contract:
  * - render() passes the plugin's raw lines through UNCHANGED (no ANSI
  *   sanitization — the Unstable contract; the Host's Stable surfaces keep
  *   their own sanitization and are never affected);
- * - handleInput() forwards the RAW chunk to the plugin (never decoded);
+ * - handleInput() forwards the normalized input sequence to the plugin
+ *   (never decoded further);
  * - the `focused` setter (the fork's Focusable protocol) tracks focus;
  * - every plugin callback is isolated: a throw is reported (health) and
  *   never escapes into the Host's render/input path.
@@ -68,7 +70,8 @@ export class UnstableMountedComponentAdapter implements Component, Focusable {
     }
   }
 
-  /** RAW input passthrough — never decoded (the Unstable contract). */
+  /** Input passthrough — the normalized preHostInput sequence, never
+   * decoded further (the Unstable contract). */
   handleInput(data: string): void {
     if (this.disposed) return
     try {

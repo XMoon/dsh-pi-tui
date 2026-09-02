@@ -12,9 +12,12 @@ calls `unstable(service)` to get the facade.
   API rename/removal, patch-breaking changes, implementation-coupled
   behavior. Plugin authors bear the upgrade cost.
 - **A broken plugin can disrupt Host behavior.** Raw captures can consume
-  or rewrite ANY input — Enter, Esc, Ctrl+C, paste, CSI-u, terminal-
-  specific protocols. Host shortcuts may stop working. This is the
-  accepted risk of the tier; it is not disguised as "safe".
+  or rewrite ANY input that reaches the Host router — Enter, Esc, Ctrl+C,
+  paste, CSI-u. Host shortcuts may stop working. This is the
+  accepted risk of the tier; it is not disguised as "safe". (The captures
+  are a `preHostInput` seam: the TUI's own terminal-negotiation replies
+  are filtered before them, so a capture cannot break the terminal
+  negotiation itself.)
 - **The ONLY Host-owned recovery is the emergency fail-safe** (triple-Esc
   within 1.5s): it releases every raw capture and closes every unstable
   mount, restoring Host input. It is detected BEFORE the captures are
@@ -49,8 +52,9 @@ export function apply(ctx) {
 
 ## 1. Raw input interception (`ui.input.captureRaw`)
 
-Register a capture that receives RAW terminal chunks BEFORE the Host
-decodes anything:
+Register a capture that receives the normalized terminal input sequence
+BEFORE the Host routes it semantically (a `preHostInput` seam — NOT the
+raw OS byte stream):
 
 ```ts
 ui.input.captureRaw({
@@ -59,7 +63,8 @@ ui.input.captureRaw({
   priority: 10,               // ASC; ties break by id ASC (deterministic)
   when: () => myState.active, // optional gate
   handle: (event) => {
-    // event.data is the RAW chunk; event.surfaceId identifies the surface.
+    // event.data is one normalized input sequence; event.surfaceId
+    // identifies the surface.
     if (event.data === 'x') return { action: 'consume' }
     if (event.data === 'a') return { action: 'rewrite', data: 'b' }
     return { action: 'pass' } // or undefined
@@ -67,16 +72,40 @@ ui.input.captureRaw({
 })
 ```
 
+What the capture actually sees — the Host input path is:
+
+```text
+OS stdin
+  → ProcessTerminal / StdinBuffer (batched chunks split into individual
+    sequences; bracketed-paste content re-wrapped in its markers)
+  → keyboard-protocol negotiation (Kitty flags / DA replies filtered)
+  → native modifier normalization (Windows / Apple Terminal Return →
+    CSI-u Shift+Enter)
+  → TUI-owned query replies filtered (OSC11 background, color-scheme
+    reports, cell-size responses)
+  → TUI input listeners
+  → THIS capture (BEFORE Host semantic routing)
+```
+
+So a capture can see, consume or rewrite anything the Host router would
+otherwise decode — Enter, Esc, Ctrl+C, bracketed paste (markers
+preserved), CSI-u sequences — but it CANNOT see the terminal-negotiation
+replies the TUI itself consumes (Kitty/DA, OSC11, color-scheme,
+cell-size), and it never sees raw multi-byte chunks mid-sequence. A
+capture therefore cannot break the terminal negotiation; it CAN still
+make Host shortcuts stop working.
+
 - `observe` never consumes or rewrites; `capture` may consume or rewrite;
   `exclusive` is the SOLE capture consumer while live — capture-mode
   captures are not consulted (observers still run). A second exclusive
   registration is an explicit error, never a load-order winner.
-- A rewrite replaces the chunk for the Host decoder. **Each terminal
-  chunk passes the interception chain at most once** — the replacement
-  goes straight to the decoder and never re-enters the chain (no
-  recursion, no reentrancy).
+- A rewrite replaces the sequence for the Host decoder. **Each sequence
+  passes the interception chain at most once** — the replacement goes
+  straight to the decoder and never re-enters the chain (no recursion,
+  no reentrancy).
 - A throwing handler (or `when` gate) is isolated and FAILS OPEN: the
-  chunk passes through, and the failure is recorded in the health ledger.
+  sequence passes through, and the failure is recorded in the health
+  ledger.
 - **Security / terminal safety:** the raw API deliberately bypasses the
   Stable sanitization. A plugin can send or interpret control sequences;
   the plugin author owns terminal behavior; the Host does not guarantee
@@ -118,7 +147,7 @@ handle.width / handle.height
 handle.requestRender()  // repaint the active screen
 const lease = handle.mountComponent({
   render: (width) => [`raw line at ${width}`],  // RAW lines, no sanitization
-  handleInput: (raw) => { /* RAW input while focused */ },
+  handleInput: (raw) => { /* normalized input sequence while focused */ },
   dispose: () => {},
 })
 lease.focus(); lease.blur(); lease.invalidate()
@@ -129,11 +158,13 @@ lease.hide(); lease.show(); lease.close()
   the terminal object — only the capabilities a low-level plugin
   genuinely needs.
 - The mount is a capturing overlay: the plugin renders RAW lines and
-  receives RAW input; the Host owns the physical mount, focus, stacking,
-  fullscreen migration and teardown. With no `width` option, the mount follows
-  the full available terminal width so `render(width)` changes after resize;
-  an explicit width remains authoritative. The lease is caller-fiber-owned; a
-  stale lease (surface disposed) is inert.
+  receives the normalized input sequence (the same preHostInput contract
+  as `captureRaw` — never raw OS bytes); the Host owns the physical
+  mount, focus, stacking, fullscreen migration and teardown. With no
+  `width` option, the mount follows the full available terminal width so
+  `render(width)` changes after resize; an explicit width remains
+  authoritative. The lease is caller-fiber-owned; a stale lease (surface
+  disposed) is inert.
 - The handle follows the CURRENT surface attachment; without a live
   surface it is inert (safe no-ops).
 

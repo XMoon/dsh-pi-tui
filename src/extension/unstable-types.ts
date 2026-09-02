@@ -25,15 +25,35 @@ import type { TuiOverlayOptions } from './public-types.ts'
 export const UNSTABLE_API_LEVEL = 1 as const
 
 /**
- * One raw terminal input chunk (plan §5). The plugin receives the RAW
- * bytes exactly as the terminal delivered them — no decoding, no
- * sanitization. `surfaceId` identifies the surface generation the chunk
- * arrived on.
+ * One normalized terminal input sequence (plan §5). The plugin receives
+ * the input AFTER the terminal pipeline has reassembled and normalized it
+ * — NOT the raw OS byte stream. The Host's input path is:
+ *
+ * ```text
+ * OS stdin
+ *   → ProcessTerminal / StdinBuffer (batched chunks split into individual
+ *     sequences; bracketed-paste content re-wrapped in its markers)
+ *   → keyboard-protocol negotiation (Kitty flags / DA replies filtered)
+ *   → native modifier normalization (Windows / Apple Terminal Return →
+ *     CSI-u Shift+Enter)
+ *   → TUI-owned query replies filtered (OSC11 background, color-scheme
+ *     reports, cell-size responses)
+ *   → TUI input listeners
+ *   → THIS capture (BEFORE Host semantic routing)
+ * ```
+ *
+ * So the sequence is a `preHostInput` event: it can see, consume or
+ * rewrite anything the Host router would otherwise decode — Enter, Esc,
+ * Ctrl+C, bracketed paste (markers preserved), CSI-u sequences — but it
+ * CANNOT see the terminal-negotiation replies the TUI itself consumes
+ * (Kitty/DA, OSC11, color-scheme, cell-size), and it never sees raw
+ * multi-byte chunks mid-sequence. `surfaceId` identifies the surface
+ * generation the sequence arrived on.
  */
 export interface UnstableRawInputEvent {
-  /** The raw terminal data (a chunk, not necessarily one key). */
+  /** The normalized terminal input sequence (a sequence, not a raw chunk). */
   readonly data: string
-  /** The surface generation the chunk arrived on. */
+  /** The surface generation the sequence arrived on. */
   readonly surfaceId: string
 }
 
@@ -54,12 +74,17 @@ export type UnstableRawCaptureMode = 'observe' | 'capture' | 'exclusive'
 
 /**
  * One raw input capture registration (plan §5/§8). The capture is
- * consulted by the Host BEFORE terminal protocol decoding — it can see,
- * consume or rewrite ANY raw chunk, including Enter, Esc, Ctrl+C, paste,
- * CSI-u sequences and terminal-specific protocols. This is the Unstable
- * contract: a broken capture can make Host shortcuts stop working. The
- * ONLY Host-owned recovery is the emergency fail-safe (triple-Esc), which
- * the Unstable API cannot rewrite.
+ * consulted by the Host BEFORE semantic routing — after the terminal
+ * pipeline has reassembled and normalized the input (see
+ * {@link UnstableRawInputEvent}): it can see, consume or rewrite any
+ * sequence that would otherwise reach the Host router, including Enter,
+ * Esc, Ctrl+C, paste and CSI-u sequences. It is NOT consulted before
+ * terminal protocol decoding: the TUI's own negotiation replies (Kitty
+ * flags, DA, OSC11, color-scheme, cell-size) never reach a capture, and
+ * a capture cannot break the terminal negotiation. This is the Unstable
+ * contract: a broken capture can still make Host shortcuts stop working.
+ * The ONLY Host-owned recovery is the emergency fail-safe (triple-Esc),
+ * which the Unstable API cannot rewrite.
  *
  * Modes:
  * - `observe` — never consumes or rewrites; a pure observer.
@@ -69,8 +94,8 @@ export type UnstableRawCaptureMode = 'observe' | 'capture' | 'exclusive'
  *   registration is an explicit error, never a load-order winner.
  *
  * Ordering is deterministic: `priority` ASC, then `id` ASC. A throwing
- * handler is isolated (health ledger) and FAILS OPEN — the chunk passes
- * through, so a broken capture can never stall the TUI.
+ * handler is isolated (health ledger) and FAILS OPEN — the sequence
+ * passes through, so a broken capture can never stall the TUI.
  */
 export interface UnstableRawInputSpec {
   /** Stable diagnostic identity, unique per owner. */
@@ -106,7 +131,9 @@ export interface UnstableRawInputHandle {
 export interface UnstableMountedComponent {
   /** Render the current state as raw terminal lines at the given width. */
   render(width: number): string[]
-  /** Receive one raw input chunk while this component owns focus. */
+  /** Receive one normalized terminal input sequence while this component
+   * owns focus (the same preHostInput contract as
+   * {@link UnstableRawInputEvent} — never raw OS bytes). */
   handleInput?(raw: string): void
   /** The component was disposed (mount closed / surface died). */
   dispose?(): void
