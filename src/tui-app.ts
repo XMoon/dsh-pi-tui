@@ -9280,6 +9280,10 @@ export class TuiApp {
     // Hiding resets the expansion: the next todo-toggle shows the compact panel.
     if (!this.todoPanelVisible) this.todoExpanded = false
     this.renderTodoPanel()
+    // Any state participating in todoSummaryText() must publish the extension
+    // activity projection when it changes. Visibility hides the builtin-backed
+    // dock summary while the panel is open and restores it when the panel closes.
+    this.syncExtensionState()
     // The dock summary hides while the panel is expanded (it would sit on
     // top of the full list); restore it on collapse.
     this.renderDock()

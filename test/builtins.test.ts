@@ -62,6 +62,115 @@ async function mountTree(ctx: Context): Promise<{ builtinsFiber: unknown }> {
   return { builtinsFiber }
 }
 
+type AttachedExtensionService = PiTuiExtensionService & {
+  _ledger(): import('../src/extension/internal/ledger.ts').ExtensionLedger
+  attachSurface(
+    bridge: { subscribe(listener: (state: unknown) => void): () => void },
+    capabilities: ReadonlySet<string>,
+    surfaceId: string,
+    requestRender?: (force?: boolean) => void,
+  ): void
+  detachSurface(surfaceId?: string): void
+}
+
+type LiveBuiltinApp = {
+  service: AttachedExtensionService
+  vt: VirtualTerminal
+  app: TuiApp
+  host: SurfaceHost
+}
+
+async function settleRender(app: TuiApp, vt: VirtualTerminal): Promise<void> {
+  await settle()
+  app.requestRender(true)
+  await new Promise<void>(resolve => process.nextTick(resolve))
+  await vt.flush()
+}
+
+/** Attach the real builtins state bridge to a live TuiApp. */
+async function attachBuiltinApp(ctx: Context, width = 80, height = 24): Promise<LiveBuiltinApp> {
+  await mountTree(ctx)
+  const service = ctx.get('piTuiExtensions') as AttachedExtensionService
+  const builtinDockIds = service._ledger().snapshot('input.dock.item').records.map(record => record.id)
+  assert.ok(builtinDockIds.includes('builtin-todo-summary'), `builtin todo dock item missing: ${builtinDockIds.join(', ')}`)
+
+  const vt = new VirtualTerminal(width, height)
+  let app!: TuiApp
+  const host = new SurfaceHost(service._ledger(), () => app.requestRender())
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
+  app.start()
+  startedApps.add(app)
+  await settleRender(app, vt)
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: host.surfaceId, generation: 1, width, height, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  service.attachSurface(
+    { subscribe: listener => host.subscribeState(listener as never) },
+    host.capabilitiesOf() as ReadonlySet<string>,
+    host.surfaceId,
+    force => app.requestRender(force),
+  )
+  app.refreshChrome()
+  await settleRender(app, vt)
+  return { service, vt, app, host }
+}
+
+async function disposeContext(ctx: Context): Promise<void> {
+  for (const runtime of [...ctx.registry.values()]) {
+    for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+  }
+}
+
+async function disposeBuiltinFixture(fixture: LiveBuiltinApp | undefined, ctx: Context): Promise<void> {
+  try {
+    fixture?.app.dispose()
+  } finally {
+    fixture?.service.detachSurface(fixture.host.surfaceId)
+    await disposeContext(ctx)
+  }
+}
+
+/** Send one SGR mouse click using 1-based terminal coordinates. */
+function sendFullscreenClick(fixture: LiveBuiltinApp, x: number, y: number): void {
+  fixture.vt.sendInput(`\x1b[<0;${x};${y}M`)
+  fixture.vt.sendInput(`\x1b[<0;${x};${y}m`)
+}
+
+function visibleRow(fixture: LiveBuiltinApp, text: string, context: string): number {
+  const row = fixture.vt.getViewport().findIndex(line => line.includes(text))
+  if (row < 0) throw new Error(`${context}: row containing ${JSON.stringify(text)} is not visible`)
+  return row
+}
+
+async function clickFullscreenRow(fixture: LiveBuiltinApp, row: number): Promise<void> {
+  const x = Math.max(1, Math.floor(fixture.vt.columns / 2))
+  sendFullscreenClick(fixture, x, row + 1)
+  await settleRender(fixture.app, fixture.vt)
+}
+
+async function clickTodoSummary(fixture: LiveBuiltinApp): Promise<void> {
+  await clickFullscreenRow(fixture, visibleRow(fixture, '☑', 'todo summary click'))
+}
+
+async function clickTodoRow(fixture: LiveBuiltinApp, text: string): Promise<void> {
+  await clickFullscreenRow(fixture, visibleRow(fixture, text, 'todo panel click'))
+}
+
+/** Reset the Todo target coalescing window without relying on a timer. */
+function resetTodoClickGesture(fixture: LiveBuiltinApp): void {
+  const x = Math.max(1, Math.floor(fixture.vt.columns / 2))
+  sendFullscreenClick(fixture, x, fixture.vt.rows)
+}
+
+function assertBuiltinTodoSummary(fixture: LiveBuiltinApp, expected: string, context: string): void {
+  const view = fixture.vt.getViewport().join('\n')
+  const label = `☑  ${expected}`
+  assert.ok(view.includes(label), `${context}: viewport summary missing:\n${view}`)
+  assert.equal((view.match(/☑/g) ?? []).length, 1, `${context}: expected exactly one builtin todo summary:\n${view}`)
+  assert.ok(fixture.host.dockText().includes(expected), `${context}: builtin dock summary missing: ${fixture.host.dockText()}`)
+}
+
 test('builtins register the version badge through the PUBLIC service API; turns/steps are host-native', async () => {
   const ctx = new Context()
   try {
@@ -158,6 +267,149 @@ test('the builtins render into a live TuiApp and the turn/step counter tracks st
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
     }
+  }
+})
+
+test('builtin todo dock summary returns after a >5-item full cycle', async () => {
+  const ctx = new Context()
+  let fixture: LiveBuiltinApp | undefined
+  try {
+    fixture = await attachBuiltinApp(ctx)
+    const todos = Array.from({ length: 8 }, (_, index) => ({
+      content: `todo item ${index + 1}`,
+      status: 'pending' as const,
+    }))
+    fixture.app.setTodoSummary(todos)
+    fixture.app.setFullscreen(true)
+    await settleRender(fixture.app, fixture.vt)
+
+    let view = fixture.vt.getViewport().join('\n')
+    assert.ok(view.includes('☑'), `builtin summary must render while the panel is closed:\n${view}`)
+    assert.ok(fixture.host.state().activity.todoSummary !== '', 'closed panel must publish a non-empty todo summary')
+
+    // The summary row opens compact; reset the gesture window before each
+    // deliberate follow-up click so the test does not wait on a timer.
+    await clickTodoSummary(fixture)
+    assert.equal(fixture.app.isTodoPanelVisible(), true, 'summary click opens the panel')
+    assert.equal(fixture.app.isTodoPanelExpanded(), false, 'summary click opens the compact panel')
+    assert.equal(fixture.host.state().activity.todoSummary, '', 'open panel must clear the extension summary projection')
+    view = fixture.vt.getViewport().join('\n')
+    assert.ok(!view.includes('☑'), `builtin dock summary must hide while the panel is open:\n${view}`)
+    assert.ok(view.includes('todo item 1'), `compact builtin panel missing:\n${view}`)
+    assert.ok(!view.includes('todo item 8'), `compact builtin panel must hide the eighth row:\n${view}`)
+
+    resetTodoClickGesture(fixture)
+    await clickTodoRow(fixture, 'todo item 1')
+    assert.equal(fixture.app.isTodoPanelExpanded(), true, 'panel click expands the full list')
+    view = fixture.vt.getViewport().join('\n')
+    assert.ok(view.includes('todo item 8'), `full builtin panel missing the last row:\n${view}`)
+
+    resetTodoClickGesture(fixture)
+    await clickTodoRow(fixture, 'todo item 8')
+    view = fixture.vt.getViewport().join('\n')
+    assert.equal(fixture.app.isTodoPanelVisible(), false, 'full panel click closes the panel')
+    assert.equal(fixture.app.isTodoPanelExpanded(), false, 'closing resets expansion')
+    assertBuiltinTodoSummary(fixture, '8 active · todo item 1', 'full cycle')
+    assert.ok(!view.includes('todo item 8'), `closed panel must hide the full-list row:\n${view}`)
+    assert.ok(fixture.host.state().activity.todoSummary !== '', 'closing must republish the todo summary projection')
+  } finally {
+    await disposeBuiltinFixture(fixture, ctx)
+  }
+})
+
+test('builtin todo dock summary survives two >5-item full cycles', async () => {
+  const ctx = new Context()
+  let fixture: LiveBuiltinApp | undefined
+  try {
+    fixture = await attachBuiltinApp(ctx)
+    fixture.app.setTodoSummary(Array.from({ length: 8 }, (_, index) => ({
+      content: `cycle todo ${index + 1}`,
+      status: 'pending' as const,
+    })))
+    fixture.app.setFullscreen(true)
+    await settleRender(fixture.app, fixture.vt)
+
+    for (let cycle = 1; cycle <= 2; cycle += 1) {
+      resetTodoClickGesture(fixture)
+      await clickTodoSummary(fixture)
+      assert.ok(fixture.app.isTodoPanelVisible(), `cycle ${cycle}: summary click must open the panel`)
+      assert.ok(!fixture.app.isTodoPanelExpanded(), `cycle ${cycle}: first state must be compact`)
+
+      resetTodoClickGesture(fixture)
+      await clickTodoRow(fixture, 'cycle todo 1')
+      assert.ok(fixture.app.isTodoPanelExpanded(), `cycle ${cycle}: panel click must expand the full list`)
+
+      resetTodoClickGesture(fixture)
+      await clickTodoRow(fixture, 'cycle todo 8')
+      assert.equal(fixture.app.isTodoPanelVisible(), false, `cycle ${cycle}: full panel must close`)
+      assert.equal(fixture.app.isTodoPanelExpanded(), false, `cycle ${cycle}: close must clear expansion`)
+      assertBuiltinTodoSummary(fixture, '8 active · cycle todo 1', `cycle ${cycle}`)
+      assert.ok(fixture.host.state().activity.todoSummary !== '', `cycle ${cycle}: closed panel must publish the summary`)
+    }
+  } finally {
+    await disposeBuiltinFixture(fixture, ctx)
+  }
+})
+
+test('builtin todo dock summary survives two <=5-item list cycles', async () => {
+  const ctx = new Context()
+  let fixture: LiveBuiltinApp | undefined
+  try {
+    fixture = await attachBuiltinApp(ctx)
+    fixture.app.setTodoSummary(Array.from({ length: 3 }, (_, index) => ({
+      content: `small todo ${index + 1}`,
+      status: index === 0 ? ('in_progress' as const) : ('pending' as const),
+    })))
+    fixture.app.setFullscreen(true)
+    await settleRender(fixture.app, fixture.vt)
+
+    for (let cycle = 1; cycle <= 2; cycle += 1) {
+      resetTodoClickGesture(fixture)
+      await clickTodoSummary(fixture)
+      assert.ok(fixture.app.isTodoPanelVisible(), `cycle ${cycle}: summary click must open the list`)
+      assert.ok(!fixture.app.isTodoPanelExpanded(), `cycle ${cycle}: small list must not expand`)
+
+      resetTodoClickGesture(fixture)
+      await clickTodoRow(fixture, 'small todo 1')
+      assert.equal(fixture.app.isTodoPanelVisible(), false, `cycle ${cycle}: list click must close the panel`)
+      assert.equal(fixture.app.isTodoPanelExpanded(), false, `cycle ${cycle}: close must clear expansion`)
+      assertBuiltinTodoSummary(fixture, '3 active · small todo 1', `cycle ${cycle}`)
+      assert.ok(fixture.host.state().activity.todoSummary !== '', `cycle ${cycle}: closed panel must publish the summary`)
+    }
+  } finally {
+    await disposeBuiltinFixture(fixture, ctx)
+  }
+})
+
+test('Ctrl+T restores the builtin todo dock summary after closing the panel', async () => {
+  const ctx = new Context()
+  let fixture: LiveBuiltinApp | undefined
+  try {
+    fixture = await attachBuiltinApp(ctx)
+    fixture.app.setTodoSummary([
+      { content: 'keyboard todo 1', status: 'in_progress' },
+      { content: 'keyboard todo 2', status: 'pending' },
+      { content: 'keyboard todo 3', status: 'pending' },
+    ])
+    fixture.app.setFullscreen(true)
+    await settleRender(fixture.app, fixture.vt)
+
+    fixture.vt.sendInput('\x14')
+    await settleRender(fixture.app, fixture.vt)
+    assert.equal(fixture.app.isTodoPanelVisible(), true, 'Ctrl+T opens the panel')
+    assert.equal(fixture.app.isTodoPanelExpanded(), false, 'Ctrl+T opens the compact/list state')
+    assert.equal(fixture.host.state().activity.todoSummary, '', 'Ctrl+T open must clear the extension summary projection')
+    const openView = fixture.vt.getViewport().join('\n')
+    assert.ok(!openView.includes('☑'), `Ctrl+T open must hide the builtin dock summary:\n${openView}`)
+
+    fixture.vt.sendInput('\x14')
+    await settleRender(fixture.app, fixture.vt)
+    assert.equal(fixture.app.isTodoPanelVisible(), false, 'Ctrl+T closes the panel')
+    assert.equal(fixture.app.isTodoPanelExpanded(), false, 'Ctrl+T close must clear expansion')
+    assertBuiltinTodoSummary(fixture, '3 active · keyboard todo 1', 'Ctrl+T close')
+    assert.ok(fixture.host.state().activity.todoSummary !== '', 'Ctrl+T close must publish the summary projection')
+  } finally {
+    await disposeBuiltinFixture(fixture, ctx)
   }
 })
 
