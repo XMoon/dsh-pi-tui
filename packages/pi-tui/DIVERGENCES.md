@@ -48,8 +48,10 @@ intentionally absent — their files must match upstream):
   longer exists locally. `--strict` promotes warnings to failures.
 
 Upstream resolution: `$PI_UPSTREAM_REPO` → `~/project/pi` → GitHub
-codeload tarball of the pinned commit. Keep `vendor-divergences.json` in
-sync with this file on every re-vendor.
+codeload tarball of the pinned commit. The gate runs in CI (source-checks
+job, `pnpm gate:pi-vendor-diff` — the codeload fallback covers runners
+without a local checkout) and locally via `pnpm gate:pi-vendor-diff`.
+Keep `vendor-divergences.json` in sync with this file on every re-vendor.
 
 ## Divergences
 
@@ -909,7 +911,12 @@ sync with this file on every re-vendor.
   coordinates throughout and accumulates the expansion delta separately —
   an earlier draft compared an already-expanded cursor against later raw
   marker ends, over-counting markers the cursor never passed (a cursor
-  between two markers jumped past the second one on handoff).
+  between two markers jumped past the second one on handoff). A cursor
+  INSIDE an atomic marker snaps to that marker's EXPANDED end
+  (`markerStart + delta + content.length` — the marker is REPLACED by the
+  content, so the raw marker length must not be added; an earlier draft
+  used `markerEnd + delta + content.length`, which could return a cursor
+  beyond the expanded text end on a single-marker document).
 - Tests: "expanded cursor mapping (X045)" in `test/editor.test.ts`,
   including the marker-collision test (a literal `[paste #N ...]` inside
   an earlier paste's content survives verbatim while the real marker still
@@ -917,7 +924,9 @@ sync with this file on every re-vendor.
   every-raw-position mapping test (before the first marker, inside it,
   between two markers, exactly at the second marker's start, inside it,
   after every marker — the between-markers case fails under the mixed
-  raw/expanded algorithm).
+  raw/expanded algorithm, and the inside-marker cases fail when the snap
+  formula adds the raw marker length; a snapped cursor is asserted to
+  never exceed the expanded text).
 - Migration action: re-apply together with the host's expanded-draft
   wiring (round-2 P1: steer/submit/getDraft/viewer wires and seat
   handoffs all carry expanded text).
