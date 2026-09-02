@@ -125,6 +125,10 @@ export function resolveEscapeTimeoutMs(env: NodeJS.ProcessEnv = process.env): nu
  */
 export class ProcessTerminal implements Terminal {
 	private wasRaw = false;
+	/** Whether start() has run without a matching stop(): the FIRST start
+	 * captures the pre-raw stdin state; a repeated start finds stdin
+	 * already raw and must NOT re-capture it (X016). */
+	private started = false;
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
 	private _kittyProtocolActive = false;
@@ -159,18 +163,36 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	start(onInput: (data: string) => void, onResize: () => void): void {
-		// A repeated start() must not stack resize listeners: stop() can only
-		// remove the CURRENT reference, so remove any listener registered by a
-		// previous start() BEFORE overwriting it, or the old one leaks.
-		// (dsh-pi-tui divergence X016.)
+		// A repeated start() must swap EVERY owned handler safely, not just
+		// the resize listener (dsh-pi-tui divergence X016): stop() can only
+		// remove the CURRENT references, so anything a previous start()
+		// registered must be removed BEFORE it is overwritten, or the old
+		// handler leaks and double-delivers (a stale StdinBuffer callback
+		// and a stale stdin "data" listener both forward into the NEW
+		// inputHandler — one stdin event would reach the TUI twice).
 		if (this.resizeHandler) {
 			process.stdout.removeListener("resize", this.resizeHandler);
 		}
+		if (this.stdinDataHandler) {
+			process.stdin.removeListener("data", this.stdinDataHandler);
+			this.stdinDataHandler = undefined;
+		}
+		if (this.stdinBuffer) {
+			this.stdinBuffer.destroy();
+			this.stdinBuffer = undefined;
+		}
+		this.clearKeyboardProtocolNegotiationBuffer();
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
 
-		// Save previous state and enable raw mode
-		this.wasRaw = process.stdin.isRaw || false;
+		// Save previous state and enable raw mode. Only the FIRST start()
+		// may capture the pre-raw state: a repeated start() finds stdin
+		// already raw, and re-capturing would make the eventual stop()
+		// restore raw mode instead of the original cooked state (X016).
+		if (!this.started) {
+			this.wasRaw = process.stdin.isRaw || false;
+		}
+		this.started = true;
 		if (process.stdin.setRawMode) {
 			process.stdin.setRawMode(true);
 		}
@@ -478,6 +500,9 @@ export class ProcessTerminal implements Terminal {
 		if (process.stdin.setRawMode) {
 			process.stdin.setRawMode(this.wasRaw);
 		}
+		// A later start() is a fresh lifecycle: it re-captures the pre-raw
+		// state (stdin is cooked again after the restore above).
+		this.started = false;
 	}
 
 	write(data: string): void {
