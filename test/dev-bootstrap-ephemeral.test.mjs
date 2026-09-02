@@ -744,6 +744,19 @@ test('bootstrap locks are keyed per worktree', (t) => {
   assert.equal(bootstrapTest.bootstrapLockPath(contextA), lockA, 'the same worktree maps to the same lock')
 })
 
+test('acquireDirectoryLock honors a custom wait timeout', async (t) => {
+  const life = testLifecycle(t)
+  const lockPath = join(life.tempDir('dsh-ephemeral-lockwait-'), 'test.lock')
+  const first = await bootstrapTest.acquireDirectoryLock(lockPath, 'test lock')
+  const started = Date.now()
+  await assert.rejects(
+    () => bootstrapTest.acquireDirectoryLock(lockPath, 'test lock', { waitMs: 50 }),
+    /timed out waiting/u,
+  )
+  assert.ok(Date.now() - started < 5000, 'the custom wait timeout must be honored instead of the default')
+  bootstrapTest.releaseDirectoryLock(first)
+})
+
 test('a successful bootstrap releases the per-worktree lock', async (t) => {
   const life = testLifecycle(t)
   const { root, config } = sourceFixture(life)

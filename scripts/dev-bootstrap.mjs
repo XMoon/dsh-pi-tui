@@ -49,6 +49,11 @@ const EPHEMERAL_ROOT_PREFIX = 'dsh-pi-tui-source-'
 const EPHEMERAL_MARKER_NAME = '.dsh-pi-tui-ephemeral.json'
 const EPHEMERAL_MARKER_KIND = 'dsh-pi-tui-source-pack'
 const LOCK_WAIT_MS = 15 * 60 * 1000
+// A single bootstrap may legitimately run a 60-minute source-pack build
+// (TIMEOUTS.sourcePack), so the per-worktree bootstrap lock must let a
+// waiting agent outlast the longest legitimate bootstrap instead of
+// failing after the generic 15-minute lock timeout.
+const BOOTSTRAP_LOCK_WAIT_MS = 90 * 60 * 1000
 const LOCK_STALE_MS = 10 * 60 * 1000
 const TIMEOUTS = {
   git: 20 * 60 * 1000,
@@ -485,7 +490,7 @@ function reapStaleLock(path, label = 'lock') {
   return true
 }
 
-async function acquireDirectoryLock(lockPath, label) {
+async function acquireDirectoryLock(lockPath, label, { waitMs = LOCK_WAIT_MS } = {}) {
   const token = randomUUID()
   const started = Date.now()
   while (true) {
@@ -496,7 +501,7 @@ async function acquireDirectoryLock(lockPath, label) {
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error
       reapStaleLock(lockPath, label)
-      if (Date.now() - started >= LOCK_WAIT_MS) {
+      if (Date.now() - started >= waitMs) {
         fail(`timed out waiting for ${label}: ${lockPath}`)
       }
       await new Promise(resolvePromise => setTimeout(resolvePromise, 500))
@@ -1159,6 +1164,8 @@ function parseCli() {
 export const _test = {
   acquireSourceLock,
   releaseSourceLock,
+  acquireDirectoryLock,
+  releaseDirectoryLock,
   sourceDistribution,
   sourcePackCommandArgs,
   writeDevelopmentEnvironment,
@@ -1199,7 +1206,7 @@ function bootstrapLockPath(context) {
 }
 
 async function acquireBootstrapLock(context) {
-  return acquireDirectoryLock(bootstrapLockPath(context), 'worktree bootstrap lock')
+  return acquireDirectoryLock(bootstrapLockPath(context), 'worktree bootstrap lock', { waitMs: BOOTSTRAP_LOCK_WAIT_MS })
 }
 
 function releaseBootstrapLock(lock) {
