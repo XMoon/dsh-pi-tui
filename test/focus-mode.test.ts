@@ -2075,6 +2075,96 @@ test('expanded: the initial user stays before the Thought; a mid-turn steer retu
     'the initial user precedes the Thought; the steer follows the tool that preceded it')
 })
 
+test('expanded: injected/system context before the initial user stays above the Thought (core regression)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    // Injected context folds into a system row BEFORE the initial prompt.
+    eventAt('user/message', {
+      id: MessageId('ctx'), role: 'user',
+      content: [{ type: 'text', text: 'system reminder' }],
+      source: { kind: 'plugin', plugin: 'agent-instructions' },
+    }, 1001, 1),
+    eventAt('user/message', {
+      id: MessageId('init'), role: 'user',
+      content: [{ type: 'text', text: 'initial prompt 0' }],
+      source: { kind: 'user' },
+    }, 1002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1003, 3),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c-0-1'), name: 'read', arguments: '{}' }, 1004, 4),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r-0'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c-0-1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c-0-1') },
+      },
+    }, 1005, 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a-0'), role: 'assistant', content: [{ type: 'text', text: 'final answer 0' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1006, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7000, 7),
+  ])
+  const messages = folder.messages()
+  assert.equal(messages[0]?.kind, 'system', 'precondition: the raw fold starts with the injected system row')
+  const blocks = projectFocus(messages, folder.turnActivities(), new Set([0]), true)
+  // system → user(initial) → activity → thinking → tool → assistant(final):
+  // the initial user must NOT land below the Thought (the countLeadingUsers
+  // regression — a non-user lead used to zero the prefix).
+  assert.deepEqual(blockKinds(blocks), ['system', 'user', 'activity', 'thinking', 'tool', 'assistant'],
+    `the injected context and the initial user must precede the Thought: ${blockKinds(blocks).join(',')}`)
+  const userTexts = blocks.flatMap(b => b.kind === 'message' && b.message.kind === 'user' ? [b.message.text] : [])
+  assert.deepEqual(userTexts, ['initial prompt 0'], 'the initial user stays above the Thought')
+})
+
+test('expanded: a second CONSECUTIVE user is a steer, never part of the initial prompt', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'first prompt' }],
+      source: { kind: 'user' },
+    }, 1001, 1),
+    eventAt('user/message', {
+      id: MessageId('u2'), role: 'user',
+      content: [{ type: 'text', text: 'second prompt' }],
+      source: { kind: 'user' },
+    }, 1002, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1003, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
+  ])
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  // Only the FIRST direct user is the initial prompt; the second
+  // consecutive user returns to its chronological position (plan: no
+  // adjacency guessing — consecutive users are queue/steer input).
+  assert.deepEqual(blockKinds(blocks), ['user', 'activity', 'user', 'assistant'],
+    `only the first user precedes the Thought: ${blockKinds(blocks).join(',')}`)
+  const userTexts = blocks.flatMap(b => b.kind === 'message' && b.message.kind === 'user' ? [b.message.text] : [])
+  assert.deepEqual(userTexts, ['first prompt', 'second prompt'], 'both users render, in order')
+})
+
+test('expanded: a turn with NO user row keeps the Thought and never crashes (no synthetic user)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1002, 2),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1003, 3),
+  ])
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  assert.deepEqual(blockKinds(blocks), ['activity', 'thinking', 'assistant'],
+    'no user → the Thought leads, chronology intact, no synthetic user')
+  assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'user'), 'never a synthetic user row')
+})
+
 test('expanded: multiple steers keep their relative chronology', () => {
   const folder = new TranscriptFolder()
   folder.apply([
@@ -2120,7 +2210,7 @@ test('expanded: user rows never carry the owner collapse mark; process rows alwa
   }
 })
 
-test('expanded: a turn with NO initial user starts with the Thought (chronology intact)', () => {
+test('expanded: rows before the first user stay in place; a late steer stays chronological', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 0 }, 1000, 0),
@@ -2137,8 +2227,11 @@ test('expanded: a turn with NO initial user starts with the Thought (chronology 
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
   ])
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
-  assert.deepEqual(blockKinds(blocks), ['activity', 'thinking', 'user', 'assistant'],
-    'no initial user → the Thought leads and the steer stays chronological')
+  // The row BEFORE the first user (thinking) stays in place, the first
+  // user stays above the Thought, and the Thought follows — the steer
+  // never gets lifted above the Thought (plan: initial-prompt boundary).
+  assert.deepEqual(blockKinds(blocks), ['thinking', 'user', 'activity', 'assistant'],
+    'pre-user rows and the first user precede the Thought; the steer stays chronological')
 })
 
 test('fold → expand → fold projection is reversible (same collapsed output)', () => {

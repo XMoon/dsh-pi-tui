@@ -369,20 +369,23 @@ export function projectFocus(
       // the final assistant held back and appended LAST (a max-tokens
       // turn's `max tokens reached` system row must never land after the
       // final: the settled order is User → Thought → process → final).
-      // The LEADING user prefix (the initial prompt; multiple consecutive
-      // initial users all stay) precedes the Thought; every later
+      // The INITIAL-PROMPT boundary precedes the Thought: rows before the
+      // turn's FIRST direct user (injected/system context) stay in place
+      // and the initial user itself stays above the Thought; every later
       // user/steer returns to its chronological position in the process
       // (plan: expanded chronology — the projection reorders, never the
-      // session events). Every revealed process row carries the
-      // owner-turn collapse mark; the user's rows and the FINAL assistant
-      // stay unmarked (clicking them must not collapse the Thought —
-      // review P2).
-      const leadingUserCount = countLeadingUsers(group)
-      for (const member of group.slice(0, leadingUserCount)) {
+      // session events). Only the FIRST direct user is the initial
+      // prompt — consecutive users are queue/steer input, never a
+      // multi-row initial prompt (plan: no adjacency guessing). Every
+      // revealed process row carries the owner-turn collapse mark; the
+      // user's rows and the FINAL assistant stay unmarked (clicking them
+      // must not collapse the Thought — review P2).
+      const boundary = initialPromptBoundary(group)
+      for (const member of group.slice(0, boundary)) {
         out.push({ kind: 'message', message: member })
       }
       if (activity !== undefined) out.push({ kind: 'activity', activity })
-      for (const member of group.slice(leadingUserCount)) {
+      for (const member of group.slice(boundary)) {
         if (member.kind === 'user') {
           out.push({ kind: 'message', message: member })
         } else {
@@ -428,17 +431,17 @@ function lastAssistant(
   return undefined
 }
 
-/** The number of CONSECUTIVE user rows at the START of a turn group: the
- * initial prompt (multiple consecutive initial users all stay before the
- * Thought in the expanded view). Every user row AFTER this prefix is a
- * steer and returns to its chronological position. */
-function countLeadingUsers(group: readonly TranscriptMessage[]): number {
-  let count = 0
-  for (const member of group) {
-    if (member.kind !== 'user') break
-    count += 1
-  }
-  return count
+/** The initial-prompt boundary of one turn group: the index AFTER the
+ * turn's FIRST direct user row. Rows before it (injected/system context)
+ * and the initial user itself stay above the Thought; every later row
+ * (steers included) returns to its chronological position. 0 when the
+ * turn has no user row — the Thought then leads with chronology intact
+ * (never a synthetic user, never a crash). Only the FIRST direct user is
+ * the initial prompt: consecutive users are queue/steer input, not a
+ * multi-row initial prompt (plan: no adjacency guessing). */
+function initialPromptBoundary(group: readonly TranscriptMessage[]): number {
+  const firstUserIndex = group.findIndex(member => member.kind === 'user')
+  return firstUserIndex < 0 ? 0 : firstUserIndex + 1
 }
 
 /** Whether one assistant message truly renders visible rows. The flat
