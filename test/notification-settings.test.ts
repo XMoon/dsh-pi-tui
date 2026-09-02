@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { TuiSettingsDoc } from '../src/runtime/config-port.ts'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
@@ -21,6 +21,20 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { parseNotificationMethod, parseNotificationMode } from '../src/notification/settings.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 
 /** A fake TuiSettingsLike recording every replace. */
 function fakeSettings(doc: Record<string, unknown>) {
@@ -45,6 +59,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
   ctx.provide('commands', {
     register: (def: { name: string; handler?: unknown }): (() => void) => {
@@ -192,7 +207,7 @@ test('persisted values render on the rows; invalid values fall back to the defau
     `persisted mode must render:\n${view}`)
   assert.ok(view.split('\n').some(line => line.includes('Notification method') && line.includes('osc777')),
     `persisted method must render:\n${view}`)
-  t.app.stop()
+  t.app.dispose()
   // Invalid persisted values fall back to the defaults (never render raw).
   const t2 = setupSettings({ notificationMode: 'garbage', notificationMethod: 'beep' })
   await t2.run()
