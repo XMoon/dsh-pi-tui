@@ -244,8 +244,18 @@ export class Container implements Component {
 		this.children = [];
 	}
 
+	/**
+	 * Release every child exactly once (dsh-pi-tui divergence X007
+	 * hardening): the children are detached BEFORE disposal, so a second
+	 * dispose() is a no-op instead of double-disposing the children.
+	 * Deliberately NOT `this.clear()` — ScrollView overrides clear() to
+	 * throw (its child cannot be cleared), and dispose() must stay valid
+	 * for every Container subclass.
+	 */
 	dispose(): void {
-		for (const child of this.children) child.dispose?.();
+		const children = this.children;
+		this.children = [];
+		for (const child of children) child.dispose?.();
 	}
 
 	invalidate(): void {
