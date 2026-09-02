@@ -30,12 +30,19 @@
  * @module @xmoon76/dsh-pi-tui/subagent-viewer-submit
  */
 
-/** One human-authored content part for a viewer prompt. Text today; the
- * image part joins when the viewer gains image intake — the DTO must not
- * lock the delivery to text-only (alpha.4's official `prompt()` already
- * admits image parts through the Host attachment store). */
+/** One human-authored content part for a viewer prompt. The DTO mirrors
+ * the official `PromptContentPart` vocabulary (alpha.4's official
+ * `prompt()` admits image parts through the Host attachment store), so the
+ * delivery contract is not locked to text-only — the viewer's image intake
+ * joins in a later milestone without another port change. */
 export type SubagentPromptContentPart =
   | { readonly type: 'text'; readonly text: string }
+  | {
+    readonly type: 'image'
+    readonly mediaType: string
+    readonly data: string
+    readonly name?: string
+  }
 
 /** The semantic prompt request from the viewer (mirrors
  * SubagentViewerSubmit without importing TuiApp). The `requestId` and
@@ -198,8 +205,10 @@ export async function submitSubagentPrompt(
       if (part.type === 'text') {
         canonical.push({ type: 'text', text: await deps.canonicalizeText?.(part.text) ?? part.text })
       } else {
-        // Unknown part kinds are forwarded verbatim (future image parts
-        // are admitted by the Host, never rewritten here).
+        // Image parts are forwarded VERBATIM: the Host admits and persists
+        // them through the attachment store before delivery (the official
+        // prompt contract) — the TUI never rewrites them, and the
+        // @-mention canonicalization applies to text only.
         canonical.push(part)
       }
     }

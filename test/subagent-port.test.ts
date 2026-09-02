@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectSubagentPort, type HostContextLike } from '../src/runtime/direct/subagent-direct.ts'
-import type { SubagentPromptService } from '../src/subagent-viewer-submit.ts'
+import type { SubagentPromptContentPart, SubagentPromptService } from '../src/subagent-viewer-submit.ts'
 import type { SubagentPromptContext } from '../src/runtime/subagent-port.ts'
 
 const request = {
@@ -33,7 +33,7 @@ interface RecordedCall {
   parentSessionId: string
   childSessionId: string
   mode: string
-  content: readonly { type: 'text'; text: string }[]
+  content: readonly SubagentPromptContentPart[]
 }
 
 function service(calls: RecordedCall[]): SubagentPromptService {
@@ -85,7 +85,9 @@ test('applies the caller canonicalization before delivery', async () => {
     context({ canonicalizeText: (text) => text.replace('@src/foo.ts', '/abs/src/foo.ts') }),
   )
   assert.equal(outcome.kind, 'ok')
-  assert.equal(calls[0].content[0].text, 'check /abs/src/foo.ts')
+  const first = calls[0].content[0]
+  assert.equal(first.type, 'text')
+  if (first.type === 'text') assert.equal(first.text, 'check /abs/src/foo.ts')
 })
 
 test('rejects unavailable when the ctx.subagents service is absent', async () => {

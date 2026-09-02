@@ -14,6 +14,7 @@ import {
   resolveSubagentSettleTarget,
   submitSubagentPrompt,
   viewerCanonicalizeScope,
+  type SubagentPromptContentPart,
   type SubagentPromptService,
   type SubagentSettleViewerState,
   type SubagentViewerSubmitDeps,
@@ -40,7 +41,7 @@ interface RecordedCall {
   parentSessionId: string
   childSessionId: string
   mode: string
-  content: readonly { type: 'text'; text: string }[]
+  content: readonly SubagentPromptContentPart[]
   clientTimeZone: string | undefined
   signal: AbortSignal
 }
@@ -110,8 +111,12 @@ test('the prompt text runs through the SAME canonicalization as the main session
     }),
   )
   assert.equal(outcome.kind, 'ok')
-  assert.equal(calls[0]!.content[0]!.text, 'review @/home/xmoon/project/src/foo.ts',
-    'the prompt content must carry the canonicalized absolute path')
+  const first = calls[0]!.content[0]!
+  assert.equal(first.type, 'text')
+  if (first.type === 'text') {
+    assert.equal(first.text, 'review @/home/xmoon/project/src/foo.ts',
+      'the prompt content must carry the canonicalized absolute path')
+  }
 })
 
 test('a signal aborted while canonicalizing rejects BEFORE the write path (never a stale accept)', async () => {
@@ -268,4 +273,30 @@ test('review: the canonicalize scope is the VIEWED CHILD workspace, never the pa
     { kind: 'session', sessionId: '' },
     'a sessionless fallback stays fail-closed',
   )
+})
+
+test('image parts are forwarded VERBATIM (the Host admits them; the TUI never rewrites them)', async () => {
+  // The DTO mirrors the official PromptContentPart vocabulary: an image
+  // part rides through untouched — no canonicalization, no rewriting —
+  // while a text part in the same prompt still canonicalizes.
+  const calls: RecordedCall[] = []
+  const outcome = await submitSubagentPrompt(
+    {
+      parentSessionId: request.parentSessionId,
+      childSessionId: request.childSessionId,
+      content: [
+        { type: 'text', text: 'review @src/foo.ts' },
+        { type: 'image', mediaType: 'image/png', data: 'aGVsbG8=', name: 'shot.png' },
+      ],
+    },
+    deps({
+      subagents: () => service(calls),
+      canonicalizeText: (text) => text.replace('@src/foo.ts', '@/home/xmoon/project/src/foo.ts'),
+    }),
+  )
+  assert.equal(outcome.kind, 'ok')
+  assert.deepEqual(calls[0]!.content, [
+    { type: 'text', text: 'review @/home/xmoon/project/src/foo.ts' },
+    { type: 'image', mediaType: 'image/png', data: 'aGVsbG8=', name: 'shot.png' },
+  ], 'text canonicalizes, the image part is forwarded verbatim')
 })
