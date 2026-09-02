@@ -12,11 +12,12 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { CompletionNotificationController } from '../src/notification/controller.ts'
 import {
+
   DISABLE_FOCUS_REPORTING,
   ENABLE_FOCUS_REPORTING,
   FOCUS_IN_SEQUENCE,
@@ -24,6 +25,18 @@ import {
   TerminalFocusTracker,
   isFocusReport,
 } from '../src/notification/terminal-focus.ts'
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 test('the tracker defaults to focused (the safe assumption)', () => {
   const tracker = new TerminalFocusTracker()
@@ -78,6 +91,7 @@ test('TuiApp regular mode: focus reports fire onTerminalFocus and never reach th
     onTerminalFocus: (focused) => { focusReports.push(focused) },
   })
   app.start()
+  startedApps.add(app)
   // Type a draft so the editor is live.
   vt.sendInput('hello')
   await vt.waitForRender()
@@ -104,6 +118,7 @@ test('TuiApp: a focus report never triggers a plugin keybinding', async () => {
     onExtensionAction: (action) => { actions.push(action) },
   })
   app.start()
+  startedApps.add(app)
   // A live plugin binding: the focus reports share no sequence with it,
   // and the app filters them BEFORE the key ladder — they must never be
   // decoded as a key at all.
@@ -119,6 +134,7 @@ test('TuiApp regular mode: focus reports are consumed host-side and never reach 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // Instrument the focused component: every raw input it receives is
   // recorded. In REGULAR mode no viewport listener exists, so the host
@@ -145,6 +161,7 @@ test('TuiApp: a focus report never triggers autocomplete', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   // The ONLY completion source is the injected extensionSuggest counter
   // (empty host command list — the host provider returns null for plain
   // text, so every Tab consults the injected provider).
@@ -178,6 +195,7 @@ test('fullscreen toggle-off keeps focus reporting enabled; a full teardown disab
   vt.write = (data: string) => { writes.push(data); originalWrite(data) }
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -220,6 +238,7 @@ test('a throwing focus-reporting reassert cannot crash the fullscreen toggle', a
   }
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -255,6 +274,7 @@ test('unstable raw captures cannot consume or rewrite focus reports (host-reserv
     },
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput(FOCUS_OUT_SEQUENCE)
   vt.sendInput(FOCUS_IN_SEQUENCE)
@@ -282,6 +302,7 @@ test('unstable raw captures cannot rewrite ordinary input INTO a focus report', 
     },
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('x')
   await vt.waitForRender()
@@ -302,6 +323,7 @@ test('TuiApp: ordinary input fires onUserInput; focus reports do not', async () 
     onUserInput: () => { userInputs += 1 },
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // Focus reports are NOT user activity.
   vt.sendInput(FOCUS_OUT_SEQUENCE)
