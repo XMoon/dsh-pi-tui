@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
  * Verify the shipped DSH preset assembly independently of any published
- * consumer bridge. This gate installs only the exact target DSH version, the
- * candidate dsh-pi-tui package, and the durable-header probe, then exercises
- * standard/ptc/minimal/cordis through real Agent/Session creation in tmux.
+ * consumer bridge. This gate installs the exact currently validated DSH version
+ * from test/compat/dsh-source.json, the candidate dsh-pi-tui package, and the
+ * durable-header probe, then exercises standard/ptc/minimal/cordis through real
+ * Agent/Session creation in tmux.
  *
  * Usage: node scripts/official-presets-smoke.mjs [path-to-candidate.tgz]
  *        pnpm smoke:official-presets -- [path-to-candidate.tgz]
@@ -23,7 +24,6 @@ import {
   dshInvocation,
   installPlugin,
   isolatedEnvironment,
-  readJson,
   requireExactVersion,
   resolveTarball,
   run,
@@ -31,7 +31,6 @@ import {
   runPnpmInstall,
   smokeOfficialPresetMounts,
   validateCandidateTarball,
-  validateTargetDshManifest,
   writeHeaderProbePackage,
 } from './pi2dsh-compat-smoke.mjs'
 import {
@@ -45,7 +44,6 @@ import { pnpmExecutable } from './lib/process.mjs'
 const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
-const MANIFEST_PATH = join(PACKAGE_ROOT, 'test', 'compat', 'pi2dsh.json')
 
 function commandOutput(result) {
   return [result.stdout, result.stderr, result.error?.message]
@@ -60,6 +58,11 @@ function optionValue(args, option) {
   const value = args[index + 1]
   if (value === undefined || value.startsWith('--')) throw new Error(`${option} requires a value`)
   return value
+}
+
+/** Return the single DSH version currently validated by this checkout. */
+export function currentValidatedDshVersion(configPath = DEFAULT_SOURCE_CONFIG) {
+  return loadDshSourceConfig(configPath).expectedVersion
 }
 
 export function sourceConfigForArgs(args, defaultConfig = DEFAULT_SOURCE_CONFIG) {
@@ -85,11 +88,9 @@ async function main() {
   const smokeArgs = process.argv.slice(2)
   const tarball = resolveTarball(candidateArgument(smokeArgs))
   validateCandidateTarball(tarball)
-  const manifest = readJson(MANIFEST_PATH, 'compatibility manifest')
-  const manifestDshVersion = validateTargetDshManifest(manifest)
   const distributionPath = distributionArgument(smokeArgs)
   const sourceConfig = sourceConfigForArgs(smokeArgs)
-  const targetDshVersion = sourceConfig?.expectedVersion ?? manifestDshVersion
+  const targetDshVersion = sourceConfig?.expectedVersion ?? currentValidatedDshVersion()
   const distribution = distributionPath === undefined
     ? loadDshDistribution({ mode: 'npm', version: targetDshVersion })
     : loadDshDistribution({
