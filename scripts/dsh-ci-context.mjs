@@ -2,13 +2,16 @@
 /**
  * Resolve the one DSH distribution mode used by a GitHub Actions run.
  *
- * Tags are always npm mode. A push to next and a pull request targeting next
- * use the pinned source pack. All other branches/PR bases use npm mode.
+ * Tags are always npm mode. A push to next and a pull request targeting
+ * next follow the TRACKED branch-level mode policy
+ * (test/compat/dsh-mode.json) — one line flips the whole branch between
+ * the pinned source pack and the registry-backed npm distribution. All
+ * other branches/PR bases use npm mode.
  *
  * @module dsh-ci-context
  */
 
-import { appendFileSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -18,25 +21,50 @@ import { DEFAULT_SOURCE_CONFIG, loadDshSourceConfig } from './lib/dsh-distributi
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(SCRIPT_DIR, '..')
 const PI2DSH_MANIFEST = join(ROOT, 'test', 'compat', 'pi2dsh.json')
+const MODE_CONFIG = join(ROOT, 'test', 'compat', 'dsh-mode.json')
 
 function fail(message) {
   throw new Error(message)
 }
 
 /**
- * Resolve source/npm mode from GitHub event context.
- * @param {{eventName?: string, ref?: string, baseRef?: string, forcedMode?: string}} context
+ * Read the tracked branch-level DSH mode policy. The file is the SINGLE
+ * source of truth for next's distribution; a missing or malformed file
+ * is an explicit error (next always carries it).
+ * @param {string} path - the mode-config path (injectable for tests).
  * @returns {'source'|'npm'}
  */
-export function resolveDshMode({ eventName = '', ref = '', baseRef = '', forcedMode } = {}) {
+export function readTrackedMode(path = MODE_CONFIG) {
+  if (!existsSync(path)) fail(`DSH mode config is missing: ${path}`)
+  let value
+  try {
+    value = JSON.parse(readFileSync(path, 'utf8'))
+  } catch (error) {
+    fail(`DSH mode config could not be read: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) fail('DSH mode config must be an object')
+  if (value.schemaVersion !== 1) fail(`unsupported DSH mode config schema ${JSON.stringify(value.schemaVersion)}`)
+  const mode = value.mode
+  if (mode !== 'source' && mode !== 'npm') {
+    fail(`unsupported DSH mode ${JSON.stringify(mode)}; expected source or npm`)
+  }
+  return mode
+}
+
+/**
+ * Resolve source/npm mode from GitHub event context.
+ * @param {{eventName?: string, ref?: string, baseRef?: string, forcedMode?: string, modeConfigPath?: string}} context
+ * @returns {'source'|'npm'}
+ */
+export function resolveDshMode({ eventName = '', ref = '', baseRef = '', forcedMode, modeConfigPath = MODE_CONFIG } = {}) {
   const tag = ref.startsWith('refs/tags/')
+  const isNext = (eventName === 'pull_request' && baseRef === 'next')
+    || (eventName === 'push' && ref === 'refs/heads/next')
   const computed = tag
     ? 'npm'
-    : eventName === 'pull_request' && baseRef === 'next'
-      ? 'source'
-      : eventName === 'push' && ref === 'refs/heads/next'
-        ? 'source'
-        : 'npm'
+    : isNext
+      ? readTrackedMode(modeConfigPath)
+      : 'npm'
   if (tag && forcedMode === 'source') fail('release tag events must never use DSH source mode')
   if (forcedMode !== undefined && forcedMode !== computed) {
     fail(`forced DSH mode ${forcedMode} disagrees with resolved mode ${computed}`)
@@ -56,9 +84,9 @@ function readTargetVersion() {
 }
 
 /** Resolve and validate all context outputs. */
-export function resolveDshContext({ eventName, ref, baseRef, configPath = DEFAULT_SOURCE_CONFIG, forcedMode } = {}) {
+export function resolveDshContext({ eventName, ref, baseRef, configPath = DEFAULT_SOURCE_CONFIG, forcedMode, modeConfigPath = MODE_CONFIG } = {}) {
   const config = loadDshSourceConfig(configPath)
-  const mode = resolveDshMode({ eventName, ref, baseRef, forcedMode })
+  const mode = resolveDshMode({ eventName, ref, baseRef, forcedMode, modeConfigPath })
   return {
     mode,
     version: readTargetVersion() ?? config.expectedVersion,

@@ -25,6 +25,7 @@ import {
 } from './lib/dsh-distribution.mjs'
 
 export const SOURCE_CONFIG_RELATIVE = join('test', 'compat', 'dsh-source.json')
+export const MODE_CONFIG_RELATIVE = join('test', 'compat', 'dsh-mode.json')
 export const DEV_STATE_FILE = '.dsh-dev-state.json'
 export const DEV_ENV_FILE = '.dsh-dev-env'
 export const CACHE_DIRECTORY_NAME = 'dsh-pi-tui'
@@ -87,6 +88,26 @@ export function loadSourceConfig(path) {
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error))
   }
+}
+
+/**
+ * Read the tracked branch-level DSH mode policy (test/compat/dsh-mode.json).
+ * The file is the SINGLE source of truth for which distribution a branch
+ * uses; the legacy dsh-source.json presence check below is only the
+ * fallback for checkouts that predate the mode file.
+ * @param {string} path - the resolved mode-config path.
+ * @returns {'source'|'npm'}
+ */
+export function readModeConfig(path) {
+  const resolved = resolve(path)
+  if (!existsSync(resolved) || !statSync(resolved).isFile()) fail(`DSH mode config is missing: ${resolved}`)
+  const value = readJsonFile(resolved, 'DSH mode config')
+  if (value.schemaVersion !== 1) fail(`unsupported DSH mode config schema ${JSON.stringify(value.schemaVersion)}`)
+  const mode = value.mode
+  if (mode !== 'source' && mode !== 'npm') {
+    fail(`unsupported DSH mode ${JSON.stringify(mode)}; expected source or npm`)
+  }
+  return mode
 }
 
 export function cacheRoot(environment = process.env) {
@@ -154,7 +175,15 @@ export function resolveDshDevContext({ root = process.cwd(), mode, config, distr
     : undefined
   const configuredMode = mode ?? environmentMode
   const configPath = sourceConfigPath(directory, config, environment)
-  const modeFromPolicy = configuredMode ?? (existsSync(configPath) ? 'source' : 'npm')
+  // Mode precedence: explicit option → environment override → the
+  // tracked branch-level mode policy (test/compat/dsh-mode.json) → the
+  // legacy fallback (a workspace carrying the source pin uses source
+  // mode; otherwise npm). The legacy fallback keeps older checkouts and
+  // main working without a mode file.
+  const modeConfigPath = resolve(directory, MODE_CONFIG_RELATIVE)
+  const modeFromPolicy = configuredMode
+    ?? (existsSync(modeConfigPath) ? readModeConfig(modeConfigPath) : undefined)
+    ?? (existsSync(configPath) ? 'source' : 'npm')
   if (modeFromPolicy !== 'source' && modeFromPolicy !== 'npm') {
     fail(`unsupported DSH development mode ${modeFromPolicy}; expected source or npm`)
   }
