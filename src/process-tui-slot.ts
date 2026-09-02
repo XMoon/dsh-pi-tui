@@ -2,27 +2,34 @@
  * The process-local single-live-TUI slot (re-vendor lifecycle follow-up
  * P3).
  *
- * The vendored fork's keybindings (`getKeybindings()`) are a
- * PROCESS-GLOBAL singleton: a TuiApp mutates the shared `tui.editor.submit`,
- * Home/End and alt-screen mappings while it runs, so two LIVE TuiApps in
- * one Node process would silently fight over one keybinding state (App A
- * submit = Ctrl+X, App B submit = Enter — only one can win; the other
- * app's input becomes unpredictable). The product/CLI architecture is one
- * process = one live TUI, and this module makes that invariant explicit
- * and fail-fast.
+ * The shared resource this lock protects is NOT the terminal raw-mode —
+ * it is the vendored fork's PROCESS-GLOBAL keybindings
+ * (`getKeybindings()` singleton). A TuiApp's HostKeybindingManager syncs
+ * `app.input.submit` → `tui.editor.submit` (plus Home/End and alt-screen
+ * mappings) into that singleton on EVERY rebuild (constructor, user
+ * remap, safe-mode flip, plugin keybinding sync, extension unload/HMR) —
+ * and the manager SURVIVES `stop()`: a stopped-but-not-final-disposed
+ * surface is still a valid surface generation (the Stable extension
+ * contract keeps registrations/handles alive across start/stop
+ * round-trips; only the final `dispose()` ends it), so its later rebuild
+ * would silently repaint the process-global bindings under a second,
+ * concurrently started app.
  *
- * Slot semantics: the slot is held by a LIVE surface. `TuiApp.start()`
- * claims it and `TuiApp.stop()` releases it, so the invariant enforced is
- * "never two CONCURRENTLY LIVE surfaces" — exactly what the
- * process-global keybindings require. A stop/start round-trip (the
- * external-editor suspend/resume, surface stop/start cycles) never trips
- * the guard (release then re-claim); fullscreen main/alt-screen swaps
- * stop/start the SCREENS, not the app, so they never touch this module at
- * all. Final disposal releases through the same stop path
- * (`TuiApp.dispose()` calls `stop()`). The slot is deliberately NOT held
- * through a stop: the existing headless suite exercises many sequential
- * start/stop surfaces per process, and a stopped surface is not live —
- * only a concurrently LIVE second surface is the hazard.
+ * Therefore the slot is held from the FIRST successful `start()` until
+ * the FINAL `dispose()`:
+ *
+ * ```text
+ * first start → claim
+ * stop        → KEEP claim (the namespace is still owned)
+ * same start  → no re-claim
+ * final dispose (completed teardown) → release
+ * ```
+ *
+ * Exclusivity is FAIL-CLOSED: the release happens only at the END of a
+ * successfully completed final teardown. If `dispose()` throws midway,
+ * the slot stays claimed — a half-torn-down surface must never be
+ * publicly replaceable by a new one. `stop()` never releases (a
+ * throwing stop teardown must not fail open either).
  *
  * This is a host-side guard over the vendored singleton, NOT a
  * re-vendoring of the fork's keybinding manager (which stays upstream-
@@ -31,32 +38,35 @@
  * @module @xmoon76/dsh-pi-tui/process-tui-slot
  */
 
-/** The number of LIVE (started, not stopped) TuiApps in this process. */
+/** The number of process-slot claims outstanding in this process (1 =
+ * one TuiApp owns the process-global keybinding namespace). */
 let liveTuiCount = 0
 
 /**
- * Claim the process's single live-TUI slot. Throws deterministically when
- * another TuiApp is already live in this process — a second live surface
- * would silently share the fork's process-global keybinding state.
+ * Claim the process slot. Throws deterministically when another TuiApp
+ * already owns it (no final dispose yet) — a second surface would
+ * silently share (and fight over) the fork's process-global keybinding
+ * state.
  * @param surfaceId - the claiming surface's id (diagnostic only).
  */
 export function claimProcessTuiSlot(surfaceId: string): void {
   if (liveTuiCount !== 0) {
     throw new Error(
       `dsh-pi-tui supports one live TuiApp per process (pi-tui keybindings are process-global); `
-        + `the surface "${surfaceId}" cannot start while another TuiApp is live`,
+        + `the surface "${surfaceId}" cannot start while another TuiApp owns the process slot`,
     )
   }
   liveTuiCount += 1
 }
 
-/** Release the process live-TUI slot (idempotent — a double release is a
- * no-op; a release without a claim is a no-op too). */
+/** Release the process slot (idempotent — a double release is a no-op;
+ * a release without a claim is a no-op too). Must be called ONLY from
+ * the completed final dispose path (fail-closed). */
 export function releaseProcessTuiSlot(): void {
   if (liveTuiCount > 0) liveTuiCount -= 1
 }
 
-/** Test hook: the current number of live TUIs in this process. */
+/** Test hook: the number of outstanding process-slot claims (0 or 1). */
 export function liveTuiCountForTest(): number {
   return liveTuiCount
 }

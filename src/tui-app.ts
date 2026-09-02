@@ -2880,44 +2880,33 @@ export class TuiApp {
     }
   }
 
-  /** Leave raw mode and stop rendering. */
+  /** Leave raw mode and stop rendering. The process live-TUI slot is
+   * deliberately NOT released here (review-loop round 2): a stopped-but-
+   * not-final-disposed surface is still a valid generation whose host
+   * keybinding manager keeps syncing into the PROCESS-GLOBAL fork
+   * keybindings — the slot is held until the FINAL dispose() (see
+   * process-tui-slot.ts). */
   stop(): void {
-    try {
-      this.clearNotify()
-      // Issue #8: the exit-chord timer dies with the surface — a stopped
-      // TUI must never fire a stale disarm into a dead footer.
-      this.clearCtrlCExit()
-      // A stop/start cycle is a fresh surface lifecycle: a PENDING leader
-      // sequence must be cancelled (its timeout must never fire into the
-      // stopped surface) and the interrupt double-action window must not
-      // survive the restart (a post-start interrupt must not read as the
-      // second press of a pre-stop one — convergence findings).
-      this.keybindings.cancelLeader()
-      this.lastEscapeAt = undefined
-      this.working.dispose()
-      // Every pending question flow settles rejected: a stopped TUI must
-      // not leave askQuestions promises hanging forever.
-      this.cancelQuestionFlows()
-      for (const dispose of this.schemeDisposers) dispose()
-      this.schemeDisposers = []
-      this.tui.stop()
-      this.fullscreen?.stop()
-      this.fullscreen = undefined
-    } finally {
-      // Re-vendor lifecycle follow-up P3: release the process live-TUI
-      // slot UNCONDITIONALLY (idempotent — a repeated stop or a stop
-      // before start is a no-op; a throwing teardown step must never skip
-      // the release and poison the process). The surface is no longer
-      // LIVE: a later start() re-claims, and a second surface may start
-      // while this one is stopped (the invariant is never two
-      // CONCURRENTLY live surfaces — the process-global keybindings'
-      // actual requirement). Final disposal releases through this same
-      // path (dispose() calls stop()).
-      if (this.processTuiSlotClaimed) {
-        this.processTuiSlotClaimed = false
-        releaseProcessTuiSlot()
-      }
-    }
+    this.clearNotify()
+    // Issue #8: the exit-chord timer dies with the surface — a stopped
+    // TUI must never fire a stale disarm into a dead footer.
+    this.clearCtrlCExit()
+    // A stop/start cycle is a fresh surface lifecycle: a PENDING leader
+    // sequence must be cancelled (its timeout must never fire into the
+    // stopped surface) and the interrupt double-action window must not
+    // survive the restart (a post-start interrupt must not read as the
+    // second press of a pre-stop one — convergence findings).
+    this.keybindings.cancelLeader()
+    this.lastEscapeAt = undefined
+    this.working.dispose()
+    // Every pending question flow settles rejected: a stopped TUI must
+    // not leave askQuestions promises hanging forever.
+    this.cancelQuestionFlows()
+    for (const dispose of this.schemeDisposers) dispose()
+    this.schemeDisposers = []
+    this.tui.stop()
+    this.fullscreen?.stop()
+    this.fullscreen = undefined
   }
 
   /**
@@ -2932,16 +2921,11 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    // Re-vendor lifecycle follow-up P3: release the process live-TUI slot
-    // IMMEDIATELY — dispose() is latched, so a throwing teardown step
-    // below must never leave the slot claimed with no release path
-    // (stop()'s own release later is a no-op on the already-released
-    // flag). The keybinding defaults restore below runs before any
-    // teardown that could matter.
-    if (this.processTuiSlotClaimed) {
-      this.processTuiSlotClaimed = false
-      releaseProcessTuiSlot()
-    }
+    // The process live-TUI slot stays CLAIMED through the whole final
+    // teardown (review-loop round 2): every step below still owns the
+    // process-global keybinding namespace (the host keybinding manager
+    // syncs into it until dispose()). The slot is released LAST, only
+    // after the completed teardown — see the tail of this method.
     // The keybinding manager dies FIRST: every later teardown callback
     // (approval settles, extension/editor disposal) could rebuild the
     // keymap and schedule rendering — the disposed manager makes those
@@ -3040,6 +3024,18 @@ export class TuiApp {
     // subscribe, invalidate) becomes inert; a late plugin callback can no
     // longer mutate the seat or dispatch a real submission.
     this.editorSeatHolder.dispose()
+    // Re-vendor lifecycle follow-up P3 (review-loop round 2): release the
+    // process slot ONLY after the completed final teardown — the
+    // ownership covers the process-global keybinding namespace, which
+    // every step above (keybinding manager, extension host, editor
+    // holder) still owned while it ran. Deliberately NOT a finally: if
+    // the final teardown throws, the slot stays claimed (fail-closed — a
+    // half-torn-down surface must never be publicly replaceable by a new
+    // one; the process is dying anyway).
+    if (this.processTuiSlotClaimed) {
+      this.processTuiSlotClaimed = false
+      releaseProcessTuiSlot()
+    }
   }
 
   /** The surface generation (M0): stable across start/stop/fullscreen/
