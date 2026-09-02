@@ -38,14 +38,18 @@ from the tracked registry metadata.
 
 Mode selection is policy-driven, not branch-name-driven:
 
-- A worktree with `test/compat/dsh-source.json` uses source mode by default.
-- A worktree without that source pin uses npm mode by default.
+- A worktree with `test/compat/dsh-mode.json` follows its tracked `mode`
+  (`npm` or `source`) — the SINGLE branch-level switch.
+- Legacy fallback (checkouts without the mode file): a worktree with
+  `test/compat/dsh-source.json` uses source mode; without it, npm mode.
 - `DSH_DEV_MODE` or `--mode` can explicitly select a mode for a one-off check.
 
-The main branch intentionally has no source-pin file so its default remains
-npm. The next branch carries its own tracked `test/compat/dsh-source.json`; a
-main-to-next merge must preserve that next-only policy rather than adding it to
-main.
+The main branch intentionally has no mode file and no source-pin file, so
+its default remains npm. The next branch carries BOTH tracked files:
+`test/compat/dsh-mode.json` (the live switch) and `test/compat/dsh-source.json`
+(the source fallback's exact SHA — never deleted, so the branch can flip
+back to source with a one-line diff). A main-to-next merge must preserve
+that next-only policy rather than adding it to main.
 
 ### main / npm mode
 
@@ -61,8 +65,15 @@ pnpm dev:bootstrap
 
 ### next / source mode
 
-The next worktree reads the repository and exact 40-character commit SHA from
-`test/compat/dsh-source.json`. The source pack cache is keyed by:
+Flip the tracked policy to source (one line), commit, push:
+
+```diff
+- "mode": "npm"
++ "mode": "source"
+```
+
+The next worktree then reads the repository and exact 40-character commit SHA
+from `test/compat/dsh-source.json`. The source pack cache is keyed by:
 
 ```text
 repository + exact commit SHA
