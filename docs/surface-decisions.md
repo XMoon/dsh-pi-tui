@@ -439,23 +439,30 @@ mode (only `TuiAltScreen` wires `onCellClick`):
 
 The vendored fork's `getKeybindings()` is a PROCESS-GLOBAL singleton
 (upstream shape — deliberately NOT re-vendored into per-TUI dependency
-injection). A TuiApp mutates the shared `tui.editor.submit`, Home/End and
-alt-screen mappings while it runs, so two concurrently LIVE surfaces in one
-Node process would silently fight over one keybinding state — App A's
-submit remap would hijack App B's Enter. The product/CLI architecture is
-one process = one live TUI; the host enforces that invariant fail-fast
-(re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
+injection). A TuiApp's HostKeybindingManager syncs `app.input.submit` →
+`tui.editor.submit` (plus Home/End and alt-screen mappings) into that
+singleton on EVERY rebuild — and the manager SURVIVES `stop()` (only the
+final `dispose()` ends the surface generation, keeping extension
+registrations/handles valid across stop/start round-trips). Two surfaces
+sharing one process would therefore fight over one keybinding state —
+App A's submit remap would hijack App B's Enter — even when one of them
+is merely stopped, not disposed. The host enforces the invariant
+fail-fast (re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
 
-- `TuiApp.start()` CLAIMS the process slot; `TuiApp.stop()` releases it
-  (idempotent); `TuiApp.dispose()` releases through the same stop path;
-  a failed `start()` never leaks the claim.
-- A second surface that starts while another is LIVE rejects with a
-  deterministic error — never a silent keybinding collision.
-- The slot is a LIVE slot, deliberately not held across `stop()`: the
-  invariant the guard needs is "never two CONCURRENTLY live surfaces",
-  which is exactly what the process-global keybindings require. The
-  external-editor suspend/resume and ordinary stop/start cycles release
-  and re-claim without tripping; fullscreen main/alt-screen swaps stop/
-  start the SCREENS (not the app) and never touch the slot at all.
-- A stopped surface may be replaced by another surface (sequential, not
-  concurrent — still one live TUI at a time).
+- `TuiApp.start()` CLAIMS the process slot at the first successful start
+  (a failed `start()` never leaks the claim); `TuiApp.stop()` NEVER
+  releases it — a stopped-but-not-final-disposed surface still owns the
+  process-global keybinding namespace; `TuiApp.dispose()` releases LAST,
+  only after the completed final teardown (keybinding manager, extension
+  host and editor holder all disposed).
+- A second surface whose `start()` runs before the first one's final
+  dispose rejects with a deterministic error — never a silent keybinding
+  collision.
+- Exclusivity is FAIL-CLOSED: if the final teardown throws, the slot
+  stays claimed (a half-torn-down surface must never be publicly
+  replaceable by a new one). `stop()` never releases, so a throwing stop
+  teardown cannot fail open either.
+- The external-editor suspend/resume and ordinary stop/start cycles keep
+  the claim (same generation, same ownership — no trip); fullscreen
+  main/alt-screen swaps stop/start the SCREENS (not the app) and never
+  touch the slot at all.
