@@ -276,6 +276,12 @@ export class ProcessTerminal implements Terminal {
 	private queryAndEnableKittyProtocol(): void {
 		this.setupStdinBuffer();
 		process.stdin.on("data", this.stdinDataHandler!);
+		// A repeated start() without a stop() must NOT push the keyboard
+		// protocol again: CSI > flags u PUSHES a layer and stop()/drainInput()
+		// pop exactly once (CSI < u) — a second push would leave the
+		// terminal in Kitty enhancement mode after exit (X016). The
+		// negotiated mode is kept as-is; only the parser is rebuilt.
+		if (this.keyboardProtocolPushed) return;
 		this.keyboardProtocolPushed = true;
 		this.clearKeyboardProtocolNegotiationBuffer();
 		process.stdout.write(KITTY_KEYBOARD_PROTOCOL_QUERY);

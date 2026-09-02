@@ -4817,6 +4817,71 @@ describe("expanded cursor mapping (X045)", () => {
 		editor.setTextAndCursor(editor.getText(), { line: 0, col: editor.getText().length });
 		assert.strictEqual(editor.getExpandedCursor(), expanded.length, "the expanded cursor must land at the expanded end");
 	});
+
+	it("maps the cursor through EVERY raw position without mixing raw and expanded coordinates (X045)", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		const contentA = Array.from({ length: 12 }, (_, i) => `A-line-${i}`).join("\n");
+		editor.handleInput(`\x1b[200~${contentA}\x1b[201~`);
+		const contentB = Array.from({ length: 12 }, (_, i) => `B-line-${i}`).join("\n");
+		editor.handleInput(`\x1b[200~${contentB}\x1b[201~`);
+		const expand = (text: string, rawCursor?: number): { text: string; cursor?: number } =>
+			(editor as unknown as {
+				expandPasteMarkersSinglePass(text: string, rawCursor?: number): { text: string; cursor?: number };
+			}).expandPasteMarkersSinglePass(text, rawCursor);
+
+		const raw = editor.getText();
+		const markers = raw.match(/\[paste #\d+[^\]]*\]/g)!;
+		const m1 = markers[0]!;
+		const m2 = markers[1]!;
+		const m1Start = raw.indexOf(m1);
+		const m1End = m1Start + m1.length;
+		const delta1 = contentA.length - m1.length;
+		const delta2 = contentB.length - m2.length;
+
+		// before the first marker: unchanged
+		assert.strictEqual(expand(raw, 0).cursor, 0);
+		// inside the first marker: snap to its EXPANDED end
+		assert.strictEqual(expand(raw, m1Start + 5).cursor, m1End + contentA.length);
+
+		// A separator between the markers so "between" and "at #2 start"
+		// are distinct raw positions.
+		const staged = raw.slice(0, m1End) + "MID" + raw.slice(m1End);
+		const sM1End = m1End;
+		const sM2Start = staged.indexOf(m2);
+		const sM2End = sM2Start + m2.length;
+		// between the markers: the RAW cursor must be compared against RAW
+		// marker ends — an already-expanded cursor would over-count #2.
+		assert.strictEqual(expand(staged, sM1End + 1).cursor, sM1End + 1 + delta1);
+		// exactly at the second marker's start: #2 not yet passed
+		assert.strictEqual(expand(staged, sM2Start).cursor, sM2Start + delta1);
+		// inside the second marker: snap to its expanded end
+		assert.strictEqual(expand(staged, sM2Start + 5).cursor, sM2End + delta1 + contentB.length);
+		// after every marker: the full expansion
+		assert.strictEqual(expand(staged, sM2End).cursor, sM2End + delta1 + delta2);
+		assert.strictEqual(expand(staged, sM2End).text.length, sM2End + delta1 + delta2);
+	});
+
+	it("maps a cursor BETWEEN two markers through the public getExpandedCursor (X045)", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		const contentA = Array.from({ length: 12 }, (_, i) => `A-line-${i}`).join("\n");
+		editor.handleInput(`\x1b[200~${contentA}\x1b[201~`);
+		const contentB = Array.from({ length: 12 }, (_, i) => `B-line-${i}`).join("\n");
+		editor.handleInput(`\x1b[200~${contentB}\x1b[201~`);
+
+		const raw = editor.getText();
+		const m1 = raw.match(/\[paste #\d+[^\]]*\]/g)![0]!;
+		const m1End = raw.indexOf(m1) + m1.length;
+		const staged = raw.slice(0, m1End) + "MID" + raw.slice(m1End);
+		// The cursor sits inside the separator — a raw position between the
+		// two markers, never inside a marker (the editor would snap it).
+		editor.setTextAndCursor(staged, { line: 0, col: m1End + 1 });
+		assert.strictEqual(editor.getCursor().col, m1End + 1, "precondition: the cursor is between the markers");
+		assert.strictEqual(
+			editor.getExpandedCursor(),
+			m1End + 1 + (contentA.length - m1.length),
+			"only the FIRST marker's expansion may shift a between-markers cursor",
+		);
+	});
 });
 
 describe("protected autocomplete seam (X044)", () => {
