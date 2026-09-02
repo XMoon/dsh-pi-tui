@@ -171,12 +171,38 @@ function buildDiffClusters(diffLines: readonly DiffLine[], contextLines: number)
   return { clusters, changedCount: changeIndices.length, addedCount: added, removedCount: removed }
 }
 
-/** One diff body row: dim line-number gutter plus the colored/plain code. */
-function formatDiffRow(line: DiffLine): string {
-  const gutter = color.diffGutter(`${String(line.lineNum).padStart(4)} `)
+/** One diff body row: dim line-number gutter plus the colored/plain code.
+ * The gutter renders ONLY when the hunk carries a provable absolute
+ * anchor (`oldStart`/`newStart`) — without one the relative hunk line
+ * numbers would masquerade as file line numbers (plan: never guess a
+ * gutter). */
+function formatDiffRow(line: DiffLine, showLineNumber: boolean): string {
+  const gutter = showLineNumber ? color.diffGutter(`${String(line.lineNum).padStart(4)} `) : ''
   if (line.kind === 'add') return gutter + color.diffAdded(`+ ${line.code}`)
   if (line.kind === 'delete') return gutter + color.diffRemoved(`- ${line.code}`)
   return gutter + `  ${line.code}`
+}
+
+/**
+ * A diff hunk that MAY carry the absolute hunk anchors the DSH public
+ * `FileDiff` contract does not expose yet. Presentation-side structural
+ * type ONLY: additive / optional runtime capability, never assumed to be
+ * present, never sourced from a private API. When the upstream contract
+ * grows `oldStart`/`newStart`, this type resolves to the same shape and
+ * the real absolute line numbers render again.
+ */
+export type AnchoredFileDiff = FileDiff & {
+  oldStart?: number
+  newStart?: number
+}
+
+/** Whether a hunk carries PROVABLE absolute anchors: both sides must be
+ * positive integers (a missing or malformed anchor is NOT provable — the
+ * hunk then renders without a gutter). */
+export function isAnchoredFileDiff(hunk: FileDiff): hunk is AnchoredFileDiff {
+  const anchored = hunk as AnchoredFileDiff
+  return Number.isInteger(anchored.oldStart) && (anchored.oldStart as number) >= 1
+    && Number.isInteger(anchored.newStart) && (anchored.newStart as number) >= 1
 }
 
 /** Options for {@link renderDiffView}. */
@@ -197,7 +223,10 @@ export interface DiffViewOptions {
  * `… N unchanged lines …` separator, and `maxLines` caps the body at a
  * cluster boundary with a `… N more changes hidden (hint)` footer. A hunk
  * with `oldText: null` (create) shows only new lines; an empty newText
- * (pure deletion) shows only old lines.
+ * (pure deletion) shows only old lines. The body renders a line-number
+ * gutter ONLY when the hunk carries provable absolute anchors
+ * (`oldStart`/`newStart` — an optional additive capability); without
+ * them no gutter renders (never a fake 1..N gutter).
  * @param diffs - the diff view's hunks.
  * @param cwd - workspace root for path relativization; optional.
  * @param options - context/cap/hint tuning.
@@ -210,13 +239,20 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
     : Number.POSITIVE_INFINITY
   const out: string[] = []
   for (const hunk of diffs) {
+    // The absolute hunk anchors are an OPTIONAL additive capability: only
+    // a provable anchor renders the gutter — without one the body shows
+    // no line numbers at all (never a fake 1..N gutter; plan: hide the
+    // gutter, never guess it).
+    const anchored = isAnchoredFileDiff(hunk)
+    const oldStart = anchored ? hunk.oldStart! : 1
+    const newStart = anchored ? hunk.newStart! : 1
     const oldSide = hunk.oldText === null || hunk.oldText === '' ? [] : hunk.oldText.split('\n')
     const newSide = hunk.newText === '' ? [] : hunk.newText.split('\n')
     const diffLines: DiffLine[] = oldSide.length === 0
-      ? newSide.map((code, index) => ({ kind: 'add', lineNum: index + 1, code }))
+      ? newSide.map((code, index) => ({ kind: 'add', lineNum: newStart + index, code }))
       : newSide.length === 0
-        ? oldSide.map((code, index) => ({ kind: 'delete', lineNum: index + 1, code }))
-        : computeDiffLines(hunk.oldText!, hunk.newText)
+        ? oldSide.map((code, index) => ({ kind: 'delete', lineNum: oldStart + index, code }))
+        : computeDiffLines(hunk.oldText!, hunk.newText, oldStart, newStart)
     const { clusters, changedCount, addedCount, removedCount } = buildDiffClusters(diffLines, contextLines)
 
     let header = ''
@@ -226,6 +262,9 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
     out.push(header)
     if (clusters.length === 0) continue
 
+    // The elision/footer indent mirrors the gutter column when the gutter
+    // renders; without a gutter the body starts at column 0.
+    const elideIndent = anchored ? '     ' : ''
     let body = 0
     let prevEnd = -1
     let truncated = false
@@ -242,7 +281,7 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
             truncated = true
             break
           }
-          out.push(color.diffMeta(`     … ${gap} unchanged line${gap > 1 ? 's' : ''} …`))
+          out.push(color.diffMeta(`${elideIndent}… ${gap} unchanged line${gap > 1 ? 's' : ''} …`))
           body++
         }
       }
@@ -256,7 +295,7 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
           break outer
         }
         const line = diffLines[i]!
-        out.push(formatDiffRow(line))
+        out.push(formatDiffRow(line, anchored))
         body++
         if (line.kind !== 'context') shownChanges++
         prevEnd = i
@@ -267,7 +306,7 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
       if (hidden > 0) {
         const hint = options.expandHint ?? 'click to expand'
         out.push(color.diffMeta(
-          `     … ${hidden} more change${hidden > 1 ? 's' : ''} hidden (${hint})`,
+          `${elideIndent}… ${hidden} more change${hidden > 1 ? 's' : ''} hidden (${hint})`,
         ))
       }
     }
