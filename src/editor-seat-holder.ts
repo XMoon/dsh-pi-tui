@@ -645,9 +645,16 @@ export class EditorSeatHolder {
         // swap (question capture) left the QuestionFrame mounted and this
         // view detached earlier. The state update (component = next) is
         // exactly what the question settle must mount (plan Risk B).
+        // Review-loop round 1: the dispose is ISOLATED like the compile +
+        // swap above — a throwing disposer must not escape into the host
+        // input/render path (the documented isolation contract).
         const previous = component
         component = next
-        previous.dispose?.()
+        try {
+          previous.dispose?.()
+        } catch (error) {
+          holder.reportEditorError(id, error)
+        }
       },
       addToHistory: () => {}, // the host default owns history recall
       clearHistory: () => {},

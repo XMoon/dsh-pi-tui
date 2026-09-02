@@ -1421,3 +1421,84 @@ test('TuiApp: a compile throw inside invalidate() is isolated — the host keeps
   await vt.waitForRender()
   app.stop()
 })
+
+// Re-vendor lifecycle follow-up P1 (plan §4 P1-D, review-loop round 1):
+// the compiled component lifecycle is OWNED by the holder — the non-owning
+// seat mount never disposes, so the holder must release the superseded
+// compiled component at handoff and the current one at final disposal,
+// exactly once each. A compiled ROWS view is a Container: its dispose
+// detaches children, which is the observable "released" state.
+function rowsFixture(rows: string[]): ExtensionEditor & { doc: string } {
+  const state = { doc: '' }
+  // EXPLICIT ExtensionView typing: a ROWS view compiles into a Container
+  // whose dispose() detaches children — the exactly-once observable.
+  const editor: ExtensionEditor = {
+    get component(): import('../src/extension/public-types.ts').ExtensionView {
+      const rowViews: import('../src/extension/public-types.ts').ExtensionView[] = rows.map(row => ({
+        kind: 'text',
+        spans: [{ text: row }],
+      }))
+      return { kind: 'rows', rows: rowViews }
+    },
+    getText: () => state.doc,
+    setText: (text) => { state.doc = text },
+    getCursor: () => 0,
+    setCursor: () => {},
+    dispose: () => {},
+  }
+  return { ...editor, doc: state.doc }
+}
+
+test('EditorSeatHolder: the superseded compiled component is released exactly at handoff (plan P1-D)', () => {
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => seatHostAdapter(),
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: () => {},
+    viewSwap: () => {},
+  })
+  const a = rowsFixture(['row a1', 'row a2'])
+  holder.handoff({ id: 'a', create: () => a })
+  // A compiled rows view holds its children while alive.
+  const compiledA = holder.currentEditor().component as unknown as { children: unknown[] }
+  assert.equal(compiledA.children.length, 2, 'A compiles with its rows')
+  // Handoff A → B: the superseded compiled component must be disposed
+  // (Container.dispose detaches its children) EXACTLY here — the seat
+  // mount never does it.
+  const b = rowsFixture(['row b1'])
+  holder.handoff({ id: 'b', create: () => b })
+  assert.equal(compiledA.children.length, 0, 'the superseded compiled component must be released at the handoff')
+  const compiledB = holder.currentEditor().component as unknown as { children: unknown[] }
+  assert.equal(compiledB.children.length, 1, 'B compiles with its rows')
+  // Final disposal releases the CURRENT compiled component exactly once.
+  holder.dispose()
+  assert.equal(compiledB.children.length, 0, 'the final holder dispose must release the current compiled component')
+  // Idempotent: a repeated dispose does not double-dispose (Container is
+  // idempotent — the detach is a no-op and no throw escapes).
+  holder.dispose()
+  assert.equal(compiledB.children.length, 0)
+})
+
+test('EditorSeatHolder: restoring the host releases the plugin compiled component exactly once (plan P1-D)', () => {
+  const holder = new EditorSeatHolder({
+    hostAdapter: () => seatHostAdapter(),
+    surfaceId: 'test-surface',
+    generation: () => 1,
+    actionSink: () => false,
+    notifyError: () => {},
+    viewSwap: () => {},
+  })
+  const a = rowsFixture(['plugin row'])
+  holder.handoff({ id: 'a', create: () => a })
+  const compiledA = holder.currentEditor().component as unknown as { children: unknown[] }
+  assert.equal(compiledA.children.length, 1)
+  // Handoff back to the host default: the plugin's compiled component is
+  // released at the restore (the seat mount never disposes).
+  holder.handoff(undefined)
+  assert.equal(holder.currentEditor().id, 'host')
+  assert.equal(compiledA.children.length, 0, 'the restore-to-host handoff must release the plugin compiled component')
+  // The host seat's component (the fork Editor / a plain Text) has no
+  // owner release — the final dispose stays a no-op for it.
+  holder.dispose()
+})
