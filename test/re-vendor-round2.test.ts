@@ -8,8 +8,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { MessageId } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { openerFor } from '../src/open-url.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -211,5 +214,53 @@ test('right-click paste is DROPPED when focus moves during the clipboard read (r
   assert.deepEqual(bInputs, [], 'the new focus owner must never receive the paste either')
   leaseA.close()
   leaseB.close()
+  app.stop()
+})
+
+test('fullscreen FOCUS_OUT with an active approval still cleans the selection and reaches app-level listeners (X036 × X043)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'assistant/message', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // An app-level listener registered AFTER the host router and the
+  // viewport listener: the viewport listener deliberately does NOT
+  // consume FOCUS reports, so this listener must still receive them.
+  const alt = (app as unknown as { fullscreen: { addInputListener(listener: (data: string) => unknown): void } }).fullscreen
+  assert.ok(alt !== undefined, 'fullscreen must be live')
+  const focusReports: string[] = []
+  alt.addInputListener((data: string) => { focusReports.push(data) })
+  // Start an ACTIVE drag selection (press + drag, NO release).
+  vt.sendInput('\x1b[<0;1;1M')
+  vt.sendInput('\x1b[<32;10;5M')
+  await vt.waitForRender()
+  const selection = (app as unknown as {
+    fullscreen: {
+      selectionPressActive: boolean
+      selectionAnchor: unknown
+      selectionFocus: unknown
+    }
+  }).fullscreen
+  assert.equal(selection.selectionPressActive, true, 'precondition: the drag selection must be active')
+  assert.ok(selection.selectionAnchor !== undefined, 'precondition: the selection must have an anchor')
+  // An approval is active: its key handler consumes EVERY key — without
+  // the FOCUS pass-through it would starve the viewport listener of the
+  // report and leave the selection active after focus loss.
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[O') // FOCUS_OUT
+  await vt.waitForRender()
+  assert.equal(selection.selectionPressActive, false, 'FOCUS_OUT must cancel the active selection even under an approval')
+  assert.equal(selection.selectionAnchor, undefined, 'the selection anchor must be cleared')
+  assert.equal(selection.selectionFocus, undefined, 'the selection focus must be cleared')
+  assert.ok(focusReports.includes('\x1b[O'), 'the FOCUS_OUT report must reach app-level listeners')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
   app.stop()
 })

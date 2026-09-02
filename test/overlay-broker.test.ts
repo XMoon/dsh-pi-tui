@@ -102,6 +102,27 @@ test('OverlayBroker: hideAll + clear (fullscreen migration / surface teardown)',
   assert.equal(broker.isTracked(a), false)
 })
 
+test('OverlayBroker: disposeAll physically unmounts every tracked overlay WITHOUT restoring dependents (final teardown)', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const b = fakeHandle('b')
+  broker.track(a)
+  broker.track(b)
+  // b hides a; disposeAll must physically unmount BOTH and never restore
+  // a — the whole surface is dying, nothing may flash back (unlike
+  // closeForHost, which restores dependents).
+  broker.disposeAll()
+  assert.deepEqual(a.hiddenLog, ['hide-temp', 'hide'], 'a is hidden by b, then physically unmounted')
+  assert.deepEqual(b.hiddenLog, ['hide'], 'b is physically unmounted')
+  assert.equal(broker.graphState().handles, 0)
+  assert.equal(broker.isTracked(a), false)
+  assert.equal(broker.isTracked(b), false)
+  // Idempotent: a second disposeAll must not re-hide anything.
+  broker.disposeAll()
+  assert.deepEqual(a.hiddenLog, ['hide-temp', 'hide'])
+  assert.deepEqual(b.hiddenLog, ['hide'])
+})
+
 // ── Surface-level: the managed overlay lease ───────────────────────────────
 
 test('TuiApp: a plugin overlay lease mounts through the broker and closes idempotently', async () => {
@@ -162,6 +183,32 @@ test('TuiApp: the surface dispose closes every still-owned plugin overlay lease'
   lease.close() // must not throw
   assert.equal(app.overlayGraphState().handles, 0)
   assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0, 'dispose must drop every owned lease')
+})
+
+test('TuiApp: final dispose stops the output viewer refresh timer even without the closer (X007)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  await vt.waitForRender()
+  let refreshes = 0
+  app.openOutputViewer({
+    title: 'job output',
+    initial: '',
+    refresh: () => { refreshes += 1; return 'tick' },
+    intervalMs: 10,
+  })
+  await vt.waitForRender()
+  assert.ok(refreshes >= 1, 'the viewer must refresh while open')
+  // FINAL dispose WITHOUT invoking the closer: the panel-owned interval
+  // must be cleared through the disposeOnHide chain (overlay hide →
+  // FocusForwardingFrame.dispose → OutputViewerPanel.dispose), so the
+  // refresh callback never fires into the disposed surface.
+  app.dispose()
+  const afterDispose = refreshes
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(refreshes, afterDispose, 'the refresh timer must not fire after final dispose')
 })
 
 test('TuiApp: a plugin overlay lease survives a fullscreen toggle (round-1 finding 2)', async () => {
