@@ -8,15 +8,13 @@
  * @module dev-bootstrap
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import {
   closeSync,
   existsSync,
-  fstatSync,
   lstatSync,
-  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -346,163 +344,26 @@ function writeDevelopmentEnvironmentFile(context, distributionPath = undefined, 
 }
 
 /**
- * Atomically create `path` with `content`, EXCLUSIVELY: returns
- * { created: false } when the path exists and NEVER replaces an existing
- * entry. The created file's inode identity is pinned from the fd that
- * wrote the content, so callers can later prove the entry is still theirs.
- * Primary publish is temp-file + hardlink (O_EXCL semantics with fully
- * written, link-atomic content); on filesystems without hardlink support
- * it falls back to a true O_EXCL create ('wx'), which keeps exclusivity —
- * the property that matters for a user-ownable path — even though the
- * content is then not link-atomic.
- *
- * Once the publication outcome is decided, nothing may throw anymore: the
- * caller cannot roll back a published-but-thrown creation, so all cleanup
- * after a decided outcome (fd close, temporary removal) only warns. Every
- * removal — of the publish temporary or of an incomplete fallback publish
- * — is inode-checked against the identity pinned at creation, so a
- * pre-existing or concurrently replaced entry at those paths is never
- * touched.
- */
-function writeFileExclusively(path, content, mode = 0o600) {
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
-  let fd
-  let tempIdentity
-  try {
-    fd = openSync(temporary, 'wx', mode)
-    const info = fstatSync(fd)
-    tempIdentity = { dev: info.dev, ino: info.ino }
-  } catch (error) {
-    // The temporary was not created (open failed) or its identity could
-    // not be pinned (fstat failed after a successful O_EXCL open). In the
-    // latter case the entry at the path is OURS, but without a pinned
-    // identity no later removal can prove it — fail closed and leave the
-    // inert temporary rather than risk deleting a replaced entry.
-    if (fd !== undefined) {
-      try { closeSync(fd) } catch { /* best effort; nothing was published */ }
-    }
-    throw error
-  }
-  try {
-    return publishFileFromTemporary(temporary, fd, tempIdentity, path, content, mode)
-  } finally {
-    try {
-      closeSync(fd)
-    } catch (closeError) {
-      // The publication outcome is already decided; a close failure must
-      // not turn it into a throw (the fd is released at process exit).
-      console.warn(`could not close the exclusive-publish temporary fd for ${temporary}: ${closeError instanceof Error ? closeError.message : String(closeError)}`)
-    }
-    removePinnedFile(temporary, tempIdentity, 'exclusive-publish temporary')
-  }
-}
-
-/** Remove a file only while it is still the exact inode whose identity was
- * pinned at creation; anything else at the path (or any failure) only
- * warns and leaves the entry in place. */
-function removePinnedFile(path, identity, label) {
-  try {
-    const info = existingPathInfo(path)
-    if (info === undefined) return
-    if (!info.isFile() || info.isSymbolicLink()
-      || info.dev !== identity?.dev || info.ino !== identity?.ino) {
-      console.warn(`not removing ${label} ${path}: it is no longer the file this process created`)
-      return
-    }
-    rmSync(path, { force: true })
-  } catch (error) {
-    console.warn(`could not remove ${label} ${path}: ${error instanceof Error ? error.message : String(error)}`)
-  }
-}
-
-/** Remove a directory (recursively) only while it is still the exact inode
- * whose identity was pinned at creation; anything else at the path (or any
- * failure) only warns and leaves the entry in place. */
-function removePinnedDirectory(path, identity, label) {
-  try {
-    const info = existingPathInfo(path)
-    if (info === undefined) return
-    if (!info.isDirectory() || info.isSymbolicLink()
-      || info.dev !== identity?.dev || info.ino !== identity?.ino) {
-      console.warn(`not removing ${label} ${path}: it is no longer the directory this process created`)
-      return
-    }
-    rmSync(path, { recursive: true, force: true })
-  } catch (error) {
-    console.warn(`could not remove ${label} ${path}: ${error instanceof Error ? error.message : String(error)}`)
-  }
-}
-
-function publishFileFromTemporary(temporary, fd, tempIdentity, path, content, mode) {
-  writeFileSync(fd, content)
-  try {
-    linkSync(temporary, path)
-  } catch (error) {
-    if (error?.code === 'EEXIST') return { created: false }
-    if (error?.code === 'EPERM' || error?.code === 'EOPNOTSUPP' || error?.code === 'ENOSYS') {
-      // Filesystems without hardlink support: publish with a true O_EXCL
-      // create on the final path. The created inode's identity is pinned
-      // immediately from the fd; if the write then fails, the entry this
-      // open created is removed inode-checked before propagating — the
-      // caller must never inherit a partial, untrackable file. If the
-      // identity itself cannot be pinned (fstat failure), the entry is
-      // left in place fail-closed. After the write completes the outcome
-      // is decided, so the close is warn-only.
-      let exclusiveFd
-      try {
-        exclusiveFd = openSync(path, 'wx', mode)
-      } catch (exclusiveError) {
-        if (exclusiveError?.code === 'EEXIST') return { created: false }
-        throw exclusiveError
-      }
-      let createdIdentity
-      try {
-        const info = fstatSync(exclusiveFd)
-        createdIdentity = { dev: info.dev, ino: info.ino }
-      } catch (identityError) {
-        // The final-path entry was created by this O_EXCL open but its
-        // identity could not be pinned: without a pinned identity no
-        // removal can prove the entry is still ours, so fail closed and
-        // leave it (a double fault — open succeeded, fstat failed — is
-        // operator territory; the entry is never silently deleted).
-        try { closeSync(exclusiveFd) } catch { /* best effort; nothing is removed unproven */ }
-        console.warn(`could not pin the exclusive publish identity for ${path}; leaving the created entry in place (fail closed)`)
-        throw identityError
-      }
-      try {
-        writeFileSync(exclusiveFd, content)
-      } catch (publishError) {
-        try { closeSync(exclusiveFd) } catch { /* best effort; the pinned entry is removed below */ }
-        removePinnedFile(path, createdIdentity, 'incomplete exclusive publish')
-        throw publishError
-      }
-      try {
-        closeSync(exclusiveFd)
-      } catch (closeError) {
-        console.warn(`could not close the exclusive publish fd for ${path}: ${closeError instanceof Error ? closeError.message : String(closeError)}`)
-      }
-      return { created: true, identity: createdIdentity }
-    }
-    throw error
-  }
-  // The hardlink shares the temporary's inode: the pinned identity is the
-  // published entry's identity.
-  return { created: true, identity: tempIdentity }
-}
-
-/**
- * The .envrc shim is only ever CREATED, never modified: an entry that
- * already exists before a bootstrap — regular file, symlink, or directory —
- * is left alone, and a failed commit must leave it equally alone. Creation
- * is exclusive (an entry created while we publish loses the race cleanly
- * and is treated as pre-existing), and the created file's identity is
- * pinned from the creating fd — no post-publication lookup that a
- * permission error could turn into a leaked, unremovable shim.
+ * The .envrc shim is only ever CREATED, never modified, and is NOT part of
+ * the env+state commit transaction: it is created best-effort AFTER a
+ * successful commit (its content is static and has no relation to the
+ * committed generation). An existing entry of any kind (regular file,
+ * symlink, directory) is never touched; a creation failure only warns and
+ * never fails the bootstrap.
  */
 function ensureEnvrcShim(context) {
   const direnvPath = join(context.root, '.envrc')
-  if (existingPathInfo(direnvPath) !== undefined) return { created: false }
-  return writeFileExclusively(direnvPath, `# Generated by pnpm dev:bootstrap\nsource ./${DEV_ENV_FILE}\n`)
+  try {
+    const fd = openSync(direnvPath, 'wx', 0o600)
+    try {
+      writeFileSync(fd, `# Generated by pnpm dev:bootstrap\nsource ./${DEV_ENV_FILE}\n`)
+    } finally {
+      closeSync(fd)
+    }
+  } catch (error) {
+    if (error?.code === 'EEXIST') return
+    console.warn(`could not create the .envrc shim at ${direnvPath}: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 /**
@@ -884,43 +745,26 @@ function ephemeralSourcePackRoot(context) {
   // bootstrap of the SAME worktree prove ownership before reclaiming the
   // superseded generation (never a global /tmp sweep).
   const root = mkdtempSync(join(tmpdir(), EPHEMERAL_ROOT_PREFIX))
-  // Pin the root directory identity at creation: every later cleanup of
-  // this root (a marker failure below) removes it only while it is still
-  // exactly this directory — a replaced root is never recursively deleted.
-  const rootIdentity = ephemeralRootIdentity(root)
-  if (rootIdentity === undefined) {
-    fail(`ephemeral source pack root must be a real directory: ${root}`)
-  }
   const markerPath = join(root, EPHEMERAL_MARKER_NAME)
-  let markerIdentity
   try {
-    // Create the marker through an exclusively-opened fd and pin its inode
-    // identity from THAT fd: the identity is part of creation itself, so it
-    // cannot be spoofed by replacing the path afterwards. Callers use it to
-    // prove a root is still the one this process created before any
-    // recursive removal.
-    const fd = openSync(markerPath, 'wx', 0o600)
-    try {
-      writeFileSync(fd, `${JSON.stringify({
-        schemaVersion: 1,
-        kind: EPHEMERAL_MARKER_KIND,
-        workspaceRoot: context.root,
-        createdAt: new Date().toISOString(),
-        pid: process.pid,
-      }, null, 2)}\n`)
-      const info = fstatSync(fd)
-      markerIdentity = { dev: info.dev, ino: info.ino }
-    } finally {
-      closeSync(fd)
-    }
+    writeFileSync(markerPath, `${JSON.stringify({
+      schemaVersion: 1,
+      kind: EPHEMERAL_MARKER_KIND,
+      workspaceRoot: context.root,
+      createdAt: new Date().toISOString(),
+      pid: process.pid,
+    }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
   } catch (error) {
     // A generation without its owner marker is unclaimable garbage: remove
-    // the root — identity-checked against the creation pin — instead of
-    // leaving it for OS temp hygiene; a replaced root is never deleted.
-    removePinnedDirectory(root, rootIdentity, 'ephemeral source pack root')
+    // the empty root instead of leaving it for OS temp hygiene.
+    try {
+      rmSync(root, { recursive: true, force: true })
+    } catch {
+      // Best effort; the root is empty and harmless.
+    }
     throw error
   }
-  return { root, rootIdentity, markerIdentity }
+  return root
 }
 
 /**
@@ -1020,13 +864,7 @@ function reclaimEphemeralRoot(candidateRoot, activeDistributionPath = undefined,
 
 async function buildProvidedSourcePack(helper, context, requestedDirectory) {
   const dshDirectory = await ensureHarnessCheckout(context, requestedDirectory)
-  // Creation pins the generation's identities — the root directory inode
-  // and the owner marker inode (see ephemeralSourcePackRoot). Every later
-  // removal of this root (a build failure here, or a materialize/commit
-  // failure in the caller) revalidates both, so a root replaced mid-flight
-  // is never recursively deleted.
-  const { root: outputRoot, rootIdentity, markerIdentity } = ephemeralSourcePackRoot(context)
-  const ownedEphemeral = { root: outputRoot, rootIdentity, markerIdentity }
+  const outputRoot = ephemeralSourcePackRoot(context)
   const output = join(outputRoot, 'pack')
   try {
     const distribution = await runSourcePack(helper, context, dshDirectory, output, {
@@ -1038,58 +876,28 @@ async function buildProvidedSourcePack(helper, context, requestedDirectory) {
     // must discard it if materializeSource() fails before the new state
     // commits. An explicit --distribution is also `provided`, but it is NOT
     // ours to delete — only this freshly built root is.
-    return { distribution, path: output, cacheHit: false, provided: true, ownedEphemeral }
+    return { distribution, path: output, cacheHit: false, provided: true, ownedEphemeralRoot: outputRoot }
   } catch (error) {
-    discardOwnedEphemeralRoot(ownedEphemeral)
+    discardOwnedEphemeralRoot(context, outputRoot)
     throw error
   }
-}
-
-/** The current inode identity of a generation root, if it is still a real
- * (non-symlink) directory. */
-function ephemeralRootIdentity(root) {
-  const info = existingPathInfo(root)
-  if (info === undefined || !info.isDirectory() || info.isSymbolicLink()) return undefined
-  return { dev: info.dev, ino: info.ino }
-}
-
-/**
- * The current inode identity of a generation's owner marker, if the marker
- * still satisfies the owner contract: a single-link, owner-only regular
- * file (never a symlink). A hardlinked or permissive marker is not
- * acceptable proof that the root is still ours — the same contract
- * reclaimableEphemeralRoot enforces.
- */
-function ephemeralMarkerIdentity(root) {
-  const markerInfo = existingPathInfo(join(root, EPHEMERAL_MARKER_NAME))
-  if (markerInfo === undefined || !markerInfo.isFile() || markerInfo.isSymbolicLink()) return undefined
-  if (markerInfo.nlink !== 1 || (markerInfo.mode & 0o777) !== 0o600) return undefined
-  return { dev: markerInfo.dev, ino: markerInfo.ino }
 }
 
 /**
  * Delete an ephemeral generation this process built but never committed:
  * materializeSource() failed after the pack succeeded (install, resolution
  * assert, or the env/state commit), so nothing references the new root and
- * the previous generation stays the active one. The recursive removal is
- * guarded by BOTH identities pinned at creation — the root directory inode
- * AND the owner marker inode (with its single-link owner-only contract):
- * a root that was replaced while the bootstrap was in flight, even by a
- * directory carrying the original marker FILE, is never recursively
- * deleted. Residual window: Node's rmSync is path-based, so a swap between
- * the identity checks and the removal cannot be closed with stdlib means;
- * the marker is tamper evidence, not a boundary against a hostile
- * same-uid process (which could rm -rf the worktree itself). Best effort:
- * failures only warn; the original bootstrap error is what propagates.
+ * the previous generation stays the active one. The removal is guarded by
+ * the structural ownership contract (ephemeralRootOwnedBy): a root that no
+ * longer satisfies it — replaced, marker missing/forged, foreign worktree —
+ * is never recursively deleted. Best effort: failures only warn; the
+ * original bootstrap error is what propagates.
  */
-function discardOwnedEphemeralRoot(ownedEphemeral) {
-  if (ownedEphemeral === undefined) return
-  const { root, rootIdentity, markerIdentity } = ownedEphemeral
-  let currentRoot
-  let currentMarker
+function discardOwnedEphemeralRoot(context, root) {
+  if (root === undefined) return
+  let owned
   try {
-    currentRoot = ephemeralRootIdentity(root)
-    currentMarker = ephemeralMarkerIdentity(root)
+    owned = ephemeralRootOwnedBy(context, root)
   } catch (error) {
     // A validation failure (for example EACCES on a path component) must
     // never replace the original bootstrap error: fail closed and leave
@@ -1097,10 +905,8 @@ function discardOwnedEphemeralRoot(ownedEphemeral) {
     console.warn(`could not verify ephemeral source pack ${root} before removal: ${error instanceof Error ? error.message : String(error)}`)
     return
   }
-  if (currentRoot === undefined || currentMarker === undefined
-    || currentRoot.dev !== rootIdentity?.dev || currentRoot.ino !== rootIdentity?.ino
-    || currentMarker.dev !== markerIdentity?.dev || currentMarker.ino !== markerIdentity?.ino) {
-    console.warn(`not removing ephemeral source pack ${root}: it no longer matches the generation this process created`)
+  if (owned === undefined) {
+    console.warn(`not removing ephemeral source pack ${root}: it no longer satisfies the ownership contract for this worktree`)
     return
   }
   try {
@@ -1233,96 +1039,17 @@ function rollbackPath(path, snapshot) {
   else writeAtomic(path, snapshot.content, snapshot.mode)
 }
 
-/**
- * Remove the .envrc shim THIS commit created — and only that exact file.
- * Identity is verified twice: by lstat (type check) and then through an fd
- * pinned to the entry (fstat), so a symlink or another regular file swapped
- * onto the path before the check is refused. Node cannot unlink by fd, so
- * a microscopic swap window between the fd verification and the rmSync
- * remains — the same bounded check-then-delete race reclaimableEphemeralRoot
- * accepts; anything the checks can see is left in place and reported.
- */
-function removeCreatedEnvrcShim(context, shim) {
-  if (shim?.created !== true) return
-  const envrcPath = join(context.root, '.envrc')
-  const current = existingPathInfo(envrcPath)
-  if (current === undefined) return
-  if (current.isSymbolicLink() || !current.isFile()
-    || current.dev !== shim.identity.dev || current.ino !== shim.identity.ino) {
-    console.warn(`not removing the .envrc entry at ${envrcPath}: it was replaced while this commit was in flight`)
-    return
-  }
-  let fd
-  try {
-    fd = openSync(envrcPath, 'r')
-    const pinned = fstatSync(fd)
-    if (pinned.dev !== shim.identity.dev || pinned.ino !== shim.identity.ino) {
-      console.warn(`not removing the .envrc entry at ${envrcPath}: it was replaced while this commit was in flight`)
-      return
-    }
-  } catch (error) {
-    // Verification itself failed (for example an unreadable entry): fail
-    // closed and leave the shim to the operator.
-    console.warn(`could not verify the .envrc entry at ${envrcPath} before removal: ${error instanceof Error ? error.message : String(error)}`)
-    return
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd)
-      } catch (closeError) {
-        // The verification already succeeded; a close failure must not
-        // skip the removal of the shim this commit created.
-        console.warn(`could not close the .envrc verification fd: ${closeError instanceof Error ? closeError.message : String(closeError)}`)
-      }
-    }
-  }
-  rmSync(envrcPath, { force: true })
-}
-
-/**
- * Roll back ONLY what this commit actually changed:
- * - a `.envrc` this commit CREATED (identified by inode) is removed again —
- *   a pre-existing `.envrc` of ANY kind (regular file with any mode,
- *   symlink, directory), or an entry swapped in mid-commit, is never
- *   modified and never rolled back;
- * - the generated env file is restored only when its write SUCCEEDED and
- *   the state write then failed: writeAtomic() never partially replaces
- *   the target, so a throw from the env writer means the path is already
- *   exactly as it was.
- * Each cleanup runs independently: a fail-closed env rollback (for
- * example an unexpected directory swapped onto the env path) must not
- * leak a shim this commit created.
- */
-function rollbackDevelopmentState(context, shim, envFileCommitted, previousEnv) {
-  const errors = []
-  if (envFileCommitted) {
-    try {
-      rollbackPath(context.envPath, previousEnv)
-    } catch (error) {
-      errors.push(error)
-    }
-  }
-  try {
-    removeCreatedEnvrcShim(context, shim)
-  } catch (error) {
-    errors.push(error)
-  }
-  if (errors.length === 1) throw errors[0]
-  if (errors.length > 1) throw new AggregateError(errors, 'could not roll back the dev environment after commit failure')
-}
-
 function commitDevelopmentState(context, writeEnvironment, writeStateFn) {
-  // The env file, the .envrc shim, and the state file are one logical
-  // checkpoint: a shell sources the env file (and direnv sources .envrc),
-  // but every durable decision (mode, generation, distribution) is read
-  // back from the state file. The state file is the commit point —
-  // writeAtomic() leaves it untouched when it throws — so a failed commit
-  // keeps every durable reference pointing at the previous generation.
-  // The static .envrc shim is created first (only when absent); then the
-  // env file; the state write commits. Only paths this commit actually
-  // modified are rolled back — that is also why reclaimEphemeralRoot is
-  // only reached after this returns.
-  const shim = ensureEnvrcShim(context)
+  // The env file and the state file are one logical checkpoint: a shell
+  // sources the env file, but every durable decision (mode, generation,
+  // distribution) is read back from the state file. The state file is the
+  // commit point — writeAtomic() leaves it untouched when it throws — so a
+  // failed commit keeps every durable reference pointing at the previous
+  // generation. Only the env file is rolled back, and only when its write
+  // SUCCEEDED and the state write then failed: writeAtomic() never
+  // partially replaces the target, so a throw from the env writer means
+  // the path is already exactly as it was. The .envrc shim is NOT part of
+  // this transaction (see ensureEnvrcShim).
   let envFileCommitted = false
   let previousEnv
   try {
@@ -1332,7 +1059,7 @@ function commitDevelopmentState(context, writeEnvironment, writeStateFn) {
     writeStateFn()
   } catch (error) {
     try {
-      rollbackDevelopmentState(context, shim, envFileCommitted, previousEnv)
+      if (envFileCommitted) rollbackPath(context.envPath, previousEnv)
     } catch (rollbackError) {
       console.warn(`could not roll back the dev environment after state commit failure: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`)
     }
@@ -1376,6 +1103,9 @@ async function materializeSource(helper, context, distribution, distributionPath
     () => writeDevelopmentEnvironmentFile(context, distributionPath, { ephemeral }),
     () => writeState(context, pnpm, distributionPath, { ephemeral }),
   )
+  // Best-effort, AFTER the commit: the .envrc shim is not part of the
+  // transaction and a failure here must never fail the bootstrap.
+  ensureEnvrcShim(context)
 }
 
 function npmMaterialized(context, pnpm, force) {
@@ -1403,6 +1133,9 @@ async function materializeNpm(context, force) {
     () => writeDevelopmentEnvironmentFile(context),
     () => writeState(context, pnpm),
   )
+  // Best-effort, AFTER the commit: the .envrc shim is not part of the
+  // transaction and a failure here must never fail the bootstrap.
+  ensureEnvrcShim(context)
 }
 
 function parseCli() {
@@ -1430,9 +1163,6 @@ export const _test = {
   sourcePackCommandArgs,
   writeDevelopmentEnvironment,
   writeDevelopmentEnvironmentFile,
-  writeFileExclusively,
-  removePinnedFile,
-  removePinnedDirectory,
   ensureEnvrcShim,
   existingCachePath,
   reapStaleLock,
@@ -1445,49 +1175,83 @@ export const _test = {
   runCommand,
   commandEnvironment,
   ephemeralSourcePackRoot,
-  ephemeralMarkerIdentity,
   reclaimableEphemeralRoot,
   reclaimEphemeralRoot,
   discardOwnedEphemeralRoot,
   commitDevelopmentState,
+  bootstrapLockPath,
+  acquireBootstrapLock,
+  releaseBootstrapLock,
   EPHEMERAL_ROOT_PREFIX,
   EPHEMERAL_MARKER_NAME,
   EPHEMERAL_MARKER_KIND,
 }
 
+const BOOTSTRAP_LOCK_DIRECTORY = 'bootstrap-locks'
+
+/** The per-worktree bootstrap lock path: one lock per canonical worktree
+ * root, shared by every process bootstrapping that worktree. */
+function bootstrapLockPath(context) {
+  const root = join(context.cacheRoot, BOOTSTRAP_LOCK_DIRECTORY)
+  assertRealDirectory(root, 'bootstrap lock root')
+  const key = createHash('sha256').update(canonicalPath(context.root)).digest('hex').slice(0, 16)
+  return join(root, `${key}.lock`)
+}
+
+async function acquireBootstrapLock(context) {
+  return acquireDirectoryLock(bootstrapLockPath(context), 'worktree bootstrap lock')
+}
+
+function releaseBootstrapLock(lock) {
+  releaseDirectoryLock(lock)
+}
+
 export async function bootstrapDevelopmentEnvironment(options = {}) {
   const context = resolveDshDevContext(options)
   const force = options.force === true
-  // Captured BEFORE any state mutation: the ephemeral generation this
-  // worktree still references. It stays untouched until the new generation
-  // has committed, so a failed bootstrap leaves the previous one usable.
-  const previousEphemeralRoot = reclaimableEphemeralRoot(context)
-  let result
-  if (context.mode === 'npm') {
-    await materializeNpm(context, force)
-    result = { context, distribution: undefined, cacheHit: undefined }
-  } else {
-    if (process.platform === 'win32') fail('source mode requires POSIX directory operations and is unsupported on Windows')
-    const helper = await distributionHelper(context)
-    const selected = await sourceDistribution(helper, context, options)
-    try {
-      await materializeSource(helper, context, selected.distribution, selected.path, force, selected.provided)
-    } catch (error) {
-      // The pack succeeded but nothing committed to it yet: this process is
-      // still the owner of the fresh generation, so a failure here must not
-      // leak a new dsh-pi-tui-source-* root into the OS temp area.
-      discardOwnedEphemeralRoot(selected.ownedEphemeral)
-      throw error
+  // One bootstrap at a time per worktree: two agents bootstrapping the same
+  // worktree concurrently would race on node_modules, the env/state commit,
+  // and generation reclaim (the second one would reclaim the first's
+  // committed generation). The lock covers the whole flow — previous-state
+  // read, source selection/build, materialize, env/state commit, reclaim —
+  // so the second caller waits, then sees the first caller's committed
+  // state and reuses it. Different worktrees have independent locks.
+  const lock = await acquireBootstrapLock(context)
+  try {
+    // Captured BEFORE any state mutation: the ephemeral generation this
+    // worktree still references. It stays untouched until the new
+    // generation has committed, so a failed bootstrap leaves the previous
+    // one usable.
+    const previousEphemeralRoot = reclaimableEphemeralRoot(context)
+    let result
+    if (context.mode === 'npm') {
+      await materializeNpm(context, force)
+      result = { context, distribution: undefined, cacheHit: undefined }
+    } else {
+      if (process.platform === 'win32') fail('source mode requires POSIX directory operations and is unsupported on Windows')
+      const helper = await distributionHelper(context)
+      const selected = await sourceDistribution(helper, context, options)
+      try {
+        await materializeSource(helper, context, selected.distribution, selected.path, force, selected.provided)
+      } catch (error) {
+        // The pack succeeded but nothing committed to it yet: this process is
+        // still the owner of the fresh generation, so a failure here must not
+        // leak a new dsh-pi-tui-source-* root into the OS temp area.
+        discardOwnedEphemeralRoot(context, selected.ownedEphemeralRoot)
+        throw error
+      }
+      result = {
+        context,
+        distribution: selected.distribution,
+        distributionPath: selected.path,
+        cacheHit: selected.cacheHit,
+      }
     }
-    result = {
-      context,
-      distribution: selected.distribution,
-      distributionPath: selected.path,
-      cacheHit: selected.cacheHit,
-    }
+    reclaimEphemeralRoot(previousEphemeralRoot, result.distributionPath, context)
+    return result
+  } finally {
+    releaseBootstrapLock(lock)
   }
-  reclaimEphemeralRoot(previousEphemeralRoot, result.distributionPath, context)
-  return result
 }
 
 async function main() {
