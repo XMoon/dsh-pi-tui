@@ -896,6 +896,15 @@ class OutputViewerPanel implements Component {
   private readonly body: Text
   /** Key routing installed by openOutputViewer (Esc closes, `s` stops). */
   handleInput?: (data: string) => void
+  /** The refresh interval. The PANEL owns it (X007 ownership): final
+   * teardown (overlay disposeOnHide → FocusForwardingFrame.dispose →
+   * this.dispose) clears it even when the caller never invokes the
+   * closer — a ref'd interval must not outlive the surface. */
+  private timer: NodeJS.Timeout | undefined
+  private refresh: (() => string) | undefined
+  private requestRender: (() => void) | undefined
+  /** Latched by dispose(): an in-flight tick must not render. */
+  private disposed = false
 
   constructor(title: string, initial: string) {
     this.title = new Text(title, 0, 0)
@@ -911,6 +920,31 @@ class OutputViewerPanel implements Component {
   setBody(text: string): void {
     this.body.setText(text)
     this.body.invalidate()
+  }
+
+  /** Start the refresh timer (openOutputViewer wires the live callbacks).
+   * The interval is unref'd so a viewer left open never blocks process
+   * exit by itself, and owned by THIS panel so the dispose chain stops
+   * it exactly once. */
+  startRefreshing(refresh: () => string, requestRender: () => void, intervalMs: number): void {
+    this.refresh = refresh
+    this.requestRender = requestRender
+    this.timer = setInterval(() => {
+      if (this.disposed) return
+      this.body.setText(this.refresh!())
+      this.body.invalidate()
+      this.requestRender!()
+    }, intervalMs)
+    this.timer.unref()
+  }
+
+  /** Stop the refresh timer (the overlay is closing / the surface dies). */
+  dispose(): void {
+    this.disposed = true
+    if (this.timer !== undefined) {
+      clearInterval(this.timer)
+      this.timer = undefined
+    }
   }
 
   render(width: number): string[] {
@@ -1977,7 +2011,8 @@ export class TuiApp {
    * runner; consulted after host capturing flows + reserved keys). */
   private readonly advancedInputRoute: ((data: string) => 'consumed' | 'passed') | undefined
   /** Phase 3: the UNSTABLE raw input route (wired by the runner; consulted
-   * BEFORE terminal protocol decoding). */
+   * BEFORE Host semantic routing — after the terminal pipeline has
+   * reassembled and normalized the input; see UnstableRawInputEvent). */
   private readonly unstableInputRoute: ((data: string, surfaceId: string) => import('./extension/internal/unstable-input.ts').UnstableRawRouteResult) | undefined
   /** Phase 3: whether any raw capture is live (arms the fail-safe). */
   private readonly unstableInputsLive: (() => boolean) | undefined
@@ -2881,10 +2916,15 @@ export class TuiApp {
     this.pendingBrokerSettles.clear()
     // Footer configurators are wrapped in a generic Frame, whose removal
     // does not forward Component.dispose(); close their owned timers before
-    // the broker drops the physical overlay handles.
+    // the broker unmounts the physical overlay handles.
     for (const close of [...this.footerConfiguratorClosers]) close()
     this.footerConfiguratorClosers.clear()
-    this.overlayBroker.clear()
+    // FINAL teardown: physically unmount every still-tracked overlay
+    // (disposeOnHide releases the panels — OutputViewer's refresh
+    // interval, TaskBrowser's tick — exactly once) instead of merely
+    // forgetting the handles. A caller that never invoked its closer must
+    // not leave a ref'd interval firing into the disposed surface.
+    this.overlayBroker.disposeAll()
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
     this.searchOverlay = undefined
@@ -3050,10 +3090,12 @@ export class TuiApp {
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
-    // Phase 3: the UNSTABLE raw interception stage — BEFORE terminal
-    // protocol decoding (plan §4). A raw capture can see, consume or
-    // rewrite ANY chunk (Enter, Esc, Ctrl+C, paste, CSI-u, terminal-
-    // specific protocols). The Host emergency fail-safe is detected FIRST
+    // Phase 3: the UNSTABLE raw interception stage — BEFORE Host
+    // semantic routing (plan §4), after the terminal pipeline has
+    // reassembled and normalized the input (see UnstableRawInputEvent).
+    // A raw capture can see, consume or rewrite any sequence that would
+    // otherwise reach the Host router (Enter, Esc, Ctrl+C, paste, CSI-u).
+    // The Host emergency fail-safe is detected FIRST
     // (host-owned, not rewritable by the Unstable API): triple-Esc within
     // the window releases every raw capture and closes every unstable
     // mount, restoring Host input. The fail-safe is armed only while
@@ -3103,6 +3145,17 @@ export class TuiApp {
     // did when it was registered first. (Unstable raw captures already ran
     // BEFORE this point and still see every chunk.)
     if (MOUSE_SEQUENCE.test(data) || (data.length === 6 && data.startsWith('\x1b[M'))) {
+      return undefined
+    }
+    // FOCUS reports (X036 × X043 cross-divergence): the viewport listener
+    // owns FOCUS_OUT's fullscreen selection cleanup and deliberately does
+    // NOT consume the report, so app-level listeners (terminal focus
+    // tracking) still receive it. A question/approval handler consumes
+    // EVERY key — without this pass-through it would starve the viewport
+    // listener of the report and leave a fullscreen selection active
+    // after focus loss. Same treatment as mouse sequences: fall through
+    // so the viewport listener runs.
+    if (data === '\x1b[O' || data === '\x1b[I') {
       return undefined
     }
     // Kitty-protocol terminals report press, repeat, and release events as
@@ -10695,11 +10748,13 @@ export class TuiApp {
   }): () => void {
     const panel = new OutputViewerPanel(options.title, options.initial)
     let closed = false
-    let timer: NodeJS.Timeout | undefined
     const close = (): void => {
       if (closed) return
       closed = true
-      if (timer !== undefined) clearInterval(timer)
+      // The panel OWNS the refresh interval: hide() runs the
+      // disposeOnHide chain (FocusForwardingFrame.dispose →
+      // OutputViewerPanel.dispose → clearInterval), so a final surface
+      // teardown that never calls this closer still stops the timer.
       handle.hide()
       options.onClose?.()
     }
@@ -10711,11 +10766,7 @@ export class TuiApp {
       }
     }
     const handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), { width: 88, maxHeight: 24 })
-    timer = setInterval(() => {
-      if (closed) return
-      panel.setBody(options.refresh())
-      this.requestRender()
-    }, options.intervalMs ?? 1000)
+    panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000)
     return close
   }
 
