@@ -156,6 +156,8 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     applyFooterSettings: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},

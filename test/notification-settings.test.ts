@@ -1,17 +1,17 @@
 /**
- * Icon-style /settings tests (plan §17 + §34.8): the row lists all three
- * styles, missing/invalid persisted values fall back to emoji, the toggle
- * applies to the app IMMEDIATELY (no restart, no session reload) and
- * persists a replace that preserves the other fields.
- * @module @xmoon76/dsh-pi-tui/icon-style-settings.test
+ * Completion-notification /settings panel tests (plan §8): the two rows
+ * (Notifications Mode / Notification method) render with their defaults,
+ * cycling a row persists the whole document without dropping other
+ * fields AND applies the runtime setters, and invalid persisted values
+ * fall back to the defaults. Pure — no dsh tree needed.
+ * @module @xmoon76/dsh-pi-tui/notification-settings.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
-import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import type { TuiSettingsDoc } from '../src/runtime/config-port.ts'
+import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -20,9 +20,9 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { parseNotificationMethod, parseNotificationMode } from '../src/notification/settings.ts'
 
-/** A fake TuiSettingsLike recording every replace (the TUI settings
- * document surface; the writes array lets tests assert persistence). */
+/** A fake TuiSettingsLike recording every replace. */
 function fakeSettings(doc: Record<string, unknown>) {
   const writes: Array<Record<string, unknown>> = []
   return {
@@ -38,8 +38,9 @@ function fakeSettings(doc: Record<string, unknown>) {
   }
 }
 
-/** Register the TUI commands with a stubbed runner and return /settings. */
-function setupSettings(options: { iconStyle?: string } = {}) {
+/** Register the TUI commands with a stubbed runner and return /settings
+ * plus the recorded runtime notification setter calls. */
+function setupSettings(options: { notificationMode?: string; notificationMethod?: string } = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -55,9 +56,6 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     execute: async () => undefined,
   } as never)
   ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
-  // The fake document starts from the FULL default shape. When no
-  // iconStyle is passed, the field is OMITTED entirely — the exact shape
-  // of an old settings file written before the preference existed.
   const settings = fakeSettings({
     theme: 'auto',
     footer: 'full',
@@ -66,9 +64,11 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
     focusMode: 'off',
-    wheelScrollLines: '1',
-    ...(options.iconStyle === undefined ? {} : { iconStyle: options.iconStyle }),
+    ...(options.notificationMode === undefined ? {} : { notificationMode: options.notificationMode }),
+    ...(options.notificationMethod === undefined ? {} : { notificationMethod: options.notificationMethod }),
   })
+  const appliedModes: string[] = []
+  const appliedMethods: string[] = []
   const runner: TuiCommandRunner = {
     ctx,
     app,
@@ -131,8 +131,8 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     applyFooterSettings: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
-    setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setNotificationMode: (mode) => { appliedModes.push(mode) },
+    setNotificationMethod: (method) => { appliedMethods.push(method) },
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
@@ -150,7 +150,7 @@ function setupSettings(options: { iconStyle?: string } = {}) {
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   const run = async (): Promise<void> => {
     await (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
-      commandId: CommandId('cmd-icon-test'),
+      commandId: 'x' as never,
       agent: undefined as never,
       rawInput: '',
       signal: new AbortController().signal,
@@ -160,83 +160,95 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, settings, run, view }
+  return { vt, app, settings, runner, appliedModes, appliedMethods, run, view }
 }
 
-test('/settings lists the Icon style row; missing and invalid persisted values fall back to emoji', async () => {
-  // Missing field (old settings file): the row reads emoji.
+test('the notification rows render with the defaults (Unfocused / Auto)', async () => {
   const t = setupSettings({})
   await t.run()
   await t.view()
-  // Rows without a session: theme, icon-style, expand, thinking, footer,
-  // busy-enter, local-shell-sandbox, home-end-keys, fullscreen — the
-  // icon-style row is the 2nd.
-  t.vt.sendInput('\x1b[B')
-  const view = await t.view()
-  assert.ok(view.includes('Icon style'), `row missing:\n${view}`)
-  // The selected row's VALUE sits on the label's line (the description
-  // below also names the styles, so assert on the row line specifically).
-  const row = stripTerminalSequences(view).split('\n').find(line => line.includes('Icon style'))
-  assert.ok(row !== undefined && row.includes('Icon style') && row.includes('emoji'),
-    `missing persisted value must fall back to emoji (row: ${row}):\n${view}`)
+  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B')
+  const view = stripTerminalSequences(await t.view())
+  const modeRow = view.split('\n').find(line => line.includes('Notifications'))
+  const methodRow = view.split('\n').find(line => line.includes('Notification method'))
+  // The panel shows the RAW persisted values (the codebase-wide settings
+  // convention — wheel rows show literal step numbers, sandbox rows show
+  // 'bypass'); the DESCRIPTION carries the user-facing explanation.
+  assert.ok(modeRow !== undefined && modeRow.includes('unfocused'),
+    `default mode row must show unfocused (row: ${modeRow}):\n${view}`)
+  assert.ok(methodRow !== undefined && methodRow.includes('auto'),
+    `default method row must show auto (row: ${methodRow}):\n${view}`)
   t.app.stop()
-
-  // An invalid persisted value never renders outside the values list.
-  const t2 = setupSettings({ iconStyle: 'garbage' })
-  await t2.run()
-  await t2.view()
-  t2.vt.sendInput('\x1b[B')
-  const view2 = await t2.view()
-  assert.ok(stripTerminalSequences(view2).split('\n').some(line => line.includes('Icon style') && line.includes('emoji')),
-    `invalid persisted value must fall back to emoji:\n${view2}`)
-  assert.ok(!view2.includes('garbage'), `the raw invalid value must never render:\n${view2}`)
-  t2.app.stop()
-
-  // A persisted minimal value renders as minimal.
-  const t3 = setupSettings({ iconStyle: 'minimal' })
-  await t3.run()
-  await t3.view()
-  t3.vt.sendInput('\x1b[B')
-  const view3 = await t3.view()
-  assert.ok(stripTerminalSequences(view3).split('\n').some(line => line.includes('Icon style') && line.includes('minimal')),
-    `persisted minimal must render on the row:\n${view3}`)
-  t3.app.stop()
 })
 
-test('the Icon style row toggle applies immediately and persists without dropping other fields', async () => {
-  const t = setupSettings({ iconStyle: 'emoji' })
+test('persisted values render on the rows; invalid values fall back to the defaults', async () => {
+  // Persisted values render verbatim.
+  const t = setupSettings({ notificationMode: 'always', notificationMethod: 'osc777' })
   await t.run()
   await t.view()
-  t.vt.sendInput('\x1b[B') // move to the icon-style row
+  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B')
+  const view = stripTerminalSequences(await t.view())
+  assert.ok(view.split('\n').some(line => line.includes('Notifications') && line.includes('always')),
+    `persisted mode must render:\n${view}`)
+  assert.ok(view.split('\n').some(line => line.includes('Notification method') && line.includes('osc777')),
+    `persisted method must render:\n${view}`)
+  t.app.stop()
+  // Invalid persisted values fall back to the defaults (never render raw).
+  const t2 = setupSettings({ notificationMode: 'garbage', notificationMethod: 'beep' })
+  await t2.run()
+  await t2.view()
+  for (let i = 0; i < 12; i += 1) t2.vt.sendInput('\x1b[B')
+  const view2 = stripTerminalSequences(await t2.view())
+  assert.ok(view2.split('\n').some(line => line.includes('Notifications') && line.includes('unfocused')),
+    `invalid mode must fall back to unfocused:\n${view2}`)
+  assert.ok(view2.split('\n').some(line => line.includes('Notification method') && line.includes('auto')),
+    `invalid method must fall back to auto:\n${view2}`)
+  assert.ok(!view2.includes('garbage') && !view2.includes('beep'),
+    `the raw invalid values must never render:\n${view2}`)
+  t2.app.stop()
+})
+
+test('cycling the mode row applies the runtime setter and persists the whole document', async () => {
+  const t = setupSettings({ notificationMode: 'unfocused' })
+  await t.run()
   await t.view()
-  t.vt.sendInput('\r') // toggle emoji -> symbols
+  for (let i = 0; i < 9; i += 1) t.vt.sendInput('\x1b[B') // move to the mode row
   await t.view()
-  // The app runtime switched IMMEDIATELY (no restart, no reload).
-  assert.equal(t.app.currentIconStyle(), 'symbols', 'the app runtime must switch before persistence settles')
+  t.vt.sendInput('\r') // cycle mode: unfocused -> always
+  await t.view()
+  assert.deepEqual(t.appliedModes, ['always'], 'the runtime setter must receive the chosen mode')
   assert.ok(t.settings.writes.length >= 1, 'the toggle must persist a write')
   const last = t.settings.writes[t.settings.writes.length - 1]
-  assert.equal(last?.iconStyle, 'symbols', `wrote: ${JSON.stringify(last)}`)
+  assert.equal(last?.notificationMode, 'always', `wrote: ${JSON.stringify(last)}`)
   // A replace is wholesale: every other field rides along untouched.
   assert.equal(last?.theme, 'auto')
   assert.equal(last?.footer, 'full')
-  assert.equal(last?.fullscreen, 'on')
+  assert.equal(last?.focusMode, 'off')
   t.app.stop()
 })
 
-test('the toggle cycles through all three styles in one open panel', async () => {
-  const t = setupSettings({ iconStyle: 'emoji' })
+test('cycling the method row applies the runtime setter and persists', async () => {
+  const t = setupSettings({ notificationMode: 'unfocused', notificationMethod: 'auto' })
   await t.run()
   await t.view()
-  t.vt.sendInput('\x1b[B') // icon-style row
+  for (let i = 0; i < 10; i += 1) t.vt.sendInput('\x1b[B') // move to the method row
   await t.view()
-  t.vt.sendInput('\r') // -> symbols
+  t.vt.sendInput('\r') // cycle method: auto -> osc9
   await t.view()
-  assert.equal(t.app.currentIconStyle(), 'symbols')
-  t.vt.sendInput('\r') // -> minimal
-  await t.view()
-  assert.equal(t.app.currentIconStyle(), 'minimal', 'minimal must be reachable in the same panel')
-  t.vt.sendInput('\r') // -> emoji (wraps)
-  await t.view()
-  assert.equal(t.app.currentIconStyle(), 'emoji', 'the cycle wraps back to emoji')
+  assert.deepEqual(t.appliedMethods, ['osc9'], 'the runtime setter must receive the chosen method')
+  assert.ok(t.settings.writes.length >= 1, 'the toggle must persist a write')
+  const last = t.settings.writes[t.settings.writes.length - 1]
+  assert.equal(last?.notificationMethod, 'osc9', `wrote: ${JSON.stringify(last)}`)
+  // The mode field rides along untouched.
+  assert.equal(last?.notificationMode, 'unfocused')
   t.app.stop()
+})
+
+test('the parsers are the single authority (defaults unfocused/auto)', () => {
+  assert.equal(parseNotificationMode(undefined), 'unfocused')
+  assert.equal(parseNotificationMode('always'), 'always')
+  assert.equal(parseNotificationMode('garbage'), 'unfocused')
+  assert.equal(parseNotificationMethod(undefined), 'auto')
+  assert.equal(parseNotificationMethod('osc9'), 'osc9')
+  assert.equal(parseNotificationMethod('beep'), 'auto')
 })

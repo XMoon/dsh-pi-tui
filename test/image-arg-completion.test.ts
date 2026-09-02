@@ -117,6 +117,8 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},

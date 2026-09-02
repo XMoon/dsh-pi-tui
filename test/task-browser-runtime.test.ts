@@ -401,18 +401,23 @@ const indexSource = readFileSync(
 )
 
 test('the runner wires agent/status to the membership-gated RUNTIME-only refresh', () => {
-  assert.ok(indexSource.includes("ctx.on('agent/status', ({ agent }) => {"),
+  assert.ok(indexSource.includes("ctx.on('agent/status', ({ agent, status }) => {"),
     'the runner must register the agent/status listener')
   assert.ok(indexSource.includes('if (taskRuntime?.has(agent.id) !== true) return'),
     'the listener must be membership-gated (main-agent flips must never repaint)')
   // The handler must route to the runtime-only refresh — a re-listing
   // here would defeat the whole split (and the membership gate).
-  const marker = "ctx.on('agent/status', ({ agent }) => {"
-  const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 400)
+  const marker = "ctx.on('agent/status', ({ agent, status }) => {"
+  const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 500)
   assert.ok(handler.includes('refreshAgentRuntimeOnly()'),
     'agent/status must refresh RUNTIME only, never refreshAgents()')
   assert.ok(!handler.includes('refreshAgents()'),
     'agent/status must never trigger a catalog re-listing')
+  // The MAIN agent's transitions route to the completion-notification
+  // controller (the settled boundary) BEFORE the child membership gate —
+  // children still never repaint and never notify.
+  assert.ok(handler.includes('completionController.onAgentStatus(agent.id, status)'),
+    'the main agent\'s status must feed the completion controller')
 })
 
 test('a session switch closes the open task browser, CLEARS the badge synchronously and resets the runtime coordinator', () => {

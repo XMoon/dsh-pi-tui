@@ -190,6 +190,8 @@ function stubRunner(
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     // The merged /tasks browser: jobs + subagents, Enter routes to
@@ -291,7 +293,7 @@ test('/settings working-directory row follows the live session cwd', async () =>
   await vt.waitForRender()
   // The working-directory row sits at the end of the scrolling list (the
   // icon-style and sandbox rows joined the panel, so the list is longer).
-  for (let index = 0; index < 10; index += 1) vt.sendInput('\x1b[B')
+  for (let index = 0; index < 12; index += 1) vt.sendInput('\x1b[B')
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('/ws/alpha'), `session cwd row missing:\n${view}`)
@@ -301,7 +303,7 @@ test('/settings working-directory row follows the live session cwd', async () =>
   await vt.waitForRender()
   ;(settingsDef!.handler as () => unknown)()
   await vt.waitForRender()
-  for (let index = 0; index < 10; index += 1) vt.sendInput('\x1b[B')
+  for (let index = 0; index < 12; index += 1) vt.sendInput('\x1b[B')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('/ws/beta'), `updated session cwd missing:\n${view}`)
