@@ -65,7 +65,7 @@ and the pre-rebase snapshot; the audit record lives at
   prebuild docs state the real degrade impact and supported surface; X028
   records `canScroll`; fullscreen ScrollView `basis: 0`; the
   `REMOVED_UNUSED` list rewritten with per-category criteria.
-- **Verification**: fork suite 1017 tests (+39; round 5 adds the stale-submenu-callback guard), the full bundle suite,
+- **Verification**: fork suite 1019 tests (+41; the independent review round adds Box.dispose and the synchronous-done guard), the full bundle suite,
   pi-surface-compat 8/8, typecheck, and build all green.
 ### Development temp-file hygiene (/tmp hygiene)
 

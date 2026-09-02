@@ -51,7 +51,7 @@
   （kimi 方案，`HOST_MARKDOWN_OPTIONS`）；native prebuild 文档如实写明
   降级影响与支持面；X028 补记 `canScroll`；fullscreen ScrollView
   `basis: 0`；`REMOVED_UNUSED` 清单按四类标准重写理由。
-- **验证**：fork 套件 1017 项（+39，round-5 补 stale-callback 守卫）、bundle 全量、pi-surface-compat 8/8、
+- **验证**：fork 套件 1019 项（+41，独立复核轮补 Box.dispose/同步 done 守卫）、bundle 全量、pi-surface-compat 8/8、
   typecheck、build 全绿。
 ### 开发环境临时文件卫生（/tmp hygiene）
 

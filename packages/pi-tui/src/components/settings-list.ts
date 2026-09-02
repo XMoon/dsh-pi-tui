@@ -268,7 +268,7 @@ export class SettingsList implements Component, Focusable {
 			// X007 — the submenu slot owns the component's lifecycle).
 			this.submenuComponent?.dispose?.();
 			const generation = ++this.submenuGeneration;
-			this.submenuComponent = item.submenu(
+			const component = item.submenu(
 				item.currentValue,
 				(selectedValue?: string, options?: { navigateTo?: string }) => {
 					// A callback from a CLOSED/REPLACED/DISPOSED submenu is
@@ -284,6 +284,17 @@ export class SettingsList implements Component, Focusable {
 					this.closeSubmenu();
 				},
 			);
+			// The factory may call done() SYNCHRONOUSLY before returning
+			// (round-7 review P2): the callback passed its own generation
+			// check, closeSubmenu() ran, and the outer assignment would
+			// otherwise RESURRECT the closed submenu (or overwrite a
+			// follow-up submenu opened by navigateAfterClose). Re-check the
+			// generation AFTER the factory returns and release the orphan.
+			if (generation !== this.submenuGeneration) {
+				component.dispose?.();
+				return;
+			}
+			this.submenuComponent = component;
 			// The freshly opened submenu becomes the input the user types
 			// into: forward the current focus state so its CURSOR_MARKER
 			// (IME positioning) matches the list's focus (dsh-pi-tui
