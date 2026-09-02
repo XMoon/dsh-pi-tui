@@ -111,6 +111,9 @@ import {
   GOAL_TOOL_NAMES,
   foldedResultSummaryFor,
   FOLDED_JSON_RESULT_TOOLS,
+  compactToolPresentation,
+  compactToolExpandedLines,
+  isCompactActionTool,
   focusToolDisplay,
   systemContextBody,
   toolCardHeader,
@@ -119,6 +122,7 @@ import {
   type ToolPresenter,
 } from './present.ts'
 import { TranscriptSearchComponent } from './search.ts'
+import { CompactTextPreview } from './compact-text-preview.ts'
 import { HistoryPanel } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
@@ -8016,7 +8020,7 @@ export class TuiApp {
 
   /**
    * Whether a HOST build bakes width-dependent truncation into the
-   * component at build time — the FOLDED system / compaction / tool
+   * component at build time — the FOLDED system / compaction / legacy tool
    * cards (their preview rows truncate to the content width once, so a
    * terminal resize must rebuild them at the new width). Render-time
    * width-aware builds (assistant/user markdown and bubbles, Thinking
@@ -8028,7 +8032,8 @@ export class TuiApp {
    */
   private bakesFoldedWidth(message: TranscriptMessage, expanded: boolean): boolean {
     if (expanded) return false
-    return message.kind === 'system' || message.kind === 'compaction' || message.kind === 'tool'
+    return message.kind === 'system' || message.kind === 'compaction'
+      || (message.kind === 'tool' && !isCompactActionTool(message.name, message.args))
   }
 
   /**
@@ -8374,7 +8379,13 @@ export class TuiApp {
     // pill keeps its semantic color (ok/error/running).
     const card = new Container()
     const header = toolCardHeader(message.name, message.args, this.workspaceRoot)
-    const summary = header.summary === '' ? '' : ` ${header.summary}`
+    const action = compactToolPresentation(message.name, message.args, message.result, {
+      isError: message.status === 'error',
+      ...(message.error === undefined ? {} : { error: message.error }),
+    })
+    // Action identities use a dot separator (`Send message · child-1`) while
+    // the existing Web-style rows retain their historical space separator.
+    const summary = header.summary === '' ? '' : action !== undefined ? ` · ${header.summary}` : ` ${header.summary}`
     // The glyph resolves through the icon registry against the CURRENT
     // style; iconPrefix drops the separator when the style hides the icon
     // (minimal) — the header starts directly with the title.
@@ -8390,7 +8401,9 @@ export class TuiApp {
     // cannot fill the TUI, expanded only while the expand switch is on.
     const localShell = isLocalShellCard(message)
     if (expanded) {
-      card.addChild(new Text(head, 0, 0))
+      // Action headers and payloads are live width-aware components; every
+      // other host card keeps its existing Text path and cache behavior.
+      card.addChild(action === undefined ? new Text(head, 0, 0) : new CompactTextPreview(head, 1, ''))
       // An explicitly expanded card renders diff bodies in full; the
       // default recent-turn view caps them (kimi parity). The flag is
       // the FULL REVEAL: the per-card override (the fullscreen secondary
@@ -8398,6 +8411,20 @@ export class TuiApp {
       // regular mode would have no mouse affordance to open it.
       this.renderToolBody(card, message, fullReveal)
     } else {
+      if (action !== undefined) {
+        // Action cards deliberately keep the stable header separate from the
+        // payload. CompactTextPreview wraps/truncates at render time, so this
+        // same cached card remains correct after every resize.
+        card.addChild(new CompactTextPreview(head, 1, ''))
+        if (action.payload !== undefined && action.payload !== '') {
+          card.addChild(new CompactTextPreview(color.textDim(action.payload), 2, '  '))
+        }
+        if (action.result !== undefined && action.result !== '') {
+          const result = message.status === 'error' ? color.error(action.result) : color.textDim(action.result)
+          card.addChild(new CompactTextPreview(result, 1, '  '))
+        }
+        return card
+      }
       // Folded cards render 2–3 rows instead of one cramped line: the header
       // row, then the call preview (bash `$ command` / edit-write diff —
       // kimi parity: the command and the change are visible without
@@ -8687,6 +8714,41 @@ export class TuiApp {
       }
       return
     }
+
+    const action = compactToolPresentation(message.name, message.args, message.result, {
+      isError: message.status === 'error',
+      ...(message.error === undefined ? {} : { error: message.error }),
+    })
+    if (action !== undefined && message.name !== 'terminal_send') {
+      // Action bodies are semantic too: send/interrupt cards never expose a
+      // delivery receipt, while list_agents keeps the historical snapshot.
+      const lines = compactToolExpandedLines(message.name, message.args, message.result, {
+        isError: message.status === 'error',
+        ...(message.error === undefined ? {} : { error: message.error }),
+      }) ?? []
+      for (const [index, line] of lines.entries()) {
+        const styled = message.status === 'error' && action.result !== undefined && index === lines.length - 1
+          ? color.error(line)
+          : color.textDim(line)
+        card.addChild(new Text(`  ${styled}`, 0, 0))
+      }
+      return
+    }
+    if (action !== undefined && message.name === 'terminal_send') {
+      // terminal_send may also have a dedicated result presenter. Its sent
+      // text belongs above that existing terminal output; do not replace the
+      // output/exit-code path merely to make the payload visible.
+      if (action.payload !== undefined && action.payload !== '') {
+        for (const line of action.payload.split(/\r\n|\r|\n/)) {
+          card.addChild(new Text(color.textDim(`  ${line}`), 0, 0))
+        }
+      }
+      if (message.status === 'running') return
+      if (message.status === 'error') {
+        if (action.result !== undefined) card.addChild(new Text(color.error(`  ${action.result}`), 0, 0))
+        return
+      }
+    }
     // Workflow run cards: the body is the run's member tree, grouped by phase
     // in arrival order (Web WorkflowRunPanel parity). Rows render even while
     // the run is still streaming (members land incrementally).
@@ -8820,6 +8882,9 @@ export class TuiApp {
       isError: message.status === 'error',
       ...message.meta === undefined ? {} : { meta: message.meta },
     })
+    // A dedicated terminal presenter, when available, remains authoritative
+    // for output and exit status. Without one, the legacy raw-result fallback
+    // below keeps the expanded viewport/wait/session snapshot intact.
     if (resultView !== undefined) {
       switch (resultView.card) {
         case 'read': {

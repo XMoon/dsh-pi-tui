@@ -221,6 +221,346 @@ export function foldedResultSummaryFor(name: string, text: string): string | und
   return undefined
 }
 
+/** The small semantic model used by host fallback cards for action tools. */
+export interface CompactToolPresentation {
+  /** Human-facing action title, e.g. `Send message`. */
+  readonly title: string
+  /** Stable identity shown in the card header (target, session, or scope). */
+  readonly summary?: string
+  /** User-meaningful call input retained for the folded preview. */
+  readonly payload?: string
+  /** A meaningful settled result, or an error identity. */
+  readonly result?: string
+  /** Whether an acknowledgement-only success result should be omitted. */
+  readonly suppressSuccessResult?: boolean
+}
+
+/** Structured failure information available on a transcript tool card. */
+export interface CompactToolPresentationOptions {
+  readonly isError?: boolean
+  readonly error?: { readonly name: string; readonly code: string }
+}
+
+/** Counts from one historical `list_agents` result snapshot. */
+export interface AgentListSummary {
+  readonly total: number
+  readonly running: number
+  readonly idle: number
+  readonly ready: number
+  readonly diagnostics?: number
+}
+
+export interface SendMessageCallPresentation {
+  readonly target: string
+  readonly message: string
+}
+
+export interface TerminalSendCallPresentation {
+  readonly sessionId: string
+  readonly text: string
+}
+
+export interface InterruptAgentCallPresentation {
+  readonly target: string
+}
+
+export interface ListAgentsCallPresentation {
+  readonly scope: 'children' | 'descendants'
+}
+
+function nonBlankString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined
+}
+
+/** Parse standard and Agent Teams-compatible send_message arguments. */
+export function sendMessageCallPresentation(argsRaw: string): SendMessageCallPresentation | undefined {
+  const parsed = parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const args = parsed as Record<string, unknown>
+  // The two currently known producers use agent_id and target respectively;
+  // nullish selection keeps a valid standard field authoritative.
+  const target = nonBlankString(args.agent_id) ?? nonBlankString(args.target)
+  if (target === undefined || typeof args.message !== 'string') return undefined
+  return { target, message: args.message }
+}
+
+/** Parse standard and Agent Teams-compatible interrupt_agent arguments. */
+export function interruptAgentCallPresentation(argsRaw: string): InterruptAgentCallPresentation | undefined {
+  const parsed = parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const args = parsed as Record<string, unknown>
+  const target = nonBlankString(args.agent_id) ?? nonBlankString(args.target)
+  return target === undefined ? undefined : { target }
+}
+
+/** Parse the terminal_send identity and payload. */
+export function terminalSendCallPresentation(argsRaw: string): TerminalSendCallPresentation | undefined {
+  const parsed = parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const args = parsed as Record<string, unknown>
+  const sessionId = nonBlankString(args.sessionId)
+  if (sessionId === undefined || typeof args.text !== 'string') return undefined
+  return { sessionId, text: args.text }
+}
+
+/** Parse list_agents scope without consulting any live registry. */
+export function listAgentsCallPresentation(argsRaw: string): ListAgentsCallPresentation | undefined {
+  // No-parameter tools are recorded as `{}` in normal events, but an older
+  // replay can retain an empty argument string; both mean the default scope.
+  const parsed = argsRaw.trim() === '' ? {} : parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const scope = (parsed as Record<string, unknown>).scope
+  if (scope === undefined) return { scope: 'children' }
+  return scope === 'children' || scope === 'descendants' ? { scope } : undefined
+}
+
+/** Count one structured list_agents snapshot. */
+function summarizeAgentEntries(entries: readonly unknown[]): AgentListSummary {
+  let running = 0
+  let idle = 0
+  let ready = 0
+  let diagnostics = 0
+  for (const entry of entries) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      diagnostics += 1
+      continue
+    }
+    const value = entry as Record<string, unknown>
+    if (value.kind === 'diagnostic') {
+      diagnostics += 1
+      continue
+    }
+    // The standard snapshot uses `kind: child`; Agent Teams returns member
+    // rows without a kind. A recognized status is enough for the latter.
+    if (value.kind !== undefined && value.kind !== 'child' && value.kind !== 'agent') {
+      diagnostics += 1
+      continue
+    }
+    switch (value.status) {
+      case 'running': running += 1; break
+      case 'idle': idle += 1; break
+      case 'ready': ready += 1; break
+      default: diagnostics += 1; break
+    }
+  }
+  const total = running + idle + ready + diagnostics
+  return { total, running, idle, ready, ...(diagnostics === 0 ? {} : { diagnostics }) }
+}
+
+/** Parse both the structured snapshot and the standard rendered text. */
+export function summarizeAgentListResult(text: string): AgentListSummary | undefined {
+  const parsed = parseJsonValue(text)
+  if (Array.isArray(parsed)) return summarizeAgentEntries(parsed)
+
+  const trimmed = text.trim()
+  if (trimmed === '(no subagents)') return { total: 0, running: 0, idle: 0, ready: 0 }
+  if (trimmed === '') return undefined
+  let running = 0
+  let idle = 0
+  let ready = 0
+  let diagnostics = 0
+  let matched = 0
+  for (const line of trimmed.split(/\r\n|\r|\n/)) {
+    if (/\[running\](?:\s|$)/.test(line)) { running += 1; matched += 1; continue }
+    if (/\[idle\](?:\s|$)/.test(line)) { idle += 1; matched += 1; continue }
+    if (/\[ready\](?:\s|$)/.test(line)) { ready += 1; matched += 1; continue }
+    if (/\[diagnostic:\s*[^\]]+\]/.test(line)) { diagnostics += 1; matched += 1 }
+  }
+  if (matched === 0) return undefined
+  const total = running + idle + ready + diagnostics
+  return { total, running, idle, ready, ...(diagnostics === 0 ? {} : { diagnostics }) }
+}
+
+/** Format a list snapshot without treating diagnostics as agents. */
+export function formatAgentListSummary(summary: AgentListSummary): string {
+  if (summary.total === 0) return 'no subagents'
+  const agents = summary.running + summary.idle + summary.ready
+  const diagnostics = summary.diagnostics ?? 0
+  const parts = [
+    diagnostics > 0 ? `${summary.total} ${summary.total === 1 ? 'entry' : 'entries'}` : `${agents} ${agents === 1 ? 'agent' : 'agents'}`,
+  ]
+  if (summary.running > 0) parts.push(`${summary.running} running`)
+  if (summary.idle > 0) parts.push(`${summary.idle} idle`)
+  if (summary.ready > 0) parts.push(`${summary.ready} ready`)
+  if (diagnostics > 0) parts.push(`${diagnostics} ${diagnostics === 1 ? 'diagnostic' : 'diagnostics'}`)
+  return parts.join(' · ')
+}
+
+/** A compact result line for a non-JSON action acknowledgement/error. */
+function firstActionResultDetail(text: string): string | undefined {
+  const trimmed = text.trim()
+  if (trimmed === '') return undefined
+  const parsed = parseJsonValue(text)
+  if (typeof parsed === 'string') return firstLine(parsed)
+  // A malformed/unknown object is still protocol noise; never expose it as a
+  // folded preview merely because it failed to parse.
+  if (parsed !== undefined || /^[\[{]/.test(trimmed)) return undefined
+  return firstLine(trimmed)
+}
+
+/** Pull a human detail out of a structured action error without raw JSON. */
+function actionErrorDetail(text: string): string | undefined {
+  const parsed = parseJsonValue(text)
+  if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    const value = parsed as Record<string, unknown>
+    const code = nonBlankString(value.code)
+    const message = nonBlankString(value.message ?? value.error ?? value.detail ?? value.reason)
+    if (code !== undefined && message !== undefined) return `${code}: ${message}`
+    return message ?? code
+  }
+  // Failure text is user-facing evidence, even when a malformed JSON-looking
+  // payload cannot be safely summarized. Success-only protocol-noise rules do
+  // not get to hide an error.
+  const detail = firstActionResultDetail(text)
+  return detail ?? (text.trim() === '' ? undefined : firstLine(text.trim()))
+}
+
+/** Combine a structured error identity with any safe human detail. */
+function actionErrorResult(text: string, options: CompactToolPresentationOptions): string | undefined {
+  const identity = options.error === undefined ? undefined : `${options.error.name}: ${options.error.code}`
+  const detail = actionErrorDetail(text)
+  return identity === undefined ? detail : detail === undefined ? identity : `${identity}: ${detail}`
+}
+
+const ACKNOWLEDGEMENT_STATUSES = new Set(['accepted', 'completed', 'delivered', 'ok', 'sent', 'success'])
+
+/** Derive a meaningful result for one action tool; receipt-only results vanish. */
+function actionResultSummary(
+  kind: 'send_message' | 'terminal_send' | 'interrupt_agent',
+  text: string,
+): string | undefined {
+  const trimmed = text.trim()
+  if (trimmed === '') return undefined
+  const parsed = parseJsonValue(text)
+  if (kind === 'terminal_send') {
+    // Foreground terminal output is useful only in the expanded body; the
+    // folded card keeps the sent text. A background job id is the exception:
+    // it is new information the user needs for job_output/job_kill.
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      const value = parsed as Record<string, unknown>
+      if (nonBlankString(value.status)?.toLowerCase() === 'queued') return 'queued'
+      if (value.kind === 'background') {
+        const jobId = nonBlankString(value.jobId)
+        return jobId === undefined ? undefined : `started background job ${jobId}`
+      }
+      return undefined
+    }
+    const value = typeof parsed === 'string' ? firstLine(parsed) : firstLine(trimmed)
+    if (/^started background job\b/i.test(value)) return value
+    return /\bqueued\b/i.test(value) ? 'queued' : undefined
+  }
+  if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    const value = parsed as Record<string, unknown>
+    const status = nonBlankString(value.status)?.toLowerCase()
+    if (status === 'queued') return 'queued'
+    if (status !== undefined && !ACKNOWLEDGEMENT_STATUSES.has(status)) return status
+    if (kind === 'interrupt_agent') {
+      const previous = nonBlankString(value.previousStatus)
+      if (previous !== undefined) return `was ${previous}`
+    }
+    return undefined
+  }
+  const value = typeof parsed === 'string' ? firstLine(parsed) : firstLine(trimmed)
+  if (value === '') return undefined
+  if (kind === 'send_message' && /^message\s+(?:delivered|sent|accepted)\b/i.test(value)) return /\bqueued\b/i.test(value) ? 'queued' : undefined
+  if (kind === 'interrupt_agent' && /^interrupt\s+requested\s+for\s+agent\b/i.test(value)) return undefined
+  return firstActionResultDetail(value)
+}
+
+/**
+ * Derive action semantics from the recorded call/result only. This is the
+ * host fallback boundary: extension-owned renderers still take precedence in
+ * the TUI, while replay remains deterministic and registry-independent.
+ */
+export function compactToolPresentation(
+  name: string,
+  argsRaw: string,
+  result = '',
+  options: CompactToolPresentationOptions = {},
+): CompactToolPresentation | undefined {
+  const send = name === 'send_message' ? sendMessageCallPresentation(argsRaw) : undefined
+  if (send !== undefined) {
+    const failed = options.isError === true || options.error !== undefined
+    const resultText = failed
+      ? actionErrorResult(result, options)
+      : actionResultSummary('send_message', result)
+    return {
+      title: 'Send message', summary: send.target, payload: send.message,
+      ...(resultText === undefined ? {} : { result: resultText }),
+      suppressSuccessResult: true,
+    }
+  }
+
+  const terminal = name === 'terminal_send' ? terminalSendCallPresentation(argsRaw) : undefined
+  if (terminal !== undefined) {
+    const failed = options.isError === true || options.error !== undefined
+    const resultText = failed
+      ? actionErrorResult(result, options)
+      : actionResultSummary('terminal_send', result)
+    return {
+      title: 'Terminal', summary: terminal.sessionId, payload: terminal.text,
+      ...(resultText === undefined ? {} : { result: resultText }),
+      suppressSuccessResult: true,
+    }
+  }
+
+  const interrupt = name === 'interrupt_agent' ? interruptAgentCallPresentation(argsRaw) : undefined
+  if (interrupt !== undefined) {
+    const failed = options.isError === true || options.error !== undefined
+    const resultText = failed
+      ? actionErrorResult(result, options)
+      : actionResultSummary('interrupt_agent', result)
+    return {
+      title: 'Interrupt agent', summary: interrupt.target,
+      ...(resultText === undefined ? {} : { result: resultText }),
+      suppressSuccessResult: true,
+    }
+  }
+
+  const list = name === 'list_agents' ? listAgentsCallPresentation(argsRaw) : undefined
+  if (list !== undefined) {
+    const failed = options.isError === true || options.error !== undefined
+    const summary = failed
+      ? actionErrorResult(result, options)
+      : (() => {
+        const snapshot = summarizeAgentListResult(result)
+        return snapshot === undefined ? undefined : formatAgentListSummary(snapshot)
+      })()
+    return {
+      title: 'List agents', summary: list.scope,
+      ...(summary === undefined ? {} : { result: summary }),
+    }
+  }
+  return undefined
+}
+
+/** Whether a valid action-tool call uses the compact semantic fallback. */
+export function isCompactActionTool(name: string, argsRaw: string): boolean {
+  return compactToolPresentation(name, argsRaw) !== undefined
+}
+
+/** Expanded semantic lines for action cards; list_agents keeps its history snapshot. */
+export function compactToolExpandedLines(
+  name: string,
+  argsRaw: string,
+  result = '',
+  options: CompactToolPresentationOptions = {},
+): string[] | undefined {
+  const presentation = compactToolPresentation(name, argsRaw, result, options)
+  if (presentation === undefined) return undefined
+  if (name === 'list_agents' && options.isError !== true && options.error === undefined) {
+    const parsed = parseJsonValue(result)
+    if (Array.isArray(parsed)) return JSON.stringify(parsed, null, 2).split('\n')
+    // The standard tool records its render() text, not the execute return:
+    // preserve that readable historical snapshot verbatim when it is plain
+    // text (`(no subagents)` or one row per child).
+    if (result.trim() !== '') return result.split(/\r\n|\r|\n/)
+  }
+  const lines = presentation.payload === undefined ? [] : presentation.payload.split(/\r\n|\r|\n/)
+  if (presentation.result !== undefined) lines.push(presentation.result)
+  return lines
+}
+
 /** Summary key preference per variant (args-derived). */
 const SUMMARY_KEYS: Record<string, string[]> = {
   bash: ['description', 'command'],
@@ -713,6 +1053,12 @@ export function readFoldedPreview(result: string): string {
  * @param cwd - workspace root for relativization; optional.
  */
 export function toolCardHeader(name: string, argsRaw: string, cwd?: string): ToolCardHeader {
+  // Action cards use a shape-level semantic title/identity instead of the
+  // generic first-string rule (`agent_id`/`sessionId` is identity, not the
+  // payload). Invalid or unknown shapes deliberately keep the old fallback.
+  const action = compactToolPresentation(name, argsRaw)
+  if (action !== undefined) return { title: action.title, summary: action.summary ?? '' }
+
   const variant = classifyTool(name)
   const toolTitle = TOOL_TITLES[name] ?? TUI_TOOL_TITLES[name]
   // Tool-specific summaries replace the args-derived base before the
@@ -1136,6 +1482,13 @@ function formatOwnedCallForCompactFocus(view: ToolCallView): string {
  * generic "Tool call" — the compact line names the actual tool instead
  * (plan §9.3: an unknown custom tool is still a Tool). */
 function focusToolFallbackDisplay(name: string, argsRaw: string, cwd?: string): string {
+  const action = compactToolPresentation(name, argsRaw)
+  if (action !== undefined) {
+    const identity = action.summary === undefined ? action.title : `${action.title} ${action.summary}`
+    const payload = action.payload === undefined || action.payload === '' ? '' : ` · ${firstLine(action.payload)}`
+    return `${identity}${payload}`
+  }
+
   const header = toolCardHeader(name, argsRaw, cwd)
   const known = classifyTool(name) !== 'others'
     || TOOL_TITLES[name] !== undefined
