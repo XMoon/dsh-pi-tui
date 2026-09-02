@@ -1847,9 +1847,17 @@ export class TuiApp {
    * capabilities fail benignly instead of touching a dead terminal. */
   private disposed = false
   /** Re-vendor lifecycle follow-up P3: whether this surface currently
-   * holds the process's single live-TUI slot (claim on start, release on
-   * stop — see start()/stop()). */
+   * holds the process's single live-TUI slot (claimed at the first
+   * successful start, released only by the FINAL dispose — never by
+   * stop(); see start()/dispose()). */
   private processTuiSlotClaimed = false
+  /** Re-vendor lifecycle follow-up P3 (review P2): the app's CURRENT
+   * effective editor submit keys (the builtin default until the
+   * HostKeybindingManager's construction callback populates them). The
+   * onEditorSubmitSync callback only caches here; committing to the
+   * process-global fork keybindings requires owning the process slot
+   * (see syncForkEditorSubmitKeys). */
+  private editorSubmitKeys: KeyId[] = ['enter']
   /**
    * The editor's SEAT (kimi's editorContainer): holds the editor normally,
    * the QuestionFrame while a question flow is active — so the dialog
@@ -2474,12 +2482,17 @@ export class TuiApp {
       // tui.input.submit is reset to its builtin default in the same write:
       // a pre-X037 instance (or test) may have left a remap behind.
       onEditorSubmitSync: (keys) => {
-        const kb = getKeybindings()
-        kb.setUserBindings({
-          ...kb.getUserBindings(),
-          'tui.input.submit': 'enter',
-          'tui.editor.submit': keys.length === 0 ? [] : keys.length === 1 ? keys[0]! : [...keys],
-        })
+        // Re-vendor lifecycle follow-up P3 (review P2): the callback only
+        // COMPUTES the app's effective submit keys. Committing them to
+        // the PROCESS-GLOBAL fork keybindings is restricted to the owner
+        // of the process slot — a mere CONSTRUCTED app must be
+        // read/compute-only, or the constructor of a second TuiApp would
+        // repaint the singleton (builtin 'enter') under a running app
+        // BEFORE the start() guard rejects it.
+        if (this.disposed) return
+        this.editorSubmitKeys = [...keys]
+        if (!this.processTuiSlotClaimed) return
+        this.syncForkEditorSubmitKeys()
       },
     })
     this.actionDispatcher = new AppActionDispatcher(this.buildActionHost())
@@ -2760,6 +2773,27 @@ export class TuiApp {
     return this.handleInput(data)
   }
 
+  /** Commit the app's CURRENT effective submit keys into the
+   * PROCESS-GLOBAL fork keybindings (`getKeybindings().setUserBindings` —
+   * X037: the fork editor routes the submit key through its OWN
+   * tui.editor.submit binding; `tui.input.submit` is reset to its builtin
+   * default in the same write so a pre-X037 instance/test remap cannot
+   * leak into every plain Input). Callable only while this surface owns
+   * the process slot (review P2: the singleton must never be repainted by
+   * a constructed-but-not-started or non-owning TuiApp). */
+  private syncForkEditorSubmitKeys(): void {
+    const kb = getKeybindings()
+    kb.setUserBindings({
+      ...kb.getUserBindings(),
+      'tui.input.submit': 'enter',
+      'tui.editor.submit': this.editorSubmitKeys.length === 0
+        ? []
+        : this.editorSubmitKeys.length === 1
+          ? this.editorSubmitKeys[0]!
+          : [...this.editorSubmitKeys],
+    })
+  }
+
   /** Enter raw mode and start rendering. Re-vendor lifecycle follow-up
    * P3: starting also CLAIMS the process's single live-TUI slot (the fork
    * keybindings are process-global) — a second concurrently live surface
@@ -2779,6 +2813,11 @@ export class TuiApp {
     if (firstStart) {
       claimProcessTuiSlot(`tui-${Date.now().toString(36)}`)
       this.processTuiSlotClaimed = true
+      // Review P2: only NOW — after owning the process slot — may the
+      // app commit its effective submit keys into the process-global
+      // fork keybindings (the constructor and any pre-start rebuilds
+      // only cached them).
+      this.syncForkEditorSubmitKeys()
     }
     try {
       this.tui.start()
