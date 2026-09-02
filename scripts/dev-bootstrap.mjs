@@ -8,7 +8,7 @@
  * @module dev-bootstrap
  */
 
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import {
@@ -801,7 +801,10 @@ function ephemeralRootOwnedBy(context, candidateRoot) {
   const markerInfo = existingPathInfo(markerPath)
   if (markerInfo === undefined || !markerInfo.isFile() || markerInfo.isSymbolicLink()) return undefined
   // The marker contract is an owner-only ordinary file: a forged mode or a
-  // hardlink (nlink > 1) is not acceptable proof of ownership.
+  // hardlink (nlink > 1) is not acceptable proof of ownership. The exact
+  // 0600 mode is a POSIX contract — dev:bootstrap source mode is explicitly
+  // POSIX-only (see bootstrapDevelopmentEnvironment), and Node does not
+  // implement owner/group/other permission distinctions on Windows.
   if (markerInfo.nlink !== 1 || (markerInfo.mode & 0o777) !== 0o600) return undefined
   let marker
   try {
@@ -1194,15 +1197,16 @@ export const _test = {
   EPHEMERAL_MARKER_KIND,
 }
 
-const BOOTSTRAP_LOCK_DIRECTORY = 'bootstrap-locks'
+// The bootstrap lock lives INSIDE the worktree root (next to the other
+// local dev state files) so it is shared by every process bootstrapping
+// that worktree regardless of XDG_CACHE_HOME / DSH_HOME / shell
+// environment, and different worktrees naturally have different locks.
+const DEV_BOOTSTRAP_LOCK = '.dsh-dev-bootstrap.lock'
 
-/** The per-worktree bootstrap lock path: one lock per canonical worktree
- * root, shared by every process bootstrapping that worktree. */
+/** The per-worktree bootstrap lock path: one lock per worktree root,
+ * shared by every process bootstrapping that worktree. */
 function bootstrapLockPath(context) {
-  const root = join(context.cacheRoot, BOOTSTRAP_LOCK_DIRECTORY)
-  assertRealDirectory(root, 'bootstrap lock root')
-  const key = createHash('sha256').update(canonicalPath(context.root)).digest('hex').slice(0, 16)
-  return join(root, `${key}.lock`)
+  return join(context.root, DEV_BOOTSTRAP_LOCK)
 }
 
 async function acquireBootstrapLock(context) {
