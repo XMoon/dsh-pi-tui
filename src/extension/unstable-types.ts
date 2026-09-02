@@ -185,9 +185,10 @@ export interface UnstableSurfaceHandle {
   requestRender(): void
   /**
    * Mount a low-level component (plan §9 option A) as a capturing overlay.
-   * The plugin renders RAW lines and receives RAW input; the Host owns
-   * the physical mount, focus, stacking, fullscreen migration and
-   * teardown. Caller-fiber-owned lease.
+   * The plugin renders RAW lines and receives the normalized input
+   * sequence (the preHostInput contract — see UnstableRawInputEvent;
+   * never raw OS bytes); the Host owns the physical mount, focus,
+   * stacking, fullscreen migration and teardown. Caller-fiber-owned lease.
    */
   mountComponent(component: UnstableMountedComponent, options?: TuiOverlayOptions): UnstableMountLease
 }

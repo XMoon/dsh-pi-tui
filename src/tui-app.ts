@@ -3408,8 +3408,8 @@ export class TuiApp {
     // keybindings — an advanced plugin can preempt ordinary editor/panel
     // input, but never a Host question/approval/overlay or a fatal-recovery
     // shortcut (session safety stays Host-owned). The registry normalizes
-    // the raw chunk itself (the shared Host decoder); a consuming capture
-    // stops the event here.
+    // the input sequence itself (the shared Host decoder); a consuming
+    // capture stops the event here.
     if (this.advancedInputRoute !== undefined && this.advancedInputRoute(data) === 'consumed') {
       return { consume: true }
     }
@@ -4329,11 +4329,11 @@ export class TuiApp {
           this.rightClickPasteFromClipboard()
         },
         // X043: defer the viewport input listener so the host's single
-        // router (installed below) sees every raw chunk BEFORE the
-        // viewport consumes wheel/mouse events and semantic scroll keys —
-        // the unstable raw-capture contract ("see/consume/rewrite ANY
-        // chunk") and the host key ladder must observe the same stream on
-        // BOTH screens.
+        // router (installed below) sees every normalized input sequence
+        // BEFORE the viewport consumes wheel/mouse events and semantic
+        // scroll keys — the unstable preHostInput contract
+        // ("see/consume/rewrite ANY sequence") and the host key ladder
+        // must observe the same stream on BOTH screens.
         deferViewportListener: true,
       })
       // Fullscreen layout: header and todo pinned, the transcript scrolls in
@@ -6798,9 +6798,9 @@ export class TuiApp {
    * re-register therefore invalidates every earlier press — a stale pair
    * from a previous capture session can never make the first Esc of a
    * new session count as the third press.
-   * @param data - the raw chunk.
+   * @param data - the normalized input sequence.
    * @returns true when the fail-safe fired (the caller must consume the
-   *   chunk and run the release).
+   *   sequence and run the release).
    */
   private unstableFailSafe(data: string): boolean {
     // Only a PRESS counts: Kitty CSI-u release/repeat events
@@ -6847,10 +6847,11 @@ export class TuiApp {
 
   /**
    * Phase 3: mount a low-level component (plan §9 option A) as a capturing
-   * overlay. The plugin renders RAW lines and receives RAW input (the
-   * Unstable contract — no sanitization); the host owns the physical
-   * mount, focus, stacking, fullscreen migration and teardown. The
-   * surface's final dispose closes every still-owned lease.
+   * overlay. The plugin renders RAW lines and receives the normalized
+   * input sequence (the preHostInput contract — no sanitization); the
+   * host owns the physical mount, focus, stacking, fullscreen migration
+   * and teardown. The surface's final dispose closes every still-owned
+   * lease.
    */
   showUnstableMount(
     component: import('./extension/unstable-types.ts').UnstableMountedComponent,
