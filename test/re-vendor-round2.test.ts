@@ -152,3 +152,64 @@ test('openKeybindingEditor disposes a NON-Focusable panel on close (round-5 P2)'
   assert.equal(disposeCount, 1, 'the non-Focusable panel must be disposed exactly once on close')
   app.stop()
 })
+
+test('right-click paste lands in the focused editor with `this` intact (round-9 P2)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: (_label, task) => { Promise.resolve(task()).catch(() => {}) },
+  }, {
+    readClipboardText: async () => 'pasted text',
+  })
+  app.start()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // The seat editor owns focus in fullscreen.
+  ;(app as unknown as { rightClickPasteFromClipboard(): void }).rightClickPasteFromClipboard()
+  await new Promise(resolve => setTimeout(resolve, 30))
+  const draft = app.getDraft()
+  assert.ok(draft.includes('pasted text'), `the paste must reach the editor draft with a live this:\n${draft}`)
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  app.stop()
+})
+
+test('right-click paste is DROPPED when focus moves during the clipboard read (round-9 P2)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let resolveClipboard!: (text: string) => void
+  const clipboard = new Promise<string>(resolve => { resolveClipboard = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: (_label, task) => { Promise.resolve(task()).catch(() => {}) },
+  }, {
+    readClipboardText: () => clipboard,
+  })
+  app.start()
+  await vt.waitForRender()
+  const handle = app.unstableSurfaceHandle()
+  const aInputs: string[] = []
+  const bInputs: string[] = []
+  const leaseA = handle.mountComponent({
+    render: () => ['A'],
+    handleInput: (data: string) => { aInputs.push(data) },
+  })
+  await vt.waitForRender()
+  assert.equal(leaseA.focused, true, 'A owns focus (the right-click target)')
+  ;(app as unknown as { rightClickPasteFromClipboard(): void }).rightClickPasteFromClipboard()
+  // While the clipboard read is pending, focus moves to B.
+  const leaseB = handle.mountComponent({
+    render: () => ['B'],
+    handleInput: (data: string) => { bInputs.push(data) },
+  })
+  await vt.waitForRender()
+  assert.equal(leaseB.focused, true, 'B owns focus now')
+  resolveClipboard('X')
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.deepEqual(aInputs, [], 'the stale target must never receive the paste')
+  assert.deepEqual(bInputs, [], 'the new focus owner must never receive the paste either')
+  leaseA.close()
+  leaseB.close()
+  app.stop()
+})

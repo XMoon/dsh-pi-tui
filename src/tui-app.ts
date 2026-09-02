@@ -2708,8 +2708,7 @@ export class TuiApp {
     // read swaps the active screen entirely.
     const screen = this.activeScreen
     const target = screen.getFocusedComponent()
-    const handleInput = target?.handleInput
-    if (handleInput === undefined) return
+    if (target === null || target === undefined || target.handleInput === undefined) return
     // Fire-and-forget through the owned-task entry (AGENTS.md hard rule —
     // never a bare `void promise`): a clipboard-read failure is classified
     // and logged, never an unhandled rejection; success feeds the paste.
@@ -2724,7 +2723,13 @@ export class TuiApp {
       // The right-click target must still be the focused component on the
       // SAME screen — otherwise the paste is dropped (never misdirected).
       if (this.disposed || this.activeScreen !== screen || screen.getFocusedComponent() !== target) return
-      handleInput(`\x1b[200~${text}\x1b[201~`)
+      // Call THROUGH the target — never cache the method: handleInput is a
+      // prototype method (TuiEditor/Input/FocusForwardingFrame) that reads
+      // `this`; a bare extracted call would run with this === undefined in
+      // strict mode and throw on the first access. The `!` is safe: the
+      // guard above plus the focus-identity re-check guarantee the method
+      // exists on the still-focused component.
+      target.handleInput!(`\x1b[200~${text}\x1b[201~`)
       screen.requestRender()
     }, { onCancel: () => {}, onError: () => {} })
   }
