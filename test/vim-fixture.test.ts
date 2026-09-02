@@ -13,7 +13,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
@@ -22,6 +22,20 @@ import { apply as applyExtensionHost } from '../src/extensions.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { EditorRegistry } from '../src/editor-registry.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** A minimal provider fiber that provides tuiStartup (the host's gate). */
 function startupPlugin(ctx: Context): void {
@@ -95,6 +109,7 @@ test('M10: the vim fixture validates the editor-extension seam over semantic eve
       pluginActionFor: (key) => service.keybindings.actionFor(key),
     })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
     assert.equal(app.seatEditorForTest().id, 'vim-editor', 'the vim fixture occupies the seat')
 
@@ -124,17 +139,18 @@ test('M10: the vim fixture validates the editor-extension seam over semantic eve
 
     // Host-owned submission: Enter submits through the HOST path and
     // clears the plugin draft — the plugin never re-implements it.
-    // Re-vendor lifecycle follow-up P3: the first app must stop BEFORE a
-    // second one starts — the vendored keybindings are process-global, so
-    // two CONCURRENTLY live apps would silently share them (the guard
-    // rejects the second start; see src/process-tui-slot.ts).
-    app.stop()
+    // Re-vendor lifecycle follow-up P3: the first app must be FINAL-DISPOSED
+    // before a second one starts — a stopped-but-alive surface still owns
+    // the process slot (its keybinding manager keeps syncing into the
+    // process-global fork keybindings); see src/process-tui-slot.ts.
+    app.dispose()
     const submitted: string[] = []
     const app2 = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, {
       editorRegistry: service.editors,
       pluginActionFor: (key) => service.keybindings.actionFor(key),
     })
     app2.start()
+    startedApps.add(app2)
     await vt.waitForRender()
     vt.sendInput('draft')
     await vt.waitForRender()

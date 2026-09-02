@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { getEventListeners } from 'node:events'
 import { join } from 'node:path'
@@ -15,6 +15,20 @@ import { FooterCommandRunner, KILL_GRACE_MS, type FooterCommandConfig } from '..
 import { TuiApp } from '../src/tui-app.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 const CONFIG: FooterCommandConfig = {
   command: 'node -e "process.stdout.write(\'hello\\n\')"',
@@ -527,6 +541,7 @@ test('the app renders the command surface; the Host instruction still merges on 
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setFooterCommandRows(['\x1b[31mred\x1b[0m line'])
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')

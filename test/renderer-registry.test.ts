@@ -7,10 +7,25 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { RendererRegistry } from '../src/renderer-registry.ts'
 import type { ExtensionView } from '../src/extension/public-types.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 function textView(text: string): ExtensionView {
   return { kind: 'text', spans: [{ text }] }
@@ -203,6 +218,7 @@ test('TuiApp: a tool renderer replaces the tool card; unload rebuilds the host c
     onExit: () => {},
   }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // A tool message.
   const message = {
@@ -243,6 +259,7 @@ test('TuiApp: a throwing tool renderer falls back to the host card (no stall)', 
     onExit: () => {},
   }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   registry.registerToolRenderer({
     id: 'exploder', toolName: 'bash',
@@ -277,6 +294,7 @@ test('TuiApp: the recorded rendererId matches the view actually built on content
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // First build: the renderer runs and the identity is recorded.
   const m1 = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{"a":1}', result: '', status: 'running' as const }
@@ -308,6 +326,7 @@ test('TuiApp: a host-fallback entry records the revision so renderers do NOT re-
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const user = { kind: 'user' as const, turn: 0, text: 'hello' }
   const e1 = app.messageCacheEntryForTest?.(user, 0)
@@ -337,6 +356,7 @@ test('TuiApp: renderer failures reach the health ledger sink (round-1 P3)', asyn
   const failures: { id: string; error: unknown }[] = []
   app.setRendererErrorSink((record) => failures.push(record))
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: '', status: 'running' as const }
   app.messageCacheEntryForTest?.(tool, 0)
@@ -368,6 +388,7 @@ test('TuiApp: a broken renderer view lets a lower-priority renderer claim the ca
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: '', status: 'ok' as const }
   const entry = app.messageCacheEntryForTest?.(tool, 0)
@@ -398,6 +419,7 @@ test('TuiApp: a renderer-returned view whose COMPILATION throws abdicates to the
   const failures: { id: string; error: unknown }[] = []
   app.setRendererErrorSink((record) => failures.push(record))
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: 'out', status: 'ok' as const }
   // Must NOT throw (the old code let 'compile boom' escape the render
@@ -440,6 +462,7 @@ test('TuiApp: a failed renderer RECOVERS and its health record clears (P1-08)', 
   })
   app.setRendererRecoveredSink(({ id }) => ledger.clearError('transcript.renderer', id, 'plugin'))
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: 'out', status: 'ok' as const }
   // FAIL: the renderer throws → the host card renders + the health record
@@ -475,6 +498,7 @@ test('TuiApp: the tool snapshot arguments/result are deeply frozen (round-1 P4)'
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const tool = {
     kind: 'tool' as const, turn: 0, name: 'bash',
@@ -513,6 +537,7 @@ test('TuiApp: a plugin-rendered component renders inside the transcript gutter (
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'assistant', turn: 0, text: 'host fallback never runs' }])
   await vt.waitForRender()
   // The wrapped rows follow the first `probe` row (the tail row of the
@@ -566,6 +591,7 @@ test('TuiApp: a resize does NOT re-run plugin renderers for unchanged content (w
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'assistant', turn: 0, text: 'first' }])
   await vt.waitForRender()
   assert.equal(calls, 1, 'the renderer must run exactly once for one message')

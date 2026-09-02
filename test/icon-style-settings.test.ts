@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
@@ -20,6 +20,20 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** A fake TuiSettingsLike recording every replace (the TUI settings
  * document surface; the writes array lets tests assert persistence). */
@@ -44,6 +58,7 @@ function setupSettings(options: { iconStyle?: string } = {}) {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
   ctx.provide('commands', {
     register: (def: { name: string; handler?: unknown }): (() => void) => {
@@ -179,7 +194,7 @@ test('/settings lists the Icon style row; missing and invalid persisted values f
   const row = stripTerminalSequences(view).split('\n').find(line => line.includes('Icon style'))
   assert.ok(row !== undefined && row.includes('Icon style') && row.includes('emoji'),
     `missing persisted value must fall back to emoji (row: ${row}):\n${view}`)
-  t.app.stop()
+  t.app.dispose()
 
   // An invalid persisted value never renders outside the values list.
   const t2 = setupSettings({ iconStyle: 'garbage' })
@@ -190,7 +205,7 @@ test('/settings lists the Icon style row; missing and invalid persisted values f
   assert.ok(stripTerminalSequences(view2).split('\n').some(line => line.includes('Icon style') && line.includes('emoji')),
     `invalid persisted value must fall back to emoji:\n${view2}`)
   assert.ok(!view2.includes('garbage'), `the raw invalid value must never render:\n${view2}`)
-  t2.app.stop()
+  t2.app.dispose()
 
   // A persisted minimal value renders as minimal.
   const t3 = setupSettings({ iconStyle: 'minimal' })

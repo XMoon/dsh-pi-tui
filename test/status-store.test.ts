@@ -6,9 +6,24 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { StatusStore } from '../src/status/store.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 function snapshotWith(overrides: Partial<StatusSnapshot>): StatusSnapshot {
   return { ...emptyStatusSnapshot(), ...overrides }
@@ -114,6 +129,7 @@ test('the TuiApp setStatus projection MERGES into the current sections (runner-d
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   // Seed the store with runner-derived facts (what refreshStatus projects).
   app.getFooterItemRegistry() // touch nothing
   const store = (app as unknown as { statusStore: StatusStore }).statusStore
@@ -146,6 +162,7 @@ test('setStatus clears stale owned facts: a gone model, a changed cwd re-derives
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const store = (app as unknown as { statusStore: StatusStore }).statusStore
   app.setStatus({ model: 'deepseek/flash', cwd: '/a/b', branch: 'main' })
   // The model disappears (the legacy label becomes the empty/'no model'
@@ -174,6 +191,7 @@ test('a same-value setStatus does not bump the store revision', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const store = (app as unknown as { statusStore: StatusStore }).statusStore
   app.setStatus({ model: 'deepseek/flash', cwd: '/a/b', branch: 'main', turns: 1, steps: 2 })
   const revision = store.revision()

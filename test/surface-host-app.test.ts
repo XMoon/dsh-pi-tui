@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { Text } from '@xmoon76/pi-tui'
@@ -20,11 +20,26 @@ import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function makeApp(ledger: ExtensionLedger): { vt: VirtualTerminal; app: TuiApp; host: SurfaceHost } {
   const vt = new VirtualTerminal(80, 24)
   const host = new SurfaceHost(ledger, () => app.requestRender())
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
   app.start()
+  startedApps.add(app)
   return { vt, app, host }
 }
 
@@ -282,6 +297,7 @@ test('a Cordis plugin registering through the real service renders into the surf
     const host = new SurfaceHost(service._ledger(), () => app.requestRender())
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
     host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
       surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
@@ -467,6 +483,7 @@ test('a Cordis plugin registering BEFORE attach renders once the surface attache
     const host = new SurfaceHost(service._ledger(), () => app.requestRender())
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
     // Attach AFTER the registration: attach re-bakes the outlets from the
     // current ledger, so the pre-attach badge renders immediately.

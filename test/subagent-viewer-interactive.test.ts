@@ -9,10 +9,24 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
 import { mergeDraft } from '../src/steer.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 const continuable = (overrides: Partial<SubagentViewerTarget> = {}): SubagentViewerTarget => ({
   parentSessionId: 'session-main',
@@ -54,6 +68,7 @@ async function startApp(
     onSubagentSubmit: events.onSubagentSubmit,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   return { vt, app }
 }
@@ -325,6 +340,7 @@ test('a replacement (plugin) editor receives the child draft and the follow-up t
     onSubagentSubmit: (request) => submits.push(request),
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   registry.register({ id: 'vim', priority: 0, create: () => ({
     component: { kind: 'text', spans: [{ text: 'vim' }] },
@@ -371,6 +387,7 @@ test('a replacement editor submit clears the child slot EXPLICITLY (no resurrect
     onSubagentSubmit: (request) => submits.push(request),
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   registry.register({ id: 'vim', priority: 0, create: () => ({
     component: { kind: 'text', spans: [{ text: 'vim' }] },
@@ -424,6 +441,7 @@ test('a replacement editor that edits through its OWN handleInput submits the LA
     onSubagentSubmit: (request) => submits.push({ text: request.text }),
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   registry.register({ id: 'vim', priority: 0, create: () => ({
     component: { kind: 'text', spans: [{ text: 'vim' }] },
@@ -469,6 +487,7 @@ test('parking keeps NEW replacement-editor text even when it is a SUBSTRING of t
   let pluginText = ''
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   registry.register({ id: 'vim', priority: 0, create: () => ({
     component: { kind: 'text', spans: [{ text: 'vim' }] },
@@ -627,6 +646,7 @@ test('a plugin keybinding still REACHES the runner inside a continuable viewer (
     },
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setViewerMode(continuable())
   await vt.waitForRender()

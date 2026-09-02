@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { HostKeybindingManager } from '../src/keybindings/manager.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -8,6 +8,20 @@ import { ActionEditorPanel } from '../src/keybinding-ui/action-editor.ts'
 import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../src/keybinding-ui/list.ts'
 import type { KeybindingMutationResult } from '../src/keybinding-ui/controller.ts'
 import { buildKeybindingEditorModel } from '../src/keybinding-ui/model.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 function plain(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, '')
@@ -463,6 +477,7 @@ test('fullscreen teardown disposes a pending tracked editor before late results 
   const app = new TuiApp(new VirtualTerminal(80, 24), { onSubmit: () => {}, onExit: () => {} })
   try {
     app.start()
+    startedApps.add(app)
     app.trackKeybindingEditor(panel)
     panel.handleInput('\r')
     panel.handleInput('\r')

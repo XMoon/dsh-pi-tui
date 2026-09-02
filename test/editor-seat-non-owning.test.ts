@@ -13,17 +13,32 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { EditorRegistry } from '../src/editor-registry.ts'
 import { EditorSeatMount } from '../src/editor-seat.ts'
 import type { EditorHost, ExtensionEditor, ExtensionView } from '../src/extension/public-types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function startApp(registry: EditorRegistry): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 

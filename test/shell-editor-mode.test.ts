@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
@@ -24,6 +24,20 @@ import { MentionProvider } from '../src/mentions.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** The owned-task entry the runner wires in production (real runOwned,
  * silent capture diag). */
@@ -75,6 +89,7 @@ function startApp(
   })
   app.setCommandCompletions(options.commands ?? [], cwd, options.fileReferences ?? null)
   app.start()
+  startedApps.add(app)
   return { vt, app, submitted, queued, get cancels() { return cancels } }
 }
 
@@ -664,6 +679,7 @@ test('a shell-mode draft round-trips through a plugin editor handoff with its mo
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
@@ -703,6 +719,7 @@ test('a plugin draft without a shell prefix restores in PROMPT mode (no stale !)
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // Enter shell mode, then let the plugin take over and REPLACE the draft
@@ -746,6 +763,7 @@ test('task-browser routing and the footer hint follow the VISIBLE seat editor, n
   }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // Enter shell mode, then hand the seat to a plugin editor (the hidden
@@ -792,6 +810,7 @@ test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the 
   }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
@@ -854,6 +873,7 @@ test('the plugin action sink steers the wire form and clears the editor', async 
   }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // A plugin editor whose document is the wire form dispatches steer.
@@ -933,6 +953,7 @@ test('a busy Esc cancels BEFORE a consuming plugin editor sees it', async (t) =>
   }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // A plugin editor whose handleInput CONSUMES every event (vim-like).
@@ -1096,6 +1117,7 @@ test('a plugin editor that DECLINES Esc still arms the host double-Esc cancel', 
   }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // A vim-like plugin that DECLINES Esc (returns false — it has no modal
@@ -1143,6 +1165,7 @@ test('a consumed plugin Esc disarms a window armed by a prior declined Esc', asy
   }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // A plugin that DECLINES the first Esc (arming the host window) and
@@ -1193,6 +1216,7 @@ test('a consumed onSingleEscape disarms the pending double-Esc window', async (t
   })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('\x1b') // not consumed → the host window arms
@@ -1219,6 +1243,7 @@ test('the external editor round-trips the WIRE form (shell modes switchable in $
   })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
@@ -1246,6 +1271,7 @@ test('a prompt-mode draft edited into a shell line in $EDITOR comes back as shel
   })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('hello')
@@ -1383,6 +1409,7 @@ test('the Stable autocomplete extension query keeps the WIRE document in shell m
     return null
   })
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // Force the host provider to return null (a failed compgen run), so the
@@ -1559,6 +1586,7 @@ test('the Stable autocomplete extension query keeps the wire document on MULTILI
     return null
   })
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
@@ -1628,6 +1656,7 @@ test('Ctrl+C on a BARE ! (empty body, shell mode) clears the mode and arms the e
   })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
@@ -1651,6 +1680,7 @@ test('a plugin DECLINED ! round-trips through the host shell mode into the wire 
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []
@@ -1738,6 +1768,7 @@ test('a Stable extension suggestion applies through the wire adapter symmetrical
     }
   })
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // Natural typing of the path must NOT consult the plugin chain (the
@@ -1841,6 +1872,7 @@ test('a Stable extension prefix computed on the WIRE line applies without corrup
     prefix: '!ch',
   }))
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // Force the host provider to return null (a failed compgen run) so the
@@ -1874,6 +1906,7 @@ test('a mid-body ! completion token (echo !ch) keeps its literal !', async (t) =
     prefix: '!ch',
   }))
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
@@ -1986,6 +2019,7 @@ test('the extension chain is NOT consulted on a continuation-line natural / trig
     }
   })
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
@@ -2069,6 +2103,7 @@ test('completion uses the VISIBLE seat mode — a hidden host shell mode never l
     return null
   })
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
@@ -2150,6 +2185,7 @@ test('a replacement editor submit keeps the shell wire form through the host fal
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []
@@ -2205,6 +2241,7 @@ test('a replacement plugin Tab runs the shell completion grammar of the wire doc
     return null
   })
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []
@@ -2276,6 +2313,7 @@ test('a text change after a declined Tab cancels the stale dropdown (no stale ac
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []
@@ -2344,6 +2382,7 @@ test('a declined pageUp/pageDown keeps the open dropdown alive (fork parity)', a
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []
@@ -2420,6 +2459,7 @@ test('a synchronous rejection restore survives the fallback sync-back', async (t
   }, { editorRegistry: registry })
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   const created: ReturnType<typeof pluginEditor>[] = []

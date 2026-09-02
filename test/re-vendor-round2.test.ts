@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { openerFor } from '../src/open-url.ts'
@@ -15,6 +15,20 @@ import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 const pasted = Array.from({ length: 12 }, (_, i) => `real line ${i + 1}`).join('\n')
 
@@ -27,6 +41,7 @@ test('steer carries the EXPANDED paste content, never the marker text', async ()
   const steered: string[] = []
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onSteer: (text: string) => steered.push(text) })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.steer': 'ctrl+x' }))
   await vt.waitForRender()
   pasteLarge(vt)
@@ -43,6 +58,7 @@ test('getDraft returns the EXPANDED wire form after a marker paste', async () =>
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   pasteLarge(vt)
   await vt.waitForRender()
@@ -65,6 +81,7 @@ test('a partially-applied suspend (stop throws mid-way) is rolled back to a runn
     runOwned: (_label, task) => { Promise.resolve(task()).catch(() => {}) },
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const screen = (app as unknown as { tui: { start: () => void; stop: () => void } }).tui
   const originalStop = screen.stop.bind(screen)
@@ -139,6 +156,7 @@ test('openKeybindingEditor disposes a NON-Focusable panel on close (round-5 P2)'
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   let disposeCount = 0
   // A plain Component panel — NOT Focusable — must still be disposed by
@@ -166,6 +184,7 @@ test('right-click paste lands in the focused editor with `this` intact (round-9 
     readClipboardText: async () => 'pasted text',
   })
   app.start()
+  startedApps.add(app)
   app.setFullscreen(true)
   await vt.waitForRender()
   // The seat editor owns focus in fullscreen.
@@ -190,6 +209,7 @@ test('right-click paste is DROPPED when focus moves during the clipboard read (r
     readClipboardText: () => clipboard,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const handle = app.unstableSurfaceHandle()
   const aInputs: string[] = []
@@ -221,6 +241,7 @@ test('fullscreen FOCUS_OUT with an active approval still cleans the selection an
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,

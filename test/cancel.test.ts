@@ -29,7 +29,7 @@ afterEach(() => {
   for (const app of [...startedApps]) {
     startedApps.delete(app)
     if (app.isDisposed()) continue
-    try { app.stop() } catch {}
+    try { app.dispose() } catch {}
   }
 })
 

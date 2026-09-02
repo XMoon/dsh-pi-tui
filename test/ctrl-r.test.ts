@@ -8,12 +8,27 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { FileHistorySearchSource } from '../src/history-search.ts'
 import { historyFilePath } from '../src/history.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 function tempHome(life: TestLifecycle): string {
   return life.tempDir('pi-tui-ctrl-r-')
@@ -45,6 +60,7 @@ async function makeApp(life: TestLifecycle, home: string, cwd = '/work/a') {
     historySearchCwd: () => cwd,
   })
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   return { vt, app, submitted }
@@ -122,6 +138,7 @@ test('an active transcript-search overlay keeps its keys (Ctrl+R never opens a s
     historySearchCwd: () => '/work/a',
   })
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   app.startTranscriptSearch()
@@ -155,6 +172,7 @@ test('Ctrl+R resolves the Current directory at OPEN time (a session switch moves
     historySearchCwd: () => liveCwd,
   })
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   // "Session switch": the live cwd moves before Ctrl+R is pressed.
@@ -192,6 +210,7 @@ test('UI4: Ctrl+R captures the session identity at OPEN time (a session switch m
     historySearchSessionId: () => liveSessionId,
   })
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('\x12') // Ctrl+R
@@ -228,6 +247,7 @@ test('Ctrl+R on a TINY terminal (8 rows) never clips the panel footer', async (t
     historySearchCwd: () => '/work/a',
   })
   app.start()
+  startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('\x12') // Ctrl+R
@@ -254,6 +274,7 @@ test('plugin keybindings can never claim Ctrl+R (host-reserved)', async (t) => {
     pluginActionFor: () => 'open-search' as const,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x12') // Ctrl+R
   await vt.waitForRender()

@@ -9,14 +9,29 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -32,6 +47,7 @@ test('the surface generation is stable across start/stop and fullscreen toggles'
   const initial = app.getSurfaceGeneration()
   app.stop()
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   assert.equal(app.getSurfaceGeneration(), initial, 'stop/start must not bump the generation')
   app.setFullscreen(true)
@@ -58,6 +74,7 @@ test('the external-editor round-trip does not bump the surface generation', asyn
     runOwned: () => {},
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const initial = app.getSurfaceGeneration()
   app.setDraft('hello')
@@ -119,6 +136,7 @@ test('a pending external-editor round-trip finishing after dispose restarts noth
     runOwned: () => {},
   })
   app.start()
+  startedApps.add(app)
   const pending = app.launchExternalEditor()
   app.dispose()
   release('late edit')
@@ -133,6 +151,7 @@ test('an in-flight theme autodetect settling after dispose applies nothing', asy
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const pending = app.autoDetectTheme()
   app.dispose()
   await pending

@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { testLifecycle } from './support/temp-lifecycle.ts'
@@ -24,6 +24,20 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** Bounded wall-clock spin (setImmediate turns, never a fixed setTimeout):
  * the repo's headless-test discipline for "wait a bounded window, then
@@ -204,6 +218,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const customItems = [{ schemaVersion: 1 as const, id: 'user:environment', kind: 'text' as const, text: 'PROD', tone: 'warning' as const }]
@@ -339,6 +354,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const known = { schemaVersion: 1 as const, id: 'user:environment', kind: 'text' as const, text: 'OLD', tone: 'warning' as const }
@@ -522,6 +538,7 @@ test('/footer Esc cancels without writing', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const settings = fakeSettings({ footer: 'default' })
@@ -592,6 +609,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const persisted = {
@@ -667,6 +685,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setFooterPreset('compact')
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
@@ -768,6 +787,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
@@ -853,6 +873,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
@@ -932,6 +953,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
@@ -1014,6 +1036,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const notifications: Array<string> = []
@@ -1138,6 +1161,7 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   // The REAL runtime, wired exactly like the production applyFooterSettings
   // syncs it: it can only ever see definitions a successful save commits.
   const runtime = wireRuntimeApply(app)
@@ -1252,6 +1276,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   // The REAL runtime: a failed save must never reach it.
   const runtime = wireRuntimeApply(app)
   try {
@@ -1357,6 +1382,7 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   // The REAL runtime, synced exactly like the production
   // applyFooterSettings: only a successful save's validated definitions
   // can reach it.

@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import {
   busyAfterTurnBoundary,
   compactingFromLog,
@@ -21,6 +21,20 @@ import { TuiApp } from '../src/tui-app.ts'
 import { WorkingIndicator } from '../src/working.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 /** A structural compaction event (dsh-compaction is not a peer). */
 function compactionEvent(
   type: 'compaction/start' | 'compaction/summary' | 'compaction/end',
@@ -33,6 +47,7 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -358,6 +373,7 @@ test('the progress bar advances on the working indicator tick', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setCompactionPhase('summarizing')
   await vt.waitForRender()

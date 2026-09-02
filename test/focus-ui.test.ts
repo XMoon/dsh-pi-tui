@@ -12,7 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { visibleWidth } from '@xmoon76/pi-tui'
@@ -21,10 +21,25 @@ import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth } from '../src/tui-
 import type { ToolPresenter } from '../src/present.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -768,6 +783,7 @@ test('a plugin tool renderer sees the EFFECTIVE expansion inside an expanded Tho
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(runningTurn(0))
   app.setFocusMode(true)
@@ -894,6 +910,7 @@ test('regular Ctrl+O derives ONLY the recent Focus turns; older roots stay colla
   const vt = new VirtualTerminal(100, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 4; turn += 1) folder.apply(miniTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -920,6 +937,7 @@ test('regular search reveal of a NON-recent root full-reveals its process (no de
   const vt = new VirtualTerminal(100, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 4; turn += 1) folder.apply(miniTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -954,6 +972,7 @@ test('regular Focus expanded roots render large diffs in FULL (no mouse, no cap)
     },
   })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -996,6 +1015,7 @@ test('cache identity: Ctrl+O ON caps a large diff, then /focus on FULL-REVEALS t
     },
   })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -1034,6 +1054,7 @@ test('cache identity: /focus off restores the ordinary CAPPED diff presentation 
     },
   })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -1149,6 +1170,7 @@ test('fullscreen Focus: a multiline Bash heredoc stays ONE row and never ghosts 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: bashHeredocPresenter() })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   // Baseline frame WITHOUT the tool: the alt screen's diff state is
   // established cleanly (a first frame with the multiline row would be a
@@ -1194,6 +1216,7 @@ test('fullscreen Focus expand/collapse: the expanded Bash card keeps the multili
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: bashHeredocPresenter() })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   // Same diff-frame sequence: clean baseline, then ONLY the appended
   // suffix (tool/call + settle) lands in one later frame — a real
@@ -1329,6 +1352,7 @@ test('fullscreen Focus Ctrl+O expands ONLY the recent roots; secondaries stay co
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -1365,6 +1389,7 @@ test('fullscreen Ctrl+O Expand Recent follows a pre-set global Thinking preferen
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 3; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -1390,6 +1415,7 @@ test('fullscreen Ctrl+O collapses ALL roots once any is expanded (plan §22.2)',
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -1414,6 +1440,7 @@ test('fullscreen Ctrl+O roundtrip is deterministic: recent-3 → all → recent-
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -1434,6 +1461,7 @@ test('fullscreen Ctrl+O Collapse All clears every secondary override; the global
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1536,6 +1564,7 @@ test('blank-row collapse works when the Thought header scrolled OUT of view (pla
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(offscreenThoughtTurn(0))
   app.setFocusMode(true)
@@ -1585,6 +1614,7 @@ test('a secondary content row toggles only the secondary; the adjacent blank row
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1629,6 +1659,7 @@ test('clicking the Thinking row toggles the secondary, never the root (plan §23
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1655,6 +1686,7 @@ test('a blank-row click collapses ONLY the owning Thought (plan §23.4)', async 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   folder.apply(settledThoughtTurn(2, 100))
@@ -1696,6 +1728,7 @@ test('clicking a blank row that belongs to NO Thought is a no-op (plan §23.5)',
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1725,6 +1758,7 @@ test('clicks on the editor seat and the footer never collapse a Thought (plan §
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1752,6 +1786,7 @@ test('the blank-row fallback never pierces an open overlay (plan §23.7)', async
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1794,6 +1829,7 @@ test('resize keeps the blank-row click map aligned (plan §23.8)', async () => {
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(offscreenThoughtTurn(0))
   app.setFocusMode(true)
@@ -1837,6 +1873,7 @@ test('a blank-row click BEFORE the first paint after a resize is dropped — reb
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(offscreenThoughtTurn(0))
   app.setFocusMode(true)
@@ -1886,6 +1923,7 @@ test('Collapse All clears a secondary override parked on a WINDOWED-AWAY message
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   folder.apply(settledThoughtTurn(2, 100))
@@ -1991,6 +2029,7 @@ test('a zero-height trailing process row must not turn the boundary spacer into 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(reasoningTailTurn(0))
   app.setFocusMode(true)
@@ -2020,6 +2059,7 @@ test('a Thought with NO process cards: the header trailing spacer stays a no-op'
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -2050,6 +2090,7 @@ test('the boundary spacer between two adjacent Thoughts is a no-op', async () =>
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   folder.apply(settledThoughtTurn(2, 100))
@@ -2083,6 +2124,7 @@ test('the collapsed header block trailing spacer stays a no-op — never expands
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -2109,6 +2151,7 @@ test('Ctrl+O with a PARKED expansion on a windowed-away root still expands the v
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -2139,6 +2182,7 @@ test('local shell cards stay folded in fullscreen Focus even with the Ctrl+O mas
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const long = Array.from({ length: 30 }, (_, i) => `shell line ${i}`).join('\n')
   app.pushLocalMessage({
     kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
@@ -2177,6 +2221,7 @@ test('gutter blocker: the fullscreen Focus hit-map stays aligned across the disc
   const vt = new VirtualTerminal(40, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -2268,6 +2313,7 @@ test('the truncated marker stays ONE row inside the gutter: a click below it sti
   const vt = new VirtualTerminal(16, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     // Turn 1: a max-tokens turn whose final carries the truncated marker.
@@ -2344,6 +2390,7 @@ test('editor/footer clicks are clipped OUT of the transcript hit-test when scrol
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(offscreenThoughtTurn(0))
   app.setFocusMode(true)
@@ -2395,6 +2442,7 @@ test('Collapse All keeps a local shell card mouse-expanded (its override is not 
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   const long = Array.from({ length: 30 }, (_, i) => `shell line ${i}`).join('\n')

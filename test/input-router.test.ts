@@ -16,9 +16,24 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { InputRouter } from '../src/input-router.ts'
 import type { NormalizedKey, TuiAction } from '../src/extension/public-types.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** The default context: NO host action resolves anything (the effective
  * keymap is empty) — so no key is runtime-reserved. Tests that need the
@@ -270,6 +285,7 @@ test('TuiApp: a throwing plugin action is isolated and reported with its contrib
     pluginActionIdFor: key => key.key === 'x' && key.ctrl && key.alt ? 'binding-x' : undefined,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x1b\x18')
   await vt.waitForRender()
@@ -290,6 +306,7 @@ test('TuiApp: host-routed typing updates the visible editor immediately', async 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
 
   const seat = app.seatEditorForTest()
@@ -334,6 +351,7 @@ test('TuiApp: a plugin keybinding fires the semantic action (headless)', async (
     },
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // Ctrl+Alt+X as a legacy sequence (ESC + Ctrl+X = \x18): the fork's
   // parseKey maps it to ctrl+alt+x — a non-printable normalized key the
@@ -367,6 +385,7 @@ test('TuiApp: an untracked keybinding error is not reported under the key name',
     pluginActionFor: () => { throw new Error('resolver boom') },
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x1b\x18')
   await vt.waitForRender()
@@ -393,6 +412,7 @@ test('TuiApp: active host lifecycle keys never fire a plugin binding (action-dri
     pluginActionFor: (key) => `open-search` as const,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // Plain Enter: the editor consumes it (tui.input.submit) — never a
   // plugin binding.
@@ -438,6 +458,7 @@ test('TuiApp: a key with NO active host action falls through to a plugin binding
     pluginActionFor: (key) => key.key === 'v' && key.ctrl ? 'open-search' as const : undefined,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // Default keymap: Ctrl+V is app.clipboard.pasteMedia (ACTIVE, CONSUMING
   // host action) — the host ladder consumes it, the plugin never sees it.
@@ -476,6 +497,7 @@ test('TuiApp: a plugin binding NEVER steals a key the focused editor owns (P1-06
     editorRegistry: registry,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // While the HOST editor is focused (the default), ↑ must reach the
   // editor — never fire the plugin binding.
@@ -521,6 +543,7 @@ test('TuiApp: submitDraft clears the draft like a normal submit (round-1 P2)', a
     onExit: () => {},
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // Type a draft, then submit via the host-owned path.
   app.setDraft('hello from a plugin action')

@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -28,6 +28,20 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** Poll an async predicate until true or the timeout elapses (the picker
  * listing runs behind a scheduler yield inside a detached task). */
@@ -272,6 +286,7 @@ function setup(options: {
   const vt = new VirtualTerminal(options.width ?? 100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
@@ -1014,7 +1029,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
   assert.ok((failed as { text: string }).text.includes('failed'), `error text missing: ${JSON.stringify(failed)}`)
   assert.equal(replaced, 1, 'the write must be attempted')
   assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+x'], 'a failed reset must keep the running keymap')
-  t.app.stop()
+  t.app.dispose()
 
   let okReplaced = 0
   // Round 35: the success fixture is the reviewer's regression shape — the
@@ -1044,7 +1059,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
   assert.equal(okReplaced, 1)
   assert.equal(okReads, 1, 'the reset must read the settings document exactly ONCE (no post-write read)')
   assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+s'], 'the reset must REBUILD the running keymap from the cleared document (defaults)')
-  t.app.stop()
+  t.app.dispose()
 
   // Round 30: a throwing FIRST read must not escape the handler either —
   // the reset reports an error and the running keymap stays untouched.

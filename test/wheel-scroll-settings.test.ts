@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
@@ -26,6 +26,20 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../src/wheel-scroll.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 // ── the pure parsing helper ──────────────────────────────────────────────
 
@@ -75,6 +89,7 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
   ctx.provide('commands', {
     register: (def: { name: string; handler?: unknown }): (() => void) => {
@@ -204,7 +219,7 @@ test('/settings lists the Mouse wheel lines row; missing and invalid persisted v
   const row = stripTerminalSequences(view).split('\n').find(line => line.includes('Mouse wheel lines'))
   assert.ok(row !== undefined && row.includes('1'),
     `missing persisted value must fall back to 1 (row: ${row}):\n${view}`)
-  t.app.stop()
+  t.app.dispose()
 
   // An invalid persisted value never renders outside the values list.
   const t2 = setupSettings({ wheelScrollLines: 'garbage' })
@@ -215,7 +230,7 @@ test('/settings lists the Mouse wheel lines row; missing and invalid persisted v
   assert.ok(stripTerminalSequences(view2).split('\n').some(line => line.includes('Mouse wheel lines') && line.includes('1')),
     `invalid persisted value must fall back to 1:\n${view2}`)
   assert.ok(!view2.includes('garbage'), `the raw invalid value must never render:\n${view2}`)
-  t2.app.stop()
+  t2.app.dispose()
 
   // A persisted 8 renders as 8.
   const t3 = setupSettings({ wheelScrollLines: '8' })
@@ -283,6 +298,7 @@ test('the default wheel step is 1: one wheel event scrolls one line', async () =
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript(longTranscript().messages(), longTranscript().turnActivities())
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -300,6 +316,7 @@ test('setWheelScrollLines reaches the NEXT alt-screen mount (one wheel event scr
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript(longTranscript().messages(), longTranscript().turnActivities())
   app.setWheelScrollLines(3)
   app.setFullscreen(true)
@@ -318,6 +335,7 @@ test('a change while fullscreen is ACTIVE applies on the next re-entry (v1 seman
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript(longTranscript().messages(), longTranscript().turnActivities())
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -347,6 +365,7 @@ test('setWheelScrollLines normalizes defensively', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript(longTranscript().messages(), longTranscript().turnActivities())
   app.setWheelScrollLines(0)
   app.setWheelScrollLines(-5)

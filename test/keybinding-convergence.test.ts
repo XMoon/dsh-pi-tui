@@ -21,7 +21,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { matchesKey } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
@@ -29,6 +29,20 @@ import { HostKeybindingManager } from '../src/keybindings/manager.ts'
 import { deriveKeybindingContext } from '../src/keybindings/context.ts'
 import { InputRouter } from '../src/input-router.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 const editorContext = deriveKeybindingContext({ focusedSeat: 'editor' })
 
@@ -121,6 +135,7 @@ test('4.1f a working submit remap permits and runs leader Enter', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const parsed = parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: {
@@ -288,6 +303,7 @@ test('4.7 leader completion obeys the action context predicate', async () => {
     onOpenTasks: () => { tasksOpened += 1 },
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: { 'app.tasks.open': '<leader>t' },
@@ -324,6 +340,7 @@ test('4.8 a remapped interrupt (ctrl+x) keeps its semantic behavior', async () =
     onCancel: () => { cancels.push('cancel') },
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' }))
   await vt.waitForRender()
   // Busy: ctrl+x must interrupt (the semantic action), never fall through
@@ -353,6 +370,7 @@ test('4.10 a real armed window is disarmed by the viewer-close Esc', async () =>
     onCancel: () => { cancels += 1 },
   })
   app.start()
+  startedApps.add(app)
   // First main Esc: not consumed → handleInterruptAction ARMS the window.
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -391,6 +409,7 @@ test('4.9a a declined host action is not re-reserved (reaches the plugin)', asyn
     pluginActionFor: (key) => key.key === 'v' && key.ctrl ? 'open-search' : undefined,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x16') // ctrl+v
   await vt.waitForRender()
@@ -413,6 +432,7 @@ test('4.9b a declined host action reaches a REPLACEMENT editor', async () => {
     editorRegistry: registry,
   })
   app.start()
+  startedApps.add(app)
   // Register a replacement editor that DECLINES Ctrl+V (handleInput
   // returns undefined). The declined host pasteMedia action must reach
   // the replacement editor first, then the plugin.
@@ -468,6 +488,7 @@ test('5.1 a remapped interrupt (ctrl+x) does NOT enter the physical-Escape edito
     editorRegistry: registry,
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' }))
   // A replacement editor whose handleInput CONSUMES Ctrl+X — the remapped
   // interrupt must NOT be routed to it (a replacement editor's Esc seams
@@ -507,6 +528,7 @@ test('5.2 a remapped interrupt keeps its consecutive-press idle semantics', asyn
     onRewind: () => { rewinds += 1 },
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' }))
   await vt.waitForRender()
   // Idle: two Ctrl+X presses within the window = the idle double action
@@ -576,6 +598,7 @@ test('4.6c a leader-only action actually fires its completion', async () => {
     onExit: () => {},
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: { 'app.transcript.toggleFullscreen': '<leader>n' },
@@ -620,6 +643,7 @@ test('4.8b Ctrl+X → Esc → Ctrl+X does NOT fire the idle double action', asyn
     onRewind: () => { rewinds += 1 },
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.agent.interrupt': 'ctrl+x' }))
   await vt.waitForRender()
   vt.sendInput('\x18') // ctrl+x — arm the interrupt window
@@ -650,6 +674,7 @@ test('5.4 stop() cancels a pending leader sequence', async () => {
   let tasksOpened = 0
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onOpenTasks: () => { tasksOpened += 1 } })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: { 'app.tasks.open': '<leader>t' },
@@ -672,11 +697,13 @@ test('5.5 stop() clears the interrupt double-action window', async () => {
   let cancels = 0
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => { cancels += 1 } })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x1b') // first Esc (idle) arms the double window
   await vt.waitForRender()
   app.stop()
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // A post-restart single Esc must NOT read as the second press (which
   // would cancel/rewind an empty session).
@@ -857,6 +884,7 @@ test('5.15 a disabled submit never fires on LF/Enter through the host editor', a
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': false }))
   await vt.waitForRender()
   app.setDraft('stays')
@@ -881,6 +909,7 @@ test('6.1a submit remapped onto a HOST key: the editor-owned winner submits, ste
     onExit: () => {},
   })
   app.start()
+  startedApps.add(app)
   // The user moves submit onto Ctrl+S — the steer BUILTIN's key. The user
   // rule (200) beats the builtin (100), and the WINNER's owner decides the
   // executor: editor → the fork editor submits. The host ladder must NOT
@@ -975,6 +1004,7 @@ test('6.3 mixed direct + leader submit: BOTH triggers stay, Enter is removed', a
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: { 'app.input.submit': ['ctrl+z', '<leader>s'] },
@@ -1097,6 +1127,7 @@ test('6.6a leader-only REPLACES the builtin direct key of a normal Host action',
     onExit: () => {},
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: { 'app.todo.toggle': '<leader>t' },
@@ -1129,6 +1160,7 @@ test('6.6b leader-only REPLACES the builtin steer key (Ctrl+S no longer steers)'
     onSteer: (text: string) => steered.push(text),
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: { 'app.input.steer': '<leader>s' },
@@ -1205,6 +1237,7 @@ test('6.6d a leader-only declaration WITHOUT a leader key leaves the builtin int
     onExit: () => {},
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     bindings: { 'app.todo.toggle': '<leader>t' },
   }))
@@ -1277,6 +1310,7 @@ test('7.2 a plugin-owner winner NEVER enters the Host dispatcher', async () => {
     onExit: () => { exits += 1 },
   })
   app.start()
+  startedApps.add(app)
   // A smuggled plugin rule (the internal keymap path) carrying a
   // HOST-private action — the registry rejects it at registration, and
   // the host dispatcher must never execute it either (review finding:
@@ -1305,6 +1339,7 @@ test('7.2b a legit plugin action still executes through the Stable remainder', a
     pluginActionFor: (key) => key.key === 'x' && key.ctrl && key.alt ? 'open-search' : undefined,
   })
   app.start()
+  startedApps.add(app)
   app.keybindingsManager().setPluginRules([{ id: 'plugin', action: 'open-search', key: 'ctrl+alt+x' }])
   await vt.waitForRender()
   vt.sendInput('\x1b\x18') // ctrl+alt+x

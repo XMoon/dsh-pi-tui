@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { FooterComposer } from '../src/footer/composer.ts'
 import { FooterConfiguratorModel, sameFooterCustomItem } from '../src/footer/configurator-model.ts'
@@ -19,10 +19,25 @@ import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 import type { StatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function startApp(cols = 100, rows = 30): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(cols, rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -715,6 +730,7 @@ test('resizing the terminal LARGER after opening does not clip the configurator'
   const vt = new VirtualTerminal(40, 10)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
   openDefault(app)
   await vt.waitForRender()
@@ -925,6 +941,7 @@ test('the whole-footer composer preview is sanitized too (SGR survives, OSC/CSI 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
   const model = new FooterConfiguratorModel({
     schemaVersion: 1,
@@ -1034,6 +1051,7 @@ for (const rows of [3, 4, 6, 40]) {
     const vt = new VirtualTerminal(100, rows)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
+    startedApps.add(app)
     openDefault(app)
     await vt.waitForRender()
     const view = vt.getViewport()
@@ -1052,6 +1070,7 @@ for (const cols of [40, 80, 120]) {
       const vt = new VirtualTerminal(cols, rows)
       const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
       app.start()
+      startedApps.add(app)
       app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
       openDefault(app)
       await vt.waitForRender()
@@ -1086,6 +1105,7 @@ test('a 4-physical-row preview cannot eat the editable body (10-row terminal)', 
   const vt = new VirtualTerminal(40, 10)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setStatus({ model: `a-very-long-model-name/${'x'.repeat(120)}`, cwd: '/home/x/proj' })
   const model = openDefault(app)
   await vt.waitForRender()
@@ -1207,7 +1227,7 @@ test('PR E: Save & Exit saves; Discard & Exit closes without saving', async () =
     assert.equal(saved, 1)
     assert.equal(cancelled, 0)
     assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the overlay closed after success')
-    app.stop()
+    app.dispose()
   }
   // Discard & Exit.
   {
@@ -1313,6 +1333,7 @@ test('PR E: the exit guard keeps all three actions visible at 40x10', async () =
   const vt = new VirtualTerminal(40, 10)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   let cancelled = 0
   openWith(app, { onCancel: () => { cancelled += 1 } })
   await vt.waitForRender()
@@ -1371,6 +1392,7 @@ test('PR E: closing during an in-flight save is safe (no unhandled rejection)', 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   let attempts = 0
   let release: (() => void) | undefined
   const gate = new Promise<void>(resolve => { release = resolve })
@@ -1397,6 +1419,7 @@ test('PR E: the Save row stays visible at 40x10 and Saving… survives a resize'
   const vt = new VirtualTerminal(40, 10)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   let attempts = 0
   let release: (() => void) | undefined
   const gate = new Promise<void>(resolve => { release = resolve })

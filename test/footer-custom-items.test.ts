@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { FooterComposer } from '../src/footer/composer.ts'
@@ -24,6 +24,20 @@ import { FooterConfiguratorModel, itemMenuFor } from '../src/footer/configurator
 import type { FooterItemDefinition } from '../src/footer/types.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 const VALID_ENVIRONMENT = {
   schemaVersion: 1 as const,
@@ -310,6 +324,7 @@ test('Custom Text creation is visible in the real configurator UI and saves both
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const catalog = new FooterCustomItemCatalog()
   const registry = new FooterItemRegistry(app.getFooterItemRegistry())
   registry.setCustomSource(catalog)

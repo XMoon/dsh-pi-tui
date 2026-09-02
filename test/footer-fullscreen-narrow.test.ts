@@ -17,10 +17,24 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp, type StatusData } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** Realistic status: at narrow widths the status row wraps 3+ times. */
 const RICH_STATUS: StatusData = {
@@ -48,6 +62,7 @@ async function startFullscreenApp(columns: number, rows: number): Promise<{ vt: 
   const vt = new VirtualTerminal(columns, rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setStatus(RICH_STATUS)
   app.setTodoSummary([
     { content: 'fix the narrow footer clipping', status: 'in_progress' },
@@ -150,7 +165,7 @@ test('the footer never clips out of a narrow fullscreen viewport', async () => {
       assert.ok(view.length > 0, `empty viewport at ${columns}x${viewportRows}`)
       assertPinnedChromeIntact(app, view, columns, viewportRows, expectStats, expectModel)
     } finally {
-      app.stop()
+      app.dispose()
     }
   }
 })
@@ -255,6 +270,7 @@ test('a regular -> fullscreen switch recomposes the budget (widgets are fullscre
   const host = new SurfaceHost(ledger, () => app.requestRender())
   app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
   app.start()
+  startedApps.add(app)
   host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
     surfaceId: host.surfaceId,
     generation: 1,
@@ -313,6 +329,7 @@ test('a surface with ZERO available footer slots renders nothing at all', async 
   const vt = new VirtualTerminal(80, 4)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setStatus(RICH_STATUS)
   await vt.waitForRender()
   app.setFullscreen(true)

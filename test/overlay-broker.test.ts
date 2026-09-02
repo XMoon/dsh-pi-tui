@@ -6,9 +6,24 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { OverlayBroker } from '../src/overlay-broker.ts'
 import type { OverlayHandle } from '@xmoon76/pi-tui'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** A fake overlay handle recording setHidden/hide calls. */
 function fakeHandle(label: string): OverlayHandle & { label: string; hiddenLog: string[] } {
@@ -131,6 +146,7 @@ test('TuiApp: a plugin overlay lease mounts through the broker and closes idempo
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // A plugin overlay via the public lease API.
   const lease = app.showExtensionOverlay({
@@ -168,6 +184,7 @@ test('TuiApp: the surface dispose closes every still-owned plugin overlay lease'
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const lease = app.showExtensionOverlay({
     kind: 'text',
@@ -197,6 +214,7 @@ test('TuiApp: final dispose stops the output viewer refresh timer even without t
     const vt = new VirtualTerminal(80, 24)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
     let refreshes = 0
     app.openOutputViewer({
@@ -229,6 +247,7 @@ test('TuiApp: openOutputViewer after final dispose mints no refresh timer (round
     const vt = new VirtualTerminal(80, 24)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
     app.dispose()
     let refreshes = 0
@@ -252,6 +271,7 @@ test('TuiApp: final dispose leaves the terminal cursor VISIBLE (every overlay un
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // An open overlay whose physical hide() writes hideCursor when the
   // last overlay leaves the stack.
@@ -271,6 +291,7 @@ test('TuiApp: a plugin overlay lease survives a fullscreen toggle (round-1 findi
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const lease = app.showExtensionOverlay({
     kind: 'text',
@@ -313,6 +334,7 @@ test('TuiApp: a LATE showExtensionOverlay after dispose is inert — no new leas
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.dispose()
   // The review repro: before dispose 0 owned leases; a late plugin call
@@ -337,6 +359,7 @@ test('TuiApp: an explicitly closed lease is dropped from the owned set (round-1 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const lease = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'x' }] })
   assert.equal(app.ownedExtensionOverlayLeasesForTest(), 1)
