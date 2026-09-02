@@ -269,6 +269,12 @@ jobs:
       - name: Pi component compatibility contract
         run: pnpm gate:pi-surface-compat
 
+      # Vendored-fork divergence gate: every local src change must be
+      # covered by vendor-divergences.json against the pinned upstream
+      # blobs (resolved via the codeload tarball fallback on CI).
+      - name: Vendored fork divergence gate
+        run: pnpm gate:pi-vendor-diff
+
       - name: Verify naming and packaging contracts
         run: node scripts/naming-gate.mjs
 
