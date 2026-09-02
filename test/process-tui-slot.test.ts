@@ -14,6 +14,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { getKeybindings } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { liveTuiCountForTest } from '../src/process-tui-slot.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
@@ -166,4 +167,32 @@ test('the final dispose releases the process slot exactly once (idempotent)', ()
   assert.equal(app.isDisposed(), true)
   app.dispose() // idempotent
   assert.equal(liveTuiCountForTest(), 0, 'a repeated dispose must not re-release anything')
+})
+
+test('a constructed-but-not-started TuiApp never pollutes the shared global keybindings (review P2)', () => {
+  const appA = newApp()
+  appA.start()
+  // A owns the process slot: its remap commits to the PROCESS-GLOBAL
+  // fork keybindings (the shared resource the guard protects).
+  appA.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
+  assert.equal(getKeybindings().getUserBindings()['tui.editor.submit'], 'ctrl+x', 'A must own the global submit binding')
+  // B's CONSTRUCTION runs the HostKeybindingManager constructor, whose
+  // initial onEditorSubmitSync used to repaint the singleton with the
+  // builtin 'enter' — corrupting A BEFORE the start() guard ever ran.
+  // The sync is now compute-only until the app owns the process slot.
+  const appB = newApp()
+  assert.equal(getKeybindings().getUserBindings()['tui.editor.submit'], 'ctrl+x', 'B construction must not touch the global binding')
+  // B's own pre-start keybinding modifications are read/compute-only too.
+  appB.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+l' }))
+  assert.equal(getKeybindings().getUserBindings()['tui.editor.submit'], 'ctrl+x', 'a not-yet-started B must be read/compute-only')
+  // The rejected start must not have polluted anything either.
+  assert.throws(() => appB.start(), /one live TuiApp per process/)
+  assert.equal(getKeybindings().getUserBindings()['tui.editor.submit'], 'ctrl+x')
+  assert.equal(appB.keybindingsManager().keysFor('app.input.submit').join(','), 'ctrl+l', 'B keeps its own computed keymap')
+  // After A's final dispose the slot is free: B starts and commits its
+  // OWN effective keys into the global singleton exactly then.
+  appA.dispose()
+  appB.start()
+  assert.equal(getKeybindings().getUserBindings()['tui.editor.submit'], 'ctrl+l', 'the owner commits its keys on the first start')
+  appB.dispose()
 })
