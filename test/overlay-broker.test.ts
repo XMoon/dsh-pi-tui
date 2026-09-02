@@ -186,29 +186,64 @@ test('TuiApp: the surface dispose closes every still-owned plugin overlay lease'
 })
 
 test('TuiApp: final dispose stops the output viewer refresh timer even without the closer (X007)', async () => {
+  const { mock } = await import('node:test')
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  await vt.waitForRender()
-  let refreshes = 0
-  app.openOutputViewer({
-    title: 'job output',
-    initial: '',
-    refresh: () => { refreshes += 1; return 'tick' },
-    intervalMs: 10,
-  })
-  await vt.waitForRender()
-  assert.ok(refreshes >= 1, 'the viewer must refresh while open')
-  // FINAL dispose WITHOUT invoking the closer: the panel-owned interval
-  // must be cleared through the disposeOnHide chain (overlay hide →
-  // FocusForwardingFrame.dispose → OutputViewerPanel.dispose), so the
-  // refresh callback never fires into the disposed surface.
-  app.dispose()
-  const afterDispose = refreshes
-  await new Promise(resolve => setTimeout(resolve, 60))
-  assert.equal(refreshes, afterDispose, 'the refresh timer must not fire after final dispose')
+  // Deterministic timer control: only setInterval is mocked (the app's
+  // render scheduling and waitForRender use real setTimeout/nextTick), so
+  // a leaked 10ms interval would fire on tick() regardless of load.
+  mock.timers.enable({ apis: ['setInterval'] })
+  try {
+    const vt = new VirtualTerminal(80, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    await vt.waitForRender()
+    let refreshes = 0
+    app.openOutputViewer({
+      title: 'job output',
+      initial: '',
+      refresh: () => { refreshes += 1; return 'tick' },
+      intervalMs: 10,
+    })
+    mock.timers.tick(10)
+    assert.ok(refreshes >= 1, 'the viewer must refresh while open')
+    // FINAL dispose WITHOUT invoking the closer: the panel-owned interval
+    // must be cleared through the disposeOnHide chain (overlay hide →
+    // FocusForwardingFrame.dispose → OutputViewerPanel.dispose), so the
+    // refresh callback never fires into the disposed surface.
+    app.dispose()
+    const afterDispose = refreshes
+    mock.timers.tick(1000) // a leaked 10ms interval would fire 100 times
+    assert.equal(refreshes, afterDispose, 'the refresh timer must not fire after final dispose')
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('TuiApp: openOutputViewer after final dispose mints no refresh timer (round-1 P1)', async () => {
+  const { mock } = await import('node:test')
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  mock.timers.enable({ apis: ['setInterval'] })
+  try {
+    const vt = new VirtualTerminal(80, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    await vt.waitForRender()
+    app.dispose()
+    let refreshes = 0
+    const closer = app.openOutputViewer({
+      title: 'job output',
+      initial: '',
+      refresh: () => { refreshes += 1; return 'tick' },
+      intervalMs: 10,
+    })
+    closer() // must be inert
+    mock.timers.tick(1000)
+    assert.equal(refreshes, 0, 'a disposed surface must not mint a refresh timer')
+  } finally {
+    mock.timers.reset()
+  }
 })
 
 test('TuiApp: a plugin overlay lease survives a fullscreen toggle (round-1 finding 2)', async () => {

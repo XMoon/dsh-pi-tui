@@ -10524,6 +10524,12 @@ export class TuiApp {
     onCancel: () => void,
     options: TaskBrowserOptions = {},
   ): TaskBrowserHandle {
+    // A finally-disposed surface must not mint the panel's 1s elapsed
+    // tick: the inert overlay handle would never dispose the panel, so
+    // the unref'd interval would keep firing into the dead panel.
+    if (this.disposed) {
+      return { close: () => {}, setItems: () => {} }
+    }
     const panel = new TaskBrowserPanel(
       items.map(item => ({ ...item })),
       options.maxVisible ?? 10,
@@ -10746,6 +10752,10 @@ export class TuiApp {
     onClose?: () => void
     intervalMs?: number
   }): () => void {
+    // A finally-disposed surface must not mint a live refresh timer: the
+    // inert overlay handle would never dispose the panel, so the unref'd
+    // interval would keep calling options.refresh() forever.
+    if (this.disposed) return () => {}
     const panel = new OutputViewerPanel(options.title, options.initial)
     let closed = false
     const close = (): void => {

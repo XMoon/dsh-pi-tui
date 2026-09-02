@@ -87,23 +87,44 @@ function resolveUpstream() {
       // checkout exists but the pinned commit is not present
     }
   }
-  // Network fallback: codeload tarball of the pinned commit.
+  // Tarball fallback: codeload tarball of the pinned commit. A local
+  // tarball (PI_UPSTREAM_TARBALL) is honored first so the extraction
+  // path is testable hermetically (no network).
   const tmp = mkdtempSync(path.join(tmpdir(), 'pi-vendor-diff-'))
-  const url = `https://codeload.github.com/${repository}/tar.gz/${commit}`
-  const curl = spawnSync('curl', ['-fsSL', url], { encoding: 'utf8' })
-  if (curl.status !== 0) {
-    rmSync(tmp, { recursive: true, force: true })
-    throw new Error(
-      `cannot resolve upstream ${repository}@${commit}: set PI_UPSTREAM_REPO to a checkout containing the pinned commit ` +
-        `(or make curl available for the tarball fallback)`,
-    )
+  let tarball
+  let source
+  if (process.env.PI_UPSTREAM_TARBALL) {
+    try {
+      tarball = readFileSync(process.env.PI_UPSTREAM_TARBALL)
+    } catch (error) {
+      rmSync(tmp, { recursive: true, force: true })
+      throw new Error(`cannot read PI_UPSTREAM_TARBALL: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    source = process.env.PI_UPSTREAM_TARBALL
+  } else {
+    const url = `https://codeload.github.com/${repository}/tar.gz/${commit}`
+    // NO encoding: the tarball is gzip BINARY — UTF-8 decoding corrupts
+    // it and tar fails to extract. maxBuffer must cover the repo tarball
+    // (the default 1 MiB would truncate it). PI_UPSTREAM_CURL overrides
+    // the curl binary (hermetic tests inject a fake curl).
+    const curlBin = process.env.PI_UPSTREAM_CURL ?? 'curl'
+    const curl = spawnSync(curlBin, ['-fsSL', url], { maxBuffer: 128 * 1024 * 1024 })
+    if (curl.status !== 0) {
+      rmSync(tmp, { recursive: true, force: true })
+      throw new Error(
+        `cannot resolve upstream ${repository}@${commit}: set PI_UPSTREAM_REPO to a checkout containing the pinned commit ` +
+          `(or make curl available for the tarball fallback)`,
+      )
+    }
+    tarball = curl.stdout
+    source = `codeload ${url}`
   }
-  const tar = spawnSync('tar', ['-xz', '-C', tmp, '--strip-components=1'], { input: curl.stdout })
+  const tar = spawnSync('tar', ['-xz', '-C', tmp, '--strip-components=1'], { input: tarball })
   if (tar.status !== 0) {
     rmSync(tmp, { recursive: true, force: true })
     throw new Error(`failed to extract upstream tarball: ${tar.stderr?.toString() ?? 'tar error'}`)
   }
-  return { repo: tmp, packageDir, commit, source: `codeload ${url}` }
+  return { repo: tmp, packageDir, commit, source }
 }
 
 function main() {
