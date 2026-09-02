@@ -26,13 +26,6 @@ import { color } from './theme.ts'
 import { classifyFileCompletionContext, FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input-mode.ts'
 
-/** The fork's private autocomplete surface (runtime methods; kimi's
- * CustomEditor uses the same cast idiom). */
-interface AutocompleteInternals {
-  cancelAutocomplete(): void
-  requestAutocomplete(options: { force: boolean; explicitTab: boolean }): void
-}
-
 /** Host render-routing options for the host editor. */
 export interface TuiEditorOptions {
   /**
@@ -206,11 +199,11 @@ export class TuiEditor extends Editor {
    * request (the host-owned stale-context guard — the declined-key
    * fallback cancels when the staged document differs from the host's
    * current autocomplete context, so a stale dropdown can never accept
-   * candidates into the new document). Named distinctly: the fork's own
-   * `cancelAutocomplete` is private and MUST stay reachable for its
-   * internal callers — a same-named override would shadow it and recurse. */
+   * candidates into the new document). Named distinctly from the fork's
+   * `cancelAutocomplete` (X044): the fork method is PROTECTED and called
+   * directly — a same-named override would shadow it and recurse. */
   cancelHostAutocomplete(): void {
-    ;(this as unknown as AutocompleteInternals).cancelAutocomplete()
+    this.cancelAutocomplete()
   }
 
   /** Switch the input mode. A real change fires onChange (the host's
@@ -223,7 +216,7 @@ export class TuiEditor extends Editor {
   setInputMode(mode: EditorInputMode): void {
     if (this.inputMode === mode) return
     this.inputMode = mode
-    ;(this as unknown as AutocompleteInternals).cancelAutocomplete()
+    this.cancelAutocomplete()
     this.onChange?.(this.getText())
     this.tui.requestRender()
   }
@@ -272,7 +265,7 @@ export class TuiEditor extends Editor {
     // parity — otherwise Esc would immediately reopen the list). This
     // keeps its priority over the shell-mode Esc exit below.
     if (matchesKey(data, 'escape') && this.isShowingAutocomplete()) {
-      ;(this as unknown as AutocompleteInternals).cancelAutocomplete()
+      this.cancelAutocomplete()
       return
     }
     // Esc on an EMPTY shell body cancels the whole shell mode (the app
@@ -316,8 +309,7 @@ export class TuiEditor extends Editor {
       const beforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
       const context = classifyFileCompletionContext(beforeCursor, FILE_ARGUMENT_COMMANDS)
       if (context.kind === 'mention' || context.kind === 'image-argument') {
-        ;(this as unknown as AutocompleteInternals)
-          .requestAutocomplete({ force: true, explicitTab: true })
+        this.requestAutocomplete({ force: true, explicitTab: true })
         return
       }
       const trimmed = beforeCursor.trimStart()
@@ -328,8 +320,7 @@ export class TuiEditor extends Editor {
         // Still run the provider request so the separate extension
         // autocomplete chain can answer ordinary positions. MentionProvider's
         // host file branch remains closed for this `none` context.
-        ;(this as unknown as AutocompleteInternals)
-          .requestAutocomplete({ force: true, explicitTab: true })
+        this.requestAutocomplete({ force: true, explicitTab: true })
         return
       }
     }
@@ -344,8 +335,7 @@ export class TuiEditor extends Editor {
       const beforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
       const trimmed = beforeCursor.trimStart()
       if (trimmed.startsWith('/') && !trimmed.includes(' ')) {
-        ;(this as unknown as AutocompleteInternals)
-          .requestAutocomplete({ force: true, explicitTab: true })
+        this.requestAutocomplete({ force: true, explicitTab: true })
         return
       }
     }
@@ -398,8 +388,7 @@ export class TuiEditor extends Editor {
     const quotedMention = context.query.startsWith('@"')
     const nonstandardBoundary = beforeAt !== undefined && beforeAt !== ' ' && beforeAt !== '\t'
     if (!quotedMention && !nonstandardBoundary) return
-    ;(this as unknown as AutocompleteInternals)
-      .requestAutocomplete({ force: false, explicitTab: false })
+    this.requestAutocomplete({ force: false, explicitTab: false })
   }
 
   /** Stitch a buffered paste-marker prefix onto this chunk. */
@@ -525,8 +514,7 @@ export class TuiEditor extends Editor {
     // per-command hardcode, and never a plain trailing `/` (a `see /tmp/`
     // position stays closed).
     if ((textBeforeCursor.endsWith('/') || textBeforeCursor.endsWith('\\')) && isFileArgumentContext(textBeforeCursor)) {
-      ;(this as unknown as AutocompleteInternals)
-        .requestAutocomplete({ force: false, explicitTab: false })
+      this.requestAutocomplete({ force: false, explicitTab: false })
     }
   }
 }

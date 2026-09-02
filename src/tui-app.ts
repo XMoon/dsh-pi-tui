@@ -2700,6 +2700,16 @@ export class TuiApp {
   private rightClickPasteFromClipboard(): void {
     const read = this.readClipboardText
     if (read === undefined) return
+    // Capture the paste TARGET at right-click time (round-2 review P2):
+    // the clipboard read is async, and focus may move while it runs (a
+    // question closes, the user clicks the editor) — pasting into the
+    // CURRENT focus owner would drop the content into the wrong input.
+    // The screen identity is fenced too: a fullscreen toggle during the
+    // read swaps the active screen entirely.
+    const screen = this.activeScreen
+    const target = screen.getFocusedComponent()
+    const handleInput = target?.handleInput
+    if (handleInput === undefined) return
     // Fire-and-forget through the owned-task entry (AGENTS.md hard rule —
     // never a bare `void promise`): a clipboard-read failure is classified
     // and logged, never an unhandled rejection; success feeds the paste.
@@ -2711,8 +2721,11 @@ export class TuiApp {
         return // best-effort: no backend / helper failure is user-invisible
       }
       if (text === undefined || text === '') return
-      this.activeScreen.getFocusedComponent()?.handleInput?.(`\x1b[200~${text}\x1b[201~`)
-      this.activeScreen.requestRender()
+      // The right-click target must still be the focused component on the
+      // SAME screen — otherwise the paste is dropped (never misdirected).
+      if (this.disposed || this.activeScreen !== screen || screen.getFocusedComponent() !== target) return
+      handleInput(`\x1b[200~${text}\x1b[201~`)
+      screen.requestRender()
     }, { onCancel: () => {}, onError: () => {} })
   }
 

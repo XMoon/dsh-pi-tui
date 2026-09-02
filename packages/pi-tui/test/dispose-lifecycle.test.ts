@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Box } from "../src/components/box.ts";
+import { Container } from "../src/tui.ts";
 import { SettingsList } from "../src/components/settings-list.ts";
 import { Text } from "../src/components/text.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
@@ -108,6 +109,27 @@ describe("Component dispose lifecycle completeness (X007)", () => {
 			box.clear();
 			assert.equal(first.disposeCount, 1);
 			assert.equal(second.disposeCount, 1);
+		});
+
+		it("a parent-owned Box forwards disposal to its children (nested ownership)", () => {
+			// Container -> Box -> resource-owning child: removing the Box
+			// from the Container must dispose the child exactly once.
+			const container = new Container();
+			const box = new Box(1, 1);
+			const child = new DisposeCounter();
+			box.addChild(child.toComponent());
+			container.addChild(box);
+
+			container.removeChild(box);
+			assert.equal(child.disposeCount, 1, "Box.dispose must cascade to its children");
+
+			// And a second removal path (Container.dispose) stays idempotent.
+			const box2 = new Box(1, 1);
+			const child2 = new DisposeCounter();
+			box2.addChild(child2.toComponent());
+			container.addChild(box2);
+			container.dispose();
+			assert.equal(child2.disposeCount, 1);
 		});
 	});
 
@@ -259,6 +281,33 @@ describe("Component dispose lifecycle completeness (X007)", () => {
 		// navigate anywhere (its generation is stale).
 		closeFirst!(undefined, { navigateTo: "a" });
 		assert.equal(second.disposeCount, 0, "a stale callback must not close the CURRENT submenu");
+	});
+
+	it("a SYNCHRONOUS done() inside the factory cannot resurrect the submenu (round-7 P2)", () => {
+		const counter = new DisposeCounter();
+		const followUp = new DisposeCounter();
+		const items = [
+			{
+				id: "nav",
+				label: "Nav",
+				currentValue: "",
+				submenu: (_c: string, done: (v?: string, o?: { navigateTo?: string }) => void) => {
+					// The factory closes itself BEFORE returning its component.
+					done(undefined, { navigateTo: "other" });
+					return counter.toComponent();
+				},
+			},
+			{ id: "other", label: "Other", currentValue: "", submenu: () => followUp.toComponent() },
+		];
+		const list = new SettingsList(items, 5, listTheme, () => {}, () => {});
+		list.selectItem("nav");
+		list.handleInput("\r");
+
+		// The synchronous done() closed "nav" and opened the follow-up
+		// "other"; the factory's returned component must NOT resurrect
+		// "nav" over it.
+		assert.equal(counter.disposeCount, 1, "the orphaned factory component is disposed");
+		assert.equal(followUp.disposeCount, 0, "the follow-up submenu stays mounted");
 	});
 
 	it("Text.dispose() stays a harmless no-op inside disposed containers", () => {

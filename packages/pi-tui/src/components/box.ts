@@ -48,6 +48,16 @@ export class Box implements Component {
 		this.invalidateCache();
 	}
 
+	/**
+	 * Release every child (dsh-pi-tui divergence X007): a Box nested under
+	 * a Container/overlay must forward disposal — without this, only
+	 * box.removeChild/clear released children and a parent-owned Box
+	 * leaked its resource-owning subtree.
+	 */
+	dispose(): void {
+		this.clear();
+	}
+
 	setBgFn(bgFn?: (text: string) => string): void {
 		this.bgFn = bgFn;
 		// Don't invalidate here - we'll detect bgFn changes by sampling output
