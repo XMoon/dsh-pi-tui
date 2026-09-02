@@ -762,10 +762,19 @@ export class Editor implements Component, Focusable {
 		// whole-line injection, not a terminal dribbling a paste one
 		// character at a time. Disabled integrations skip the tracking
 		// entirely.
-		const isEnterKey = data !== "\n" && kb.matches(data, "tui.editor.submit");
+		//
+		// The burst's Enter is the PHYSICAL Enter that currently carries
+		// the submit binding (X037 × X038 cross-divergence): a remapped
+		// submit key (e.g. Ctrl+X) is a chord, not a paste's trailing
+		// Enter — it must reset the burst and submit, never be suppressed
+		// into a newline.
+		const isPhysicalSubmitEnter =
+			data !== "\n" &&
+			matchesKey(data, "enter") &&
+			kb.matches(data, "tui.editor.submit");
 		const burstChar = decodePrintableKey(data)
 			?? (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) !== 0x7f ? data : undefined);
-		if (!this.disablePasteBurst && !isEnterKey && burstChar === undefined) {
+		if (!this.disablePasteBurst && !isPhysicalSubmitEnter && burstChar === undefined) {
 			this.pasteBurst.reset();
 		}
 
@@ -950,8 +959,15 @@ export class Editor implements Component, Focusable {
 			// directly follows a rapid plain-character stream — a lost-marker
 			// paste's trailing Enter. Insert a newline instead of submitting
 			// the half-pasted draft (and keep the window open: a multi-line
-			// paste ends with several Enter-delimited lines).
-			if (!this.disablePasteBurst && this.pasteBurst.shouldInsertNewlineInsteadOfSubmit(Date.now())) {
+			// paste ends with several Enter-delimited lines). Only a PHYSICAL
+			// Enter that currently carries the submit binding is suppressed
+			// (X037 × X038): a remapped submit chord (Ctrl+X) submits even
+			// mid-burst.
+			if (
+				!this.disablePasteBurst &&
+				isPhysicalSubmitEnter &&
+				this.pasteBurst.shouldInsertNewlineInsteadOfSubmit(Date.now())
+			) {
 				this.addNewLine();
 				this.pasteBurst.extendWindow(Date.now());
 				return;
@@ -1128,13 +1144,47 @@ export class Editor implements Component, Focusable {
 		return this.state.lines.join("\n");
 	}
 
-	private expandPasteMarkers(text: string): string {
-		let result = text;
-		for (const [pasteId, pasteContent] of this.pastes) {
-			const markerRegex = new RegExp(`\\[paste #${pasteId}( (\\+\\d+ lines|\\d+ chars))?\\]`, "g");
-			result = result.replace(markerRegex, () => pasteContent);
+	/**
+	 * ONE pass over the raw document: expand every paste marker in
+	 * document order, producing the expanded text AND the cursor mapping
+	 * in the same walk (X045 robustness). The upstream multi-round
+	 * replace re-scans the output of earlier rounds, so a paste whose
+	 * CONTENT contains a literal marker string for a LATER paste id would
+	 * be re-expanded — corrupting real text and desyncing the expanded
+	 * cursor. Single-pass expansion never re-scans inserted content.
+	 * @param text - the raw document (markers unexpanded).
+	 * @param rawCursor - the raw cursor offset, or undefined for text-only.
+	 * @returns the expanded text and (when rawCursor is given) the mapped
+	 *   cursor: every marker before the cursor grows the offset by its
+	 *   content delta; a cursor inside an atomic marker snaps to that
+	 *   marker's end first.
+	 */
+	private expandPasteMarkersSinglePass(
+		text: string,
+		rawCursor?: number,
+	): { text: string; cursor?: number } {
+		let result = "";
+		let cursor = rawCursor;
+		let lastIndex = 0;
+		for (const match of text.matchAll(PASTE_MARKER_REGEX)) {
+			const content = this.pastes.get(Number.parseInt(match[1]!, 10));
+			if (content === undefined) continue; // unknown id: leave the marker as-is
+			const markerStart = match.index!;
+			const markerEnd = markerStart + match[0].length;
+			result += text.slice(lastIndex, markerStart) + content;
+			if (cursor !== undefined) {
+				if (cursor >= markerEnd) {
+					cursor += content.length - match[0].length;
+				} else if (cursor > markerStart) {
+					// The cursor sits inside an atomic marker: snap to its
+					// end, then account for the expansion.
+					cursor = markerEnd + content.length - match[0].length;
+				}
+			}
+			lastIndex = markerEnd;
 		}
-		return result;
+		result += text.slice(lastIndex);
+		return { text: result, cursor };
 	}
 
 	/**
@@ -1142,7 +1192,7 @@ export class Editor implements Component, Focusable {
 	 * Use this when you need the full content (e.g., for external editor).
 	 */
 	getExpandedText(): string {
-		return this.expandPasteMarkers(this.state.lines.join("\n"));
+		return this.expandPasteMarkersSinglePass(this.state.lines.join("\n")).text;
 	}
 
 	/**
@@ -1151,7 +1201,9 @@ export class Editor implements Component, Focusable {
 	 * grows the offset by its content length; a cursor inside an atomic
 	 * marker snaps to that marker's end first. Pairs with
 	 * getExpandedText() for draft HANDOFFS (seat transfers), where both
-	 * the text and the cursor must survive marker expansion.
+	 * the text and the cursor must survive marker expansion. Both use the
+	 * SAME single-pass expansion, so they can never disagree about which
+	 * markers expanded.
 	 */
 	getExpandedCursor(): number {
 		let rawCursor = 0;
@@ -1159,26 +1211,7 @@ export class Editor implements Component, Focusable {
 			rawCursor += (this.state.lines[line] ?? "").length + 1;
 		}
 		rawCursor += this.state.cursorCol;
-		let delta = 0;
-		let lineStart = 0;
-		for (const text of this.state.lines) {
-			for (const match of (text ?? "").matchAll(PASTE_MARKER_REGEX)) {
-				const content = this.pastes.get(Number.parseInt(match[1]!, 10));
-				if (content === undefined) continue;
-				const markerStart = lineStart + match.index!;
-				const markerEnd = markerStart + match[0].length;
-				if (rawCursor >= markerEnd) {
-					delta += content.length - match[0].length;
-				} else if (rawCursor > markerStart) {
-					// The cursor sits inside an atomic marker: snap to its
-					// end, then account for the expansion.
-					rawCursor = markerEnd;
-					delta += content.length - match[0].length;
-				}
-			}
-			lineStart += (text ?? "").length + 1;
-		}
-		return rawCursor + delta;
+		return this.expandPasteMarkersSinglePass(this.state.lines.join("\n"), rawCursor).cursor!;
 	}
 
 	getLines(): string[] {
@@ -1520,7 +1553,7 @@ export class Editor implements Component, Focusable {
 
 	private submitValue(): void {
 		this.cancelAutocomplete();
-		const result = this.expandPasteMarkers(this.state.lines.join("\n")).trim();
+		const result = this.expandPasteMarkersSinglePass(this.state.lines.join("\n")).text.trim();
 
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.pastes.clear();
