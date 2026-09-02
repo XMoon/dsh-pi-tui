@@ -75,9 +75,9 @@ test('current 0.4 release body carries the DSH/TUI install pairing', () => {
 test('0.4 release guidance follows the stable or next tag channel', (t) => {
   const life = testLifecycle(t)
   // A fixture on the alpha.4 floor (any 0.4 prerelease after 0.4.0-alpha.1)
-  // must document the alpha.4 pin; the stable 0.4.0 cutover must not retain
-  // prerelease-only guidance.
-  const prereleaseGuidance = '\n- @deepseek-ai/dsh@0.1.2-alpha.4\n- @xmoon76/dsh-pi-tui@next\n- @xmoon76/dsh-pi-tui@0.3'
+  // must document the latest validated alpha.5 pin; the stable 0.4.0 cutover
+  // must not retain prerelease-only guidance.
+  const prereleaseGuidance = '\n- @deepseek-ai/dsh@0.1.2-alpha.5\n- @xmoon76/dsh-pi-tui@next\n- @xmoon76/dsh-pi-tui@0.3'
   const futurePrerelease = createFixture(life, { version: '0.4.0-alpha.2', guidance: prereleaseGuidance })
   try {
     const accepted = run(futurePrerelease, 'next-v0.4.0-alpha.2')

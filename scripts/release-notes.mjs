@@ -141,10 +141,10 @@ function containsExactGuidance(content, command) {
 }
 
 // The DSH install pin each 0.4 prerelease documents: 0.4.0-alpha.1 shipped
-// on the alpha.3 family; the alpha.4 floor (this line's [Unreleased]) starts
-// with the NEXT 0.4 prerelease. Released changelog sections are immutable,
-// so the requirement follows the version being released.
-const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3' : '0.1.2-alpha.4'
+// on the alpha.3 family; current prerelease guidance uses the latest validated
+// alpha.5 family while the peer floor remains alpha.4. Released changelog
+// sections are immutable, so the requirement follows the version being released.
+const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3' : '0.1.2-alpha.5'
 if (version.startsWith('0.4.')) {
   const requiredGuidance = channel === 'next'
     ? [

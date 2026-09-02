@@ -34,7 +34,8 @@ const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 // 0.1.1-rc.2 (the oldest reproducible one). The finer alpha floor
 // regressions are pinned by the startup-gate unit tests instead.
 const OLD_DSH_VERSION = '0.1.1-rc.2'
-const TARGET_DSH_VERSION = '0.1.2-alpha.4'
+const MIN_DSH_VERSION = '0.1.2-alpha.4'
+const TARGET_DSH_VERSION = '0.1.2-alpha.5'
 const OLD_TUI_LINE = '0.3'
 const ALPHA23_TUI_LINE = '0.4.0-alpha.1'
 const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
@@ -139,7 +140,7 @@ function floorNoticeFor(oldVersion) {
   if (semver.lt(oldVersion, '0.1.2-alpha.2')) {
     return { requires: '0.1.2-alpha.2', upgrade: TARGET_DSH_VERSION, fallbackTui: OLD_TUI_LINE }
   }
-  return { requires: TARGET_DSH_VERSION, upgrade: TARGET_DSH_VERSION, fallbackTui: ALPHA23_TUI_LINE }
+  return { requires: MIN_DSH_VERSION, upgrade: TARGET_DSH_VERSION, fallbackTui: ALPHA23_TUI_LINE }
 }
 
 function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION) {

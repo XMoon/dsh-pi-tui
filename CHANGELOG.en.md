@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Sync DSH alpha.5 development and validation dependencies
+
+- **Development and test dependencies now use DSH `0.1.2-alpha.5`** to pick up DSH's
+  data-upgrade fix, with a rebuilt lockfile; the published peer floor remains
+  `>=0.1.2-alpha.4`, so environments
+  that still work with alpha.4 are not rejected unnecessarily.
+- **The Source Mode pin now targets official `dsh-v0.1.2-alpha.5`**; npm install
+  guidance and incompatible-runtime upgrade notices recommend alpha.5. TUI runtime,
+  SessionPort, SubagentPort, and resume logic are unchanged.
+
 ### Post-re-vendor follow-up audit fixes (X037–X045; 4x P1, 10x P2, several P3; review-round hardening included)
 
 A full sweep after PR #68 (the Earendil v0.84.4 rebase) merged,

@@ -9,7 +9,7 @@ import {
   resolveDshMode,
 } from '../scripts/dsh-ci-context.mjs'
 
-const nextSha = '4e84901e6471b79ec0338099867ebb4606d12bb5'
+const nextSha = 'db6bdc3576c2d4e7c965e8e3ed0c2a731eed87f5'
 
 /** A temp mode-config file with the given mode (the tracked policy is
  * injectable so the source branch of the resolver is testable without
@@ -77,5 +77,5 @@ test('context exposes the tracked source pin only in source mode', (t) => {
   const source = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: path })
   assert.equal(source.mode, 'source')
   assert.equal(source.sourceRef, nextSha)
-  assert.equal(source.sourceExpectedVersion, '0.1.2-alpha.4')
+  assert.equal(source.sourceExpectedVersion, '0.1.2-alpha.5')
 })
