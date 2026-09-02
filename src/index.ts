@@ -74,9 +74,10 @@ import type {} from '@deepseek-ai/dsh-jobs'
 import type { JobId } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-permission-presets'
 // The sandbox/mode knob event merge (permission presets fold it too).
-// The VALUE is capability-detected at apply time (see
-// resolveSandboxFold) — a Harness whose dsh-sandbox-policy lacks the
-// effectiveSandboxMode export must degrade, never crash at load.
+// Alpha.4 removed the effectiveSandboxMode fold export: the sandbox fact
+// is read through the official sandboxPolicy service (derive-access), so
+// this import is type-only (the module augmentation) and never a value
+// dependency.
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 // P5e merges: shell capability for `!` mode and credentials for /login.

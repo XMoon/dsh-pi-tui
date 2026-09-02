@@ -1,9 +1,10 @@
 /**
  * Headless tests for the startup compatibility notice: on a DeepSeek Harness
- * older than the minimum (dsh-v0.1.2-alpha.2) the TUI prints ACTIONABLE
+ * older than the minimum (dsh-v0.1.2-alpha.4) the TUI prints ACTIONABLE
  * upgrade/rollback guidance when it can prove the version, but does not make
  * concurrent Loader ordering a hard startup contract. The 0.4 line has no
- * 0.1.1 compatibility shim. Future runtime lines are not rejected without
+ * 0.1.1 compatibility shim; the alpha.2/alpha.3 baseline falls back to the
+ * previous published 0.4 line. Future runtime lines are not rejected without
  * evidence of a break. `--help` stays available on any harness (the action
  * never runs).
  * @module @xmoon76/dsh-pi-tui/startup.test

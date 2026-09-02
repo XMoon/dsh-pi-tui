@@ -457,7 +457,7 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
     id: 'runner-session-a',
     header: { id: 'runner-session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('resumed answer'), ...modelHistory('provider-a', 'model-a', 'high')],
-  }
+  })
   const resumeHarness = makeHarness(home, resumed, { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' })
   resumeContext = new Context()
   resumeFiber = await mountRunner(resumeContext, home, resumeHarness, { sessionId: resumed.id }, { sessionId: resumed.id })
@@ -551,12 +551,12 @@ test('switching between two old Sessions restores each Session own model', async
     id: 'switch-session-a',
     header: { id: 'switch-session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('answer a'), ...modelHistory('provider-a', 'model-a', 'high')],
-  }
-  const sessionB: FakeSession = {
+  })
+  const sessionB: FakeSession = fakeSession({
     id: 'switch-session-b',
     header: { id: 'switch-session-b', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('answer b'), ...modelHistory('provider-b', 'model-b', 'max')],
-  }
+  })
   const harness = makeHarness(home, [sessionA, sessionB], { provider: 'global', model: 'fallback', reasoningEffort: 'low' })
   context = new Context()
   fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
@@ -594,7 +594,7 @@ test('/new without an explicit default intent observes the persisted default, ne
     id: 'new-default-session',
     header: { id: 'new-default-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('old answer'), ...modelHistory('provider-a', 'model-a', 'high')],
-  }
+  })
   const harness = makeHarness(home, resumed, { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' })
   context = new Context()
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
@@ -722,7 +722,7 @@ test('/model refreshes the Welcome card and footer from the authoritative Sessio
     id: 'welcome-session',
     header: { id: 'welcome-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('welcome answer'), ...modelHistory('provider-a', 'model-a', 'high')],
-  }
+  })
   const harness = makeHarness(home, resumed, { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' })
   context = new Context()
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
@@ -756,7 +756,7 @@ test('a global-default save failure keeps the Session, footer, and Welcome on th
     id: 'welcome-savefail-session',
     header: { id: 'welcome-savefail-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('welcome answer'), ...modelHistory('provider-a', 'model-a', 'high')],
-  }
+  })
   const harness = makeHarness(home, resumed, { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' },
     async () => { throw new Error('quota exceeded') })
   context = new Context()
@@ -793,7 +793,7 @@ test('a failed durable append leaves the Session, footer, and Welcome on the old
     header: { id: 'welcome-appendfail-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('welcome answer'), ...modelHistory('provider-a', 'model-a', 'high')],
     append: () => { throw new Error('append failed') },
-  }
+  })
   const harness = makeHarness(home, resumed, { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' })
   context = new Context()
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
@@ -825,7 +825,7 @@ test('malformed request/header events cannot break the session event firehose', 
     id: 'malformed-session',
     header: { id: 'malformed-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents('malformed answer'),
-  }
+  })
   const harness = makeHarness(home, resumed)
   context = new Context()
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
@@ -866,7 +866,7 @@ test('a live /model choice survives an immediate exit and resume', async (t) => 
     id: 'exit-resume-session',
     header: { id: 'exit-resume-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: [...sessionEvents('first answer'), ...modelHistory('provider-a', 'model-a', 'high')],
-  }
+  })
   const harness = makeHarness(home, resumed, { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' })
   context = new Context()
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
@@ -914,7 +914,7 @@ test('startup applies the persisted wheel step BEFORE the first fullscreen mount
     id: 'wheel-startup-session',
     header: { id: 'wheel-startup-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents(longText),
-  }
+  })
   const harness = makeHarness(home, resumed)
   context = new Context()
   // A settings service carrying the persisted wheel step AND fullscreen
@@ -968,7 +968,7 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
     id: 'live-follow-session',
     header: { id: 'live-follow-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents(initialText),
-  }
+  })
   const harness = makeHarness(home, resumed)
   context = new Context()
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
@@ -1059,7 +1059,7 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
     id: 'startup-status-session',
     header: { id: 'startup-status-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents('resumed answer'),
-  }
+  })
   const resumeHarness = makeHarness(home, resumed)
   resumeContext = new Context()
   resumeFiber = await mountRunner(resumeContext, home, resumeHarness, { sessionId: resumed.id }, { sessionId: resumed.id, startupStatusOutput: statusOutput })
@@ -1162,11 +1162,11 @@ test('the Preparing status stays on screen through the catalog ready barrier', a
   let fiber: { dispose: () => Promise<unknown> } | undefined
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
-  const resumed: FakeSession = {
+  const resumed: FakeSession = fakeSession({
     id: 'slow-catalog-session',
     header: { id: 'slow-catalog-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents('resumed answer'),
-  }
+  })
   const harness = makeHarness(home, resumed)
   context = new Context()
   // A SLOW skills service: the catalog ready barrier (resolveInitialCatalog
