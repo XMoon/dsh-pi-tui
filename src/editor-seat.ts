@@ -10,8 +10,60 @@
  * editor, and exit — the seat only carries TEXT, CURSOR, FOCUS, history,
  * autocomplete, and the border style. A plugin editor can never bypass
  * those through this seam.
+ *
+ * The PHYSICAL mount slot ({@link EditorSeatMount}) is deliberately
+ * NON-OWNING (re-vendor lifecycle follow-up P1): it only projects the
+ * current occupant — the EditorSeatHolder owns the replacement editor and
+ * its compiled component, the question flow state owns the QuestionFrame.
+ * mount/detach ≠ dispose; only handoff / final teardown dispose.
  * @module @xmoon76/dsh-pi-tui/editor-seat
  */
+
+import { Container, type Component } from '@xmoon76/pi-tui'
+
+/**
+ * The non-owning physical mount slot inside the editor seat (re-vendor
+ * lifecycle follow-up P1). The vendored Container is an OWNING container
+ * (X007: clear/removeChild/dispose release child resources), but the seat
+ * is only a mounting point — replacing the occupant (editor ↔ QuestionFrame
+ * ↔ editor) must NEVER dispose it:
+ *
+ * ```text
+ * EditorSeatHolder ── owns the replacement editor + compiled component
+ * EditorSeatMount ── projects the CURRENT occupant, never disposes it
+ * Question state ─── owns the QuestionFlow / QuestionFrame lifetime
+ * ```
+ *
+ * This is the same principle as the transcript projection model:
+ * mount/projection ≠ lifecycle ownership. Every owning Container method
+ * (removeChild/clear/dispose) is overridden to only re-point `children` —
+ * the seat can never accidentally dispose a mounted component through the
+ * vendored owning semantics.
+ */
+export class EditorSeatMount extends Container {
+  /** Swap the current occupant without touching its lifecycle. */
+  replace(component: Component): void {
+    this.children = [component]
+  }
+
+  /** Detach the current occupant without disposing it. */
+  detach(): void {
+    this.children = []
+  }
+
+  override removeChild(component: Component): void {
+    const index = this.children.indexOf(component)
+    if (index !== -1) this.children.splice(index, 1)
+  }
+
+  override clear(): void {
+    this.children = []
+  }
+
+  override dispose(): void {
+    this.children = []
+  }
+}
 
 /** The fork's autocomplete provider shape (structural — the host's
  * MentionProvider chain). */
