@@ -65,6 +65,7 @@ import {
   type ColorPalette,
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
+import { ENABLE_FOCUS_REPORTING, isFocusReport } from './notification/terminal-focus.ts'
 import { TaskBrowserPanel, type TaskPanelItem } from './task-panel.ts'
 import type { StatusStore } from './status/store.ts'
 import type { AccessStatus, CompositionStatus, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
@@ -1227,6 +1228,24 @@ export interface TuiAppEventsBase {
    * direct service seam, not a semantic action. Optional.
    */
   onTitleChanged?: () => void
+  /**
+   * A terminal focus report arrived (`CSI ? 1004` focus reporting:
+   * `ESC[I` = focused, `ESC[O` = unfocused). The host's focus tracker
+   * (completion notifications) observes the reports; the report itself
+   * is consumed HOST-side before the editor in regular mode, and passes
+   * through in fullscreen so the viewport listener's FOCUS_OUT
+   * selection cleanup runs (X036 × X043). Optional.
+   */
+  onTerminalFocus?: (focused: boolean) => void
+  /**
+   * Any REAL terminal input that is NOT a focus report arrived (before
+   * the raw stage and plugin routing — even a chunk a capture later
+   * consumes still proves the user is operating the terminal). The
+   * host's focus tracker restores 'focused' on user activity, so a
+   * missed FOCUS_IN can never leave the tracker believing the terminal
+   * is unfocused. Optional.
+   */
+  onUserInput?: () => void
 }
 
 /**
@@ -3096,6 +3115,21 @@ export class TuiApp {
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
+    // Terminal focus reports (CSI ? 1004 — ESC[I/ESC[O) are HOST-RESERVED:
+    // they bypass the unstable raw stage entirely (a raw capture can
+    // never consume, rewrite or starve them) and flow straight to the
+    // host decoder — the focus tracker observes them, and the
+    // screen-aware consumption (handleInputCore) keeps them out of the
+    // editor. They are NOT user activity: the tracker stays as reported.
+    if (isFocusReport(data)) {
+      return this.handleInputCore(data)
+    }
+    // Any REAL (non-focus-report) input proves the user is operating the
+    // terminal: restore the focus tracker to 'focused' BEFORE the raw
+    // stage and plugin routing — even a chunk a capture later consumes
+    // still proves user activity (a missed FOCUS_IN must not leave the
+    // tracker believing the terminal is unfocused).
+    this.events.onUserInput?.()
     // Phase 3: the UNSTABLE raw interception stage — BEFORE Host
     // semantic routing (plan §4), after the terminal pipeline has
     // reassembled and normalized the input (see UnstableRawInputEvent).
@@ -3125,6 +3159,12 @@ export class TuiApp {
       const outcome = this.unstableInputRoute(data, this.extensionHost?.surfaceId ?? 'tui')
       if (outcome.action === 'consume') return { consume: true }
       if (outcome.action === 'rewrite') {
+        // A rewrite INTO a focus-control sequence is refused: focus
+        // reports are HOST-reserved, and the tracker must never be
+        // spoofed into a false focus transition (a synthesized ESC[O
+        // could fire a completion notification while the user watches).
+        // The chunk is consumed — the editor never sees it either.
+        if (isFocusReport(outcome.data)) return { consume: true }
         // The rewritten chunk flows through the host's OWN processing AND
         // propagates to the focused component (the fork's listener-result
         // `data` field). Each terminal chunk passes the interception chain
@@ -3153,16 +3193,23 @@ export class TuiApp {
     if (MOUSE_SEQUENCE.test(data) || (data.length === 6 && data.startsWith('\x1b[M'))) {
       return undefined
     }
-    // FOCUS reports (X036 × X043 cross-divergence): the viewport listener
-    // owns FOCUS_OUT's fullscreen selection cleanup and deliberately does
-    // NOT consume the report, so app-level listeners (terminal focus
-    // tracking) still receive it. A question/approval handler consumes
-    // EVERY key — without this pass-through it would starve the viewport
-    // listener of the report and leave a fullscreen selection active
-    // after focus loss. Same treatment as mouse sequences: fall through
-    // so the viewport listener runs.
+    // FOCUS reports (CSI ? 1004 — ESC[I/ESC[O) are handled HOST-SIDE,
+    // before the key ladder: they can never reach the keybinding
+    // manager, autocomplete or a host action. Screen-aware consumption
+    // (no vendor divergence — the host owns the focus-report
+    // lifecycle):
+    //   Regular — no viewport listener exists: consume here, so the
+    //     report never reaches the editor.
+    //   Fullscreen — pass through: the alt screen's viewport listener
+    //     owns FOCUS_OUT's selection cleanup, and per this fork's
+    //     existing X036 divergence it deliberately does NOT consume,
+    //     so the report keeps flowing to the focused component
+    //     afterwards (the editor ignores ESC-prefixed sequences — that
+    //     is the pre-existing X036 behavior, not a host guarantee).
     if (data === '\x1b[O' || data === '\x1b[I') {
-      return undefined
+      this.events.onTerminalFocus?.(data === '\x1b[I')
+      if (this.fullscreen !== undefined) return undefined
+      return { consume: true }
     }
     // Kitty-protocol terminals report press, repeat, and release events as
     // separate sequences; the app must act on the PRESS only. A release of
@@ -4390,6 +4437,19 @@ export class TuiApp {
       this.fullscreen = undefined
       this.fullscreenScroll = undefined
       this.tui.start()
+      // The alt screen's stop disables focus reporting (?1004l rides the
+      // mouse-disable sequence). The main screen keeps needing focus
+      // events (the host's completion-notification tracker observes
+      // them), so re-assert the mode after the screen swap — the host
+      // owns ?1004 (enabled at TUI mount, disabled at exit). A
+      // synchronously broken stdout must never crash the input path
+      // (the async error path is already swallowed by the runner's
+      // guarded process.stdout listener).
+      try {
+        this.terminal.write(ENABLE_FOCUS_REPORTING)
+      } catch {
+        // A broken stdout degrades focus reporting silently.
+      }
       // Regular never re-reads a fullscreen per-card state: drop the
       // Thinking overrides a fullscreen click (or a search reveal)
       // created, so returning to fullscreen later starts from the bulk

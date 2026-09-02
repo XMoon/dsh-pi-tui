@@ -761,6 +761,8 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     get sessionGeneration() { return 0 },
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()

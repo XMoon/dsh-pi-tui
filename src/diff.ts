@@ -187,9 +187,12 @@ function formatDiffRow(line: DiffLine, showLineNumber: boolean): string {
  * A diff hunk that MAY carry the absolute hunk anchors the DSH public
  * `FileDiff` contract does not expose yet. Presentation-side structural
  * type ONLY: additive / optional runtime capability, never assumed to be
- * present, never sourced from a private API. When the upstream contract
- * grows `oldStart`/`newStart`, this type resolves to the same shape and
- * the real absolute line numbers render again.
+ * present, never sourced from a private API. Upstream follow-up (plan
+ * 2026-09-02 §2.5, tracked in the plan doc): add `oldStart`/`newStart`
+ * as optional fields to `FileDiff` in `@deepseek-ai/dsh-tools`
+ * (`packages/fs/tool-fs/src/diff.ts` — keep the hunk anchors when
+ * converting unified-diff output). When that lands, this type resolves
+ * to the same shape and the real absolute line numbers render again.
  */
 export type AnchoredFileDiff = FileDiff & {
   oldStart?: number

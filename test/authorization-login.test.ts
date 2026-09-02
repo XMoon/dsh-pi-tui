@@ -229,6 +229,8 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},

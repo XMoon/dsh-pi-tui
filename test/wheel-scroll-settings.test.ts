@@ -161,6 +161,8 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     applyFooterSettings: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
@@ -196,7 +198,7 @@ test('/settings lists the Mouse wheel lines row; missing and invalid persisted v
   const t = setupSettings({})
   await t.run()
   await t.view()
-  for (let i = 0; i < 10; i += 1) t.vt.sendInput('\x1b[B')
+  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B')
   const view = await t.view()
   assert.ok(view.includes('Mouse wheel lines'), `row missing:\n${view}`)
   const row = stripTerminalSequences(view).split('\n').find(line => line.includes('Mouse wheel lines'))
@@ -230,7 +232,7 @@ test('the Mouse wheel lines row toggle persists without dropping other fields', 
   const t = setupSettings({ wheelScrollLines: '1' })
   await t.run()
   await t.view()
-  for (let i = 0; i < 10; i += 1) t.vt.sendInput('\x1b[B') // move to the wheel row
+  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B') // move to the wheel row
   await t.view()
   t.vt.sendInput('\r') // toggle 1 -> 2
   await t.view()

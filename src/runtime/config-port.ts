@@ -68,6 +68,12 @@ export interface TuiSettingsDoc {
   localShellSandbox: string
   homeEndKeys: string
   focusMode: string
+  /** Completion-notification mode: 'unfocused' (default) | 'always' |
+   * 'off' — when the main agent's settlement notifies the terminal. */
+  notificationMode: string
+  /** Completion-notification method: 'auto' (default) | 'osc9' |
+   * 'osc777' | 'bell' — how the notification is delivered. */
+  notificationMethod: string
   /** The fullscreen mouse-wheel step (`1/2/3/5/8`, default `1`). A
    * Client preference persisted in the TUI settings document — never a
    * Session / Agent state; a future Remote adapter round-trips it like

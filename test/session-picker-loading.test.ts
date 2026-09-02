@@ -119,6 +119,8 @@ function harness(sessionReader: unknown): Harness {
     applyFooterSettings: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},

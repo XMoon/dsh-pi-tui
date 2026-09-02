@@ -91,6 +91,10 @@ import type { TranscriptMessage, TranscriptWindow } from './transcript.ts'
 import { TranscriptWindowController } from './transcript-window.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
+import { CompletionNotificationController } from './notification/controller.ts'
+import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
+import { DISABLE_FOCUS_REPORTING, ENABLE_FOCUS_REPORTING, FOCUS_IN_SEQUENCE, FOCUS_OUT_SEQUENCE, TerminalFocusTracker } from './notification/terminal-focus.ts'
+import { guardedStreamWriter, TerminalNotifier } from './notification/terminal-notifier.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
 import { plainSectionEqual } from './status/equal.ts'
@@ -1482,6 +1486,14 @@ export function apply(ctx: Context, config: Config): void {
   // shell) or generation checks (menu latches).
   const lifecycleController = new AbortController()
 
+  // The guarded notification writer is hoisted to the RUNNER scope: both
+  // the startup body and the terminal-total fatal catch (which lives
+  // OUTSIDE the IIFE) must be able to disable terminal focus reporting —
+  // a startup failure after the TUI mount must never leak CSI ? 1004
+  // into the shell. The guarded writer swallows broken-stream async
+  // errors; every use is additionally wrapped for synchronous throws.
+  const notificationWriter = guardedStreamWriter(process.stdout)
+
   void (async () => { // allowlist: startup lifecycle root — see AGENTS.md
     // Loader siblings mount concurrently. Await the complete application before
     // creating an Agent so its scoped tools and adapters are not half-composed.
@@ -1573,6 +1585,11 @@ export function apply(ctx: Context, config: Config): void {
         // Focus Mode: 'on' collapses turn-intermediate activity into a
         // live Thought block (default 'off' — Focus OFF == current UI).
         focusMode: z.string(),
+        // Completion notifications: mode = when the main agent's
+        // settlement notifies ('unfocused' default | 'always' | 'off'),
+        // method = how ('auto' default | 'osc9' | 'osc777' | 'bell').
+        notificationMode: z.string(),
+        notificationMethod: z.string(),
         // Fullscreen mouse-wheel step: '1' (default) | '2' | '3' | '5' |
         // '8' — the transcript lines moved per wheel event. A Client
         // preference; wheelScrollLinesOf is the single parsing authority.
@@ -1595,13 +1612,37 @@ export function apply(ctx: Context, config: Config): void {
       // The base layout is the builtin default; the schemastery output
       // type is fully-populated, so the cast bridges the sparse literal
       // (the runtime validation accepts missing optional fields).
-      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCustomItems: undefined as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1' } },
+      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCustomItems: undefined as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' } },
     )
     // The ONE authoritative Focus runtime state (plan §5): restored from
     // the persisted document BEFORE the first compose/resume below, mutated
     // only through the runner's unified setFocusMode. The system-prompt
     // section and the TUI projection both read THIS object.
     const focusState: FocusState = { enabled: focusModeOf(tuiSettings?.get().focusMode) === 'on' }
+
+    // Completion notifications (plan: Client/TUI presentation capability —
+    // settled detection, focus detection, terminal output and settings
+    // parsing stay separate modules, never a blob in the runner). The
+    // controller consumes the AUTHORITATIVE `agent/status` runtime fact
+    // (same live main agent, observed running → idle) — never `turn/end`,
+    // timers or debounces. The notifier writes through the HOISTED
+    // guarded writer (declared with the runner scope so the fatal catch
+    // can disable focus reporting too); the sink wrapper contains
+    // synchronous throws so a notification failure can never crash the
+    // TUI. The SAME guarded writer carries the focus-reporting mode
+    // writes (enable at mount, disable at cleanup AND on the
+    // startup-failure path).
+    const terminalNotifier = new TerminalNotifier(notificationWriter)
+    const completionController = new CompletionNotificationController((method, title, body) => {
+      try {
+        terminalNotifier.notify(method, title, body)
+      } catch {
+        // A notification failure is Client-local UX: never crash the TUI.
+      }
+    })
+    const terminalFocusTracker = new TerminalFocusTracker()
+    completionController.setMode(parseNotificationMode(tuiSettings?.get().notificationMode))
+    completionController.setMethod(parseNotificationMethod(tuiSettings?.get().notificationMethod))
 
     // The live Agent is declared before the TUI-facing facade so every read
     // after a transition follows the current Session rather than a startup
@@ -2058,6 +2099,9 @@ export function apply(ctx: Context, config: Config): void {
     }
     let liveHandle = handle?.direct?.ownerHandle as AgentHandle | undefined
     liveAgent = handle?.direct?.agent as Agent | undefined
+    // The completion-notification controller follows the live identity:
+    // a resumed idle session must never notify (no observed running).
+    completionController.setLiveAgent(liveAgent?.id)
     if (liveAgent !== undefined) {
       // The committed live session's lease becomes ACTIVE (a successful
       // launch resume must not stay TOUCHED — review round 32).
@@ -2269,6 +2313,11 @@ export function apply(ctx: Context, config: Config): void {
           bumpSessionGeneration()
           liveHandle = ownerHandleOf(next) as AgentHandle | undefined
           liveAgent = directAgentOf(next) as Agent
+          // Session switch: the notification controller resets with the
+          // new live identity — a late idle from the OLD agent is fenced
+          // out and the new agent must be observed running before it can
+          // ever notify.
+          completionController.setLiveAgent(liveAgent.id)
           leaseManager.markActive((directAgentOf(next) as Agent).session.id)
           // A fresh target inherits the surface's explicit choice (/new):
           // the create options carried it, but the installed ref would
@@ -2902,6 +2951,22 @@ export function apply(ctx: Context, config: Config): void {
     const cleanup = (): void => {
       if (cleanedUp) return
       cleanedUp = true
+      // Fence the completion-notification controller: after teardown a
+      // late `agent/status` idle from the old live agent must never emit
+      // a notification into a dead surface (the identity fence drops
+      // every event once the live id is undefined).
+      completionController.setLiveAgent(undefined)
+      // Disable terminal focus reporting FIRST — before any throwable
+      // teardown step — so the mode can never leak into the shell even
+      // when a later teardown operation throws (idempotent: a startup
+      // failure that never enabled it writes a harmless no-op). The
+      // guarded writer swallows a broken-stream error; a synchronous
+      // throw is contained here so teardown can never crash.
+      try {
+        notificationWriter.write(DISABLE_FOCUS_REPORTING)
+      } catch {
+        // The stream may already be gone during teardown; best effort.
+      }
       // The touched-session physical locks are DELIBERATELY NOT released
       // here (convergence plan phase 7): a clean TUI exit is not a proof
       // that the DSH persistence tree is quiet, so releasing an active /
@@ -4908,6 +4973,23 @@ export function apply(ctx: Context, config: Config): void {
       // the terminal window title policy follows, so a rename/regenerate
       // refreshes the OSC title immediately.
       onTitleChanged: () => refreshTerminalTitle(),
+      // Terminal focus reports (CSI ? 1004): the completion-notification
+      // focus tracker observes them. The report is consumed host-side in
+      // regular mode and passes through in fullscreen (the viewport
+      // listener owns FOCUS_OUT's selection cleanup), so the tracker
+      // only records state.
+      onTerminalFocus: (focused) => {
+        terminalFocusTracker.handleFocusReport(focused ? FOCUS_IN_SEQUENCE : FOCUS_OUT_SEQUENCE)
+        completionController.setFocus(terminalFocusTracker.state)
+      },
+      // Any REAL input (not a focus report) proves the user is operating
+      // the terminal: restore the tracker to 'focused' (a missed FOCUS_IN
+      // must never leave an 'unfocused' tracker that would falsely notify
+      // while the user watches).
+      onUserInput: () => {
+        terminalFocusTracker.markFocused()
+        completionController.setFocus(terminalFocusTracker.state)
+      },
       // Phase 4: the advanced host-state setTheme for a NON-built-in name
       // (a registered plugin theme). The runner resolves the palette
       // through the theme registry; unknown names are a no-op; a throwing
@@ -5718,6 +5800,17 @@ export function apply(ctx: Context, config: Config): void {
     // model the user cannot see the process while the UI still shows it in
     // full (review blocker: the two halves of Focus would split).
     app.setFocusMode(focusState.enabled)
+    // Terminal focus reporting (CSI ? 1004) for the completion
+    // notification policy: enabled at TUI mount, disabled in cleanup so
+    // the mode never leaks into the shell after exit. The app already
+    // passes the ESC[I/ESC[O reports through to the runner's tracker.
+    // The guarded writer swallows a broken-stream error; a synchronous
+    // throw is contained so a dead stdout can never fail the TUI mount.
+    try {
+      notificationWriter.write(ENABLE_FOCUS_REPORTING)
+    } catch {
+      // A broken stdout degrades the notification capability silently.
+    }
     // Issue #9: the Home/End navigation preset is applied BEFORE the first
     // fullscreen frame so the first frame and later behavior agree (plan
     // §4.8); an invalid persisted value falls back to `viewport`.
@@ -6516,6 +6609,10 @@ export function apply(ctx: Context, config: Config): void {
         const createdAgent = created.direct!.agent as Agent
         liveHandle = created.direct!.ownerHandle as AgentHandle
         liveAgent = createdAgent
+        // First-session commit: the notification controller resets with
+        // the new live identity (a fresh agent must be observed running
+        // before it can ever notify).
+        completionController.setLiveAgent(createdAgent.id)
         leaseManager.markActive(createdAgent.session.id)
         // The open-time lock was acquired BEFORE the create (above — the
         // createWithLock helper REQUIRED an acquired result, so this record
@@ -6764,6 +6861,11 @@ export function apply(ctx: Context, config: Config): void {
       app,
       diag,
       get liveAgent() { return liveAgent },
+      // Completion-notification preference setters (the /settings panel
+      // writes): the controller applies the parsed value immediately and
+      // the panel persists the raw string through the config port.
+      setNotificationMode: (mode) => completionController.setMode(parseNotificationMode(mode)),
+      setNotificationMethod: (method) => completionController.setMethod(parseNotificationMethod(method)),
       ensureSession,
       get selected() { return selected },
       // The default selection a NEW Session should observe: the latest
@@ -7220,9 +7322,16 @@ export function apply(ctx: Context, config: Config): void {
     // only flips of children in the CACHED catalog refresh the surface —
     // the MAIN agent's own per-turn flips (and any stale post-switch
     // event) never repaint, and the coordinator re-projects every child
-    // from the Agent registry at commit time.
-    ctx.on('agent/status', ({ agent }) => {
+    // from the Agent registry at commit time. The MAIN agent's
+    // transitions feed the completion-notification controller instead
+    // (the authoritative settled boundary — running → idle on the SAME
+    // live agent; children never notify).
+    ctx.on('agent/status', ({ agent, status }) => {
       if (liveAgent === undefined) return
+      if (agent.id === liveAgent.id) {
+        completionController.onAgentStatus(agent.id, status)
+        return
+      }
       if (taskRuntime?.has(agent.id) !== true) return
       refreshAgentRuntimeOnly()
     })
@@ -7310,6 +7419,16 @@ export function apply(ctx: Context, config: Config): void {
     // down. (The runner-internal cleanup() never ran — the body threw.)
     // The pre-mount status line is cleared by the lifecycle abort
     // listener registered at startup (idempotent).
+    // Terminal focus reporting (CSI ? 1004) may already be enabled when
+    // the body threw AFTER the TUI mount — disable it here so the mode
+    // never leaks into the shell on the startup-failure path either
+    // (idempotent when the mount never ran; the guarded writer swallows
+    // broken-stream errors, a synchronous throw is contained).
+    try {
+      notificationWriter.write(DISABLE_FOCUS_REPORTING)
+    } catch {
+      // The stream may already be gone during the fatal path.
+    }
     try {
       lifecycleController.abort()
     } catch {

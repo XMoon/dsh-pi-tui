@@ -25,6 +25,7 @@ import { createForkedAgent } from './session-fork.ts'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
+import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from './wheel-scroll.ts'
 import { iconStyleOf } from './icons.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
@@ -467,6 +468,14 @@ export interface TuiCommandRunner {
    * surface immediately, persists best-effort (plan §7 — /settings and
    * /focus both route through this, never a direct settings write). */
   setFocusMode(enabled: boolean): void
+  /** Apply the completion-notification MODE ('unfocused' | 'always' |
+   * 'off') to the runtime controller (the /settings panel write; the
+   * panel persists the raw string through the config port). */
+  setNotificationMode(mode: string): void
+  /** Apply the completion-notification METHOD ('auto' | 'osc9' |
+   * 'osc777' | 'bell') to the runtime controller (the /settings panel
+   * write; the panel persists the raw string through the config port). */
+  setNotificationMethod(method: string): void
   /** Repaint the welcome card from the live agent's current facts (e.g. after a preset switch). */
   updateWelcomeCard(): void
   /**
@@ -1581,6 +1590,20 @@ export function registerTuiCommands(
             values: ['off', 'on'],
           },
           {
+            id: 'notification-mode',
+            label: 'Notifications',
+            description: 'When to notify that the main agent finished: Unfocused (default) — only while the terminal is not focused; Always — whenever the main agent settles; Off — disable completion notifications',
+            currentValue: parseNotificationMode(settingsDoc?.notificationMode),
+            values: ['unfocused', 'always', 'off'],
+          },
+          {
+            id: 'notification-method',
+            label: 'Notification method',
+            description: 'How the completion notification is delivered: Auto (default) — OSC 9 / OSC 777 / bell by terminal; OSC 9; OSC 777; Bell',
+            currentValue: parseNotificationMethod(settingsDoc?.notificationMethod),
+            values: ['auto', 'osc9', 'osc777', 'bell'],
+          },
+          {
             id: 'fullscreen',
             label: 'Fullscreen',
             description: 'Alt-screen mode: on keeps the terminal clean (default); off keeps the scrollback',
@@ -1948,6 +1971,31 @@ export function registerTuiCommands(
               // The UNIFIED setter: runtime mutation first, persistence
               // best-effort (plan §7 — never a direct settings write).
               runner.setFocusMode(value === 'on')
+            }
+          } else if (id === 'notification-mode') {
+            if (value === 'unfocused' || value === 'always' || value === 'off') {
+              // Apply to the runtime controller FIRST (the next settle
+              // already uses the new policy), then persist best-effort
+              // through the shared whole-document transaction.
+              runner.setNotificationMode(value)
+              const settings = tuiSettings
+              if (settings !== undefined) {
+                detach('settings notification mode write', () => serializeTuiSettingsMutation(
+                  settings,
+                  () => settings.replace(withUserFooterCustomItems({ ...settings.get(), notificationMode: value }, runner.config)),
+                ), { notify: true })
+              }
+            }
+          } else if (id === 'notification-method') {
+            if (value === 'auto' || value === 'osc9' || value === 'osc777' || value === 'bell') {
+              runner.setNotificationMethod(value)
+              const settings = tuiSettings
+              if (settings !== undefined) {
+                detach('settings notification method write', () => serializeTuiSettingsMutation(
+                  settings,
+                  () => settings.replace(withUserFooterCustomItems({ ...settings.get(), notificationMethod: value }, runner.config)),
+                ), { notify: true })
+              }
             }
           } else if (id === 'fullscreen') {
             if (value === 'off' || value === 'on') {
