@@ -4840,8 +4840,11 @@ describe("expanded cursor mapping (X045)", () => {
 
 		// before the first marker: unchanged
 		assert.strictEqual(expand(raw, 0).cursor, 0);
-		// inside the first marker: snap to its EXPANDED end
-		assert.strictEqual(expand(raw, m1Start + 5).cursor, m1End + contentA.length);
+		// inside the first marker: snap to its EXPANDED end (marker start
+		// + delta + content length — never beyond the expanded text)
+		const inside1 = expand(raw, m1Start + 5);
+		assert.strictEqual(inside1.cursor, m1Start + contentA.length);
+		assert.ok(inside1.cursor <= inside1.text.length, "a snapped cursor must never exceed the expanded text");
 
 		// A separator between the markers so "between" and "at #2 start"
 		// are distinct raw positions.
@@ -4855,7 +4858,9 @@ describe("expanded cursor mapping (X045)", () => {
 		// exactly at the second marker's start: #2 not yet passed
 		assert.strictEqual(expand(staged, sM2Start).cursor, sM2Start + delta1);
 		// inside the second marker: snap to its expanded end
-		assert.strictEqual(expand(staged, sM2Start + 5).cursor, sM2End + delta1 + contentB.length);
+		const inside2 = expand(staged, sM2Start + 5);
+		assert.strictEqual(inside2.cursor, sM2Start + delta1 + contentB.length);
+		assert.ok(inside2.cursor <= inside2.text.length, "a snapped cursor must never exceed the expanded text");
 		// after every marker: the full expansion
 		assert.strictEqual(expand(staged, sM2End).cursor, sM2End + delta1 + delta2);
 		assert.strictEqual(expand(staged, sM2End).text.length, sM2End + delta1 + delta2);

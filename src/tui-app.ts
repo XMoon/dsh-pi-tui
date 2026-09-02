@@ -10633,6 +10633,11 @@ export class TuiApp {
   }
 
   private disposeTrackedKeybindingEditors(): void {
+    // The owning FocusForwardingFrame + disposeOnHide dispose a MOUNTED
+    // panel on overlay hide (X007), but a tracked panel may have NO owning
+    // overlay (trackKeybindingEditor also covers panels nested inside the
+    // SettingsList submenu) — so the tracking set disposes here, and the
+    // panel's own disposed guard makes the later frame-dispose a no-op.
     const panels = [...this.keybindingEditorPanels]
     this.keybindingEditorPanels.clear()
     for (const panel of panels) panel.dispose?.()
@@ -10682,18 +10687,17 @@ export class TuiApp {
     onCancel: () => void
   }): () => void {
     let handle: OverlayHandle | undefined
-    let panel: FooterConfiguratorPanel | undefined
     let closed = false
-    // The generic Frame/overlay stack does not own or forward the panel's
-    // optional Component.dispose(), so every close path owns this cleanup.
+    // The owning FocusForwardingFrame + disposeOnHide dispose the panel on
+    // hide (X007) — the closer only unmounts the overlay; no manual
+    // panel.dispose() (a second dispose would be a double-release).
     const close = (): void => {
       if (closed) return
       closed = true
       this.footerConfiguratorClosers.delete(close)
-      panel?.dispose()
       handle?.hide()
     }
-    panel = new FooterConfiguratorPanel({
+    const panel = new FooterConfiguratorPanel({
       model: options.model,
       registry: options.registry,
       snapshot: () => this.statusStore.snapshot(),

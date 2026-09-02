@@ -1183,10 +1183,10 @@ export class Editor implements Component, Focusable {
 					delta += content.length - match[0].length;
 				} else if (rawCursor > markerStart) {
 					// The cursor sits inside an atomic marker: snap to that
-					// marker's EXPANDED end (marker end + the delta accrued
-					// before it + the content length). Every later marker
-					// lies beyond it, so this is the final cursor.
-					snappedCursor = markerEnd + delta + content.length;
+					// marker's EXPANDED end (marker start + the delta
+					// accrued before it + the content length). Every later
+					// marker lies beyond it, so this is the final cursor.
+					snappedCursor = markerStart + delta + content.length;
 				}
 			}
 			lastIndex = markerEnd;
