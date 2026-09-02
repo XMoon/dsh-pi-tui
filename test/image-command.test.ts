@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -20,6 +20,20 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.stop() } catch {}
+  }
+})
+
 
 /** A tiny PNG (1×1) byte header. */
 function pngBytes(): Buffer {
@@ -54,6 +68,7 @@ function setup(): {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const ctx = new Context()
   const services = fakeCommands()
   ctx.provide('commands', services.commands as never)

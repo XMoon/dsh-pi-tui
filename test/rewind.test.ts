@@ -11,7 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
@@ -38,6 +38,20 @@ import { DraftImageStore } from '../src/image/draft-store.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.stop() } catch {}
+  }
+})
+
 
 // ── event fixtures ─────────────────────────────────────────────────────────
 
@@ -802,6 +816,7 @@ function setupCommands(options: { agent?: Agent } = {}): {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const rewinds: number[] = []
   const ensureCalls: string[] = []
   const commands = fakeCommandsService()
@@ -858,6 +873,7 @@ test('review round 23: /new resolves ONE compose and passes NO recovery step', a
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommandsService()
   const ctx = new Context()
   ctx.provide('commands', commands.service as never)
@@ -904,6 +920,7 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommandsService()
   const ctx = new Context()
   ctx.provide('commands', commands.service as never)
@@ -944,6 +961,7 @@ test('review round 27: /preset live-swap runs inside the session-transition gate
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommandsService()
   const ctx = new Context()
   ctx.provide('commands', commands.service as never)

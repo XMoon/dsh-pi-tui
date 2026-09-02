@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
@@ -23,6 +23,21 @@ import { TranscriptWindowController } from '../src/transcript-window.ts'
 import { Text, visibleWidth, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.stop() } catch {}
+  }
+})
+
+
 // CI/tooling environments export NO_COLOR, FORCE_COLOR=0 and CI=true, which
 // themeOptOut() honours by skipping terminal queries entirely — that would
 // silently turn every autodetect test into a no-op assertion. Clear all
@@ -36,6 +51,7 @@ function startApp(width = 100, height = 24): { vt: VirtualTerminal; app: TuiApp 
   const vt = new VirtualTerminal(width, height)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -235,6 +251,8 @@ test('the question dialog height cap tracks the terminal height', async () => {
     const vt = new VirtualTerminal(100, rows)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
+
+    startedApps.add(app)
     const promise = app.askQuestions([{
       id: 'q1',
       question: 'Pick one',
@@ -252,6 +270,10 @@ test('the question dialog height cap tracks the terminal height', async () => {
     assert.ok(view.includes('more lines'), `truncation marker missing at ${rows} rows:\n${view}`)
     await vt.sendInput('\x1b')
     await assert.rejects(promise, /cancelled/)
+    // Re-vendor lifecycle follow-up P3: the single-live-TUI process slot
+    // is held by a LIVE surface — stop this iteration's app before the
+    // next case starts (see src/process-tui-slot.ts).
+    app.stop()
   }
 })
 
@@ -328,6 +350,10 @@ test('the highlighted question option stays visible at narrow terminal widths', 
     }
     vt.sendInput('\x1b')
     await assert.rejects(promise, /cancelled/)
+    // Re-vendor lifecycle follow-up P3: the single-live-TUI process slot
+    // is held by a LIVE surface — stop this iteration's app before the
+    // next width starts (see src/process-tui-slot.ts).
+    app.stop()
   }
 })
 
@@ -397,6 +423,8 @@ test('an active question re-budgets when the terminal resizes', async () => {
   const vt = new VirtualTerminal(100, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const promise = app.askQuestions([{
     id: 'q1',
     question: 'Pick one',
@@ -421,6 +449,8 @@ test('a queued question budgets against the terminal height at presentation', as
   const vt = new VirtualTerminal(100, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }])
   const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [
     ...Array.from({ length: 7 }, (_, i) => ({ label: `Option ${i + 1}`, description: 'd'.repeat(800) })),
@@ -1149,6 +1179,8 @@ test('the message component cache is pruned to the live transcript', () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const cache = (app as unknown as { messageComponents: Map<object, unknown> }).messageComponents
   const messages: { kind: 'user'; turn: number; text: string }[] = []
   for (let i = 0; i < 50; i += 1) {
@@ -1170,6 +1202,8 @@ test('local card push/replace/clear prune the component cache too', () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const cache = (app as unknown as { messageComponents: Map<object, unknown> }).messageComponents
   const locals = (app as unknown as { localMessages: object[] }).localMessages
   // 200 distinct cards, each running→settled: every replacement is a NEW
@@ -1265,6 +1299,8 @@ test('autoDetectTheme coalesces concurrent calls onto one shared query', async (
   }) as unknown as Terminal
   const app = new TuiApp(spy, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   try {
     const first = app.autoDetectTheme()
     const second = app.autoDetectTheme()
@@ -1301,6 +1337,8 @@ test('trackTerminalTheme enables DSR 996 scheme tracking idempotently', async ()
   }) as unknown as Terminal
   const app = new TuiApp(spy, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   try {
     app.trackTerminalTheme(true)
     app.trackTerminalTheme(true) // idempotent: no second query
@@ -1406,6 +1444,8 @@ test('fullscreen Ctrl+F and Ctrl+Shift+F search the full folder and re-window to
     },
   })
   app.start()
+
+  startedApps.add(app)
   try {
     renderWindow()
     app.setFullscreen(true)
@@ -1437,6 +1477,8 @@ test('fullscreen suppresses the stale fork search key after host search is remap
     onSearchQuery: (query) => hostQueries.push(query),
   })
   app.start()
+
+  startedApps.add(app)
   try {
     app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.search': 'ctrl+x' }))
     app.setTranscript([{ kind: 'user', turn: 0, text: 'visible window' }])
@@ -1633,6 +1675,8 @@ test('working indicator alternates between the whale emojis', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
   app.start()
+
+  startedApps.add(app)
   app.setWorking(true)
   await vt.waitForRender()
   const seen = new Set<string>()
@@ -1668,6 +1712,8 @@ test('live theme switch recolors every surface while the content stays identical
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   app.setStatus({ model: 'p/m', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: 'llm 1s' })
   app.setPlanMode(true)
   app.setTodoSummary([{ content: 'fix the theme', status: 'in_progress' }])
@@ -1707,6 +1753,8 @@ test('theme switch recolors the welcome card (its width cache must not freeze AN
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-x', model: 'p/m', version: '0.0.0' })
   await vt.waitForRender()
   const row = vt.getViewport().findIndex(line => line.includes('╭'))
@@ -1723,6 +1771,8 @@ test('working indicator keeps animating in fullscreen and after leaving it, with
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
   app.start()
+
+  startedApps.add(app)
   app.setWorking(true)
   await vt.waitForRender()
   // Sample several ticks WHILE the alt screen renders: the repaint callback
@@ -1776,6 +1826,8 @@ test('search cards group matches by file and mark truncation', async () => {
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep',
@@ -1800,6 +1852,8 @@ test('terminal cards show the output and the exit code', async () => {
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'bash',
@@ -1865,6 +1919,8 @@ test('running bash cards use the presenter command and never double-render it', 
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'bash',
@@ -1902,6 +1958,8 @@ test('generic presenter cards keep the command row above the raw input', async (
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'bash',
@@ -1935,6 +1993,8 @@ test('a SETTLED background bash keeps the $ command above the generic result', a
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'bash',
@@ -1963,6 +2023,8 @@ test('a settled generic result on a NON-terminal tool adds no command row', asyn
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'exit_plan_mode',
@@ -2132,6 +2194,8 @@ test('tool cards degrade to generic rendering when the registry lookup is absent
     present: toolPresenterFrom(() => undefined),
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep',
@@ -2177,6 +2241,8 @@ test('tool and context cards render the symbols palette', async (t) => {
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'symbols' })
   t.after(() => app.stop())
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([
     { kind: 'tool', turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' },
     { kind: 'tool', turn: 0, name: 'bash', args: JSON.stringify({ command: 'ls' }), result: '', status: 'ok' },
@@ -2213,6 +2279,8 @@ test('minimal hides decorative icons with no dangling whitespace', async (t) => 
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'minimal' })
   t.after(() => app.stop())
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([
     { kind: 'tool', turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' },
     { kind: 'tool', turn: 0, name: 'subagent', args: '', result: '', status: 'ok' },
@@ -2251,6 +2319,8 @@ test('the same folded messages repaint across emoji → symbols → minimal → 
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   t.after(() => app.stop())
   app.start()
+
+  startedApps.add(app)
   const messages = [
     { kind: 'tool' as const, turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' as const },
     { kind: 'system' as const, turn: 0, text: '# AGENTS.md', label: 'AGENTS.md', icon: 'context-file' as const },
@@ -2294,6 +2364,8 @@ test('working indicator frames follow the icon style; custom frames survive swit
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
   t.after(() => app.stop())
   app.start()
+
+  startedApps.add(app)
   app.setWorking(true)
   await vt.waitForRender()
   const workingLine = (): string | undefined =>
@@ -2358,6 +2430,8 @@ test('fullscreen cards and the Focus disclosure repaint across an icon style swi
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   t.after(() => app.stop())
   app.start()
+
+  startedApps.add(app)
   const activity: TurnActivity = {
     turn: 0,
     startedAt: 1000,
@@ -2941,6 +3015,8 @@ test('merged read groups expand into one tree row per file', async () => {
     workspaceRoot: '/ws',
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   // The merged card is what groupConsecutiveReads produces: args "N files"
   // plus the consecutive envelopes joined in the result.
@@ -3492,6 +3568,8 @@ test('web search result views render sources and the answer (WebBlock parity)', 
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'web_search',
     args: '{"query":"dsh cards"}',
@@ -3519,6 +3597,8 @@ test('web fetch result views render the URL and HTTP status', async () => {
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'web_fetch',
     args: '{"url":"https://example.com/page"}',
@@ -3546,6 +3626,8 @@ test('todo_write rawInput renders as a checklist instead of pretty JSON', async 
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'todo_write',
     args: JSON.stringify({ todos: [
@@ -3576,6 +3658,8 @@ test('exit_plan_mode renders its content plan body while running', async () => {
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'exit_plan_mode',
     args: JSON.stringify({ plan: '# The Plan\nStep one.\nStep two.' }),
@@ -3598,6 +3682,8 @@ test('generic result content renders instead of the raw model-facing text', asyn
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'exit_plan_mode',
     args: '{"plan":"x"}', result: 'raw plan review', status: 'ok',
@@ -3758,6 +3844,8 @@ test('assistant long text wraps inside the transcript gutter (40 cols → 38)', 
   const vt = new VirtualTerminal(40, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([{ kind: 'assistant', turn: 0, text: 'x'.repeat(60) }])
   await vt.waitForRender()
   const lines = vt.getViewport()
@@ -3782,6 +3870,8 @@ test('the user bubble background ends at the transcript content width, not the t
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.applyTheme('dark')
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([{ kind: 'user', turn: 0, text: 'y'.repeat(60) }])
   await vt.waitForRender()
   const lines = vt.getViewport()
@@ -3809,6 +3899,8 @@ test('assistant markdown with CJK, emoji and inline code stays inside the gutter
   const vt = new VirtualTerminal(40, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([{
     kind: 'assistant', turn: 0,
     text: '这是一段非常长的中文内容用来验证窄终端换行必须发生在内容宽度内部 🎉 同时还有一段 `inline code` 片段需要保持完整',
@@ -3831,6 +3923,8 @@ test('folded tool / system / compaction rows respect the transcript gutter', asy
   const vt = new VirtualTerminal(40, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([
     { kind: 'tool', turn: 0, name: 'bash', args: JSON.stringify({ command: `echo ${'x'.repeat(80)}` }), result: 'y'.repeat(120), status: 'ok' },
     { kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell', args: `echo ${'z'.repeat(80)}`, result: 'w'.repeat(200), status: 'ok' },
@@ -3860,6 +3954,8 @@ test('a terminal resize re-bakes the folded rows at the new content width (never
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([
     { kind: 'system', turn: 0, label: 'workspace-instructions', summary: 's'.repeat(80), text: 'body' },
     { kind: 'tool', turn: 0, name: 'bash', args: JSON.stringify({ command: `echo ${'x'.repeat(80)}` }), result: 'y'.repeat(80), status: 'ok' },
@@ -3891,6 +3987,8 @@ test('assistant bullet, thinking and compaction follow the symbols palette', asy
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'symbols' })
   t.after(() => app.stop())
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([
     { kind: 'assistant', turn: 0, text: 'para one\n\npara two' },
     { kind: 'thinking', turn: 0, text: 'reasoning preview line' },
@@ -3909,6 +4007,8 @@ test('minimal keeps the bullet and notice hourglass; thinking/compaction titles 
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'minimal' })
   t.after(() => app.stop())
   app.start()
+
+  startedApps.add(app)
   app.setTranscript([
     { kind: 'assistant', turn: 0, text: 'para one' },
     { kind: 'thinking', turn: 0, text: 'reasoning preview line' },

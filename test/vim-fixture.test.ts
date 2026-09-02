@@ -124,6 +124,11 @@ test('M10: the vim fixture validates the editor-extension seam over semantic eve
 
     // Host-owned submission: Enter submits through the HOST path and
     // clears the plugin draft — the plugin never re-implements it.
+    // Re-vendor lifecycle follow-up P3: the first app must stop BEFORE a
+    // second one starts — the vendored keybindings are process-global, so
+    // two CONCURRENTLY live apps would silently share them (the guard
+    // rejects the second start; see src/process-tui-slot.ts).
+    app.stop()
     const submitted: string[] = []
     const app2 = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, {
       editorRegistry: service.editors,
