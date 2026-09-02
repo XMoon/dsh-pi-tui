@@ -42,7 +42,11 @@ Mode selection is policy-driven, not branch-name-driven:
   (`npm` or `source`) — the SINGLE branch-level switch.
 - Legacy fallback (checkouts without the mode file): a worktree with
   `test/compat/dsh-source.json` uses source mode; without it, npm mode.
-- `DSH_DEV_MODE` or `--mode` can explicitly select a mode for a one-off check.
+- `DSH_MODE` or `--mode` can explicitly select a mode for a one-off check
+  (a user override that beats the tracked policy).
+- `DSH_DEV_MODE` is GENERATED development state (what `dev:bootstrap`
+  materialized into `.dsh-dev-env`); it is only a legacy fallback when no
+  tracked mode policy exists, and never overrides `dsh-mode.json`.
 
 The main branch intentionally has no mode file and no source-pin file, so
 its default remains npm. The next branch carries BOTH tracked files:
