@@ -124,80 +124,94 @@ function resolveUpstream() {
     rmSync(tmp, { recursive: true, force: true })
     throw new Error(`failed to extract upstream tarball: ${tar.stderr?.toString() ?? 'tar error'}`)
   }
-  return { repo: tmp, packageDir, commit, source }
+  // The extracted checkout is OURS: the caller must remove it when done
+  // (a local checkout has no cleanup).
+  return {
+    repo: tmp,
+    packageDir,
+    commit,
+    source,
+    cleanup: () => rmSync(tmp, { recursive: true, force: true }),
+  }
 }
 
 function main() {
   const upstream = resolveUpstream()
-  const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8'))
-  const entries = Object.entries(manifest).filter(([id]) => !id.startsWith('_'))
-  if (entries.length === 0) throw new Error(`manifest ${path.relative(ROOT, MANIFEST_PATH)} has no entries`)
+  try {
+    const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8'))
+    const entries = Object.entries(manifest).filter(([id]) => !id.startsWith('_'))
+    if (entries.length === 0) throw new Error(`manifest ${path.relative(ROOT, MANIFEST_PATH)} has no entries`)
 
-  // Reverse index: src file -> divergence ids that cover it. Manifest
-  // paths carry the `src/` prefix (matching DIVERGENCES.md); the local
-  // walk yields paths relative to the fork's src/ root, so normalize.
-  const normalize = (file) => (file.startsWith('src/') ? file.slice(4) : file)
-  const coveredBy = new Map()
-  for (const [id, files] of entries) {
-    for (const file of files) {
-      if (!file.startsWith('src/')) continue // non-src paths are not gated
-      const list = coveredBy.get(normalize(file)) ?? []
-      list.push(id)
-      coveredBy.set(normalize(file), list)
-    }
-  }
-
-  const localFiles = listTsFiles(FORK_SRC)
-  const changed = []
-  const unchanged = []
-  for (const file of localFiles) {
-    const local = readFileSync(path.join(FORK_SRC, file), 'utf8')
-    const upstreamContent = upstreamBlob(upstream.repo, upstream.packageDir, upstream.commit, file)
-    if (upstreamContent === undefined || upstreamContent !== local) changed.push(file)
-    else unchanged.push(file)
-  }
-
-  const failures = []
-  const warnings = []
-  const unaccounted = changed.filter((file) => !coveredBy.has(file))
-  for (const file of unaccounted) {
-    failures.push(`UNACCOUNTED divergence: ${file} differs from upstream ${upstream.commit} but no manifest entry covers it`)
-  }
-
-  for (const [id, files] of entries) {
-    const srcFiles = files.filter((file) => file.startsWith('src/')).map(normalize)
-    if (srcFiles.length === 0) continue
-    const allMatch = srcFiles.every((file) => !changed.includes(file))
-    if (allMatch) {
-      warnings.push(`STALE ledger: ${id} lists ${srcFiles.join(', ')} but every file matches upstream — absorbed or reverted?`)
-    }
-    for (const file of srcFiles) {
-      if (!localFiles.includes(file)) {
-        warnings.push(`STALE ledger: ${id} lists ${file} which no longer exists locally`)
+    // Reverse index: src file -> divergence ids that cover it. Manifest
+    // paths carry the `src/` prefix (matching DIVERGENCES.md); the local
+    // walk yields paths relative to the fork's src/ root, so normalize.
+    const normalize = (file) => (file.startsWith('src/') ? file.slice(4) : file)
+    const coveredBy = new Map()
+    for (const [id, files] of entries) {
+      for (const file of files) {
+        if (!file.startsWith('src/')) continue // non-src paths are not gated
+        const list = coveredBy.get(normalize(file)) ?? []
+        list.push(id)
+        coveredBy.set(normalize(file), list)
       }
     }
-  }
 
-  const lines = []
-  lines.push(`pi-vendor-diff gate (upstream: ${upstream.source})`)
-  lines.push(`  compared ${localFiles.length} local src files against ${upstream.commit}`)
-  lines.push(`  changed: ${changed.length}  unchanged: ${unchanged.length}  manifest entries: ${entries.length}`)
-  if (failures.length > 0) {
-    lines.push('')
-    lines.push('FAIL:')
-    for (const f of failures) lines.push(`  - ${f}`)
-  }
-  if (warnings.length > 0) {
-    lines.push('')
-    lines.push(`WARN${STRICT ? ' (strict: failing)' : ''}:`)
-    for (const w of warnings) lines.push(`  - ${w}`)
-  }
-  if (failures.length === 0 && warnings.length === 0) {
-    lines.push('  OK: every local change is covered by the divergence manifest; no stale entries.')
-  }
-  console.log(lines.join('\n'))
+    const localFiles = listTsFiles(FORK_SRC)
+    const changed = []
+    const unchanged = []
+    for (const file of localFiles) {
+      const local = readFileSync(path.join(FORK_SRC, file), 'utf8')
+      const upstreamContent = upstreamBlob(upstream.repo, upstream.packageDir, upstream.commit, file)
+      if (upstreamContent === undefined || upstreamContent !== local) changed.push(file)
+      else unchanged.push(file)
+    }
 
-  if (failures.length > 0 || (STRICT && warnings.length > 0)) process.exitCode = 1
+    const failures = []
+    const warnings = []
+    const unaccounted = changed.filter((file) => !coveredBy.has(file))
+    for (const file of unaccounted) {
+      failures.push(`UNACCOUNTED divergence: ${file} differs from upstream ${upstream.commit} but no manifest entry covers it`)
+    }
+
+    for (const [id, files] of entries) {
+      const srcFiles = files.filter((file) => file.startsWith('src/')).map(normalize)
+      if (srcFiles.length === 0) continue
+      const allMatch = srcFiles.every((file) => !changed.includes(file))
+      if (allMatch) {
+        warnings.push(`STALE ledger: ${id} lists ${srcFiles.join(', ')} but every file matches upstream — absorbed or reverted?`)
+      }
+      for (const file of srcFiles) {
+        if (!localFiles.includes(file)) {
+          warnings.push(`STALE ledger: ${id} lists ${file} which no longer exists locally`)
+        }
+      }
+    }
+
+    const lines = []
+    lines.push(`pi-vendor-diff gate (upstream: ${upstream.source})`)
+    lines.push(`  compared ${localFiles.length} local src files against ${upstream.commit}`)
+    lines.push(`  changed: ${changed.length}  unchanged: ${unchanged.length}  manifest entries: ${entries.length}`)
+    if (failures.length > 0) {
+      lines.push('')
+      lines.push('FAIL:')
+      for (const f of failures) lines.push(`  - ${f}`)
+    }
+    if (warnings.length > 0) {
+      lines.push('')
+      lines.push(`WARN${STRICT ? ' (strict: failing)' : ''}:`)
+      for (const w of warnings) lines.push(`  - ${w}`)
+    }
+    if (failures.length === 0 && warnings.length === 0) {
+      lines.push('  OK: every local change is covered by the divergence manifest; no stale entries.')
+    }
+    console.log(lines.join('\n'))
+
+    if (failures.length > 0 || (STRICT && warnings.length > 0)) process.exitCode = 1
+  } finally {
+    // A tarball-fallback upstream is an extracted temp checkout: remove
+    // it on EVERY exit path (success, gate failure, throw).
+    upstream.cleanup?.()
+  }
 }
 
 try {
