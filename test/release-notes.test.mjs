@@ -88,10 +88,10 @@ test('0.4 release guidance follows the stable or next tag channel', (t) => {
       assert.notEqual(result.status, 0)
       assert.match(result.stderr, /@deepseek-ai\/dsh@0\.1\.2/u)
     } finally {
-      cleanup(stableWithPrereleaseGuidance)
+      // testLifecycle cleans the fixture roots.
     }
   } finally {
-    cleanup(futurePrerelease)
+    // testLifecycle cleans the fixture roots.
   }
 
   const stableGuidance = '\n- @deepseek-ai/dsh@0.1.2\n- @xmoon76/dsh-pi-tui@latest\n- @xmoon76/dsh-pi-tui@0.3'

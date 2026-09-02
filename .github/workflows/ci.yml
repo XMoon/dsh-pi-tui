@@ -1004,9 +1004,10 @@ jobs:
   # Release always means the same version is already on npm.
   #
   # The assets are the SAME artifact chain as npm: the tarball produced by
-  # build-and-pack, smoke-tested by compat-smoke and ecosystem-compat, then
-  # published by publish —
-  # never a rebuild. A SHA256 file rides along for download verification.
+  # build-and-pack, smoke-tested by compat-smoke (the pi2dsh ecosystem gate
+  # is currently DISABLED — see the ecosystem-compat job comment), then
+  # published by publish — never a rebuild. A SHA256 file rides along for
+  # download verification.
   #
   # The job is re-runnable: an existing release is edited in place and assets
   # are uploaded with --clobber.

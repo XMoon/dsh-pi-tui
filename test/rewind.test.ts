@@ -175,9 +175,10 @@ test('R06: steers inside one turn do not create new rewind points', () => {
 
 test('R07: compaction-shadowed history still yields candidates from the raw log', () => {
   // The raw append-only log keeps the ORIGINAL user events even after a
-  // compaction replacement — the source of truth is session.events, never
-  // the folded surface projection. Compaction events are structural
-  // (dsh-compaction augments the map; the transcript treats them the same).
+  // compaction replacement — the source of truth is the session log
+  // (served through the alpha.4 snapshot reads), never the folded surface
+  // projection. Compaction events are structural (dsh-compaction augments
+  // the map; the transcript treats them the same).
   const compaction = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
     ({ type, seq, time: 1_700_000_000_000 + seq, data }) as SessionEvent
   const events = [

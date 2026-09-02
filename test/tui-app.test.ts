@@ -241,7 +241,7 @@ test('tool cards present through the real registry: read shows the relativized p
     assert.equal(outcome.isError, false)
     const resultEvent: SessionEvent = {
       type: 'tool/result',
-      seq: 1,
+      seq: SessionSeq(1),
       time: 1_700_000_000_001,
       data: {
         turn: 0,

@@ -373,7 +373,7 @@ async function main() {
       ], workspace, 'official DSH preset matrix', sourcePnpmEnv)
       await run(process.execPath, [join(workspace, 'scripts', 'dsh-runtime-boundary-smoke.mjs'), candidate], workspace, 'old DSH boundary', sourcePnpmEnv)
     }
-    console.log('pi2dsh Gate B runs in the ecosystem-compat CI job (both modes; published DSH + pi2dsh from the registry)')
+    console.log('pi2dsh Gate B is DISABLED in CI (the published pi2dsh@0.24.0 bridge is runtime-incompatible with the alpha.4 baseline); re-enable per the ecosystem-compat job comment when a compatible pi2dsh release lands')
     console.log(`DSH Source Compatibility: CODE COMPLETE candidate ${basename(candidate)}`)
   } finally {
     if (root !== undefined) {
