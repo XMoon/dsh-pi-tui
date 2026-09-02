@@ -4624,6 +4624,57 @@ describe("paste-burst fallback (X038)", () => {
 		editor.handleInput("\r");
 		assert.strictEqual(submitted, undefined, "re-enabling must restore the fallback");
 	});
+
+	it("a remapped submit chord submits even mid-burst (X037 × X038)", () => {
+		setKeybindings(
+			new KeybindingsManager(TUI_KEYBINDINGS, {
+				"tui.editor.submit": "ctrl+x",
+			}),
+		);
+		try {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted: string | undefined;
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			for (const ch of "abcdefgh") editor.handleInput(ch); // rapid burst
+			editor.handleInput("\x18"); // ctrl+x — the remapped submit
+
+			assert.strictEqual(
+				submitted,
+				"abcdefgh",
+				"a remapped submit chord must submit even mid-burst (the burst suppresses only a physical Enter)",
+			);
+		} finally {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+		}
+	});
+
+	it("a physical Enter under a remapped submit breaks the burst instead of submitting (X037 × X038)", () => {
+		setKeybindings(
+			new KeybindingsManager(TUI_KEYBINDINGS, {
+				"tui.editor.submit": "ctrl+x",
+			}),
+		);
+		try {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted: string | undefined;
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			for (const ch of "abcdefgh") editor.handleInput(ch); // rapid burst
+			editor.handleInput("\r"); // physical Enter: no longer the submit key
+			assert.strictEqual(submitted, undefined, "Enter must not submit under the remap");
+			assert.strictEqual(editor.getText(), "abcdefgh", "Enter is not a newline under the remap either");
+
+			editor.handleInput("\x18"); // ctrl+x
+			assert.strictEqual(submitted, "abcdefgh", "the chord must submit after the burst was broken");
+		} finally {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+		}
+	});
 });
 
 describe("editor submit binding split (X037)", () => {
@@ -4738,6 +4789,33 @@ describe("expanded cursor mapping (X045)", () => {
 			"a start-snapped cursor maps to the expansion's start",
 		);
 		assert.ok(editor.getExpandedText().startsWith(editor.getText().slice(0, markerStart) + pasted));
+	});
+
+	it("never re-expands a literal marker string inside an earlier paste's content (single-pass)", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		// Paste #1's CONTENT contains a literal marker string for paste #2.
+		// The multi-round replace would re-scan the output of round 1 and
+		// expand that literal too — corrupting real text and desyncing the
+		// expanded cursor. Single-pass expansion must leave it verbatim.
+		const contentA = Array.from({ length: 12 }, (_, i) =>
+			i === 5 ? "[paste #2 +12 lines]" : `A-line-${i}`,
+		).join("\n");
+		editor.handleInput(`\x1b[200~${contentA}\x1b[201~`);
+		const pastedB = Array.from({ length: 12 }, (_, i) => `B-line-${i}`).join("\n");
+		editor.handleInput(`\x1b[200~${pastedB}\x1b[201~`);
+
+		const expanded = editor.getExpandedText();
+		assert.ok(
+			expanded.includes("A-line-4\n[paste #2 +12 lines]\nA-line-6"),
+			"the literal marker inside paste #1's content must survive verbatim",
+		);
+		assert.ok(expanded.includes(pastedB), "the REAL paste #2 marker must still expand");
+		assert.ok(!expanded.includes("[paste #1"), "every real marker must be expanded");
+
+		// The expanded cursor must agree with the expanded text: a cursor
+		// at the raw end maps to the expanded end.
+		editor.setTextAndCursor(editor.getText(), { line: 0, col: editor.getText().length });
+		assert.strictEqual(editor.getExpandedCursor(), expanded.length, "the expanded cursor must land at the expanded end");
 	});
 });
 
