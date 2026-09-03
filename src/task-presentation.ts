@@ -139,9 +139,13 @@ export function projectTaskItems(
     list.push(item)
     childrenMap.set(parent, list)
   }
-  /** Fold a subtree predicate bottom-up in ONE reverse-preorder pass — the
-   * whole projection stays O(n) even for deep/long trees; per-node BFS
-   * re-scans (an earlier revision) made search keystrokes quadratic. */
+  /** Fold a subtree predicate bottom-up in ONE reverse-preorder pass —
+   * eliminates the repeated subtree scans that made search keystrokes
+   * quadratic; common projection paths stay near-linear. (Whole-graph
+   * strict linearity is not claimed: the include-with-ancestors, visible-
+   * ancestry and connector walks are depth-proportional by nature, which
+   * is negligible for Task Center's realistic tens-to-hundreds of
+   * descendants.) */
   const propagateSubtree = (
     nodes: readonly TaskPanelItem[],
     tree: Map<string | undefined, TaskPanelItem[]>,
@@ -161,9 +165,8 @@ export function projectTaskItems(
    * EVERYTHING below them. Computed in one preorder pass (a parent is
    * always visited before its children, so the marker propagates top-down
    * without re-scanning subtrees): the Active+search branch membership
-   * test is then O(1) per row, and the whole projection stays linear even
-   * on the worst-case search keystroke (PR review M2 — the earlier nested
-   * candidate loop re-walked every branch per matching root).
+   * test is then O(1) per row — the earlier nested candidate loop
+   * re-walked every branch per matching root (PR review M2).
    */
   const matchingInactiveRoots = new Set<string>()
   const underMatchingInactive = new Set<string>()
@@ -226,8 +229,9 @@ export function projectTaskItems(
   const collapsedIds = options.collapsedIds ?? new Set<string>()
   const autoExpandRunning = options.autoExpandRunning ?? true
 
-  // Descendant predicates over the SELECTED tree, folded once (O(n)) — the
-  // disclosure pass below then answers each query in O(1).
+  // Descendant predicates over the SELECTED tree, folded once per
+  // projection pass (near-linear) — the disclosure pass below then answers
+  // each query in constant time.
   const hasMatchingDescendant = query === ''
     ? (): boolean => false
     : propagateSubtree(selected, children, item => matchedIds.has(item.value))

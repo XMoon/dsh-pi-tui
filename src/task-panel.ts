@@ -224,6 +224,19 @@ export class TaskBrowserPanel implements Component, Focusable {
     const previousValue = this.filtered[this.selected]?.value
     this.items = [...items]
     this.loading = false
+    // Forget exposures whose row left the attention set: a STABLE id can
+    // exit failure and later re-enter it, and the runtime treats that as a
+    // NEW attention event (it clears the acknowledged set when the failure
+    // id disappears). The panel must mirror that — otherwise the second
+    // failure of the same id would never re-expose (P2 edge case).
+    if (this.exposedAttention.size > 0) {
+      const currentAttention = new Set(this.items
+        .filter(item => item.attention === true)
+        .map(item => item.value))
+      for (const id of [...this.exposedAttention]) {
+        if (!currentAttention.has(id)) this.exposedAttention.delete(id)
+      }
+    }
     if (preferredValue !== undefined) this.preferredValue = preferredValue
     this.rebuildTypeCycle()
     if (this.activeType !== null && !this.typeOrder.includes(this.activeType)) this.activeType = null

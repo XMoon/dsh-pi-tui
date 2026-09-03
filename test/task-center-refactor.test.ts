@@ -192,3 +192,30 @@ test('scrolling new attention rows into view exposes them exactly once (PR revie
   assert.equal(exposed.length, 13, 'no re-exposure of already-seen rows')
   panel.dispose()
 })
+
+test('a STABLE id re-entering failure is exposed again (P2 edge: id reuse)', () => {
+  // The runtime supports stable-id reuse: when the same job id exits the
+  // failure set and later re-enters it, that is a NEW attention event.
+  // The panel's seen-set must forget the old exposure accordingly.
+  const exposed: string[] = []
+  const panel = new TaskBrowserPanel([
+    { ...job('job:j1'), status: 'failed', active: false, attention: true },
+  ], 8, {
+    mode: 'full', enableSearch: true, header: 'Tasks',
+    onViewportExpose: ids => exposed.push(...ids),
+  }, () => {}, () => {}, () => {})
+  panel.render(80)
+  assert.deepEqual(exposed, ['job:j1'], 'first failure is exposed once')
+  // The job leaves the failure set (e.g. it is retried and now runs).
+  panel.setItems([{ ...job('job:j1') }])
+  panel.render(80)
+  assert.equal(exposed.length, 1, 'while not failing, no exposure happens')
+  // The SAME id fails again: a fresh attention event must re-expose it.
+  panel.setItems([
+    { ...job('job:j1'), status: 'failed', active: false, attention: true },
+  ])
+  panel.render(80)
+  assert.deepEqual(exposed, ['job:j1', 'job:j1'],
+    'the second failure of the same id must be exposed again (the runtime treats it as new)')
+  panel.dispose()
+})
