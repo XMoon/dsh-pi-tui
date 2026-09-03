@@ -129,6 +129,44 @@ export function projectTaskItems(
   const filterMatches = (item: TaskPanelItem): boolean => typeMatches(item) && queryMatches(item)
 
   const matchedIds = new Set(all.filter(filterMatches).map(item => item.value))
+  // The FULL tree (before any include pass): answering "does this inactive
+  // branch contain active work?" during Active projection needs the
+  // complete lineage, not the selected subset.
+  const childrenMap = new Map<string | undefined, TaskPanelItem[]>()
+  for (const item of all) {
+    const parent = parentById.get(item.value)
+    const list = childrenMap.get(parent) ?? []
+    list.push(item)
+    childrenMap.set(parent, list)
+  }
+  /** Fold a subtree predicate bottom-up in ONE reverse-preorder pass — the
+   * whole projection stays O(n) even for deep/long trees; per-node BFS
+   * re-scans (an earlier revision) made search keystrokes quadratic. */
+  const propagateSubtree = (
+    nodes: readonly TaskPanelItem[],
+    tree: Map<string | undefined, TaskPanelItem[]>,
+    marker: (item: TaskPanelItem) => boolean,
+  ): (id: string) => boolean => {
+    const subtree = new Map<string, boolean>()
+    for (let i = nodes.length - 1; i >= 0; i -= 1) {
+      const node = nodes[i]!
+      const anyChild = (tree.get(node.value) ?? []).some(child => subtree.get(child.value) === true)
+      subtree.set(node.value, anyChild || marker(node))
+    }
+    return (id: string) => (tree.get(id) ?? []).some(child => subtree.get(child.value) === true)
+  }
+  const hasActiveDescendantInAll = propagateSubtree(all, childrenMap, isTaskItemActive)
+  const isDescendantOf = (candidate: TaskPanelItem, root: string): boolean => {
+    let parent = parentById.get(candidate.value)
+    const seen = new Set<string>()
+    while (parent !== undefined && !seen.has(parent)) {
+      seen.add(parent)
+      if (parent === root) return true
+      parent = parentById.get(parent)
+    }
+    return false
+  }
+
   const includedIds = new Set<string>()
   const includeWithAncestors = (item: TaskPanelItem): void => {
     let current: TaskPanelItem | undefined = item
@@ -143,14 +181,24 @@ export function projectTaskItems(
 
   if (options.scope === 'active') {
     // Search narrows the active set; with an empty query every active row is
-    // retained. If the query matches an inactive ancestor, retain that row so
-    // the user can still discover its matching context.
+    // retained. A query that matches an INACTIVE branch keeps that branch
+    // only as the CONTEXT of active work below it — the matching ancestors
+    // and their active descendants join together, never an isolated dead
+    // branch (an Active view must keep at least one active row; PR review
+    // M3).
     for (const item of all) {
       if (!typeMatches(item)) continue
       if (isTaskItemActive(item) && queryMatches(item)) includeWithAncestors(item)
       else if (options.includeAttentionInActive === true && !isTaskItemActive(item)
         && (item.attention === true || isTaskItemFailure(item.status)) && queryMatches(item)) includeWithAncestors(item)
-      else if (!isTaskItemActive(item) && queryMatches(item) && item.hasChildren) includedIds.add(item.value)
+      else if (!isTaskItemActive(item) && queryMatches(item) && item.hasChildren
+        && hasActiveDescendantInAll(item.value)) {
+        for (const candidate of all) {
+          if (candidate.value !== item.value && isTaskItemActive(candidate) && isDescendantOf(candidate, item.value)) {
+            includeWithAncestors(candidate)
+          }
+        }
+      }
     }
   } else {
     for (const item of all) {
@@ -170,19 +218,14 @@ export function projectTaskItems(
   const collapsedIds = options.collapsedIds ?? new Set<string>()
   const autoExpandRunning = options.autoExpandRunning ?? true
 
-  const descendants = (id: string): TaskPanelItem[] => {
-    const result: TaskPanelItem[] = []
-    const queue = [...(children.get(id) ?? [])]
-    while (queue.length > 0) {
-      const next = queue.shift()!
-      result.push(next)
-      queue.push(...(children.get(next.value) ?? []))
-    }
-    return result
-  }
-  const hasMatchingDescendant = (id: string): boolean => query !== '' && descendants(id).some(item => matchedIds.has(item.value))
-  const hasActiveDescendant = (id: string): boolean => descendants(id).some(isTaskItemActive)
-  const hasAttentionDescendant = (id: string): boolean => descendants(id).some(candidate => candidate.attention === true || isTaskItemFailure(candidate.status))
+  // Descendant predicates over the SELECTED tree, folded once (O(n)) — the
+  // disclosure pass below then answers each query in O(1).
+  const hasMatchingDescendant = query === ''
+    ? (): boolean => false
+    : propagateSubtree(selected, children, item => matchedIds.has(item.value))
+  const hasActiveDescendant = propagateSubtree(selected, children, isTaskItemActive)
+  const hasAttentionDescendant = propagateSubtree(selected, children,
+    item => item.attention === true || isTaskItemFailure(item.status))
   const isExpanded = (item: TaskPanelItem): boolean => {
     if (!(item.hasChildren || (children.get(item.value)?.length ?? 0) > 0)) return false
     if (collapsedIds.has(item.value)) return false
@@ -210,7 +253,13 @@ export function projectTaskItems(
       parent = parentById.get(parent)
     }
     if (hidden) continue
-    const context = (options.scope === 'active' && !isTaskItemActive(item)) || !matchedIds.has(item.value)
+    // Context rows are the NON-ACTIVE rows kept only to explain the view:
+    // inactive ancestors in Active scope, or any row that survived a filter
+    // without matching it. An ACTIVE row is never context — it is the work
+    // the view exists to show, even when a search query did not match it
+    // (a matching inactive branch pulls its running descendants in, PR
+    // review M3).
+    const context = !isTaskItemActive(item) && ((options.scope === 'active') || !matchedIds.has(item.value))
     visible.push({
       ...item,
       kind: item.kind ?? 'task',

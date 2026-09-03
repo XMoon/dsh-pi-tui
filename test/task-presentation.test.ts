@@ -51,3 +51,50 @@ test('Quick can surface an attention row when no work is active', () => {
   const projection = projectTaskItems(failed, options({ scope: 'active', includeAttentionInActive: true }))
   assert.deepEqual(projection.rows.map(row => row.value), ['agent:a', 'agent:a2', 'job:b'])
 })
+
+test('Active + search: a matching inactive branch keeps its RUNNING lineage (PR review M3)', () => {
+  const items: TaskPanelItem[] = [
+    { value: 'agent:planner', label: 'planner', status: 'inactive', active: false, source: 'subagent', type: 'subagent', parentId: undefined, depth: 1, hasChildren: true },
+    { value: 'agent:coder', label: 'coder', status: 'running', active: true, source: 'subagent', type: 'subagent', parentId: 'agent:planner', depth: 2 },
+  ]
+  // /planner under Active: the branch context + the running child join —
+  // the Active view never degrades to an isolated inactive row.
+  const projection = projectTaskItems(items, options({ scope: 'active', query: 'planner' }))
+  assert.deepEqual(projection.rows.map(row => row.value), ['agent:planner', 'agent:coder'])
+  assert.equal(projection.rows[0]!.ancestorContext, true, 'the matching inactive ancestor is context')
+  assert.equal(projection.rows[1]!.ancestorContext, false)
+})
+
+test('Active + search: a matching dead branch stays OUT of the Active view (PR review M3)', () => {
+  const items: TaskPanelItem[] = [
+    { value: 'agent:old', label: 'old project', status: 'inactive', active: false, source: 'subagent', type: 'subagent', parentId: undefined, depth: 1, hasChildren: true },
+    { value: 'agent:old-child', label: 'child', status: 'inactive', active: false, source: 'subagent', type: 'subagent', parentId: 'agent:old', depth: 2 },
+    { value: 'job:build', label: 'build', status: 'running', active: true, source: 'job', type: 'bash', parentId: undefined, depth: 0 },
+  ]
+  const projection = projectTaskItems(items, options({ scope: 'active', query: 'old' }))
+  assert.deepEqual(projection.rows.map(row => row.value), [],
+    'the fully-settled matching branch must not appear (and the non-matching running job is not part of this query)')
+})
+
+test('a deep/long tree projects linearly (no per-node subtree re-scan)', () => {
+  // 300-node straight chain: the O(n) fold must not blow up the projection
+  // (a quadratic implementation re-scans every ancestor per node).
+  const depth = 300
+  const chain: TaskPanelItem[] = []
+  for (let i = 1; i <= depth; i += 1) {
+    chain.push({
+      value: `agent:n${i}`, label: `n${i}`, status: i === depth ? 'running' : 'inactive',
+      active: i === depth,
+      source: 'subagent', type: 'subagent',
+      parentId: i === 1 ? undefined : `agent:n${i - 1}`,
+      depth: i, hasChildren: i < depth,
+    })
+  }
+  const start = performance.now()
+  const projection = projectTaskItems(chain, options({ scope: 'active' }))
+  const elapsed = performance.now() - start
+  assert.equal(projection.rows.length, depth, 'the whole active lineage stays visible')
+  assert.ok(elapsed < 500, `linear projection expected, took ${elapsed.toFixed(1)}ms`)
+  // Every ancestor of the running leaf must be a context row.
+  assert.equal(projection.rows.filter(row => row.ancestorContext === true).length, depth - 1)
+})

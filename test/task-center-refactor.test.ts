@@ -135,3 +135,24 @@ test('a stale restored type filter snaps to All instead of a dead view', () => {
   assert.ok(!plain.includes('[pwsh]'), `vanished type must not stay active:\n${plain}`)
   panel.dispose()
 })
+
+test('acknowledge scope is the VIEWPORT, not the whole projection (PR review M1)', () => {
+  // 20 failures, Quick shows the attention projection with maxVisible 8:
+  // opening the browser acknowledges ONLY the first 8 (the ones actually
+  // rendered); the 12 below the fold keep their footer attention.
+  const failures: TaskPanelItem[] = Array.from({ length: 20 }, (_, i) => ({
+    value: `job:f${i}`, label: `failure ${i}`, status: 'failed', active: false, attention: true,
+    source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs',
+  }))
+  const panel = new TaskBrowserPanel(failures, 8, {
+    mode: 'quick', enableSearch: true, header: 'Tasks',
+  }, () => {}, () => {}, () => {})
+  assert.equal(panel.visibleItems().filter(item => item.kind !== 'view-full').length, 20,
+    'the projection holds every failure (plus the quick view-all pseudo-row)')
+  assert.equal(panel.viewportItems().length, 8, 'the viewport renders only maxVisible rows')
+  assert.deepEqual(panel.viewportItems().map(item => item.value),
+    Array.from({ length: 8 }, (_, i) => `job:f${i}`),
+    'the viewport is the scroll window from the top (the pseudo-row is beyond the fold)')
+  assert.ok(panel.viewportItems().every(item => item.attention === true), 'every visible row is an attention row')
+  panel.dispose()
+})

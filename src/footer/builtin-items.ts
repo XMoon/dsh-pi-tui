@@ -167,8 +167,15 @@ const tasksItem: FooterItemDefinition = {
     if (density === 'compact') {
       const parts: string[] = []
       if (failed > 0) parts.push(`!${failed}`)
-      if (tasks > 0 || agents > 0) {
+      // Only the kinds that are actually active render — a jobs-only state
+      // must not advertise `●0/0a`, and an agents-only state no `0/0j`
+      // (PR review polish).
+      if (tasks > 0 && agents > 0) {
         parts.push(`●${agents}/${totalAgents}a`)
+        parts.push(`${tasks}/${totalJobs}j`)
+      } else if (agents > 0) {
+        parts.push(`●${agents}/${totalAgents}a`)
+      } else if (tasks > 0) {
         parts.push(`${tasks}/${totalJobs}j`)
       }
       if (context.taskBrowserAvailable) parts.push('↓')
@@ -176,9 +183,13 @@ const tasksItem: FooterItemDefinition = {
     }
     const parts: string[] = []
     if (failed > 0) parts.push(`! ${failed} failed`)
-    if (tasks > 0 || agents > 0) {
+    if (tasks > 0 && agents > 0) {
       parts.push(`● ${agents}/${totalAgents} agents`)
       parts.push(`${tasks}/${totalJobs} jobs`)
+    } else if (agents > 0) {
+      parts.push(`● ${agents}/${totalAgents} agents`)
+    } else if (tasks > 0) {
+      parts.push(`● ${tasks}/${totalJobs} jobs`)
     }
     return { spans: [{ text: `[${parts.join(' · ')}${hint}]`, tone }] }
   },

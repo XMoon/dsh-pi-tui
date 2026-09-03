@@ -1508,8 +1508,10 @@ export interface TaskBrowserHandle {
   setRefreshState?(state: 'loading' | 'ready' | 'stale', error?: string): void
   /** Read the presentation state for a Quick → Full transition. */
   getViewState?(): TaskBrowserViewState
-  /** Read projected rows for failure acknowledgement and tests. */
+  /** Read projected rows for tests/embedders (the full projection). */
   visibleItems?(): readonly TaskPanelItem[]
+  /** Read ONLY the rows the open viewport renders (the acknowledge scope). */
+  viewportItems?(): readonly TaskPanelItem[]
 }
 
 /** Footer status data supplied by the runner. */
@@ -10791,7 +10793,7 @@ export class TuiApp {
         selectedId: options.selectedId ?? options.preferredValue ?? null,
         expandedIds: new Set(options.expandedIds ?? []),
         collapsedIds: new Set(options.collapsedIds ?? []),
-      }), visibleItems: () => [] }
+      }), visibleItems: () => [], viewportItems: () => [] }
     }
     const panel = new TaskBrowserPanel(
       items.map(item => ({ ...item })),
@@ -10859,6 +10861,7 @@ export class TuiApp {
       },
       getViewState: () => panel.getViewState(),
       visibleItems: () => panel.visibleItems(),
+      viewportItems: () => panel.viewportItems(),
     }
   }
 

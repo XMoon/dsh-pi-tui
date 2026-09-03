@@ -245,6 +245,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     return this.filtered
   }
 
+  /** ONLY the rows the current viewport actually renders (the ack scope:
+   * a failure the user has not scrolled to was never "seen"). */
+  viewportItems(): readonly TaskPanelItem[] {
+    return this.filtered.slice(this.scroll, this.scroll + this.maxVisible)
+  }
+
   /** Current view state used by Quick → Full. */
   getViewState(): TaskBrowserViewState {
     return {
