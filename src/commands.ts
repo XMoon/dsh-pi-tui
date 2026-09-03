@@ -480,14 +480,15 @@ export interface TuiCommandRunner {
   updateWelcomeCard(): void
   /**
    * Open one job's detail from a task list: bash jobs show the status
-   * viewer, subagent jobs the child transcript. Shared by the ↓/Ctrl+J
-   * browser and `/tasks`.
+   * viewer, subagent jobs the child transcript. Shared by the footer ↓
+   * Quick Tasks browser and `/tasks`.
    */
   openJobView(jobId: string): void
   /**
-   * Open the MERGED task browser (jobs + subagents, searchable, row-level
-   * interrupt on subagent rows). The single command-side entry behind
-   * `/tasks` (and its `subagents` alias) — identical to the ↓ trigger.
+   * Open the full Task Center (jobs + subagents, searchable, with
+   * confirmed row-level Stop on capable rows). This is the command-side
+   * entry behind `/tasks` (and its `subagents` alias); the footer ↓ opens
+   * the compact Quick Tasks view.
    */
   openTasksBrowser(): void
   /**
@@ -3111,12 +3112,12 @@ export function registerTuiCommands(
 
   registerTuiCommand({
     name: 'tasks',
-    description: 'Browse background jobs and subagents for this session (search filters rows)',
+    description: 'Open the full Task Center for this session (scope, type, search, and tree controls)',
     aliases: ['subagents'],
     handler: async () => {
       // The merged browser: jobs + subagents in one searchable list, with
-      // row-level interrupt on subagent rows — the same surface as the ↓
-      // trigger (runner.openTasksBrowser). Completed jobs and finished
+      // row-level confirmed Stop on capable rows — the full surface behind
+      // `/tasks` (runner.openTasksBrowser). Completed jobs and finished
       // one-shot children are reachable exactly through this path.
       await requireAgent()
       runner.openTasksBrowser()

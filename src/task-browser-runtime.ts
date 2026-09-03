@@ -38,6 +38,16 @@ import {
   type TaskBrowserRow,
 } from './tasks-browser.ts'
 
+/** The separate job/agent counts and unacknowledged failure attention. */
+export interface TaskBrowserSummary {
+  readonly runningAgents: number
+  readonly totalAgents: number
+  readonly runningJobs: number
+  readonly totalJobs: number
+  readonly failedAttention: number
+  readonly failedTotal: number
+}
+
 /** The runtime hooks the coordinator drives (wired by the runner). */
 export interface TaskBrowserRuntimeHooks {
   /** Session-identity key of the CURRENT live root (undefined = no live
@@ -61,6 +71,10 @@ export interface TaskBrowserRuntimeHooks {
   commitRows(rows: readonly TaskBrowserRow[], preferredValue?: string): void
   /** Commit the dock badge: the RUNNING children only (id + label). */
   commitBadge(running: ReadonlyArray<{ id: string; label: string }>): void
+  /** Commit independent job/agent totals and failure attention. */
+  commitSummary?(summary: TaskBrowserSummary): void
+  /** Commit async loading/stale state for the open presentation. */
+  commitRefreshState?(state: 'loading' | 'ready' | 'stale', error?: string): void
 }
 
 /** Structural type for the jobs the coordinator merges (a projection of
@@ -79,9 +93,15 @@ export class TaskBrowserRuntime {
   /** The last committed rows (the row-identity source for the open
    * browser's select path — see {@link rows}). */
   private lastRows: TaskBrowserRow[] = []
+  /** Failure ids acknowledged by opening/reading the visible Task Center. */
+  private readonly acknowledgedFailures = new Set<string>()
+  /** Failure ids in the previous committed job projection. */
+  private previousFailureIds = new Set<string>()
   /** Monotonic catalog-request epoch: every refreshCatalog request takes
    * the next value. */
   private requestEpoch = 0
+  /** Keeps runtime-only status events from clearing a pending catalog load. */
+  private catalogInFlight = 0
   /** The epoch of the LAST SUCCESSFULLY COMMITTED catalog. A response
    * may commit only when its own request epoch is NOT below this — i.e.
    * "latest successfully committed wins", never "latest requested wins":
@@ -125,12 +145,27 @@ export class TaskBrowserRuntime {
     const key = this.hooks.currentKey()
     if (key === undefined) return
     const epoch = ++this.requestEpoch
-    const entries = await this.hooks.listDescendants()
+    this.catalogInFlight += 1
+    this.hooks.commitRefreshState?.('loading')
+    let entries: readonly SubagentDescendantListEntry[]
+    try {
+      entries = await this.hooks.listDescendants()
+    } catch (error) {
+      // A stale session's failure must not overwrite the new session's state.
+      if (this.hooks.currentKey() === key && epoch >= this.committedEpoch) {
+        const message = error instanceof Error ? error.message : 'Task catalog refresh failed'
+        this.hooks.commitRefreshState?.('stale', message)
+      }
+      throw error
+    } finally {
+      this.catalogInFlight -= 1
+    }
     if (this.hooks.currentKey() !== key) return
     if (epoch < this.committedEpoch) return
     this.committedEpoch = epoch
     this.catalog = [...entries]
     this.apply(entries)
+    if (this.catalogInFlight === 0) this.hooks.commitRefreshState?.('ready')
   }
 
   /** A RUNTIME-only refresh: NO descendant listing — reuse the cached
@@ -140,6 +175,10 @@ export class TaskBrowserRuntime {
    * key is captured and consumed atomically. */
   refreshRuntime(): void {
     if (this.hooks.currentKey() === undefined) return
+    // Rows only — never a 'ready' commit: this runs on idle/status events
+    // and must not clear a "Refresh failed · R retry" stale notice (only a
+    // successful CATALOG listing, or the rows replacing an empty loading
+    // frame, is allowed to clear async state).
     this.apply(this.catalog)
   }
 
@@ -152,6 +191,17 @@ export class TaskBrowserRuntime {
     this.committedEpoch = ++this.requestEpoch
     this.catalog = []
     this.lastRows = []
+    this.acknowledgedFailures.clear()
+    this.previousFailureIds = new Set()
+  }
+
+  /** Acknowledge only failure rows the current surface actually showed. */
+  acknowledge(values: readonly string[]): void {
+    const visible = new Set(values)
+    for (const id of this.previousFailureIds) {
+      if (visible.has(id)) this.acknowledgedFailures.add(id)
+    }
+    if (this.hooks.currentKey() !== undefined) this.apply(this.catalog)
   }
 
   private apply(entries: readonly SubagentDescendantListEntry[]): void {
@@ -159,7 +209,24 @@ export class TaskBrowserRuntime {
     // is re-read for every child, so row + badge statuses always reflect
     // the CURRENT drivers — never the listing's snapshot.
     const projected = projectSubagentActivity(entries, (childId) => this.hooks.agentStatusOf(childId))
-    const rows = buildTaskRows(this.hooks.readJobs(), projected)
+    const jobs = this.hooks.readJobs()
+    const rawRows = buildTaskRows(jobs, projected)
+    const currentFailureIds = new Set(rawRows
+      .filter(row => row.kind === 'job' && (row.status === 'failed' || row.status === 'timed_out' || row.status === 'lost'))
+      .map(row => row.value))
+    for (const id of this.previousFailureIds) {
+      if (!currentFailureIds.has(id)) this.acknowledgedFailures.delete(id)
+    }
+    // A row that transitions into failure is a new attention event even if
+    // the registry reused its stable job id.
+    for (const id of currentFailureIds) {
+      if (!this.previousFailureIds.has(id)) this.acknowledgedFailures.delete(id)
+    }
+    this.previousFailureIds = currentFailureIds
+    const attentionIds = new Set([...currentFailureIds].filter(id => !this.acknowledgedFailures.has(id)))
+    const rows = rawRows.map(row => row.kind === 'job'
+      ? { ...row, attention: attentionIds.has(row.value) }
+      : row)
     this.lastRows = rows
     // Preferred cursor (plan §6.6): the first RUNNING subagent in tree
     // order, else the first active job — the tree itself never re-sorts
@@ -168,12 +235,22 @@ export class TaskBrowserRuntime {
     const preferred = rows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
       ?? rows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
     this.hooks.commitRows(rows, preferred)
+    const runningAgents = projected.filter((entry): entry is Extract<SubagentDescendantListEntry, { kind: 'child' }> =>
+      entry.kind === 'child' && entry.activity === 'running')
+    const totalAgents = projected.filter(entry => entry.kind === 'child').length
+    const summary: TaskBrowserSummary = {
+      runningAgents: runningAgents.length,
+      totalAgents,
+      runningJobs: jobs.filter(job => isActiveJobStatus(job.status)).length,
+      totalJobs: jobs.length,
+      failedAttention: attentionIds.size,
+      failedTotal: currentFailureIds.size,
+    }
+    this.hooks.commitSummary?.(summary)
     // The badge counts the PROJECTED running children (the registry
     // projection, never the catalog's store-presence activity): an idle
     // continuable child must not keep the badge permanently armed.
-    this.hooks.commitBadge(projected
-      .filter((entry): entry is Extract<SubagentDescendantListEntry, { kind: 'child' }> =>
-        entry.kind === 'child' && entry.activity === 'running')
+    this.hooks.commitBadge(runningAgents
       .map(entry => ({ id: entry.id, label: entry.label ?? entry.id })))
   }
 }

@@ -94,7 +94,7 @@ Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应
 
 ### Subagent 与后台任务
 
-`/tasks` 提供当前 Session 的任务浏览器。
+`/tasks` 打开完整 Task Center（当前 Session 的所有后台工作）；Footer 的 `↓` 直接打开轻量 Quick Tasks（只看正在运行的工作）。
 
 Subagent 按完整 lineage 显示，包括嵌套创建的 descendant：
 
@@ -112,6 +112,8 @@ main
 * running / inactive
 * nested descendant
 * 后台 Job
+
+两个视图共享同一份运行时状态：`A` 切换 Active / All scope，`Tab` 切换类型过滤，`/` 进入搜索，`S`（确认后）停止所选任务，`N` / `Shift+N` 在运行中的任务间跳转，Quick 内 `T` 或底部 "View all" 行进入完整 Task Center，`Esc` 逐层返回。
 
 已经结束的 one-shot Subagent 仍可以打开并查看持久化 Transcript。
 

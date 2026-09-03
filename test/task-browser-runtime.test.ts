@@ -458,3 +458,42 @@ test('openTasksBrowser seeds the FIRST FRAME from the cached runtime and gates i
   assert.ok(!open.replace(/\/\/.*$/gm, '').includes("row.mode !== 'continuable'"),
     'the interrupt execution gate must not drift back to a mode-only check')
 })
+
+test('Task Center dispatch re-validates session, driver and job state at confirm time (review round)', () => {
+  const marker = 'const actionRow = (value: string, action: \'stop\' | \'interrupt\'): void => {'
+  const start = indexSource.indexOf(marker)
+  const handler = indexSource.slice(start, start + 4000)
+  // The stale-confirm fence: the generation captured at dispatch must equal
+  // the CURRENT generation and the live agent must be unchanged.
+  assert.ok(handler.includes("actionGeneration !== sessionGeneration || liveAgent !== actionSession"),
+    'the dispatch must refuse a stale session generation')
+  // A subagent stop re-reads the LIVE driver before firing the interrupt.
+  assert.ok(handler.includes("agents?.get(row.childId as SessionId)?.status !== 'running'"),
+    'the dispatch must re-check the live registry driver at confirm time')
+  // A job stop re-reads the current record through the public registry API.
+  assert.ok(handler.includes('jobs.get(row.jobId as JobId, actionSession)'),
+    'the dispatch must re-read the live job record before killing')
+  assert.ok(handler.includes('!isActiveJobStatus(current.status)'),
+    'a settled job must not be killable at confirm time')
+})
+
+test('Esc from a promoted full view returns to Quick ONLY for the quick-opener stack (review round)', () => {
+  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
+  const cancelBlock = open.slice(open.indexOf("() => {"), open.indexOf('},', open.indexOf('() => {')) + 3)
+  assert.ok(cancelBlock.includes("viewMode === 'full' && restoreState !== undefined"),
+    'Esc must reopen Quick only when the full view was promoted from Quick')
+  assert.ok(cancelBlock.includes("openTasksBrowser('quick', state)"),
+    'the Esc path must restore the shared context into Quick')
+  assert.ok(cancelBlock.includes('quickTaskState'),
+    'Quick state must be carried across the promote/demote round-trip')
+})
+
+test('the Task Center surface never calls the consuming jobs read API (review round)', () => {
+  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
+  assert.ok(!open.includes('jobs.read('),
+    'the browser must never consume the model-owned job output cursor')
+  assert.ok(open.includes('jobs.get('),
+    'metadata reads through the public get API are the only job access the surface needs')
+})
