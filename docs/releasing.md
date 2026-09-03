@@ -130,9 +130,10 @@ fork:
 | No change under `packages/pi-tui/` | `pnpm run verify:prepush:nofork` |
 | Any change under `packages/pi-tui/` | `pnpm run verify:prepush` |
 
-Both commands run the documentation test, naming gate, client-boundary gate,
-keybinding gate, production dependency audit, and `pack:release`. The full
-variant additionally runs the fork typecheck and fork tests. `pack:release`
+Both commands run the documentation test, tooling tests, divergence
+ledger/vendor gates, naming gate, client-boundary gate, keybinding gate,
+production dependency audit, and `pack:release`. The full variant additionally
+runs the fork typecheck and fork tests. `pack:release`
 executes the package lifecycle: clean, build, bundle typecheck/tests, tarball
 smoke, public extension fixture smokes, plugin smokes, and declaration-leak
 checks. Do not treat source tests alone as sufficient.

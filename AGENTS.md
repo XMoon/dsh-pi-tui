@@ -488,7 +488,8 @@ gitignored):
 
 - **`v*` and `next-v*` release tags** → `pnpm run verify:prepush`, the
   CI-equivalent full chain: fork typecheck + fork tests + docs tests +
-  naming gate + `pnpm audit --prod --audit-level high` + `pnpm pack:release`
+  tooling tests + divergence ledger/vendor gates + naming gate +
+  `pnpm audit --prod --audit-level high` + `pnpm pack:release`
   (prepack build/typecheck/tests + every postpack smoke, including the
   declaration-leak gate). Measured ≈2 min. Some failures are ONLY visible
   in the packed artifact (the settleCompactionSurface declaration leak was

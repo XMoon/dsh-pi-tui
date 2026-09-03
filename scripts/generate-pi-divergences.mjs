@@ -89,7 +89,7 @@ function renderEntry(id, entry) {
     `- Risk: ${code(entry.risk)}`,
     `- Files: ${files}`,
     `- Last audited: ${code(entry.audit?.lastAuditedAt)}`,
-    `- Audited against: ${code(`${checked.repo ?? ''}@${checked.ref ?? ''}`)}`,
+    `- Baseline compared: ${code(`${checked.repo ?? ''}@${checked.baselineRef ?? ''}`)}`,
     '',
     '#### Why it exists',
     '',
@@ -109,9 +109,9 @@ function renderEntry(id, entry) {
     '',
     '#### Upstream comparison',
     '',
-    `- Baseline: ${code(`${checked.repo ?? ''}@${checked.ref ?? ''}`)}`,
+    `- Baseline: ${code(`${checked.repo ?? ''}@${checked.baselineRef ?? ''}`)}`,
     `- Semantic equivalence: ${code(entry.upstream?.equivalence)}`,
-    `- Current upstream check: ${code(checked.currentRef ?? 'not recorded')}`,
+    `- Reference snapshot: ${code(checked.referenceRef ? `${checked.repo ?? ''}@${checked.referenceRef}` : 'not recorded')}`,
     '- Relevant upstream files:',
     ...listLines(entry.upstream?.relevantFiles),
     '- Relevant issues/PRs:',
@@ -170,7 +170,7 @@ function renderCategoryDefinitions(definitions) {
 function renderGatePolicy(policy) {
   if (policy === null || typeof policy !== 'object' || Array.isArray(policy)) return []
   const lines = ['## Gate policy', '']
-  for (const key of ['sourceCoverage', 'staleActive', 'historicalRecords', 'packagingPaths']) {
+  for (const key of ['sourceCoverage', 'staleActive', 'historicalRecords', 'packagingPaths', 'referenceSnapshotPolicy']) {
     if (policy[key] !== undefined) lines.push(`- ${oneLine(key)}: ${oneLine(policy[key])}`)
   }
   if (Array.isArray(policy.upstreamResolution)) {
@@ -206,13 +206,14 @@ export function renderMarkdown(manifest) {
     `- Tag: ${code(baseline.tag)}`,
     `- Pinned commit: ${code(baseline.commit)}`,
     '',
-    '## Re-audit context',
+    '## Audit snapshot',
     '',
+    `- Audited local source commit: ${code(verification.auditedSourceCommit)}`,
     `- Branch audited: ${code(verification.branch)}`,
-    `- next commit: ${code(verification.nextCommit)}`,
-    `- Current upstream snapshot: ${code(`${verification.currentUpstream?.repository ?? ''}@${verification.currentUpstream?.commit ?? ''}`)}`,
-    `- Current Kimi snapshot: ${code(`${verification.currentKimi?.repository ?? ''}@${verification.currentKimi?.commit ?? ''}`)}`,
     `- Audit date: ${code(verification.auditedAt)}`,
+    `- Upstream reference snapshot: ${code(`${verification.referenceSnapshots?.upstream?.repository ?? ''}@${verification.referenceSnapshots?.upstream?.commit ?? ''}`)}`,
+    `- Kimi reference snapshot: ${code(`${verification.referenceSnapshots?.kimi?.repository ?? ''}@${verification.referenceSnapshots?.kimi?.commit ?? ''}`)}`,
+    `- Snapshot policy: ${oneLine(manifest.gatePolicy?.referenceSnapshotPolicy)}`,
     '',
     ...methods,
     '',

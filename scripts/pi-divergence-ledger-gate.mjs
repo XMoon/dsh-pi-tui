@@ -107,15 +107,23 @@ function validateVerification(manifest, errors) {
   }
   if (!validDate(verification.auditedAt)) add(errors, 'verification.auditedAt', 'must be a valid YYYY-MM-DD date')
   if (!nonEmptyString(verification.branch)) add(errors, 'verification.branch', 'must be a non-empty string')
-  if (!SHA_PATTERN.test(verification.nextCommit ?? '')) add(errors, 'verification.nextCommit', 'must be a full 40-character commit SHA')
-  for (const key of ['currentUpstream', 'currentKimi']) {
-    const snapshot = verification[key]
-    if (!isRecord(snapshot)) {
-      add(errors, `verification.${key}`, 'must record repository and a full commit SHA')
-      continue
+  if (!SHA_PATTERN.test(verification.auditedSourceCommit ?? '')) add(errors, 'verification.auditedSourceCommit', 'must be a full 40-character commit SHA')
+  const snapshots = verification.referenceSnapshots
+  if (!isRecord(snapshots)) {
+    add(errors, 'verification.referenceSnapshots', 'must record upstream and Kimi audit snapshots')
+  } else {
+    for (const key of ['upstream', 'kimi']) {
+      const snapshot = snapshots[key]
+      if (!isRecord(snapshot)) {
+        add(errors, `verification.referenceSnapshots.${key}`, 'must record repository and a full commit SHA')
+        continue
+      }
+      if (!nonEmptyString(snapshot.repository)) add(errors, `verification.referenceSnapshots.${key}.repository`, 'must be a non-empty string')
+      if (key === 'upstream' && nonEmptyString(manifest.baseline?.repository) && snapshot.repository !== manifest.baseline.repository) {
+        add(errors, `verification.referenceSnapshots.${key}.repository`, 'must match baseline.repository')
+      }
+      if (!SHA_PATTERN.test(snapshot.commit ?? '')) add(errors, `verification.referenceSnapshots.${key}.commit`, 'must be a full 40-character commit SHA')
     }
-    if (!nonEmptyString(snapshot.repository)) add(errors, `verification.${key}.repository`, 'must be a non-empty string')
-    if (!SHA_PATTERN.test(snapshot.commit ?? '')) add(errors, `verification.${key}.commit`, 'must be a full 40-character commit SHA')
   }
   if (!stringArray(verification.method, { allowEmpty: false })) add(errors, 'verification.method', 'must contain at least one audit-method statement')
 }
@@ -166,23 +174,23 @@ function validateUpstream(entry, location, errors, manifest) {
   }
   if (!EQUIVALENCE.includes(upstream.equivalence)) add(errors, `${location}.upstream.equivalence`, `must be one of ${EQUIVALENCE.join(', ')}`)
   if (!isRecord(upstream.checkedAgainst)) {
-    add(errors, `${location}.upstream.checkedAgainst`, 'must record the pinned and current source refs')
+    add(errors, `${location}.upstream.checkedAgainst`, 'must record the baseline and reference source refs')
   } else {
-    for (const key of ['repo', 'ref', 'currentRef']) {
+    for (const key of ['repo', 'baselineRef', 'referenceRef']) {
       if (!nonEmptyString(upstream.checkedAgainst[key])) add(errors, `${location}.upstream.checkedAgainst.${key}`, 'must be a non-empty string')
     }
-    for (const key of ['ref', 'currentRef']) {
+    for (const key of ['baselineRef', 'referenceRef']) {
       if (!SHA_PATTERN.test(upstream.checkedAgainst[key] ?? '')) add(errors, `${location}.upstream.checkedAgainst.${key}`, 'must be a full 40-character commit SHA')
     }
     if (nonEmptyString(manifest.baseline?.repository) && upstream.checkedAgainst.repo !== manifest.baseline.repository) {
       add(errors, `${location}.upstream.checkedAgainst.repo`, 'must match baseline.repository')
     }
-    if (nonEmptyString(manifest.baseline?.commit) && upstream.checkedAgainst.ref !== manifest.baseline.commit) {
-      add(errors, `${location}.upstream.checkedAgainst.ref`, 'must match baseline.commit')
+    if (nonEmptyString(manifest.baseline?.commit) && upstream.checkedAgainst.baselineRef !== manifest.baseline.commit) {
+      add(errors, `${location}.upstream.checkedAgainst.baselineRef`, 'must match baseline.commit')
     }
-    const currentUpstreamCommit = manifest.verification?.currentUpstream?.commit
-    if (SHA_PATTERN.test(currentUpstreamCommit ?? '') && upstream.checkedAgainst.currentRef !== currentUpstreamCommit) {
-      add(errors, `${location}.upstream.checkedAgainst.currentRef`, 'must match verification.currentUpstream.commit')
+    const referenceUpstreamCommit = manifest.verification?.referenceSnapshots?.upstream?.commit
+    if (SHA_PATTERN.test(referenceUpstreamCommit ?? '') && upstream.checkedAgainst.referenceRef !== referenceUpstreamCommit) {
+      add(errors, `${location}.upstream.checkedAgainst.referenceRef`, 'must match verification.referenceSnapshots.upstream.commit')
     }
   }
   if (!stringArray(upstream.relevantFiles, { allowEmpty: false })) add(errors, `${location}.upstream.relevantFiles`, 'must list at least one checked source file')
@@ -265,7 +273,7 @@ function validateOverview(manifest, errors, required) {
   } else if (!isRecord(policy)) {
     add(errors, 'gatePolicy', 'must be an object')
   } else {
-    for (const key of ['sourceCoverage', 'staleActive', 'historicalRecords', 'packagingPaths']) {
+    for (const key of ['sourceCoverage', 'staleActive', 'historicalRecords', 'packagingPaths', 'referenceSnapshotPolicy']) {
       if (!nonEmptyString(policy[key])) add(errors, `gatePolicy.${key}`, 'must be a non-empty policy statement')
     }
     if (!stringArray(policy.upstreamResolution, { allowEmpty: false })) add(errors, 'gatePolicy.upstreamResolution', 'must list upstream resolution strategies')
