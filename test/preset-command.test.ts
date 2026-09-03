@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -29,6 +29,31 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
+/** Poll an async predicate until true or the timeout elapses (the picker
+ * listing runs behind a scheduler yield inside a detached task). */
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 3000, stepMs = 10): Promise<void> {
+  const start = Date.now()
+  for (;;) {
+    if (await predicate()) return
+    if (Date.now() - start > timeoutMs) throw new Error(`waitFor timed out after ${timeoutMs}ms`)
+    await new Promise<void>(resolve => setTimeout(resolve, stepMs))
+  }
+}
+
 // themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /
 // CI=true — clear all three so the render paths under test stay live.
 process.env.NO_COLOR = ''
@@ -37,29 +62,38 @@ process.env.CI = ''
 
 /** A blank or started fake agent. */
 function fakeAgent(sessionId: string, events: readonly { type: string }[] = []): Agent {
+  // The alpha.4 Session shape: the log is served through the snapshot reads.
   return {
-    session: { id: sessionId, header: { cwd: '/ws' }, events },
+    session: {
+      id: sessionId,
+      header: { cwd: '/ws' },
+      get seq() { return events.length },
+      eventAt: (seq: number) => events[seq],
+      snapshotEvents: () => events,
+    },
     ctx: { on: () => () => {} },
     options: { provider: 'p', model: 'm' },
   } as unknown as Agent
 }
 
 /** The four shipped rows WITH Chinese metadata, exactly as the dsh install's
- * own `config/agent-presets` ships them (the CLI's composeProfile overlay
- * makes that root the effective roster). */
+ * agent-presets package ships them in its official shipped root. */
 const SHIPPED_ROWS = [
   { id: 'standard', name: '标准模式', description: '功能完整的编码 Agent。', trust: 'system' },
-  { id: 'code', name: 'PTC 模式', description: 'Code Mode SDK。', trust: 'system' },
+  { id: 'ptc', name: 'PTC 模式', description: 'Code Mode SDK。', trust: 'system' },
   { id: 'minimal', name: '极简模式', description: '双工具编码 Agent。', trust: 'system' },
   { id: 'cordis', name: '创造模式', description: '自定义 Agent preset。', trust: 'system' },
 ]
 
-function presetService(rows: { id: string; name?: string; description?: string; trust?: string }[]) {
+function presetService(
+  rows: { id: string; name?: string; description?: string; trust?: string }[],
+  defaultPresetId = 'standard',
+) {
   const resolved: string[] = []
   return {
     resolved,
     service: {
-      defaultId: 'standard',
+      defaultId: defaultPresetId,
       list: async () => rows.map(row => ({
         id: row.id,
         trust: row.trust ?? 'system',
@@ -109,6 +143,9 @@ function stubRunner(options: {
   tuiSettings?: TuiSettingsLike
   applyFooterSettings?: () => void
   extensions?: TuiCommandRunner['extensions']
+  agents?: TuiCommandRunner['agents']
+  sessionReader?: Partial<TuiCommandRunner['sessionReader']>
+  effectivePresetId?: string
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
   /** Defaults to a pass-through capture (the test themes use id === name). */
@@ -123,15 +160,24 @@ function stubRunner(options: {
     get liveAgent() { return options.agent },
     ensureSession: async () => { options.ensureCalls?.push('ensureSession') },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
-    agents: {} as never,
+    agents: options.agents ?? {
+      create: async () => ({}) as never,
+      resume: async () => ({}) as never,
+    },
     sessionReader: {
       list: async () => [],
       search: async () => [],
-      titles: async () => new Map(),
+      projectionBatch: async () => new Map(),
       measureContext: () => undefined,
       readExportData: async () => ({ kind: 'none' }),
+       ...options.sessionReader,
     },
     catalog: new DirectCatalogPort(options.ctx as never, () => undefined),
     config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),
@@ -167,7 +213,7 @@ function stubRunner(options: {
     currentPreset: () => undefined,
     get pendingPreset() { return pending.value },
     set pendingPreset(id: string | undefined) { pending.value = id },
-    get effectivePresetId() { return pending.value },
+    get effectivePresetId() { return pending.value ?? options.effectivePresetId },
     refreshCatalog: async (request) => {
       refreshes.push(request)
       return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
@@ -176,6 +222,8 @@ function stubRunner(options: {
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
@@ -225,6 +273,10 @@ function setup(options: {
   settings?: { get(ns: string): unknown; mutate(ns: string, patch: unknown[]): Promise<unknown> }
   tuiSettings?: TuiSettingsLike
   extensions?: TuiCommandRunner['extensions']
+  defaultPresetId?: string
+  agents?: TuiCommandRunner['agents']
+  sessionReader?: Partial<TuiCommandRunner['sessionReader']>
+  effectivePresetId?: string
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
   captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
@@ -234,10 +286,11 @@ function setup(options: {
   const vt = new VirtualTerminal(options.width ?? 100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
-  const presets = presetService(options.rows ?? SHIPPED_ROWS)
+  const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId)
   ctx.provide('agentPresets', presets.service as never)
   if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
   const ensureCalls: string[] = []
@@ -251,6 +304,9 @@ function setup(options: {
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
     extensions: options.extensions,
+    agents: options.agents,
+    sessionReader: options.sessionReader,
+    effectivePresetId: options.effectivePresetId,
     captureExtensionHealthRef: options.captureExtensionHealthRef
       ?? ((slot, id) => {
         // Real-service semantics: only a REGISTERED plugin theme resolves
@@ -301,7 +357,10 @@ test('/keybindings opens sessionless without creating a session', async () => {
       localShellSandbox: 'bypass',
       homeEndKeys: 'viewport',
       focusMode: 'off',
+    wheelScrollLines: '1',
       iconStyle: 'emoji',
+      notificationMode: 'unfocused',
+      notificationMethod: 'auto',
       keybindings: undefined,
     }),
     replace: async () => {},
@@ -325,7 +384,7 @@ test('/preset with no session opens the English roster and creates nothing', asy
   assert.deepEqual(t.ensureCalls, [], '/preset must not create a session')
   const view = await t.view()
   assert.ok(view.includes('Standard mode (standard)'), `roster row missing:\n${view}`)
-  assert.ok(view.includes('PTC mode (code)'), `roster row missing:\n${view}`)
+  assert.ok(view.includes('PTC mode (ptc)'), `roster row missing:\n${view}`)
   assert.ok(view.includes('Minimal mode (minimal)'), `roster row missing:\n${view}`)
   assert.ok(view.includes('Creator mode (cordis)'), `roster row missing:\n${view}`)
   assert.ok(!view.includes('标准模式'), `Chinese preset name leaked:\n${view}`)
@@ -354,6 +413,87 @@ test('/preset <id> with no session rejects an unknown id', async () => {
   assert.match(result.text, /not found/)
   assert.equal(t.pending.value, undefined)
   assert.deepEqual(t.ensureCalls, [])
+  t.app.stop()
+})
+
+test('/preset code remains unknown when the roster has no code entry', async () => {
+  const t = setup({})
+  const result = await t.run('code') as { kind: string; text: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /preset "code" not found/)
+  assert.match(result.text, /use preset "ptc"/)
+  assert.equal(t.pending.value, undefined)
+  t.app.stop()
+})
+
+test('/preset code selects a legal custom code roster entry', async () => {
+  const t = setup({ rows: [...SHIPPED_ROWS, { id: 'code', name: 'Custom code', trust: 'user' }] })
+  const result = await t.run('code')
+  assert.deepEqual(result, { kind: 'success', text: 'new sessions will start on preset code' })
+  assert.equal(t.pending.value, 'code')
+  t.app.stop()
+})
+
+test('/new resolves an absent legacy code default as canonical ptc', async () => {
+  const created: { agentPreset?: string }[] = []
+  const t = setup({
+    defaultPresetId: 'code',
+    agents: {
+      create: async options => {
+        created.push({ agentPreset: options.agentPreset })
+        return {} as never
+      },
+      resume: async () => ({}) as never,
+    },
+  })
+  const result = await t.runCommand('new') as { kind: string; text?: string }
+  assert.deepEqual(result, { kind: 'success', text: 'started a fresh session' })
+  assert.deepEqual(t.presets.resolved, ['ptc'], 'the legacy default falls back to the canonical ptc roster entry')
+  assert.deepEqual(created, [{ agentPreset: 'ptc' }], 'new session metadata must stay canonical')
+  t.app.stop()
+})
+
+test('/sessions opens input-first and shows projection-pending rows before enrichment settles', async () => {
+  let resolveBatch!: (value: Map<string, { title?: string; preset?: string }>) => void
+  const batch = new Promise<Map<string, { title?: string; preset?: string }>>(resolve => { resolveBatch = resolve })
+  const t = setup({
+    sessionReader: {
+      list: async () => [{ id: 'session-cold', createdAt: 10, cwd: '/ws', live: false }],
+      projectionBatch: async () => batch,
+    },
+  })
+  const result = await t.runCommand('sessions')
+  assert.deepEqual(result, { kind: 'success' })
+  // The overlay owns the input immediately (loading frame); the listing is
+  // behind a scheduler yield, so poll until the row lands — still without
+  // the pending preset.
+  const initial = await t.view()
+  assert.ok(initial.includes('Loading sessions…') || initial.includes('cold'),
+    `the first frame must be interactive (loading row or listed row):\n${initial}`)
+  await waitFor(async () => (await t.view()).includes('cold'))
+  const pending = await t.view()
+  assert.ok(!pending.includes('preset:standard'), 'a pending projection must not show an effective preset')
+  resolveBatch(new Map([['session-cold', { preset: 'standard' }]]))
+  await waitFor(async () => (await t.view()).includes('preset:standard'))
+  t.app.stop()
+})
+
+test('/new honors the launch-time effective preset', async () => {
+  const created: { agentPreset?: string }[] = []
+  const t = setup({
+    effectivePresetId: 'minimal',
+    agents: {
+      create: async options => {
+        created.push({ agentPreset: options.agentPreset })
+        return {} as never
+      },
+      resume: async () => ({}) as never,
+    },
+  })
+  const result = await t.runCommand('new') as { kind: string; text?: string }
+  assert.deepEqual(result, { kind: 'success', text: 'started a fresh session' })
+  assert.deepEqual(t.presets.resolved, ['minimal'])
+  assert.deepEqual(created, [{ agentPreset: 'minimal' }])
   t.app.stop()
 })
 
@@ -446,23 +586,23 @@ function standingOutcome(skills: string[], notice?: string): CatalogRefreshOutco
 
 test('/preset <id> with no session requests a STANDING refresh of the new preset, creating nothing', async () => {
   const t = setup({ refreshCatalog: async () => standingOutcome(['glab']) })
-  const result = await t.run('code')
-  assert.equal(t.pending.value, 'code')
+  const result = await t.run('ptc')
+  assert.equal(t.pending.value, 'ptc')
   assert.equal(t.refreshes.length, 1, 'the preset choice must request one standing refresh')
   assert.equal(t.refreshes[0]?.source, 'preset')
-  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'ptc' })
   assert.deepEqual(t.ensureCalls, [], '/preset must not create a session')
   t.app.stop()
 })
 
 test('/preset <id> with no session surfaces the standing degradation notice', async () => {
   const t = setup({
-    refreshCatalog: async () => standingOutcome(['global-skill'], 'skill catalog unavailable for preset "code": preset exploded'),
+    refreshCatalog: async () => standingOutcome(['global-skill'], 'skill catalog unavailable for preset "ptc": preset exploded'),
   })
-  const result = await t.run('code') as { kind: string; text: string }
+  const result = await t.run('ptc') as { kind: string; text: string }
   assert.equal(result.kind, 'success')
-  assert.equal(result.text, 'new sessions will start on preset code')
-  assert.equal(t.pending.value, 'code')
+  assert.equal(result.text, 'new sessions will start on preset ptc')
+  assert.equal(t.pending.value, 'ptc')
   await t.view()
   const view = t.vt.getViewport().join('\n')
   assert.ok(view.includes('preset exploded'), `degradation notice missing:\n${view}`)
@@ -478,11 +618,46 @@ test('/preset default <id> with no override requests a standing refresh of the n
       mutate: async (ns, patch) => { mutated.push({ ns, patch }); return undefined },
     },
   })
-  const result = await t.run('default code') as { kind: string; text: string }
+  const result = await t.run('default ptc') as { kind: string; text: string }
   assert.equal(result.kind, 'success')
-  assert.equal(result.text, 'default preset set: code')
+  assert.equal(result.text, 'default preset set: ptc')
   assert.equal(mutated.length, 1)
   assert.equal(t.refreshes.length, 1, 'an unmasked default change must refresh the standing catalog')
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'ptc' })
+  t.app.stop()
+})
+
+test('/preset default code remains unknown when the roster has no code entry', async () => {
+  const writes: unknown[] = []
+  const t = setup({
+    refreshCatalog: async () => standingOutcome(['glab']),
+    settings: {
+      get: () => undefined,
+      mutate: async (_ns, patch) => { writes.push(patch); return undefined },
+    },
+  })
+  const result = await t.run('default code') as { kind: string; text: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /preset "code" not found/u)
+  assert.match(result.text, /use preset "ptc"/u)
+  assert.deepEqual(writes, [], 'an unknown code id must never be persisted')
+  assert.deepEqual(t.refreshes, [])
+  t.app.stop()
+})
+
+test('/preset default code writes a legal custom roster entry', async () => {
+  const writes: unknown[] = []
+  const t = setup({
+    rows: [...SHIPPED_ROWS, { id: 'code', name: 'Custom code', trust: 'user' }],
+    refreshCatalog: async () => standingOutcome(['glab']),
+    settings: {
+      get: () => undefined,
+      mutate: async (_ns, patch) => { writes.push(patch); return undefined },
+    },
+  })
+  const result = await t.run('default code') as { kind: string; text: string }
+  assert.deepEqual(result, { kind: 'success', text: 'default preset set: code' })
+  assert.deepEqual(writes, [[{ op: 'set', path: ['default'], value: 'code' }]])
   assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
   t.app.stop()
 })
@@ -496,7 +671,7 @@ test('/preset default <id> masked by a pending preset does NOT refresh', async (
     },
   })
   t.pending.value = 'minimal'
-  const result = await t.run('default code') as { kind: string; text: string }
+  const result = await t.run('default ptc') as { kind: string; text: string }
   assert.equal(result.kind, 'success')
   assert.equal(t.refreshes.length, 0, 'the pending override masks the new default — no refresh')
   t.app.stop()
@@ -524,7 +699,7 @@ function reloadSettings(theme: string, onGet?: (count: number) => void): TuiSett
     get: () => {
       reads += 1
       onGet?.(reads)
-      return { theme: currentTheme, iconStyle: 'emoji', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }
+      return { theme: currentTheme, iconStyle: 'emoji', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }
     },
     replace: doc => { currentTheme = doc.theme as string },
   }
@@ -640,15 +815,15 @@ test('/reload unknown theme does not create plugin health', async () => {
 
 test('/reload with a pending preset reports the standing degradation notice', async () => {
   const t = setup({
-    refreshCatalog: async () => standingOutcome([], 'skill catalog unavailable for preset "code": preset exploded'),
+    refreshCatalog: async () => standingOutcome([], 'skill catalog unavailable for preset "ptc": preset exploded'),
   })
-  t.pending.value = 'code'
+  t.pending.value = 'ptc'
   await t.runCommand('reload')
   await t.view()
   const view = t.vt.getViewport().join('\n')
   assert.ok(view.includes('0 human skills'), `skill count missing:\n${view}`)
   assert.ok(view.includes('preset exploded'), `degradation notice missing:\n${view}`)
-  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
+  assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'ptc' })
   t.app.stop()
 })
 
@@ -681,8 +856,9 @@ test('/keybindings reload re-reads the settings document LAZILY (the explicit re
   // reload time (a stale cached parse would miss a later settings edit).
   let settingsDoc = {
     theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue',
-    localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off',
-    iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' },
+    localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1',
+    iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto',
+    keybindings: { 'app.input.steer': 'ctrl+x' },
   }
   let reads = 0
   const tuiSettings: TuiSettingsLike = {
@@ -720,7 +896,10 @@ test('/keybindings reload queues behind an editor write and applies the latest d
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
     focusMode: 'off',
+    wheelScrollLines: '1',
     iconStyle: 'emoji',
+    notificationMode: 'unfocused',
+    notificationMethod: 'auto',
     keybindings: { 'app.input.steer': 'ctrl+x' },
   }
   let writes = 0
@@ -783,7 +962,10 @@ test('/keybindings reset queues behind an editor write and keeps the final reset
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
     focusMode: 'off',
+    wheelScrollLines: '1',
     iconStyle: 'emoji',
+    notificationMode: 'unfocused',
+    notificationMethod: 'auto',
     keybindings: undefined,
   }
   let writes = 0
@@ -837,7 +1019,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
   // now-keybindings-less document.
   let replaced = 0
   const failing: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' } }),
+    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }),
     replace: async () => { replaced += 1; throw new Error('write refused') },
   }
   let t = setup({ tuiSettings: failing })
@@ -847,7 +1029,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
   assert.ok((failed as { text: string }).text.includes('failed'), `error text missing: ${JSON.stringify(failed)}`)
   assert.equal(replaced, 1, 'the write must be attempted')
   assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+x'], 'a failed reset must keep the running keymap')
-  t.app.stop()
+  t.app.dispose()
 
   let okReplaced = 0
   // Round 35: the success fixture is the reviewer's regression shape — the
@@ -864,7 +1046,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
     get: () => {
       okReads += 1
       if (okReads > 1) throw new Error('no second read allowed')
-      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' } }
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
     },
     replace: async () => { okReplaced += 1 },
   }
@@ -877,7 +1059,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
   assert.equal(okReplaced, 1)
   assert.equal(okReads, 1, 'the reset must read the settings document exactly ONCE (no post-write read)')
   assert.deepEqual(t.app.keybindingsManager().keysFor('app.input.steer'), ['ctrl+s'], 'the reset must REBUILD the running keymap from the cleared document (defaults)')
-  t.app.stop()
+  t.app.dispose()
 
   // Round 30: a throwing FIRST read must not escape the handler either —
   // the reset reports an error and the running keymap stays untouched.
@@ -925,7 +1107,7 @@ test('/keybindings reload is fail-soft: a throwing settings read keeps the last-
   const tuiSettings: TuiSettingsLike = {
     get: () => {
       if (failing) throw new Error('settings read exploded')
-      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', iconStyle: 'emoji', keybindings: { 'app.input.steer': 'ctrl+x' } }
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
     },
     replace: async () => {},
   }

@@ -69,6 +69,23 @@ export abstract class Stack extends Container {
 		this.entries.length = 0;
 	}
 
+	/**
+	 * Release this stack (dsh-pi-tui divergence X007 completion — re-vendor
+	 * lifecycle follow-up P2): the base Container.dispose() clears only
+	 * `children`, but a Stack maintains a SECOND `entries` layout
+	 * representation which the fullscreen layout engine reads through
+	 * [LAYOUT_NODE]().entries — after dispose() the entries would stay
+	 * stale and still reference the (already disposed) children. Clear the
+	 * shadow state FIRST, then release the children: even if a child
+	 * disposer re-enters render/layout, it can never observe stale
+	 * entries. Repeated dispose stays idempotent (entries are already
+	 * empty and Container.dispose is idempotent).
+	 */
+	override dispose(): void {
+		this.entries.length = 0;
+		super.dispose();
+	}
+
 	[LAYOUT_NODE](): StackLayoutNode {
 		return {
 			type: this.layoutType,

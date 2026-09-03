@@ -23,6 +23,7 @@ function settingsFixture(initialKeybindings: unknown, footerCustomItems?: unknow
     localShellSandbox: 'off',
     homeEndKeys: 'off',
     focusMode: 'off',
+    wheelScrollLines: '1',
     footerCommand: { command: 'printf status', intervalMs: 1000 },
     ...footerCustomItems === undefined ? {} : { footerCustomItems },
     unrelated: 'preserved',
@@ -89,7 +90,7 @@ test('mutation performs one get, one replace, preserves unrelated fields, then p
 test('keybinding writes project merged footer items back from the USER raw projection', async () => {
   const userRaw = [
     { schemaVersion: 1, id: 'user:mine', kind: 'text', text: 'USER', tone: 'default' },
-    { schemaVersion: 1, id: 'user:future', kind: 'command', command: 'future command', futureField: { version: 2 } },
+    { schemaVersion: 1, id: 'user:future', kind: 'future-kind', command: 'future command', futureField: { version: 2 } },
   ]
   const projectRaw = [
     { schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT', tone: 'warning' },
@@ -325,6 +326,9 @@ test('shared settings mutations serialize and preserve both concurrent edits', a
     localShellSandbox: 'off',
     homeEndKeys: 'off',
     focusMode: 'off',
+    wheelScrollLines: '1',
+    notificationMode: 'unfocused',
+    notificationMethod: 'auto',
   }
   let gets = 0
   let replaces = 0
@@ -386,6 +390,9 @@ test('the shared queue also preserves an unrelated whole-document settings write
     localShellSandbox: 'off',
     homeEndKeys: 'off',
     focusMode: 'off',
+    wheelScrollLines: '1',
+    notificationMode: 'unfocused',
+    notificationMethod: 'auto',
   }
   let replaces = 0
   const firstReplaceStarted = deferred<void>()

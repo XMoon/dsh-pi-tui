@@ -1,20 +1,20 @@
 # Pre-push gate:
-#   - main and release tags (refs/tags/v*): run the FULL CI-equivalent
-#     verification (source checks + audit + pack with every postpack
-#     smoke). A failed CI round-trip costs ~5 minutes, and some failures
-#     are only visible in the PACKED artifact (the declaration-leak gate,
-#     tarball smokes) — the settleCompactionSurface leak was exactly this
-#     class, see AGENTS.md "Traps hit".
-#   - any other branch: fast typecheck only, so WIP pushes stay cheap.
-# When the pushed range does NOT touch packages/pi-tui/ (the vendored
-# fork), the fork's own typecheck/tests are skipped (~15 s saved) — the
-# fork suite only guards fork changes, and CI still runs it regardless.
+#   - branch pushes: skipped; CI is authoritative.
+#   - release tags (refs/tags/v* and refs/tags/next-v*): run the FULL
+#     CI-equivalent verification (source checks + audit + pack with every
+#     postpack smoke). A failed CI round-trip costs ~5 minutes, and some
+#     failures are only visible in the PACKED artifact (the declaration-leak
+#     gate, tarball smokes) — the settleCompactionSurface leak was exactly
+#     this class, see AGENTS.md "Traps hit".
+#   - other tags: skipped.
+# When the pushed range does NOT touch packages/pi-tui/ (the vendored fork),
+# the fork's own typecheck/tests are skipped (~15 s saved) — the fork suite
+# only guards fork changes, and CI still runs it regardless.
 #
 # The stage list is NOT hard-coded: .husky/pre-push runs the exact script
-# selected below (verify:prepush / verify:prepush:nofork / pnpm typecheck /
-# pnpm typecheck:bundle) by deriving its per-command stages from
-# package.json via scripts/pre-push-stages.mjs — package.json stays the
-# single source of truth, so there is nothing to drift.
+# selected below (verify:prepush / verify:prepush:nofork) by deriving its
+# per-command stages from package.json via scripts/pre-push-stages.mjs —
+# package.json stays the single source of truth, so there is nothing to drift.
 #
 # Output: the gate never goes silent. Every stage prints a timestamped
 # progress line (start / ok + elapsed / FAIL + elapsed) as it runs, and
@@ -32,19 +32,19 @@
 
 set -eu
 
-FULL=0
-# Aggregate across ALL pushed refs: the gate must run the strictest level
-# any ref demands. Initialize to 0 (clean) and only ever RAISE it to 1 —
-# on an unknown remote base or a fork-touching range — never reset it, so
-# a later clean ref cannot downgrade an earlier strict one. A fully clean
-# multi-ref push still selects the fast nofork/bundle chain.
+RUN_GATE=0
+# Aggregate across ALL pushed refs: any release tag demands the full gate.
+# Branches and arbitrary tags never enter the verification path below. When
+# the gate does run, an unknown remote base or a fork-touching range selects
+# the strict fork-aware chain and can never be downgraded by a later clean ref
+# in the same multi-ref push.
 FORK_CHANGED=0
 while read -r local_ref local_sha remote_ref remote_sha; do
   case "$remote_ref" in
-    refs/heads/main | refs/tags/v*) FULL=1 ;;
+    refs/tags/v* | refs/tags/next-v*) RUN_GATE=1 ;;
   esac
-  # The remote base may be unknown (new branch: zero sha, or a shallow
-  # clone): fall back to the safe "fork changed" default.
+  # The remote base may be unknown (new tag: zero sha, or a shallow clone):
+  # fall back to the safe "fork changed" default.
   if git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
     if ! git diff --quiet "$remote_sha" "$local_sha" -- packages/pi-tui/; then
       FORK_CHANGED=1
@@ -54,19 +54,24 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   fi
 done
 
-if [ "$FULL" -eq 1 ]; then
-  if [ "$FORK_CHANGED" -eq 1 ]; then
-    VERIFY="verify:prepush"
-  else
-    VERIFY="verify:prepush:nofork"
-  fi
-else
-  if [ "$FORK_CHANGED" -eq 1 ]; then
-    VERIFY="typecheck"
-  else
-    VERIFY="typecheck:bundle"
-  fi
+if [ "$RUN_GATE" -eq 0 ]; then
+  echo "✓ pre-push verification skipped (only v* and next-v* tags run the gate)"
+  exit 0
 fi
+
+if [ "$FORK_CHANGED" -eq 1 ]; then
+  VERIFY="verify:prepush"
+else
+  VERIFY="verify:prepush:nofork"
+fi
+
+# git push sets GIT_DIR/GIT_WORK_TREE/GIT_PREFIX/... for the hook process;
+# the verification stages spawn their own ISOLATED git fixtures
+# (dev-environment tests), which would otherwise inherit them and operate
+# on THIS repository instead of the fixture. Clear them before running
+# the stages.
+unset GIT_DIR GIT_WORK_TREE GIT_PREFIX GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_COMMON_DIR 2>/dev/null || true
 
 # Single source of truth: derive the ordered stage list from the selected
 # package.json script. Non-verify scripts (typecheck / typecheck:bundle)

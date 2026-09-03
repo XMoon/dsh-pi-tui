@@ -34,6 +34,14 @@ const FULL_SHA = /^[0-9a-f]{40}$/iu
 const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u
 const SOURCE_OVERRIDE_START = '# BEGIN DSH SOURCE OVERRIDES'
 const SOURCE_OVERRIDE_END = '# END DSH SOURCE OVERRIDES'
+const BINARY_ABSOLUTE_PATH_PREFIXES = [
+  '/home/',
+  '/Users/',
+  '/runner/_work/',
+  '/tmp/dsh-',
+  '\\tmp\\dsh-',
+]
+
 export class DshDistributionError extends Error {
   constructor(message) {
     super(message)
@@ -108,9 +116,9 @@ export function validateSourceIdentity(dshDir, config, options = {}) {
   if (!existsSync(directory) || !statSync(directory).isDirectory()) fail(`DSH source checkout is missing: ${directory}`)
   const expectedRepository = stringValue(config.repository, 'DSH source repository')
   if (expectedRepository !== DSH_REPOSITORY) fail(`DSH source repository must be ${DSH_REPOSITORY}`)
-  const remote = normalizeDshRepositoryRemote(runGit(directory, ['remote', 'get-url', 'origin']))
-  if (remote !== expectedDshRepositoryRemote(expectedRepository)) {
-    fail(`DSH source repository remote mismatch: expected ${expectedDshRepositoryRemote(expectedRepository)}, got ${remote}`)
+  const origin = normalizeDshRepositoryRemote(runGit(directory, ['remote', 'get-url', 'origin']))
+  if (origin !== expectedDshRepositoryRemote(expectedRepository)) {
+    fail(`DSH source repository remote mismatch: expected ${expectedDshRepositoryRemote(expectedRepository)}, got ${origin}`)
   }
   const expectedRef = assertSha(stringValue(config.ref, 'DSH source ref'), 'DSH source ref')
   const expectedVersion = assertVersion(stringValue(config.expectedVersion, 'DSH expected version'), 'DSH expected version')
@@ -242,6 +250,16 @@ function runTar(args) {
   })
   if (result.status !== 0) fail(`tar ${args.join(' ')} failed${commandText(result) ? `:\n${commandText(result)}` : ''}`)
   return result.stdout ?? ''
+}
+
+function runTarBuffer(args) {
+  const result = spawnSync('tar', args, {
+    encoding: null,
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  if (result.status !== 0) fail(`tar ${args.join(' ')} failed${commandText(result) ? `:\n${commandText(result)}` : ''}`)
+  return result.stdout ?? Buffer.alloc(0)
 }
 
 /** Read package/package.json from one official tarball. */
@@ -376,7 +394,12 @@ export function validateSourceDistribution(input, options = {}) {
     // inputs; callers must opt out of the shared SHA cache separately.
     if (options.allowDirty !== true) fail('DSH distribution is dirty or non-reproducible')
   }
-  const packages = normalisePackageEntries({ ...manifest, version }, directory, options)
+  const packages = normalisePackageEntries({ ...manifest, version }, directory, {
+    ...options,
+    // Distribution validation checks dependency metadata; the dedicated leak
+    // gate opts into archive-byte scanning for the final TUI artifact.
+    scanArchive: options.scanArchive ?? false,
+  })
   const listedPaths = new Set([...packages.values()].map(entry => resolve(entry.path)))
   const unlistedTarballs = tgzFiles(directory).filter(path => !listedPaths.has(resolve(path)))
   if (unlistedTarballs.length > 0) fail(`DSH distribution contains unlisted tarball(s): ${unlistedTarballs.join(', ')}`)
@@ -399,8 +422,8 @@ export function validateSourceDistribution(input, options = {}) {
     directory,
     manifest,
     packages,
-    dirty: manifest.dirty,
-    reproducible: manifest.reproducible,
+    dirty: manifest.dirty === true,
+    reproducible: manifest.reproducible !== false,
   }
 }
 
@@ -457,7 +480,7 @@ export function loadDshDistribution({
     return distribution
   }
   if (mode !== 'npm') fail(`unsupported DSH distribution mode ${mode}; expected source or npm`)
-  return npmDshDistribution(version ?? process.env.DSH_VERSION ?? '0.1.2-alpha.1')
+  return npmDshDistribution(version ?? process.env.DSH_VERSION ?? '0.1.2-alpha.2')
 }
 
 /** Return temporary pnpm override values for every packed DSH package. */
@@ -716,7 +739,12 @@ function scanDependencySpecs(value, location, forbidden) {
   }
 }
 
-/** Inspect one tarball's package metadata for source-only dependency specs. */
+/**
+ * Inspect a candidate tarball for source-only dependency specs or checkout
+ * paths. Dependency manifests are authoritative; archive-content scanning is
+ * bounded and checks concrete temporary/source path tokens without rejecting
+ * ordinary prose identifiers.
+ */
 export function assertNoSourceLeak(tarball, options = {}) {
   const metadata = readPackedPackageJson(tarball)
   const forbidden = [
@@ -735,6 +763,77 @@ export function assertNoSourceLeak(tarball, options = {}) {
     bundledDependencies: metadata.bundledDependencies,
     pnpm: metadata.pnpm,
   }, `${tarball} package.json`, forbidden)
+
+  if (options.scanArchive === false) return metadata
+
+  const allEntries = runTar(['-tzf', tarball]).split(/\r?\n/u).filter(Boolean)
+  // Explicit source roots are used to reject dependency specs, not ordinary
+  // prose embedded in a package's documentation. Archive bytes still reject
+  // concrete temporary/build-root tokens below.
+  const textForbidden = [
+    '/tmp/dsh-',
+    '\\tmp\\dsh-',
+  ]
+  const archiveForbidden = [...new Set(forbidden.flatMap(token => {
+    const normalized = token.replaceAll('\\', '/').toLowerCase()
+    return [normalized, normalized.replace(/^\/+/, '')]
+  }))]
+  for (const entry of allEntries) {
+    const normalized = entry.replaceAll('\\', '/')
+    const normalizedLower = normalized.toLowerCase()
+    const pathLeak = archiveForbidden.find(token => token !== '' && normalizedLower.includes(token))
+    const parts = normalized.split('/')
+    if (pathLeak !== undefined) {
+      fail(`source leak in ${tarball}: forbidden archive path token ${pathLeak} in ${entry}`)
+    }
+    if (normalized.startsWith('/') || normalized.startsWith('\\\\') || /^[A-Za-z]:[\\/]/u.test(normalized) || parts.includes('..') || /\.tgz$/iu.test(normalized)) {
+      fail(`source leak in ${tarball}: unsafe or nested archive entry ${entry}`)
+    }
+  }
+  const linkEntries = runTar(['-tvzf', tarball, '--quoting-style=escape']).split(/\r?\n/u).filter(line => line.startsWith('l') || line.startsWith('h'))
+  for (const line of linkEntries) {
+    const arrow = line.indexOf(' -> ')
+    const hardLink = line.indexOf(' link to ')
+    const marker = arrow >= 0 ? arrow + 4 : hardLink >= 0 ? hardLink + 9 : -1
+    if (marker < 0) continue
+    const target = line.slice(marker).trim()
+    const normalizedTarget = target.replaceAll('\\', '/').toLowerCase()
+    const targetLeak = archiveForbidden.find(token => token !== '' && normalizedTarget.includes(token))
+    const targetParts = normalizedTarget.split('/')
+    if (targetLeak !== undefined
+      || normalizedTarget.startsWith('/')
+      || normalizedTarget.startsWith('\\')
+      || /^[a-z]:[\\/]/u.test(normalizedTarget)
+      || targetParts.includes('..')) {
+      fail(`source leak in ${tarball}: unsafe archive link target ${target}`)
+    }
+  }
+  // Documentation may legitimately mention an absolute path as prose. Scan
+  // executable and metadata payloads for leaked build roots, while leaving
+  // README/license text to the dependency and archive-path checks above.
+  const entries = allEntries.filter(entry => {
+    if (!entry.startsWith('package/') || entry.endsWith('/')) return false
+    // README and license files are documentation, not executable payloads;
+    // extensionless files under lib/dist are still commonly loaders/scripts.
+    if (/(?:^|\/)(?:README|LICENSE)(?:\.[^/]*)?$/iu.test(entry)) return false
+    return /\.(?:[cm]?js|[cm]?ts|json|map|ya?ml|sh|ps1|css|html)$/iu.test(entry)
+      || /(?:^|\/)(?:lib|dist)\/[^/]+$/u.test(entry)
+  })
+  for (const entry of entries) {
+    const bytes = runTarBuffer(['-xOf', tarball, entry])
+    const byteMatch = textForbidden.find(token => bytes.includes(Buffer.from(token)))
+    const binary = bytes.includes(0)
+    const binaryPathMatch = binary
+      ? BINARY_ABSOLUTE_PATH_PREFIXES.find(token => bytes.includes(Buffer.from(token)))
+        ?? (/[A-Za-z]:[\\/]/u.exec(bytes.toString('latin1'))?.[0])
+      : undefined
+    const text = bytes.toString('utf8').replaceAll('\0', ' ')
+    const match = byteMatch
+      ?? binaryPathMatch
+      ?? textForbidden.find(token => text.includes(token))
+      ?? (/(?:^|[\s"'=])(?:\/home\/|\/Users\/|\/home\/runner\/work\/|[A-Za-z]:[\\/])/u.exec(text)?.[0])
+    if (match !== undefined) fail(`source leak in ${tarball}:${entry}: ${match}`)
+  }
   return metadata
 }
 

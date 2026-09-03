@@ -11,7 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
@@ -38,6 +38,20 @@ import { DraftImageStore } from '../src/image/draft-store.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 
 // ── event fixtures ─────────────────────────────────────────────────────────
 
@@ -175,9 +189,10 @@ test('R06: steers inside one turn do not create new rewind points', () => {
 
 test('R07: compaction-shadowed history still yields candidates from the raw log', () => {
   // The raw append-only log keeps the ORIGINAL user events even after a
-  // compaction replacement — the source of truth is session.events, never
-  // the folded surface projection. Compaction events are structural
-  // (dsh-compaction augments the map; the transcript treats them the same).
+  // compaction replacement — the source of truth is the session log
+  // (served through the alpha.4 snapshot reads), never the folded surface
+  // projection. Compaction events are structural (dsh-compaction augments
+  // the map; the transcript treats them the same).
   const compaction = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
     ({ type, seq, time: 1_700_000_000_000 + seq, data }) as SessionEvent
   const events = [
@@ -273,6 +288,7 @@ test('rewindSeed refuses a vanished point and an open-turn boundary', () => {
 interface CreatedCall {
   sessionId: string
   meta: Record<string, unknown>
+  inheritedEventCount?: number
   provider?: string
   model?: string
   agentPreset?: string
@@ -310,6 +326,7 @@ function makeRig(options: {
   const state = { sessionId: 'session-source', generation: 1 }
   const host: RewindCommitHost = {
     sessionCwd: () => options.sessionCwd ?? '/live-ws',
+    sessionPreset: (session) => session.header.agentPreset,
     compose: async (presetId?: string) => {
       resolved.push(presetId ?? '(default)')
       return options.composePreset === undefined
@@ -322,6 +339,7 @@ function makeRig(options: {
         const record: CreatedCall = {
           sessionId: String(call.sessionId),
           meta: call.meta,
+          ...call.inheritedEventCount === undefined ? {} : { inheritedEventCount: call.inheritedEventCount },
           provider: call.provider,
           model: call.model,
           agentPreset: call.agentPreset,
@@ -355,17 +373,22 @@ function makeRig(options: {
 }
 
 function sourceAgent(sessionId = 'session-source', events: readonly SessionEvent[] = [], agentPreset?: string, cwd = '/ws'): Agent {
+  // The alpha.4 Session shape: the log is served through the snapshot
+  // reads (the comment at the fold below still explains WHY the log is
+  // the source of truth — the accessor, not the field).
   return {
     session: {
       id: sessionId,
-      header: { version: 0, id: sessionId, createdAt: 1, cwd, ...(agentPreset === undefined ? {} : { agentPreset }) },
-      events,
+      header: { version: 0, id: sessionId, createdAt: 1, isSeeded: false, cwd, ...(agentPreset === undefined ? {} : { agentPreset }) },
+      get seq() { return events.length },
+      eventAt: (seq: number) => events[seq],
+      snapshotEvents: () => events,
     },
     options: { provider: 'deepseek', model: 'deepseek-chat' },
   } as unknown as Agent
 }
 
-test('C04: createForkedAgent records preset, source cwd, parent, seedLength, provider/model', async () => {
+test('C04: createForkedAgent records preset, source cwd, parent, seeded lineage, provider/model', async () => {
   const rig = makeRig({ sessionCwd: '/other-cwd' })
   const seed = turn(0, 1, 'A')
   // The concrete preset id rides the create (migration M1.11 — no
@@ -379,7 +402,8 @@ test('C04: createForkedAgent records preset, source cwd, parent, seedLength, pro
   assert.equal(call.meta.cwd, '/ws', 'the SOURCE workspace wins, never a live-surface value')
   assert.equal(call.meta.agentPreset, 'minimal')
   assert.equal(call.meta.parentSession, 'session-parent')
-  assert.equal(call.meta.seedLength, 4)
+  assert.equal(call.meta.isSeeded, true)
+  assert.equal(call.inheritedEventCount, 4)
   assert.equal(call.provider, 'deepseek')
   assert.equal(call.model, 'deepseek-chat')
   assert.equal(call.seed, seed)
@@ -399,7 +423,7 @@ test('review P2: the cwd is captured BEFORE the create await (no parent=A cwd=B 
     agents: {
       create: async (call) => {
         liveCwd = '/ws-b' // a switch lands DURING the create await
-        created.push({ sessionId: String(call.sessionId), meta: call.meta, provider: call.provider, model: call.model, agentPreset: call.agentPreset, seed: call.seed })
+        created.push({ sessionId: String(call.sessionId), meta: call.meta, ...call.inheritedEventCount === undefined ? {} : { inheritedEventCount: call.inheritedEventCount }, provider: call.provider, model: call.model, agentPreset: call.agentPreset, seed: call.seed })
         return { session: { id: String(call.sessionId) }, direct: { agent: { session: { id: String(call.sessionId) } }, ownerHandle: { dispose: async () => {} } } }
       },
       resume: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
@@ -441,7 +465,7 @@ test('I01: commitRewind creates, swaps and restores the selected prompt', async 
   assert.equal(outcome.turn, 2)
   assert.equal(rig.created.length, 1)
   assert.equal(rig.created[0]!.meta.parentSession, 'session-source')
-  assert.equal(rig.created[0]!.meta.seedLength, 4, 'seed = everything before turn 2/start')
+  assert.equal(rig.created[0]!.inheritedEventCount, 4, 'seed = everything before turn 2/start')
   assert.equal(rig.committed.length, 1, 'the transaction commits the created child')
   assert.equal(rig.committed[0]!.session.id, rig.created[0]!.sessionId)
   assert.deepEqual(rig.drafts, ['B'], 'the selected prompt restores into the editor')
@@ -547,7 +571,7 @@ test('I03: rewinding to the FIRST turn seeds an empty child', async () => {
     generation: 1,
   })
   assert.equal(outcome.kind, 'rewound')
-  assert.equal(rig.created[0]!.meta.seedLength, 0)
+  assert.equal(rig.created[0]!.inheritedEventCount, 0)
 })
 
 test('I05: a stale generation cancels BEFORE any create', async () => {
@@ -708,13 +732,18 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     get liveAgent() { return options.agent },
     ensureSession: async () => { options.ensureCalls.push('ensureSession') },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: undefined,
     applyFooterSettings: () => {},
     agents: {} as never,
     sessionReader: {
       list: async () => [],
       search: async () => [],
-      titles: async () => new Map(),
+      projectionBatch: async () => new Map(),
       measureContext: () => undefined,
       readExportData: async () => ({ kind: 'none' }),
     },
@@ -746,6 +775,8 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     get sessionGeneration() { return 0 },
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -785,6 +816,7 @@ function setupCommands(options: { agent?: Agent } = {}): {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const rewinds: number[] = []
   const ensureCalls: string[] = []
   const commands = fakeCommandsService()
@@ -841,6 +873,7 @@ test('review round 23: /new resolves ONE compose and passes NO recovery step', a
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommandsService()
   const ctx = new Context()
   ctx.provide('commands', commands.service as never)
@@ -887,6 +920,7 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommandsService()
   const ctx = new Context()
   ctx.provide('commands', commands.service as never)
@@ -899,13 +933,7 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
   const runner: TuiCommandRunner = {
     ...base,
     liveAgent: sourceAgent('session-source', turn(0, 1, 'A')),
-    catalog: {
-      ...base.catalog!,
-      presets: {
-        ...base.catalog!.presets,
-        resolve: async () => { resolves += 1; return { id: 'minimal' } },
-      },
-    },
+    currentPreset: () => { resolves += 1; return 'minimal' },
     agents: {
       create: async (opts: { agentPreset?: string }) => {
         createPreset = opts.agentPreset
@@ -933,6 +961,7 @@ test('review round 27: /preset live-swap runs inside the session-transition gate
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommandsService()
   const ctx = new Context()
   ctx.provide('commands', commands.service as never)

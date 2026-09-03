@@ -4,8 +4,9 @@
  * `@xmoon76/dsh-pi-tui` tarball end to end, so a fresh checkout can never
  * publish a broken or leaky artifact:
  *
- *   1. structure — every `exports` file exists, config + cordis.patch.yml +
- *      repair scripts are included, nothing else leaks in (no test fixtures,
+ *   1. structure — every `exports` file exists, cordis.patch.yml + repair
+ *      scripts are included, no duplicated official preset root is shipped, and
+ *      nothing else leaks in (no test fixtures,
  *      no backups, no nested tarballs, no absolute paths);
  *   2. content — no workspace absolute paths anywhere, and the bundle does
  *      NOT import `@xmoon76/pi-tui` externally (it is bundled);
@@ -18,12 +19,19 @@
  *      sessions reports the damaged one and touches nothing.
  *
  * Usage: node scripts/tarball-smoke.mjs [path-to-tgz]
+ *   [--dsh-distribution path]
  * The tarball path defaults to the newest `xmoon76-dsh-pi-tui-*.tgz` in
  * the current directory (the `pnpm pack` / `npm pack` output location;
  * npm/pnpm strip the `@` scope from tarball filenames).
  *
- * Env: TARBALL_SMOKE_SKIP_INSTALL=1 skips the npm install step (offline
- * dev runs); TARBALL_SMOKE_KEEP=1 keeps the temp dirs for inspection.
+ * `--dsh-distribution` (or DSH_SOURCE_DISTRIBUTION) selects the validated
+ * local DSH source-pack adapter for a truly fresh pnpm install. Without it,
+ * the existing npm registry install path is used.
+ *
+ * Env: TARBALL_SMOKE_SKIP_INSTALL=1 skips the install step (offline postpack
+ * structural checks) when no source distribution is supplied; it is rejected
+ * for Source Mode so a fresh-install check cannot be bypassed. TARBALL_SMOKE_KEEP=1
+ * keeps the temp dirs for inspection.
  * @module tarball-smoke
  */
 
@@ -44,7 +52,18 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
+import { parseArgs } from 'node:util'
 import { zstdCompressSync } from 'node:zlib'
+
+import {
+  assertSourceResolution,
+  isDshPackage,
+  loadDshDistribution,
+  prepareDshInstall,
+  restoreDshInstall,
+  sourceInstallPackages,
+} from './lib/dsh-distribution.mjs'
+import { pnpmExecutable } from './lib/process.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 /** The dsh-pi-tui package root (the workspace checkout). */
@@ -60,7 +79,7 @@ function check(name, ok, detail = '') {
 }
 
 function run(command, args, options = {}) {
-  return spawnSync(command, args, { encoding: 'utf8', ...options })
+  return spawnSync(command, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...options })
 }
 
 /** Resolve the tarball: explicit arg, else the newest matching tgz in the
@@ -133,8 +152,101 @@ function dtsParses(ts, file) {
     : { ok: false, detail: source.parseDiagnostics[0].messageText }
 }
 
+function parseCli() {
+  const { values, positionals } = parseArgs({
+    args: process.argv.slice(2),
+    options: {
+      'dsh-distribution': { type: 'string' },
+    },
+    allowPositionals: true,
+    strict: true,
+  })
+  if (positionals.length > 1) throw new Error('usage: node scripts/tarball-smoke.mjs [candidate.tgz] [--dsh-distribution path]')
+  return {
+    tarball: positionals[0],
+    dshDistribution: values['dsh-distribution'] ?? process.env.DSH_SOURCE_DISTRIBUTION,
+  }
+}
+
+/** Build a clean probe package that exposes every candidate DSH edge to the
+ * shared source-install planner without borrowing the TUI workspace metadata. */
+function sourceProbePackage(tarball, candidate) {
+  const peerDependencies = { ...candidate.peerDependencies }
+  for (const section of ['dependencies', 'optionalDependencies']) {
+    for (const [name, range] of Object.entries(candidate[section] ?? {})) {
+      if (isDshPackage(name) && peerDependencies[name] === undefined) peerDependencies[name] = range
+    }
+  }
+  return {
+    name: 'tarball-smoke-source-probe',
+    private: true,
+    dependencies: { [candidate.name]: `file:${tarball}` },
+    peerDependencies,
+    ...(candidate.peerDependenciesMeta === undefined ? {} : { peerDependenciesMeta: candidate.peerDependenciesMeta }),
+  }
+}
+
+function sourceInstallEnvironment() {
+  return {
+    ...process.env,
+    PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false',
+    PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
+    npm_config_minimum_release_age: '0',
+    pnpm_config_minimum_release_age: '0',
+  }
+}
+
+function resultDetail(result) {
+  return [result?.stderr, result?.stdout, result?.error?.message]
+    .filter(value => typeof value === 'string' && value.length > 0)
+    .join(' ')
+    .split(/\r?\n/u)
+    .slice(-20)
+    .join(' ')
+}
+
+function runSourceInstall(tarball, candidate, distribution, probeDir) {
+  mkdirSync(probeDir)
+  const probePackage = sourceProbePackage(tarball, candidate)
+  const packagePath = join(probeDir, 'package.json')
+  writeFileSync(packagePath, `${JSON.stringify(probePackage, null, 2)}\n`)
+  const required = sourceInstallPackages(distribution, probePackage)
+  const prepared = prepareDshInstall(distribution, probeDir, {
+    materializeSourceDependencies: true,
+    stripPackageManager: true,
+  })
+  let install
+  try {
+    install = run(pnpmExecutable(), [
+      ...prepared.installArgs,
+      '--ignore-scripts',
+      '--config.minimum-release-age=0',
+      '--reporter=append-only',
+    ], {
+      cwd: probeDir,
+      env: sourceInstallEnvironment(),
+      timeout: 10 * 60_000,
+    })
+  } finally {
+    restoreDshInstall(prepared)
+  }
+  check('source distribution fresh install (pnpm)', install.status === 0,
+    install.status === 0 ? '' : resultDetail(install))
+  if (install.status !== 0) return { probePackage, required, installed: false }
+
+  try {
+    assertSourceResolution(probeDir, distribution, required)
+    check('all reachable DSH packages resolve from local tarballs', true)
+  } catch (error) {
+    check('all reachable DSH packages resolve from local tarballs', false,
+      error instanceof Error ? error.message : String(error))
+  }
+  return { probePackage, required, installed: true }
+}
+
 function main() {
-  const tarball = resolveTarball(process.argv[2])
+  const cli = parseCli()
+  const tarball = resolveTarball(cli.tarball)
   const keep = process.env.TARBALL_SMOKE_KEEP === '1'
   const skipInstall = process.env.TARBALL_SMOKE_SKIP_INSTALL === '1'
   const workDir = mkdtempSync(join(tmpdir(), 'tarball-smoke-'))
@@ -145,6 +257,12 @@ function main() {
     const pkg = JSON.parse(readFileSync(join(extracted, 'package.json'), 'utf8'))
     check('package name', pkg.name === '@xmoon76/dsh-pi-tui', pkg.name)
     check('published package is not private', pkg.private !== true, `private=${String(pkg.private)}`)
+    const sourceDistribution = cli.dshDistribution === undefined
+      ? undefined
+      : loadDshDistribution({ mode: 'source', manifest: cli.dshDistribution, packageJson: pkg })
+    if (sourceDistribution !== undefined && skipInstall) {
+      throw new Error('TARBALL_SMOKE_SKIP_INSTALL=1 cannot be combined with a DSH source distribution; source mode requires a fresh install')
+    }
 
     // --- structure ---
     const files = walkFiles(extracted)
@@ -156,7 +274,7 @@ function main() {
     check('exports entry dist/builtins.mjs', has('dist/builtins.mjs'))
     check('types dist/builtins.d.mts', has('dist/builtins.d.mts'))
     check('cordis.patch.yml included', has('cordis.patch.yml'))
-    check('config/ included', files.some(name => name.startsWith('config/')))
+    check('no duplicated official preset root', !files.some(name => name.startsWith('config/agent-presets/')))
     check('repair-session.mjs included', has('scripts/repair-session.mjs'))
     check('repair-core.mjs included', has('scripts/repair-core.mjs'))
     check('README included', has('README.md'))
@@ -291,18 +409,25 @@ function main() {
 
     // --- install + runtime ---
     if (skipInstall) {
-      checks.push('skip npm install (TARBALL_SMOKE_SKIP_INSTALL=1)')
+      checks.push('skip install (TARBALL_SMOKE_SKIP_INSTALL=1)')
     } else {
-      mkdirSync(probeDir)
-      writeFileSync(join(probeDir, 'package.json'), JSON.stringify({ name: 'tarball-smoke-probe', private: true }))
-      const install = run('npm', [
-        'install', '--omit=dev', '--no-save',
-        '--cache', join(workDir, 'npm-cache'),
-        tarball,
-      ], { cwd: probeDir, timeout: 180_000 })
-      check('tarball installs standalone (npm install --omit=dev)', install.status === 0,
-        install.status === 0 ? '' : (install.stderr.split('\n').slice(-3).join(' ')))
-      if (install.status === 0) {
+      let installSucceeded = false
+      if (sourceDistribution !== undefined) {
+        const sourceInstall = runSourceInstall(tarball, pkg, sourceDistribution, probeDir)
+        installSucceeded = sourceInstall.installed
+      } else {
+        mkdirSync(probeDir)
+        writeFileSync(join(probeDir, 'package.json'), JSON.stringify({ name: 'tarball-smoke-probe', private: true }))
+        const install = run('npm', [
+          'install', '--omit=dev', '--no-save',
+          '--cache', join(workDir, 'npm-cache'),
+          tarball,
+        ], { cwd: probeDir, timeout: 180_000 })
+        installSucceeded = install.status === 0
+        check('tarball installs standalone (npm install --omit=dev)', installSucceeded,
+          installSucceeded ? '' : resultDetail(install))
+      }
+      if (installSucceeded) {
         const installed = join(probeDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
         check('installed package contains dist', existsSync(join(installed, 'dist', 'index.mjs')))
         const importRun = run(process.execPath, ['--input-type=module', '-e',

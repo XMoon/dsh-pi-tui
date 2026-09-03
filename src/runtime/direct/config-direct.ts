@@ -17,7 +17,6 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { CredentialKey, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   AuthorizationDeclinedError,
@@ -37,7 +36,12 @@ import {
 } from '../../provider-catalog.ts'
 import { cancellationError } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import { resolveTrustedFooterCommand, resolveUserLayerFooterMode } from '../../footer/command-trust.ts'
+import {
+  resolveTrustedFooterCommand,
+  resolveUserCommandItemActivationIds,
+  resolveUserCommandItemFallbackActivationIds,
+  resolveUserLayerFooterMode,
+} from '../../footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../footer/custom-items.ts'
 import type {
   AuthorizationConfig,
@@ -52,6 +56,8 @@ import type {
   PermissionConfig,
   PresetDefaultConfig,
   ProviderProfileConfig,
+  SubagentAllowedModelRoute,
+  SubagentModelSelectionConfig,
   TuiSettingsConfig,
 } from '../config-port.ts'
 
@@ -82,6 +88,11 @@ export interface PermissionPresetsServiceLike {
   get names(): readonly string[]
 }
 
+/** The structural approval service surface (the session override read). */
+export interface ApprovalServiceLike {
+  overrideOf(session: unknown): 'ask' | 'never' | undefined
+}
+
 /** The structural commands service surface (permission application only). */
 export interface CommandsServiceLike {
   execute(agent: unknown, line: string, args: readonly unknown[], signal?: AbortSignal): Promise<unknown>
@@ -103,6 +114,7 @@ export class DirectConfigPort implements ConfigPort {
   readonly authorization: AuthorizationConfig
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
+  readonly subagentModelSelection: SubagentModelSelectionConfig
 
   constructor(
     ctx: HostContextLike,
@@ -117,6 +129,7 @@ export class DirectConfigPort implements ConfigPort {
     this.authorization = new DirectAuthorizationConfig(ctx)
     this.permissions = new DirectPermissionConfig(ctx, agentFor)
     this.presetDefault = new DirectPresetDefaultConfig(ctx)
+    this.subagentModelSelection = new DirectSubagentModelSelectionConfig(ctx)
   }
 }
 
@@ -144,13 +157,33 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   get userFooterMode(): string | undefined {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
-    return resolveUserLayerFooterMode([descriptor], settingsNamespace('dsh-pi-tui'))
+    return resolveUserLayerFooterMode([descriptor], 'dsh-pi-tui')
   }
 
   get command() {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
-    return resolveTrustedFooterCommand([descriptor], settingsNamespace('dsh-pi-tui'))
+    return resolveTrustedFooterCommand([descriptor], 'dsh-pi-tui')
+  }
+
+  /** The ids the USER layer authorizes for custom command item execution
+   * (PR D activation trust, mode-gated): the USER custom layout's refs,
+   * but only while the USER layer itself declares footer: custom — a
+   * stale leftover layout under footer: default/compact authorizes
+   * nothing, so a project merged layout can never resurrect a dormant
+   * USER command. */
+  get userCommandItemActivationIds() {
+    const descriptor = this.readDescriptor()
+    if (descriptor === undefined) return new Set<string>()
+    return resolveUserCommandItemActivationIds([descriptor], 'dsh-pi-tui')
+  }
+
+  /** The ids authorized for the native FALLBACK surface (the USER's own
+   * footerFallbackMode decides). */
+  get userCommandItemFallbackActivationIds() {
+    const descriptor = this.readDescriptor()
+    if (descriptor === undefined) return new Set<string>()
+    return resolveUserCommandItemFallbackActivationIds([descriptor], 'dsh-pi-tui')
   }
 
   /** One describe() read per synchronous evaluation: the two getters are
@@ -160,7 +193,7 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
     if (this.descriptorCache !== null) return this.descriptorCache
     const settings = this.ctx.get('settings') as { describe?(): readonly SettingsDescriptorLike[] | undefined } | undefined
     const descriptors = settings?.describe?.()
-    const found = descriptors?.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
+    const found = descriptors?.find(entry => entry.ns === 'dsh-pi-tui')
     this.descriptorCache = found ?? undefined
     // The cache is per-synchronous-evaluation only: reset on the next
     // macrotask so a settings change is picked up.
@@ -205,7 +238,7 @@ class DirectFooterCustomItems implements FooterCustomItemsConfig {
       if (settings === undefined || typeof settings.describe !== 'function') return { value: undefined, failed: true }
       const descriptors = settings.describe()
       if (descriptors === undefined) return { value: undefined, failed: true }
-      const descriptor = descriptors.find(entry => entry.ns === settingsNamespace('dsh-pi-tui'))
+      const descriptor = descriptors.find(entry => entry.ns === 'dsh-pi-tui')
       if (descriptor === undefined) return { value: undefined, failed: true }
       const user = descriptor.user
       if (user === undefined) return { value: undefined, failed: false }
@@ -234,7 +267,7 @@ const PROVIDER_ROUTE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 function isKeylessProfileSlot(ns: string, path: readonly string[], route: string): boolean {
   return route !== 'deepseek-official'
     && PROVIDER_ROUTE_PATTERN.test(route)
-    && ns === settingsNamespace('llm-pi-ai')
+    && ns === 'llm-pi-ai'
     && path.length === 2 && path[0] === 'providers' && path[1] === route
 }
 
@@ -293,7 +326,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
 
   /** The llm-pi-ai `providers` dict (route → apiKeyEnv), detached. */
   private readPiAiProvidersInternal(): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
-    const section = this.readSectionInternal(settingsNamespace('llm-pi-ai')) as
+    const section = this.readSectionInternal('llm-pi-ai') as
       | { providers?: Record<string, { apiKeyEnv?: string } | undefined> }
       | undefined
     if (section === undefined || typeof section !== 'object' || section === null) return undefined
@@ -341,7 +374,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
         // branch applies (the conventional `providers.<route>` slot): a
         // hostile providers key that fails the route pattern (or the
         // builtin) is never advertised as writable.
-        canProvisionProfile: isKeylessProfileSlot(settingsNamespace('llm-pi-ai'), ['providers', route], route),
+        canProvisionProfile: isKeylessProfileSlot('llm-pi-ai', ['providers', route], route),
       }
     })
   }
@@ -350,7 +383,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
     if (!PROVIDER_ROUTE_PATTERN.test(route)) throw new Error('invalid provider route')
-    await settings.mutate(settingsNamespace('llm-pi-ai'), [
+    await settings.mutate('llm-pi-ai', [
       { op: 'set', path: ['providers', route], value: profile },
     ])
   }
@@ -385,7 +418,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     // conventional llm-pi-ai slot apply.
     const llm = this.llm()
     if (llm === undefined) {
-      await settings.mutate(settingsNamespace('llm-pi-ai'), [
+      await settings.mutate('llm-pi-ai', [
         { op: 'set', path: ['providers', route], value: {} },
       ])
       return { kind: 'written' }
@@ -788,7 +821,7 @@ export class DirectPermissionConfig implements PermissionConfig {
     const settings = this.settings()
     if (settings === undefined) return undefined
     try {
-      const doc = settings.get(settingsNamespace('permission')) as { defaultPreset?: string } | undefined
+      const doc = settings.get('permission') as { defaultPreset?: string } | undefined
       return doc?.defaultPreset
     } catch {
       // The namespace is absent until the presets service registers it.
@@ -799,9 +832,21 @@ export class DirectPermissionConfig implements PermissionConfig {
   async setDefaultPreset(name: string): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) return
-    await settings.mutate(settingsNamespace('permission'), [
+    await settings.mutate('permission', [
       { op: 'set', path: ['defaultPreset'], value: name },
     ])
+  }
+
+  approvalOverrideOf(session: unknown): 'ask' | 'never' | undefined {
+    const approval = this.ctx.get('approval') as ApprovalServiceLike | undefined
+    if (approval === undefined) return undefined
+    try {
+      return approval.overrideOf(session)
+    } catch {
+      // A throwing approval service degrades to "no override", never
+      // breaks the settings read.
+      return undefined
+    }
   }
 
   async applyPermissionPreset(
@@ -846,7 +891,7 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
     const settings = this.settings()
     if (settings === undefined) return undefined
     try {
-      const doc = settings.get(settingsNamespace('agent-presets')) as { default?: string } | undefined
+      const doc = settings.get('agent-presets') as { default?: string } | undefined
       // `??` semantics: an empty saved value is displayed as-is, only an
       // ABSENT value falls back to the roster default (old behavior).
       if (doc?.default !== undefined) return doc.default
@@ -860,8 +905,90 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
   async set(id: string): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
-    await settings.mutate(settingsNamespace('agent-presets'), [
+    await settings.mutate('agent-presets', [
       { op: 'set', path: ['default'], value: id },
     ])
+  }
+}
+
+/** The Direct subagent model-selection config: the OFFICIAL
+ * `subagent-model-selection` settings section (registered Host-side by the
+ * subagent-model-selection-settings service — mounting the service alone
+ * does NOT enable anything; the section defaults to disabled with an
+ * empty allowlist, and each NEW session samples the preference at
+ * composition time). */
+export class DirectSubagentModelSelectionConfig implements SubagentModelSelectionConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  private settings(): SettingsServiceLike | undefined {
+    return this.ctx.get('settings') as SettingsServiceLike | undefined
+  }
+
+  available(): boolean {
+    // The OFFICIAL capability is the subagent-model-selection-settings
+    // service (it registers the section into the settings service when it
+    // mounts). A generic settings service alone does NOT make the section
+    // writable — without the official service the /settings rows must not
+    // appear at all.
+    return this.ctx.get('subagentModelSelection') !== undefined && this.settings() !== undefined
+  }
+
+  get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } {
+    const settings = this.settings()
+    if (settings === undefined) return { enabled: false, allowedModels: [] }
+    try {
+      const doc = settings.get('subagent-model-selection') as
+        | { enabled?: unknown; allowedModels?: readonly unknown[] }
+        | undefined
+      return {
+        enabled: doc?.enabled === true,
+        allowedModels: (doc?.allowedModels ?? []).flatMap(route => {
+          const candidate = route as { provider?: unknown; model?: unknown }
+          return typeof candidate?.provider === 'string' && typeof candidate?.model === 'string'
+            ? [{ provider: candidate.provider, model: candidate.model }]
+            : []
+        }),
+      }
+    } catch {
+      // The section registers only when the settings service knows it; an
+      // unknown namespace reads as the shipped default (off, empty).
+      return { enabled: false, allowedModels: [] }
+    }
+  }
+
+  async set(value: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }): Promise<void> {
+    // Client-side pre-validation with the OFFICIAL rules (fail fast before
+    // the write; the Host validates again on the section boundary):
+    // duplicates by provider+model, and enabled requires at least one route.
+    assertOfficialSubagentRoutes(value.allowedModels)
+    if (value.enabled && value.allowedModels.length === 0) {
+      throw new Error('enabled subagent model selection requires at least one allowed model')
+    }
+    const settings = this.settings()
+    if (settings === undefined) throw new Error('settings service unavailable')
+    await settings.mutate('subagent-model-selection', [
+      { op: 'set', path: ['enabled'], value: value.enabled },
+      { op: 'set', path: ['allowedModels'], value: value.allowedModels.map(route => ({ ...route })) },
+    ])
+  }
+}
+
+/** The official route-list rules (mirrored client-side so a malformed edit
+ * fails before the Host write; same messages as the Host validator). */
+function assertOfficialSubagentRoutes(routes: readonly SubagentAllowedModelRoute[]): void {
+  const seen = new Set<string>()
+  for (const route of routes) {
+    if (route.provider.length === 0 || route.model.length === 0) {
+      throw new Error('subagent model selection requires non-empty provider and model ids')
+    }
+    const key = `${route.provider}\u0000${route.model}`
+    if (seen.has(key)) {
+      throw new Error(`subagent model selection repeats route "${route.provider}/${route.model}"`)
+    }
+    seen.add(key)
   }
 }

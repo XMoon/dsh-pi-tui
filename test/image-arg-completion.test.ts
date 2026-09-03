@@ -11,9 +11,8 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { afterEach, test } from 'node:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
@@ -24,6 +23,21 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** A fake commands service whose list() returns the registered defs (the
  * real dsh service answers commands.list(undefined) with the global layer —
@@ -42,14 +56,16 @@ function fakeCommands(): { commands: { register: (def: { name: string; handler?:
 
 /** A sessionless runner + a workspace with image-named fixtures; the TUI
  * commands are registered through the real entry (registerTuiCommands). */
-function setup(): { vt: VirtualTerminal; app: TuiApp } {
+function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
+  const root = life.tempDir('dsh-image-arg-')
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
   const ctx = new Context()
   const { commands } = fakeCommands()
   ctx.provide('commands', commands as never)
-  const root = mkdtempSync(join(tmpdir(), 'dsh-image-arg-'))
   mkdirSync(join(root, 'subdir'))
   writeFileSync(join(root, 'shot.png'), 'x')
   writeFileSync(join(root, 'notes.txt'), 'x')
@@ -62,13 +78,18 @@ function setup(): { vt: VirtualTerminal; app: TuiApp } {
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: undefined,
     applyFooterSettings: () => {},
     agents: {} as never,
     sessionReader: {
       list: async () => [],
       search: async () => [],
-      titles: async () => new Map(),
+      projectionBatch: async () => new Map(),
       measureContext: () => undefined,
       readExportData: async () => ({ kind: 'none' }),
     },
@@ -111,6 +132,8 @@ function setup(): { vt: VirtualTerminal; app: TuiApp } {
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
@@ -140,8 +163,9 @@ async function waitForDropdownRow(vt: VirtualTerminal, needle: string, label: st
   }
 }
 
-test('the installed /image completion answers natural typing with a menu', async () => {
-  const { vt, app } = setup()
+test('the installed /image completion answers natural typing with a menu', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = setup(life)
   await vt.waitForRender()
   vt.sendInput('/image sh')
   const view = await waitForDropdownRow(vt, 'shot.png', 'natural typing')
@@ -149,16 +173,15 @@ test('the installed /image completion answers natural typing with a menu', async
   // path description.
   assert.ok(view.includes('shot.png'), 'the candidate row is visible')
   assert.ok(!app.getDraft().includes('shot.png'), 'typing alone must not apply anything')
-  app.stop()
 })
 
-test('Tab on an empty /image argument lists the workspace through the real chain', async () => {
-  const { vt, app } = setup()
+test('Tab on an empty /image argument lists the workspace through the real chain', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = setup(life)
   await vt.waitForRender()
   vt.sendInput('/image ')
   await vt.waitForRender()
   vt.sendInput('\t')
   const view = await waitForDropdownRow(vt, 'subdir/', 'Tab on an empty argument')
   assert.ok(view.includes('notes.txt'), 'files are listed alongside directories')
-  app.stop()
 })

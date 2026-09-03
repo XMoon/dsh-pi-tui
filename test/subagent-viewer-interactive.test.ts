@@ -9,10 +9,24 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
 import { mergeDraft } from '../src/steer.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 const continuable = (overrides: Partial<SubagentViewerTarget> = {}): SubagentViewerTarget => ({
   parentSessionId: 'session-main',
@@ -54,6 +68,7 @@ async function startApp(
     onSubagentSubmit: events.onSubagentSubmit,
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   return { vt, app }
 }
@@ -325,6 +340,7 @@ test('a replacement (plugin) editor receives the child draft and the follow-up t
     onSubagentSubmit: (request) => submits.push(request),
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   registry.register({ id: 'vim', priority: 0, create: () => ({
     component: { kind: 'text', spans: [{ text: 'vim' }] },
@@ -371,6 +387,7 @@ test('a replacement editor submit clears the child slot EXPLICITLY (no resurrect
     onSubagentSubmit: (request) => submits.push(request),
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   registry.register({ id: 'vim', priority: 0, create: () => ({
     component: { kind: 'text', spans: [{ text: 'vim' }] },
@@ -424,6 +441,7 @@ test('a replacement editor that edits through its OWN handleInput submits the LA
     onSubagentSubmit: (request) => submits.push({ text: request.text }),
   }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   registry.register({ id: 'vim', priority: 0, create: () => ({
     component: { kind: 'text', spans: [{ text: 'vim' }] },
@@ -469,6 +487,7 @@ test('parking keeps NEW replacement-editor text even when it is a SUBSTRING of t
   let pluginText = ''
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   registry.register({ id: 'vim', priority: 0, create: () => ({
     component: { kind: 'text', spans: [{ text: 'vim' }] },
@@ -518,7 +537,7 @@ test('the footer switches to the viewed child\u2019s identity and back on exit',
     // usage facts.
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+      performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
       turns: 3,
       steps: 5,
     },
@@ -528,7 +547,7 @@ test('the footer switches to the viewed child\u2019s identity and back on exit',
   assert.ok(view.includes('[subagent · continuable]'), `subagent footer badge missing:\n${view}`)
   assert.ok(view.includes('research'), `child label missing from the footer:\n${view}`)
   assert.ok(view.includes('t3/s5'), `child turn/step counters missing:\n${view}`)
-  assert.ok(view.includes('LLM 12.3s'), `child stats line missing:\n${view}`)
+  assert.ok(view.includes('TTFB 12.3s'), `child stats line missing:\n${view}`)
   assert.ok(!view.includes('parent-model'), `the parent model must not leak into the viewer footer:\n${view}`)
   // Clearing restores the parent footer (the runner's exitView calls BOTH
   // setters — the view subject and the footer payload return together).
@@ -558,7 +577,7 @@ test('the one-shot viewer footer carries the one-shot badge and no stats line un
     statsLine: 'child stats',
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+      performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
       turns: 1,
       steps: 2,
     },
@@ -566,7 +585,7 @@ test('the one-shot viewer footer carries the one-shot badge and no stats line un
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('[subagent · one-shot]'), `one-shot badge missing:\n${view}`)
-  assert.ok(!view.includes('LLM 12.3s'), `compact preset must drop the stats line:\n${view}`)
+  assert.ok(!view.includes('TTFB 12.3s'), `compact preset must drop the stats line:\n${view}`)
   app.setViewerFooter(undefined)
   app.setViewerMode(undefined)
   app.stop()
@@ -594,7 +613,7 @@ test('the viewer footer never shows the parent\u2019s Ctrl+C exit hint (round-1 
     statsLine: 'child stats line',
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+      performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
       turns: 1,
       steps: 1,
     },
@@ -602,7 +621,7 @@ test('the viewer footer never shows the parent\u2019s Ctrl+C exit hint (round-1 
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('Press Ctrl+C again'), `the parent exit hint must never leak into the viewer footer:\n${view}`)
-  assert.ok(view.includes('LLM 12.3s'), `the child stats line must show instead:\n${view}`)
+  assert.ok(view.includes('TTFB 12.3s'), `the child stats line must show instead:\n${view}`)
   app.setViewerFooter(undefined)
   app.setViewerMode(undefined)
   app.stop()
@@ -627,6 +646,7 @@ test('a plugin keybinding still REACHES the runner inside a continuable viewer (
     },
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.setViewerMode(continuable())
   await vt.waitForRender()

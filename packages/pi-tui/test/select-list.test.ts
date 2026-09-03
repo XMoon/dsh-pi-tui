@@ -229,6 +229,91 @@ describe("SelectList", () => {
 			const rendered = list.render(80);
 			assert.ok(!rendered.some((line) => line.includes("navigate")), "hint must not render by default");
 		});
+
+		it("reflows to a live row budget without losing selection or hint", () => {
+			const list = new SelectList(
+				Array.from({ length: 12 }, (_, index) => ({ value: `v${index}`, label: `item ${index}` })),
+				10,
+				testTheme,
+				{},
+				{ header: "items", showHint: true },
+			);
+			for (let index = 0; index < 8; index++) list.handleInput(String.fromCharCode(0x1b) + "[B");
+			list.setMaxRows(8);
+			const rendered = list.render(80);
+			assert.ok(rendered.some((line) => line.includes("item 8")), "selected item must remain visible");
+			assert.ok(rendered.some((line) => line.includes("esc close")), "hint must remain visible");
+			assert.ok(rendered.length <= 8, "list must fit the live row budget");
+		});
+
+		it("keeps the hint when a grouped window exceeds a small row budget", () => {
+			const items = Array.from({ length: 9 }, (_, index) => ({
+				value: `v${index}`,
+				label: `item ${index}`,
+				group: index < 3 ? "alpha" : index < 6 ? "beta" : "gamma",
+			}));
+			const list = new SelectList(items, 10, testTheme, {}, { header: "items", showHint: true });
+			// 6-row grant: header(2) + hint(2) + indicator(1) + group(1)
+			// leaves a zero item budget; the render must still fit the grant
+			// and keep the hint plus the selected row.
+			list.setMaxRows(6);
+			list.handleInput(String.fromCharCode(0x1b) + "[B"); // select item 1 (still alpha)
+			const rendered = list.render(80);
+			assert.ok(rendered.length <= 6, `grouped list must fit the grant (${rendered.length})`);
+			assert.ok(rendered.some((line) => line.includes("esc close")), "hint must remain visible");
+			assert.ok(rendered.some((line) => line.includes("item 1")), "selected item must remain visible");
+		});
+
+		it("restores the full window after a selection move (no render-time ratchet)", () => {
+			// Runs: a[0,1], b[2-6], c[7,8], d[9-11]. At selection 0 the
+			// window straddles a/b and shrinks; moving into the b run must
+			// restore the full 4-item window — the render-time shrink is a
+			// LOCAL adjustment, never a persistent maxVisible ratchet.
+			const groups = ["a", "a", "b", "b", "b", "b", "b", "c", "c", "d", "d", "d"];
+			const items = groups.map((group, index) => ({ value: `v${index}`, label: `item ${index}`, group }));
+			const list = new SelectList(items, 10, testTheme, {}, { header: "items", showHint: true });
+			list.setMaxRows(10); // budget: header 2 + hint 2 + indicator 1 + group 1 -> 4
+			const first = list.render(80);
+			assert.ok(first.some((line) => line.includes("item 1")), "first window must show the selected region");
+			for (let index = 0; index < 4; index++) list.handleInput(String.fromCharCode(0x1b) + "[B"); // -> item 4
+			const second = list.render(80);
+			assert.ok(second.some((line) => line.includes("item 2")),
+				`the full 4-item window must return inside the b run (${JSON.stringify(second)})`);
+			assert.ok(second.some((line) => line.includes("item 5")), "the window must reach item 5");
+		});
+
+		it("fits the no-match state to the row grant, keeping the message and hint", () => {
+			const list = new SelectList(
+				[{ value: "a", label: "alpha" }, { value: "b", label: "beta" }],
+				10,
+				testTheme,
+				{},
+				{ header: "items", enableSearch: true },
+			);
+			list.setMaxRows(6); // header 2 + search 2 + message 1 + hint 2 = 7 > 6
+			list.handleInput("zzz"); // no match
+			const rendered = list.render(80);
+			assert.ok(rendered.length <= 6, `no-match must fit the grant (${rendered.length})`);
+			assert.ok(rendered.some((line) => line.includes("No matching")), "message must survive");
+			assert.ok(rendered.some((line) => line.includes("esc close")), "hint must survive");
+		});
+
+		it("keeps the message over the header on an extreme no-match grant", () => {
+			const list = new SelectList(
+				[{ value: "a", label: "alpha" }],
+				10,
+				testTheme,
+				{},
+				{ header: "items", enableSearch: true },
+			);
+			list.setMaxRows(2); // compact rows: header/search/message/hint = 4 > 2
+			list.handleInput("zzz"); // no match
+			const rendered = list.render(80);
+			assert.ok(rendered.length <= 2, `extreme no-match must fit the grant (${rendered.length})`);
+			assert.ok(rendered.some((line) => line.includes("No matching")),
+				"the no-match message must beat the header");
+			assert.ok(!rendered.some((line) => line.includes("items")), "the header must yield");
+		});
 	});
 
 	describe("group headers (dsh-pi-tui extension)", () => {
@@ -277,6 +362,122 @@ describe("SelectList", () => {
 			assert.equal(list.getSelectedItem()?.value, "10");
 			list.handleInput("\x1b[5~"); // pageUp
 			assert.equal(list.getSelectedItem()?.value, "5");
+		});
+	});
+
+	describe("setFilter without search (X001 navigation bounds)", () => {
+		it("navigates and selects within the filtered list only", () => {
+			const items = [
+				{ value: "session-a", label: "alpha" },
+				{ value: "session-b", label: "beta" },
+				{ value: "session-c", label: "gamma" },
+			];
+			const list = new SelectList(items, 5, testTheme);
+			let selected = "";
+			list.onSelect = (item) => {
+				selected = item.value;
+			};
+
+			// Filter to the last row only: Up/Down/Enter must never walk
+			// into the invisible rows (regression: navigation used the raw
+			// items while render drew the filtered list).
+			list.setFilter("gamma");
+			assert.equal(list.getSelectedItem()?.value, "session-c");
+			list.handleInput("\x1b[A"); // up wraps within the filtered list
+			assert.equal(list.getSelectedItem()?.value, "session-c");
+			list.handleInput("\x1b[B"); // down wraps within the filtered list
+			assert.equal(list.getSelectedItem()?.value, "session-c");
+			list.handleInput("\r"); // confirm
+			assert.equal(selected, "session-c");
+		});
+
+		it("keeps selection within bounds after narrowing to a middle row", () => {
+			const items = Array.from({ length: 10 }, (_, i) => ({ value: String(i), label: `item-${i}` }));
+			const list = new SelectList(items, 5, testTheme);
+			list.setSelectedIndex(9);
+			list.setFilter("7");
+			// Only item-7 survives; the selected index must clamp to it.
+			assert.equal(list.getSelectedItem()?.value, "7");
+			list.handleInput("\x1b[6~"); // pageDown
+			assert.equal(list.getSelectedItem()?.value, "7");
+			list.handleInput("\x1b[A"); // up
+			assert.equal(list.getSelectedItem()?.value, "7");
+		});
+
+		it("keeps selectedIndex at 0 when navigation keys arrive with ZERO matches", () => {
+			const items = [
+				{ value: "session-a", label: "alpha" },
+				{ value: "session-b", label: "beta" },
+			];
+			const list = new SelectList(items, 5, testTheme);
+			list.setFilter("zzz"); // zero matches
+			assert.equal(list.getSelectedItem(), null);
+			// Every navigation key must be a no-op: a wrap on the empty list
+			// would otherwise push selectedIndex to -1 (up/pageDown) or 1
+			// (down) and break the invariant.
+			list.handleInput("\x1b[A"); // up
+			list.handleInput("\x1b[B"); // down
+			list.handleInput("\x1b[5~"); // pageUp
+			list.handleInput("\x1b[6~"); // pageDown
+			assert.equal((list as unknown as { selectedIndex: number }).selectedIndex, 0);
+			assert.equal(list.getSelectedItem(), null, "confirm must stay inert on an empty list");
+			// A later filter that matches again must restore navigation.
+			list.setFilter("session-");
+			assert.equal(list.getSelectedItem()?.value, "session-a");
+			list.handleInput("\x1b[B");
+			assert.equal(list.getSelectedItem()?.value, "session-b");
+		});
+	});
+	describe("canonical filter state (X041)", () => {
+		const items = [
+			{ value: "session-a", label: "alpha", description: "first" },
+			{ value: "session-b", label: "zulu", description: "second" },
+			{ value: "session-c", label: "mike", description: "third" },
+		];
+
+		it("setFilter updates getFilter() and the rendered search box", () => {
+			const list = new SelectList(items, 5, testTheme, {}, { enableSearch: true });
+			list.setFilter("al");
+
+			assert.equal(list.getFilter(), "al", "getFilter must reflect the programmatic filter");
+			const rendered = list.render(80);
+			assert.ok(rendered.some((line) => line.includes("al")), "search box must show the programmatic query");
+			assert.equal(list.getSelectedItem()?.value, "session-a");
+		});
+
+		it("user typing APPENDS to a programmatic filter instead of replacing it", () => {
+			const list = new SelectList(items, 5, testTheme, {}, { enableSearch: true });
+			list.setFilter("alp");
+			list.handleInput("h");
+
+			assert.equal(list.getFilter(), "alph", "the typed char must extend the programmatic query");
+			assert.equal(list.getSelectedItem()?.value, "session-a");
+		});
+
+		it("a programmatic filter survives setItems() refreshes", () => {
+			const list = new SelectList(items, 5, testTheme, {}, { enableSearch: true });
+			list.setFilter("zu");
+			list.setItems(items.map((item) => ({ ...item, description: "refreshed" })));
+
+			assert.equal(list.getFilter(), "zu", "setItems must re-apply the canonical query");
+			assert.equal(list.getSelectedItem()?.value, "session-b");
+		});
+
+		it("getFilter() reports the programmatic query with search disabled too", () => {
+			const list = new SelectList(items, 5, testTheme);
+			list.setFilter("mi");
+
+			assert.equal(list.getFilter(), "mi");
+			assert.equal(list.getSelectedItem()?.value, "session-c");
+		});
+
+		it("initialQuery prefill leaves the cursor at the end (typing appends)", () => {
+			const list = new SelectList(items, 5, testTheme, {}, { enableSearch: true, initialQuery: "al" });
+			assert.equal(list.getFilter(), "al");
+			list.handleInput("p");
+
+			assert.equal(list.getFilter(), "alp", "the first keystroke must append, not prepend");
+			assert.equal(list.getSelectedItem()?.value, "session-a");
 		});
 	});
 });

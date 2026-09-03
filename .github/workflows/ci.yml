@@ -4,8 +4,10 @@ on:
   push:
     branches:
       - main
+      - next
     tags:
       - 'v*'
+      - 'next-v*'
   pull_request:
 
 # Default to the minimum permission required by normal CI jobs.
@@ -20,6 +22,151 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Resolve the DSH dependency lane once. The resolver is unit-tested and keeps
+  # branch/base/tag policy out of every downstream job.
+  # ---------------------------------------------------------------------------
+  dsh-context:
+    name: Resolve DSH distribution context
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.context.outputs.mode }}
+      dsh_mode: ${{ steps.context.outputs.dsh_mode }}
+      version: ${{ steps.context.outputs.version }}
+      source_ref: ${{ steps.context.outputs.source_ref }}
+      source_expected_version: ${{ steps.context.outputs.source_expected_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Resolve mode
+        id: context
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: node scripts/dsh-ci-context.mjs
+
+  # ---------------------------------------------------------------------------
+  # Build the pinned source family once. The artifact contains only official
+  # release tarballs and the generated distribution manifest.
+  # ---------------------------------------------------------------------------
+  prepare-dsh-source:
+    name: Prepare pinned DSH source pack
+    needs: dsh-context
+    if: ${{ needs.dsh-context.result == 'success' && needs.dsh-context.outputs.mode == 'source' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 135
+
+    steps:
+      - name: Checkout dsh-pi-tui
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned DeepSeek Harness
+        uses: actions/checkout@v7
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ needs.dsh-context.outputs.source_ref }}
+          path: deepseek-harness
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Build and pack official DSH family
+        env:
+          DSH_SOURCE_REF: ${{ needs.dsh-context.outputs.source_ref }}
+          DSH_EXPECTED_VERSION: ${{ needs.dsh-context.outputs.source_expected_version }}
+        run: |
+          set -euo pipefail
+          node scripts/dsh-source-pack.mjs \
+            --dsh-dir "$GITHUB_WORKSPACE/deepseek-harness" \
+            --ref "$DSH_SOURCE_REF" \
+            --expected-version "$DSH_EXPECTED_VERSION" \
+            --out "$RUNNER_TEMP/dsh-source-pack"
+
+          mapfile -t TARBALLS < <(find "$RUNNER_TEMP/dsh-source-pack" -maxdepth 1 -type f -name '*.tgz' -print | sort)
+          if [ "${#TARBALLS[@]}" -eq 0 ]; then
+            echo 'official DSH source pack produced no tarballs' >&2
+            exit 1
+          fi
+          if [ ! -f "$RUNNER_TEMP/dsh-source-pack/dsh-source-distribution.json" ]; then
+            echo 'source artifact is missing dsh-source-distribution.json' >&2
+            exit 1
+          fi
+          UNEXPECTED="$(find "$RUNNER_TEMP/dsh-source-pack" -maxdepth 1 -type f \
+            ! -name '*.tgz' ! -name 'dsh-source-distribution.json' -print -quit)"
+          if [ -n "$UNEXPECTED" ]; then
+            echo "source artifact contains an unexpected file: $UNEXPECTED" >&2
+            exit 1
+          fi
+
+      - name: Upload DSH source pack
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+          if-no-files-found: error
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # Parse and validate release metadata once. Branch pushes and pull requests
+  # skip this tag-only job; tag jobs consume the same outputs everywhere.
+  # ---------------------------------------------------------------------------
+  release-context:
+    name: Resolve release context
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      channel: ${{ steps.context.outputs.channel }}
+      version: ${{ steps.context.outputs.version }}
+      npm_tag: ${{ steps.context.outputs.npm_tag }}
+      is_prerelease: ${{ steps.context.outputs.is_prerelease }}
+      required_branch: ${{ steps.context.outputs.required_branch }}
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Parse release tag
+        id: context
+        run: node scripts/release-context.mjs "$GITHUB_REF_NAME"
+
+      - name: Verify tag branch ancestry
+        env:
+          REQUIRED_BRANCH: ${{ steps.context.outputs.required_branch }}
+        run: |
+          set -euo pipefail
+          git fetch origin main next --no-tags
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$REQUIRED_BRANCH"; then
+            echo "Tag $GITHUB_REF_NAME is not an ancestor of origin/$REQUIRED_BRANCH" >&2
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
   # Source-level checks that are NOT already covered by package prepack.
   #
   # package.json prepack already runs:
@@ -27,14 +174,22 @@ jobs:
   #   - clean:fork
   #   - build
   #   - typecheck:bundle
-  #   - test:bundle
+  #   - test:product
   #
-  # So this job only checks the remaining source contracts.
+  # So this job only checks the remaining source contracts, plus the
+  # development-tooling suite (dev-environment, pre-push policy, DSH
+  # distribution gates) that must NOT run inside the artifact lifecycle.
   # ---------------------------------------------------------------------------
   source-checks:
     name: Source checks
+    needs:
+      - dsh-context
+      - prepare-dsh-source
+    if: ${{ always() && needs.dsh-context.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
 
     steps:
       - name: Checkout
@@ -51,8 +206,46 @@ jobs:
           cache: true
           install: false
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Set DSH source artifact path
+        run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
+
+      - name: Download DSH source pack
+        if: env.DSH_MODE == 'source'
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare DSH dependency environment
+        env:
+          DSH_SOURCE_CONFIG: test/compat/dsh-source.json
+        run: |
+          set -euo pipefail
+          if [ "$DSH_MODE" = source ]; then
+            node scripts/prepare-dsh-test-environment.mjs \
+              --mode source \
+              --distribution "$DSH_SOURCE_ARTIFACT" \
+              --workspace "$GITHUB_WORKSPACE" \
+              --config "$DSH_SOURCE_CONFIG"
+            echo 'PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false' >> "$GITHUB_ENV"
+            echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false' >> "$GITHUB_ENV"
+            echo 'TARBALL_SMOKE_SKIP_INSTALL=1' >> "$GITHUB_ENV"
+          else
+            printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+             NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+               npm_config_registry=https://registry.npmjs.org/ \
+               NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+               npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+               PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+               PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+               pnpm install --frozen-lockfile
+             {
+               echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+               echo 'npm_config_registry=https://registry.npmjs.org/'
+               echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+               echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+             } >> "$GITHUB_ENV"
+          fi
 
       - name: Typecheck vendored pi-tui
         run: pnpm typecheck:fork
@@ -64,11 +257,23 @@ jobs:
       - name: Test documentation
         run: pnpm test:docs
 
+      # Development-tooling suite: dev-environment fixtures, pre-push policy,
+      # DSH distribution gates. Kept OUT of prepack so the artifact lifecycle
+      # never depends on the developer git/CI environment.
+      - name: Test development tooling
+        run: pnpm test:tooling
+
       - name: Build vendored pi-tui for compatibility contract
         run: pnpm build:fork
 
       - name: Pi component compatibility contract
         run: pnpm gate:pi-surface-compat
+
+      # Vendored-fork divergence gate: every local src change must be
+      # covered by vendor-divergences.json against the pinned upstream
+      # blobs (resolved via the codeload tarball fallback on CI).
+      - name: Vendored fork divergence gate
+        run: pnpm gate:pi-vendor-diff
 
       - name: Verify naming and packaging contracts
         run: node scripts/naming-gate.mjs
@@ -83,7 +288,7 @@ jobs:
   #   clean:fork
   #   build
   #   typecheck:bundle
-  #   test:bundle
+  #   test:product
   #
   # postpack:
   #   tarball-smoke
@@ -98,8 +303,14 @@ jobs:
   # ---------------------------------------------------------------------------
   build-and-pack:
     name: Build and pack
+    needs:
+      - dsh-context
+      - prepare-dsh-source
+    if: ${{ always() && needs.dsh-context.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
 
     steps:
       - name: Checkout
@@ -114,8 +325,46 @@ jobs:
           cache: true
           install: false
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Set DSH source artifact path
+        run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
+
+      - name: Download DSH source pack
+        if: env.DSH_MODE == 'source'
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare DSH dependency environment
+        env:
+          DSH_SOURCE_CONFIG: test/compat/dsh-source.json
+        run: |
+          set -euo pipefail
+          if [ "$DSH_MODE" = source ]; then
+            node scripts/prepare-dsh-test-environment.mjs \
+              --mode source \
+              --distribution "$DSH_SOURCE_ARTIFACT" \
+              --workspace "$GITHUB_WORKSPACE" \
+              --config "$DSH_SOURCE_CONFIG"
+            echo 'PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false' >> "$GITHUB_ENV"
+            echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false' >> "$GITHUB_ENV"
+            echo 'TARBALL_SMOKE_SKIP_INSTALL=1' >> "$GITHUB_ENV"
+          else
+            printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+             NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+               npm_config_registry=https://registry.npmjs.org/ \
+               NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+               npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+               PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+               PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+               pnpm install --frozen-lockfile
+             {
+               echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+               echo 'npm_config_registry=https://registry.npmjs.org/'
+               echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+               echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+             } >> "$GITHUB_ENV"
+          fi
 
       - name: Build, test and pack
         run: |
@@ -156,6 +405,17 @@ jobs:
           echo "SHA256:"
           sha256sum "$TARBALL"
 
+      - name: Source leak gate
+        env:
+          DSH_CANDIDATE: ${{ steps.package.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          if [ "$DSH_MODE" = source ]; then
+            node scripts/dsh-source-leak-gate.mjs "$DSH_CANDIDATE" --distribution "$DSH_SOURCE_ARTIFACT"
+          else
+            node scripts/dsh-source-leak-gate.mjs "$DSH_CANDIDATE"
+          fi
+
       - name: Upload release tarball
         uses: actions/upload-artifact@v7
         with:
@@ -172,15 +432,21 @@ jobs:
   #   24.0.0  = minimum Node 24 covered by >=24
   #   26      = current/newer supported major
   #
-  # Node 24 used during pack already runs every postpack smoke.
-  # This matrix therefore only needs the broad tarball acceptance smoke.
+  # Node 24 used during pack already runs every postpack smoke. The matrix
+  # additionally performs a clean fresh install; Source Mode injects the
+  # validated local DSH tarball closure into that probe.
   # ---------------------------------------------------------------------------
   compat-smoke:
     name: Tarball smoke / Node ${{ matrix.node }}
     needs:
+      - dsh-context
+      - prepare-dsh-source
       - build-and-pack
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
 
     runs-on: ubuntu-latest
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
     timeout-minutes: 15
 
     strategy:
@@ -204,10 +470,37 @@ jobs:
           cache: true
           install: false
 
-      # Keep dev dependencies available because tarball-smoke optionally
-      # uses tooling such as TypeScript from the workspace.
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      # The source probe is intentionally independent of this checkout's
+      # node_modules, lockfile, and workspace metadata. npm mode retains the
+      # existing workspace install for its registry-backed lane.
+      - name: Set DSH source artifact path
+        run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
+
+      - name: Download DSH source pack
+        if: env.DSH_MODE == 'source'
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare npm dependency environment
+        if: env.DSH_MODE == 'npm'
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+          NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+            npm_config_registry=https://registry.npmjs.org/ \
+            NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+            npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+            PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+          {
+            echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+            echo 'npm_config_registry=https://registry.npmjs.org/'
+            echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+            echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+          } >> "$GITHUB_ENV"
 
       - name: Download release tarball
         uses: actions/download-artifact@v8
@@ -233,19 +526,39 @@ jobs:
             exit 1
           fi
 
-          node scripts/tarball-smoke.mjs "${TARBALLS[0]}"
+          if [ "$DSH_MODE" = source ]; then
+            node scripts/tarball-smoke.mjs "${TARBALLS[0]}" --dsh-distribution "$DSH_SOURCE_ARTIFACT"
+          else
+            node scripts/tarball-smoke.mjs "${TARBALLS[0]}"
+          fi
 
   # ---------------------------------------------------------------------------
-  # Test the EXACT packed artifact against the published pi2dsh bridge and a
-  # real Pi component in a real pseudo-terminal. This is intentionally outside
-  # postpack: local packing stays offline and non-interactive.
+  # DISABLED (2026-09-02): the published pi2dsh@0.24.0 bridge is
+  # RUNTIME-INCOMPATIBLE with the DSH 0.1.2-alpha.4 baseline — its dsh peers
+  # (`^0.1.2-alpha.1`) satisfy alpha.4 semver-wise, so the metadata preflight
+  # passes, but the bridge was built against the alpha.1-era Session/subagent
+  # APIs and fails in the real runtime smoke. The gate would fail on every
+  # alpha.4 run, so it is switched off until pi2dsh ships a release that
+  # declares AND runs on DSH >= 0.1.2-alpha.4.
+  #
+  # RE-ENABLE PROCEDURE: (1) flip the `if` below back to
+  # `${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' }}`;
+  # (2) restore `needs.ecosystem-compat.result == 'success'` and the
+  # `- ecosystem-compat` entry in the publish job below; (3) keep
+  # test/compat/pi2dsh.json at the target pairing. The official-preset-assembly
+  # job keeps the real preset coverage while this gate is off.
   # ---------------------------------------------------------------------------
   ecosystem-compat:
     name: External compatibility / pi2dsh
     needs:
+      - dsh-context
+      - prepare-dsh-source
       - build-and-pack
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
 
     steps:
       - name: Checkout
@@ -260,8 +573,23 @@ jobs:
           cache: true
           install: false
 
-      - name: Install repository dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Prepare npm dependency environment
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+          NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+            npm_config_registry=https://registry.npmjs.org/ \
+            NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+            npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+            PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+          {
+            echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+            echo 'npm_config_registry=https://registry.npmjs.org/'
+            echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+            echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+          } >> "$GITHUB_ENV"
 
       - name: Download release tarball
         uses: actions/download-artifact@v8
@@ -294,7 +622,11 @@ jobs:
             exit 1
           fi
 
-          node scripts/pi2dsh-compat-smoke.mjs "${TARBALLS[0]}"
+          # The NARROW stale-peer allowance: only a TUI-peer-only metadata
+          # mismatch proceeds to the targeted real runtime smoke (whose
+          # result decides). DSH peer mismatches, missing dsh peers, and
+          # runtime/fixture failures stay blocking.
+          node scripts/pi2dsh-compat-smoke.mjs "${TARBALLS[0]}" --allow-stale-tui-peer
 
       - name: Upload pi2dsh compatibility diagnostics
         if: failure()
@@ -304,6 +636,169 @@ jobs:
           path: pi2dsh-compat-debug
           if-no-files-found: warn
           retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Verify the EXACT packed artifact against every official DSH preset without
+  # consulting any published consumer metadata. This remains runnable when
+  # pi2dsh is behind the target release line.
+  # ---------------------------------------------------------------------------
+  official-preset-assembly:
+    name: Official DSH preset assembly
+    needs:
+      - dsh-context
+      - prepare-dsh-source
+      - build-and-pack
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Set DSH source artifact path
+        run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
+
+      - name: Download DSH source pack
+        if: env.DSH_MODE == 'source'
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare DSH dependency environment
+        env:
+          DSH_SOURCE_CONFIG: test/compat/dsh-source.json
+        run: |
+          set -euo pipefail
+          if [ "$DSH_MODE" = source ]; then
+            node scripts/prepare-dsh-test-environment.mjs \
+              --mode source \
+              --distribution "$DSH_SOURCE_ARTIFACT" \
+              --workspace "$GITHUB_WORKSPACE" \
+              --config "$DSH_SOURCE_CONFIG"
+            echo 'PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false' >> "$GITHUB_ENV"
+            echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false' >> "$GITHUB_ENV"
+            echo 'TARBALL_SMOKE_SKIP_INSTALL=1' >> "$GITHUB_ENV"
+          else
+            printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+             NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+               npm_config_registry=https://registry.npmjs.org/ \
+               NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+               npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+               PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+               PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+               pnpm install --frozen-lockfile
+             {
+               echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+               echo 'npm_config_registry=https://registry.npmjs.org/'
+               echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+               echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+             } >> "$GITHUB_ENV"
+          fi
+
+      - name: Download release tarball
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-tarball
+          path: tarball
+
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+
+      - name: Run official preset assembly smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(
+            find tarball -maxdepth 1 -type f \
+              -name 'xmoon76-dsh-pi-tui-*.tgz' \
+              -print \
+              | sort
+          )
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tarball, found ${#TARBALLS[@]}" >&2
+            printf '%s\n' "${TARBALLS[@]}" >&2
+            exit 1
+          fi
+          if [ "$DSH_MODE" = source ]; then
+            node scripts/official-presets-smoke.mjs "${TARBALLS[0]}" --distribution "$DSH_SOURCE_ARTIFACT"
+          else
+            node scripts/official-presets-smoke.mjs "${TARBALLS[0]}"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Verify the EXACT packed artifact rejects the old Harness. The unsupported
+  # runtime is a nonzero boundary check; the startup's friendly guidance is
+  # best-effort because DSH Loader mounts profile entries concurrently.
+  # ---------------------------------------------------------------------------
+  runtime-boundary:
+    name: Runtime boundary / old DSH rejection
+    needs:
+      - dsh-context
+      - prepare-dsh-source
+      - build-and-pack
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Download release tarball
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-tarball
+          path: tarball
+
+      # The smoke script runs from the repo root and imports devDependencies
+      # (semver since the alpha.4 baseline); every other CI job installs the
+      # workspace, this one must too or the import fails with
+      # ERR_MODULE_NOT_FOUND. The harness it drives is a separate isolated
+      # directory, so the workspace install does not affect the boundary
+      # semantics under test.
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run expected-rejection smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(
+            find tarball -maxdepth 1 -type f \
+              -name 'xmoon76-dsh-pi-tui-*.tgz' \
+              -print \
+              | sort
+          )
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tarball, found ${#TARBALLS[@]}" >&2
+            printf '%s\n' "${TARBALLS[@]}" >&2
+            exit 1
+          fi
+          node scripts/dsh-runtime-boundary-smoke.mjs "${TARBALLS[0]}"
 
   # ---------------------------------------------------------------------------
   # Production dependency security gate.
@@ -339,7 +834,7 @@ jobs:
   # changelog problem fails BEFORE npm publish: the publish gate below depends
   # on it. The script verifies, in one pass:
   #
-  #   - tag == package.json version
+  #   - parsed tag version == package.json version
   #   - CHANGELOG.md has a ## [<version>] section
   #   - CHANGELOG.en.md has the same section
   #   - the two section headings (version + date) match exactly
@@ -350,7 +845,9 @@ jobs:
   release-metadata:
     name: Prepare release metadata
 
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - release-context
 
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -404,13 +901,19 @@ jobs:
   publish:
     name: Publish to npm
 
-    if: startsWith(github.ref, 'refs/tags/v')
+    # The pi2dsh ecosystem gate is DISABLED (see the ecosystem-compat job
+    # comment) — restore `needs.ecosystem-compat.result == 'success'` and the
+    # `- ecosystem-compat` need when a compatible pi2dsh release lands.
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.build-and-pack.result == 'success' && needs.compat-smoke.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
+      - dsh-context
+      - release-context
       - source-checks
       - build-and-pack
       - compat-smoke
-      - ecosystem-compat
+      - official-preset-assembly
+      - runtime-boundary
       - security-audit
       - release-metadata
 
@@ -422,6 +925,24 @@ jobs:
       id-token: write
 
     steps:
+      - name: Configure isolated public npm registry
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-publish-npmrc"
+          {
+            echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+            echo 'npm_config_registry=https://registry.npmjs.org/'
+            echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-publish-npmrc"
+            echo "npm_config_userconfig=$RUNNER_TEMP/dsh-publish-npmrc"
+          } >> "$GITHUB_ENV"
+
+      - name: Assert release uses npm DSH mode
+        env:
+          DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+        run: |
+          set -euo pipefail
+          test "$DSH_MODE" = npm
+
       # No checkout is needed here.
       #
       # The release job only receives the already-tested tarball. This makes
@@ -473,8 +994,10 @@ jobs:
 
           TAG="${GITHUB_REF_NAME}"
 
-          if [ "$TAG" != "v$VERSION" ]; then
-            echo "Release tag $TAG does not match artifact version v$VERSION" >&2
+          EXPECTED_VERSION="${{ needs.release-context.outputs.version }}"
+
+          if [ "$VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "Artifact version $VERSION does not match parsed release version $EXPECTED_VERSION" >&2
             exit 1
           fi
 
@@ -489,16 +1012,17 @@ jobs:
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
       - name: Publish to npm
-        run: npm publish "./${{ steps.package.outputs.tarball }}" --access public
+        run: npm publish "./${{ steps.package.outputs.tarball }}" --access public --tag "${{ needs.release-context.outputs.npm_tag }}" --registry=https://registry.npmjs.org/
 
   # ---------------------------------------------------------------------------
   # Create the GitHub Release AFTER npm publish succeeded, so a visible
   # Release always means the same version is already on npm.
   #
   # The assets are the SAME artifact chain as npm: the tarball produced by
-  # build-and-pack, smoke-tested by compat-smoke and ecosystem-compat, then
-  # published by publish —
-  # never a rebuild. A SHA256 file rides along for download verification.
+  # build-and-pack, smoke-tested by compat-smoke (the pi2dsh ecosystem gate
+  # is currently DISABLED — see the ecosystem-compat job comment), then
+  # published by publish — never a rebuild. A SHA256 file rides along for
+  # download verification.
   #
   # The job is re-runnable: an existing release is edited in place and assets
   # are uploaded with --clobber.
@@ -506,9 +1030,11 @@ jobs:
   release:
     name: Create GitHub Release
 
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.publish.result == 'success' && needs.build-and-pack.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
+      - dsh-context
+      - release-context
       - publish
       - build-and-pack
       - release-metadata
@@ -520,6 +1046,13 @@ jobs:
       contents: write
 
     steps:
+      - name: Assert release uses npm DSH mode
+        env:
+          DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+        run: |
+          set -euo pipefail
+          test "$DSH_MODE" = npm
+
       - name: Download release tarball
         uses: actions/download-artifact@v8
         with:
@@ -571,19 +1104,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.release-context.outputs.version }}
+          IS_PRERELEASE: ${{ needs.release-context.outputs.is_prerelease }}
           TARBALL: ${{ steps.assets.outputs.tarball }}
           CHECKSUM: ${{ steps.assets.outputs.checksum }}
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION="${TAG#v}"
+          VERSION="$RELEASE_VERSION"
 
-          CREATE_ARGS=()
+          RELEASE_STATE_ARGS=(--prerelease=false)
 
-          # SemVer prerelease, e.g. 0.4.0-rc.1
-          if [[ "$VERSION" == *-* ]]; then
-            CREATE_ARGS+=(--prerelease)
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            RELEASE_STATE_ARGS=(--prerelease)
           fi
 
           if gh release view "$TAG" \
@@ -593,7 +1127,7 @@ jobs:
 
             gh release edit "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "dsh-pi-tui $TAG" \
+              --title "dsh-pi-tui $VERSION" "${RELEASE_STATE_ARGS[@]}" \
               --notes-file release-metadata/release-notes.md
           else
             echo "Creating release $TAG"
@@ -601,9 +1135,8 @@ jobs:
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
-              --title "dsh-pi-tui $TAG" \
-              --notes-file release-metadata/release-notes.md \
-              "${CREATE_ARGS[@]}"
+              --title "dsh-pi-tui $VERSION" "${RELEASE_STATE_ARGS[@]}" \
+              --notes-file release-metadata/release-notes.md
           fi
 
           gh release upload "$TAG" \

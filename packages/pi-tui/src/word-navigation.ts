@@ -105,7 +105,8 @@ export function findWordForward(text: string, cursor: number, options?: WordNavi
 		} else if (match.index === 0) {
 			// Punctuation at the segment START: skip it instead of stopping
 			// before it (which would be a no-op move). Mirrors the backward
-			// direction, which skips whole punctuation runs.
+			// direction, which skips whole punctuation runs. (dsh-pi-tui
+			// divergence X006.)
 			newCursor += Math.min(match[0].length, next.value.segment.length);
 		} else {
 			newCursor += match.index;

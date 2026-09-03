@@ -10,11 +10,23 @@ A Pi-style terminal frontend for [DeepSeek Harness](https://github.com/deepseek-
 `dsh-pi-tui` is installed as an independent dsh bundle inside a profile. It provides terminal interaction for streaming conversations, tool calls, session management, subagents, history search, shell commands, approvals, and settings. Models, tools, Sessions, permissions, Skills, Plan, Goal, and Subagent runtime behavior are still provided by DeepSeek Harness.
 
 ```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 
 ![dsh-pi-tui](docs/dsh-pi-tui.png)
+
+## DSH compatibility and source validation
+
+The published package declares the lower-bound-only DSH peer contract `>=0.1.2-alpha.4`. Source validation does not change that contract or vendor DSH into this repository.
+
+When the target DSH version is not yet available from npm, validate against the official checkout pinned by commit SHA:
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+```
+
+CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Both `next` lanes use `test/compat/dsh-source.json` for the current validated DSH target; Source Mode validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary, while npm Mode runs the frozen registry lane. The published `pi2dsh` ecosystem check is explicitly marked skipped for an unpublished source family. See [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md) for the full workflow.
 
 ## Features
 
@@ -103,9 +115,16 @@ The browser distinguishes:
 
 Completed one-shot Subagents remain available for persisted Transcript inspection.
 
-A direct `continuable` Child can be opened in an interactive viewer and sent follow-up messages directly. The Child has its own Transcript, Draft, and runtime state, without modifying the main Session input.
+A direct `continuable` Child can be opened in an interactive viewer and sent follow-up messages directly (through DSH's official `subagents.prompt()` human channel — queued in order as the Child's own next turn, with user provenance). The Child has its own Transcript, Draft, and runtime state, without modifying the main Session input.
 
 Deeper nested Subagents are read-only by default.
+
+The official subagent model selection (the DSH `subagent-model-selection`
+setting) can be toggled and its allowlist maintained in `/settings`: once
+enabled, a NEW session's official `subagent` tool may pick the child
+provider/model per call (bounded by the allowlist). The setting is sampled at
+session composition and never rewrites the tools of an already-running
+session.
 
 ### Shell
 
@@ -171,134 +190,25 @@ Slash Commands registered by other plugins through `ctx.commands` are discovered
 
 ### Footer customization
 
-The status line is a **composable surface** — no plugin or shell needed
-for the common cases.
+`/footer` is the interactive Footer editor. You can combine builtin status items, change their side and order, choose a Style and Tone, edit Prefix/Suffix and Importance, and create your own Footer items.
 
-`/settings` → Status line (or the `footer` key in the `dsh-pi-tui`
-settings document) selects the preset:
+Four item sources are supported:
 
-| Value | Meaning |
-|---|---|
-| `default` (legacy `full`) | the classic two-row footer (status + stats) |
-| `compact` | the status row only (stats line hidden) |
-| `custom` | a versioned `footerLayout` (see below) |
-| `command` | a user-configured command renders the status surface (see below) |
+- **Builtin Item** — Model, Context, Token, Tasks, Git branch, and other built-in status facts;
+- **Custom Text** — a user-created static text item;
+- **Custom Command Item** — a user-created dynamic command output that can be composed with other items;
+- **Extension Item** — a Footer item contributed by a plugin through the Stable Extension API.
 
-The first three values are selectable in the `/settings` panel; `command`
-is NOT in the panel — it can only be enabled through the USER-layer
-settings document (`footer: "command"` + `footerCommand`). The `/settings`
-Status line row offers exactly `default / compact / custom`.
+On narrow terminals, builtins with compact forms shorten before lower-importance content is dropped. Runtime compaction never rewrites the Style you saved.
 
-`/footer` is a hierarchical interactive configurator: pick a row first
-(Row Selector), then edit that row's items — `↑/↓` walks every item of
-the row in order (Left/Right are visual grouping only), `←/→` moves an
-item across sides, `Space` removes it, `A` opens a searchable Add Picker
-(filtered by label / id / description, with the highlighted item's
-description below), `M` enters Move Mode to reorder, and `Enter` opens
-the Item Editor (Style candidates previewed with the item's real render;
-semantic tones; Advanced edits prefix / suffix / importance with a
-one-keystroke Reset). The preview is composed by the real footer engine
-and — with the contextual help — pinned to the top of the panel; it never
-scrolls away at any terminal size. `S` on the Row Selector saves
-(persisted); `Esc` walks back page by page and closes on the first page
-without touching the active layout. With dirty changes, `Esc` first offers
-Save & Exit, Discard & Exit, or Keep Editing; saving waits for the settings
-write to succeed. Usable before any session exists.
+A `/footer` Custom Command Item is different from `footer: command`: the former is one dynamic item that can sit next to Model, Context, and other items; the latter hands the whole Footer status surface to one user command.
 
-The Add Picker also offers `+ Create Custom Text` for user-defined static text items. Their text, default semantic tone, display name, and deletion are editable; definitions are read and persisted only from the USER layer. The definition tone is separate from the placement Tone, and the item can otherwise be shown/hidden, moved, and reordered like any other footer item.
+For the full `/footer` workflow, Custom Text / Command items, YAML reference, security model, and troubleshooting, see:
 
-`footerLayout` is a nested settings object (schemaVersion 1, 1–2 rows,
-left/right zones, a separator, finite formatters, semantic tones,
-prefix/suffix, importance). The `/footer` configurator builds it
-interactively; the YAML shape is:
+- [Footer customization guide](docs/footer-customization.md)
+- [Extension API for plugin authors](docs/extension-api.md)
 
-```yaml
-footer: custom
-footerLayout:
-  schemaVersion: 1
-  rows:
-    - left:
-        - id: agent-preset
-          format: compact
-        - id: model
-        - id: project
-        - id: context
-          format: full
-        - id: cache-hit
-        - id: token-usage
-          format: io
-        - id: performance
-          format: speed
-        - id: version
-          format: tui
-      right:
-        - id: focus-mode
-      separator:
-        text: " │ "
-        tone: textDim
-```
-
-Builtin format choices are finite and use the existing `format` field (no
-second style schema): Model `badge` / `plain` / `compact`; Permission preset
-`badge` / `plain` / `compact`; Plan state `badge` / `plain`; Working directory
-`short` / `basename` / `full`; Git branch `plain` / `label`; Context `bar` /
-`percent` / `full`; Token usage `io` / `total` / `compact`; Cache hit `full` /
-`compact`; Performance `full` / `speed` / `latency` measures average time
-to first token; Turns/steps `both` / `turns` / `steps`; Version keeps `tui` / `dsh` /
-`both`. Omitting `format` continues to use each item's legacy default.
-
-Builtin item ids: `agent-preset`, `model`, `reasoning`,
-`permission-preset`, `sandbox-mode`, `approval-policy`, `plan-state`,
-`focus-mode`, `focused-seat`, `view-scope`, `cwd`, `project`,
-`git-branch`, `run-state`, `queue`, `tasks`, `agents`, `todo`,
-`context`, `cache-hit`, `token-usage`, `performance`, `turns-steps`,
-`stats-line`, `version`, `ext:*` (the legacy extension segments).
-An invalid `footerLayout` warns once and falls back to the default — the
-TUI always starts.
-
-`footer: command` hands the Status Surface to a user-configured command
-(Claude/Kimi style): the current status snapshot is serialized to JSON on
-the command's stdin (schemaVersion 1 — no secrets, no credentials, no
-prompts), and the command's stdout (sanitized: SGR colors and OSC 8
-hyperlinks only) renders the status surface. The Host's instruction
-surface (e.g. the Ctrl+C exit hint) always survives on top.
-
-```yaml
-footer: command
-footerCommand:
-  schemaVersion: 1
-  command: "~/.config/dsh/statusline.sh"
-  timeoutMs: 300        # default 300, max 1000
-  refreshIntervalMs: 1000  # min 1000
-  maxRows: 1            # 1..2
-```
-
-**Security:** the command is executed ONLY when it lives in the USER
-layer of your settings document. A repository/project-supplied
-`footerCommand` is never executed — command mode is disabled and the
-native layout applies. The command refreshes periodically according to
-`refreshIntervalMs` and renders at most two rows; failures (empty output,
-non-zero exit, timeout) fall back to the native layout automatically.
-
-### Extension footer items
-
-Plugins can contribute **configurable footer items** through the Stable
-extension API (`@xmoon76/dsh-pi-tui/extensions`): register a
-`FooterItemContribution` on the `chrome.footer.item` slot — a label and a
-plain-data `segment` (styled spans; the host strips any terminal control
-sequence, plugins never style the terminal). Users show/hide, reorder and
-zone-place the item in `/footer` exactly like a builtin item. Feature-detect
-the `slot.chrome.footer.item` capability before registering (it is
-advertised before any surface exists). The item's config identity is the
-canonical key `ext:<owner>/<id>` where the owner is the plugin's stable
-name — **stable across HMR**: a layout referencing an unloaded plugin's
-item keeps the reference and recovers automatically when the plugin
-reloads. An npm-scoped plugin name (`@scope/name`) is legal: its `/` is
-percent-encoded via `encodeURIComponent` in the key
-(`ext:%40scope%2Fname/<id>`); the id itself must
-not contain `/`. The legacy `chrome.footer.status` slot is unchanged: its
-segments aggregate into the single `ext:*` item. Full author guide:
-[docs/extension-api.md](docs/extension-api.md).
+`/statusline` is an alias of `/footer`.
 
 ## Common keys
 
@@ -405,14 +315,55 @@ dsh-pi-tui:
 * DeepSeek Harness
 * Node.js `^22.19.0 || >=24`
 
-The project currently follows the DeepSeek Harness `0.1.1-rc.x` release line.
+### DSH/TUI version pairing (important)
+
+| TUI package line | Matching DSH line | Notes |
+|---|---|---|
+| `0.4.x-alpha` (`@next`) | `>=0.1.2-alpha.4` | Current prerelease; each release validates its concrete DSH family |
+| `0.4.0-alpha.2` (published) | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; its releases validated the alpha.4/alpha.5 family |
+| `0.4.0-alpha.1` (published) | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 runtime |
+| `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
+
+Do not mix the lines: DSH 0.1.1 is outside the 0.4 peer window and the
+normal incompatible-runtime boundary will fail. The startup row prints upgrade
+and rollback guidance when concurrent Loader ordering allows it, but that
+friendly notice is best-effort rather than a startup-order guarantee. If you
+keep DSH 0.1.1, use the 0.3 TUI line; if you keep the alpha.2/alpha.3
+baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`. For the current 0.4
+prerelease, install DSH first and then add the TUI to a profile:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.5
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+If you need to keep the legacy DSH runtime:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
+dsh --profile pi-tui
+```
+
+The current 0.4 line declares `>=0.1.2-alpha.4`; each release validates
+its concrete DSH family. Running only `npm install -g @xmoon76/dsh-pi-tui` does
+not install the plugin into a DSH profile; the `dsh plugin` command is still
+required.
+
+New agent sessions use the official roster's selected preset id. A custom DSH
+preset literally named `code` is valid and remains `code` when it exists in the
+current roster. Old persisted `code` defaults/session values fall back to `ptc`
+only after the roster proves that no custom `code` preset exists.
 
 ### npm
 
-Using a dedicated `pi-tui` profile is recommended:
+Using a dedicated `pi-tui` profile is recommended. Once a stable 0.4 release
+exists, use the matching stable TUI channel (`@latest`); use `@next` for the
+prerelease channel:
 
 ```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 
@@ -420,6 +371,15 @@ Resume an existing Session:
 
 ```sh
 dsh --profile pi-tui --session <session-id>
+```
+
+### Source Mode (validation only)
+
+Source Mode is the validation-only distribution selected by the tracked policy for `next` CI and available for local compatibility checks. It reads the full commit pin in `test/compat/dsh-source.json`, builds the official DSH tarball family, installs it through temporary pnpm overrides, and removes the temporary state afterward. Do not write DSH source paths, `file:` dependencies, or workspace symlinks into a published package.
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
 ```
 
 The published package already contains the Pi TUI fork required at runtime. No separate internal TUI package needs to be installed.

@@ -79,4 +79,31 @@ describe("TUI cell size responses", () => {
 			tui.stop();
 		});
 	});
+
+	it("consumes cell size responses BEFORE input listeners — a consume-everything listener cannot swallow them (X046)", () => {
+		withImageTerminal(() => {
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+
+			const terminal = new VirtualTerminal(80, 24);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const recorder = new InputRecorder();
+			const listenerInputs: string[] = [];
+
+			tui.setFocus(recorder);
+			// A listener that consumes EVERY chunk (the host's
+			// question/approval modal, an unstable raw capture): the
+			// terminal-owned cell-size reply must be filtered BEFORE it,
+			// or the reply is swallowed and the dimensions stay stale.
+			tui.addInputListener((data) => {
+				listenerInputs.push(data);
+				return { consume: true };
+			});
+			tui.start();
+
+			terminal.sendInput("\x1b[6;20;10t");
+			assert.deepStrictEqual(listenerInputs, [], "the cell-size reply must never reach input listeners");
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 10, heightPx: 20 }, "the dimensions must still update");
+			tui.stop();
+		});
+	});
 });

@@ -139,12 +139,38 @@ and arms the badge while it works, even without any job record; the
 background-one-shot double row (job row + child row) is expected, see
 tasks-browser.ts.
 
+## Completion notifications and terminal focus
+
+The TUI enables terminal focus reporting (`CSI ? 1004`) at mount for the
+completion notification policy: the main agent's settlement notifies only
+while the terminal is UNFOCUSED (default `mode=unfocused`; `mode=always`
+notifies regardless, `mode=off` disables — `/settings → Notifications`).
+
+Manual acceptance under tmux:
+
+1. `tmux set -g focus-events on` — tmux must FORWARD focus events to the
+   pane (the option is off by default on some tmux versions; zellij and
+   other multiplexers have their own toggle). Without forwarding, the
+   tracker stays `focused` (the safe default — **no false notifications**,
+   but also no unfocused notifications; use `mode=always` for such
+   environments).
+2. Run a long turn, then switch to another pane/window BEFORE it settles.
+   Expected: exactly ONE notification when the main agent finally goes
+   idle (never mid-turn, never per `turn/end`, never for subagents).
+3. Run a turn while KEEPING the TUI focused. Expected: silent.
+4. Queue a follow-up mid-turn and switch away: still exactly one
+   notification at the final settle, nothing at the intermediate turn
+   boundary.
+
 ## Trap list (every item hit in real testing)
 
-1. **PasteBurst turns Enter into a newline**: `send-keys 'text' Enter`
-   delivers a batch fast enough for the editor's paste heuristic (≥8 plain
-   chars within 8ms) to treat it as a paste and suppress Enter for 120ms.
-   Always `send-keys -l 'text'` → `sleep 0.3+` → `send-keys Enter`.
+1. **PasteBurst turns a batched Enter into a newline**: `send-keys 'text'
+   Enter` delivers the text fast enough for the editor's lost-marker paste
+   heuristic (X038: ≥8 plain chars within 8ms → the trailing Enter inserts
+   a newline instead of submitting, 120ms window) to treat it as a paste.
+   Restored with the kimi baseline after the Earendil re-vendor briefly
+   dropped it (DIVERGENCES.md X038). Always drive the editor in two steps:
+   `send-keys -l 'text'` → `sleep 0.3+` → `send-keys Enter`.
 2. **zsh treats `;` as a command separator**: `COLORFGBG=15;0 dsh …` runs
    `0`. Quote the env value (`COLORFGBG='15;0' dsh …`) and mind nested quotes
    in scripts (wrap the whole thing in double quotes).
@@ -196,6 +222,12 @@ tasks-browser.ts.
     `fullscreen: on` (freezes the TUI under a pipe/tee with no interactive
     TTY). Reset them (`theme: auto`, `defaultPreset: workspace-write`,
     fullscreen off) before re-testing in a different launch environment.
+12. **tmux does not forward focus events by default on all versions**: the
+    completion notification's `mode=unfocused` silently never fires when
+    the multiplexer eats the focus reports. Either `set -g focus-events
+    on` (tmux 2.9+) or use `mode=always` — the TUI never guesses, so an
+    environment without forwarding under-notifies by design (safe
+    default).
 
 ## Scripts
 

@@ -75,6 +75,306 @@ test('models surface detached provider/model DTOs and forward discovery', async 
   assert.deepEqual(saved, { provider: 'deepseek', model: 'deepseek-chat' })
 })
 
+test('model catalog separates global default from live Session selection', async () => {
+  const appended: unknown[] = []
+  let liveSelection: { provider: string; model: string; reasoningEffort?: string } = {
+    provider: 'session-provider', model: 'session-model', reasoningEffort: 'high',
+  }
+  let savedDefault: unknown
+  const owner = {
+    current: () => liveSelection,
+    appendSelection: (_agent: unknown, next: typeof liveSelection) => {
+      appended.push({ type: 'model/selection', data: next })
+    },
+    setCurrent: (_agent: unknown, next: typeof liveSelection) => {
+      liveSelection = next
+    },
+    selectForNextRequest: (_agent: unknown, next: typeof liveSelection) => {
+      appended.push({ type: 'model/selection', data: next })
+      liveSelection = next
+    },
+  }
+  const models = new DirectCatalogPort(host({
+    llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }),
+      saveSelection: async (next: unknown) => { savedDefault = next },
+    },
+  }), () => liveAgent, owner).models
+
+  assert.deepEqual(models.defaultSelection(), { provider: 'default-provider', model: 'default-model' })
+  assert.deepEqual(models.sessionSelection('session-live'), liveSelection)
+  await models.selectSessionModel('session-live', { provider: 'new-provider', model: 'new-model', reasoningEffort: 'max' })
+  assert.deepEqual(appended, [{
+    type: 'model/selection',
+    data: { provider: 'new-provider', model: 'new-model', reasoningEffort: 'max' },
+  }])
+  assert.deepEqual(models.sessionSelection('session-live'), {
+    provider: 'new-provider', model: 'new-model', reasoningEffort: 'max',
+  })
+  assert.deepEqual(savedDefault, {
+    provider: 'new-provider', model: 'new-model', reasoningEffort: 'max',
+  })
+})
+
+test('overlapping default writes reassert the newest choice after stale completion', async () => {
+  let rejectFirst!: (error: Error) => void
+  const calls: string[] = []
+  const first = new Promise<never>((_resolve, reject) => { rejectFirst = reject })
+  const models = new DirectCatalogPort(host({
+    llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
+      saveSelection: (next: { model: string }) => {
+        calls.push(next.model)
+        return next.model === 'old' ? first : Promise.resolve()
+      },
+    },
+  }), () => undefined).models
+
+  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' })
+  const latest = models.saveDefaultSelection({ provider: 'p', model: 'new' })
+  await latest
+  rejectFirst(new Error('stale write failed'))
+  await assert.rejects(stale, /stale write failed/u)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(calls.at(-1), 'new', 'the stale completion must not leave the global default at old')
+})
+
+test('a stale SUCCESSFUL write still reasserts the newest choice', async () => {
+  let resolveFirst!: () => void
+  const calls: string[] = []
+  const first = new Promise<void>((resolve) => { resolveFirst = resolve })
+  const models = new DirectCatalogPort(host({
+    llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
+      saveSelection: (next: { model: string }) => {
+        calls.push(next.model)
+        return next.model === 'old' ? first : Promise.resolve()
+      },
+    },
+  }), () => undefined).models
+
+  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' })
+  const latest = models.saveDefaultSelection({ provider: 'p', model: 'new' })
+  await latest
+  resolveFirst() // the stale write SUCCEEDS after the newer one
+  await stale
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(calls.at(-1), 'new', 'a stale success must not leave the global default at old')
+})
+
+test('a selection started during the correction is reasserted after it', async () => {
+  let resolveFirst!: () => void
+  let resolveCorrection!: () => void
+  const calls: string[] = []
+  const first = new Promise<void>((resolve) => { resolveFirst = resolve })
+  let correction: Promise<void> | undefined
+  const models = new DirectCatalogPort(host({
+    llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
+      saveSelection: (next: { model: string }) => {
+        calls.push(next.model)
+        if (next.model === 'old') return first
+        // The third write is the fencing correction for 'new': hold it so a
+        // newer selection can start while the correction is in flight.
+        if (calls.length === 3) {
+          correction = new Promise<void>((resolve) => { resolveCorrection = resolve })
+          return correction
+        }
+        return Promise.resolve()
+      },
+    },
+  }), () => undefined).models
+
+  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' })
+  const latest = models.saveDefaultSelection({ provider: 'p', model: 'new' })
+  await latest
+  resolveFirst() // the stale write completes; its fence starts the correction
+  await stale
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(calls.at(-1), 'new', 'the correction for the newest value must be in flight')
+  const newest = models.saveDefaultSelection({ provider: 'p', model: 'newest' })
+  await newest
+  resolveCorrection() // the held correction completes
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(calls.at(-1), 'newest', 'a selection started during the correction must be reasserted after it')
+})
+
+test('a failed fencing correction is reported through the diagnostic sink', async () => {
+  let resolveFirst!: () => void
+  const calls: string[] = []
+  const warnings: string[] = []
+  const first = new Promise<void>((resolve) => { resolveFirst = resolve })
+  const models = new DirectCatalogPort(host({
+    llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
+      saveSelection: (next: { model: string }) => {
+        calls.push(next.model)
+        if (next.model === 'old') return first
+        // The third write is the fencing correction for 'new': make it fail.
+        if (calls.length === 3) return Promise.reject(new Error('correction write failed'))
+        return Promise.resolve()
+      },
+    },
+  }), () => undefined, undefined, { warn: (message: string) => { warnings.push(message) } }).models
+
+  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' })
+  const latest = models.saveDefaultSelection({ provider: 'p', model: 'new' })
+  await latest
+  resolveFirst() // the stale write completes; its fence starts the correction
+  await stale
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(warnings.length, 1, 'the failed correction must be reported, never silently swallowed')
+  assert.match(warnings[0]!, /correction failed/u)
+})
+
+test('a global-default save failure does not erase a durable live Session choice', async () => {
+  const appended: unknown[] = []
+  let liveSelection: { provider: string; model: string } = { provider: 'old-provider', model: 'old-model' }
+  const owner = {
+    current: () => liveSelection,
+    appendSelection: (_agent: unknown, next: { provider: string; model: string }) => {
+      appended.push({ type: 'model/selection', data: next })
+    },
+    setCurrent: (_agent: unknown, next: { provider: string; model: string }) => {
+      liveSelection = next
+    },
+    selectForNextRequest: (_agent: unknown, next: { provider: string; model: string }) => {
+      appended.push({ type: 'model/selection', data: next })
+      liveSelection = next
+    },
+  }
+  const models = new DirectCatalogPort(host({
+    llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'global', model: 'default' }),
+      saveSelection: async () => { throw new Error('quota exceeded') },
+    },
+  }), () => liveAgent, owner).models
+
+  await assert.rejects(
+    models.selectSessionModel('session-live', { provider: 'new-provider', model: 'new-model' }),
+    /quota exceeded/u,
+  )
+  assert.deepEqual(appended, [{ type: 'model/selection', data: { provider: 'new-provider', model: 'new-model' } }])
+  assert.deepEqual(models.sessionSelection('session-live'), { provider: 'new-provider', model: 'new-model' })
+})
+
+test('a failed durable append never becomes the Agent selection', async () => {
+  const owner = {
+    current: () => ({ provider: 'old-provider', model: 'old-model' }),
+    appendSelection: () => { throw new Error('append failed') },
+    setCurrent: () => { throw new Error('setCurrent must not run after a failed append') },
+    selectForNextRequest: () => { throw new Error('selectForNextRequest must not run') },
+  }
+  const models = new DirectCatalogPort(host({
+    llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'global', model: 'default' }),
+      saveSelection: async () => {},
+    },
+  }), () => liveAgent, owner).models
+
+  await assert.rejects(
+    models.selectSessionModel('session-live', { provider: 'new-provider', model: 'new-model' }),
+    /append failed/u,
+  )
+  assert.deepEqual(models.sessionSelection('session-live'), { provider: 'old-provider', model: 'old-model' },
+    'a failed append must leave the Agent selection untouched')
+})
+
+test('a failed selection is never resurrected by the fencing correction', async () => {
+  let resolveFirst!: () => void
+  let resolveCorrection!: () => void
+  const calls: string[] = []
+  const first = new Promise<void>((resolve) => { resolveFirst = resolve })
+  let correction: Promise<void> | undefined
+  const models = new DirectCatalogPort(host({
+    llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
+      saveSelection: (next: { model: string }) => {
+        calls.push(next.model)
+        if (next.model === 'old') return first
+        if (next.model === 'new') {
+          // The second 'new' write is the fencing correction: hold it.
+          if (calls.filter(call => call === 'new').length === 2) {
+            correction = new Promise<void>((resolve) => { resolveCorrection = resolve })
+            return correction
+          }
+          return Promise.resolve()
+        }
+        // 'newest' (the failed choice) always fails.
+        return Promise.reject(new Error('quota exceeded'))
+      },
+    },
+  }), () => undefined).models
+
+  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' })
+  const latest = models.saveDefaultSelection({ provider: 'p', model: 'new' })
+  await latest
+  resolveFirst() // the stale write completes; its fence starts the correction
+  await stale
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(calls.at(-1), 'new', 'the correction for the newest committed value must be in flight')
+  await assert.rejects(
+    models.saveDefaultSelection({ provider: 'p', model: 'newest' }),
+    /quota exceeded/u,
+  )
+  resolveCorrection() // the held correction completes
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(calls.at(-1), 'new',
+    'a failed selection must never be resurrected by the correction: the persistent target stays the newest committed value')
+})
+
+test('a stale success after a failed newer attempt still reasserts the newest committed value', async () => {
+  let resolveA!: () => void
+  let resolveB!: () => void
+  const calls: string[] = []
+  const a = new Promise<void>((resolve) => { resolveA = resolve })
+  const b = new Promise<void>((resolve) => { resolveB = resolve })
+  const models = new DirectCatalogPort(host({
+    llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
+      saveSelection: (next: { model: string }) => {
+        calls.push(next.model)
+        if (next.model === 'old') return a
+        if (next.model === 'new') return b
+        // 'newest' (C) always fails.
+        return Promise.reject(new Error('quota exceeded'))
+      },
+    },
+  }), () => undefined).models
+
+  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' }) // A gen1
+  const mid = models.saveDefaultSelection({ provider: 'p', model: 'new' }) // B gen2
+  const failed = models.saveDefaultSelection({ provider: 'p', model: 'newest' }) // C gen3
+  await assert.rejects(failed, /quota exceeded/u) // C fails first
+  resolveB() // B succeeds while C's generation is current
+  await mid
+  resolveA() // A succeeds LAST, overwriting the store with the stale value
+  await stale
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(calls.at(-1), 'new',
+    'a stale success after a failed newer attempt must still reassert the newest committed value (B), never the stale A')
+})
+
 test('catalog DTOs are DETACHED — mutating a returned value never aliases Host data', async () => {
   const providers = [{ id: 'deepseek', name: 'DeepSeek' }]
   const models = [{ id: 'deepseek-chat' }]
@@ -134,6 +434,7 @@ test('presets degrade to unavailable without a roster service', async () => {
   assert.equal(presets.available(), false)
   assert.deepEqual(await presets.list(), [])
   assert.deepEqual(await presets.resolve('standard'), {}, 'rosterless resolve yields no preset identity')
+  await assert.rejects(presets.resolve('code'), /preset "code" is unavailable/)
   assert.equal(presets.defaultId(), undefined)
 })
 
@@ -152,7 +453,27 @@ test('presets list/resolve/defaultId return detached roster DTOs', async () => {
     { id: 'code', trust: 'user', name: 'PTC', broken: 'x' },
   ])
   assert.deepEqual(await presets.resolve(undefined), { id: 'standard' }, 'concrete id only, no setup callback')
+  assert.deepEqual(await presets.resolve('code'), { id: 'code' }, 'a legal custom code id resolves as itself')
   assert.equal(presets.defaultId(), 'standard')
+})
+
+test('presets resolves an absent legacy code default as ptc but preserves explicit code semantics', async () => {
+  const resolved: Array<string | undefined> = []
+  const presets = port({
+    agentPresets: {
+      list: async () => [preset('ptc')],
+      resolve: async (id?: string) => {
+        resolved.push(id)
+        if (id === 'code') throw Object.assign(new Error('unknown preset'), { presetId: 'code' })
+        return preset(id ?? 'ptc')
+      },
+      get defaultId() { return 'code' },
+    },
+  }).presets
+  assert.deepEqual(await presets.resolve(undefined), { id: 'ptc' })
+  await assert.rejects(() => presets.resolve('code'), /unknown preset/u)
+  assert.deepEqual(resolved, ['code', 'ptc', 'code'], 'only omitted default resolution gets the legacy fallback')
+  assert.equal(presets.defaultId(), 'code', 'the synchronous default read preserves roster ambiguity')
 })
 
 test('presets.resolve propagates an unknown-preset rejection', async () => {
@@ -260,4 +581,32 @@ test('skills standing degrades to the global layer with a one-shot notice', asyn
 test('skills standing throws when no registry is reachable', async () => {
   const skills = port({ agentPresets: {} }).skills
   await assert.rejects(() => skills.standing(undefined, '/ws'), /skill service unavailable/)
+})
+
+test('model discovery stays on the official seam (alpha.4 profile-header regression)', async () => {
+  // Alpha.4 fixed the HOST to reuse a configured provider profile's custom
+  // headers during discovery. The TUI's contract is unchanged and must
+  // STAY unchanged: the request is forwarded VERBATIM to
+  // `ctx.llm.discoverModels` (the only seam — the TUI never reconstructs
+  // headers, reads stored credentials, or fetches /models itself), and the
+  // answer is projected to detached id/name DTOs only.
+  const seen: Array<{ ns: string; request: unknown }> = []
+  const models = port({
+    llm: {
+      listProviders: () => [],
+      listModels: async () => [],
+      resolveModelInfo: async () => ({}),
+      discoverModels: async (ns: string, request: unknown) => {
+        seen.push({ ns, request })
+        return [{ id: 'profiled-model' }]
+      },
+      listConfigurableProviders: () => [],
+    },
+  }).models
+  const request = { provider: 'acme-gateway', baseURL: 'https://acme.example/v1', api: 'openai' }
+  const discovered = await models.discoverModels(request)
+  assert.deepEqual(discovered, [{ id: 'profiled-model' }])
+  assert.equal(seen.length, 1, 'exactly one official discovery call')
+  assert.equal(seen[0]!.ns, 'llm-pi-ai', 'the adapter owns the settings namespace')
+  assert.deepEqual(seen[0]!.request, request, 'the request crosses the seam verbatim (headers stay HOST-side)')
 })

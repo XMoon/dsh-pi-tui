@@ -17,6 +17,11 @@
 
 import type { AgentPreset } from '@deepseek-ai/dsh-agent-presets'
 import {
+  copyModelSelection,
+  normalizeModelSelection,
+} from '../../model-selection.ts'
+import type { SessionModelSelectionOwnerLike } from './model-selection-direct.ts'
+import {
   readHumanSkillCatalog,
   resolveColdSkillTarget,
   resolveLiveSkillTarget,
@@ -42,6 +47,7 @@ import type {
 } from '../catalog-port.ts'
 import type { StandingSkillRead } from '../../skill-catalog-refresh.ts'
 import type { ProviderCatalogEntry } from '../../provider-catalog.ts'
+import { resolvePresetRequest } from '../session-preset.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -61,8 +67,14 @@ export interface LlmServiceLike {
 
 /** The structural `agentDefaultModel` service surface. */
 export interface DefaultModelServiceLike {
-  currentSelection(): ModelSelectionDto
+  currentSelection(): ModelSelectionDto | undefined
   saveSelection(next: ModelSelectionDto): Promise<unknown>
+}
+
+/** The narrow diagnostic surface the model catalog reports fencing
+ *  corrections through (structural — the runner's Diag satisfies it). */
+export interface ModelDiagLike {
+  warn(message: string, fields?: Record<string, unknown>): void
 }
 
 /** The structural `agentPresets` service surface. */
@@ -94,10 +106,15 @@ export class DirectCatalogPort implements Catalog {
   readonly presets: PresetCatalog
   readonly skills: SkillCatalogCapability
 
-  constructor(ctx: HostContextLike, agentFor: (sessionId: string) => unknown | undefined) {
+  constructor(
+    ctx: HostContextLike,
+    agentFor: (sessionId: string) => unknown | undefined,
+    modelSelections?: SessionModelSelectionOwnerLike,
+    diag?: ModelDiagLike,
+  ) {
     this.ctx = ctx
     this.agentFor = agentFor
-    this.models = new DirectModelCatalog(ctx)
+    this.models = new DirectModelCatalog(ctx, agentFor, modelSelections, diag)
     this.presets = new DirectPresetCatalog(ctx)
     this.skills = new DirectSkillCatalog(ctx, agentFor)
   }
@@ -113,9 +130,32 @@ function agentCwd(agent: LiveAgentLike): string {
 /** The Direct model/provider catalog (`ctx.llm` + `ctx.agentDefaultModel`). */
 export class DirectModelCatalog implements ModelCatalog {
   private readonly ctx: HostContextLike
+  private readonly agentFor: (sessionId: string) => unknown | undefined
+  private readonly modelSelections: SessionModelSelectionOwnerLike | undefined
+  private readonly diag: ModelDiagLike | undefined
+  /** Fence overlapping default writes so the newest choice wins persistence. */
+  private defaultWriteGeneration = 0
+  /** The generation of the newest SUCCESSFULLY committed default. Any
+   *  successful write with a NEWER generation advances it, so a failed
+   *  newer attempt never erases an older success (the correction target
+   *  stays the newest committed value). */
+  private committedGeneration = 0
+  /** The newest SUCCESSFULLY committed default (the correction target). A
+   *  failed attempt is never recorded here, so a failed choice can never be
+   *  resurrected by a stale-write correction. */
+  private latestCommitted: ModelSelectionDto | undefined
+  private latestWrite: Promise<unknown> = Promise.resolve()
 
-  constructor(ctx: HostContextLike) {
+  constructor(
+    ctx: HostContextLike,
+    agentFor: (sessionId: string) => unknown | undefined = () => undefined,
+    modelSelections?: SessionModelSelectionOwnerLike,
+    diag?: ModelDiagLike,
+  ) {
     this.ctx = ctx
+    this.agentFor = agentFor
+    this.modelSelections = modelSelections
+    this.diag = diag
   }
 
   private llm(): LlmServiceLike | undefined {
@@ -161,21 +201,107 @@ export class DirectModelCatalog implements ModelCatalog {
     })) } }
   }
 
-  currentSelection(): ModelSelectionDto | undefined {
+  defaultSelection(): ModelSelectionDto | undefined {
     const selection = this.defaultModel()?.currentSelection()
-    if (selection === undefined) return undefined
-    // Detached copy.
-    return {
-      provider: selection.provider,
-      model: selection.model,
-      ...typeof selection.reasoningEffort === 'string' ? { reasoningEffort: selection.reasoningEffort } : {},
+    return copyModelSelection(normalizeModelSelection(selection))
+  }
+
+  saveDefaultSelection(selection: ModelSelectionDto): Promise<unknown> {
+    const next = normalizeModelSelection(selection)
+    if (next === undefined) return Promise.reject(new Error('invalid model selection'))
+    const defaultModel = this.defaultModel()
+    if (defaultModel === undefined) return Promise.reject(new Error('model selection service unavailable'))
+
+    const generation = ++this.defaultWriteGeneration
+    // Start immediately rather than serializing behind a hung older write. If
+    // an older write settles after a newer one, its completion fences and
+    // reasserts the newest COMMITTED value after all newer writes have settled.
+    const write = Promise.resolve().then(() => defaultModel.saveSelection({ ...next }))
+    this.latestWrite = write
+    const fence = (outcome: { ok: true; value: unknown } | { ok: false; error: unknown }): Promise<unknown> => {
+      // Any successful write advances the committed target when its
+      // generation is NEWER than the current committed one: a failed newer
+      // attempt must never erase an older success, and a stale write's
+      // success must never mark an older value as the committed target.
+      if (outcome.ok && generation > this.committedGeneration) {
+        this.committedGeneration = generation
+        this.latestCommitted = { ...next }
+      }
+      // Reassert asynchronously: the caller must observe this write's own
+      // result promptly, while the detached correction protects persistence
+      // when an older write settles after a newer one.
+      void this.reassertLatest(generation).catch(() => undefined) // allowlist: fenced latest-write correction
+      return outcome.ok ? Promise.resolve(outcome.value) : Promise.reject(outcome.error)
+    }
+    return write.then(
+      value => fence({ ok: true, value }),
+      error => fence({ ok: false, error }),
+    )
+  }
+
+  private async reassertLatest(generation: number): Promise<void> {
+    while (generation !== this.defaultWriteGeneration) {
+      const observedGeneration = this.defaultWriteGeneration
+      const observedWrite = this.latestWrite
+      await observedWrite.catch(() => undefined)
+      if (observedGeneration !== this.defaultWriteGeneration) continue
+      const latest = this.latestCommitted
+      const defaultModel = this.defaultModel()
+      if (latest === undefined || defaultModel === undefined) return
+      try {
+        await defaultModel.saveSelection({ ...latest })
+      } catch (error) {
+        // A failed correction leaves the durable default stale until the
+        // next save reasserts it; report the failure instead of swallowing
+        // it (the caller still observes its own write's result).
+        this.diag?.warn('model default correction failed', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return
+      }
+      // Mark the generation we just reasserted as observed. A newer selection
+      // could have started while the correction was in flight; the loop then
+      // observes that newer generation and reasserts it instead.
+      generation = observedGeneration
     }
   }
 
+  sessionSelection(sessionId: string): ModelSelectionDto | undefined {
+    const agent = this.agentFor(sessionId)
+    if (agent === undefined || this.modelSelections === undefined) return undefined
+    return copyModelSelection(normalizeModelSelection(this.modelSelections.current(agent)))
+  }
+
+  async selectSessionModel(sessionId: string, selection: ModelSelectionDto): Promise<ModelSelectionDto> {
+    const next = normalizeModelSelection(selection)
+    if (next === undefined) throw new Error('invalid model selection')
+    const agent = this.agentFor(sessionId)
+    if (agent === undefined) throw new Error('session model selection unavailable')
+    if (this.modelSelections === undefined) {
+      // Without the Direct owner there is no safe Session projection to
+      // mutate: fail loudly instead of silently saving only the global
+      // default (which would make the caller believe the Session changed).
+      throw new Error('session model selection unavailable')
+    }
+    // The durable append is the commit point: it throws on failure and the
+    // Agent-local selection is untouched, so a failed choice can never be
+    // observed by a request. Only after the append commits does the choice
+    // become the Agent's pending selection; the global-default write is
+    // best-effort and never undoes the durable Session choice.
+    this.modelSelections.appendSelection(agent, next)
+    this.modelSelections.setCurrent(agent, next)
+    await this.saveDefaultSelection(next)
+    return { ...next }
+  }
+
+  /** @deprecated Use {@link defaultSelection}. */
+  currentSelection(): ModelSelectionDto | undefined {
+    return this.defaultSelection()
+  }
+
+  /** @deprecated Use {@link saveDefaultSelection}. */
   saveSelection(selection: ModelSelectionDto): Promise<unknown> {
-    const defaultModel = this.defaultModel()
-    if (defaultModel === undefined) return Promise.reject(new Error('model selection service unavailable'))
-    return defaultModel.saveSelection(selection)
+    return this.saveDefaultSelection(selection)
   }
 
   discoverModels(request: ModelDiscoveryRequest): Promise<readonly ModelInfoSummary[]> {
@@ -234,12 +360,21 @@ export class DirectPresetCatalog implements PresetCatalog {
     const presets = this.presets()
     // Rosterless deployment: no preset identity to record (the old compose
     // path returned `agentPreset: undefined`).
-    if (presets === undefined) return {}
-    const preset = await presets.resolve(id)
+    if (presets === undefined) {
+      if (id === 'code') throw new Error('preset "code" is unavailable in this deployment; use a configured preset')
+      return {}
+    }
+    // An omitted id means "use the persisted deployment default". DSH allows
+    // a user preset literally named `code`, so probe that real roster entry
+    // before applying the old pi-tui default-data compatibility mapping.
+    const preset = await resolvePresetRequest(presets, id)
     return { id: preset.id }
   }
 
   defaultId(): string | undefined {
+    // This synchronous projection cannot inspect the async roster. Preserve a
+    // literal `code`; callers resolving a persisted default use resolve(),
+    // which disambiguates a real custom entry from old TUI data.
     return this.presets()?.defaultId
   }
 }

@@ -4,8 +4,8 @@
  * notes for a version straight from the changelogs, never from commit
  * messages or AI summarization. Doubles as the release-metadata gate:
  *
- *   - the tag must be a `v`-prefixed version,
- *   - package.json `version` must equal the tag version,
+ *   - the tag must be `v<stable-version>` or `next-v<prerelease-version>`,
+ *   - package.json `version` must equal the parsed tag version,
  *   - CHANGELOG.md must contain a `## [<version>]` section,
  *   - CHANGELOG.en.md must contain the same section,
  *   - the two section headings (version + date) must match exactly.
@@ -16,20 +16,27 @@
  */
 
 import { readFileSync, writeFileSync } from 'node:fs'
+import { parseReleaseTag } from './release-context.mjs'
 
-const [, , tag, output = 'release-notes.md'] = process.argv
+const [, , input, output = 'release-notes.md'] = process.argv
 
-if (!tag?.startsWith('v')) {
-  throw new Error('Usage: node scripts/release-notes.mjs v<version> [output]')
+if (input === undefined) {
+  throw new Error('Usage: node scripts/release-notes.mjs <tag-or-version> [output]')
 }
 
-const version = tag.slice(1)
+// CI passes the original tag after release-context has validated it; local
+// invocations may pass either supported tag form (or a bare version). Re-use
+// the same parser without making the `next-` prefix part of package SemVer.
+const release = input.startsWith('v') || input.startsWith('next-')
+  ? parseReleaseTag(input)
+  : parseReleaseTag(input.includes('-') ? `next-v${input}` : `v${input}`)
+const { channel, version } = release
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
 
 if (pkg.version !== version) {
   throw new Error(
-    `Tag ${tag} does not match package.json version ${pkg.version}`,
+    `Release ${input} does not match package.json version ${pkg.version}`,
   )
 }
 
@@ -120,6 +127,41 @@ if (zh.heading !== en.heading) {
       `  CHANGELOG.md:    ${zh.heading}\n` +
       `  CHANGELOG.en.md: ${en.heading}`,
   )
+}
+
+// The 0.4 migration changes the runtime pairing. Keep the copy-paste commands
+// in both the changelog and the generated GitHub Release body; a release page
+// that only says "upgrade" is not actionable enough to prevent a mixed install.
+// The stable cutover has a different install channel and DSH baseline from the
+// alpha train, so do not make a future stable release retain prerelease-only
+// guidance by accident.
+function containsExactGuidance(content, command) {
+  const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`${escaped}(?![0-9A-Za-z.+-])`, 'u').test(content)
+}
+
+// The DSH install pin each 0.4 prerelease documents: 0.4.0-alpha.1 shipped
+// on the alpha.3 family; current prerelease guidance uses the latest validated
+// alpha.5 family while the peer floor remains alpha.4. Released changelog
+// sections are immutable, so the requirement follows the version being released.
+const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3' : '0.1.2-alpha.5'
+if (version.startsWith('0.4.')) {
+  const requiredGuidance = channel === 'next'
+    ? [
+        `@deepseek-ai/dsh@${dshAlphaPin}`,
+        '@xmoon76/dsh-pi-tui@next',
+        '@xmoon76/dsh-pi-tui@0.3',
+      ]
+    : [
+        '@deepseek-ai/dsh@0.1.2',
+        '@xmoon76/dsh-pi-tui@latest',
+        '@xmoon76/dsh-pi-tui@0.3',
+      ]
+  for (const command of requiredGuidance) {
+    if (!containsExactGuidance(zh.content, command) || !containsExactGuidance(en.content, command)) {
+      throw new Error(`Version ${version} must document ${command} in both changelogs`)
+    }
+  }
 }
 
 const notes = [

@@ -42,24 +42,27 @@
     - id: authorization
       name: '@deepseek-ai/dsh-authorization'
 
-    # The agent-preset roster. The SHIPPED root is an assembly fact of this
-    # bundle: the four presets (standard/code/minimal/cordis) travel with the
-    # package under config/agent-presets and carry `system` trust. The
-    # expression reads the root from the startup service, so it resolves only
-    # after `tuiStartup` exists — the web bundle's `webserver` row pattern
-    # (no `!!js` at boot time, no HMR race). The writable root is
-    # `dsh-agent-presets`' own default (`includeUserRoot`):
-    # `$DSH_HOME/.agent-presets`, where a person authors their own presets.
+    # Consume DSH 0.1.2's official shipped presets directly. The upstream
+    # service defaults includeShippedRoot/includeUserRoot to true, so this
+    # bundle deliberately owns no duplicate standard/ptc/minimal/cordis root.
+    # The legacy persisted id `code` is normalized at the data boundary to
+    # `ptc`; it is not another preset row.
     - id: agent-presets
       name: '@deepseek-ai/dsh-agent-presets'
-      inject: [tuiStartup]
       config:
         default: standard
-        roots:
-          - path: !!js ctx.tuiStartup.shippedPresetRoot
-            trust: system
 
-    # Host-plane TypeScript runtime: the `code` preset's `tool-presentation`
+    # The official standard preset composes its `subagent` tool with
+    # `modelSelectionSettings: true`, which injects this Host-owned setting
+    # service — the row is required for the standard composition to mount.
+    # Mounting the service ALONE enables nothing: it only owns the
+    # `subagent-model-selection` settings section (default enabled=false,
+    # empty allowlist). Each NEW session samples that section at
+    # composition; the TUI exposes the toggle + allowlist in /settings.
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+
+    # Host-plane TypeScript runtime: the `ptc` preset's `tool-presentation`
     # row waits for `codeRuntime` and fails the preset at mount without it
     # (same host row the web bundle inserts).
     - id: code-runtime
@@ -85,10 +88,12 @@
 #
 # Rows that STAY on the host plane (not listed): `tools` (registry), `shell-env`
 # (publishes the DSH env the model's shell sees), `subagent` + its spawn/fork
-# backends (process singletons), `tool-subagent-report` (host singleton), the
-# goal/jobs/compaction services and their commands, `permission`, `approval`,
-# `sandbox*`, `fs-observation-policy`, `spill*`, `timeout-policy`,
-# `repeat-tool-reminder`, `session-*`, `token-meter`.
+# backends (process singletons), `subagent-model-selection-settings`, the
+# goal/jobs/compaction services and
+# their host infrastructure, `permission`, `approval`, `sandbox*`,
+# `fs-observation-policy`, `spill*`, `timeout-policy`, `repeat-tool-reminder`,
+# `session-*`, `token-meter`. `command-goal` is disabled below and reintroduced
+# only by presets that own that command in their scoped composition.
 
 - id: tool-bash
   disabled: true
@@ -112,6 +117,9 @@
   disabled: true
 
 - id: tool-skill
+  disabled: true
+
+- id: command-goal
   disabled: true
 
 - id: tool-goal

@@ -343,8 +343,8 @@ export const selectListTheme: SelectListTheme = {
 
 /**
  * Status-dot colour for a background-job status (dsh-web StateDot parity:
- * running = ongoing/primary, stopping = warning, completed = done/dim,
- * failed/killed/timed-out/lost = error). Unknown statuses fall back to the
+ * running = ongoing/primary, stopping/killed = warning, completed = done/dim,
+ * failed/timed-out/lost = error). Unknown statuses fall back to the
  * muted token so a future wire status never crashes the renderer.
  */
 export function taskStatusColor(status: string): (text: string) => string {
@@ -353,7 +353,7 @@ export function taskStatusColor(status: string): (text: string) => string {
     case 'stopping': return color.warning
     case 'completed': return color.textDim
     case 'failed':
-    case 'killed':
+    case 'killed': return color.warning
     case 'timed_out':
     case 'lost':
       return color.error
@@ -382,6 +382,18 @@ export const editorTheme: EditorTheme = {
   borderColor: (text: string) => color.border(text),
   selectList: selectListTheme,
 }
+
+/**
+ * Markdown rendering options shared by EVERY host transcript renderer
+ * (assistant cards, thinking blocks, plugin component compilation).
+ * LaTeX-to-Unicode rendering is deliberately OFF (the kimi-host parity
+ * choice): the Earendil 0.84.4 re-vendor introduced `renderLatex`
+ * defaulting to true, which silently changed how `$...$`/`$$...$$`
+ * segments in assistant output render. Keep the pre-re-vendor rendering;
+ * revisit as an explicit setting if LaTeX output ever becomes a product
+ * requirement.
+ */
+export const HOST_MARKDOWN_OPTIONS = { renderLatex: false } as const
 
 /** Markdown palette for assistant messages. */
 export const markdownTheme: MarkdownTheme = {

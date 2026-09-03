@@ -75,9 +75,9 @@ export function fuzzyMatch(query: string, text: string): FuzzyMatch {
 	const alphaNumericMatch = queryLower.match(/^(?<letters>[a-z]+)(?<digits>[0-9]+)$/);
 	const numericAlphaMatch = queryLower.match(/^(?<digits>[0-9]+)(?<letters>[a-z]+)$/);
 	const swappedQuery = alphaNumericMatch
-		? `${alphaNumericMatch.groups?.["digits"] ?? ""}${alphaNumericMatch.groups?.["letters"] ?? ""}`
+		? `${alphaNumericMatch.groups?.digits ?? ""}${alphaNumericMatch.groups?.letters ?? ""}`
 		: numericAlphaMatch
-			? `${numericAlphaMatch.groups?.["letters"] ?? ""}${numericAlphaMatch.groups?.["digits"] ?? ""}`
+			? `${numericAlphaMatch.groups?.letters ?? ""}${numericAlphaMatch.groups?.digits ?? ""}`
 			: "";
 
 	if (!swappedQuery) {
@@ -135,6 +135,7 @@ export function fuzzyFilter<T>(items: T[], query: string, getText: (item: T) => 
 	// Scores accumulate fractional parts (i * 0.1), so ties can occur even
 	// between genuinely different matches; the original index tie-break makes
 	// the order deterministic instead of depending on sort engine internals.
+	// (dsh-pi-tui divergence X012.)
 	results.sort((a, b) => a.totalScore - b.totalScore || a.index - b.index);
 	return results.map((r) => r.item);
 }

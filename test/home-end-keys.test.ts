@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
@@ -24,6 +24,20 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** The keybindings manager is a process-global singleton: every test
  * starts from a pristine manager so presets never leak across tests. */
@@ -92,13 +106,14 @@ test('fullscreen Ctrl+End remains a Host semantic action in both presets', async
       },
     })
     app.start()
+    startedApps.add(app)
     app.setTranscript([], undefined, { mode: 'history', endTurn: 1, firstTurn: 1, lastTurn: 1 })
     app.setFullscreen(true)
     await vt.waitForRender()
     vt.sendInput('\x1b[1;5F') // Ctrl+End
     await vt.waitForRender()
     assert.equal(jumps, 1, `Ctrl+End must dispatch to the Host in ${mode} mode`)
-    app.stop()
+    app.dispose()
   }
   resetKeybindings()
 })
@@ -107,6 +122,7 @@ function startFullscreenApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`)
   folder.apply([
@@ -134,6 +150,7 @@ test('registered older-boundary callback preserves history follow state', async 
   }
   app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onTranscriptMoveOlder: loadOlder })
   app.start()
+  startedApps.add(app)
   app.setTranscript(transcript(80))
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -154,6 +171,44 @@ test('registered older-boundary callback preserves history follow state', async 
   assert.ok(after !== undefined)
   assert.equal(after.scrollTop, before, 'new history content must preserve the current viewport')
   assert.ok(after.scrollTop < after.maxScrollTop, 'new history content must not jump back to its end')
+  app.stop()
+})
+
+test('fullscreen Ctrl+Up/Ctrl+Down drive the host turn navigation (prompt-nav seam)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const olderCalls: number[] = []
+  const newerCalls: number[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onTranscriptTurnOlder: () => {
+      olderCalls.push(Date.now())
+      return true
+    },
+    onTranscriptTurnNewer: () => {
+      newerCalls.push(Date.now())
+      return true
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join('\n'),
+  }])
+  app.setFullscreen(true)
+  await vt.waitForRender()
+
+  // Ctrl+Up / Ctrl+Down (the fork's previousPrompt/nextPrompt defaults)
+  // must reach the HOST seams in fullscreen — not vanish into the fork's
+  // OSC 133 scan (a permanent no-op on DSH transcripts).
+  vt.sendInput('\x1b[1;5A') // ctrl+up
+  await vt.waitForRender()
+  vt.sendInput('\x1b[1;5B') // ctrl+down
+  await vt.waitForRender()
+  assert.equal(olderCalls.length, 1, 'Ctrl+Up must reach onTranscriptTurnOlder exactly once')
+  assert.equal(newerCalls.length, 1, 'Ctrl+Down must reach onTranscriptTurnNewer exactly once')
   app.stop()
 })
 
@@ -184,6 +239,7 @@ test('history window paging preserves the overlap row across uneven heights', as
     onTranscriptMoveNewer: moveNewer,
   })
   app.start()
+  startedApps.add(app)
   try {
     app.setTranscript(windowAt(81, 100))
     app.setFullscreen(true)
@@ -212,7 +268,7 @@ test('history window paging preserves the overlap row across uneven heights', as
     assert.ok(viewportHasLine(vt, 'turn-90'), 'newer paging must keep the old bottom overlap row visible')
     assert.ok(!viewportHasLine(vt, 'turn-100'), 'newer paging must not skip past the preserved bottom overlap')
   } finally {
-    app.stop()
+    app.dispose()
   }
 })
 
@@ -264,6 +320,7 @@ test('folder window summaries do not discard the older-page top anchor', async (
   }
   app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onTranscriptMoveOlder: moveOlder })
   app.start()
+  startedApps.add(app)
   try {
     renderProjection()
     app.setFullscreen(true)
@@ -283,7 +340,7 @@ test('folder window summaries do not discard the older-page top anchor', async (
     const afterRow = viewportRow('turn-81')
     assert.equal(afterRow, beforeRow, 'the overlap row must stay at the same viewport row after the summary-bearing window swap')
   } finally {
-    app.stop()
+    app.dispose()
   }
 })
 
@@ -332,6 +389,7 @@ test('a non-scrollable transcript lets Home/End reach the editor in both modes',
     const vt = new VirtualTerminal(80, 24)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
+    startedApps.add(app)
     const folder = new TranscriptFolder()
     folder.apply([
       { type: 'assistant/message', seq: 0, time: 1_700_000_000_000, data: { turn: 0, step: 0, message: { id: MessageId('m1'), role: 'assistant', content: [{ type: 'text', text: 'short' }] } } } as SessionEvent,
@@ -347,7 +405,7 @@ test('a non-scrollable transcript lets Home/End reach the editor in both modes',
     const after = vt.getCursorPosition()
     assert.ok(after.x < before.x,
       `[${mode}] Home must move the editor cursor to the line start when the transcript cannot scroll (${JSON.stringify(before)} → ${JSON.stringify(after)})`)
-    app.stop()
+    app.dispose()
   }
 })
 
@@ -358,6 +416,7 @@ test('regular mode: Home/End keep their editor behavior under both presets', asy
     const vt = new VirtualTerminal(80, 24)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
     vt.sendInput('hello world')
     await vt.waitForRender()
@@ -384,7 +443,7 @@ test('regular mode: Home/End keep their editor behavior under both presets', asy
     const ctrlEnd = vt.getCursorPosition()
     assert.ok(ctrlEnd.x >= ctrlHome.x,
       `[${mode}] Ctrl+End must move the editor cursor to the line end in regular mode (${JSON.stringify(ctrlHome)} → ${JSON.stringify(ctrlEnd)})`)
-    app.stop()
+    app.dispose()
   }
 })
 
@@ -401,6 +460,7 @@ test('regular mode Ctrl+End declines the semantic latest action', async () => {
     },
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x1b[1;5F')
   await vt.waitForRender()
@@ -435,6 +495,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
   ctx.provide('commands', {
     register: (def: { name: string; handler?: unknown }): (() => void) => {
@@ -454,13 +515,18 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: settings.value,
     applyFooterSettings: () => {},
     agents: {} as never,
     sessionReader: {
       list: async () => [],
       search: async () => [],
-      titles: async () => new Map(),
+      projectionBatch: async () => new Map(),
       measureContext: () => undefined,
       readExportData: async () => ({ kind: 'none' }),
     },
@@ -504,6 +570,8 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},

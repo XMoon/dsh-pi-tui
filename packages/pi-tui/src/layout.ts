@@ -47,7 +47,7 @@ export interface ScrollbarGeometry {
 interface LayoutContext {
 	viewport: { width: number; height: number };
 	renderCache: Map<Component, Map<number, string[]>>;
-	/** Max visible line width per (component, width), for measureWidth. */
+	/** Max visible line width per (component, width), for measureWidth. (dsh-pi-tui divergence X014.) */
 	maxWidthCache: Map<Component, Map<number, number>>;
 	requestRender: () => void;
 	primaryScrollView: ScrollView | undefined;
@@ -91,6 +91,7 @@ function measureWidth(context: LayoutContext, component: Component, width: numbe
 	if (max === undefined) {
 		// Scan the cached lines once per (component, width) per frame instead
 		// of re-running visibleWidth over them at every call site.
+		// (dsh-pi-tui divergence X014.)
 		max = renderCached(context, component, safeWidth).reduce((m, line) => Math.max(m, visibleWidth(line)), 0);
 		widths.set(safeWidth, max);
 	}

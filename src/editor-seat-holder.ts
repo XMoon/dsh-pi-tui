@@ -50,6 +50,22 @@ interface ChangeSubscription {
 export interface SeatEditor {
   readonly id: 'host' | string
   getText(): string
+  /**
+   * The draft with fork paste markers (`[paste #N ...]`) EXPANDED to their
+   * real content (the fork Editor's registry lookup; X004A). Use this
+   * whenever draft text LEAVES the editor's own context — the external
+   * editor round-trip, draft snapshots — or the registry can be cleared
+   * before the marker is expanded again and the real content is lost.
+   * Absent on editors without a paste registry: fall back to getText().
+   */
+  getExpandedText?(): string
+  /**
+   * The cursor offset mapped into the expanded text's coordinates
+   * (X045): pairs with getExpandedText() for seat HANDOFFS, where the
+   * cursor must survive marker expansion too. Absent together with
+   * getExpandedText on editors without a paste registry.
+   */
+  getExpandedCursor?(): number
   setText(text: string): void
   getCursor(): number
   setCursor(offset: number): void
@@ -92,6 +108,10 @@ export interface SeatEditor {
 /** A host-editor adapter (the fork Editor + history/autocomplete). */
 export interface HostEditorAdapter {
   getText(): string
+  /** The draft with paste markers expanded (external-editor round-trip). */
+  getExpandedText?(): string
+  /** The cursor offset in the expanded text's coordinates (X045). */
+  getExpandedCursor?(): number
   setText(text: string): void
   /** Whether the host editor's autocomplete dropdown is open. */
   isShowingAutocomplete?(): boolean
@@ -250,6 +270,12 @@ export class EditorSeatHolder {
     const seat: SeatEditor = {
       id: 'host',
       getText: () => editor.getText(),
+      getExpandedText: editor.getExpandedText === undefined
+        ? undefined
+        : () => editor.getExpandedText!(),
+      getExpandedCursor: editor.getExpandedCursor === undefined
+        ? undefined
+        : () => editor.getExpandedCursor!(),
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete?.() ?? false,
       getInputMode: () => editor.getInputMode?.() ?? 'prompt',
@@ -300,13 +326,23 @@ export class EditorSeatHolder {
    */
   private wireCursorOf(seat: SeatEditor): { wireText: string; wireCursor: number } {
     const mode = seat.getInputMode?.() ?? 'prompt'
+    // Round-2 review P1: expand paste markers for the handoff — the
+    // target editor holds no share in THIS editor's paste registry, so
+    // literal `[paste #N …]` markers would orphan the moment any restore
+    // clears the registry. The cursor maps through the same expansion
+    // (X045) so it lands at the same visual position in the new document.
+    const rawText = seat.getText()
+    const expandedText = seat.getExpandedText?.()
+    const expanded = expandedText !== undefined && expandedText !== rawText
+    const text = expanded ? expandedText! : rawText
+    const cursor = expanded ? seat.getExpandedCursor?.() ?? seat.getCursor() : seat.getCursor()
     if (mode !== 'prompt') {
       return {
-        wireText: serializeEditorInput(mode, seat.getText()),
-        wireCursor: seat.getCursor() + shellPrefixForMode(mode).length,
+        wireText: serializeEditorInput(mode, text),
+        wireCursor: cursor + shellPrefixForMode(mode).length,
       }
     }
-    return { wireText: seat.getText(), wireCursor: seat.getCursor() }
+    return { wireText: text, wireCursor: cursor }
   }
 
   /** The current seat snapshot (Phase 2: the ADVANCED editor controls
@@ -389,6 +425,16 @@ export class EditorSeatHolder {
       this.currentHostLease = undefined
       this.current = host
       ++this.seatGeneration
+      // Re-vendor lifecycle follow-up P1: the non-owning seat mount never
+      // disposes — the holder is the ONLY lifecycle owner, so the handoff
+      // releases the superseded occupant's compiled component here (its
+      // editor teardown follows; see the plugin-commit branch below). The
+      // host adapter's component (the fork Editor) has no dispose — no-op.
+      try {
+        previous.component.dispose?.()
+      } catch (error) {
+        this.reportHostError(error)
+      }
       try {
         previous.dispose()
       } catch (error) {
@@ -477,6 +523,14 @@ export class EditorSeatHolder {
     // Mount + dispose old (atomic: everything succeeded). A throwing old
     // dispose is reported but cannot leave the new editor unowned.
     if (this.disposed || !lease.active) {
+      // The created editor never mounted: release its compiled component
+      // too (the non-owning seat mount never disposes — the holder owns
+      // every compiled view it produced).
+      try {
+        adapted.component.dispose?.()
+      } catch (error) {
+        this.reportEditorError(target.id, error)
+      }
       this.discardCreatedEditor(target.id, created, lease)
       return
     }
@@ -487,6 +541,16 @@ export class EditorSeatHolder {
     ++this.seatGeneration
     // The creating lease becomes the committed seat owner only here; any
     // create-time subscriptions retained their lease and now receive changes.
+    // Re-vendor lifecycle follow-up P1: the holder releases the superseded
+    // occupant's compiled component (the non-owning seat mount never
+    // disposes) BEFORE its editor teardown — a throwing plugin dispose
+    // cannot orphan a mounted-seat-then-detached compiled view. The host
+    // adapter's component (the fork Editor) has no dispose — no-op.
+    try {
+      previous.component.dispose?.()
+    } catch (error) {
+      this.reportEditorError(previous.id, error)
+    }
     try {
       previous.dispose()
     } catch (error) {
@@ -574,7 +638,23 @@ export class EditorSeatHolder {
           return
         }
         holder.clearEditorError(id)
+        // Re-vendor lifecycle follow-up P1: the holder owns every compiled
+        // view — the non-owning seat mount never disposes, so the REPLACED
+        // component is released here. It is no longer the seat occupant in
+        // either case: an unfenced swap already mounted `next`; a fenced
+        // swap (question capture) left the QuestionFrame mounted and this
+        // view detached earlier. The state update (component = next) is
+        // exactly what the question settle must mount (plan Risk B).
+        // Review-loop round 1: the dispose is ISOLATED like the compile +
+        // swap above — a throwing disposer must not escape into the host
+        // input/render path (the documented isolation contract).
+        const previous = component
         component = next
+        try {
+          previous.dispose?.()
+        } catch (error) {
+          holder.reportEditorError(id, error)
+        }
       },
       addToHistory: () => {}, // the host default owns history recall
       clearHistory: () => {},
@@ -819,5 +899,27 @@ export class EditorSeatHolder {
     this.currentHostLease = undefined
     this.creatingHostLease = undefined
     this.changeListeners.clear()
+    // Re-vendor lifecycle follow-up P1: FINAL lifecycle — the holder is
+    // the ONLY owner of the current occupant (the non-owning seat mount
+    // never disposes, so no other path may release it). Release the
+    // occupant and its current compiled component EXACTLY once here: the
+    // host adapter's dispose is a no-op (the fork Editor has no owner to
+    // release), a plugin editor's dispose() runs, and a repeated dispose()
+    // is a no-op (guarded by `disposed` above). This is the ONLY place a
+    // mounted replacement can be disposed — the seat's detach/replace
+    // never is (plan §3 / Risk C).
+    const current = this.current
+    try {
+      current.dispose()
+    } catch (error) {
+      if (current.id === 'host') this.reportHostError(error)
+      else this.reportEditorError(current.id, error)
+    }
+    try {
+      current.component.dispose?.()
+    } catch (error) {
+      if (current.id === 'host') this.reportHostError(error)
+      else this.reportEditorError(current.id, error)
+    }
   }
 }

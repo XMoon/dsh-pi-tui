@@ -32,10 +32,10 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     category: 'Input',
     scope: 'editor',
     configurable: true,
-    // The submit key stays with the FORK editor's submit path (paste-burst
-    // and backslash-newline semantics live there — plan §8 resolver
+    // The submit key stays with the FORK editor's submit path
+    // (backslash-newline semantics live there — plan §8 resolver
     // priority 5); the host ladder NEVER consumes it. A user remap /
-    // `false` is synced into the fork editor's `tui.input.submit` binding
+    // `false` is synced into the fork editor's `tui.editor.submit` binding (X037)
     // by the runner (onEditorSubmitSync), so Enter REALLY moves / gets
     // disabled — not just the hints (PR review finding).
     hostResolved: false,
@@ -336,19 +336,99 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     configurable: false,
   },
 
-  // ── Focused component: task browser (plan §3.3) ────────────────────────
-  'tasks.confirm': {
-    id: 'tasks.confirm',
+  // ── Focused component: Task Center (plan §3.3/§29) ──────────────────────
+  'tasks.open': {
+    id: 'tasks.open',
     defaultKeys: ['enter'],
-    description: 'Confirm the selected task',
+    description: 'Open the selected task',
     category: 'Tasks',
     scope: 'tasks',
     configurable: false,
   },
-  'tasks.cancel': {
-    id: 'tasks.cancel',
+  'tasks.search.enter': {
+    id: 'tasks.search.enter',
+    defaultKeys: ['/'],
+    description: 'Enter task search mode',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.search.exit': {
+    id: 'tasks.search.exit',
     defaultKeys: ['escape'],
-    description: 'Close the task browser',
+    description: 'Exit task search mode or close the Task Center',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.scope.toggle': {
+    id: 'tasks.scope.toggle',
+    defaultKeys: ['a'],
+    description: 'Toggle Active and All task scope',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.type.next': {
+    id: 'tasks.type.next',
+    defaultKeys: ['tab'],
+    description: 'Cycle the task type filter',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.tree.expand': {
+    id: 'tasks.tree.expand',
+    defaultKeys: ['right'],
+    description: 'Expand the selected task branch',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.tree.collapse': {
+    id: 'tasks.tree.collapse',
+    defaultKeys: ['left'],
+    description: 'Collapse the selected task branch',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.running.next': {
+    id: 'tasks.running.next',
+    defaultKeys: ['n'],
+    description: 'Select the next running task',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.running.previous': {
+    id: 'tasks.running.previous',
+    defaultKeys: ['shift+n'],
+    description: 'Select the previous running task',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.stop': {
+    id: 'tasks.stop',
+    defaultKeys: ['s', 'shift+s'],
+    description: 'Stop the selected task after confirmation',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.view.full': {
+    id: 'tasks.view.full',
+    defaultKeys: ['t'],
+    description: 'Open the full Task Center',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.refresh': {
+    id: 'tasks.refresh',
+    defaultKeys: ['r'],
+    description: 'Refresh task rows',
     category: 'Tasks',
     scope: 'tasks',
     configurable: false,
@@ -385,18 +465,37 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     scope: 'tasks',
     configurable: false,
   },
+  // Deprecated aliases kept so third-party focused components compiled
+  // against the old browser contract remain loadable. They have no defaults,
+  // preventing i from ever being a destructive Task Center key.
+  'tasks.confirm': {
+    id: 'tasks.confirm',
+    defaultKeys: [],
+    description: 'Deprecated alias for opening the selected task',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.cancel': {
+    id: 'tasks.cancel',
+    defaultKeys: [],
+    description: 'Deprecated alias for closing the Task Center',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
   'tasks.cycleType': {
     id: 'tasks.cycleType',
-    defaultKeys: ['tab'],
-    description: 'Cycle the task type filter',
+    defaultKeys: [],
+    description: 'Deprecated alias for cycling task types',
     category: 'Tasks',
     scope: 'tasks',
     configurable: false,
   },
   'tasks.interrupt': {
     id: 'tasks.interrupt',
-    defaultKeys: ['i'],
-    description: 'Interrupt the selected task',
+    defaultKeys: [],
+    description: 'Deprecated interrupt alias; use the confirmed stop action',
     category: 'Tasks',
     scope: 'tasks',
     configurable: false,

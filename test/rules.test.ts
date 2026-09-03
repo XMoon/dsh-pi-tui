@@ -407,7 +407,7 @@ test('legacy history cleanup preserves the raw USER custom-item field', () => {
   // entry this version intentionally cannot parse.
   const userRaw = [
     { schemaVersion: 1, id: 'user:known', kind: 'text', text: 'USER' },
-    { schemaVersion: 1, id: 'user:future', kind: 'command', command: 'date' },
+    { schemaVersion: 1, id: 'user:future', kind: 'future-kind', command: 'date' },
   ]
   const merged = { footerCustomItems: [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }], history: { '/ws': ['old'] } }
   const projected: { footerCustomItems: unknown; history?: unknown } = { ...merged, footerCustomItems: userRaw }
@@ -720,4 +720,21 @@ test('steerNow calls the empty-Ctrl+S gate BEFORE any runOwned/ensureSession wor
     'the empty-Ctrl+S gate must run BEFORE runOwned(\'steer\') — a fresh empty Ctrl+S must never create the session')
   assert.ok(gateLine !== -1 && (ensureLine === -1 || gateLine < ensureLine),
     'the empty-Ctrl+S gate must run BEFORE ensureSession — the gate is the deferred-start no-creation contract')
+})
+
+test('the host editor consumes the X044 protected autocomplete seam directly (no private casts)', () => {
+  // X044's whole point is COMPILE-TIME compatibility protection: the
+  // vendored Editor's requestAutocomplete/cancelAutocomplete are protected
+  // and the host subclass must call them directly. A regression to
+  // `as unknown as AutocompleteInternals` casts would silently survive
+  // upstream signature changes and explode at runtime — the exact class
+  // of breakage the re-vendor gates exist to prevent.
+  const path = join(srcDir, 'tui-editor.ts')
+  const source = readFileSync(path, 'utf8')
+  assert.ok(!source.includes('AutocompleteInternals'),
+    'the AutocompleteInternals cast interface must not exist — the host calls the protected seam directly')
+  // Narrow on the CAST IDIOM only: an unrelated, legitimate `as unknown
+  // as` in this file (a future compat seam) must not trip the X044 gate.
+  assert.ok(!source.includes('as unknown as AutocompleteInternals'),
+    'tui-editor.ts must not cast to reach editor internals (X044)')
 })

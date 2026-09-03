@@ -11,21 +11,22 @@
 
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
+import { scheduler } from 'node:timers/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
-import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import { createForkedAgent } from './session-fork.ts'
-import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
+import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
+import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from './wheel-scroll.ts'
 import { iconStyleOf } from './icons.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
 import { formatKeyId } from './keybindings/hints.ts'
@@ -43,7 +44,7 @@ import {
   type FooterCustomItemSettings,
 } from './footer/custom-items.ts'
 import { FooterItemRegistry } from './footer/item-registry.ts'
-import { FooterConfiguratorModel } from './footer/configurator-model.ts'
+import { FooterConfiguratorModel, sameFooterCustomItem } from './footer/configurator-model.ts'
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
@@ -54,6 +55,7 @@ import { readImageFile } from './image/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
 import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from './theme-menu.ts'
+import { SubagentModelAllowlistSubmenu, allowlistSummary } from './subagent-model-menu.ts'
 import { resolveThemeSelection, normalizePersistedTheme } from './theme-source.ts'
 import { suggestPathArgument } from './mentions.ts'
 import { FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
@@ -61,8 +63,8 @@ import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { renderTranscriptMarkdown, textOf } from './transcript.ts'
 import {
-  TITLE_BATCH_SIZE,
-  TITLE_FIRST_BATCH,
+  PROJECTION_BATCH_SIZE,
+  PROJECTION_FIRST_BATCH,
   buildSessionTree,
   findSessionMatch,
   sameWorkspace,
@@ -71,7 +73,7 @@ import {
   type SessionPickerItem,
   type SessionPickerRow,
 } from './sessions.ts'
-import type { SessionReader } from './runtime/session-reader-port.ts'
+import type { SessionReader, SessionSummary } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
@@ -137,20 +139,30 @@ function metaOf(cwd: string, presetId: string | undefined): Record<string, unkno
  * workspace (the sessionCwd the whole surface follows); `all` lists every
  * main session, grouped by its workspace. Exported so the scope contract
  * is unit-testable without a runner.
+ *
+ * The `items` factories read the SHARED `rows` array at activation time
+ * (not a snapshot taken here): the picker opens input-first on a loading
+ * placeholder and `list()` lands AFTER the categories were built — the
+ * late rows appear through the same factories on the next refresh. When
+ * `rows` is still empty and a `placeholder` is supplied, both categories
+ * render it (the loading row); once rows land the placeholder disappears
+ * naturally.
  * @param rows - the picker rows, newest first (the FULL row set — a main
- *   session beyond any read-window is still listed here, so the title
- *   loader must cover every row this function can show).
+ *   session beyond any read-window is still listed here, so the projection
+ *   loader must cover every row this function can show). The array is read
+ *   lazily and may be filled after the picker opens.
  * @param currentCwd - the live session's workspace.
  * @param header - the picker header prefix (`sessions` / `resume`).
  * @param itemFor - the row → picker item mapper (titles + current marker).
+ * @param placeholder - the loading row shown while `rows` is still empty.
  */
 export function sessionPickerCategories(
   rows: readonly SessionPickerRow[],
   currentCwd: string,
   header: string,
   itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem,
+  placeholder?: () => SessionPickerItem,
 ): PickerCategory[] {
-  const mainRows = rows.filter(row => row.origin !== 'subagent')
   return [
     {
       id: 'current',
@@ -160,9 +172,13 @@ export function sessionPickerCategories(
       // workspace's subset: a fork/rewind branch whose parent lives in
       // another workspace (or outside the window) is an orphan at depth 1 —
       // never lost, never mis-nested under an unrelated root.
-      items: () => buildSessionTree(
-        mainRows.filter(row => sameWorkspace(row.cwd, currentCwd)),
-      ).map(entry => itemFor(entry.row, entry.depth)),
+      items: () => {
+        const mainRows = rows.filter(row => row.origin !== 'subagent')
+        if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
+        return buildSessionTree(
+          mainRows.filter(row => sameWorkspace(row.cwd, currentCwd)),
+        ).map(entry => itemFor(entry.row, entry.depth))
+      },
     },
     {
       id: 'all',
@@ -172,7 +188,11 @@ export function sessionPickerCategories(
       // hang under their parentSession chain with a └─ prefix — never flat
       // roots. Orphans sit at depth 1; the tree's `placed` guard keeps
       // corrupt metadata from looping.
-      items: () => buildSessionTree(mainRows).map(entry => itemFor(entry.row, entry.depth)),
+      items: () => {
+        const mainRows = rows.filter(row => row.origin !== 'subagent')
+        if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
+        return buildSessionTree(mainRows).map(entry => itemFor(entry.row, entry.depth))
+      },
     },
   ]
 }
@@ -180,23 +200,19 @@ export function sessionPickerCategories(
 /**
  * Display copy for the four shipped agent presets, fixed in English — the
  * web surface's `BUILT_IN_PRESET_KEYS` mapping (`dsh-client-ui-agent-preset`),
- * TUI-side. The EFFECTIVE roster root is the dsh install's own
- * `config/agent-presets`: the dsh CLI's profile composition replaces this
- * bundle's shipped root with that one at boot (the `composeProfile`
- * agent-presets overlay), and its preset.yml language is not ours to
- * control. Mapping the known ids keeps the picker English regardless of
+ * TUI-side. The effective roster root is the DSH agent-presets package's
+ * official shipped root; its preset metadata language is not ours to control. Mapping the known ids keeps the picker English regardless of
  * what the files say; everything else renders file metadata. Names follow
- * the upstream English locale (`presetCodeName` is 'PTC mode' since dsh
- * 0.1.0-rc.7, renamed from 'Code mode').
+ * the upstream English locale (`presetCodeName` is 'PTC mode').
  */
 const BUILT_IN_PRESET_COPY: Readonly<Record<string, { name: string; description: string }>> = {
   standard: {
     name: 'Standard mode',
     description: 'Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.',
   },
-  code: {
+  ptc: {
     name: 'PTC mode',
-    description: 'All Standard mode capabilities, with tools exposed through the Code Mode SDK so the model can combine multi-step operations in one TypeScript program.',
+    description: 'All Standard mode capabilities, with tools exposed through the PTC mode SDK so the model can combine multi-step operations in one TypeScript program.',
   },
   minimal: {
     name: 'Minimal mode',
@@ -246,6 +262,13 @@ export interface CommandRegistryLike {
   list(agent?: unknown): readonly CommandDescriptor[]
 }
 
+/** One default-intent operation's ownership record: the id is the settle
+ *  authority (an older operation settling must never clear or restore a
+ *  newer operation's pending intent), the selection is the intent value. */
+export interface DefaultIntentRecord {
+  readonly id: number
+  readonly selection: ModelSelection
+}
 
 /** Everything the TUI-owned commands read from the runner. */
 export interface TuiCommandRunner {
@@ -260,8 +283,37 @@ export interface TuiCommandRunner {
   readonly liveAgent: Agent | undefined
   /** Create the first session lazily when none exists (deferred start). */
   ensureSession(): Promise<void>
-  /** The process-wide mutable model selection (footer + /model). */
+  /**
+   * TUI-facing live selection facade (footer + /model). It follows the
+   * current Agent; with deferred start it holds only the sessionless
+   * optimistic choice and never gets installed into an Agent context.
+   */
   readonly selected: ModelSelectionRef
+  /** The default selection a NEW Session should observe: the latest explicit
+   * default intent (a /model commit this run), falling back to the persisted
+   * global default. Distinct from {@link selected}: a fresh Session observes
+   * the default, never the current Session's local choice. */
+  defaultSelection(): ModelSelection | undefined
+  /** The latest explicit default intent, or undefined when no /model commit
+   * happened this run (a fresh Session then observes the persisted default
+   * dynamically instead of being seeded). */
+  readonly defaultIntent: ModelSelection | undefined
+  /** The current default-intent OWNERSHIP record (id + selection), or
+   * undefined when no intent is active. The id is the operation's settle
+   * authority: an older /model operation settling must never clear or
+   * restore a NEWER operation's pending intent. */
+  readonly defaultIntentRecord: DefaultIntentRecord | undefined
+  /** Record a NEW default-intent operation (allocates a fresh ownership id
+   * and links the previous operation as ancestry). The Session selection is
+   * NEVER written through this seam: the catalog port commits it after the
+   * durable append succeeds. */
+  setDefaultIntent(selection: ModelSelection | undefined): void
+  /** Report one operation's save outcome to the intent state machine. The
+   * machine decides whether the intent clears (committed), walks the
+   * ancestry back to the nearest still-pending operation (failed), or stays
+   * with a newer operation — the caller never restores or settles the
+   * intent itself. */
+  settleIntent(id: number, outcome: 'committed' | 'failed'): void
   /** The TUI settings document, when the settings service is present. */
   readonly tuiSettings: TuiSettingsLike | undefined
   /** The session lifecycle port (migration M1.5): /new and /fork create
@@ -375,6 +427,10 @@ export interface TuiCommandRunner {
     /** Whether the target is a FRESH session: the target lock must settle
      * as acquired, or the transaction aborts before the create. */
     fresh?: boolean
+    /** An explicit model choice the fresh target must inherit: recorded
+     * durably on the created Agent so its first request never falls back
+     * to a stale global default (the /new seeding path). */
+    inheritSelection?: ModelSelection
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
@@ -397,24 +453,42 @@ export interface TuiCommandRunner {
   /** Re-compose a still-blank session onto another preset (see recomposeBlank). */
   recomposeBlank(presetId: string): Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
   refreshStatus(): void
+  /** PR D2: the /status explicit context force — measures NOW through the
+   * runner's context coordinator (mark dirty + semantic SessionReader),
+   * repaints the footer cheaply, and returns the fresh (or last-good)
+   * value for the panel. Panel and footer share ONE cached measurement —
+   * a caller SHOULD prefer this over a direct sessionReader read (which
+   * would bypass the cache and could duplicate an in-flight measurement).
+   * Optional: stubs without the coordinator fall back to a direct
+   * sessionReader read. */
+  forceContextMeasurement?(): number | undefined
   /** Whether Focus Mode is currently on (the authoritative runtime state). */
   focusEnabled(): boolean
   /** The UNIFIED Focus setter: mutates the runtime state and the TUI
    * surface immediately, persists best-effort (plan §7 — /settings and
    * /focus both route through this, never a direct settings write). */
   setFocusMode(enabled: boolean): void
+  /** Apply the completion-notification MODE ('unfocused' | 'always' |
+   * 'off') to the runtime controller (the /settings panel write; the
+   * panel persists the raw string through the config port). */
+  setNotificationMode(mode: string): void
+  /** Apply the completion-notification METHOD ('auto' | 'osc9' |
+   * 'osc777' | 'bell') to the runtime controller (the /settings panel
+   * write; the panel persists the raw string through the config port). */
+  setNotificationMethod(method: string): void
   /** Repaint the welcome card from the live agent's current facts (e.g. after a preset switch). */
   updateWelcomeCard(): void
   /**
    * Open one job's detail from a task list: bash jobs show the status
-   * viewer, subagent jobs the child transcript. Shared by the ↓/Ctrl+J
-   * browser and `/tasks`.
+   * viewer, subagent jobs the child transcript. Shared by the footer ↓
+   * Quick Tasks browser and `/tasks`.
    */
   openJobView(jobId: string): void
   /**
-   * Open the MERGED task browser (jobs + subagents, searchable, row-level
-   * interrupt on subagent rows). The single command-side entry behind
-   * `/tasks` (and its `subagents` alias) — identical to the ↓ trigger.
+   * Open the full Task Center (jobs + subagents, searchable, with
+   * confirmed row-level Stop on capable rows). This is the command-side
+   * entry behind `/tasks` (and its `subagents` alias); the footer ↓ opens
+   * the compact Quick Tasks view.
    */
   openTasksBrowser(): void
   /**
@@ -1334,6 +1408,11 @@ export function registerTuiCommands(
       // Both panel rows degrade gracefully when the service is absent.
       const permissions = runner.config.permissions
       const permissionNames: string[] = [...permissions.presetNames()]
+      // Serialized whole-section writes for the subagent model-selection
+      // toggle: rapid toggles commit in order (a slow earlier write can
+      // never land after a newer one), and every settle re-syncs the row
+      // to the ACTUAL committed state (review round 2).
+      let subagentModelWriteChain: Promise<void> = Promise.resolve()
       const defaultPermission = permissions.defaultPreset()
       // Before the first session (deferred start) the session-scoped rows —
       // approval policy and the read-only session facts — do not exist yet;
@@ -1361,13 +1440,18 @@ export function registerTuiCommands(
           keyboardShortcutsRow.currentValue = model.summary
         },
       ) ?? new KeybindingEditorUnavailablePanel(done)
-      app.openSettings(
+      // The live allowlist submenu instance (created lazily when the row
+      // opens): the panel teardown disposes it so a write pending when the
+      // whole /settings overlay closes can never repaint or toast after
+      // the panel is gone (review round 6).
+      let allowlistMenu: SubagentModelAllowlistSubmenu | undefined
+      const closeSettings = app.openSettings(
         [
           ...liveAgent === undefined ? [] : [{
             id: 'approval',
             label: 'Approval policy (this session)',
             description: 'How tool approvals are handled in this session',
-            currentValue: effectiveApprovalPolicy(liveAgent.session.events) ?? 'ask',
+            currentValue: permissions.approvalOverrideOf(liveAgent.session) ?? 'ask',
             values: ['ask', 'never'],
           }],
           ...permissionNames.length > 0 ? [{
@@ -1377,6 +1461,46 @@ export function registerTuiCommands(
             currentValue: defaultPermission ?? permissionNames[0] ?? '',
             values: permissionNames,
           }] : [],
+          // The OFFICIAL subagent model-selection preference (DSH's
+          // `subagent-model-selection` section): when enabled, a NEW
+          // session's `subagent` tool may pick a child provider/model from
+          // the allowlist below. Sampled at session composition — turning
+          // it on never rewrites an already-running session's tools. The
+          // ALLOWLIST row comes FIRST: the UI order expresses the setup
+          // dependency (configure allowed routes, then enable selection).
+          ...(runner.config.subagentModelSelection.available() && runner.catalog.models.available()) ? (() => {
+            const subagentSelection = runner.config.subagentModelSelection.get()
+            return [{
+              id: 'subagent-model-allowlist',
+              label: 'Subagent allowed models',
+              description: 'The child LLM routes the official subagent tool may pick from',
+              currentValue: allowlistSummary(subagentSelection.allowedModels),
+              submenu: (_currentValue: string, done: (selected?: string) => void) => {
+                const menu = new SubagentModelAllowlistSubmenu({
+                  selection: runner.config.subagentModelSelection,
+                  catalog: runner.catalog.models,
+                  notify: (message, kind) => app.notify(message, kind),
+                  requestRender: () => app.requestRender(),
+                  done,
+                  runOwned: (label, task, options) => {
+                    runOwned(label, task, {
+                      diag: runner.diag,
+                      sessionId: () => runner.liveAgent?.session.id,
+                      ...options,
+                    })
+                  },
+                })
+                allowlistMenu = menu
+                return menu
+              },
+            }, {
+              id: 'subagent-model-selection',
+              label: 'Subagent model selection',
+              description: 'Let new sessions pick a child provider/model in the subagent tool (official DSH setting; needs at least one allowed route)',
+              currentValue: subagentSelection.enabled ? 'on' : 'off',
+              values: ['off', 'on'],
+            }]
+          })() : [],
           {
             id: 'theme',
             label: 'Theme',
@@ -1467,11 +1591,34 @@ export function registerTuiCommands(
             values: ['off', 'on'],
           },
           {
+            id: 'notification-mode',
+            label: 'Notifications',
+            description: 'When to notify that the main agent finished: Unfocused (default) — only while the terminal is not focused; Always — whenever the main agent settles; Off — disable completion notifications',
+            currentValue: parseNotificationMode(settingsDoc?.notificationMode),
+            values: ['unfocused', 'always', 'off'],
+          },
+          {
+            id: 'notification-method',
+            label: 'Notification method',
+            description: 'How the completion notification is delivered: Auto (default) — OSC 9 / OSC 777 / bell by terminal; OSC 9; OSC 777; Bell',
+            currentValue: parseNotificationMethod(settingsDoc?.notificationMethod),
+            values: ['auto', 'osc9', 'osc777', 'bell'],
+          },
+          {
             id: 'fullscreen',
             label: 'Fullscreen',
             description: 'Alt-screen mode: on keeps the terminal clean (default); off keeps the scrollback',
             currentValue: app.isFullscreen() ? 'on' : 'off',
             values: ['off', 'on'],
+          },
+          {
+            id: 'wheel-scroll-lines',
+            label: 'Mouse wheel lines',
+            description: 'Number of transcript lines moved per mouse-wheel event in fullscreen; applies on the next fullscreen entry',
+            // The fallback applies HERE too: an invalid/missing persisted
+            // value must never render as a row outside the values list.
+            currentValue: String(wheelScrollLinesOf(settingsDoc?.wheelScrollLines)),
+            values: [...WHEEL_SCROLL_LINE_VALUES],
           },
           // ── read-only session facts ─────────────────────────────
           {
@@ -1515,7 +1662,7 @@ export function registerTuiCommands(
             ...(row.values.length > 0 ? { values: [...row.values] } : {}),
           })),
         ],
-        (id, value, revert) => {
+        (id, value, revert, navigate) => {
           if (id === 'approval') {
             if ((value === 'ask' || value === 'never') && liveAgent !== undefined) {
               runner.interaction.setApprovalPolicy(liveAgent.session.id, value)
@@ -1526,6 +1673,51 @@ export function registerTuiCommands(
           } else if (id === 'default-permission') {
             if (permissionNames.includes(value)) {
               detach('permission default write', () => runner.config.permissions.setDefaultPreset(value) as Promise<unknown>, { notify: true })
+            }
+          } else if (id === 'subagent-model-selection') {
+            // The OFFICIAL section write (never a TUI-owned copy). The
+            // whole current allowlist rides along; enabling with an empty
+            // allowlist is refused by the official rule (the Direct
+            // adapter fails fast with the official message and the Host
+            // validates again at the section boundary). Writes are
+            // SERIALIZED (the payload is captured at toggle time, so the
+            // last toggle wins) and every settle re-syncs the row to the
+            // ACTUAL committed state — a rejected write rolls back, and a
+            // superseded success never leaves a stale display.
+            if (value === 'on' || value === 'off') {
+              const current = runner.config.subagentModelSelection.get()
+              const previous = current.enabled ? 'on' : 'off'
+              const desired = value === 'on'
+              // EMPTY-ALLOWLIST UX GATE: enabling with no allowed routes
+              // is a SETUP PRECONDITION, not a write failure. Skip the
+              // official write entirely (no Host settings mutation), keep
+              // the row off, and guide the user to configure the allowlist
+              // first — the ConfigPort/Host validation stays as the
+              // fail-closed boundary for non-UI callers (the TUI never
+              // auto-fills the allowlist: it is the user's explicit grant
+              // of which child routes the subagent tool may use).
+              if (desired && current.allowedModels.length === 0) {
+                revert(previous)
+                app.notify('Select at least one Subagent allowed model before enabling model selection.', 'info')
+                navigate?.('subagent-model-allowlist')
+                return
+              }
+              subagentModelWriteChain = subagentModelWriteChain
+                .then(() => runner.config.subagentModelSelection.set({
+                  enabled: desired,
+                  allowedModels: current.allowedModels,
+                }))
+                .then(
+                  () => {
+                    // Re-sync to the committed state (a later toggle may
+                    // have superseded this one).
+                    revert(runner.config.subagentModelSelection.get().enabled ? 'on' : 'off')
+                  },
+                  (error: unknown) => {
+                    revert(previous)
+                    app.notify(`subagent model selection write failed: ${safeErrorMessage(error)}`, 'error')
+                  },
+                )
             }
           } else if (id === 'theme') {
             // The submenu fires onChange with the SOURCE-QUALIFIED selectable
@@ -1781,15 +1973,62 @@ export function registerTuiCommands(
               // best-effort (plan §7 — never a direct settings write).
               runner.setFocusMode(value === 'on')
             }
+          } else if (id === 'notification-mode') {
+            if (value === 'unfocused' || value === 'always' || value === 'off') {
+              // Apply to the runtime controller FIRST (the next settle
+              // already uses the new policy), then persist best-effort
+              // through the shared whole-document transaction.
+              runner.setNotificationMode(value)
+              const settings = tuiSettings
+              if (settings !== undefined) {
+                detach('settings notification mode write', () => serializeTuiSettingsMutation(
+                  settings,
+                  () => settings.replace(withUserFooterCustomItems({ ...settings.get(), notificationMode: value }, runner.config)),
+                ), { notify: true })
+              }
+            }
+          } else if (id === 'notification-method') {
+            if (value === 'auto' || value === 'osc9' || value === 'osc777' || value === 'bell') {
+              runner.setNotificationMethod(value)
+              const settings = tuiSettings
+              if (settings !== undefined) {
+                detach('settings notification method write', () => serializeTuiSettingsMutation(
+                  settings,
+                  () => settings.replace(withUserFooterCustomItems({ ...settings.get(), notificationMethod: value }, runner.config)),
+                ), { notify: true })
+              }
+            }
           } else if (id === 'fullscreen') {
             if (value === 'off' || value === 'on') {
               app.setFullscreen(value === 'on')
               // setFullscreen reports through onFullscreenChange, which
               // persists the same field (this branch is the panel write).
             }
+          } else if (id === 'wheel-scroll-lines') {
+            // v1 semantics: the fork's wheelScrollLines is a
+            // constructor-time alt-screen option, so the preference
+            // applies on the NEXT fullscreen mount (a change while
+            // fullscreen is active takes effect on re-entry — never a
+            // private-field hack on the live alt screen). Persist through
+            // the shared whole-document transaction.
+            const lines = wheelScrollLinesOf(value)
+            app.setWheelScrollLines(lines)
+            const settings = tuiSettings
+            if (settings !== undefined) {
+              detach('settings wheel scroll lines write', () => serializeTuiSettingsMutation(
+                settings,
+                () => settings.replace(withUserFooterCustomItems({ ...settings.get(), wheelScrollLines: String(lines) }, runner.config)),
+              ), { notify: true })
+            }
           }
         },
-        () => {},
+        () => {
+          // Esc: close without writing. The allowlist submenu is disposed
+          // with the panel — a write pending when the whole /settings
+          // overlay closes must not repaint or toast after teardown
+          // (review round 6).
+          allowlistMenu?.dispose()
+        },
       )
       return { kind: 'success' }
     },
@@ -1838,6 +2077,21 @@ export function registerTuiCommands(
       // cannot mutate the active footer or its persisted definitions.
       const registry = new FooterItemRegistry(app.getFooterItemRegistry())
       const customItems = new FooterCustomItemCatalog(app.getFooterCustomItems())
+      // PR D preview contract (§14): the preview NEVER executes a command.
+      // A draft command item shows the committed cache ONLY while its
+      // definition is unchanged (same command/refresh/timeout/tone) — a
+      // modified draft must not pretend the old cache is the new command's
+      // result — and the dim `[command]` placeholder otherwise.
+      customItems.setCommandValueSource({
+        value: (id) => {
+          const draft = customItems.get(id)
+          if (draft === undefined || draft.kind !== 'command') return undefined
+          const committed = app.getFooterCustomItems().find(item => item.id === id)
+          if (committed === undefined || !sameFooterCustomItem(draft, committed)) return { kind: 'placeholder' }
+          const text = app.getFooterCommandItemValue(id)
+          return text === undefined ? { kind: 'placeholder' } : { kind: 'value', text }
+        },
+      })
       registry.setCustomSource(customItems)
       const composer = new FooterComposer(registry)
       const model = new FooterConfiguratorModel(initial, registry, customItems)
@@ -1957,27 +2211,58 @@ export function registerTuiCommands(
     },
   })
 
-  // Shared /sessions + /resume body: list persisted sessions newest-first,
-  // open the picker, and enrich rows with titles in the background. The
-  // header parameter lets the resume alias present itself under its own name.
-  const openSessionPicker = async (invocation: { rawInput: string }, header: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {    // The current marker is the live session's id; before the first session
+  // Shared /sessions + /resume body — input-first (the official /resume
+  // fix): the picker overlay opens IMMEDIATELY on a loading placeholder and
+  // owns the input (Esc, arrows, search) while the Host listing and the
+  // combined projection enrichment land in the background. The header
+  // parameter lets the resume alias present itself under its own name.
+  /** Generation/staleness fence for the open picker load: a superseding
+   * open bumps the generation and aborts the previous scan, and any late
+   * settlement from a closed/superseded picker is dropped. */
+  let sessionPickerGeneration = 0
+  let activeSessionPickerScan: AbortController | undefined
+  const openSessionPicker = async (
+    invocation: { rawInput: string },
+    header: string,
+    /** `/resume <arg>`: after the ONE shared listing lands, resolve the
+     * argument as a direct id/prefix match — a unique match closes the
+     * picker and switches; no match falls through to the filtered picker
+     * (the argument stays as the live search query). */
+    directMatchQuery?: string,
+  ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
+    // The current marker is the live session's id; before the first session
     // (deferred start) no row is marked current, and the picker can still
     // browse and switch to a persisted session without creating one.
     const currentId = runner.liveAgent?.session.id
-    // The session READ port (migration M1.3): live-preferred listing with
-    // the persistence fallback lives in the Direct adapter, never here.
-    const rows = await runner.sessionReader.list(currentId)
-    if (rows === undefined) return { kind: 'error', text: 'session persistence unavailable' }
-    if (rows.length === 0) return { kind: 'error', text: 'no persisted sessions' }
-    // The picker opens instantly on the headers; titles land in the
-    // background below. The category scopes see the FULL row set, so "All
+    // A NEW picker open supersedes the previous one outright: bump the
+    // generation, cancel its scan, and take over as the active load.
+    sessionPickerGeneration += 1
+    const generation = sessionPickerGeneration
+    activeSessionPickerScan?.abort()
+    const controller = new AbortController()
+    activeSessionPickerScan = controller
+    const scanSignal = AbortSignal.any([signal, controller.signal])
+    /** True when this load's result may no longer touch the UI: the picker
+     * closed (abort), the runner quit, or a newer open superseded it. */
+    const stale = (): boolean => scanSignal.aborted || generation !== sessionPickerGeneration
+
+    // The picker rows: EMPTY until `list()` lands. The category factories
+    // read this shared array at activation time, so the loading placeholder
+    // renders first and the late rows appear through the same factories.
+    const rows: SessionPickerRow[] = []
+    // Live enrichment maps: the background projection batch fills them, and
+    // the category factories re-read them on every activation (Tab cycle,
+    // refresh). The category scopes see the FULL row set, so "All
     // directories" really lists every main session (round-1 review finding:
     // the old code capped the rows themselves at MAX_PICKER_SESSIONS).
-    // Live title map: the background loader fills it, and the category
-    // factories re-read it on every activation (Tab cycle, refresh).
     const titlesById = new Map<string, string>()
+    const presetsById = new Map<string, string>()
     const itemFor = (row: SessionPickerRow, indent = 0): SessionPickerItem =>
-      sessionPickerItem({ ...row, title: titlesById.get(row.id) }, runner.liveAgent?.session.id ?? '', indent)
+      sessionPickerItem({
+        ...row,
+        title: titlesById.get(row.id),
+        preset: presetsById.get(row.id) ?? row.preset,
+      }, runner.liveAgent?.session.id ?? '', indent)
     // Category tabs (Tab cycles while the picker is open): the session
     // picker is a HUMAN surface, so subagent children never appear in
     // either scope — /tasks and the subagent viewer own that surface now
@@ -1985,56 +2270,206 @@ export function registerTuiCommands(
     // Current directory scopes to the live session's workspace (the
     // sessionCwd the whole surface follows); All directories lists every
     // main session, grouped by its workspace.
-    const categories = sessionPickerCategories(rows, runner.sessionCwd(), header, itemFor)
+    const loadingItem: SessionPickerItem = {
+      value: '',
+      label: 'Loading sessions…',
+      description: '',
+      group: '',
+    }
+    // The status row the categories render while `rows` is still empty: the
+    // loading label first, swapped for the refusal text when the listing
+    // fails (the overlay is already open — an in-picker refusal beats a
+    // dead loading frame; Esc still closes it).
+    let statusRow = loadingItem
+    const categories = sessionPickerCategories(rows, runner.sessionCwd(), header, itemFor, () => statusRow)
+    /** The `/resume <arg>` outcome of the ONE shared listing, resolved by
+     * the detached load task — the overlay stays interactive the whole
+     * time, and the awaiting handler keeps the OLD synchronous semantics
+     * (the switch has started before the handler returns). */
+    type ListingOutcome =
+      | { kind: 'switched' }
+      | { kind: 'picker' }
+      | { kind: 'refused'; text: string }
+      | { kind: 'cancelled' }
+    let settleListing: ((outcome: ListingOutcome) => void) | undefined
+    const listing = directMatchQuery === undefined
+      ? undefined
+      : new Promise<ListingOutcome>(resolve => { settleListing = resolve })
+    /** Idempotent outcome settle — later calls are no-ops (the abort
+     * listener races the task's own settles). */
+    const settleOnce = (outcome: ListingOutcome): void => {
+      settleListing?.(outcome)
+      settleListing = undefined
+    }
+    if (listing !== undefined) {
+      // Esc / any close settles the awaiting /resume <arg> handler; a real
+      // switch settles 'switched' BEFORE the abort so the listener cannot
+      // overwrite it.
+      controller.signal.addEventListener('abort', () => settleOnce({ kind: 'cancelled' }), { once: true })
+    }
     const picker = app.openPicker(
       categories[0]!.items(),
       (id) => {
-        if (id === currentId) return
+        // Any close — including the loading row's Enter — ends the scan:
+        // the picker is gone, so late enrichment may not touch the UI.
+        if (id !== '' && id !== currentId) settleOnce({ kind: 'switched' })
+        controller.abort()
+        // Enter on the loading placeholder (value '') must never resume.
+        if (id === '' || id === currentId) return
         switchSession(id)
       },
-      () => {},
+      () => {
+        controller.abort()
+      },
       {
         enableSearch: true,
         header: categories[0]!.header,
         noMatchText: '  no matching sessions',
-        initialQuery: invocation.rawInput.trim(),
+        // The command argument is applied AFTER the rows land (below), not
+        // as initialQuery: a prefilled filter would hide the STATUS rows
+        // (loading / refusal / already-on) behind "no matching sessions"
+        // while the scan is still running.
+        initialQuery: '',
         width: 76,
         maxHeight: 26,
         showHint: true,
         categories,
+        // A closed picker (select, Esc) aborts the background scan through
+        // the same controller; a runner exit closes the overlay AND cancels
+        // the scan through the shared signal.
+        signal: scanSignal,
         // The selected session's long title marquees; the lineage tree
         // connector and the `●` current marker stay fixed (plan §7.6/§7.7).
         marquee: { labelPartsOf: sessionLabelParts },
       },
     )
-    // Enrich rows with titles as they load (progressive: the first
-    // TITLE_FIRST_BATCH rows land immediately so the visible window fills,
-    // then TITLE_BATCH_SIZE chunks refresh behind it — the picker's own
-    // factory re-reads the shared title map). The local cache under
-    // $DSH_HOME skips the expensive full-log reads while the log files are
-    // unchanged. Cancellations (TUI quit, the abort signal) are debug-level
-    // through the unified entry; a real batch failure lands in diagnostics
-    // instead of being swallowed.
-    //
-    // The batches cover MAIN rows only (the categories never show subagents)
-    // and the FULL main-row set — NOT the `shown` window: the category scopes
-    // see every main session (round-1 review finding), so a session beyond
-    // MAX_PICKER_SESSIONS that IS displayed (e.g. an old session in the
-    // "Current directory" scope) would otherwise never get a title read and
-    // would show a bare short id forever.
-    const mainRows = rows.filter(row => row.origin !== 'subagent')
-    detach('session titles', async () => {
-      const loadBatch = async (batch: SessionPickerRow[]): Promise<void> => {
-        const titles = await runner.sessionReader.titles(batch, signal)
-        if (titles.size === 0) return
-        for (const [id, title] of titles) titlesById.set(id, title)
+    // The listing + progressive enrichment run behind the open overlay.
+    // Cancellations (picker close, TUI quit, a superseding open) are
+    // debug-level through the unified entry; a real failure lands in
+    // diagnostics instead of being swallowed. Every await re-checks the
+    // staleness fence so a late settlement never refreshes a picker that
+    // already closed or was replaced.
+    detach('session picker load', async () => {
+      // The FIRST thing the scan does is a real event-loop yield: the
+      // overlay must be registered, focused, and repainted before any Host
+      // work starts (a microtask yield would not guarantee the terminal
+      // I/O phase a turn).
+      await scheduler.yield()
+      scanSignal.throwIfAborted()
+
+      // The session READ port (migration M1.3): live-preferred listing with
+      // the persistence fallback lives in the Direct adapter, never here.
+      let listed: readonly SessionSummary[] | undefined
+      try {
+        listed = await runner.sessionReader.list(currentId, scanSignal)
+      } catch (error) {
+        // A real listing failure surfaces in-picker (the overlay is already
+        // open) and settles the awaiting /resume <arg> handler — never a
+        // dead loading frame, never a hanging handler.
+        if (stale()) return
+        const message = safeErrorMessage(error)
+        statusRow = { value: '', label: `session listing failed: ${message}`, description: '', group: '' }
         picker.refresh?.()
+        settleOnce({ kind: 'refused', text: message })
+        return
       }
-      await loadBatch(mainRows.slice(0, TITLE_FIRST_BATCH))
-      for (let offset = TITLE_FIRST_BATCH; offset < mainRows.length; offset += TITLE_BATCH_SIZE) {
-        await loadBatch(mainRows.slice(offset, offset + TITLE_BATCH_SIZE))
+      if (stale()) return
+      if (listed === undefined || listed.length === 0) {
+        // The overlay is already open — keep it open on the refusal row
+        // (Esc closes as always) instead of leaving a dead loading frame.
+        const text = listed === undefined ? 'session persistence unavailable' : 'no persisted sessions'
+        statusRow = { value: '', label: text, description: '', group: '' }
+        picker.refresh?.()
+        settleOnce({ kind: 'refused', text })
+        return
+      }
+      // `/resume <arg>` direct fast path, resolved against the ONE shared
+      // listing (never a second one): a unique id/prefix match closes the
+      // picker and switches (the switch has STARTED before the awaiting
+      // handler returns — the old synchronous semantics); matching the
+      // CURRENT session surfaces the already-on notice; no match falls
+      // through to the filtered picker with the argument preserved as the
+      // live search query.
+      if (directMatchQuery !== undefined) {
+        const match = findSessionMatch(listed, directMatchQuery)
+        if (match !== undefined) {
+          if (match.id === currentId) {
+            // Nothing to switch and nothing to browse: close the overlay —
+            // the error result is the whole feedback (a status row would
+            // linger behind the argument filter).
+            settleOnce({ kind: 'refused', text: 'already on this session' })
+            controller.abort()
+            picker.close()
+            return
+          }
+          settleOnce({ kind: 'switched' })
+          controller.abort()
+          picker.close()
+          switchSession(match.id)
+          return
+        }
+        settleOnce({ kind: 'picker' })
+      }
+      // Mutate the shared row array in place: the category factories read
+      // it at activation time, so this one splice swaps the loading
+      // placeholder for the real rows on the next refresh.
+      rows.push(...listed)
+      picker.refresh?.()
+      // NOW the command argument becomes the live filter — real rows are
+      // in, so it narrows sessions instead of hiding the status phase. A
+      // query the USER typed during the load is never clobbered.
+      const pendingQuery = invocation.rawInput.trim()
+      if (pendingQuery !== '' && picker.getFilter?.() === '') {
+        picker.setFilter?.(pendingQuery)
+      }
+
+      // Progressive combined projection batches: the first
+      // PROJECTION_FIRST_BATCH rows fill the visible window, then
+      // PROJECTION_BATCH_SIZE chunks refresh behind it. Each row's title
+      // and preset arrive TOGETHER from the one DSH projection batch (one
+      // cold read per session, never one scan per field), and the yield
+      // between batches keeps the event loop responsive to input while the
+      // cold observations drain. The batches cover MAIN rows only (the
+      // categories never show subagents) and the FULL main-row set — NOT
+      // the `shown` window: a session beyond MAX_PICKER_SESSIONS that IS
+      // displayed (e.g. an old session in the "Current directory" scope)
+      // would otherwise never be enriched and would show a bare short id
+      // forever.
+      const mainRows = listed.filter(row => row.origin !== 'subagent')
+      const loadBatch = async (batch: readonly SessionSummary[]): Promise<void> => {
+        const projections = await runner.sessionReader.projectionBatch(batch, scanSignal)
+        if (stale()) return
+        let enriched = false
+        for (const [id, projection] of projections) {
+          if (projection.title !== undefined) {
+            titlesById.set(id, projection.title)
+            enriched = true
+          }
+          if (projection.preset !== undefined) {
+            presetsById.set(id, projection.preset)
+            enriched = true
+          }
+        }
+        if (enriched) picker.refresh?.()
+      }
+      await loadBatch(mainRows.slice(0, PROJECTION_FIRST_BATCH))
+      if (stale()) return
+      for (let offset = PROJECTION_FIRST_BATCH; offset < mainRows.length; offset += PROJECTION_BATCH_SIZE) {
+        // Yield between batches so input/repaint keep their turns even when
+        // every projection is a cold miss.
+        await scheduler.yield()
+        if (stale()) return
+        await loadBatch(mainRows.slice(offset, offset + PROJECTION_BATCH_SIZE))
       }
     })
+    if (listing === undefined) return { kind: 'success' }
+    // `/resume <arg>` keeps the OLD synchronous command semantics — the
+    // switch has started before the handler returns — while the overlay
+    // stays interactive during the wait (Esc cancels). No match settles as
+    // success with the filtered picker; a refusal returns the error text.
+    const outcome = await listing
+    if (outcome.kind === 'refused') return { kind: 'error', text: outcome.text }
+    if (outcome.kind === 'cancelled') return { kind: 'error', text: 'resume cancelled' }
     return { kind: 'success' }
   }
 
@@ -2044,26 +2479,16 @@ export function registerTuiCommands(
     input: { hint: '[query]' },
     handler: (invocation) => openSessionPicker(invocation, 'sessions'),
     aliases: ['resume'],
-    // /resume keeps its direct-resume fast path (exact/prefix id match);
-    // without a match it falls back to the same picker under its own name.
+    // /resume keeps its direct-resume fast path (exact id, a session-
+    // prefixed prefix, or the short id prefix) — resolved against the ONE
+    // input-first listing inside the shared picker lifecycle: the overlay
+    // opens immediately, and a unique match switches as soon as `list()`
+    // lands. No match leaves the filtered picker with the argument as the
+    // live search query. Never a second listing.
     aliasHandlers: {
-      resume: async (invocation) => {
+      resume: (invocation) => {
         const raw = invocation.rawInput.trim()
-        if (raw !== '') {
-          // Direct resume: exact id, a session- prefixed prefix, or the short
-          // id prefix. Falls back to the picker when nothing matches.
-          const currentId = runner.liveAgent?.session.id
-          const rows = await runner.sessionReader.list(currentId)
-          if (rows !== undefined) {
-            const match = findSessionMatch(rows, raw)
-            if (match !== undefined) {
-              if (match.id === currentId) return { kind: 'error', text: 'already on this session' }
-              switchSession(match.id)
-              return { kind: 'success' }
-            }
-          }
-        }
-        return openSessionPicker(invocation, 'resume')
+        return openSessionPicker(invocation, 'resume', raw === '' ? undefined : raw)
       },
     },
   })
@@ -2520,29 +2945,79 @@ export function registerTuiCommands(
       const models = runner.catalog.models
       if (!models.available()) return { kind: 'error', text: 'model service unavailable' }
       const providers = models.listProviders()
-      const current = models.currentSelection() ?? { provider: '', model: '' }
+      const current = selected.current ?? models.defaultSelection() ?? { provider: '', model: '' }
       /** Commit a selection (model, optional effort) and refresh the footer. */
       const apply = (next: ModelSelection): void => {
-        // Persist and reflect with LATEST-WINS semantics: saves run
-        // concurrently, so a failure must only roll back when the current
-        // selection is still the one THIS save was for — an older failed
-        // save must never overwrite a newer successful selection (out-of-
-        // order completion must not regress the persistent state either;
-        // the UI at least never lies about what is current).
-        const previous = selected.current
-        runDetached('model selection save', () => models.saveSelection(next), {
-          diag: runner.diag,
-          notify: (message) => {
-            if (selected.current === next) {
-              selected.current = previous
+        const liveSessionId = runner.liveAgent?.session.id
+        if (liveSessionId === undefined) {
+          // Before a Session exists, `/model` is an optimistic sessionless
+          // choice. It must not create a Session, but it becomes the dynamic
+          // creation fallback and is persisted as the global default. The
+          // intent is TRANSIENT: a settled save clears it (the next /new
+          // reads the persisted default dynamically), a failed save walks
+          // the operation ancestry back to the nearest still-pending
+          // operation.
+          runner.setDefaultIntent(next)
+          const intentId = runner.defaultIntentRecord?.id
+          runOwned('model default save', () => models.saveDefaultSelection(next), {
+            diag: runner.diag,
+            onResult: () => {
+              // The global default committed: report the settle to the
+              // intent state machine (it clears the intent only when THIS
+              // operation still owns it; a newer operation is never cleared
+              // by an older completion).
+              if (intentId !== undefined) runner.settleIntent(intentId, 'committed')
+            },
+            onError: (error) => {
+              // The default save failed: report the settle to the intent
+              // state machine (it walks the ancestry back to the nearest
+              // still-pending operation, or clears). The footer must
+              // re-project the resulting intent — the optimistic choice was
+              // already painted.
+              if (intentId !== undefined) runner.settleIntent(intentId, 'failed')
               runner.refreshStatus()
-            }
-            app.notify(message, 'error')
-          },
-          recoverable: () => true,
-        })
-        selected.current = next
+              runner.updateWelcomeCard()
+              app.notify(`model default save: ${safeErrorMessage(error)}`, 'error')
+            },
+          })
+        } else {
+          // A live Session owns the durable intent. The port appends
+          // model/selection FIRST and only then makes the choice
+          // authoritative, so a failed append can never be observed by a
+          // request. The Session commit and the global-default commit are
+          // settled SEPARATELY: a durable Session choice stands even when
+          // the default write fails, while the transient default intent is
+          // settled by the state machine.
+          runner.setDefaultIntent(next)
+          const intentId = runner.defaultIntentRecord?.id
+          runOwned('model selection save', () => models.selectSessionModel(liveSessionId, next), {
+            diag: runner.diag,
+            onResult: () => {
+              // Both commits succeeded: report the settle to the intent
+              // state machine (it clears the intent only when THIS operation
+              // still owns it).
+              if (intentId !== undefined) runner.settleIntent(intentId, 'committed')
+            },
+            onError: (error) => {
+              // The Session side needs no restore: the port commits the
+              // Agent-local selection only after the durable append, so a
+              // failed append leaves it untouched and a successful append
+              // keeps the choice. Only the transient default intent is
+              // settled by the state machine.
+              if (intentId !== undefined) runner.settleIntent(intentId, 'failed')
+              app.notify(`model selection save: ${safeErrorMessage(error)}`, 'error')
+            },
+          })
+        }
+        // The Session commit (durable append + Agent-local selection) is
+        // synchronous inside the owned task factory, so the surface can
+        // project the new authoritative selection immediately; the owned
+        // task's onResult/onError settle the transient default intent and
+        // notify. The Welcome card is refreshed from the SAME authoritative
+        // selection — a global-default persistence failure never reverts or
+        // stales it.
         runner.refreshStatus()
+        runner.updateWelcomeCard()
       }
       // The model and effort levels render INSIDE the provider list's
       // submenu slot (ModelSubmenu/EffortSubmenu): selecting applies
@@ -2599,18 +3074,27 @@ export function registerTuiCommands(
       // COMPOSITION (setup callback) is resolved inside the Direct session
       // lifecycle from this id — the command surface only ever sees the
       // identity (migration M1.11).
-      const resolved = await runner.catalog.presets.resolve(runner.pendingPreset)
+      const resolved = await runner.catalog.presets.resolve(runner.effectivePresetId)
+      // Read the DEFAULT selection intent at transition time: a fresh
+      // Session observes the global default (official blank-session
+      // semantics), never the old Session's local choice. After `/model`
+      // the intent carries the latest explicit choice.
+      const creationSelection = runner.defaultSelection()
       const newOptions = {
-        provider: runner.liveAgent?.options.provider ?? runner.selected.current?.provider,
-        model: runner.liveAgent?.options.model ?? runner.selected.current?.model,
+        provider: creationSelection?.provider,
+        model: creationSelection?.model,
       }
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd } },
         fresh: true,
+        // Seed only an explicit default intent: without one the fresh
+        // Session observes the persisted default dynamically instead of
+        // freezing it into a durable choice.
+        ...(runner.defaultIntent === undefined ? {} : { inheritSelection: runner.defaultIntent }),
         create: () => runner.agents.create({
           sessionId: String(sessionId),
           meta: metaOf(cwd, resolved.id),
-          // Before the first session the process-wide selection stands in.
+          // Before the first session the sessionless/default selection stands in.
           provider: newOptions.provider,
           model: newOptions.model,
           agentPreset: resolved.id,
@@ -2628,12 +3112,12 @@ export function registerTuiCommands(
 
   registerTuiCommand({
     name: 'tasks',
-    description: 'Browse background jobs and subagents for this session (search filters rows)',
+    description: 'Open the full Task Center for this session (scope, type, search, and tree controls)',
     aliases: ['subagents'],
     handler: async () => {
       // The merged browser: jobs + subagents in one searchable list, with
-      // row-level interrupt on subagent rows — the same surface as the ↓
-      // trigger (runner.openTasksBrowser). Completed jobs and finished
+      // row-level confirmed Stop on capable rows — the full surface behind
+      // `/tasks` (runner.openTasksBrowser). Completed jobs and finished
       // one-shot children are reachable exactly through this path.
       await requireAgent()
       runner.openTasksBrowser()
@@ -2691,16 +3175,33 @@ export function registerTuiCommands(
       // The live composition is the runner's own read (Direct ownership);
       // the roster catalog the command surface needs is the port's.
       const current = runner.currentPreset()
+      const displayedDefault = async (): Promise<string | undefined> => {
+        const configured = runner.config.presetDefault.get()
+        if (configured !== 'code') return configured ?? presets.defaultId()
+        // A persisted legacy `code` value is resolved through the roster. This
+        // keeps status/default display consistent with composition: a real
+        // custom code remains code, while old data without code displays ptc.
+        try {
+          return (await presets.resolve()).id ?? configured
+        } catch {
+          return configured
+        }
+      }
+      const presetErrorText = (error: unknown, id: string): string => {
+        const message = safeErrorMessage(error)
+        if (id !== 'code' || !/\b(?:not found|unknown|unavailable)\b/iu.test(message)) return message
+        return `${message}; if you meant the legacy PTC session identity, use preset "ptc"`
+      }
       const matched = invocation.rawInput.trim().match(/^(\S+)(?:\s+(.*))?$/)
       const verb = matched?.[1] ?? ''
       const rest = matched?.[2]?.trim() ?? ''
       if (verb === 'status') {
-        return { kind: 'success', text: `preset: ${current ?? 'none'} · default: ${presets.defaultId()}` }
+        return { kind: 'success', text: `preset: ${current ?? 'none'} · default: ${await displayedDefault()}` }
       }
       if (verb === 'default') {
         if (!runner.config.presetDefault.available()) return { kind: 'error', text: 'settings service unavailable' }
         if (rest === '') {
-          return { kind: 'success', text: `default preset: ${runner.config.presetDefault.get() ?? presets.defaultId()}` }
+          return { kind: 'success', text: `default preset: ${await displayedDefault()}` }
         }
         // The saved default only affects sessions created from now on. A
         // standing catalog refresh follows ONLY when no higher-precedence
@@ -2708,9 +3209,13 @@ export function registerTuiCommands(
         // new default — the masked case must not re-read a preset the next
         // session will not compose on.
         try {
+          // Validate before writing settings. `code` is legal when the current
+          // DSH roster contains a custom preset with that id; an unknown code
+          // remains an ordinary unknown-preset failure and is never aliased.
+          await presets.resolve(rest)
           await runner.config.presetDefault.set(rest)
         } catch (error) {
-          return { kind: 'error', text: safeErrorMessage(error) }
+          return { kind: 'error', text: presetErrorText(error, rest) }
         }
         if (runner.effectivePresetId === undefined) {
           const outcome = await runner.refreshCatalog({
@@ -2773,7 +3278,7 @@ export function registerTuiCommands(
         try {
           outcome = await applyPresetSelection(id)
         } catch (error) {
-          app.notify(safeErrorMessage(error), 'error')
+          app.notify(presetErrorText(error, id), 'error')
           return
         }
         if (outcome.kind === 'pending') {
@@ -2800,15 +3305,16 @@ export function registerTuiCommands(
           }
           return { kind: 'success', text: `session preset switched to ${outcome.preset}` }
         } catch (error) {
-          return { kind: 'error', text: safeErrorMessage(error) }
+          return { kind: 'error', text: presetErrorText(error, verb) }
         }
       }
       const roster = await presets.list()
       if (roster.length === 0) return { kind: 'success', text: 'no agent presets configured' }
+      const defaultId = await displayedDefault()
       // A started conversation's history was produced under its preset's
       // tools: offer no selectable roster — say why instead (the typed
       // /preset <id> path above refuses the same way).
-      if (liveAgent !== undefined && liveAgent.session.events.some(event => event.type === 'turn/start')) {
+      if (liveAgent !== undefined && liveAgent.session.snapshotEvents().some(event => event.type === 'turn/start')) {
         const message = `preset switching is only available in a new session — session "${liveAgent.session.id}" has already started; its preset is fixed (use /new for a fresh session, or /preset default <id> for future sessions)`
         app.notify(message, 'error')
         return { kind: 'error', text: message }
@@ -2822,7 +3328,7 @@ export function registerTuiCommands(
             description: [
               display.description,
               preset.trust === 'system' ? 'system' : 'user',
-              preset.id === presets.defaultId() ? 'default' : undefined,
+              preset.id === defaultId ? 'default' : undefined,
               preset.id === current ? '← current' : undefined,
               preset.broken,
             ].filter(Boolean).join(' · '),
@@ -2931,8 +3437,17 @@ export function registerTuiCommands(
     description: 'Copy the last assistant message to the system clipboard (tmux-aware)',
     handler: async () => {
       const liveAgent = await requireAgent()
-      const last = liveAgent.session.events.findLast((event): event is SessionEvent<'assistant/message'> =>
-        event.type === 'assistant/message')
+      // Single-event lookup: walk BACKWARDS from the log offset with
+      // eventAt (alpha.4) — never materialize the whole log for one
+      // message (the plan's count/eventAt/snapshot split).
+      let last: SessionEvent<'assistant/message'> | undefined
+      for (let seq = Number(liveAgent.session.seq) - 1; seq >= 0; seq -= 1) {
+        const event = liveAgent.session.eventAt(SessionSeq(seq))
+        if (event?.type === 'assistant/message') {
+          last = event
+          break
+        }
+      }
       if (last === undefined) return { kind: 'error', text: 'no assistant message yet' }
       const text = last.data.message.content
         .filter(block => block.type === 'text')
@@ -3065,11 +3580,11 @@ export function registerTuiCommands(
     description: 'Fork this session at the last completed turn',
     handler: () => runner.withSessionTransition(async () => {
       const source = runner.liveAgent
-      const seed = source === undefined ? undefined : forkSeed(source.session.events)
+      const seed = source === undefined ? undefined : forkSeed(source.session.snapshotEvents())
       if (seed === undefined || source === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
       // Shared child creation with rewind (plan §6.2): preset inheritance,
       // live session cwd, provider/model inheritance, parentSession +
-      // seedLength metadata — one chain, no drift between the two surfaces.
+      // isSeeded/inheritedEventCount metadata — one chain, no drift between the two surfaces.
       // The child's id is PRE-GENERATED so the transaction acquires its
       // open lock BEFORE the create publishes it (review round 6); the
       // create runs inside the unified transaction, and a failure before
@@ -3077,17 +3592,16 @@ export function registerTuiCommands(
       // no rollback attempt).
       const sessionId = SessionId(`session-${randomUUID()}`)
       const childCwd = source.session.header.cwd || runner.sessionCwd()
-      // The concrete preset id is resolved ONCE and rides the create (a
-      // rejected create is NEVER retried — the first DSH call may have left
-      // a hidden lifecycle, so the target is PINNED immediately). The
-      // composition setup stays inside the Direct session lifecycle —
-      // the command surface only ever sees the identity (migration M1.11).
-      const resolved = await runner.catalog.presets.resolve(resolveSessionPreset(source.session))
-      const forkOptions = { provider: source.options.provider, model: source.options.model }
+      // The current preset is read once from the DSH projection and rides the
+      // create (a rejected create is NEVER retried — the first DSH call may
+      // have left a hidden lifecycle, so the target is PINNED immediately).
+      // The composition setup stays inside the Direct session lifecycle — the
+      // command surface only ever sees the identity (migration M1.11).
+      const sourcePreset = runner.currentPreset()
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd: childCwd } },
         fresh: true,
-        create: () => createForkedAgent(runner, source, seed, sessionId, resolved.id),
+        create: () => createForkedAgent(runner, source, seed, sessionId, sourcePreset),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
@@ -3118,11 +3632,24 @@ export function registerTuiCommands(
     description: 'Show session stats and identity',
     handler: async () => {
       const liveAgent = await requireAgent()
-      const stats = computeStats(liveAgent.session.events)
-      // Best-effort context measurement through the session-read port
-      // (migration M1.11): unavailable/unmeasurable → the panel falls back
-      // to unmeasured — never a crash.
-      const contextTokens = runner.sessionReader.measureContext(liveAgent.session.id)
+      const stats = computeStats(liveAgent.session.snapshotEvents())
+      // Explicit status: measure NOW through the runner's context
+      // coordinator — the panel and the cached footer value share ONE
+      // measurement (no duplicate reads, no stale footer). Stubs without
+      // the coordinator fall back to a direct session-read port read
+      // (best-effort, migration M1.11): unavailable/unmeasurable → the
+      // panel falls back to unmeasured — never a crash.
+      // Explicit status: measure NOW through the runner's context
+      // coordinator — the panel and the cached footer value share ONE
+      // measurement (no duplicate reads, no stale footer). The direct
+      // session-read port is used ONLY when the coordinator is absent
+      // (stubs): an explicit presence check, never a `??` fallback — a
+      // force returning undefined (no live session / measurement failure)
+      // must not trigger a second, uncached measurement (round-9 finding).
+      const forceContext = runner.forceContextMeasurement
+      const contextTokens = forceContext === undefined
+        ? runner.sessionReader.measureContext(liveAgent.session.id)
+        : forceContext()
       app.openSettings(
         [
           {
@@ -3155,9 +3682,9 @@ export function registerTuiCommands(
     handler: async (invocation) => {
       const credentials = runner.config.credentials
       if (!credentials.available()) return { kind: 'error', text: 'credentials service unavailable' }
-      // The two credential planes (dsh 0.1.1-rc.1): reference targets from
-      // the provider catalog, authorization flows from the seam. An absent
-      // authorization service degrades to the reference-only surface.
+      // The two credential planes: reference targets from the provider
+      // catalog, authorization flows from the seam. An absent authorization
+      // service degrades to the reference-only surface.
       const targets = runner.config.authorization.listTargets()
       const options = runner.config.providers.listCredentialOptions()
       const merged = mergeLoginTargets(options, targets)

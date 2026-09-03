@@ -8,11 +8,21 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback, stripControlChars } from '../src/footer/layout.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 
 test('the builtin default layout parses as valid', () => {
   const parsed = parseFooterLayout(DEFAULT_FOOTER_LAYOUT)
   assert.ok(isFooterLayout(parsed), `default layout must parse: ${JSON.stringify(parsed)}`)
+})
+
+test('the presets never share placement objects (no cross-preset aliasing)', () => {
+  // The status-row placements come from a FACTORY: mutating one preset's
+  // refs (a runtime consumer ignoring the readonly types) must never
+  // reach the other preset.
+  const defaultRef = DEFAULT_FOOTER_LAYOUT.rows[0]!.left[0]!
+  const compactRef = COMPACT_FOOTER_LAYOUT.rows[0]!.left[0]!
+  assert.notEqual(defaultRef, compactRef, 'each preset owns its placement objects')
+  assert.deepEqual(defaultRef, compactRef, 'the placement content is identical')
 })
 
 test('a custom layout with zones, separator, formats and tones parses', () => {
@@ -34,6 +44,32 @@ test('a custom layout with zones, separator, formats and tones parses', () => {
   assert.equal(layout.rows[0]!.left.length, 3)
   assert.equal(layout.rows[0]!.right.length, 1)
   assert.equal(layout.rows[0]!.separator?.text, ' │ ')
+})
+
+test('DUPLICATE item ids parse in order with every ref intact (repeated placements)', () => {
+  // The ordered array IS the placement identity (rowIndex + zone + index):
+  // the same definition may be placed repeatedly with independent
+  // overrides — no instance id, no schema change (schemaVersion stays 1).
+  const parsed = parseFooterLayout({
+    schemaVersion: 1,
+    rows: [{
+      left: [
+        { id: 'performance', format: 'latency' },
+        { id: 'performance', format: 'speed' },
+        { id: 'user:env', tone: 'primary' },
+        { id: 'user:env', importance: 10 },
+      ],
+      right: [{ id: 'performance' }],
+    }],
+  })
+  assert.ok(isFooterLayout(parsed), `duplicate placements must parse: ${JSON.stringify(parsed)}`)
+  const layout = parsed as Exclude<typeof parsed, { kind: 'error' }>
+  const left = layout.rows[0]!.left
+  assert.deepEqual(left.map(ref => ref.id), ['performance', 'performance', 'user:env', 'user:env'])
+  assert.deepEqual(left.map(ref => ref.format), ['latency', 'speed', undefined, undefined])
+  assert.equal(left[2]!.tone, 'primary')
+  assert.equal(left[3]!.importance, 10)
+  assert.deepEqual(layout.rows[0]!.right.map(ref => ref.id), ['performance'])
 })
 
 test('invalid documents fail soft with a message', () => {

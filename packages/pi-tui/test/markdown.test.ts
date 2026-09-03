@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { afterEach, describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
-import { Markdown } from "../src/components/markdown.ts";
+import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
 import type { Component, TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
@@ -12,31 +12,20 @@ import { VirtualTerminal } from "./virtual-terminal.ts";
 // Force full color in CI so ANSI assertions are deterministic
 const chalk = new Chalk({ level: 3 });
 
-function getCellItalic(terminal: VirtualTerminal, row: number, col: number): number {
+function getCell(terminal: VirtualTerminal, row: number, col: number) {
 	const xterm = (terminal as unknown as { xterm: XtermTerminalType }).xterm;
 	const buffer = xterm.buffer.active;
 	const line = buffer.getLine(buffer.viewportY + row);
 	assert.ok(line, `Missing buffer line at row ${row}`);
 	const cell = line.getCell(col);
 	assert.ok(cell, `Missing cell at row ${row} col ${col}`);
-	return cell.isItalic();
-}
-
-function getCellUnderline(terminal: VirtualTerminal, row: number, col: number): number {
-	const xterm = (terminal as unknown as { xterm: XtermTerminalType }).xterm;
-	const buffer = xterm.buffer.active;
-	const line = buffer.getLine(buffer.viewportY + row);
-	assert.ok(line, `Missing buffer line at row ${row}`);
-	const cell = line.getCell(col);
-	assert.ok(cell, `Missing cell at row ${row} col ${col}`);
-	return cell.isUnderline();
+	return cell;
 }
 
 function stripAnsi(line: string): string {
 	return line.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-/** Resulting foreground-open state after applying one SGR sequence. */
 function fgOpenAfterSgr(prev: boolean, params: string): boolean {
 	if (params === "" || params === "0") {
 		return false;
@@ -53,7 +42,7 @@ function fgOpenAfterSgr(prev: boolean, params: string): boolean {
 	return open;
 }
 
-/** Assert no box-drawing character is rendered while a foreground color is open. */
+/** Assert no box-drawing character is rendered while a foreground color is open. (dsh-pi-tui divergence X021.) */
 function assertNoBordersInOpenFgColor(lines: string[]): void {
 	const borderChar = /[│┌┐└┘├┤┬┴─]/;
 	const sgrRegex = /\x1b\[([0-9;]*)m/g;
@@ -523,6 +512,127 @@ describe("Markdown component", () => {
 			assert.ok(allText.includes("Install"), "Should contain 'Install'");
 		});
 
+		it("should not leak wrapped link styles into table borders or plain cells", async () => {
+			const source = `| Link | Plain |
+| --- | --- |
+| [**one two three four five six**](https://example.com) | normal text |`;
+
+			try {
+				for (const hyperlinks of [true, false]) {
+					setCapabilities({ images: null, trueColor: false, hyperlinks });
+					const terminal = new VirtualTerminal(24, 16);
+					const tui: TUI = new TuiMainScreen(terminal);
+					tui.addChild(new Markdown(source, 0, 0, defaultMarkdownTheme));
+					tui.start();
+
+					try {
+						await terminal.waitForRender();
+						const viewport = terminal.getViewport();
+						const row = viewport.findIndex((line) => line.includes("one") && line.includes("norm"));
+						assert.notStrictEqual(row, -1, `Missing wrapped table row: ${JSON.stringify(viewport)}`);
+						const line = viewport[row];
+						const linkCol = line.indexOf("one");
+						const separatorCol = line.indexOf("│", linkCol);
+						const plainCol = line.indexOf("norm");
+						assert.ok(linkCol >= 0 && separatorCol > linkCol && plainCol > separatorCol);
+						assert.strictEqual(getCell(terminal, row, linkCol).isFgDefault(), false);
+						assert.strictEqual(getCell(terminal, row, separatorCol).isFgDefault(), true);
+						assert.strictEqual(getCell(terminal, row, plainCol).isFgDefault(), true);
+						assert.notStrictEqual(getCell(terminal, row, linkCol).isBold(), 0);
+						assert.strictEqual(getCell(terminal, row, separatorCol).isBold(), 0);
+						assert.strictEqual(getCell(terminal, row, plainCol).isBold(), 0);
+
+						if (!hyperlinks) {
+							const urlRow = viewport.findIndex((viewportLine) => viewportLine.includes("https"));
+							assert.notStrictEqual(urlRow, -1, `Missing fallback URL row: ${JSON.stringify(viewport)}`);
+							const urlLine = viewport[urlRow];
+							const urlCol = urlLine.indexOf("https");
+							const urlSeparatorCol = urlLine.indexOf("│", urlCol);
+							const urlBorderCol = urlLine.lastIndexOf("│");
+							assert.ok(urlCol >= 0 && urlSeparatorCol > urlCol && urlBorderCol > urlSeparatorCol);
+							assert.notStrictEqual(getCell(terminal, urlRow, urlCol).isDim(), 0);
+							assert.strictEqual(getCell(terminal, urlRow, urlSeparatorCol).isDim(), 0);
+							assert.strictEqual(getCell(terminal, urlRow, urlBorderCol).isDim(), 0);
+						}
+					} finally {
+						tui.stop();
+					}
+				}
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("should restore the enclosing style after a wrapped table link", async () => {
+			const quoteColor = 0x123456;
+			const theme: MarkdownTheme = {
+				...defaultMarkdownTheme,
+				// Use a basic wrapper that does not automatically reopen itself after nested resets.
+				quote: (text) => `\x1b[38;2;18;52;86m${text}\x1b[39m`,
+				link: (text) => `\x1b[38;2;129;162;190m${text}\x1b[39m`,
+			};
+			const source = `> | Link | Plain |
+> | --- | --- |
+> | [one two three four five six](https://example.com) | normal text |`;
+
+			setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+			const terminal = new VirtualTerminal(28, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			tui.addChild(new Markdown(source, 0, 0, theme));
+			tui.start();
+
+			try {
+				await terminal.waitForRender();
+				const viewport = terminal.getViewport();
+				const row = viewport.findIndex((line) => line.includes("one") && line.includes("normal"));
+				assert.notStrictEqual(row, -1, `Missing wrapped blockquote table row: ${JSON.stringify(viewport)}`);
+				const line = viewport[row];
+				const linkCol = line.indexOf("one");
+				const separatorCol = line.indexOf("│", linkCol);
+				const plainCol = line.indexOf("normal");
+				assert.ok(linkCol >= 0 && separatorCol > linkCol && plainCol > separatorCol);
+
+				assert.notStrictEqual(getCell(terminal, row, linkCol).getFgColor(), quoteColor);
+				assert.strictEqual(getCell(terminal, row, separatorCol).getFgColor(), quoteColor);
+				assert.strictEqual(getCell(terminal, row, plainCol).getFgColor(), quoteColor);
+
+				const finalRow = viewport.findIndex((line) => line.includes("five six"));
+				assert.notStrictEqual(finalRow, -1, `Missing final wrapped link row: ${JSON.stringify(viewport)}`);
+				const finalLine = viewport[finalRow];
+				const finalLinkCol = finalLine.indexOf("five six");
+				const finalSeparatorCol = finalLine.indexOf("│", finalLinkCol);
+				const finalBorderCol = finalLine.lastIndexOf("│");
+				assert.ok(finalLinkCol >= 0 && finalSeparatorCol > finalLinkCol && finalBorderCol > finalSeparatorCol);
+				assert.strictEqual(getCell(terminal, finalRow, finalSeparatorCol).getFgColor(), quoteColor);
+				assert.strictEqual(getCell(terminal, finalRow, finalBorderCol).getFgColor(), quoteColor);
+			} finally {
+				tui.stop();
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("should not leak wrapped inline-code color into table borders", () => {
+			const markdown = new Markdown(
+				`| a | b |
+| --- | --- |
+| x | \`aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\` |
+| y | z |`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			const width = 40;
+			const lines = markdown.render(width);
+
+			// The long inline-code token wraps across several physical rows;
+			// none of the `│`/`─` border characters may be rendered while the
+			// code's foreground color is still open (regression: the wrap left
+			// the color unclosed on split lines, so the borders turned colored).
+			// (dsh-pi-tui divergence X021.)
+			assertNoBordersInOpenFgColor(lines);
+		});
+
 		it("should wrap long cell content to multiple lines", () => {
 			const markdown = new Markdown(
 				`| Header |
@@ -610,27 +720,6 @@ describe("Markdown component", () => {
 				const borderCount = line.split("│").length - 1;
 				assert.strictEqual(borderCount, 2, `Expected 2 borders, got ${borderCount}: "${line}"`);
 			}
-		});
-
-		it("should not leak wrapped inline-code color into table borders", () => {
-			const markdown = new Markdown(
-				`| a | b |
-| --- | --- |
-| x | \`aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\` |
-| y | z |`,
-				0,
-				0,
-				defaultMarkdownTheme,
-			);
-
-			const width = 40;
-			const lines = markdown.render(width);
-
-			// The long inline-code token wraps across several physical rows;
-			// none of the `│`/`─` border characters may be rendered while the
-			// code's foreground color is still open (regression: the wrap left
-			// the color unclosed on split lines, so the borders turned colored).
-			assertNoBordersInOpenFgColor(lines);
 		});
 
 		it("should handle extremely narrow width gracefully", () => {
@@ -755,26 +844,6 @@ describe("Markdown component", () => {
 			// Check table
 			assert.ok(plainLines.some((line) => line.includes("Col1")));
 			assert.ok(plainLines.some((line) => line.includes("│")));
-		});
-	});
-
-	describe("Backslash escapes", () => {
-		it("should normalize escaped punctuation by default", () => {
-			const markdown = new Markdown(String.raw`"\"`, 0, 0, defaultMarkdownTheme);
-
-			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
-
-			assert.deepStrictEqual(lines, [`""`]);
-		});
-
-		it("should preserve source backslash escapes when configured", () => {
-			const markdown = new Markdown(String.raw`"\"`, 0, 0, defaultMarkdownTheme, undefined, {
-				preserveBackslashEscapes: true,
-			});
-
-			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
-
-			assert.deepStrictEqual(lines, [String.raw`"\"`]);
 		});
 	});
 
@@ -1073,7 +1142,7 @@ A=
 
 			assert.ok(component.markdownLineCount > 0);
 			const inputRow = component.markdownLineCount;
-			assert.strictEqual(getCellItalic(terminal, inputRow, 0), 0);
+			assert.strictEqual(getCell(terminal, inputRow, 0).isItalic(), 0);
 			tui.stop();
 		});
 	});
@@ -1517,7 +1586,11 @@ bar`,
 			assert.ok(contentWidth > 0, "Should have visible heading content");
 
 			for (let col = contentWidth; col < 80; col++) {
-				assert.strictEqual(getCellUnderline(terminal, 0, col), 0, `Expected no underline in padding at col ${col}`);
+				assert.strictEqual(
+					getCell(terminal, 0, col).isUnderline(),
+					0,
+					`Expected no underline in padding at col ${col}`,
+				);
 			}
 
 			tui.stop();
@@ -1668,98 +1741,6 @@ bar`,
 			);
 			assert.ok(!rawPlain.join("").includes("(https://example.com)"), "URL should not appear twice");
 		});
-
-		it("should not absorb CJK punctuation after bare URLs into the link", () => {
-			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
-			const markdown = new Markdown(
-				"PR 已开：https://example.com/app/pull/232（本地 main 已退回 origin/main 保持干净）。",
-				0,
-				0,
-				defaultMarkdownTheme,
-			);
-
-			const lines = markdown.render(80);
-			const joined = lines.join("");
-
-			// The hyperlink target must stop at the CJK boundary…
-			assert.ok(
-				joined.includes("\x1b]8;;https://example.com/app/pull/232\x1b\\"),
-				"OSC 8 target should end at the URL, before the full-width parenthesis",
-			);
-			// …and the CJK text must not be part of any hyperlink target.
-			assert.ok(!joined.includes("%EF%BC%88"), "OSC 8 target should not contain encoded CJK");
-			assert.ok(!/\x1b\]8;;[^\x1b]*（/.test(joined), "No hyperlink target should contain CJK characters");
-			// The full source text still renders visibly.
-			const rawPlain = lines.map((line) =>
-				line.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, ""),
-			);
-			assert.ok(
-				rawPlain.join("").includes("https://example.com/app/pull/232（本地 main 已退回"),
-				"URL and following CJK text should both render",
-			);
-		});
-
-		it("should strip a trailing full-width parenthesis after a bare URL", () => {
-			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
-			const markdown = new Markdown("看这个（https://example.com/page）就知道", 0, 0, defaultMarkdownTheme);
-
-			const lines = markdown.render(80);
-			const joined = lines.join("");
-
-			assert.ok(
-				joined.includes("\x1b]8;;https://example.com/page\x1b\\"),
-				"OSC 8 target should exclude the wrapping full-width parenthesis",
-			);
-		});
-
-		it("should keep CJK characters inside the URL path", () => {
-			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
-			const markdown = new Markdown("见 https://example.com/wiki/测试页面 的说明", 0, 0, defaultMarkdownTheme);
-
-			const lines = markdown.render(80);
-			const joined = lines.join("");
-
-			assert.ok(
-				joined.includes("\x1b]8;;https://example.com/wiki/测试页面\x1b\\"),
-				"CJK path characters remain part of the hyperlink target",
-			);
-		});
-
-		it("should keep balanced full-width parentheses inside the URL path", () => {
-			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
-			const markdown = new Markdown(
-				"见 https://example.com/wiki/中华人民共和国（1949年） 的说明",
-				0,
-				0,
-				defaultMarkdownTheme,
-			);
-
-			const lines = markdown.render(80);
-			const joined = lines.join("");
-
-			assert.ok(
-				joined.includes("\x1b]8;;https://example.com/wiki/中华人民共和国（1949年）\x1b\\"),
-				"Balanced full-width parens remain part of the hyperlink target",
-			);
-		});
-
-		it("should keep CJK punctuation inside balanced full-width parentheses", () => {
-			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
-			const markdown = new Markdown(
-				"见 https://example.com/wiki/中华人民共和国（北京，1949年） 的说明",
-				0,
-				0,
-				defaultMarkdownTheme,
-			);
-
-			const lines = markdown.render(80);
-			const joined = lines.join("");
-
-			assert.ok(
-				joined.includes("\x1b]8;;https://example.com/wiki/中华人民共和国（北京，1949年）\x1b\\"),
-				"Punctuation inside balanced full-width parens remains part of the hyperlink target",
-			);
-		});
 	});
 
 	describe("HTML-like tags in text", () => {
@@ -1843,10 +1824,96 @@ bar`,
 	});
 });
 
-describe("Markdown negative width safety", () => {
-	it("does not throw at zero or negative widths", () => {
-		const markdown = new Markdown("# Title\n\ntext\n\n---", 1, 1, defaultMarkdownTheme);
-		assert.doesNotThrow(() => markdown.render(0));
-		assert.doesNotThrow(() => markdown.render(-1));
+describe("CJK punctuation after bare URLs (dsh-pi-tui divergence X031)", () => {
+	it("should not absorb CJK punctuation after bare URLs into the link", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		const markdown = new Markdown(
+			"PR 已开：https://example.com/app/pull/232（本地 main 已退回 origin/main 保持干净）。",
+			0,
+			0,
+			defaultMarkdownTheme,
+		);
+
+		const lines = markdown.render(80);
+		const joined = lines.join("");
+
+		// The hyperlink target must stop at the CJK boundary…
+		assert.ok(
+			joined.includes("\x1b]8;;https://example.com/app/pull/232\x1b\\"),
+			"OSC 8 target should end at the URL, before the full-width parenthesis",
+		);
+		// …and the CJK text must not be part of any hyperlink target.
+		assert.ok(!joined.includes("%EF%BC%88"), "OSC 8 target should not contain encoded CJK");
+		assert.ok(!/\x1b\]8;;[^\x1b]*（/.test(joined), "No hyperlink target should contain CJK characters");
+		// The full source text still renders visibly.
+		const rawPlain = lines.map((line) =>
+			line.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, ""),
+		);
+		assert.ok(
+			rawPlain.join("").includes("https://example.com/app/pull/232（本地 main 已退回"),
+			"URL and following CJK text should both render",
+		);
+	});
+
+	it("should strip a trailing full-width parenthesis after a bare URL", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		const markdown = new Markdown("看这个（https://example.com/page）就知道", 0, 0, defaultMarkdownTheme);
+
+		const lines = markdown.render(80);
+		const joined = lines.join("");
+
+		assert.ok(
+			joined.includes("\x1b]8;;https://example.com/page\x1b\\"),
+			"OSC 8 target should exclude the wrapping full-width parenthesis",
+		);
+	});
+
+	it("should keep CJK characters inside the URL path", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		const markdown = new Markdown("见 https://example.com/wiki/测试页面 的说明", 0, 0, defaultMarkdownTheme);
+
+		const lines = markdown.render(80);
+		const joined = lines.join("");
+
+		assert.ok(
+			joined.includes("\x1b]8;;https://example.com/wiki/测试页面\x1b\\"),
+			"CJK path characters remain part of the hyperlink target",
+		);
+	});
+
+	it("should keep balanced full-width parentheses inside the URL path", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		const markdown = new Markdown(
+			"见 https://example.com/wiki/中华人民共和国（1949年） 的说明",
+			0,
+			0,
+			defaultMarkdownTheme,
+		);
+
+		const lines = markdown.render(80);
+		const joined = lines.join("");
+
+		assert.ok(
+			joined.includes("\x1b]8;;https://example.com/wiki/中华人民共和国（1949年）\x1b\\"),
+			"Balanced full-width parens remain part of the hyperlink target",
+		);
+	});
+
+	it("should keep CJK punctuation inside balanced full-width parentheses", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		const markdown = new Markdown(
+			"见 https://example.com/wiki/中华人民共和国（北京，1949年） 的说明",
+			0,
+			0,
+			defaultMarkdownTheme,
+		);
+
+		const lines = markdown.render(80);
+		const joined = lines.join("");
+
+		assert.ok(
+			joined.includes("\x1b]8;;https://example.com/wiki/中华人民共和国（北京，1949年）\x1b\\"),
+			"Punctuation inside balanced full-width parens remains part of the hyperlink target",
+		);
 	});
 });

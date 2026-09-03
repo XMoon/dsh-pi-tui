@@ -40,6 +40,10 @@ export interface AgentsServiceLike {
     agentOptions: { provider?: string; model?: string }
     setup: (agentCtx: Context) => Promise<void> | void
     seed?: readonly SessionEvent[]
+    /** Exact fork-inherited prefix length when `meta.isSeeded` is set
+     * (alpha.4's seeded-session contract — the old header `seedLength`
+     * field is rejected now). */
+    inheritedEventCount?: number
     signal?: AbortSignal
   }): Promise<AgentHandle>
   resume(options: {
@@ -74,6 +78,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       agentOptions: { provider: request.provider, model: request.model },
       setup: composition.setup,
       seed: request.seed as readonly SessionEvent[] | undefined,
+      ...request.inheritedEventCount === undefined ? {} : { inheritedEventCount: request.inheritedEventCount },
       signal: request.signal,
     })
     // The ownership escape preserves BOTH the live agent and the real

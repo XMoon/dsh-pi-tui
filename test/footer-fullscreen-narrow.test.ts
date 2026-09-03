@@ -17,10 +17,24 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp, type StatusData } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** Realistic status: at narrow widths the status row wraps 3+ times. */
 const RICH_STATUS: StatusData = {
@@ -35,7 +49,7 @@ const RICH_STATUS: StatusData = {
   contextWindow: 10000,
   usage: {
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+    performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
     turns: 3,
     steps: 7,
   },
@@ -48,6 +62,7 @@ async function startFullscreenApp(columns: number, rows: number): Promise<{ vt: 
   const vt = new VirtualTerminal(columns, rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setStatus(RICH_STATUS)
   app.setTodoSummary([
     { content: 'fix the narrow footer clipping', status: 'in_progress' },
@@ -86,11 +101,12 @@ function assertPinnedChromeIntact(
   )
   // High-importance footer facts survive every width: the permission badge
   // (importance 110) is the contract's floor — the footer must never be
-  // COMPLETELY gone.
-  assert.ok(view.includes('workspace-write'), `permission badge lost at ${columns}x${viewportRows}:\n${view}`)
+  // COMPLETELY gone. The responsive compact pass may shorten it to `ww`
+  // and the model to its id under pressure.
+  assert.ok(view.includes('workspace-write') || view.includes('ww'), `permission badge lost at ${columns}x${viewportRows}:\n${view}`)
   if (expectModel) {
     assert.ok(
-      view.includes('deepseek'),
+      view.includes('deepseek') || view.includes('flash'),
       `the model badge must survive at ${columns}x${viewportRows}:\n${view}`,
     )
   }
@@ -135,9 +151,10 @@ test('the footer never clips out of a narrow fullscreen viewport', async () => {
   // transcript was already at zero. 20x10 is the documented EXTREME cell:
   // the 20-column todo panel wraps the chrome, so only TWO footer slots
   // remain — the surface hands the composer total=2, the footer renders
-  // status + stats (both one line, both visible) and DROPS the model
-  // (importance order), which the plan's "footer must not disappear +
-  // one high-importance status must survive" contract covers.
+  // status + stats (both one line, both visible) and the status row
+  // COMPACTS (ww/flash/ctx 10%) instead of dropping the model, which the
+  // plan's "footer must not disappear + one high-importance status must
+  // survive" contract covers.
   for (const [columns, viewportRows, expectStats, expectModel] of [
     [80, 24, true, true], [60, 16, true, true], [40, 12, true, true],
     [40, 10, true, true], [30, 10, true, true], [20, 10, true, false],
@@ -148,7 +165,7 @@ test('the footer never clips out of a narrow fullscreen viewport', async () => {
       assert.ok(view.length > 0, `empty viewport at ${columns}x${viewportRows}`)
       assertPinnedChromeIntact(app, view, columns, viewportRows, expectStats, expectModel)
     } finally {
-      app.stop()
+      app.dispose()
     }
   }
 })
@@ -166,8 +183,8 @@ test('the armed Ctrl+C instruction never pushes the footer out of a narrow fulls
     const lines = vt.getViewport()
     const view = lines.join('\n')
     assert.ok(view.includes('Press Ctrl+C again to exit'), `the exit hint must stay visible:\n${view}`)
-    assert.ok(view.includes('workspace-write'), `the status row must survive beside the hint:\n${view}`)
-    assert.ok(view.includes('LLM 12.3s'), `the stats row must survive beside the hint:\n${view}`)
+    assert.ok(view.includes('workspace-write') || view.includes('ww'), `the status row must survive beside the hint:\n${view}`)
+    assert.ok(view.includes('TTFB 12.3s'), `the stats row must survive beside the hint:\n${view}`)
     const footerLines = [...app.footerRenderRowsForTest()]
     assert.equal(footerLines.length, 3, `the footer with its instruction must stay inside the effective budget:\n${view}`)
     assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+C again'), `the hint must be the footer's last line:\n${view}`)
@@ -208,8 +225,9 @@ test('the armed Ctrl+C instruction on a chrome-heavy 20x10 viewport is NEVER cli
       `the exit hint must be visible in the VIEWPORT (not only in the component):\n${view}`,
     )
     // One high-importance status fact survives beside it (importance
-    // order): the permission badge outranks everything else.
-    assert.ok(view.includes('workspace-write'), `the high-importance status must survive:\n${view}`)
+    // order): the permission badge outranks everything else (the compact
+    // pass may shorten it to `ww`).
+    assert.ok(view.includes('workspace-write') || view.includes('ww'), `the high-importance status must survive:\n${view}`)
     const editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
     assert.ok(editorTop !== -1, `editor top border missing:\n${view}`)
     assert.ok(
@@ -252,6 +270,7 @@ test('a regular -> fullscreen switch recomposes the budget (widgets are fullscre
   const host = new SurfaceHost(ledger, () => app.requestRender())
   app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
   app.start()
+  startedApps.add(app)
   host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
     surfaceId: host.surfaceId,
     generation: 1,
@@ -310,6 +329,7 @@ test('a surface with ZERO available footer slots renders nothing at all', async 
   const vt = new VirtualTerminal(80, 4)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setStatus(RICH_STATUS)
   await vt.waitForRender()
   app.setFullscreen(true)

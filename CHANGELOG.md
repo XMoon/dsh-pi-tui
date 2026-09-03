@@ -7,1182 +7,484 @@
 
 ## [Unreleased]
 
+## [0.4.0-alpha.2] - 2026-09-03
+
+### 安装与版本对应
+
+当前预发布页面建议按以下顺序安装，先安装匹配的 DSH，再将 TUI bundle
+加入 profile：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.5
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+需要保留 DSH `0.1.1-rc.2` 的用户应改用 `@xmoon76/dsh-pi-tui@0.3`；DSH
+`0.1.2-alpha.2`/`alpha.3` 用户应固定 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`。
+完整版本矩阵和更新/卸载命令见 README 的「安装」。
+
+### 新增
+
+- **任务中心（Task Center）。** `/tasks` 重构为三层任务表面：footer 徽标 →
+  Quick Tasks（footer 下方向键，Active 范围）→ 完整任务中心（`/tasks`，
+  All 范围）。支持显式搜索模式（可打印键只作为查询文本，绝不触发破坏性
+  操作，Esc 先退出搜索再关闭面板）；`Stop`（`S` → `Y` 确认）取代原来的裸
+  `i` 中断，并在派发时重新校验会话栅栏与 agent 注册表；footer 徽标分别
+  显示运行/总数与未确认的失败提醒，打开任一表面只确认实际可见的失败行。
+- **终端完成通知。** 主 agent 在终端失焦时完成回合，会通过系统通知提醒
+  （OSC 9 / OSC 777 / 铃声，按终端环境自动选择）。只在真正 settle 时触发，
+  不会在重试、压缩、队列续跑或子代理结束时打扰。`/settings` 新增
+  `Completion notification` 模式（Unfocused / Always / Off）与方式
+  （Auto / OSC 9 / OSC 777 / Bell）两行。
+- **`/settings` 新增 Subagent model selection。** 开关与 "Subagent allowed
+  models" 路由选择器直接读写官方 `subagent-model-selection` 设置（默认
+  关闭；开启需要至少一条路由；在新会话组合时生效，不改写运行中的会话）。
+- **工具卡 action payload 成为一等公民。** 紧凑工具卡直接展示 action 载荷，
+  展开保留空行，窄宽度与零宽行有明确处理。
+
+### 改进
+
+- **`/sessions` 与 `/resume` 更快、可取消。** picker 输入优先打开（加载中
+  Enter 绝不触发 resume）；每个会话只有一次合并投影读取（live 行读内存
+  快照、冷行读持久化缓存、真正的 cache miss 才做有界 observe）；渐进富化
+  可取消，关闭/退出/重开都会中止扫描；`/resume <参数>` 共享同一生命周期。
+- **粘贴处理更可靠。** 大粘贴后 `Ctrl+G` 外部编辑器不再丢内容（`$EDITOR`
+  看到展开后的完整文本）；出站草稿（steer / submit / queue / 子代理提交）
+  统一展开 paste marker，不再把字面 marker 泄漏到 wire。
+- **编辑器提交键独立。** 新增 `tui.editor.submit` 绑定（仅编辑器消费），
+  question/搜索框不再被 `submit: ctrl+x` 类配置误提交。
+
+### 修复
+
+- **终端 resize 后各表面保持状态。** 队列窗格 / Todo 面板 / 历史搜索
+  overlay / 审批弹窗在缩放与全屏切换后重建内容而不丢失组件状态、焦点与
+  叠层语义。
+- **diff 视图不再显示无法证明的行号。** DSH 的 FileDiff 契约不带 hunk
+  锚点时隐藏行号 gutter，绝不猜测绝对行号。
+- **Focus 展开视图的 initial user prompt 保持在 Thought 之前。** 系统行
+  注入不再把首条用户消息挤到 Thought 下方。
+- **Todo 面板关闭后内置 summary 恢复。** 扩展宿主存在时，关闭面板不再让
+  dock 的 todo 摘要永久为空。
+- **稳定性加固。** 进程槽持有至最终 dispose、编辑器挂载/组件 dispose
+  硬化，减少退出与 HMR 场景下的竞态。
+
+### 兼容性
+
+- **最低 DSH 版本提升到 `>=0.1.2-alpha.4`**（原为 `>=0.1.2-alpha.2`）。
+  低于 alpha.4 的运行时收到启动提示：alpha.2/alpha.3 回退到
+  `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`，更旧的运行时回退到 0.3。
+- 开发/测试依赖与 Source Mode pin 同步到 `dsh-v0.1.2-alpha.5`；发布包
+  peer 下限保持 `>=0.1.2-alpha.4`。
+
+> **已知限制：** 当前生产默认后端仍为 Direct；remote attach 暂不支持。
+
+## [0.4.0-alpha.1] - 2026-09-01
+
+### 安装与版本对应
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.3
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+需要保留 DSH `0.1.1-rc.2` 的用户应改用 `@xmoon76/dsh-pi-tui@0.3`。
+
+### 新增
+
+- **Footer 自定义命令项。** `/footer` 的 Add picker 新增
+  `+ Create Custom Command`，可创建带刷新间隔、超时与语义色的自定义命令
+  条目；命令只从 USER 层 trusted 来源激活（项目配置永远不能提供或激活
+  命令），渲染路径永不 spawn。
+- **`/model` 选择按 live Agent 持久化。** 每个 live Agent 拥有自己的模型
+  选择引用，footer 与 `/model` 跟随当前 Agent；全局默认与 Session 本地
+  选择分离，latest-wins 栅栏防止迟到操作覆盖新意图。
+- **Focus 展开视图恢复 steer 时间线。** 展开的 Thought 中 initial user
+  保持在 Thought 前，后续 steer/user 回到实际发生位置；折叠 Message 成为
+  第三个 process slot（Think → Tool → Message），显示最新最多 3 行。
+- **全屏鼠标滚轮步长可配置。** `/settings` 新增 `Mouse wheel lines`
+  （1/2/3/5/8，默认 1）。
+- **Todo 面板交互优化。** ≤5 条时两态（summary ↔ list）；快速连点合并为
+  一次手势，不再"一闪就消失"。
+- **长会话搜索改为稳定的索引化投影。** 全屏搜索基于稳定条目身份与单一
+  语料源，查询只遍历脏条目（O(#dirty)），跳转按稳定 turn 锚定。
+- **状态行与 `/status` 上下文读数统一去重。** 普通刷新读缓存，`/status`
+  强制一次测量进缓存，面板与 footer 读数不再分叉。
+
+### 修复
+
+- 显式 cold resume 在 TUI mount 前显示启动进度（`Resuming session…` /
+  `Preparing conversation…`），不再让空白终端看起来像卡死。
+- 搜索 overlay 的 Next/Prev 不再跳过新出现的匹配。
+- 实时尾部追加刷新整个读组，搜索跳转不锚定旧窗口。
+- 立即退出的 footer 命令子进程不再崩溃 TUI（EPIPE 吞掉）。
+
+### 迁移说明
+
+- **0.4.0-alpha.1 切换到 DeepSeek Harness 0.1.2。** 声明支持范围
+  `>=0.1.2-alpha.2`；保留 DSH 0.1.1 的用户固定安装
+  `@xmoon76/dsh-pi-tui@0.3`。
+- Agent preset 身份按 roster 解析；旧数据中省略的 `code` 默认值在 roster
+  不含 `code` 时回退到 `ptc`。
+- 上游 alpha 注意事项：DSH 0.1.2-alpha.1 的 subagent dispose 行为仍有
+  上游 caveat。
+
 ## [0.3.6] - 2026-08-31
 
 ### 新增
 
-- **`@` 提及与 `/image` 参数现在共用统一的文件补全引擎。** 两种入口共享路径解析、排序、引号和目录续补逻辑，同时保留 `@` 的 Host 文件范围与 `/image` 的本地文件范围。补全支持带空格的引号路径、CJK 相邻文本、Windows 分隔符与 `fd`/回退扫描；异步结果遇到输入、会话或作用域变化时会安全丢弃，不会覆盖较新的下拉框。
-- **长会话支持有界的转录窗口。** 全屏下可以按重叠页面浏览较旧或较新的回合，并用 `Ctrl+End` 跳回最新输出；搜索、切换子代理和回到实时尾部会保留正确的窗口锚点与跟随状态。冷恢复改用批量 hydration 与线性分组，渲染不再为每一帧物化完整历史。
-- **提交现在有即时反馈与可观测的延迟时间线。** 编辑器清空到 DSH 首个权威事件之间会显示 `Submitting…` 或 `Queued…`，调试诊断会记录从接受、派发、入队/回合开始、`user.message` 到首个 assistant chunk 的阶段耗时；这只是状态反馈，不会制造伪造的 transcript 行。
-- **新增双模式本地开发工具链。** `dev:doctor` 只读检查当前 worktree，`dev:bootstrap` 幂等修复依赖，`dev:shell` 进入 source-mode 环境；main 的 registry 模式与 next 的精确 SHA source 模式各自维护独立的 `node_modules` 与可复用的 source-pack 缓存。
+- `@` 提及与 `/image` 参数共用统一的文件补全引擎（路径解析、排序、引号、
+  目录续补）。
+- 长会话支持有界的转录窗口（重叠翻页、`Ctrl+End` 回最新、窗口锚点保留）。
+- 提交即时反馈与可观测延迟时间线（`Submitting…` / `Queued…`）。
 
 ### 变更
 
-- **`/footer` 保存流程改为可发现且事务化。** Row Selector 新增 `Save changes` 与 `Unsaved / No changes / Saving…` 状态；脏状态下按 `Esc` 会先确认 Save & Exit、Discard & Exit 或 Keep Editing。保存会等待设置写入成功后才关闭，失败时保留编辑内容并允许继续修正。
-- **会话写入安全模型改为 fail-closed。** 删除提交前全量 divergence guard 与一次性 force-through 路径；可写 Session 必须先取得 owner lock，并由 process lease、cooling verifier 与 operation barrier 共同维护单写者边界，避免每次提交重读整个日志和提供可能破坏日志的强制写入。
+- `/footer` 保存流程可发现且事务化（Save changes / Unsaved 状态、Esc
+  确认）。
+- 会话写入安全模型改为 fail-closed（owner lock + 单写者边界）。
 
 ### 修复
 
-- **异步补全结果始终重绘当前活动屏幕。** 全屏切换期间，晚到的 autocomplete 提交不再只写入已停止的主屏幕；新请求、旧请求和取消路径也不会互相覆盖。
-- **Footer 在窄终端、全屏切换与 command surface 下遵守真实可用预算。** 逻辑行最多占两条物理行，Host 指令会独立保留；零预算、不可见指令、非有限尺寸和 ANSI 彩色输出都会走有限且安全的布局/截断路径，不再出现黑边、越界或隐藏提示。
-- **转录窗口切换、搜索和实时跟随不再丢失 viewport 锚点。** 翻页或摘要重放后会恢复用户正在看的顶部/底部内容；统计 replay 也按当前生命周期隔离，迟到的旧回合事件不会污染新状态。
+- 异步补全结果始终重绘当前活动屏幕。
+- Footer 在窄终端/全屏切换/command surface 下遵守真实可用预算。
+- 转录窗口切换、搜索与实时跟随不再丢失 viewport 锚点。
 
-> **已知限制：** 当前生产默认后端仍为 Direct；M2–M8 尚未完成，因此暂不支持 remote attach。
+> **已知限制：** 当前生产默认后端仍为 Direct；M2–M8 尚未完成，暂不支持
+> remote attach。
 
 ## [0.3.5] - 2026-08-28
 
 ### 新增
 
-- **新增 Pi/pi2dsh 兼容性双门禁。** `gate:pi-surface-compat` 在真实
-  `VirtualTerminal + TuiApp` 上验证 Pi component 的 render、resize、raw
-  input、focus、隐藏/显示与 dispose 生命周期;`smoke:pi2dsh` 则使用构建出的
-  精确 candidate tarball、发布版 `pi2dsh@0.20.0` 与隔离的真实 tmux TTY,
-  验证 custom component 的 render/input/resize/dispose 往返和 Host 恢复。
-  Unstable mount 在未指定宽度时跟随可用终端宽度,显式宽度仍保持固定;外部
-  smoke 不进入 `postpack`,但会阻断 CI 发布链。
-- **`/footer` 配置器重构为层级式 status-line 编辑器。** 旧界面把所有
-  Row / Zone / Available / Preview / Help 摊在一屏,靠 `Tab` 切行、
-  `Shift+Tab` 切区域、`Shift+↑/↓` 排序;现在改为层级式编辑:
-  `/footer` 先进入 Row Selector(每行显示条目数),`Enter` 进入
-  Edit Row——Left/Right 只是视觉分组,`↑/↓` 在整行条目间顺序移动,
-  `←/→` 左右换侧(保持目标侧稳定顺序,光标跟随),`Space` 移除条目
-  (自动回到条目池),`F` 保留为直接循环 style 的快捷键,`M` 进入
-  Move Mode 在所属侧内排序(`Shift+↑/↓` 仍作为兼容快捷键,但帮助
-  文案不再宣传)。`Enter` 打开 Item Editor:Style(单格式条目自动
-  隐藏;picker 用条目自身对该格式的真实渲染作示例)、Tone(持久化
-  既有 semantic token,`auto` 即移除覆盖)、Advanced(Prefix /
-  Suffix / Importance 内联编辑,空值 = 定义默认,Importance 拒绝
-  越界值;另有一键 Reset to default)。`Available` 不再是常驻区域:
-  `A` 打开可搜索的 Add Picker(对 label / id / description 做大小写
-  不敏感子串过滤,选中项下方显示描述;有搜索词时第一次 `Esc` 先
-  清空搜索)。Preview 与 contextual help 成为固定 shell——每页一条
-  简短帮助行(不再压成一条超长提示),只有中间列表随光标滚动,
-  任何终端尺寸(40/80/120 列 × 10/24/40 行矩阵)下 Preview 与帮助
-  都不会滚走。行为变化:保存键从 `Enter` 改为 Row Selector 页的
-  `S`(`Enter` 现在是导航键);`Esc` 逐页返回,首页 `Esc` 关闭并
-  取消,仍不触碰当前生效布局。持久化 schema(`FooterLayoutV1`)、
-  扩展条目能力、默认布局输出与无迁移契约均不变。Add 路径同时执行
-  持久化解析的每行 32 条上限——满行时 picker 显示明确提示,拒绝第
-  33 条而不是让之后的保存永远失败。
-- **Footer 支持用户自定义静态文本条目。** Add Picker 末尾新增 `+ Create Custom Text`,可创建带文本、默认语义色和显示名称的用户条目;创建后的定义可编辑、重命名或删除,并且只从 USER 设置层读取。它们与布局中的放置 Tone 分开,仍可像内置条目一样在 `/footer` 中显示/隐藏、移动和排序。
-- **内置 Footer 条目现在提供有意义的有限 Style。** 持久化仍只使用既有的
-  `format` 字段,常用条目新增了可区分的变体:Model 与 Permission preset
-  支持 badge/plain/compact,Working directory 支持 short/basename/full,
-  Context 支持 bar/percent/full,Token usage 支持 io/total/compact,
-  Performance 支持 full/speed/平均首 token latency,Turns/steps 支持 both 或单独计数器。
-  Cache hit 的 compact 输出也不再与 full 相同;省略 format 时所有旧默认输出
-  保持不变。
-- **插件主题的选择身份改为 SOURCE-QUALIFIED(`plugin:<owner>/<id>`)。**
-  之前插件主题与本地自定义主题文件共享同一个裸名字空间:`Foo.json` 与
-  插件注册的 `name: "Foo"` 会在 picker 里出现两个完全相同的值,真正
-  apply 时插件永远压过文件,持久化的 `custom:Foo` 含义随插件是否存在
-  而变。现在 `/settings` 的取值是 `auto|dark|light`、`file:<name>`、
-  `plugin:<owner>/<id>`(owner 为插件稳定 fiber 名,与 M4 footer 键
-  相同的编码),显示名仍为友好的 `Foo`(同名时标注 `(file)`/`(plugin)`)。
-  插件卸载后持久化的插件选择确定性地回退到内置 dark,绝不会悄悄变成
-  同名文件;旧文档里的 `custom:<name>` 仍作为文件主题读取,新写入
-  一律使用带来源前缀的形式。Theme registry 的读取侧新增
-  `selectableValues()` / `paletteForSelectable()` / `displayNameForSelectable()` /
-  `hasSelectable()`;health 协议也改为按可取值寻址。
-  `/settings` 的 Theme picker 全程以 source-qualified value 作为行 id,
-  display label 只做展示、绝不回传成 identity(打开时冻结的取值在 HMR
-  重载后也不会被重定向到同名新贡献);label 在 builtin/file/plugin 三方
-  及人为带 `(file)`/`(plugin)` 后缀的文件名下都保证唯一。选中后外层
-  设置行通过 openSettings 的 updateValue seam 显示回友好名(绝不显示
-  裸 `plugin:` 串),再次打开 submenu 时 `← current` 按当前选择的
-  source-qualified identity 比较、而不是 display 字符串——设置面板打开
-  期间新建的同名文件主题绝不可能冒领当前标记。选择提交是事务式的:
-  只有真正 apply 成功才更新"当前选择"并改写外层行;stale 选择(确认前
-  贡献已卸载)或 apply 失败会把外层行与当前选择一并回滚到上一个选择,
-  失败的选取既不会伪造当前态,也不会抢走进行中的 `auto` 终端检测。
-  自定义文件主题名校验为目录内 basename(拒绝 `..`、路径分隔符、控制
-  字符与空名),themes 目录内逃逸出目录的 symlink 也不会被加载——
-  手改/损坏的持久化 `file:../../x` 只会确定性地落入"主题缺失"回退,
-  绝不读取 themes 目录之外的文件。
-- **Theme-unload hook 增加 generation lease。** runner 的
-  `setThemeUnloadedHook` 现在返回一个 disposer,且只有当前 generation
-  的 disposer 能清除回调——旧 runner 的 HMR cleanup 永远不会清掉新
-  runner 的 hook,也不会在窗口期把卸载通知送进已 dispose 的 app(与
-  既有 surface seam 的 stale-detach 规则一致)。
-
-- **`Icon style` 设置:在 Emoji、Symbols 与 Minimal 三种结构图标风格间
-  切换。** Emoji 是默认且与之前完全一致;Symbols 用一套少量、单格
-  (1-cell)的 Unicode 符号表达同样的语义(tool card、context card、
-  Focus disclosure、Working 指示);Minimal 隐藏普通装饰性图标,只保留
-  真正有状态或交互价值的 marker(`⨯` error、`∎` interrupted、`?`
-  question、`▸/▾` disclosure、`∙/◦` working)。图标统一收敛到 semantic
-  registry(`src/icons.ts`):fold 状态只保存 semantic identity,不保存
-  最终 glyph,所以 `/settings` 切换后同一运行实例内已渲染的卡片立即换
-  图标,无需重启或重新加载会话;第三方扩展、用户/assistant/tool 内容
-  与图片 attachment marker 均不受影响。
-- **快捷键现在可用户编排。** 每个 Host 快捷键都是语义 action
-  (`app.*`),通过 context-aware keymap 解析,因此 UI(页脚提示、
-  `/help`、`/keybindings`)始终显示**生效**的按键。在 `dsh-pi-tui`
-  settings 命名空间的 `keybindings` 字段配置覆盖,然后执行 `/keybindings
-  reload` 应用(显式 reload——改设置后执行 reload 即生效,无需重启):
-  字符串表示单个按键,数组表示多个按键,`false` 禁用某 action 的
-  按键,`leader` 键加 `<leader>X` 序列支持多键绑定(M6)。任何用户声明
-  都会**替换**该 action 的内置默认键(仅 leader 的绑定是唯一触发而
-  非叠加在内置键之上;直接 + leader 混合保留两个用户触发;`false`
-  移除全部触发)。缺少或无效的 `leader` 键会让 `<leader>X` 序列失效
-  并警告,该 action 回落到内置默认键——被忽略的坏配置不会悄悄删掉
-  内置键。普通可打印键永远不能绑定到 Host action;坏配置只是
-  警告,绝不会导致启动失败(fail-soft);冲突(同键 + 作用域重叠 +
-  同优先级)会被诊断并停用——绝不静默 last-write-wins。
-  `DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有用户覆盖。`/keybindings`
-  显示生效表,`/keybindings conflicts` 列出冲突,`/keybindings reload`
-  重新读取设置(fail-soft——读取异常时保留 last-known-good keymap 并
-  报告错误),`/keybindings reset` 通过 settings 服务清除覆盖并立即
-  重建运行中的 keymap。
-- **`/help` 与 `/settings` 的按键文案改为语义化。** help 行描述语义
-  action(如"按两次 interrupt action"取代"double-Esc"),忙碌偏好改为
-  "Submit while busy"——绝不再写会因改键而过时的物理 Enter/Esc 文案;
-  标签列始终展示生效按键。
-- **子代理查看器守卫改为基于 action。** continuable 查看器按 action id
-  (而非物理键)阻止父级 action,因此改键后的父级快捷键在查看器内依然
-  被阻止——会话安全不再与物理键列表耦合。
-- **新增静态门禁阻止物理快捷键回潮。**
-  `scripts/check-host-keybindings.mts`(已接入 `verify:prepush`)对
-  host 输入路径中新增的 `matchesKey(data, 'ctrl+…'/'alt+…'/'shift+…')`
-  和弦、以及用户可见字符串中写死的和弦标签直接报错,并带有针对受
-  认可的 focused-component/protocol 接缝与 fork 编辑器级按键的
-  白名单。
-- **用户可见的键位文案跟随生效 keymap。** 页脚提示、折叠/队列窗格
-  提示(`to expand`、`to steer all`)、`/help` 行、`/settings` 行与
-  divergence-guard 通知都通过 `keymap.keyHint()/keysFor()` 渲染键标签
-  ——改键后所有文案自动更新;注释只在语义键特有(如 Ctrl+C 和弦、
-  双击 Esc 窗口)时保留键名。
+- **`/footer` 配置器重构为层级式 status-line 编辑器。** Row Selector →
+  Edit Row → Item Editor 三级；`A` 打开可搜索 Add Picker；Preview 与帮助
+  成为固定 shell；保存键改为 `S`。
+- **Footer 支持用户自定义静态文本条目。** `+ Create Custom Text`，只从
+  USER 设置层读取。
+- **内置 Footer 条目提供有意义的有限 Style。** Model / Permission /
+  Working directory / Context / Token usage / Performance / Turns 等条目
+  新增可区分变体。
+- **插件主题选择身份改为 SOURCE-QUALIFIED（`plugin:<owner>/<id>`）。**
+  插件与文件主题不再共享裸名字空间；插件卸载后确定性回退到内置 dark。
+- **`Icon style` 设置。** Emoji / Symbols / Minimal 三种结构图标风格，
+  切换即时生效。
+- **快捷键可用户编排。** 语义 action + context-aware keymap；
+  `/keybindings` 显示生效表、`conflicts` 列冲突、`reload` 重读、`reset`
+  清除；`<leader>X` 多键绑定；`DSH_PI_TUI_SAFE_KEYBINDINGS=1` 忽略所有
+  覆盖。
+- **`/help` 与 `/settings` 按键文案语义化。** 不再写会因改键而过时的物理
+  键文案。
+- **受信任的命令状态行（Claude/Kimi 风格）。** `footer: command` 把状态
+  表面交给用户配置的命令（JSON 快照进 stdin、stdout 渲染、周期刷新、失败
+  回退原生布局）；只有 USER 层的 `footerCommand` 会被执行。
 
 ### 变更
 
-- 问题流与任务浏览器改为通过语义组件 action(`question.*` /
-  `tasks.*`)路由按键;行为与按键保持不变。
-
-
-- **Footer 现在是可组合、可用户配置的表面。** 状态行由统一状态快照
-  之上的语义条目构成(权限预设、沙箱模式、审批策略、plan 状态、
-  focus 模式、agent 预设、模型、工作区、运行状态、queue/tasks/agents/
-  todo 计数、上下文、缓存命中、token 用量、性能、回合/步骤、版本、
-  查看器范围,以及旧扩展段)——每个条目都有独立的 formatter、tone、
-  importance 与 min-width。default 与 compact 预设渲染与之前完全一致;
-  新的 `custom` 预设接受版本化 `footerLayout`(1–2 行、左/右区域、
-  分隔符、有限 formatter、语义 tone、prefix/suffix、importance),以
-  嵌套设置对象持久化。非法布局会警告一次并回退到默认——TUI 始终能
-  启动。
-- **`/footer` — 交互式 Footer 配置器。** 开关条目、在左/右区域间
-  移动、Shift+↑/↓ 排序、Tab 切换行、F 循环 formatter,并实时预览由
-  真实 Footer 引擎基于当前会话状态合成的效果。`S` 保存(持久化),
-  `Esc` 取消且不影响当前生效布局。无会话时也可使用。`/statusline`
-  是它的别名(为其他 agent 的习惯命名;`/status` 保持优先匹配,
-  别名在补全目录中标记为 "(alias of /footer)")。
-- **插件可以贡献可配置的 Footer 条目。** 新的 `chrome.footer.item`
-  槽位(`slot.chrome.footer.item` 能力)让插件注册纯数据 Footer 条目
-  (label、segment、默认区域、importance、min-width),用户可像内置
-  条目一样开关、排序、左右放置——标准的 `replace()`/`invalidate()`
-  模式保持其实时性。条目的配置身份是 `ext:<owner>/<id>`,跨 HMR
-  稳定;引用已卸载插件条目的布局保留引用,插件重载后自动恢复。
-  运行时归属身份与配置身份分离:注册 owner 带 fiber uid(两个匿名
-  兄弟 fiber 是不同 owner,互不冲突),只有持久化键用稳定名;同稳定
-  键的存活注册是显式注册错误。旧的 `chrome.footer.status` 槽位不变。
-- **受信任的命令状态行(Claude/Kimi 风格)。** `footer: command` 把
-  状态表面交给用户配置的命令:当前状态快照(不含 secret、凭据、
-  提示词)以 JSON 序列化到命令的 stdin,其 stdout——仅保留 SGR 颜色
-  与 OSC 8 超链接——渲染状态表面。运行器是异步且带缓存的(两次启动
-  间隔 ≥1 秒、最新快照胜出、16 KiB 输出上限、硬超时并终止进程树、
-  过期结果永不提交),失败自动回退到原生布局,Host 指令表面(如
-  Ctrl+C 退出提示)始终叠加在最上层。**周期刷新:** 配置的刷新间隔是
-  周期触发器而不仅是节流——命令跑完后自动排下一轮,空闲状态行(时钟、
-  电池、外部 git 状态)不会被冻结在第一次输出上。含 NUL 等控制字符的
-  命令在解析层被拒绝,spawn 的同步失败也走同一回退路径,绝不断开
-  启动/配置应用链。命令 stdin 读到的状态快照与 viewer 切换是事务一致
-  的(子会话 cwd 与主会话主题绝不同帧出现)。`footerCommand` 是设置
-  文档 DTO 的正式字段:未来 Remote 适配器的整文档 replace 不会把它
-  擦掉。**安全:** 只有当命令位于你的设置文档的 USER 层时才会被执行
-  ——仓库/项目提供的 `footerCommand` 永远不会被执行。
-- **Focus 与 Transcript 的窄屏/全屏表现进一步稳定。** 全屏 Focus 支持按 Thought root 批量展开/收起和单卡点击,切换与缩放时保留正确的 viewport;Thinking 卡片使用 `🌊` marker。Transcript 为内容保留右侧 2-cell gutter,折叠和重绘不会覆盖尾部。
+- Footer 成为可组合、可用户配置的表面（`custom` 预设 + 版本化
+  `footerLayout`）。
+- 插件可贡献可配置的 Footer 条目（`chrome.footer.item` 槽位）。
+- 问题流与任务浏览器改经语义组件 action 路由按键。
 
 ### 修复
 
-- **空输入不再制造消息或副作用。** 之前空编辑器直接按 Enter,或
-  Ctrl+S(空草稿 + 空队列)会把一条空 user message 送进会话(首次
-  Ctrl+S 还会先创建会话);现在真正空(序列化后无内容且未挂载图片)
-  的 Enter / Ctrl+Enter / Ctrl+S 一律静默 no-op——不创建会话、不写
-  history、不产生空消息、不动队列。队列非空时 Ctrl+S 仍然照旧把
-  整批队列 steer 进当前 turn(空草稿没问题),`!` / `!!` shell 前缀
-  仍是有效 payload(不被空判断误杀),图片草稿(含纯图片)照常提交。
-- **编辑器 ↑/↓ 历史现在按当前会话投影。** 同一目录下多个会话的历史
-  不再混在一起:存在 live session 时 ↑/↓ 只看当前 session 自己的行
-  (旧 v1 legacy 行不猜归属,仍可通过 Ctrl+R 的 Current directory /
-  All directories 搜到);尚未创建会话时保持当前的 cwd 级行为;到
-  头即停,不会悄悄回落到 cwd 历史(显式更大范围用 Ctrl+R)。存储
-  仍是 per-cwd JSONL,`lastHistoryContent` 去重锚点仍是该文件真正
-  的最后一行(按文件去重,绝不变成按会话去重)。
-- **终端窗口标题改为人类可读。** 之前标题是
-  `dsh-pi-tui · <短 cwd> · <完整 session UUID>`,现在优先显示会话的
-  presentation title(`dsh · <title>`,自动或 `/title` 改名都跟随),
-  没有标题则显示短 cwd,再否则是 `dsh`;完整 session id / model /
-  preset 从标题移除。标题按终端可见宽度截断(CJK/emoji/ZWJ 安全,
-  上限 40 cells),并在会话创建/恢复/切换、`/title` 改名与
-  session/title 事件、advanced `ui.host.setTitle` 时即时刷新;写入前
-  会清洗 ANSI/OSC/控制序列,恶意会话标题不能借标题注入终端控制。
-- **compaction/prune 后的幽灵 Tool Card 不再出现。** 长会话发生
-  工具结果剪枝(或 summary compaction 生成检查点)后,Harness 会追加
-  携带 `surfaceOp: { op: 'replace' }` 的模型专用副本事件;Human
-  Transcript 之前会把这些副本当成新消息渲染,导致 transcript 末尾
-  突然出现一批重复的“幽灵 Tool Card”,并把原始完整结果替换成剪枝
-  后的截断文本。现在 `TranscriptFolder` 在统一入口过滤所有明确的
-  surface replacement(user/message、assistant/message、tool/result
-  一视同仁)——append-origin 历史原样保留,未标记 surfaceOp 的旧
-  session 完全兼容,`/export md` 导出采用同一契约。
+- 空输入不再制造消息或副作用（Enter / Ctrl+Enter / Ctrl+S 静默 no-op）。
+- 编辑器 ↑/↓ 历史按当前会话投影。
+- 终端窗口标题改为人类可读（`dsh · <title>`，清洗 ANSI/OSC）。
+- compaction/prune 后的幽灵 Tool Card 不再出现。
 
 ## [0.3.4] - 2026-08-25
 
 ### 新增
 
-- **Ctrl+R 搜索你的输入历史。** 编辑器上方打开一个模态面板:实时输入
-  过滤历史,`↑/↓` 在匹配项间移动,详情区展示完整多行提示词、目录、时间
-  与会话。`Tab` 循环切换 scope——`Current session`(当前会话)→
-  `Current directory`(当前目录)→ `All directories`(全部目录)(查询词
-  保留)。有活跃会话时 `Current session` 是默认档:只显示当前会话自己
-  的输入(v2 行携带 session id,legacy 行绝不猜测归属);id 在面板打开
-  时一次性捕获,切换会话后下一次 Ctrl+R 搜索的就是新会话;deferred
-  start(尚无会话)时面板回退到 `Current directory` 并隐藏会话 tab。
-  搜索是有界、最近优先的:通过 reverse reader 从 canonical JSONL 存储
-  尾部倒序读取,消耗全局扫描预算(每次搜索在所有文件中最多 5000 条
-  physical lines,绝不是每文件 5000),并优先访问最近活跃的 workspace
-  ——大历史不再每次查询都付出全量解析成本,canonical 文件永远不会被
-  整体读取。结果现在是分页的:当还有更老的历史时,source 返回
-  continuation,可精确从上次停止处继续(不重扫、不重复行)——这是未来
-  "Search older" UI 的基础。`Enter` 把选中的历史文本放回编辑器继续
-  编辑——绝不提交——`Esc` 取消且草稿原样保留。新行以 v2 schema 写入,
-  携带 cwd、时间戳与会话 id,跨 workspace 结果按时间全局排序;旧 v1
-  行永远可读,在无法证明其目录时诚实地显示 `Unknown (legacy history)`
-  (且目录只能在扫描窗口之外证明时可能从 `All directories` 中省略)。
-  `↑`/`↓` 回溯仍只从最近 100 条播种。
-
-- **`/tasks` 以树形展示完整的 subagent 世系。** 浏览器现在读取 durable
-  的后代目录(`listDescendants`):子代理的子代理会挂在父节点之下,按深度
-  缩进并带 `├─` 连接符,顺序为稳定的 pre-order——运行中的孙节点绝不会
-  跳到其 inactive 父节点之上,jobs 仍然作为树后的独立平铺组。已结束的
-  one-shot 子代理仍然可达:`inactive` 只是 live-store 的存在状态,不是
-  结果,所以 Enter 依然能打开其持久化 transcript。浏览器打开时光标落在
-  第一个 RUNNING 子代理上(或第一个活跃 job),但绝不为光标重排树。
-  查看嵌套(深度 > 1)后代时只读——mode 是持久语义,access 是当前表面
-  的权限,只有直接(深度 1)continuable 子代理可从根交互;头部会标注
-  `<mode> · nested · read-only from this parent`(始终显示真实 mode——
-  continuable 或 one-shot)。
-
-- **选中行的超长标签现在会横向滚动(marquee)。** 选中的 task 或 session
-  行标签超出列宽时,标签会水平滚动(停顿 → 每 250ms 一列 → 尾部停顿 →
-  循环),而不是静止截断——只有**主标签**在动;树连接符、当前会话标记、
-  mode 后缀、状态与耗时保持固定,CJK/emoji/ZWJ 不会在字素中间裂开。
-  未选中行保持省略号,每个面板只有一个 marquee 定时器(关闭时销毁)。
+- **Ctrl+R 搜索输入历史。** 模态面板实时过滤，`Tab` 循环 Current session /
+  Current directory / All directories；有界最近优先扫描（全局 5000 行
+  预算）；分页 continuation；`Enter` 放回编辑器继续编辑。
+- **`/tasks` 树形展示完整 subagent 世系。** 深度缩进 + `├─` 连接符，稳定
+  pre-order；嵌套后代只读。
+- **选中行超长标签横向滚动（marquee）。**
 
 ### 变更
 
-- **Thinking 块是 disclosure,不再是 visibility。** `Alt+T` 不再隐藏或
-  显示推理内容——它是唯一的 bulk detail 拥有者:所有 Thinking 块一起
-  折叠(默认)或一起展开,Focus 开/关完全一致。只要模型产生过 reasoning
-  且当前 projection 包含该块,它就一定存在,永远不会悄悄消失。折叠卡片
-  现在是 `▸ Thinking` + 最新一行推理作为 preview + 拥有者提示
-  (regular 是 `alt+t`,fullscreen 是 `click`);展开卡片是 `▾ Thinking`
-  + 完整正文——旧的 shown/hidden × collapsed/expanded 混合模型已删除。
-  `/settings` 把该项改名为 `Thinking detail`(`collapsed` / `expanded`),
-  与 Alt+T 共享同一状态。`Ctrl+O` 现在只拥有 tool/system/compaction
-  的 detail,绝不触碰 Thinking(每种 disclosure 只有一个 bulk 拥有者);
-  fullscreen 下点击仍可单独切换单个 Thinking 卡片(per-card override),
-  `Alt+T` 重置所有 per-card override,搜索命中只 full-reveal 匹配的那
-  一块、不改变 bulk 偏好。该偏好跨越 Focus 与 fullscreen 切换保持不变;
-  离开 fullscreen 时清理陈旧的 per-card 点击状态,regular 永远只跟随
-  bulk。
-
-- **`!` / `!!` shell 行升级为一等公民的编辑器模式。** shell 前缀不再是
-  草稿文本的一部分:在空输入框输入 `!`(本地执行并把命令与输出提交给
-  会话)或 `!!`(纯本地执行,不进会话)即切换到 shell 模式——提示符
-  本身变成 `!`/`!!`,缓冲区内只有命令本身,空 shell 行上按 Backspace
-  或 Esc 回到普通 `❯` 提示符。粘贴 `!git status` 会落成「模式 + 命令」,
-  而不是字面文本,shell 模式文档的每一行都走真实 shell 语义。补全跟随
-  **当前可见**模式:shell 行补全路径(不触发斜杠命令),普通 prompt 行
-  保留斜杠命令补全,补全下拉在 pageUp/pageDown 后仍然存活。Ctrl+C 连同
-  草稿一起退出该模式;模式会完整穿越 busy-Esc、steer 交接与
-  replacement-editor fallback——提交时 host 收到的仍是完整的 `!`/`!!`
-  行。
-
-- **本地 `!`/`!!` shell 卡片改为预览,不再刷屏。** 运行中的卡片折叠为
-  最新 5 行,已结束的卡片最多显示 20 个视觉行(超长行会换行并按多行计),
-  各自带诚实的隐藏行数标记——Ctrl+O(与折叠最近工具回合的同一个主开关)
-  展开到 retained buffer,命令仍在跑时也会实时跟随。capture 层完全不动
-  (字节/行/磁盘上限仍然掌管内存);被约束的只是卡片**展示**的内容。
-  **Alt+K** 快速清除已结束的卡片(运行中的卡片绝不会被清除,进程也不会
-  被取消——那是 Esc 的职责——已经提交的 `!` context payload 不受影响);
-  `!!` 仍然是纯本地。
+- **Thinking 块是 disclosure 不再是 visibility。** `Alt+T` 是唯一 bulk
+  拥有者；`Ctrl+O` 只拥有 tool/system/compaction detail。
+- **`!` / `!!` shell 行升级为一等公民编辑器模式。** 提示符变为 `!`/`!!`，
+  粘贴 `!git status` 落成模式+命令。
+- **本地 shell 卡片改为预览。** 运行中折叠为最新 5 行，已结束最多 20 行；
+  `Alt+K` 快速清除已结束卡片。
 
 ### 修复
 
-- **修复一处启动期 TDZ:footer command 生命周期槽声明过晚,启动回调读取
-  时抛 `ReferenceError`。** `startProcessTui` 捕获的 `onTerminalResize`
-  回调读取 `footerCommandRunner`,但该槽声明在约 940 行之后的 footer
-  settings 块里;首次 surface-geometry 同步就会触发该回调
-  (`lastCommandWidth` 初始为 0),而启动期间 keybinding rebuild 的
-  invalidate → requestRender 正可达此处——读取命中 temporal dead zone。
-  异常又恰好被 keybinding 启动应用的 fail-soft catch 吞掉,日志误报为
-  「keybindings startup apply failed — keeping the last-known-good
-  configuration」,尽管 rebuild 的顺序是 keymap 先行、invalidate 收尾,
-  新键表实际已经生效。修复:两个 footer 槽上移到与
-  `stopPluginKeybindingSync` / `catalogCoordinator` 相同的生命周期槽区
-  (同时位于 `cleanup()` 与 `startProcessTui` 之前);`cleanup()` 现在显式
-  释放 statusStore 订阅并 dispose runner(与 arm 路径对称,双保险幂等);
-  启动与 `/keybindings reload` 的诊断不再声称「保持 last-known-good」
-  ——post-rebuild 的 UI 失效异常下新键表已然生效。`test/rules.test.ts`
-  新增 startup-eager callback 审计:`startProcessTui` 参数中的启动期急切
-  回调(当前仅 `onTerminalResize`)与调用期即求值的属性值,只能引用在
-  调用之前声明的 runner 作用域绑定;输入期回调(onSubmit、onDequeue、
-  onClipboardPaste 等)对后声明绑定的惰性捕获仍属合法,不在审计范围。
-
-- **Linux Wayland/X11 下 Ctrl+V 图片粘贴恢复可用。** 剪贴板 runner 执行
-  `wl-paste`/`xclip` 时未显式指定编码,二进制 stdout 被当作 UTF-8 解码,
-  非法字节被替换——PNG magic 变成 `EF BF BD …`,图片解析器无法识别
-  载荷,粘贴静默无反应。runner 现在强制 `encoding: 'buffer'`,stdout/
-  stderr 全程保持原始字节,并有逐字节回归测试守护该路径。Ctrl+V 也
-  补进了 host 保留键清单,与 host 自身的生命周期处理保持一致。
-
-- **Task 弹层不再在边框旁出现黑色遮罩。** 声明了固定宽度的带框弹层现在
-  精确填满该宽度(`Frame(child, true)`):picker、task 浏览器、设置与
-  输出查看器盒子在每一行都占满声明的矩形——compositor 补出来的空白
-  (深色终端上就是一条黑带)消失了。按终端宽度计算的 approval 对话框
-  保持不变。
+- 启动期 TDZ 修复（footer command 生命周期槽声明过晚）。
+- Linux Wayland/X11 下 Ctrl+V 图片粘贴恢复（强制 buffer 编码）。
+- Task 弹层不再在边框旁出现黑色遮罩。
 
 ## [0.3.3] - 2026-08-24
 
 ### 新增
 
-- **continuable 子代理查看器现在可交互。** 从 `/tasks` 进入 `continuable`
-  子代理时,打开的是一个实时对话界面:编辑器持有子代理自己的草稿(与主
-  会话草稿隔离,再次进入时保留),回车把文本作为子代理的**下一回合**
-  通过 `ctx.subagents.followup` 投递——FIFO,运行中的子代理不会被中断
-  或 steer,非活跃的子代理会自动冷恢复。查看器内的编辑器绝不触达父会话
-  (其中的 Ctrl+S/Ctrl+Enter/Alt+↑ 均失效),投递失败时文本会合并回子
-  代理草稿(不丢失、不错发),发送期间切换查看器时,结果只恢复到原子
-  代理的草稿槽。one-shot 子代理保持严格只读。查看器打开期间,页脚
-  切换为**子代理自己的身份**(`[subagent · continuable]` 徽章、标签、
-  activity、cwd 与子代理自己的 turns/steps/stats),退出后恢复主会话
-  页脚。
-- **任务浏览器显示子代理 mode。** 每个子代理行都标注为
-  `subagent · <label> · continuable` / `· one-shot`,按下 Enter 之前就
-  能知道查看器是否可交互;mode 是不可截断的后缀(长标签会被截断,mode
-  不会),且绝不由 running/inactive 状态推断。
-- **Focus Mode: 把运行中 turn 的中间过程折叠进一个 live Thought 区块。**
-  `/focus`(或 `/settings` 中的 `Focus mode` 行)将 transcript 切换为投影
-  模式:agent 工作时,每个 turn 的思考、工具调用与中间回复会折叠成一张
-  紧凑的 `◐ Thought 16s · 8 tools · read ×4 …` 卡片,带 reasoning 预览与
-  最新一次工具调用。随时点击卡片——即使 turn 仍在运行——即可展开完整
-  过程;展开区域会持续接收新的流式内容,`turn/end` 不会收回你的展开选择。
-  Focus 开启时还会向 system prompt 注入一条指令:用户只能看到最终文本
-  消息,所以一切结论都必须写进最终回复。WorkingIndicator、session
-  数据、search/export、subagent viewer 与其它交互全部保持不变;Focus
-  OFF 与之前的版本行为完全一致。
-- **`/settings` 新增 `Home/End keys` 可配置项。** fullscreen 下 Home/End
-  存在两种用户习惯:有人期望它们控制输入框,有人期望它们滚动对话。新的
-  `Home/End keys` 行选择行为——`Input`(Home/End 在输入框内移动,
-  Ctrl+Home/End 滚动对话)或 `Viewport`(默认;Home/End 滚动对话,
-  Ctrl+Home/End 在输入框内移动)。选择立即生效并跨重启持久化;默认行为
-  保持不变。
-- **`@` 文件提及以绝对路径发给模型。** 编辑器保留你输入的简洁相对形式
-  (`@src/foo.ts`),但在提交时,每个能解析到真实文件的提及都会被规范化为
-  完整路径(`@/home/…/src/foo.ts`),模型无需猜测文件在哪个工作区。支持
-  相对路径、`./`、`../`、`~` 与带引号(`@"dir with spaces/f.ts"`)形式;
-  解析不到的提及(拼写错误或非路径的 `@` 词)原样发送。邮箱地址与
-  `pkg@1.0.0` 之类的文本绝不会被改写。
-- **任务浏览器支持按行类型过滤。** 在 `/tasks`(或 ↓/Ctrl+J 触发器)中按
-  Tab 循环 `All → subagent → bash → pwsh → …`;header 显示当前作用域
-  (`[bash]`)且计数随之变化。浏览器打开时,光标也会落在第一个 *运行中*
-  的 subagent 上,而不是在 subagent 目录异步加载期间一直停在第一个 job。
-- **Pi 风格对话 rewind:`Esc Esc`(或 `/rewind`)从更早的用户回合 fork
-  当前对话。** 编辑器为空且 agent 空闲时,快速按两次 Esc 会打开一个
-  选择器,列出会话中所有已完成的用户提示(最新在上,每回合一行,可搜索)。
-  选中一个会创建新的子会话,其历史恰好止于该回合之前(记录
-  `parentSession` 与 `seedLength`),切换到它,并把选中的提示回填到编辑器
-  供修改——不会自动发送任何内容。原会话从不被修改、截断或删除,仍可
-  通过 `/sessions` 回到;`/sessions` 的两个视图(Current directory 与
-  All directories)现在都渲染完整的 lineage 树(fork 子会话、rewind 分支
-  与 subagent 都挂在各自的 parent 之下,带 `└─` 前缀;Current 范围内,
-  父在别的工作区/窗口外的分支以深度 1 孤儿显示,不会丢失)。Rewind 只回退
-  对话:工作区与外部副作用从不回滚,历史
-  图片附件不会被重新暂存(选择器会标记多模态提示,恢复时给出警告),
-  忙碌时按一次 Esc 仍只取消——只有空闲 + 空编辑器 + 双击 Esc 才会打开
-  选择器。
-- **`/fork` 与 `/rewind` 共用同一条 fork 链路。** 两者都通过同一段代码
-  创建子会话(解析记录 preset → composition → 带
-  `parentSession`/`seedLength` 的 agent 创建),因此 preset、provider/model
-  与 cwd 的继承在两个表面之间永远不会漂移;`/fork` 现在使用当前会话的
-  cwd,而不是启动时捕获的值。
+- **continuable 子代理查看器可交互。** 实时对话界面、子代理自己的草稿、
+  FIFO 投递、失败合并回草稿；one-shot 保持只读。
+- **任务浏览器显示子代理 mode。** `continuable` / `one-shot` 标注。
+- **Focus Mode。** 运行中 turn 的中间过程折叠进 live Thought 区块，点击
+  展开持续接收流式内容。
+- **`/settings` 新增 `Home/End keys`。** Input / Viewport 两种习惯。
+- **`@` 文件提及以绝对路径发给模型。**
+- **任务浏览器按行类型过滤。** Tab 循环 All → subagent → bash → pwsh。
+- **Pi 风格 rewind：`Esc Esc`（或 `/rewind`）。** 从更早的用户回合 fork
+  对话；原会话从不修改。
+- **`/fork` 与 `/rewind` 共用同一条 fork 链路。**
 
 ### 变更
 
-- **Esc 不再清空你的队列。** 中断 agent(忙碌时按一次 Esc,空闲时按两次)
-  现在会保留已排队的输入——与 web Stop 按钮相同的 `keepInbox` 语义。
-  当前 turn 中止时,待处理队列被 park 而不是被整体清空;dsh 目前在中断
-  后会将队列 park(自动继续需要上游 dsh 能力,代码中已标注跟踪)。
-- **`/sessions` 按目录限定范围。** Main/Subagents/All 三个 tab 已移除:
-  选择器默认打开 `Current directory`(当前所在 workspace 的会话),Tab
-  切换至 `All directories`(所有主会话,按 workspace 分组,不再截断)。
-  subagent 会话不再是选择器的一个类别;`/tasks` 与 subagent 查看器才是
-  进入子会话的面。
-- **问题 Review 页回归纯审阅。** 末尾的 Submit/Cancel 二选一控件已删除:
-  Enter 提交整批答案,Esc 取消,`←` 返回上一题修改。没有焦点、没有方向键
-  ——只有你直觉里的那几个按键。
+- Esc 不再清空队列（keepInbox 语义）。
+- `/sessions` 按目录限定范围（Current directory / All directories）。
+- 问题 Review 页回归纯审阅（Enter 提交、Esc 取消、`←` 返回）。
 
 ### 修复
 
-- **Session transition 现在是单写事务。** `/new`、`/fork`、`/rewind` 与
-  `/sessions` 切换统一走同一个事务(顺序由 `src/transition.ts` 固定并
-  单元测试):先让**旧** agent 安静(`whenIdle`——busy 时的切换现在会
-  等待当前活动结束,而不是打断它),在旧锁仍持有下做最终 flush,再创建/
-  恢复子会话,**COMMIT(同步临界区,不做任何锁变更:guard 重置、
-  live 替换与 generation 递增)**,之后的旧 handle 收尾
-  是 best-effort。这关闭了三个 review
-  blocker:(1)两个 transition 永远不会交错——身份检查不可能在 await
-  间隙被并发切换覆盖;(2)子会话一旦创建就**绝不回滚**——`dispose()`
-  只能停止 agent,不会删除已持久化的会话,旧的"先创建后 flush"顺序在
-  flush 失败时会留下用户从未进入的持久分支;(3)**旧会话的 owner.lock
-  只在旧 agent 安静之后才释放**——被中止的正在运行的回合会在 finally
-  中追加 closure 事件,过早释放锁会让另一个 dsh 进程在 closure 仍在
-  写入时 resume 同一会话(正是该锁要防止的双写 seq 冲突)。此外,
-  `whenIdle()` 只是瞬时检查而非冻结——transition 进行期间(quiesce →
-  flush → create)旧 agent 仍可能被 followup/steer 重新唤醒,因此所有
-  写入路径(普通提交、busy-Enter steer、Ctrl+S、命令 fallback、`!`
-  shell 提交、per-skill 斜杠调用)在 transition 进行中都会被**写栅栏**
-  拒绝:草稿/调用行恢复保留,提示 "a session transition is in
-  progress"。open-lock 持有器改为**多槽**(`src/open-locks.ts`):切换在
-  仍持有旧锁的同时获取目标锁,**旧锁绝不在 COMMIT 内释放**(那里不做
-  任何锁变更)——它只在旧 handle dispose + detach gate + durable parity
-  验证之后的冷却释放中卸下;被拒绝或
-  失败的切换会让当前会话带着自己的锁原样 live(旧的先释放顺序会打开
-  真空窗口:另一个进程可能在切换未决时拿走旧会话,re-acquire 失败后
-  两个进程同时持有同一会话)。同会话切换在入口被拒绝,失败分支也只
-  在本次切换确实新获取了目标锁时才释放它——失败的切换永远不会通过
-  目标 id 误伤当前会话的锁。target-lock-before-create 规则现在覆盖
-  所有 transition:`/new`、`/fork` 与 rewind 预生成 child 的 session id,
-  并在 create 发布它**之前**获取其 open lock(拒绝 → 零 child 副作用
-  中止;**create/reject → 立即 PINNED,绝不释放、绝不重试**)——任何
-  transition 都不可能发布
-  一个自己尚未持锁的 child。fresh 预锁是**物理**的:锁层会预创建
-  session 目录(0700),让 owner.lock 在日志 materialize 之前就存在
-  (fresh acquire 若 settle 为 `unavailable` 会中止 transition——旧的
-  `string | undefined` 返回把"已加锁"与"无法加锁"混为一谈),释放空
-  预创建目录上的锁时会顺带移除该目录(零残留)。现在失败只
-  发生在 create **之前**:stale 的 rewind 选择根本不会创建子会话,失败
-  的 quiesce/flush/create 让当前会话原样保留。`/new` 与 `/fork` 也不再
-  在"失败"时 dispose 任何东西——因为没有任何内容发布,自然无可处置。
-  fork 的 cwd 在第一个 await 之前从父会话捕获——避免出现父/child 的
-  cwd 混合。 随后整个 session ownership 按 rewind_ref 计划收敛:发布阶段推断
-  (durable/三态分类)整体删除——每个可写 target 必须先取得 lease;进入
-  DSH 后失败**立即** PINNED(一次性 same-ID 恢复已删除:首次 DSH 调用
-  可能已留下隐藏生命周期,重试无法消除这层不确定);任何地方都不再
-  存在"第二个全新 fallback";TUI writer 经 SessionOperationBarrier
-  与 transition 互斥;切走的旧 session 进入 COOLING lease(最终快照 +
-  SHA-256 tail 指纹 + 静默窗口 + 稳定采样)验证通过后才释放锁,任何
-  不确定都 PIN;干净的 TUI 退出也不再主动释放自己的锁(stale
-  takeover 接管)。 owner lock 现在对**所有**可写 target(fresh 与 existing 一致)一律
-  fail-closed:锁不可用时拒绝 transition/resume——divergence guard 只
-  保留为第二道防线,不再充当锁的替代。旧 session 的锁现在
-  **活过 COMMIT**:只在旧 handle dispose(经 session/disposed 中止
-  session 级异步 writer)且其 persistence retirement 落定(coordinator
-  的 inspect barrier)之后才释放——另一个进程绝不可能在旧 session 仍
-  有 writer 或未定稿的 final flush 时 resume 它;retirement 无法落定时
-  旧锁保持并告警(review round 10)。
-- **COOLING 中的会话可以在同一进程内重新打开,过期的 cooling verifier
-  永远无法影响后续生命周期。** 在冷却窗口内(约 2 秒释放期)通过
-  `/sessions` 或 `/resume` 切回仍在 COOLING 的会话时,现在走
-  `reserveForActivation` 重新激活:物理锁始终留在本进程,DSH resume
-  之前同步作废旧的生命周期 epoch;RELEASED tombstone 仍然强制真正的
-  物理重获取。每次 retirement 都带一个 epoch(租约的单调
-  `lifecycleEpoch`,`beginCooling` 返回它);cooling verifier 绑定在
-  **自己的** epoch 上(每个 await 之后复查,lease manager 里的
-  release/pin 均为 epoch-atomic);in-flight 跟踪按 epoch 键控;HMR/
-  cleanup abort 是中性的——新 mount 的 `resumePending()` 继续**同一个**
-  cooling epoch。ABA 风险关闭:cooling#1 → 重新激活 → cooling#2 绝不
-  会被过期的 verifier #1 释放或 PIN。新增单测(lease manager 重新激活
-  套件 + cooling Case A–E)与按需双进程 E2E(`scripts/e2e-session-
-  lease.sh`,不进 CI 套件)覆盖:在冷却窗口内驱动 A→B→A,证明超过旧
-  释放时间后 P2 仍被拒绝。
-- **PINNED 会话成为粘性、进程寿命级的隔离——绝不能在进程内重新激活,
-  也绝不重返生命周期。** PINNED 是所有"本进程无法证明该会话没有隐藏
-  writer"类失败的落点(dispose 未干净 detach、cooling verifier 无法
-  落定、detach 被拒、create/resume 被拒)。由于一次新的 resume 无法
-  消除这层不确定,而后续一次"正常"的 cooling 释放会把锁交给另一个
-  进程、让隐藏生命周期仍可能写入(跨进程 writer 窗口),PINNED 现在
-  **没有任何业务出边**:`reserveForActivation` 拒绝它(会话在本 TUI
-  退出前保持锁定,提示语要求先重启 TUI 再打开);`beginCooling` 与
-  `markActive` 对 PINNED 直接 throw(内部 BUG)。只有进程退出——以及
-  持有者崩溃后下一个打开者的 stale-takeover——才能结束隔离。用于
-  重试被拒 create/resume 的 same-ID recovery 已整体删除
-  (`TransitionSteps.recover`、`createWithPublicationRecovery` 以及
-  启动、切换、`/new`、`/fork`、rewind-commit 五处 `recover:` 调用点):
-  任何 post-DSH rejection 都立即 PIN。由 lease manager 的 sticky
-  quarantine 用例(3 个拒绝来源、无业务出边、HMR 存活)与 E2E 的
-  PINNED case(冷却失败 → 拒绝重开 → 第二进程被拒 → 持有者退出 →
-  stale takeover)覆盖。
-- **Double-Esc rewind 和弦现在真正连续。** 两次 Esc 之间的任何真实按键
-  都会解除窗口——`Esc → Left → Esc` 不再打开 rewind 选择器(Kitty 的
-  release/repeat 事件仍然不计为按键)。
-
-- **fullscreen 拖选与 `/copy` 不再假报复制成功。** 裸 OSC 52 写入在
-  tmux(`set-clipboard external`)、无透传的 SSH 链路以及限制 OSC 52 的
-  终端(VTE、Terminal.app)下会静默地不触碰系统剪贴板——而界面却闪烁
-  `Copied!`。两条路径现在共用同一套剪贴板策略:tmux 内优先
-  `tmux load-buffer -w -`,其次平台工具(`pbcopy` / `wl-copy` / `xclip` /
-  `xsel` / `clip`),最后是 TTY 门控的 OSC 52 best-effort 兜底(tmux 内
-  序列走 DCS passthrough)。失败时显示 `Copy failed` / `failed to copy
-  last assistant message`,不再假成功。
-- **`Press Ctrl+C again to exit` 提示现在只存在于 footer,且生命周期与
-  退出窗口完全一致。** 旧的 transcript notify 会残留约 8 秒,而 1500ms
-  退出窗口早已失效——界面展示了一个不再成立的可操作状态。提示现在与
-  退出窗口共用同一个 timer:第一次 Ctrl+C 时出现(编辑器有文本时、compact
-  footer 下同样显示),窗口过期或应用退出的瞬间即消失。
-- **已结束的后台任务卡片保留命令行。** 展开已 settle 的后台 bash/pwsh
-  工具卡片时,现在会显示 `$ command` 于 `started background job …` 之上
-  ——调用与结果是两个阶段,永不互相替代。
-- **`@dir` 补全不再依赖尾部斜杠。** fd 的普通文本输出并不保证目录带尾部
-  `/`,因此 `@src<Tab>` 可能补全成带空格的类文件值,下一次 Tab 也无法
-  进入 `src/`。目录类型现在从文件系统解析(含 symlink),于是
-  `@src<Tab>` → `@src/`,Tab 可以继续下钻。
-- **打包产物的 SDK 声明不再泄漏内部实现。** compaction 收尾的测试缝
-  (`settleCompactionSurface`)原先接收完整的 `TuiApp` 类,导致整个界面
-  实现——renderer/editor 注册表、呈现与 transcript 内部模块、图片模块
-  以及 vendored pi-tui 类型——被内联进发布的 `.d.mts`,触发 tarball
-  声明泄漏门禁失败。该函数现在只接收一个最小结构化表面(phase/busy/
-  working 三个 setter),`dist/` 声明仅保留公开 runner 表面。
+- 会话切换改为单写事务：切换等待当前活动结束、失败不留半成品分支、同一
+  会话不会被两个进程同时写入。
+- Double-Esc rewind 和弦真正连续。
+- fullscreen 拖选与 `/copy` 不再假报复制成功（tmux / 平台工具 / OSC 52
+  兜底）。
+- `Press Ctrl+C again to exit` 提示只存在于 footer 且与退出窗口同生命周期。
+- 已结束的后台任务卡片保留命令行。
+- `@dir` 补全不再依赖尾部斜杠。
 
 ## [0.3.2] - 2026-08-22
 
 ### 新增
 
-- **用户输入渲染为品牌蓝气泡,输入框附带同款 `❯` 提示符。** transcript
-  中用户自己的输入现在整行铺角色气泡背景(dsh-web
-  `--dsw-specific-bubble` 同源:dark `#2C2C2F` / light `#E4EDFD`),并以
-  DeepSeek 品牌蓝 `❯`(#679EFE dark / #4177E6 light)引导,取代 kimi 的
-  琥珀色——真实用户输入呈现为浮起的色块,不再与工具卡片、上下文注入或
-  思考行混淆。队列窗格与编辑器 prompt 使用同一品牌蓝 `❯`:用户自己的
-  输入在界面各处都是同一个标记。气泡背景是可选的调色板 token
-  (`roleUserBg`),自定义主题可覆盖。
-- **`/image <path>` 支持路径补全。** 在 `/image` 后输入参数时会随击键
-  提示会话工作区内的文件与目录,Tab 可完成(包括空参数——此前 Tab
-  毫无反应),Tab 接受目录后立即列出其子项——与 `@` mention、`!` shell
-  行已有的目录补全体验一致。支持 `~`、绝对与相对路径形式——含 Windows
-  盘符(`C:\x`)与 UNC(`\\server\share`)路径,以原生反斜杠方言补全;补全挂载在
-  fork 自带的 `getArgumentCompletions` 扩展点上,vendored 代码零改动。
-- **图文混合消息的文本保留内联 `🖼️` 占位符——transcript 气泡内同样
-  可见。** 形如 `check [image] done` 的用户消息现在在气泡内读作
-  `check 🖼️ shot.png done`(缩略图作为附件行跟在下方),不再只有纯文字、
-  图片被静默挪到单独一行:transcript 搜索可按图片名命中,不具备图片
-  渲染能力的宿主也能看到图片原本所在的位置。标记边界始终带一个分隔
-  空格,占位符前没有空格的草稿也不会让标记粘在文字上。
-- **全屏模式:点击附件可将图片折叠回信息栏,再点展开。** 支持内联
-  图片的终端上,每个缩略图现在都以一条**常驻**身份行开头
-  (`🖼️ shot.png · 1490×1284 · 392.2 KiB`)——任何时候都知道是哪张
-  图——图片本体渲染在身份行下方。点击附件(身份行或图片区域)只折叠
-  该图片的行数,再点一次展开;多个附件互不影响,折叠状态与会话绑定
-  (切换会话自动恢复展开);折叠 kitty 图片时通过 fork 既有的差分渲染
-  机制自动擦除图块——vendored 代码零改动。常规(非全屏)模式按设计
-  保持鼠标无关。
+- **用户输入渲染为品牌蓝气泡**，输入框同款 `❯` 提示符（可覆盖调色板
+  token）。
+- **`/image <path>` 路径补全。**
+- **图文混合消息保留内联 `🖼️` 占位符。**
+- **全屏点击附件折叠/展开图片**（常驻身份行）。
 
 ### 修复
 
-- **注入上下文行展开时不再泄漏原始 XML 信封。** 加载 skill(TUI 回退或
-  host 的 dsh-tool-skill 监听器)会把模型面 `<skill_content>` 正文作为
-  上下文行注入,skill 目录与工作区指令也各自携带 `<system-reminder>`
-  框架;此前展开这类行(Ctrl+O)会把原始信封直接倾倒进 transcript。
-  现在展开后的上下文行渲染结构化内容——skill 指令正文、剥离包装与
-  `<available_skills>` 标记行后的目录/工作区文本——模型面字节保持
-  不变,畸形 skill 信封不渲染任何正文。折叠的 skill 行新增
-  `— N lines of instructions` 后缀(与工具卡片一致),折叠状态下也能
-  看出模型收到了什么。
-- **图片摘要标记改为 `🖼️`(带 U+FE0F),emoji 字体下不再与文件名重叠。**
-  标记在宽度计算中只占 1 格,而带 emoji 字形的字体实际渲染 2 格——
-  字形右缘悬垂吃掉了空格并压住文件名(视字体而定)。变体选择符强制
-  2 格渲染,与宽度计算一致;emoji 后的空格保留,transcript 缩略图
-  降级行、队列预览与 markdown 导出三处统一。
-- **write 卡片折叠时只显示动词,不再泄漏原始 XML 信封。** write 工具的
-  result 是 XML 确认信封(`<path>…</path> <type>…</type> <content>Updated
-  file</content>`);折叠行现在像 read 卡片显示行数摘要那样显示
-  `— Created` / `— Updated`,无 presenter 的降级展开也渲染动词+路径行
-  ——原始信封不再泄漏进 transcript。
-- **skill 与 read_image 卡片同样折叠信封内容。** skill 工具的
-  `<skill_content>` 指令块与 read_image 的
-  `<path>/<type>image/<content>` 信封不再出现在 transcript 中:折叠行
-  显示 `— N lines of instructions` 与图片摘要,展开卡片渲染指令正文
-  (含解码后的 skill 名)与图片摘要+路径,image 载荷块渲染为 `[image]`
-  而非倾倒 base64。防御性登记表(`XML_ENVELOPE_RESULT_TOOLS`)确保未来
-  新增的信封工具不会把原始 XML 标签泄漏进折叠预览;成功调用但信封
-  畸形时渲染为空,而非原始文本。
+- 注入上下文行展开不再泄漏原始 XML 信封。
+- 图片摘要标记 `🖼️`（U+FE0F）不再与文件名重叠。
+- write / skill / read_image 卡片折叠时不再泄漏原始 XML 信封。
 
 ## [0.3.1] - 2026-08-21
 
-### Changed
+### 变更
 
-- **不支持的宿主版本现在有明确的启动提示。** 在早于 `dsh-v0.1.1-rc.1` 的
-  DeepSeek Harness 上运行时,会先打印可操作的提示(检测到的版本、最低
-  版本与升级命令),再出现 loader 自身的失败——而不再是一段原始的
-  `ERR_MODULE_NOT_FOUND` 堆栈(旧宿主无法解析 profile 挂载的
-  authorization 行)。提示按声明式兼容表(`HARNESS_COMPAT`)生成,后续
-  版本约束只需在表中增加条目。
-- **`/login` 的文案区分两个凭据平面。** 选择器分组为 API-key 目标加
-  `API key ·` 类别前缀(provider 登录目标保留自己的分组),命令描述同时
-  点明两种动词("Sign in with a provider or set an API key"),密钥输入
-  问题改为 "Enter",成功/退出文案点名所在平面("API key X set" /
-  "API key X cleared")。
+- 不支持的宿主版本有明确的启动提示（版本、最低要求、升级命令）。
+- `/login` 文案区分 API-key 与 provider 两个凭据平面。
 
 ## [0.3.0] - 2026-08-21
 
-### Changed
-
-- **Minimum compatible DeepSeek Harness is now `dsh-v0.1.1-rc.1` or later on
-  the same compat line** — this release no longer supports `dsh-v0.1.0-rc.8`
-  (the split credential events, the dual credential planes and the
-  `ctx.authorization` seam it consumes do not exist there).
-
 ### 新增
 
-- **兼容 dsh authorization 的 provider-native 登录。** `/login` 现在识别
-  DeepSeek Harness `dsh-v0.1.1-rc.1` 的两个凭据平面:profile 显式声明
-  `apiKeyEnv` 的路由保持原有 API-key 流程(即使同名 provider 存在
-  authorization flow),而 keyless 路由则走 provider 原生登录——OAuth /
-  device-code / 交互式 API key。notice(要打开的 URL、设备码)显示在常驻
-  面板中,text/select 提示复用现有 question 与 picker 表面,且 **secret
-  提示默认掩码显示**(真实值只留在输入内存,确认页同样掩码,绝不进入
-  历史、日志、转录或 `/status`)。对尚未配置的 catalog 路由,登录成功后
-  写入最小 keyless profile(绝不写 `apiKeyEnv`,运行时继续读取凭据
-  record);手工声明的路由仍走 add-provider 向导。
-- **`/logout` 覆盖两个凭据平面。** 命名 key 的路由照旧 unset 引用;
-  keyless 路由删除已存凭据 record,并提示"signed out locally"——绝不明示
-  服务端 OAuth 撤销。无参数的 `/logout` 现在打开一个选择器,聚合已存
-  record 与已配置引用(只显示存在性与 key;secret 值绝不离开凭据服务)。
+- **provider-native 登录。** `/login` 识别两个凭据平面：API-key 流程与
+  OAuth / device-code 原生登录；secret 提示默认掩码。
+- **`/logout` 覆盖两个凭据平面。**
 
 ### 变更
 
-- **兼容 DeepSeek Harness `dsh-v0.1.1-rc.1`。** 所有 `@deepseek-ai/dsh-*`
-  peer 与 dev 依赖从 `^0.1.0-rc.8` 提升到 `^0.1.1-rc.1`,并新增
-  `@deepseek-ai/dsh-authorization` peer。旧事件 `credentials/updated`
-  已不存在——现在监听 `credentials/reference-updated` 与
-  `credentials/record-updated`(两者都会刷新 footer 模型行与欢迎卡片)。
-- **TUI profile 自行挂载 authorization 服务。** 没有任何 dsh bundle
-  层提供 `ctx.authorization`,因此 `cordis.patch.yml` 插入该行,runner
-  显式注入——llm-pi-ai 的 provider 登录 flow 随之注册。
-- `/login` 的 API-key 输入框与 authorization secret 提示默认掩码显示。
-- **header 版本徽标先显示 dsh 版本,再显示 `tui-` 前缀的插件版本**——
-  `[dsh-0.1.1-rc.1 · tui-v0.3.0]`;当无法解析已安装 dsh 启动器版本时
-  降级为仅显示 `[tui-vX.Y.Z]`。
+- **最低兼容 DSH 提升到 `dsh-v0.1.1-rc.1`**（不再支持 0.1.0-rc.8）。
+- header 版本徽标先显示 dsh 版本再显示 `tui-` 版本。
 
 ### 安全
 
-- authorization 的 secret 永不写入日志、输入历史、会话转录或 `/status`;
-  掩码错误与提示载荷不回显 secret。
+- authorization secret 永不写入日志、历史、转录或 `/status`。
 
 ## [0.2.2] - 2026-08-21
 
 ### 新增
 
-- **合并任务浏览器成为唯一的后台表面。** `/tasks` 现在打开一个可搜索的
-  列表,同时覆盖 job 与子代理(直接输入即可按类型/标签/状态过滤——
-  `subagent`、`bash`、`failed`…);`Enter` 打开详情(子代理为子转录,
-  job 为状态查看器),`i` 中断选中的子代理。`/subagents` 成为 `/tasks`
-  的别名,旧的逐行子菜单面板(及其 ghost-overlay 陷阱)已删除。空编辑器
-  的 ↓ 触发同一个浏览器。
-- **TUI 命令的别名注册(kimi 同款)。** `/quit`、`/resume`、`/rename` 与
-  `/subagents` 分别是 `/exit`、`/sessions`、`/title` 与 `/tasks` 的
-  别名——注册进 host 命令服务,因此执行、补全目录(输入 `resume` 会
-  补全 `/resume`)与 busy-Enter 门控都能识别,而命令面只列出一个逻辑
-  命令。
-- **子代理家族工具卡显示模型。** `subagent`/`subagent_route`/
-  `subagent_router`/`subagent_fork` 的卡片在调用参数带显式覆盖
-  (顶层或 `agentOptions`)时渲染一行 `model · provider`;没有则完全
-  不变(官方 subagent 工具的模型在配置侧,永不渲染)。
-- **`!` / `!!` 行像真实 shell 一样补全。** 命令名来自 `compgen -A
-  command` 桥(按工作目录 + PATH 缓存 30 秒),`$` 后补全 `$VAR` 名,
-  `git` 子命令实时列出(带 git < 2.18 的静态回退);`!<Tab>` 列出缓存的
-  命令。路径仍走现有 fd 补全。设计:`docs/input-and-card-polish.md` §1。
-- **本地 shell 沙箱偏好。** `/settings` → Local shell sandbox:用户手动
-  执行的 `!`/`!!` 命令默认不再经过 dsh 沙箱(bypass——pi/kimi 对齐:
-  沙箱保护的是模型自动执行的命令,不是用户自己敲的),可选的 `sandbox`
-  模式恢复策略路径。§2。
-- **问题卡展示答案。** 折叠的 `ask_user_question` 卡预览 `N/M
-  answered`(绝不显示裸 answers JSON),展开卡逐条列出答案(`● id →
-  答案`,跳过的题目暗色显示)。§3。
-- **Goal 卡可读。** `get_goal`/`create_goal`/`update_goal` 卡带命名标题
-  (Read/Create/Update Goal)、折叠摘要(`phase active · revision 3 ·
-  2/6 rounds`、`no goal set`)与展开字段行——绝不显示裸 goal JSON。§4。
-- **schedule、cordis-inspect 与 ralph 的折叠预览不再泄露 JSON。** 结果
-  预览行显示解析出的摘要(`1 scheduled`、`mode plugins`、ralph 的友好
-  首行),解析不出就整行消失——展开体保持原样,与 web 对齐。§6。
-- **全屏 todo dock 点击。** 点击 `☑` 摘要行打开 todo 面板;点击面板在
-  紧凑 → 完整列表 → 回到摘要 之间循环,鼠标即可开关面板,无需 Ctrl+T。
-  任务浏览器的提示行在存在可选子代理行时显示 `i interrupt`。
+- **合并任务浏览器成为唯一后台表面。** `/tasks` 可搜索列表覆盖 job 与
+  子代理；`/subagents` 成为别名。
+- **TUI 命令别名注册。** `/quit`、`/resume`、`/rename`、`/subagents`。
+- **子代理家族工具卡显示模型。**
+- **`!` / `!!` 行像真实 shell 一样补全。** 命令名、`$VAR`、git 子命令。
+- **本地 shell 沙箱偏好。** 用户手动命令默认 bypass 沙箱。
+- **问题卡展示答案、Goal 卡可读。** 折叠预览不再泄露 JSON。
+- **全屏 todo dock 点击。**
 
 ### 变更
 
-- **队列窗格通知分类(web parity)。** 只有用户来源的消息渲染为可
-  steer 的 `❯` 行;子代理汇报(relay)、注入指令、goal 消息与插件通知
-  渲染为 `⏳` 通知行。通知行超过五条折叠为一行 `+N more notices
-  pending`(用户行永不折叠),且一旦主 agent 接收即消失——子代理批量
-  结算不再刷屏。
-- **Todo 面板全屏点击。** 全屏时点击 todo 面板可在完整列表与折叠之间
-  切换(小终端上几何已 clamp);Ctrl+T 仍然开关面板本身。
-- **Ctrl+J 不再是 host 键位。** 传统终端把 Ctrl+J 当作 LF(编辑器的
-  回车),任务浏览器和弦不可靠;浏览器改由 ↓(空编辑器)与 `/tasks`
-  进入,插件现在可以自行绑定 Ctrl+J。
-- **`!` / `!!` 在会话工作区执行。** Shell 命令在 live 会话的 cwd 中
-  执行(pi 对齐)而不是启动目录,切换会话后补全与执行保持一致。
-- **用户手动执行的 `!`/`!!` 命令默认绕过 dsh 沙箱。** 沙箱偏好默认
-  `bypass`(见上方新设置行);设为 `sandbox` 可让用户命令重新走 dsh
-  shell 能力的策略。
+- 队列窗格通知分类（用户行 `❯` / 通知行 `⏳`）。
+- Ctrl+J 不再是 host 键位。
+- `!` / `!!` 在会话工作区执行。
 
 ### 移除
 
-- **`/queue` 命令彻底移除。** 逐条管理面板和它的兼容存根都不在了——
-  编辑器上方的队列窗格是唯一的队列面(`Ctrl+S` 全部 steer,`Alt+↑`
-  把排队消息拉回编辑)。名字已从宿主命令目录释放:输入 `/queue` 现在
-  会和任何未知 `/行` 一样被 steer 给模型,下一个版本起插件可以占用
-  这个名字。
+- **`/queue` 命令彻底移除。** 队列窗格是唯一队列面。
 
 ### 修复
 
-- **Alt+↑ 出队只拉回用户自己的消息。** 之前的过滤只匹配
-  `source.form === 'notice'`,子代理汇报、注入指令与 goal 消息可能被
-  拉进编辑器草稿变成可编辑的用户文本;窗格的分类(`isUserQueueInput`)
-  现在同时驱动窗格与出队。
-- **双击 Ctrl+C 退出和弦现在可见且更宽容。** 空输入时第一次 Ctrl+C 只会
-  在静默中武装一个 500ms 的退出窗口,没有任何提示——人手的"连按"间隔
-  往往在 0.6–1s,第二次按键会静默地重新武装而不会退出,紧接着按 Enter
-  还会发出空消息,看起来就像和弦坏了。现在窗口改为 1.5s,第一次按键会
-  显示 `Press Ctrl+C again to exit`,武装状态可见,自然的双击即可退出。
-- **Ctrl+C 清空编辑器后立即重绘。** pi 语义的首次按下清空只改了内存中的
-  草稿,却没有调度新帧——按键在应用层被消费,fork 的输入路径不会到达
-  聚焦编辑器,其渲染也不会触发。真实终端里旧文本会一直留在屏幕上直到
-  下一次按键,清空看起来像没生效(紧接着再按一次 Ctrl+C 反而会按
-  "清空后退出" 和弦直接退出)。Ctrl+S steer 与 Ctrl+Enter queue 的草稿
-  清空也补上了同样的显式重绘。
-- **折叠卡不再泄露裸 JSON。** `ask_user_question` 与 goal 卡在结果无法
-  解析出安全摘要时整行去掉折叠预览(失败调用也绝不显示成功摘要);
-  schedule、cordis-inspect 与 ralph 的预览遵循同一规则。
-- **问题答案计数与渲染行永远一致。** 畸形答案条目现在使整组作废(web
-  `every-isAnswer` 对齐),而不是"计入总数却不渲染"。
-- **失败的补全运行不再被缓存。** 超时、中止或失败的 `compgen` 运行不再
-  让 `!` 补全在整个缓存 TTL 内失效——下一次按键会重试 shell。
-- **无法提供的沙箱偏好会被提示。** Local shell sandbox 设为 `sandbox`
-  但组合中没有 shell 能力时,每次 `!` 运行都会提示命令在无沙箱下执行,
-  而不是静默降级。
-- **问题模态期间的所有点击都被捕获。** 问题框外的点击(含宽度 resize
-  后的过期几何)不再穿透到模态后面的 todo 面板或消息展开。
+- Alt+↑ 出队只拉回用户自己的消息。
+- 双击 Ctrl+C 退出和弦可见且更宽容（1.5s 窗口 + 提示）。
+- 折叠卡不再泄露裸 JSON。
 
 ## [0.2.1] - 2026-08-21
 
 ### 变更
 
-- **仓库根目录即发布包。** `@xmoon76/dsh-pi-tui` 的包根从
-  `packages/dsh-pi-tui/` 提升为仓库根目录;`packages/pi-tui`(私有
-  vendored fork,仍在构建时打进 `dist/`)成为唯一子 workspace 包。
-  对 npm 消费者无行为变化——0.2.0 的完整契约原样保留:全部 8 个公开
-  exports(含 `./extensions`、`./extensions/advanced`、
-  `./extensions/unstable` 与 `./builtins`)、6 个 tsdown 入口、7 套
-  postpack smoke,以及 CI exact-artifact 发布链(Node 22/24/26 tarball
-  smoke 与 vim-plugin-smoke 仍是 publish 门禁)。源码安装路径从
-  `@file:$PWD/packages/dsh-pi-tui` 变为 `@file:$PWD` / `@link:$PWD`,
-  中文 README 现在随包发布。
+- 仓库根目录即发布包（对 npm 消费者无行为变化）。
 
 ## [0.2.0] - 2026-08-21
 
 ### 新增
 
-- **扩展平台 v1——本版本的重头戏。** TUI 现在可扩展:第三方 Cordis
-  插件可以贡献 chrome(标题徽标、dock 项、footer 段)、编辑器上下的
-  widget、斜杠命令、主题、设置行、自动补全 provider、按键绑定、
-  transcript/工具渲染器、托管 overlay,甚至替换编辑器本身——无需接触
-  TUI 内部。插件只导入 `@xmoon76/dsh-pi-tui/extensions`,按能力特性
-  检测(API 版本 1),并且完全生命周期化:插件卸载/HMR 只移除该插件
-  的贡献,表面销毁后陈旧句柄永远无法再变更它。内置的版本徽标与
-  轮次/步骤计数器现在也通过同一公开 API 自证
-  (`@xmoon76/dsh-pi-tui/builtins`)。作者指南见
-  `docs/extension-api.md`。
-- `/login` 现在可以新增部署从未配置过的供应商。凭据选择器合并了 llm
-  configurable-provider 目录(所有内置 pi-ai catalog 路由 + 手写 profile)
-  与 settings section,按 已配置 / 可用 / 自定义 分组,并提供
-  `[ Add New Platform ]` 动作行:进入引导向导——route、线协议、Base URL、
-  显示名与 API key——自动探测端点公布的模型(失败可手填),通过
-  `settings.mutate` 落盘 profile 并存储凭据。`/login <route>` 对全新
-  route 直接进入同一向导并预填 route。catalog 路由保持一步到位:
-  `/login anthropic` 仍只询问 key。供应商拓扑、llm-pi-ai/llm-deepseek
-  settings 或任何凭据变化时(包括外部编辑 `settings.yaml` /
-  `.credentials.yaml`),footer 模型行与欢迎卡片即时刷新。
-- **真实插件验证(Phase 5)。**层级选择由真实消费者验证,见
-  `packages/dsh-pi-tui/examples/plugins/`,由
-  `scripts/examples-plugin-smoke.mjs` 对打包 tarball 门禁:
-  **生产级 vim 模态编辑器**(insert/normal 模式、h/j/k/l、词移动、
-  x/d/c、i/a/o、undo/redo、yank/paste、多行、光标同步、提交集成——
-  全部经语义化 `EditorInputEvent`,绝不接触 raw 字节;Advanced editor
-  SDK 足够,无需 Unstable)、**questionnaire 表单**(Phase-4 命令式 UI
-  broker:select → 自由文本 → confirm → notify)与**交互式 shell**
-  (Unstable raw seam:exclusive raw 所有权 + raw 渲染低层 mount;
-  `exit` 或 Host 紧急 fail-safe 返回)。作者决策树见
-  `docs/plugin-authoring.md`;API gap 过程与 Stable promotion review
-  记录在 `examples/README.md`。
-- **Pi 能力对齐(Phase 4)。** Advanced 层新增高价值 Pi 风格能力:
-  **命令式 UI broker**(`advanced.ui.select/confirm/input/notify`——
-  基于 Host 自有 picker/question/notify 基础设施的 Promise 化提示,
-  caller-fiber 取消、surface 销毁结算)、**自定义交互 UI**
-  (`advanced.ui.custom`——由 Host 挂载工厂构建的交互组件,通过公开的
-  `AdvancedCustomHost` facade 报告结果,绝不传私有 TUI 对象)、
-  **host-state facade**(`advanced.host`——theme 查询/选择、title
-  覆盖、working 指示覆盖、tool 展开偏好)。Pi 能力矩阵
-  (`docs/extension-capability-matrix.md`)记录层级映射作为路线图参考。
-  打包验收:新增 `phase4-plugin` fixture + `scripts/phase4-plugin-smoke.mjs`
-  门禁。
-- **Unstable 扩展层(Phase 3)。** `@xmoon76/dsh-pi-tui/extensions/unstable`
-  现在是可用层级(`UNSTABLE_API_LEVEL = 1`),不保证兼容:
-  **raw 输入拦截**(`unstable.input.raw`——在 Host 解码之前对 RAW
-  terminal 块做 observe/consume/rewrite、exclusive raw 所有权且冲突
-  显式报错、handler 抛错 fail-open、每个块最多过一次拦截链)、
-  **Host 紧急 fail-safe**(1.5 秒内三连 Esc 释放全部 raw capture 并
-  关闭全部 unstable mount——在 capture 之前检测,插件无法改写或消费)、
-  **低层 surface seam**(`unstable.surface.handle`——requestRender/
-  几何/mountComponent 承载 raw 渲染组件;绝不暴露 TuiApp/屏幕/
-  terminal)。facade 为 `unstable(service)`——Stable service 接口未动。
-  所有资源仍为 caller-fiber 所有、surface generation 作用域;失败进入
-  共享 health ledger。作者指南:`docs/extension-unstable.md`。打包验收:
-  新增 `unstable-plugin` fixture + `scripts/unstable-plugin-smoke.mjs`
-  门禁。
-- **Advanced 扩展层(Phase 2)。** `@xmoon76/dsh-pi-tui/extensions/advanced`
-  现在是可用层级(`ADVANCED_API_LEVEL = 1`),提供三类能力,全部仍由
-  Host 中介(绝不接触 raw terminal 字节、绝不暴露私有屏幕):
-  **规范化输入捕获**(`advanced.input.capture`——observe/capture/
-  exclusive 模式、确定性优先级排序、exclusive 冲突显式报错、handler
-  抛错 fail-open)、**聚焦交互表面**(`advanced.ui.interactive`——交互式
-  托管 overlay 承载插件自有的交互组件,渲染由 Host 编译、输入由 Host
-  归一化、focus/blur、resize 重编译与全屏迁移)、**高级编辑器控制**
-  (`advanced.editor.control`——经 Host 编辑器座位的 get/set/cursor/
-  insert/paste/focus)。facade 为 `advanced(service)`——Stable service
-  接口未动。所有资源仍为 caller-fiber 所有、surface generation 作用域;
-  失败进入共享 health ledger。作者指南:`docs/extension-advanced.md`。
-  打包验收:新增 `advanced-plugin` fixture + `scripts/advanced-plugin-smoke.mjs`
-  门禁。
-- **分层扩展面。** 公开扩展 SDK 现在分三个层级:稳定的
-  `@xmoon76/dsh-pi-tui/extensions` 入口保持其兼容契约,新增的
-  `extensions/advanced`(实验性;minor 版本可破坏)与 `extensions/unstable`
-  (不保证兼容)入口携带层级元数据与保留的能力命名空间(`advanced.` /
-  `unstable.`)。所有层级共享同一个扩展运行时(caller-fiber 所有权、
-  surface 生命周期、失效机制)。vim fixture 不再兼任生产级 Stable-API
-  的证明;完整模态编辑器移入 advanced/unstable 路线图。
-- **dsh 0.1.0-rc.8 适配。** 依赖基线整体升至 rc.8(全部
-  `@deepseek-ai/*` peer 与 dev 依赖),`commands.execute` 调用补齐 rc.8
-  新增的图片数组参数,内置 agent presets 对齐 rc.8:`minimal` 预设新增
-  Windows/PowerShell 双胞胎 shell 行(bash 在 win32 关闭、pwsh 对
-  win32 开启),`codex`/`claude-code` 子代理行从 `enableRunInBackground`
-  迁移到 `backgroundMode: one-shot`(spawn/fork 行保持 `continuable`)。
-- **`@dir/` 补全 Tab 接受后自动展开(kimi 对齐)。** Tab 接受目录
-  (`@src` → `@src/`)后立即在子项上重新打开下拉,无需再按一次 Tab;
-  Esc 关闭下拉且不重新触发。消费侧新 `TuiEditor` 宿主子类实现——
-  vendored fork 保持原样。
-- **`/sessions` 与 `/resume` 对会话列表分类。** 默认视图隐藏 subagent
-  会话(resume 面是给人用的);picker 打开期间 Tab 在 Main / All /
-  Subagents 间循环(实时搜索词跨类别保留),All 视图把 subagent 缩进到
-  其父会话之下(`└─` 树形)。直接 `/resume <subagent-id>` 仍可精确匹配
-  任意会话。
-- **会话标题加载更快。** picker 的标题读取改为分批渐进——前 20 行立即
-  落地,其后按 50 行一批刷新——并引入本地缓存
-  (`$DSH_HOME/cache/pi-tui-session-titles.json`,0600):会话日志未变时
-  直接用缓存标题,昂贵的全量日志标题扫描只对真正新增或变化的会话执行。
-- **上下文压缩的进度与结果。** 压缩进行中 working 行显示
-  `Working... · Compacting context…`(单次 Esc 取消——pi 对齐);结束时
-  弹出 `Context compacted` / `Compaction failed` 通知,transcript 新增
-  可展开的压缩卡片(标题 + `Compacted N history items (~M tokens)` +
-  摘要正文——web CompactionItem 对齐)。中途压缩的会话恢复时还原进行中
-  状态。
-- **`/model` 选择 effort 后自动关闭。** 选定 effort(或 Default)后整个
-  模型 overlay 一步关闭(web ModelSelect 对齐);Esc 仍逐级回退,无
-  effort 选项的模型保持面板打开。
-- **footer 在窄终端自动换行。** 宿主状态行不再硬截断到终端宽度:自动
-  换行跨行显示(有界——宿主 ≤3 行 + stats ≤1 行,尾部以 `…` 截断),
-  模型、cwd、分支、上下文条与轮次/步骤计数在手机窄屏上不再丢失。
-  `/settings footer` 密度语义不变。
-- **fullscreen 拖选复制去掉 emoji 列空格。** 选择从行首开始时,复制出的
-  transcript 行不再携带 bullet 列的填充空格(`❯ ` / `🐋  ` / `🐳  `
-  续行缩进);4 格及以上的内容缩进(代码块)保留,行中开始的选择不受影响。
+- **扩展平台 v1。** 第三方 Cordis 插件可贡献 chrome、widget、斜杠命令、
+  主题、设置行、补全、按键绑定、渲染器、overlay，甚至替换编辑器；插件只
+  导入 `@xmoon76/dsh-pi-tui/extensions`，完全生命周期化。
+- **分层扩展面。** stable `extensions` + `advanced`（实验性）+
+  `unstable`（不保证兼容）三层。
+- **`/login` 可新增未配置过的供应商。** 引导向导 + 端点模型探测。
+- **真实插件验证。** vim 模态编辑器、questionnaire 表单、交互式 shell
+  示例。
+- **`@dir/` 补全 Tab 接受后自动展开。**
+- **`/sessions` 与 `/resume` 分类会话列表。** Main / All / Subagents。
+- **会话标题加载更快。** 分批渐进 + 本地缓存。
+- **上下文压缩的进度与结果。** 通知 + 可展开压缩卡片。
+- **`/model` 选择 effort 后自动关闭。**
+- **footer 窄终端自动换行。**
 
 ### 变更
 
-- **TUI surface 现在有显式的生命周期。** 一个 surface GENERATION 跨越
-  `start()`/`stop()`、fullscreen 切换与外部编辑器往返;只有最终
-  `dispose()` 才递增它,dispose 之后所有交互能力都是良性 no-op
-  (approval 以 cancelled 结算、question flow 以 rejected 结算、进行中的
-  工作不应用任何结果)。这是扩展平台陈旧句柄契约所依赖的基础。
-- `/preset` 选择器中 `code` 预设的英文名改为 `PTC mode`,与上游 dsh
-  0.1.0-rc.7 的重命名保持一致(预设 id 未变,已有组合不受影响)。
-- **Ctrl+C 与 Esc 改为 pi 的编辑器语义。** 第一次 Ctrl+C 清空非空编辑器
-  (并记录时间);500ms 内第二次按下(此时编辑器已空)退出。Esc 关闭打开
-  中的自动补全下拉(此前被 app 级处理吞掉,下拉无法关闭),agent 忙碌时
-  单次 Esc 停止当前活动——转、工具运行或压缩——部分内容保留在屏幕上
-  (空闲时保持双击 Esc 取消)。working 行标签改为 `Working...`。
+- TUI surface 显式生命周期（generation / dispose）。
+- Ctrl+C 与 Esc 改为 pi 的编辑器语义。
 
 ### 安全
 
-- **插件文本不再能注入终端控制序列。** 插件文本曾是唯一原样到达终端
-  的通道;现在 C0 控制符、8-bit CSI、C1 控制符与完整 ESC 引导序列
-  (CSI/OSC/DCS/PM/APC)都会在渲染前的公开边界被剥离,纯文本与
-  markdown 视图均生效。宿主自身的样式是输出中唯一的 ANSI。
+- 插件文本不再能注入终端控制序列。
 
 ### 修复
 
-- **宿主永不会被插件遮蔽或拖垮。** 插件命令会对照权威宿主目录校验
-  (精确与近义冲突都被拒绝,包括特殊处理的 `/plan`);保留的宿主
-  生命周期键不能被按键绑定占用;插件按键绑定只在聚焦编辑器拒绝该键
-  时才触发;抛错的渲染器或回调被隔离到它自己的贡献,记录在
-  `/status` 健康行中,永不逃出渲染或输入路径。
-- **编辑器替换是安全的。** 插件编辑器占席时,通过其 `handleInput`
-  通道接收真实输入,Enter 走宿主提交路径;display-only 编辑器(无输入
-  钩子)绝不会把普通打字静默路由进隐藏的宿主编辑器;交接是原子的
-  (create/transfer/compile 抛错时当前编辑器继续工作);陈旧编辑器捕获
-  的每个能力在交接或销毁后都变为惰性。
-- **窄终端保持完好。** 水平 stack 真正并排渲染,frame 按显示单元格
-  精确钳制到宿主预算(ANSI/CJK 精确),一到两格宽的 frame 安全让位
-  而不是溢出。
-- 已结算的 `ask_user_question` 卡片不再显示原始 `{"answers":[…]}` JSON:
-  改为显示已答计数摘要(`2/3 answered`,跳过的题目不计入),取消或中断的
-  流程显示结构化错误标识(`UserQuestionError: ASK_CANCELLED` /
-  `ASK_ABORTED`),而不是空白或 JSON 正文——与 web AskQuestionRow 对齐。
+- 宿主永不会被插件遮蔽或拖垮。
+- 编辑器替换安全（原子交接、陈旧句柄惰性化）。
+- 窄终端保持完好。
 
 ## [0.1.8] - 2026-08-18
 
 ### 变更
 
-- 问题卡片的 back/skip 动词改为方向键:`→` 前进(未答题标记为 skipped,
-  已答题保留 draft),`←` 回到上一题,复核页用 `↑↓` 在 Submit/Cancel
-  之间切换、`←` 返回问题列表。字母键(`s` skip、`b` back)已移除——
-  左右方向键现在与行进方向一致。
+- 问题卡片 back/skip 改为方向键（`→` / `←` / `↑↓`）。
 
 ### 修复
 
-- 在应答 Kitty 键盘协议查询的终端(zellij、WezTerm、Windows Terminal、
-  kitty)上,问题卡片和任务浏览器的方向键/Esc/Tab 恢复正常:这两个组件
-  此前直接比较原始 legacy 序列(`\x1b[A`、`\x1b`、`\t`),CSI-u 终端上
-  这些按键以 `\x1b[1;1B` / `\x1b[27;1u` / `\x1b[9;1u` 到达后被静默丢弃——
-  方向键/Esc/Tab 全部失灵,而字母和 Enter 正常(字母经 StdinBuffer
-  可打印去重保持原始字节)。按键匹配现在统一走 `matchesKey`
-  (legacy + CSI-u + modifyOtherKeys,含 zellij 上报的 super 修饰位 128)。
-- Skill 斜杠命令(`/name` 和 `/skill <名称>`)不再吞掉用户的参数:此前
-  per-skill wrapper 丢弃了 `invocation.rawInput`,只注入一张手工拼装的
-  body 卡片,导致 `/glab open issue 123` 到达模型时只剩裸的 skill 说明,
-  请求本身丢失。现在调用与 web 对齐——用户的原始行(含任何
-  `/name args`)以普通用户消息发出,加载的 body 作为注入的指令上下文
-  紧随其后,使用官方的 `<skill_content>` 渲染和 `skill-invocation` source
-  (宿主 dsh-tool-skill 的 pre-step 监听器可见时由其渲染;TUI 只在
-  没有宿主 loader 的组合里自行注入兜底,因此 body 永远不会重复)。
+- Kitty 键盘协议终端（zellij、WezTerm、Windows Terminal、kitty）上
+  方向键/Esc/Tab 恢复正常。
+- Skill 斜杠命令不再吞掉用户参数。
 
 ## [0.1.7] - 2026-08-18
 
 ### 修复
 
-- 用户加载的 skill(`/skill <名称>` 或 `/opip-ip-query` 这类 per-skill 斜杠
-  命令)现在会真正执行了:此前加载内容用 `agent.inject()` 投递,它只进
-  next-step 队列而**不唤醒 driver**——agent 空闲时 skill 内容就一直躺在
-  队列面板里,直到有无关输入唤醒回合。现在加载与 `/queue` 的 steer 动作
-  一致:运行中的 agent 在下一个 step 边界接收,空闲的 agent 用它开启新
-  回合(与 web 对齐——web 端把 `/name` 提示作为普通 follow-up/steer 提交,
-  由宿主 pre-step 监听器注入正文)。
-- subagent transcript 查看器不再冻结主 transcript:查看子会话期间,主
-  agent 的事件此前会被丢弃,导致主 transcript 停止更新(subagent 卡片
-  一直停在 `[running]`)且 working 指示器永不熄灭。现在查看器打开时,
-  主会话事件照常进入主 folder。当被查看的子代理结果返回时(按委托的
-  description 匹配),查看器还会自动弹回主 transcript,并锚定到最新内容
-  (全屏模式滚动到底;普通模式强制一次干净的全量重绘)。
+- 用户加载的 skill 现在真正执行（空闲 agent 也会开启新回合）。
+- subagent transcript 查看器不再冻结主 transcript。
 
 ## [0.1.6] - 2026-08-18
 
 ### 新增
 
-- 打开时会话锁:打开会话(`--session`、`/resume`、`/sessions`)时,若另一
-  个存活的 dsh 进程已持有该会话则拒绝——会话日志旁的 `owner.lock`
-  文件记录持有者的 pid 与 `/proc` starttime;崩溃持有者的陈旧锁会被
-  自动接管。这封堵了一条损坏路径:第二个打开者的 resume 会让持久化层
-  把中断回合的合成 closers 写进共享日志,而第一个进程继续用自己内存
-  中的 seq 追加(写入期 guard 看不到这个冲突——第二个打开者的内存与
-  文件一致)。分歧 guard 仍然是那些不了解锁的界面的兜底。
-- 纯 `exit`(精确去除首尾空白后匹配)在创建会话或 busy-Enter 门禁之前退出
-  TUI;`/exit` 行为不变。
-- `/login` 与 `/logout` 解析凭据目标:deepseek 官方凭据加上每条
-  llm-pi-ai 路由的 `apiKeyEnv`(选择器、路由/首词匹配、环境变量名
-  原样+转大写,未知目标列出可选列表)。
-- 按工作目录(cwd)保存的输入历史,存储为
-  `$DSH_HOME/user-history/<md5(cwd)>.jsonl`(kimi-code 模式)的 JSONL:
-  只追加、连续重复跳过、100 条上限、容忍损坏行、启动预读,
-  以及从旧设置键的一次性安全迁移。
-- 待办面板与队列面板之间的目标(goal)行(仅展示,设置目标时渲染)。
-- 编辑器内联技能自动补全(`/` 在空白后或后续行触发;Enter 应用带
-  `data.inlineSkill` 标记的补全而不提交)——来自 vendored fork
-  同步到 kimi-code 44a6c70e6。
-- Web 对齐的工具卡片:`card:'web'` 结果视图(搜索的答案 + 来源列表、
-  fetch 的 URL + HTTP 状态);对象型 rawInput 的逐工具单行形态
-  (todo_write 清单、terminal 会话目标、session_event seq)取代
-  格式化 JSON;计划评审卡片在待调用与已完成两条路径都渲染内容块。
-- 任务浏览器面板:状态圆点、对齐列与实时跳动——↓/Ctrl+J 与 `/tasks`
-  列表渲染任务状态(running/stopping/completed/failed)、每秒更新的
-  已耗时、带实时计数的分组标题——web JobListAction 对齐。
+- 打开时会话锁（拒绝第二个进程同时打开同一会话，崩溃锁自动接管）。
+- 纯 `exit` 退出。
+- `/login` 与 `/logout` 解析凭据目标。
+- 按 cwd 保存的输入历史（JSONL）。
+- 编辑器内联 skill 自动补全。
+- Web 对齐的工具卡片（web 结果、todo 清单、计划评审）。
+- 任务浏览器面板（状态圆点、实时跳动）。
 
 ### 变更
 
-- 后台子代理的结算通知(可续接的子代理已结算、工具任务的一次性完成)
-  移出队列面板——任务浏览器才是它们的归宿;失败按消息 id 只通知一次。
-- 编辑器区域布局:待办摘要移入 dock 条(单行暗淡信息,无边框线);
-  dock 中逐任务/逐子代理的详情行移除(仅保留页脚徽章 + ↓/Ctrl+J
-  浏览器);目标槽位移出页脚;面板边框每侧缩进一格。
-- Vendored fork 同步到 kimi-code 44a6c70e6;两条新上游分叉修改
-  已登记在 `packages/pi-tui/AGENTS.md`。
+- 后台子代理结算通知移出队列面板。
+- 编辑器区域布局（todo 摘要移入 dock 条）。
 
 ### 修复
 
-- 问题对话框方向键在滚动视口边缘滚动,因此把光标走进选项永远不会
-  在小终端上把问题概览挤出屏幕。
-- `todo_write` 的数组型 `rawInput` 渲染为清单,而非格式化 JSON 转储。
-- 会话修复剥离 `zstdCompressSync` 可能产生的尾部空 zstd 帧,
-  修复后的日志对所有读取者保持有效。
-- 评审轮次的会话锁加固:接管路径上的租约泄漏、swap 失败修复缺口
-  (重取检查、顺序)与探针修复——swap 修复逻辑被提取为纯的、
-  无头测试的函数。
+- 问题对话框方向键在滚动视口边缘滚动。
+- 会话修复剥离尾部空 zstd 帧。
 
 ### 移除
 
-- 失效的 `@deepseek-ai/dsh-session-query` peer 依赖(选择器以结构化
-  类型引用它,并从实时上下文中读取服务)。
-- `packages/pi-tui` 中脚手架时期的 `vitest.config.ts`
-  (不包含任何测试,node --test 才是测试套件)。
+- 失效的 `@deepseek-ai/dsh-session-query` peer 依赖。
 
 ## [0.1.5] - 2026-08-17
 
 ### 新增
 
-- 表面目录协调器,支持恢复会话预取;延迟启动时的 standing-scope
-  冷技能读取;无会话的 preset/重载刷新。
-- 统一的问题页滚动视口(问题 + 详情 + 每个选项及其描述 + 自由文本行),
-  支持展开(`e` / 全屏点击)与切换标签页时的滚动位置保持;`e` 在小屏
-  上展开被截断的选项描述。
-
-### 变更
-
-- 问题面板滚动视口、展开与全屏点击;提示行适配循环保留 `esc cancel`。
-- 评审加固:单点技能适配器、不完整观测守卫(保留 last-good)、
-  preset 身份精确性、settle 顺序。
+- 表面目录协调器（恢复会话预取、冷 skill 读取）。
+- 统一的问题页滚动视口（展开、滚动位置保持）。
 
 ## [0.1.4] - 2026-08-16
 
 ### 新增
 
-- Busy-Enter 设置——代理运行时 Enter 改为 steer(与网页端 `busyEnter`
-  对齐);Ctrl+Enter 始终强制队列模式;技能命令同样 steer,
-  只有 LOCAL 命令直接执行。
-- `!` shell 把命令 + 输出提交进会话;`!!` 保持本地执行。
-- 子代理查看器以只读查看条覆盖编辑器。
-- 任务浏览器把可续接子代理与任务注册表合并;以仅含子任务的会话打开。
-- `/rename` 作为 `/title` 的别名——无参数时重新生成并覆盖会话标题。
+- Busy-Enter 设置（运行时 Enter 改为 steer）。
+- `!` shell 提交命令+输出进会话；`!!` 本地执行。
+- 子代理只读查看器。
+- 任务浏览器合并可续接子代理与任务注册表。
+- `/rename` 作为 `/title` 别名。
 
 ### 变更
 
-- 问题对话框位于编辑器 seat(kimi 的 `mountEditorReplacement` 模式)
-  而非居中浮层;宽问题对话框与 N-more 截断标记。
-- 会话记录(markdown)在终端尺寸变化时重新换行;bash 命令与审批提示
-  保持可见。
-- 文档重组为带索引的文档集(AGENTS.md + `docs/`)。
-
-### 修复
-
-- `/preset` — 无会话名单、英文文案、一次 Enter 选择。
-- 全屏模式下的主题自动检测 + 过期/迟到结果竞态;CI 在自动检测测试中
-  清除 `NO_COLOR`/`FORCE_COLOR`/`CI`。
+- 问题对话框位于编辑器 seat。
+- 会话记录 markdown 在 resize 时重新换行。
 
 ## [0.1.3] - 2026-08-16
 
 ### 新增
 
-- 后台任务拥有独立表面:队列通知标记、页脚徽章、任务浏览器、输出查看器。
-- 主题检测链(OSC11 → COLORFGBG → dark)与 diff 令牌。
-- `@` 文件提及,带 `fd` 检测与有界的递归回退。
-- `/quit` 作为 `/exit` 的原生别名;斜杠退出走统一的退出契约。
-- 可重复的打包门禁:prepack 构建+校验、postpack tarball 冒烟、
-  CI 任务(完整矩阵通过后才发布)。
-- 退出 flush 契约与可测试的 detached-task 原语。
+- 后台任务独立表面（队列通知、footer 徽章、任务浏览器、输出查看器）。
+- 主题检测链与 diff 令牌。
+- `@` 文件提及。
+- `/quit` 作为 `/exit` 别名。
 
 ### 变更
 
-- 多行工具卡片,带命令/diff 预览;问题对话框换行而非截断。
-- 工作指示器通过回调重绘;实时调色板切换重着色每个表面。
-- tmux 测试指南与可复用脚本。
-- 性能:与历史无关的窗口投影;跨轮读取分组保持快速窗口一致;
-  消息组件缓存限制并裁剪到实时会话记录;带已保存基线的基准工具。
+- 多行工具卡片（命令/diff 预览）。
+- 性能：窗口投影、跨轮读取分组、消息组件缓存。
 
 ### 修复
 
-- CI 发布路径(标签上不依赖 cwd);npm/pnpm 从 tgz 文件名剥离 `@`
-  作用域后的 tarball 发现。
-- 评审循环收敛:带全量异步边界的自有生命周期、草稿合并、逐流解码器、
-  诚实的强制提示、截断。
-- 问题流 FIFO 串行化;Esc 后模型菜单的迟到 resolve/reject 永不生效。
-- 旧会话的异步工作与状态永不泄漏进新会话。
-- 会话修复:撕裂的 zstd 尾部安全、显式布局扫描、fsync 备份、
-  拒绝歧义引用;段引用解析到实际同帧出现位置。
-- 本地 shell 输出有界,带截断标记与 0600 全量输出文件;健壮的外部编辑器。
+- 问题流 FIFO 串行化。
+- 会话修复（撕裂 zstd 尾部安全、fsync 备份）。
+- 本地 shell 输出有界。
 
 ## [0.1.2] - 2026-08-15
 
 ### 新增
 
-- 队列输入面板与 `/queue` 管理;Ctrl+S 整体 steer 队列;
-  通过 `inbox.splice` 插到指定位置。
-- 出队快捷键从 Ctrl+Q 改绑为 Alt+Up。
-- `ask_user_question` 重做为可导航、带复核的流程。
+- 队列输入面板与 `/queue` 管理；Ctrl+S 整体 steer。
+- `ask_user_question` 可导航复核流程。
 - 会话创建推迟到第一条用户消息。
-- 工作流运行卡片长出成员树;编辑器上方 dock 条。
-- `/yolo` 作为 `/permission danger-full-access` 的别名;权限模式徽章
-  与 Shift+Tab 循环。
-- edit/write 工具卡片的真实 LCS diff 渲染。
-- 交互退出时打印恢复提示(pi 对齐)。
-- 无会话斜杠命令;跨进程守卫 + 诊断。
-- Vendored fork 同步到上游 v0.84.3;浮层叠放逻辑移到 dsh。
+- `/yolo` 别名；权限模式徽章。
+- edit/write 工具卡片 LCS diff 渲染。
 
 ### 修复
 
-- 通知在重绘后存活,默认 info;错误通知显式选择加入;权限徽章位于页脚。
-- 浮层边框与叠放浮层合成。
-- 斜杠命令自动补全不再滞后一次按键。
-- 工具注册表作用域传入 agent 对象。
-- tok/s 与令牌统计对齐 Web 的采样语义。
-- 队列面板 splice 竞态;修复后的日志以 dsh 帧布局写出。
+- 通知在重绘后存活。
+- 斜杠命令自动补全不再滞后。
 
 ## [0.1.1] - 2026-08-15
 
 ### 修复
 
-- `@deepseek-ai/*` 声明为 peerDependencies 而非 dependencies——
-  profile 中不再出现重复副本(首个工具调用报
-  `Cannot read properties of undefined (reading prepare)`)。
+- `@deepseek-ai/*` 声明为 peerDependencies（profile 中不再出现重复副本）。
 
 ## [0.1.0] - 2026-08-15
 
 ### 新增
 
-- 首个公开版本:`@xmoon76/dsh-pi-tui`,面向 DeepSeek Harness profile
-  (`dsh --profile pi-tui`)的 TUI 界面,构建于 vendored pi-tui fork
-  之上,打包为单一自包含包。
-- 会话记录引擎:窗口化、增量折叠、配对、事件折叠;web 对齐的工具卡片、
-  实时最新行思考、鲸鱼工作指示器。
-- 审批对话框与权限模式(`/permission`、危险标志、预览);斜杠命令齐全:
-  `/status`、`/sessions`、`/preset`、`/model`、`/plan`、`/search`、
-  `/export`、`/subagents`、`/reload`、`/resume`、`/skill-<name>`,
-  以及会话切换器。
-- 固定编辑器的全屏布局;Ctrl+F 会话记录搜索;Ctrl+D 像 `/exit` 一样
-  退出;全屏鼠标支持(pi 对齐)。
-- 主题系统:自定义调色板文件、终端背景检测、语义令牌、折叠,
-  以及按生产者标注的上下文注入卡片。
-- 单包发布模型:构建时把 fork 打进发布包;tarball 自包含。
+- 首个公开版本：`@xmoon76/dsh-pi-tui`，面向 DeepSeek Harness profile
+  （`dsh --profile pi-tui`）的 TUI 界面，构建于 vendored pi-tui fork
+  之上，打包为单一自包含包。
+- 会话记录引擎（窗口化、增量折叠、web 对齐工具卡片）。
+- 审批对话框与权限模式；斜杠命令齐全。
+- 全屏布局、Ctrl+F 搜索、主题系统。
+- 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.2...HEAD
+[0.4.0-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...next-v0.4.0-alpha.2
+[0.4.0-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...next-v0.4.0-alpha.1
 [0.3.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.3...v0.3.4

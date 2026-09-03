@@ -117,7 +117,13 @@ export async function prepareDshTestEnvironment({
     expectedVersion: expectedVersion ?? trackedSourceConfig.expectedVersion,
   }, trackedSourceConfig.path)
   const selected = mode === 'source'
-    ? loadDshDistribution({ mode, manifest: distribution, packageJson: join(target, 'package.json'), sourceConfig, allowDirty })
+    ? loadDshDistribution({
+      mode,
+      manifest: distribution,
+      packageJson: join(target, 'package.json'),
+      sourceConfig,
+      allowDirty,
+    })
     : npmDshDistribution(dshVersion)
   const prepared = prepareDshInstall(selected, target, {
     materializeSourceDependencies: selected.kind === 'source-pack',

@@ -149,7 +149,7 @@ describe("wrapTextWithAnsi", () => {
 
 			assert.strictEqual(wrapped.length, 2);
 			// The pushed line closes the open foreground at its end; the final
-			// line carries the source's own full reset.
+			// line carries the source's own full reset. (dsh-pi-tui divergence X021.)
 			assert.strictEqual(wrapped[0], `${red}This is an example 中文汉字测试段落内容\x1b[39m`);
 			assert.strictEqual(wrapped[1], `${red}中文汉字测试段落内容.${reset}`);
 			for (const line of wrapped) {
@@ -207,6 +207,7 @@ describe("wrapTextWithAnsi", () => {
 				// Every emitted line is foreground-balanced: the open color is
 				// closed before the line ends, so content appended after the
 				// wrap (cell padding, table borders) cannot inherit it.
+				// (dsh-pi-tui divergence X021.)
 				assert.strictEqual(
 					line.endsWith("\x1b[39m"),
 					true,

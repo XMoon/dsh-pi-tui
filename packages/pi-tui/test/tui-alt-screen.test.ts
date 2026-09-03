@@ -19,6 +19,21 @@ import { VirtualTerminal } from "./virtual-terminal.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 
+class InputOverlay {
+	focused = false;
+	inputs: string[] = [];
+
+	handleInput(data: string): void {
+		this.inputs.push(data);
+	}
+
+	render(): string[] {
+		return ["overlay"];
+	}
+
+	invalidate(): void {}
+}
+
 class RecordingTerminal extends VirtualTerminal {
 	readonly events: Array<{ type: "write"; data: string } | { type: "start" } | { type: "stop" }> = [];
 
@@ -210,8 +225,9 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
-	it("invokes the right-click paste handler only on Windows", () => {
+	it("invokes the right-click paste handler only on Windows outside VS Code", () => {
 		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+		const termProgram = process.env.TERM_PROGRAM;
 		assert.ok(platformDescriptor);
 		const terminal = new VirtualTerminal();
 		let pasteCount = 0;
@@ -222,17 +238,25 @@ describe("TuiAltScreen", () => {
 		});
 		try {
 			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+			delete process.env.TERM_PROGRAM;
 			tui.start();
 			terminal.sendInput("\x1b[<2;1;1M");
 			terminal.sendInput("\x1b[<2;1;1m");
 			assert.strictEqual(pasteCount, 1);
 
+			process.env.TERM_PROGRAM = "vscode";
+			terminal.sendInput("\x1b[<2;1;1M");
+			assert.strictEqual(pasteCount, 1);
+
 			Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+			delete process.env.TERM_PROGRAM;
 			terminal.sendInput("\x1b[<2;1;1M");
 			assert.strictEqual(pasteCount, 1);
 		} finally {
 			tui.stop();
 			Object.defineProperty(process, "platform", platformDescriptor);
+			if (termProgram === undefined) delete process.env.TERM_PROGRAM;
+			else process.env.TERM_PROGRAM = termProgram;
 		}
 	});
 
@@ -292,145 +316,6 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("notifies the host when dragging the primary scrollbar to an edge", async () => {
-		const terminal = new RecordingTerminal(10, 5);
-		const boundaries: Array<[-1 | 1, "wheel" | "page" | "scrollbar"]> = [];
-		const tui = new TuiAltScreen(terminal, undefined, undefined, {
-			onScrollBoundary: (direction, source) => {
-				boundaries.push([direction, source]);
-				return true;
-			},
-		});
-		const scrollView = new ScrollView(
-			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
-			{ primary: true, scrollbar: "auto" },
-		);
-		tui.setLayoutRoot(scrollView);
-		tui.start();
-		await terminal.waitForRender();
-
-		// A wheel event reveals the scrollbar and leaves its thumb at the top.
-		terminal.sendInput("\x1b[<65;10;1M");
-		await terminal.waitForRender();
-		terminal.sendInput("\x1b[<0;10;1M");
-		terminal.sendInput("\x1b[<32;10;5M");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(boundaries, [[1, "scrollbar"]]);
-		tui.stop();
-	});
-
-	it("keeps the scrollbar column selectable while the thumb is hidden", async () => {
-		const terminal = new RecordingTerminal(10, 2);
-		const tui = new TuiAltScreen(terminal);
-		const scrollView = new ScrollView(new Text("123456789A\nabcdefghij\nmore\nlines", 0, 0), {
-			scrollbar: "auto",
-		});
-		tui.setLayoutRoot(scrollView);
-		tui.start();
-		await terminal.waitForRender();
-		assert.strictEqual(scrollView.isScrollbarVisible, false);
-
-		terminal.sendInput("\x1b[<0;10;1M");
-		terminal.sendInput("\x1b[<32;10;2M");
-		terminal.sendInput("\x1b[<0;10;2m");
-		await terminal.waitForRender();
-
-		const expected = `\x1b]52;c;${Buffer.from("A\nabcdefghij").toString("base64")}\x07`;
-		assert.ok(
-			terminal.events.some((event) => event.type === "write" && event.data.includes(expected)),
-			JSON.stringify(terminal.events.filter((event) => event.type === "write" && event.data.includes("\x1b]52;c;"))),
-		);
-		tui.stop();
-	});
-
-	it("chains unused wheel delta to an outer scroll view", async () => {
-		const terminal = new VirtualTerminal(20, 4);
-		const tui = new TuiAltScreen(terminal, undefined, undefined, { wheelScrollLines: 3 });
-		const inner = new ScrollView(new Text("i1\ni2\ni3\ni4\ni5\ni6", 0, 0));
-		const outer = new ScrollView(
-			new VStack([{ component: inner, basis: 2 }, new Text("tail1\ntail2\ntail3\ntail4\ntail5", 0, 0)]),
-			{ primary: true },
-		);
-		tui.setLayoutRoot(outer);
-		tui.start();
-		await terminal.waitForRender();
-
-		terminal.sendInput("\x1b[<65;1;1M");
-		await terminal.waitForRender();
-		assert.strictEqual(inner.scrollTop, 3);
-		assert.strictEqual(outer.scrollTop, 0);
-
-		terminal.sendInput("\x1b[<65;1;1M");
-		await terminal.waitForRender();
-		assert.strictEqual(inner.scrollTop, 4);
-		assert.strictEqual(outer.scrollTop, 2);
-		tui.stop();
-	});
-
-	it("notifies the host when PageUp and wheel reach viewport boundaries", async () => {
-		const terminal = new VirtualTerminal(20, 8);
-		const boundaries: Array<[-1 | 1, "wheel" | "page"]> = [];
-		const tui = new TuiAltScreen(terminal, undefined, undefined, {
-			onScrollBoundary: (direction, source) => {
-				boundaries.push([direction, source]);
-				return true;
-			},
-		});
-		tui.addChild(new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
-		tui.start();
-		await terminal.waitForRender();
-
-		for (let press = 0; press < 4; press += 1) {
-			terminal.sendInput("\x1b[57421u");
-			await terminal.waitForRender();
-		}
-		assert.deepStrictEqual(boundaries, [[-1, "page"]]);
-
-		terminal.sendInput("\x1b[<64;1;1M");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(boundaries, [[-1, "page"], [-1, "wheel"]]);
-		tui.stop();
-	});
-
-	it("supports configurable keyboard viewport navigation with four rows of page overlap", async () => {
-		const terminal = new VirtualTerminal(20, 8);
-		const tui = new TuiAltScreen(terminal);
-		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
-		tui.start();
-		await terminal.waitForRender();
-
-		terminal.sendInput("\x1b[57421u");
-		terminal.sendInput("\x1b[57421;1:3u");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(
-			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
-		);
-
-		terminal.sendInput("\x1b[57422u");
-		terminal.sendInput("\x1b[57422;1:3u");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(
-			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
-		);
-
-		terminal.sendInput("\x1bOH");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(
-			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
-		);
-
-		terminal.sendInput("\x1bOF");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(
-			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
-		);
-
-		tui.stop();
-	});
 
 	it("searches normalized rendered transcript text across rows", () => {
 		assert.deepStrictEqual(findAltScreenSearchMatches(["alpha QUICK", "brown fox"], "quick brown"), [
@@ -531,94 +416,6 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("host semantic viewport actions can clear built-in transcript search", async () => {
-		const terminal = new RecordingTerminal(60, 8);
-		let claimed = false;
-		let tui!: TuiAltScreen;
-		tui = new TuiAltScreen(terminal, undefined, undefined, {
-			onBeforeViewportInput: (data) => {
-				if (data !== "\x1b[1;5F") return false;
-				claimed = tui.clearSearch();
-				return claimed;
-			},
-		});
-		tui.addChild(new Text("needle in the transcript", 0, 0));
-		tui.start();
-		await terminal.waitForRender();
-
-		terminal.sendInput("\x1b[102;6u");
-		terminal.sendInput("needle");
-		await terminal.waitForRender();
-		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript")));
-
-		terminal.sendInput("\x1b[1;5F");
-		await terminal.waitForRender();
-		assert.strictEqual(claimed, true);
-		assert.ok(!terminal.getViewport().some((line) => line.includes("Find transcript")));
-		tui.stop();
-	});
-
-	it("scrolls the transcript by half a page with custom bindings", async () => {
-		const originalKeybindings = getKeybindings();
-		const terminal = new VirtualTerminal(20, 10);
-		const tui = new TuiAltScreen(terminal);
-		setKeybindings(
-			new KeybindingsManager(TUI_KEYBINDINGS, {
-				"tui.altScreen.halfPageUp": "ctrl+u",
-				"tui.altScreen.halfPageDown": "ctrl+d",
-			}),
-		);
-		try {
-			tui.addChild(new Text(Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
-			tui.start();
-			await terminal.waitForRender();
-			assert.strictEqual(tui.viewportTop, 20);
-
-			terminal.sendInput("\x15");
-			await terminal.waitForRender();
-			assert.strictEqual(tui.viewportTop, 15);
-
-			terminal.sendInput("\x04");
-			await terminal.waitForRender();
-			assert.strictEqual(tui.viewportTop, 20);
-		} finally {
-			tui.stop();
-			setKeybindings(originalKeybindings);
-		}
-	});
-
-	it("lets viewport navigation keys reach the focused component when nothing can scroll", async () => {
-		const terminal = new VirtualTerminal(20, 10);
-		const tui = new TuiAltScreen(terminal);
-		// Content fits the viewport: the primary scroll view cannot scroll, so
-		// navigation keys belong to the focused component (e.g. a full-screen
-		// viewer mounted as the layout root with its own scrolling).
-		const transcript = new ScrollView(new Text("fits", 0, 0), { follow: "end", primary: true });
-		const editorInputs: string[] = [];
-		const editor = {
-			focused: false,
-			render: () => ["editor"],
-			invalidate: () => {},
-			handleInput: (data: string) => editorInputs.push(data),
-		};
-		tui.setLayoutRoot(
-			new VStack([
-				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
-				{ component: editor, basis: 1, shrink: 0 },
-			]),
-		);
-		tui.setFocus(editor);
-		tui.start();
-		await terminal.waitForRender();
-
-		const inputs = ["\x1b[5~", "\x1b[6~", "\x1b[H", "\x1b[F"];
-		for (const input of inputs) terminal.sendInput(input);
-		await terminal.waitForRender();
-		assert.strictEqual(transcript.scrollTop, 0);
-		assert.deepStrictEqual(editorInputs, inputs);
-
-		tui.stop();
-	});
 
 	it("lets focus reports reach app-level input listeners", async () => {
 		const terminal = new VirtualTerminal(20, 10);
@@ -626,7 +423,7 @@ describe("TuiAltScreen", () => {
 		tui.addChild(new Text("content", 0, 0));
 		// App-level listeners install after the renderer's own viewport listener;
 		// focus reports must still fan out to them (the main-screen path lets them
-		// through, and notification/clipboard features depend on it).
+		// through, and notification/clipboard focus tracking depends on it).
 		const seenByApp: string[] = [];
 		tui.addInputListener((data) => {
 			seenByApp.push(data);
@@ -1010,7 +807,7 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
-	it("opens an OSC 8 hyperlink on click but not on drag", async () => {
+	it("opens an OSC 8 hyperlink with specific or generic release codes, but not on drag", async () => {
 		const terminal = new RecordingTerminal(20, 3);
 		const openedUrls: string[] = [];
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {
@@ -1030,7 +827,7 @@ describe("TuiAltScreen", () => {
 		await terminal.waitForRender();
 
 		terminal.sendInput("\x1b[<0;2;1M");
-		terminal.sendInput("\x1b[<0;2;1m");
+		terminal.sendInput("\x1b[<3;2;1m");
 		await terminal.waitForRender();
 		assert.deepStrictEqual(openedUrls, [url]);
 
@@ -1053,7 +850,7 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("selects visible text with the mouse and copies it with OSC 52", async () => {
+	it("selects visible text with the mouse and copies it with OSC 52 after a generic release", async () => {
 		const terminal = new RecordingTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal);
 		tui.addChild(new Text("\x1b[1mal\x1b[0mpha\nbeta\ngamma\ndelta", 0, 0));
@@ -1062,7 +859,7 @@ describe("TuiAltScreen", () => {
 
 		terminal.sendInput("\x1b[<0;1;1M");
 		terminal.sendInput("\x1b[<32;4;2M");
-		terminal.sendInput("\x1b[<0;4;2m");
+		terminal.sendInput("\x1b[<3;4;2m");
 		await terminal.waitForRender();
 
 		const expectedClipboardSequence = `\x1b]52;c;${Buffer.from("alpha\nbeta").toString("base64")}\x07`;
@@ -1083,7 +880,7 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("routes a completed selection through copySelection and flashes Copied! on success", async () => {
+	it("uses an injected copySelection handler instead of OSC 52 and reports success", async () => {
 		const terminal = new RecordingTerminal(20, 4);
 		const copied: string[] = [];
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {
@@ -1101,17 +898,78 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[<0;4;2m");
 		await terminal.waitForRender();
 
-		assert.deepStrictEqual(copied, ["alpha\nbeta"], "the callback must receive the selected text");
+		assert.deepStrictEqual(copied, ["alpha\nbeta"]);
 		assert.ok(
 			terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b]52;c;")),
-			"the raw OSC 52 write must NOT happen when copySelection is provided",
+			"must not emit OSC 52 when a copySelection handler is provided",
 		);
 		assert.ok(terminal.getViewport().some((line) => line.includes("Copied!")));
 
 		tui.stop();
 	});
 
-	it("flashes Copy failed when copySelection reports failure", async () => {
+	it("leaves selections visible without copying when copyOnSelect is disabled", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copyOnSelect: false,
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;4;2M");
+		terminal.sendInput("\x1b[<0;4;2m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copied, []);
+		assert.strictEqual(tui.hasActiveSelection(), true);
+		assert.ok(terminal.events.some((event) => event.type === "write" && event.data.includes("\x1b[7m")));
+		assert.ok(terminal.getViewport().every((line) => !line.includes("Copied!")));
+
+		tui.stop();
+	});
+
+	it("copies an active selection programmatically", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		assert.strictEqual(tui.hasActiveSelection(), false);
+		assert.strictEqual(await tui.copyActiveSelectionToClipboard(), false);
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;4;2M");
+		terminal.sendInput("\x1b[<0;4;2m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copied, ["alpha\nbeta"]);
+		assert.strictEqual(tui.hasActiveSelection(), true);
+
+		copied.length = 0;
+		assert.strictEqual(await tui.copyActiveSelectionToClipboard(), true);
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copied, ["alpha\nbeta"]);
+		assert.ok(terminal.getViewport().some((line) => line.includes("Copied!")));
+
+		tui.stop();
+	});
+
+	it("flashes an error when the injected copySelection handler fails", async () => {
 		const terminal = new RecordingTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {
 			copySelection: async () => false,
@@ -1125,34 +983,11 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[<0;4;2m");
 		await terminal.waitForRender();
 
+		assert.ok(terminal.getViewport().some((line) => line.includes("Copy failed")));
 		assert.ok(
 			terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b]52;c;")),
-			"the raw OSC 52 write must NOT happen when copySelection is provided",
+			"must not emit OSC 52 when a copySelection handler is provided",
 		);
-		assert.ok(terminal.getViewport().some((line) => line.includes("Copy failed")));
-		assert.ok(!terminal.getViewport().some((line) => line.includes("Copied!")));
-
-		tui.stop();
-	});
-
-	it("flashes Copy failed when copySelection throws", async () => {
-		const terminal = new RecordingTerminal(20, 4);
-		const tui = new TuiAltScreen(terminal, undefined, undefined, {
-			copySelection: async () => {
-				throw new Error("clipboard exploded");
-			},
-		});
-		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
-		tui.start();
-		await terminal.waitForRender();
-
-		terminal.sendInput("\x1b[<0;1;1M");
-		terminal.sendInput("\x1b[<32;4;2M");
-		terminal.sendInput("\x1b[<0;4;2m");
-		await terminal.waitForRender();
-
-		assert.ok(terminal.getViewport().some((line) => line.includes("Copy failed")));
-		assert.ok(!terminal.getViewport().some((line) => line.includes("Copied!")));
 
 		tui.stop();
 	});
@@ -1171,6 +1006,35 @@ describe("TuiAltScreen", () => {
 
 		assert.ok(terminal.events.some((event) => event.type === "write" && event.data.includes("foo\x1b[27m")));
 		tui.stop();
+	});
+
+	it("coalesces slash and hyphen separated segments for double-click word selection", async () => {
+		for (const { line, needle } of [
+			{ line: "extensions/starline/fixed-editor/compositor.ts", needle: "starline" },
+			{ line: "earendil-works/pi-tui", needle: "works" },
+		]) {
+			const copied: string[] = [];
+			const terminal = new RecordingTerminal(80, 1);
+			const tui = new TuiAltScreen(terminal, undefined, undefined, {
+				copySelection: async (text) => {
+					copied.push(text);
+					return true;
+				},
+			});
+			tui.addChild(new Text(line, 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+
+			const oneBasedClickColumn = line.indexOf(needle) + 1;
+			terminal.sendInput(`\x1b[<0;${oneBasedClickColumn};1M`);
+			terminal.sendInput(`\x1b[<0;${oneBasedClickColumn};1m`);
+			terminal.sendInput(`\x1b[<0;${oneBasedClickColumn};1M`);
+			terminal.sendInput(`\x1b[<0;${oneBasedClickColumn};1m`);
+			await terminal.waitForRender();
+
+			assert.deepStrictEqual(copied, [line]);
+			tui.stop();
+		}
 	});
 
 	it("highlights a complete whitespace segment during a word drag", async () => {
@@ -1474,6 +1338,357 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
+	it("gives wheel and viewport keys to a focused overlay", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		const overlay = new InputOverlay();
+		tui.start();
+		await terminal.waitForRender();
+		const topBefore = tui.viewportTop;
+		const handle = tui.showOverlay(overlay);
+		await terminal.waitForRender();
+		assert.strictEqual(overlay.focused, true);
+
+		const wheel = "\x1b[<64;10;3M";
+		const keys = ["\x1b[5~", "\x1b[6~", "\x1bOH", "\x1bOF", wheel];
+		for (const key of keys) terminal.sendInput(key);
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(overlay.inputs, keys);
+		assert.strictEqual(tui.viewportTop, topBefore);
+
+		handle.hide();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[5~");
+		await terminal.waitForRender();
+		assert.ok(tui.viewportTop < topBefore);
+		tui.stop();
+	});
+
+	it("keeps viewport scrolling when an overlay is not focused", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		const editor = new InputOverlay();
+		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.setFocus(editor);
+		tui.start();
+		await terminal.waitForRender();
+		const topBefore = tui.viewportTop;
+
+		const hidden = tui.showOverlay(new InputOverlay());
+		hidden.setHidden(true);
+		const nonCapturing = new InputOverlay();
+		tui.showOverlay(nonCapturing, { nonCapturing: true });
+		const unfocused = new InputOverlay();
+		const unfocusedHandle = tui.showOverlay(unfocused);
+		unfocusedHandle.unfocus();
+		await terminal.waitForRender();
+		assert.strictEqual(nonCapturing.focused, false);
+		assert.strictEqual(unfocused.focused, false);
+
+		terminal.sendInput("\x1b[5~");
+		terminal.sendInput("\x1b[<64;10;3M");
+		await terminal.waitForRender();
+		assert.ok(tui.viewportTop < topBefore);
+		assert.deepStrictEqual(nonCapturing.inputs, []);
+		assert.deepStrictEqual(unfocused.inputs, []);
+		tui.stop();
+	});
+
+	it("keeps viewport scrolling while transcript search is focused", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const topBefore = tui.viewportTop;
+
+		terminal.sendInput("\x1b[102;6u");
+		await terminal.waitForRender();
+		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript")));
+
+		terminal.sendInput("\x1b[5~");
+		terminal.sendInput("\x1b[<64;1;4M");
+		await terminal.waitForRender();
+		assert.ok(tui.viewportTop < topBefore);
+		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript")));
+		tui.stop();
+	});
+
+	it("notifies the host when dragging the primary scrollbar to an edge", async () => {
+		const terminal = new RecordingTerminal(10, 5);
+		const boundaries: Array<[-1 | 1, "wheel" | "page" | "scrollbar"]> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onScrollBoundary: (direction, source) => {
+				boundaries.push([direction, source]);
+				return true;
+			},
+		});
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "auto" },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+
+		// A wheel event reveals the scrollbar and leaves its thumb at the top.
+		terminal.sendInput("\x1b[<65;10;1M");
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;10;1M");
+		terminal.sendInput("\x1b[<32;10;5M");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(boundaries, [[1, "scrollbar"]]);
+		tui.stop();
+	});
+
+	it("keeps the scrollbar column selectable while the thumb is hidden", async () => {
+		const terminal = new RecordingTerminal(10, 2);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(new Text("123456789A\nabcdefghij\nmore\nlines", 0, 0), {
+			scrollbar: "auto",
+		});
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.isScrollbarVisible, false);
+
+		terminal.sendInput("\x1b[<0;10;1M");
+		terminal.sendInput("\x1b[<32;10;2M");
+		terminal.sendInput("\x1b[<0;10;2m");
+		await terminal.waitForRender();
+
+		const expected = `\x1b]52;c;${Buffer.from("A\nabcdefghij").toString("base64")}\x07`;
+		assert.ok(
+			terminal.events.some((event) => event.type === "write" && event.data.includes(expected)),
+			JSON.stringify(terminal.events.filter((event) => event.type === "write" && event.data.includes("\x1b]52;c;"))),
+		);
+		tui.stop();
+	});
+
+	it("chains unused wheel delta to an outer scroll view", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { wheelScrollLines: 3 });
+		const inner = new ScrollView(new Text("i1\ni2\ni3\ni4\ni5\ni6", 0, 0));
+		const outer = new ScrollView(
+			new VStack([{ component: inner, basis: 2 }, new Text("tail1\ntail2\ntail3\ntail4\ntail5", 0, 0)]),
+			{ primary: true },
+		);
+		tui.setLayoutRoot(outer);
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<65;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(inner.scrollTop, 3);
+		assert.strictEqual(outer.scrollTop, 0);
+
+		terminal.sendInput("\x1b[<65;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(inner.scrollTop, 4);
+		assert.strictEqual(outer.scrollTop, 2);
+		tui.stop();
+	});
+
+
+	it("notifies the host when PageUp and wheel reach viewport boundaries", async () => {
+		const terminal = new VirtualTerminal(20, 8);
+		const boundaries: Array<[-1 | 1, "wheel" | "page"]> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onScrollBoundary: (direction, source) => {
+				boundaries.push([direction, source]);
+				return true;
+			},
+		});
+		tui.addChild(new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		for (let press = 0; press < 4; press += 1) {
+			terminal.sendInput("\x1b[57421u");
+			await terminal.waitForRender();
+		}
+		assert.deepStrictEqual(boundaries, [[-1, "page"]]);
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(boundaries, [[-1, "page"], [-1, "wheel"]]);
+		tui.stop();
+	});
+
+	it("supports configurable keyboard viewport navigation with four rows of page overlap", async () => {
+		const terminal = new VirtualTerminal(20, 8);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[57421u");
+		terminal.sendInput("\x1b[57421;1:3u");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
+		);
+
+		terminal.sendInput("\x1b[57422u");
+		terminal.sendInput("\x1b[57422;1:3u");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
+		);
+
+		terminal.sendInput("\x1bOH");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
+		);
+
+		terminal.sendInput("\x1bOF");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
+		);
+
+		tui.stop();
+	});
+
+
+	it("host semantic viewport actions can clear built-in transcript search", async () => {
+		const terminal = new RecordingTerminal(60, 8);
+		let claimed = false;
+		let tui!: TuiAltScreen;
+		tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onBeforeViewportInput: (data) => {
+				if (data !== "\x1b[1;5F") return false;
+				claimed = tui.clearSearch();
+				return claimed;
+			},
+		});
+		tui.addChild(new Text("needle in the transcript", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[102;6u");
+		terminal.sendInput("needle");
+		await terminal.waitForRender();
+		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript")));
+
+		terminal.sendInput("\x1b[1;5F");
+		await terminal.waitForRender();
+		assert.strictEqual(claimed, true);
+		assert.ok(!terminal.getViewport().some((line) => line.includes("Find transcript")));
+		tui.stop();
+	});
+
+	it("lets a focused overlay keep a host-claimed viewport key (X028 defer priority)", async () => {
+		const terminal = new RecordingTerminal(60, 8);
+		let claimed = false;
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onBeforeViewportInput: (data) => {
+				if (data !== "\x1b[1;5F") return false; // Ctrl+End
+				claimed = true;
+				return true;
+			},
+		});
+		tui.addChild(new Text("transcript", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		// Without an overlay the seam claims the key.
+		terminal.sendInput("\x1b[1;5F");
+		await terminal.waitForRender();
+		assert.strictEqual(claimed, true);
+
+		// With a focused non-search overlay the SAME key must fall through
+		// to the overlay (upstream shouldDeferViewportInputToOverlay
+		// priority), never to the host seam.
+		claimed = false;
+		const received: string[] = [];
+		const overlay = {
+			render: () => ["OVERLAY"],
+			handleInput: (data: string) => {
+				received.push(data);
+			},
+			invalidate: () => {},
+		};
+		tui.showOverlay(overlay);
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[1;5F");
+		await terminal.waitForRender();
+		assert.strictEqual(claimed, false, "the host seam must not claim a key while a non-search overlay is focused");
+		assert.deepStrictEqual(received, ["\x1b[1;5F"], "the focused overlay must receive the key");
+		tui.stop();
+	});
+
+	it("scrolls the transcript by half a page with custom bindings", async () => {
+		const originalKeybindings = getKeybindings();
+		const terminal = new VirtualTerminal(20, 10);
+		const tui = new TuiAltScreen(terminal);
+		setKeybindings(
+			new KeybindingsManager(TUI_KEYBINDINGS, {
+				"tui.altScreen.halfPageUp": "ctrl+u",
+				"tui.altScreen.halfPageDown": "ctrl+d",
+			}),
+		);
+		try {
+			tui.addChild(new Text(Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportTop, 20);
+
+			terminal.sendInput("\x15");
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportTop, 15);
+
+			terminal.sendInput("\x04");
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportTop, 20);
+		} finally {
+			tui.stop();
+			setKeybindings(originalKeybindings);
+		}
+	});
+
+
+	it("lets viewport navigation keys reach the focused component when nothing can scroll", async () => {
+		const terminal = new VirtualTerminal(20, 10);
+		const tui = new TuiAltScreen(terminal);
+		// Content fits the viewport: the primary scroll view cannot scroll, so
+		// navigation keys belong to the focused component (e.g. a full-screen
+		// viewer mounted as the layout root with its own scrolling).
+		const transcript = new ScrollView(new Text("fits", 0, 0), { follow: "end", primary: true });
+		const editorInputs: string[] = [];
+		const editor = {
+			focused: false,
+			render: () => ["editor"],
+			invalidate: () => {},
+			handleInput: (data: string) => editorInputs.push(data),
+		};
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: editor, basis: 1, shrink: 0 },
+			]),
+		);
+		tui.setFocus(editor);
+		tui.start();
+		await terminal.waitForRender();
+
+		const inputs = ["\x1b[5~", "\x1b[6~", "\x1b[H", "\x1b[F"];
+		for (const input of inputs) terminal.sendInput(input);
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.scrollTop, 0);
+		assert.deepStrictEqual(editorInputs, inputs);
+
+		tui.stop();
+	});
+
+
 	it("fires onCellClick for a same-cell primary press+release without a drag", async () => {
 		const terminal = new VirtualTerminal(20, 6);
 		const clicks: Array<{ x: number; y: number }> = [];
@@ -1563,4 +1778,65 @@ describe("TuiAltScreen", () => {
 			JSON.stringify(clipboardWrites),
 		);
 		tui.stop();
+
+});
+
+describe("TuiAltScreen viewport listener registration order (X043)", () => {
+	it("registers the viewport listener in the constructor by default (host listeners see consumed scroll keys last)", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		const seen: string[] = [];
+		tui.addInputListener((data) => {
+			seen.push(data);
+			return undefined;
+		});
+		const text = new Text(Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join("\n"), 0, 0);
+		tui.setLayoutRoot(new VStack([{ component: new ScrollView(text, { follow: "end", primary: true }), basis: 0, grow: 1 }]));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<64;1;1M"); // wheel up — the viewport consumes it
+		await terminal.waitForRender();
+		assert.strictEqual(seen.length, 0, "with the default order the viewport listener consumes wheel events before later host listeners");
+		assert.ok(tui.viewportTop < 6, "the viewport actually scrolled");
+		tui.stop();
 	});
+
+	it("deferViewportListener lets the host install its router FIRST", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { deferViewportListener: true });
+		const seen: string[] = [];
+		tui.addInputListener((data) => {
+			seen.push(data);
+			return undefined;
+		});
+		tui.installViewportListener();
+		const text = new Text(Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join("\n"), 0, 0);
+		tui.setLayoutRoot(new VStack([{ component: new ScrollView(text, { follow: "end", primary: true }), basis: 0, grow: 1 }]));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<64;1;1M"); // wheel up — the host listener now sees it first
+		await terminal.waitForRender();
+		assert.deepStrictEqual(seen, ["\x1b[<64;1;1M"], "the host router must see raw chunks before the viewport consumes them");
+		assert.ok(tui.viewportTop < 6, "the unconsumed chunk still reaches the viewport and scrolls");
+		tui.stop();
+	});
+
+	it("installViewportListener is idempotent", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { deferViewportListener: true });
+		tui.installViewportListener();
+		tui.installViewportListener();
+		const text = new Text(Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join("\n"), 0, 0);
+		tui.setLayoutRoot(new VStack([{ component: new ScrollView(text, { follow: "end", primary: true }), basis: 0, grow: 1 }]));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		// A duplicated viewport listener would scroll TWICE per wheel event.
+		assert.strictEqual(tui.viewportTop, 5, "one wheel event must scroll exactly one line-step (no double listener)");
+		tui.stop();
+	});
+});

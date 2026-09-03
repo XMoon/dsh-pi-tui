@@ -9,14 +9,16 @@
  * @module @xmoon76/dsh-pi-tui/status/derive-permission
  */
 
-/** The permission-preset service surface (structural). */
+/** The permission-preset service surface (structural; alpha.4's
+ * `current(session)` reads the session's own knob state). */
 export interface PermissionServiceLike {
-  current(events: unknown): string | undefined
+  current(session: unknown): string | undefined
 }
 
-/** The live agent's session surface (structural). */
+/** The live agent's session surface (structural; the session object itself
+ * is opaque here — the service owns how it reads it). */
 export interface AgentSessionLike {
-  session: { events: unknown }
+  session: unknown
 }
 
 /**
@@ -31,7 +33,7 @@ export function deriveRunnerPermission(
 ): string | undefined {
   if (permission === undefined || agent === undefined) return undefined
   try {
-    return permission.current(agent.session.events)
+    return permission.current(agent.session)
   } catch {
     // A throwing permission service must DEGRADE (undefined = clear the
     // stale fact), never interrupt the status refresh.

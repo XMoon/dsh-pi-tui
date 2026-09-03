@@ -5,15 +5,31 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import type { SettingItem } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -37,7 +53,7 @@ test('footer shows model, cwd, branch, counters, context bar, and stats', async 
     // facts (the legacy statsLine string is no longer a footer input).
     usage: {
       tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
-      performance: { llmMs: 8100, firstTokenMs: 0, tokensPerSec: 0 },
+      performance: { llmMs: 8100, firstTokenMs: 8_100, tokensPerSec: 0 },
       turns: 2,
       steps: 5,
     },
@@ -49,7 +65,7 @@ test('footer shows model, cwd, branch, counters, context bar, and stats', async 
   assert.ok(view.includes(' main '), `branch missing:\n${view}`)
   assert.ok(view.includes('t2/s5'), `counters missing:\n${view}`)
   assert.ok(view.includes('] 25%'), `context bar missing:\n${view}`)
-  assert.ok(view.includes('↑1.2k ↓3.4k | LLM 8.1s'), `stats line missing:\n${view}`)
+  assert.ok(view.includes('↑1.2k ↓3.4k · TTFB 8.1s · 0 tok/s'), `stats line missing:\n${view}`)
 })
 
 test('plan mode shows badges in header and footer and tints the editor border', async () => {
@@ -137,6 +153,8 @@ test('editor input routes to the alt screen in fullscreen and back', async () =>
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   await viewport(vt)
   app.setFullscreen(true)
   await viewport(vt)
@@ -161,6 +179,8 @@ test('setFullscreen reports changes and stays idempotent', async () => {
     onFullscreenChange: (fullscreen) => { changes.push(fullscreen) },
   })
   app.start()
+
+  startedApps.add(app)
   assert.equal(app.isFullscreen(), false)
   app.setFullscreen(true)
   assert.equal(app.isFullscreen(), true)
@@ -233,6 +253,8 @@ test('ctrl+shift+f opens transcript search; typing reports queries; escape close
     onSearchClose: () => { closed += 1 },
   })
   app.start()
+
+  startedApps.add(app)
   vt.sendInput('\x1b[102;6u') // ctrl+shift+f (kitty CSI u, modifiers ctrl+shift)
   await viewport(vt)
   assert.ok(app.isSearching(), 'search overlay should open')
@@ -263,6 +285,8 @@ test('a single escape without overlays reaches onSingleEscape and can be consume
     onSingleEscape: () => { singleEscapes += 1; return true },
   })
   app.start()
+
+  startedApps.add(app)
   await viewport(vt)
   vt.sendInput('\x1b')
   await viewport(vt)
@@ -279,6 +303,8 @@ test('onSingleEscape fires on the Esc AFTER a settings panel closed', async () =
     onSingleEscape: () => { singleEscapes += 1; return true },
   })
   app.start()
+
+  startedApps.add(app)
   await viewport(vt)
   app.openSettings(
     [{ id: 'a', label: 'A', currentValue: '', values: ['x'] }],

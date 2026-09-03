@@ -29,7 +29,13 @@
  */
 
 import type { ApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
-import type { UserQuestionProvider } from '@deepseek-ai/dsh-user-questions'
+import type { AskUserQuestionAnswer, AskUserQuestionRequestEvent } from '@deepseek-ai/dsh-user-questions/types'
+
+/** The DSH 0.1.2 user-question waterfall provider contract. */
+export type UserQuestionProvider = (
+  request: AskUserQuestionRequestEvent,
+  next: () => Promise<AskUserQuestionAnswer>,
+) => Promise<AskUserQuestionAnswer>
 
 /** The sub-set of the official approval request the TUI consumes — the
  * transport-neutral shape (no same-process Agent). A Remote backend maps

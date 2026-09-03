@@ -16,7 +16,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
@@ -25,9 +25,24 @@ import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 /** The extension-host provider under test (real entry, real apply). */
 import { apply as applyExtensionHost } from '../src/extensions.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 /** A minimal provider fiber that provides tuiStartup (the host's gate). */
 function startupPlugin(ctx: Context): void {
-  ctx.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+  ctx.provide(TUI_STARTUP_SERVICE, {})
 }
 
 /** One registered contribution (typed per slot contract shape). */
@@ -973,7 +988,7 @@ test('P1-4: a plugin overlay closes automatically when the owner fiber unloads (
   try {
     await ctx.plugin(Loader)
     const startupFiber = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startupFiber
     const hostFiber = ctx.plugin(applyExtensionHost)
@@ -987,6 +1002,7 @@ test('P1-4: a plugin overlay closes automatically when the owner fiber unloads (
     const vt = new VirtualTerminal(80, 24)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
     service.setOverlayMount('surface-1', (view, options) => app.showExtensionOverlay(view as never, options as never))
 
@@ -1023,7 +1039,7 @@ test('P1-4: explicit close then fiber unload is idempotent — no double close, 
   try {
     await ctx.plugin(Loader)
     const startupFiber = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startupFiber
     const hostFiber = ctx.plugin(applyExtensionHost)
@@ -1068,7 +1084,7 @@ test('P1-4: an old overlay lease is INERT after its surface disposes; it never m
   try {
     await ctx.plugin(Loader)
     const startupFiber = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startupFiber
     const hostFiber = ctx.plugin(applyExtensionHost)
@@ -1082,6 +1098,7 @@ test('P1-4: an old overlay lease is INERT after its surface disposes; it never m
     const vt = new VirtualTerminal(80, 24)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
 
     // Surface A's seam is wired; a plugin opens an overlay through it.
@@ -1107,6 +1124,7 @@ test('P1-4: an old overlay lease is INERT after its surface disposes; it never m
     const vtB = new VirtualTerminal(80, 24)
     const appB = new TuiApp(vtB, { onSubmit: () => {}, onExit: () => {} })
     appB.start()
+    startedApps.add(appB)
     await vtB.waitForRender()
     service.setOverlayMount('surface-B', (view, options) => appB.showExtensionOverlay(view as never, options as never))
     lease?.show()

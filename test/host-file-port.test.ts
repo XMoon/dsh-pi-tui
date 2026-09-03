@@ -13,14 +13,14 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** A throwaway workspace with known files. */
-function fixtureWorkspace(): string {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-hostfile-'))
+function fixtureWorkspace(life: TestLifecycle): string {
+  const root = life.tempDir('dsh-hostfile-')
   writeFileSync(join(root, 'file-one.txt'), 'one')
   writeFileSync(join(root, 'file-two.ts'), 'two')
   writeFileSync(join(root, 'my file.txt'), 'spaced')
@@ -39,10 +39,11 @@ function fallbackPort(root: string): DirectHostFilePort {
     sessionId === 'session-live' ? { session: { header: { cwd: root } } } : undefined, null)
 }
 
-test('resolveFdPath finds an executable fd on PATH and returns null otherwise', () => {
+test('resolveFdPath finds an executable fd on PATH and returns null otherwise', (t) => {
+  const life = testLifecycle(t)
   const saved = process.env.PATH
   try {
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-fd-'))
+    const dir = life.tempDir('dsh-fd-')
     const fd = join(dir, 'fd')
     writeFileSync(fd, '#!/bin/sh\nexit 0\n')
     chmodSync(fd, 0o755)
@@ -56,8 +57,9 @@ test('resolveFdPath finds an executable fd on PATH and returns null otherwise', 
   }
 })
 
-test('the fallback discovers paths from anywhere in the tree (path-only DTOs)', async () => {
-  const root = fixtureWorkspace()
+test('the fallback discovers paths from anywhere in the tree (path-only DTOs)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
   const file = await port.listReferences({ kind: 'workspace', cwd: root }, '@file')
   assert.ok(file.some(item => item.path === 'file-one.txt' && item.kind === 'file'),
@@ -72,8 +74,9 @@ test('the fallback discovers paths from anywhere in the tree (path-only DTOs)', 
     `directory item missing:\n${JSON.stringify(dirs)}`)
 })
 
-test('the fallback returns RAW paths — quoting and filtering are client-side', async () => {
-  const root = fixtureWorkspace()
+test('the fallback returns RAW paths — quoting and filtering are client-side', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
   // The port answers "which Host files exist": no `@`, no quotes, no
   // trailing slash, no query filtering (the client ranks and presents).
@@ -84,8 +87,9 @@ test('the fallback returns RAW paths — quoting and filtering are client-side',
     `paths must be bare:\n${JSON.stringify(result.map(item => item.path))}`)
 })
 
-test('resolveReference honors an already-aborted request (fail closed, no filesystem access)', async () => {
-  const root = fixtureWorkspace()
+test('resolveReference honors an already-aborted request (fail closed, no filesystem access)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const controller = new AbortController()
   controller.abort()
   assert.deepEqual(
@@ -94,8 +98,9 @@ test('resolveReference honors an already-aborted request (fail closed, no filesy
   )
 })
 
-test('an abort mid-scan cancels the fallback discovery', async () => {
-  const root = fixtureWorkspace()
+test('an abort mid-scan cancels the fallback discovery', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const controller = new AbortController()
   controller.abort()
   assert.deepEqual(
@@ -104,8 +109,9 @@ test('an abort mid-scan cancels the fallback discovery', async () => {
   )
 })
 
-test('the session scope resolves through the live-agent resolver; unresolvable scopes fail closed', async () => {
-  const root = fixtureWorkspace()
+test('the session scope resolves through the live-agent resolver; unresolvable scopes fail closed', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
   const viaSession = await port.listReferences({ kind: 'session', sessionId: 'session-live' }, '@file')
   assert.ok(viaSession.some(item => item.path === 'file-one.txt'), 'the session cwd drives discovery')
@@ -114,8 +120,9 @@ test('the session scope resolves through the live-agent resolver; unresolvable s
   assert.equal(await port.canonicalizeMentions({ kind: 'session', sessionId: 'session-other' }, '@file-one.txt'), '@file-one.txt')
 })
 
-test('resolveReference probes existence with the mention resolution rules', async () => {
-  const root = fixtureWorkspace()
+test('resolveReference probes existence with the mention resolution rules', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
   const scope = { kind: 'workspace', cwd: root } as const
   assert.deepEqual(await port.resolveReference(scope, 'file-one.txt'), { kind: 'found', path: join(root, 'file-one.txt') })
@@ -125,8 +132,9 @@ test('resolveReference probes existence with the mention resolution rules', asyn
   assert.deepEqual(await port.resolveReference(scope, '~/definitely-not-a-dir-xyz'), { kind: 'missing' })
 })
 
-test('canonicalizeMentions rewrites relative, ~ and absolute mentions; missing paths stay verbatim', async () => {
-  const root = fixtureWorkspace()
+test('canonicalizeMentions rewrites relative, ~ and absolute mentions; missing paths stay verbatim', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
   const scope = { kind: 'workspace', cwd: root } as const
   assert.equal(
@@ -144,8 +152,9 @@ test('canonicalizeMentions rewrites relative, ~ and absolute mentions; missing p
   )
 })
 
-test('canonicalizeMentions absolutizes a symlink without realpath-ing it', async () => {
-  const root = fixtureWorkspace()
+test('canonicalizeMentions absolutizes a symlink without realpath-ing it', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const target = join(root, 'file-one.txt')
   const link = join(root, 'link.ts')
   symlinkSync(target, link)
@@ -154,8 +163,9 @@ test('canonicalizeMentions absolutizes a symlink without realpath-ing it', async
   assert.equal(out, `see @${link}`, 'the LINK path is the intent, never the realpath')
 })
 
-test('candidates are detached PATH-ONLY DTOs (path/kind — the official FileReferenceCandidate shape)', async () => {
-  const root = fixtureWorkspace()
+test('candidates are detached PATH-ONLY DTOs (path/kind — the official FileReferenceCandidate shape)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   const [item] = await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@file')
   assert.ok(item !== undefined)
   assert.deepEqual(Object.keys(item).sort(), ['kind', 'path'])
@@ -168,17 +178,18 @@ test('candidates are detached PATH-ONLY DTOs (path/kind — the official FileRef
 /** A fake `fd` executable: a script that prints the fixture's RELATIVE
  * paths the way real fd does (directories with a trailing `/`). The fork
  * spawns it with `--base-directory <root>` and parses stdout. */
-function fakeFd(body: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-fakefd-'))
+function fakeFd(life: TestLifecycle, body: string): string {
+  const dir = life.tempDir('dsh-fakefd-')
   const script = join(dir, 'fd')
   writeFileSync(script, `#!/bin/sh\n${body}\n`)
   chmodSync(script, 0o755)
   return script
 }
 
-test('the fd branch delegates to the fork fuzzy search and returns path-only candidates', async () => {
-  const root = fixtureWorkspace()
-  const port = new DirectHostFilePort(() => undefined, fakeFd(
+test('the fd branch delegates to the fork fuzzy search and returns path-only candidates', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = new DirectHostFilePort(() => undefined, fakeFd(life,
     `printf 'file-one.txt\\nfile-two.ts\\nsrc/\\nsrc/deep-nested.ts\\n'`))
   const scope = { kind: 'workspace', cwd: root } as const
   const hits = await port.listReferences(scope, '@file')
@@ -190,31 +201,34 @@ test('the fd branch delegates to the fork fuzzy search and returns path-only can
   assert.deepEqual(Object.keys(item).sort(), ['kind', 'path'])
 })
 
-test('the fd branch returns RAW paths — quoting is client-side', async () => {
-  const root = fixtureWorkspace()
-  const port = new DirectHostFilePort(() => undefined, fakeFd(
+test('the fd branch returns RAW paths — quoting is client-side', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = new DirectHostFilePort(() => undefined, fakeFd(life,
     `printf 'my file.txt\\nsrc/\\nsrc/deep-nested.ts\\n'`))
   const hits = await port.listReferences({ kind: 'workspace', cwd: root } as const, '@"my file')
   assert.ok(hits.some(candidate => candidate.path === 'my file.txt' && candidate.kind === 'file'),
     `a spaced fd candidate must flow through as a RAW path:\n${JSON.stringify(hits.map(h => h.path))}`)
 })
 
-test('an abort mid-fd-query fails closed (the port re-checks AFTER the await)', async () => {
-  const root = fixtureWorkspace()
+test('an abort mid-fd-query fails closed (the port re-checks AFTER the await)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   // A fake fd that would answer eventually but sleeps past the abort.
-  const port = new DirectHostFilePort(() => undefined, fakeFd('sleep 30'))
+  const port = new DirectHostFilePort(() => undefined, fakeFd(life, 'sleep 30'))
   const controller = new AbortController()
   const pending = port.listReferences({ kind: 'workspace', cwd: root } as const, '@file', { signal: controller.signal })
   controller.abort()
   assert.deepEqual(await pending, [], 'a cancelled fd query must never serve a late result')
 })
 
-test('a failing fd falls back to the bounded scan (plan §6.2 fd-first-fallback)', async () => {
-  const root = fixtureWorkspace()
+test('a failing fd falls back to the bounded scan (plan §6.2 fd-first-fallback)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
   // Non-zero exit: fd failed (a broken invocation). The plan's §6.2
   // contract is fd-FIRST, BOUNDED-FALLBACK — a failure is NOT a valid
   // empty result, so the recursive scan answers.
-  const port = new DirectHostFilePort(() => undefined, fakeFd('exit 3'))
+  const port = new DirectHostFilePort(() => undefined, fakeFd(life, 'exit 3'))
   const candidates = await port.listReferences({ kind: 'workspace', cwd: root } as const, '@file')
   assert.ok(candidates.length > 0, 'a failed fd must fall back to the bounded scan')
   assert.ok(

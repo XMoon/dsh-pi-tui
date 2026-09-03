@@ -9,13 +9,28 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { ModelSubmenu } from '../src/model-menu.ts'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
 import { createDiag } from '../src/diag.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 
 /** A promise the test resolves/rejects manually, to stage late completions. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
@@ -51,6 +66,7 @@ async function openModelFlow(
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const current = { provider: 'p', model: 'm0' } as ModelSelection
   // The real owned-task entry, with a capture diag (the runner wires
   // runOwned with its own diag in production).
@@ -94,6 +110,47 @@ async function viewport(vt: VirtualTerminal): Promise<string> {
 async function settle(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 30))
 }
+
+test('model submenu reflows to a short terminal without losing the selected model or hint', async () => {
+  const applied: ModelSelection[] = []
+  const { vt } = await openModelFlow(
+    fakeLlm({ models: Array.from({ length: 12 }, (_, index) => ({ id: `m${index}` })), efforts: undefined }),
+    applied,
+  )
+  await settle()
+  for (let index = 0; index < 6; index += 1) vt.sendInput('\x1b[B') // select m6
+  await vt.waitForRender()
+  vt.resize(80, 10) // shrink: the outer grant (maxRows = min(rows,28) − 2) must reach the inner model list
+  await settle()
+  const view = await viewport(vt)
+  assert.ok(view.includes('m6'), `selected model must survive the shrink:\n${view}`)
+  assert.ok(view.includes('Esc to cancel'), `submenu hint must survive the shrink:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('model submenu applies the row budget to a list that lands after a resize', async () => {
+  const applied: ModelSelection[] = []
+  let resolveModels!: (rows: readonly { id: string }[]) => void
+  const deferred = {
+    listModels: () => new Promise<readonly { id: string }[]>((resolve) => { resolveModels = resolve }),
+    resolveModelInfo: async (): Promise<unknown> => ({}),
+  }
+  const { vt } = await openModelFlow(deferred, applied)
+  // Resize WHILE the model list is still loading: the grant lands on the
+  // loading shell and must be re-applied when the async list swaps in —
+  // without the rowGrant re-apply the inner list would keep maxVisible 6
+  // and the 8-row frame would clip the hint.
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  resolveModels(Array.from({ length: 12 }, (_, index) => ({ id: `m${index}` })))
+  await settle()
+  const view = await viewport(vt)
+  assert.ok(view.includes('m0'), `the swapped-in model list must render the selected row:\n${view}`)
+  assert.ok(view.includes('Esc to cancel'), `the swapped-in list must honor the grant (hint needs re-apply):\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
 
 test('model submenu loads the model list in place and applies on selection', async () => {
   const applied: ModelSelection[] = []
@@ -292,6 +349,8 @@ test('applying an effort closes the whole overlay (web settleSelection parity)',
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const current = { provider: 'p', model: 'm0' } as ModelSelection
   const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
   const owned = <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>): void => {

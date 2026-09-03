@@ -36,8 +36,8 @@ describe("KeybindingsManager", () => {
 		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.halfPageDown"), []);
 		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.lineUp"), []);
 		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.lineDown"), []);
-		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.previousPrompt"), ["ctrl+shift+up"]);
-		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.nextPrompt"), ["ctrl+shift+down"]);
+		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.previousPrompt"), ["ctrl+shift+up", "ctrl+up"]);
+		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.nextPrompt"), ["ctrl+shift+down", "ctrl+down"]);
 		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.search"), ["ctrl+shift+f"]);
 		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.searchNext"), ["enter", "ctrl+g"]);
 		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.searchPrevious"), ["shift+enter", "ctrl+shift+g"]);
@@ -77,5 +77,19 @@ describe("KeybindingsManager", () => {
 			},
 		]);
 		assert.deepStrictEqual(keybindings.getKeys("tui.editor.cursorLeft"), ["left", "ctrl+b"]);
+	});
+});
+
+describe("editor submit binding split (X037)", () => {
+	it("tui.editor.submit defaults to Enter, independent of tui.input.submit", () => {
+		const kb = new KeybindingsManager(TUI_KEYBINDINGS);
+		assert.deepStrictEqual(kb.getKeys("tui.editor.submit"), ["enter"]);
+		assert.deepStrictEqual(kb.getKeys("tui.input.submit"), ["enter"]);
+
+		kb.setUserBindings({ "tui.input.submit": "ctrl+x" });
+		assert.deepStrictEqual(kb.getKeys("tui.editor.submit"), ["enter"], "input remap must not move the editor binding");
+
+		kb.setUserBindings({ "tui.editor.submit": ["ctrl+enter"] });
+		assert.deepStrictEqual(kb.getKeys("tui.editor.submit"), ["ctrl+enter"]);
 	});
 });

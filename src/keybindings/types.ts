@@ -82,13 +82,26 @@ export type AppKeybindingId =
   | 'question.pageUp'
   | 'question.pageDown'
   | 'question.toggleExpand'
-  // Focused component: the task browser (plan §3.3)
-  | 'tasks.confirm'
-  | 'tasks.cancel'
+  // Focused component: the Task Center (plan §3.3/§29)
+  | 'tasks.open'
+  | 'tasks.search.enter'
+  | 'tasks.search.exit'
+  | 'tasks.scope.toggle'
+  | 'tasks.type.next'
+  | 'tasks.tree.expand'
+  | 'tasks.tree.collapse'
+  | 'tasks.running.next'
+  | 'tasks.running.previous'
+  | 'tasks.stop'
+  | 'tasks.view.full'
+  | 'tasks.refresh'
   | 'tasks.cursorUp'
   | 'tasks.cursorDown'
   | 'tasks.pageUp'
   | 'tasks.pageDown'
+  // Compatibility ids retained without defaults for older component callers.
+  | 'tasks.confirm'
+  | 'tasks.cancel'
   | 'tasks.cycleType'
   | 'tasks.interrupt'
 
@@ -126,8 +139,8 @@ export interface AppKeybindingDefinition {
    * user direct bindings BOTH compile into the effective model as
    * owner=editor rules, participate in conflict/shadow/winner selection,
    * but execution is deferred to the fork editor (the effective keys
-   * sync into its `tui.input.submit` via onEditorSubmitSync), preserving
-   * paste-burst and backslash-newline semantics. */
+   * sync into its `tui.editor.submit` via onEditorSubmitSync — X037), preserving
+   * backslash-newline semantics. */
   readonly hostResolved?: boolean
 }
 
@@ -206,7 +219,7 @@ export type KeybindingSource = 'builtin' | 'plugin' | 'composition' | 'user'
  * carries the winner's owner so the caller can route execution: host →
  * the Host dispatcher, editor → the fork editor (via `onEditorSubmitSync`
  * + `hostResolves: false`), plugin → the plugin remainder. The editor
- * path preserves paste-burst and backslash-newline semantics. */
+ * path preserves backslash-newline semantics. */
 export type RuleOwner = 'host' | 'editor' | 'plugin'
 
 /** One compiled rule of the effective keymap (plan §7). */

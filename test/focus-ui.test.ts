@@ -12,8 +12,8 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { afterEach, test } from 'node:test'
+import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TranscriptFolder, windowMessages } from '../src/transcript.ts'
@@ -21,10 +21,25 @@ import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth } from '../src/tui-
 import type { ToolPresenter } from '../src/present.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -47,7 +62,7 @@ function runningTurn(seqBase: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'locating the transcript path…' } }, T0 + 2, seqBase + 2),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/transcript.ts' }) }, T0 + 3, seqBase + 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/transcript.ts' }) }, T0 + 3, seqBase + 3),
   ]
 }
 
@@ -58,8 +73,8 @@ function settleEvents(seqBase: number): SessionEvent[] {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 5000, seqBase + 4),
     eventAt('assistant/message', {
@@ -80,7 +95,7 @@ function miniTurn(turn: number, baseSeq: number): SessionEvent[] {
   return [
     eventAt('turn/start', { turn }, T0 + baseSeq, baseSeq),
     eventAt('user/message', { id: MessageId(`u${turn}`), role: 'user', content: [{ type: 'text', text: `prompt ${turn}` }], source: { kind: 'user' } }, T0 + baseSeq + 1, baseSeq + 1),
-    eventAt('tool/call', { turn, step: 0, callId: CallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + baseSeq + 2, baseSeq + 2),
+    eventAt('tool/call', { turn, step: 0, callId: ToolCallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + baseSeq + 2, baseSeq + 2),
     eventAt('assistant/message', { turn, step: 1, message: { id: MessageId(`a${turn}`), role: 'assistant', content: [{ type: 'text', text: `done ${turn}` }], source: { kind: 'model', provider: 'p', model: 'm' } } }, T0 + baseSeq + 3, baseSeq + 3),
     eventAt('turn/end', { turn, reason: { kind: 'completed' } }, T0 + baseSeq + 4, baseSeq + 4),
   ]
@@ -177,7 +192,7 @@ test('new events stream into the RUNNING expansion', async () => {
   // The turn keeps running: a second tool call + reasoning land live.
   folder.apply([
     eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'checking turn boundaries…' } }, T0 + 4000, 10),
-    eventAt('tool/call', { turn: 1, step: 1, callId: CallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 4100, 11),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 4100, 11),
   ])
   show(app, folder)
   await vt.waitForRender()
@@ -397,7 +412,7 @@ test('a session switch with the SAME turn number and revision renders the NEW ac
   const folderA = new TranscriptFolder()
   folderA.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('ca'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('ca'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, T0 + 1, 1),
   ])
   app.setFocusMode(true)
   show(app, folderA)
@@ -410,7 +425,7 @@ test('a session switch with the SAME turn number and revision renders the NEW ac
   const folderB = new TranscriptFolder()
   folderB.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('cb'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cb'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 1, 1),
   ])
   app.clearSessionOverrides() // the runner's session-switch cleanup
   show(app, folderB)
@@ -768,6 +783,7 @@ test('a plugin tool renderer sees the EFFECTIVE expansion inside an expanded Tho
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(runningTurn(0))
   app.setFocusMode(true)
@@ -894,6 +910,7 @@ test('regular Ctrl+O derives ONLY the recent Focus turns; older roots stay colla
   const vt = new VirtualTerminal(100, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 4; turn += 1) folder.apply(miniTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -920,6 +937,7 @@ test('regular search reveal of a NON-recent root full-reveals its process (no de
   const vt = new VirtualTerminal(100, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 4; turn += 1) folder.apply(miniTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -954,11 +972,12 @@ test('regular Focus expanded roots render large diffs in FULL (no mouse, no cap)
     },
   })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('tool/call', {
-      turn: 1, step: 0, callId: CallId('cdiff'),
+      turn: 1, step: 0, callId: ToolCallId('cdiff'),
       name: 'edit',
       arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }),
     }, T0 + 1, 1),
@@ -996,10 +1015,11 @@ test('cache identity: Ctrl+O ON caps a large diff, then /focus on FULL-REVEALS t
     },
   })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
     eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
   ])
   // Focus OFF + Ctrl+O ON: the ordinary fold expands the card, the diff CAPS.
@@ -1034,10 +1054,11 @@ test('cache identity: /focus off restores the ordinary CAPPED diff presentation 
     },
   })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
     eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
   ])
   // Focus ON + Ctrl+O ON: the derived root full-reveals the diff.
@@ -1112,7 +1133,7 @@ function multilineBashTurn(seqBase: number): SessionEvent[] {
       content: [{ type: 'text', text: 'run the patch' }],
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: MULTILINE_BASH_COMMAND }) }, T0 + 2, seqBase + 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: MULTILINE_BASH_COMMAND }) }, T0 + 2, seqBase + 2),
   ]
 }
 
@@ -1129,8 +1150,8 @@ function settleMultilineBashTurn(seqBase: number): SessionEvent[] {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 5000, seqBase + 3),
     eventAt('assistant/message', {
@@ -1149,6 +1170,7 @@ test('fullscreen Focus: a multiline Bash heredoc stays ONE row and never ghosts 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: bashHeredocPresenter() })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   // Baseline frame WITHOUT the tool: the alt screen's diff state is
   // established cleanly (a first frame with the multiline row would be a
@@ -1194,6 +1216,7 @@ test('fullscreen Focus expand/collapse: the expanded Bash card keeps the multili
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: bashHeredocPresenter() })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   // Same diff-frame sequence: clean baseline, then ONLY the appended
   // suffix (tool/call + settle) lands in one later frame — a real
@@ -1263,13 +1286,13 @@ function settledThoughtTurn(turn: number, baseSeq: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + baseSeq + 1, baseSeq + 1),
     eventAt('assistant/chunk', { turn, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: `reasoning ${turn} line A\nreasoning ${turn} line B` } }, T0 + baseSeq + 2, baseSeq + 2),
-    eventAt('tool/call', { turn, step: 0, callId: CallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + baseSeq + 3, baseSeq + 3),
+    eventAt('tool/call', { turn, step: 0, callId: ToolCallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + baseSeq + 3, baseSeq + 3),
     eventAt('tool/result', {
       turn, step: 0,
       message: {
         id: MessageId(`r${turn}`), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId(`c${turn}`), content: [{ type: 'text', text: lines }] }],
-        source: { kind: 'tool', callId: CallId(`c${turn}`) },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId(`c${turn}`), content: [{ type: 'text', text: lines }] }],
+        source: { kind: 'tool', callId: ToolCallId(`c${turn}`) },
       },
     }, T0 + baseSeq + 4, baseSeq + 4),
     eventAt('assistant/message', {
@@ -1302,17 +1325,17 @@ function offscreenThoughtTurn(seqBase: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the projection…' } }, T0 + 2, seqBase + 2),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'seq 1 120' }) }, T0 + 3, seqBase + 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'seq 1 120' }) }, T0 + 3, seqBase + 3),
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: lines }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: lines }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, seqBase + 4),
     eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'cross-checking the tail…' } }, T0 + 5, seqBase + 5),
-    eventAt('tool/call', { turn: 1, step: 2, callId: CallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'echo done' }) }, T0 + 6, seqBase + 6),
+    eventAt('tool/call', { turn: 1, step: 2, callId: ToolCallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'echo done' }) }, T0 + 6, seqBase + 6),
     eventAt('assistant/message', {
       turn: 1, step: 3,
       message: {
@@ -1329,6 +1352,7 @@ test('fullscreen Focus Ctrl+O expands ONLY the recent roots; secondaries stay co
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -1365,6 +1389,7 @@ test('fullscreen Ctrl+O Expand Recent follows a pre-set global Thinking preferen
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 3; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -1390,6 +1415,7 @@ test('fullscreen Ctrl+O collapses ALL roots once any is expanded (plan §22.2)',
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -1414,6 +1440,7 @@ test('fullscreen Ctrl+O roundtrip is deterministic: recent-3 → all → recent-
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -1434,6 +1461,7 @@ test('fullscreen Ctrl+O Collapse All clears every secondary override; the global
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1536,6 +1564,7 @@ test('blank-row collapse works when the Thought header scrolled OUT of view (pla
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(offscreenThoughtTurn(0))
   app.setFocusMode(true)
@@ -1585,6 +1614,7 @@ test('a secondary content row toggles only the secondary; the adjacent blank row
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1629,6 +1659,7 @@ test('clicking the Thinking row toggles the secondary, never the root (plan §23
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1655,6 +1686,7 @@ test('a blank-row click collapses ONLY the owning Thought (plan §23.4)', async 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   folder.apply(settledThoughtTurn(2, 100))
@@ -1696,6 +1728,7 @@ test('clicking a blank row that belongs to NO Thought is a no-op (plan §23.5)',
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1725,6 +1758,7 @@ test('clicks on the editor seat and the footer never collapse a Thought (plan §
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1752,6 +1786,7 @@ test('the blank-row fallback never pierces an open overlay (plan §23.7)', async
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -1794,6 +1829,7 @@ test('resize keeps the blank-row click map aligned (plan §23.8)', async () => {
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(offscreenThoughtTurn(0))
   app.setFocusMode(true)
@@ -1837,6 +1873,7 @@ test('a blank-row click BEFORE the first paint after a resize is dropped — reb
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(offscreenThoughtTurn(0))
   app.setFocusMode(true)
@@ -1886,6 +1923,7 @@ test('Collapse All clears a secondary override parked on a WINDOWED-AWAY message
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   folder.apply(settledThoughtTurn(2, 100))
@@ -1957,13 +1995,13 @@ function reasoningTailTurn(seqBase: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, T0 + 2, seqBase + 2),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'x' }) }, T0 + 3, seqBase + 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'x' }) }, T0 + 3, seqBase + 3),
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, seqBase + 4),
     // The reasoning-only assistant message: zero rendered rows.
@@ -1991,6 +2029,7 @@ test('a zero-height trailing process row must not turn the boundary spacer into 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(reasoningTailTurn(0))
   app.setFocusMode(true)
@@ -2020,6 +2059,7 @@ test('a Thought with NO process cards: the header trailing spacer stays a no-op'
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -2050,6 +2090,7 @@ test('the boundary spacer between two adjacent Thoughts is a no-op', async () =>
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   folder.apply(settledThoughtTurn(2, 100))
@@ -2083,6 +2124,7 @@ test('the collapsed header block trailing spacer stays a no-op — never expands
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   app.setFocusMode(true)
@@ -2109,6 +2151,7 @@ test('Ctrl+O with a PARKED expansion on a windowed-away root still expands the v
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
@@ -2139,6 +2182,7 @@ test('local shell cards stay folded in fullscreen Focus even with the Ctrl+O mas
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const long = Array.from({ length: 30 }, (_, i) => `shell line ${i}`).join('\n')
   app.pushLocalMessage({
     kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
@@ -2177,6 +2221,7 @@ test('gutter blocker: the fullscreen Focus hit-map stays aligned across the disc
   const vt = new VirtualTerminal(40, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -2186,13 +2231,13 @@ test('gutter blocker: the fullscreen Focus hit-map stays aligned across the disc
       source: { kind: 'user' },
     }, T0 + 1, 1),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'alpha reasoning\nalpha latest' } }, T0 + 2, 2),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 3, 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 3, 3),
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, 4),
     eventAt('assistant/message', {
@@ -2268,6 +2313,7 @@ test('the truncated marker stays ONE row inside the gutter: a click below it sti
   const vt = new VirtualTerminal(16, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     // Turn 1: a max-tokens turn whose final carries the truncated marker.
@@ -2294,13 +2340,13 @@ test('the truncated marker stays ONE row inside the gutter: a click below it sti
       content: [{ type: 'text', text: 'second run' }],
       source: { kind: 'user' },
     }, T0 + 5, 5),
-    eventAt('tool/call', { turn: 2, step: 0, callId: CallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 2, step: 0, callId: ToolCallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 6, 6),
     eventAt('tool/result', {
       turn: 2, step: 0,
       message: {
         id: MessageId('r2'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c2') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c2') },
       },
     }, T0 + 7, 7),
     eventAt('assistant/message', {
@@ -2344,6 +2390,7 @@ test('editor/footer clicks are clipped OUT of the transcript hit-test when scrol
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(offscreenThoughtTurn(0))
   app.setFocusMode(true)
@@ -2395,6 +2442,7 @@ test('Collapse All keeps a local shell card mouse-expanded (its override is not 
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(settledThoughtTurn(1, 0))
   const long = Array.from({ length: 30 }, (_, i) => `shell line ${i}`).join('\n')

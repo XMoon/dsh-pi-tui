@@ -25,6 +25,7 @@ import {
 } from './lib/dsh-distribution.mjs'
 
 export const SOURCE_CONFIG_RELATIVE = join('test', 'compat', 'dsh-source.json')
+export const MODE_CONFIG_RELATIVE = join('test', 'compat', 'dsh-mode.json')
 export const DEV_STATE_FILE = '.dsh-dev-state.json'
 export const DEV_ENV_FILE = '.dsh-dev-env'
 export const CACHE_DIRECTORY_NAME = 'dsh-pi-tui'
@@ -89,6 +90,26 @@ export function loadSourceConfig(path) {
   }
 }
 
+/**
+ * Read the tracked branch-level DSH mode policy (test/compat/dsh-mode.json).
+ * The file is the SINGLE source of truth for which distribution a branch
+ * uses; the legacy dsh-source.json presence check below is only the
+ * fallback for checkouts that predate the mode file.
+ * @param {string} path - the resolved mode-config path.
+ * @returns {'source'|'npm'}
+ */
+export function readModeConfig(path) {
+  const resolved = resolve(path)
+  if (!existsSync(resolved) || !statSync(resolved).isFile()) fail(`DSH mode config is missing: ${resolved}`)
+  const value = readJsonFile(resolved, 'DSH mode config')
+  if (value.schemaVersion !== 1) fail(`unsupported DSH mode config schema ${JSON.stringify(value.schemaVersion)}`)
+  const mode = value.mode
+  if (mode !== 'source' && mode !== 'npm') {
+    fail(`unsupported DSH mode ${JSON.stringify(mode)}; expected source or npm`)
+  }
+  return mode
+}
+
 export function cacheRoot(environment = process.env) {
   const configured = environment.XDG_CACHE_HOME
   const base = typeof configured === 'string' && configured.trim() !== ''
@@ -149,12 +170,23 @@ export function resolveDshDevContext({ root = process.cwd(), mode, config, distr
   const packageJson = readPackageJson(directory)
   const packageManager = packageManagerInfo(packageJson.value)
   const generatedEnvBelongsHere = generatedEnvironmentBelongsToRoot(directory, environment)
-  const environmentMode = generatedEnvBelongsHere
-    ? environment.DSH_DEV_MODE ?? environment.DSH_MODE
-    : undefined
-  const configuredMode = mode ?? environmentMode
+  const configuredMode = mode ?? (generatedEnvBelongsHere ? environment.DSH_MODE : undefined)
   const configPath = sourceConfigPath(directory, config, environment)
-  const modeFromPolicy = configuredMode ?? (existsSync(configPath) ? 'source' : 'npm')
+  // Mode precedence: explicit option → DSH_MODE (a USER override) → the
+  // tracked branch-level mode policy (test/compat/dsh-mode.json) → the
+  // legacy fallback (DSH_DEV_MODE, the state dev:bootstrap materialized
+  // into .dsh-dev-env, then the source-pin presence). DSH_DEV_MODE must
+  // NOT override the tracked policy: it is generated state, and letting
+  // it win would lock an existing worktree into its old mode after the
+  // branch flips (doctor/bootstrap would keep re-materializing the stale
+  // mode forever). The legacy fallback keeps older checkouts and main
+  // working without a mode file.
+  const modeConfigPath = resolve(directory, MODE_CONFIG_RELATIVE)
+  const hasModePolicy = existsSync(modeConfigPath)
+  const modeFromPolicy = configuredMode
+    ?? (hasModePolicy ? readModeConfig(modeConfigPath) : undefined)
+    ?? (generatedEnvBelongsHere ? environment.DSH_DEV_MODE : undefined)
+    ?? (existsSync(configPath) ? 'source' : 'npm')
   if (modeFromPolicy !== 'source' && modeFromPolicy !== 'npm') {
     fail(`unsupported DSH development mode ${modeFromPolicy}; expected source or npm`)
   }
@@ -168,6 +200,20 @@ export function resolveDshDevContext({ root = process.cwd(), mode, config, distr
     && environmentDistribution !== undefined
     && sourcePack !== undefined
     && resolve(directory, environmentDistribution) === resolve(sourcePack)
+  // A shell that sourced an ephemeral generation keeps inheriting its path
+  // after another shell's bootstrap reclaimed that generation. Such an
+  // inherited distribution is stale and must self-heal: drop it and fall
+  // back to the normal resolution (committed state / canonical cache)
+  // instead of hard-loading a path that no longer exists. Explicit
+  // distribution arguments are never second-guessed.
+  const staleEphemeralDistribution = distribution === undefined
+    && generatedEnvBelongsHere
+    && environment.DSH_DEV_EPHEMERAL === '1'
+    && environmentDistribution !== undefined
+    && !existsSync(resolve(directory, environmentDistribution))
+  if (staleEphemeralDistribution) {
+    console.warn(`DSH dev: ignoring stale inherited DSH_SOURCE_DISTRIBUTION=${environmentDistribution} (ephemeral generation no longer exists); run pnpm dev:bootstrap to refresh this shell`)
+  }
   return {
     schemaVersion: 1,
     root: directory,
@@ -182,7 +228,7 @@ export function resolveDshDevContext({ root = process.cwd(), mode, config, distr
     harnessWorktreeRoot: source === undefined ? undefined : join(cache, 'harness-worktrees'),
     harnessCheckout: source === undefined ? undefined : join(cache, 'harness-worktrees', source.ref),
     sourcePack,
-    distribution: generatedDurableDistribution ? undefined : environmentDistribution,
+    distribution: generatedDurableDistribution || staleEphemeralDistribution ? undefined : environmentDistribution,
     statePath: join(directory, DEV_STATE_FILE),
     envPath: join(directory, DEV_ENV_FILE),
     requiredDshPackages: requiredDshPackages(packageJson.value),

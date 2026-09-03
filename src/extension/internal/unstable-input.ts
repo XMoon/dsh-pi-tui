@@ -1,14 +1,19 @@
 /**
  * The UnstableInputRegistry (Phase 3, plan §5): the Host-owned registry of
- * RAW input captures. Registrations are caller-fiber-owned (the service
+ * preHostInput captures. Registrations are caller-fiber-owned (the service
  * binds them to the calling fiber); the registry itself is
  * service-lifetime — captures survive surface recreate and are consulted
  * by the CURRENT surface's input path.
  *
  * Routing contract (plan §4/§5/§8):
- * - the registry is consulted by the Host BEFORE terminal protocol
- *   decoding — a capture can see, consume or rewrite ANY raw chunk
- *   (Enter, Esc, Ctrl+C, paste, CSI-u, terminal-specific protocols);
+ * - the registry is consulted by the Host BEFORE semantic routing, AFTER
+ *   the terminal pipeline has reassembled and normalized the input
+ *   (StdinBuffer sequence splitting, keyboard-negotiation reply
+ *   filtering, native modifier normalization, TUI-owned query reply
+ *   filtering — see UnstableRawInputEvent). A capture can see, consume
+ *   or rewrite any sequence that would otherwise reach the Host router
+ *   (Enter, Esc, Ctrl+C, paste, CSI-u), but never the TUI's own
+ *   negotiation replies and never raw mid-sequence chunks;
  * - `observe` captures never consume or rewrite; they run first, in
  *   deterministic order;
  * - while an `exclusive` capture is live it is the SOLE capture consumer:
@@ -17,11 +22,11 @@
  *   load-order winner;
  * - ordering is deterministic: priority ASC, then id ASC (the ledger's
  *   rule — load order never decides);
- * - a rewrite replaces the chunk for the Host decoder; the replacement
- *   NEVER re-enters the chain (each terminal chunk passes the chain at
+ * - a rewrite replaces the sequence for the Host decoder; the replacement
+ *   NEVER re-enters the chain (each sequence passes the chain at
  *   most once — the Host applies the result and continues);
  * - a throwing handler (or `when` gate) is isolated and FAILS OPEN: the
- *   chunk passes through, and the failure is recorded in the extension
+ *   sequence passes through, and the failure is recorded in the extension
  *   health ledger (`unstable.input.raw` slot).
  * @module @xmoon76/dsh-pi-tui/extension/unstable-input
  */
@@ -182,11 +187,13 @@ export class UnstableInputRegistry {
   }
 
   /**
-   * Consult the captures for one raw chunk. The Host calls this from its
-   * input path BEFORE terminal protocol decoding; the returned outcome is
-   * applied exactly once (a rewrite goes straight to the Host decoder —
-   * it never re-enters this chain).
-   * @param event - the raw chunk + the surface generation it arrived on.
+   * Consult the captures for one normalized input sequence. The Host
+   * calls this from its input path BEFORE Host semantic routing (after
+   * terminal reassembly/normalization — see UnstableRawInputEvent); the
+   * returned outcome is applied exactly once (a rewrite goes straight to
+   * the Host decoder — it never re-enters this chain).
+   * @param event - the normalized sequence + the surface generation it
+   *   arrived on.
    * @returns the routing outcome.
    */
   route(event: UnstableRawInputEvent): UnstableRawRouteResult {

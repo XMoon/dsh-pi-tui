@@ -142,9 +142,11 @@ The child viewer's interactivity is keyed SOLELY to the catalog mode carried
 through the whole chain (`SubagentListEntry.mode` → `TaskBrowserRow.mode` →
 `SubagentViewerTarget.mode`), never guessed from running/inactive state, and
 never re-derived inside the viewer. A `continuable` viewer's editor is LIVE:
-Enter delivers the text as the child's NEXT turn through
-`ctx.subagents.followup(exactLiveParent, childId, …)` — FIFO, no interrupt,
-no steer. Decisions a future change must not silently reverse:
+Enter delivers the text as the child's NEXT distinct FIFO turn through the
+OFFICIAL `ctx.subagents.prompt({ requestId, parentSessionId, childSessionId,
+mode: 'continuable', content }, signal)` control API (DSH 0.1.2-alpha.4) —
+user provenance, no interrupt, no steer; parent authority is validated by
+the Host itself. Decisions a future change must not silently reverse:
 
 - **The viewer editor is a PLAIN text editor.** Everything typed — including
   lines that start with `/` — is delivered to the child as text; slash
@@ -155,11 +157,17 @@ no steer. Decisions a future change must not silently reverse:
   Ctrl+V image intake) are consumed by the host BEFORE the ladder reaches
   the editor, so the viewer can never act on the parent session.
 - **The write path is exactly one**: the runner's `onSubagentSubmit` →
-  `submitSubagentFollowup` (src/subagent-viewer-submit.ts) → the exact live
-  direct parent check → `ctx.subagents.followup`. Never
-  `ctx.agents.get(childId).followup(...)` (bypasses the continuation
-  manager / cold resume / direct-parent authority), never the parent's
-  submit/steer/queue path.
+  `submitSubagentPrompt` (src/subagent-viewer-submit.ts) → the official
+  `ctx.subagents.prompt`. Never `ctx.subagents.sendMessage(...)` (that is
+  the Agent-authored Steer path — a human prompt must queue as its own
+  turn), never `ctx.agents.get(childId).followup(...)` (bypasses the
+  continuation manager / cold resume / direct-parent authority), never the
+  parent's submit/steer/queue path. The caller-minted `requestId` (one
+  UUID per human submit) is persisted on the accepted message; failures
+  classify through the official RemoteError vocabulary
+  (`subagent/parent-unavailable`, `subagent/not-resumable`,
+  `subagent/unauthorized`, `subagent/delivery-unavailable`,
+  `gateway/cancelled`, …).
 - **Viewer submissions never enter the shared editor history.** An ↑ recall
   in the MAIN editor must not resend a child-scoped follow-up to the
   parent. The fork editor's own per-editor recall is untouched.
@@ -426,3 +434,49 @@ mode (only `TuiAltScreen` wires `onCellClick`):
   never dismissed, the shell process is never cancelled (Esc owns that),
   no session event is deleted, and an already-submitted `!` context
   payload is untouched. `!!` stays local-only.
+
+## One live TUI per process (the vendored keybindings are process-global)
+
+The vendored fork's `getKeybindings()` is a PROCESS-GLOBAL singleton
+(upstream shape — deliberately NOT re-vendored into per-TUI dependency
+injection). A TuiApp's HostKeybindingManager syncs `app.input.submit` →
+`tui.editor.submit` (plus Home/End and alt-screen mappings) into that
+singleton on EVERY rebuild — and the manager SURVIVES `stop()` (only the
+final `dispose()` ends the surface generation, keeping extension
+registrations/handles valid across stop/start round-trips). Two surfaces
+sharing one process would therefore fight over one keybinding state —
+App A's submit remap would hijack App B's Enter — even when one of them
+is merely stopped, not disposed. The host enforces the invariant
+fail-fast (re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
+
+- `TuiApp.start()` CLAIMS the process slot at the first successful start
+  (a failed `start()` never leaks the claim); `TuiApp.stop()` NEVER
+  releases it — a stopped-but-not-final-disposed surface still owns the
+  process-global keybinding namespace; `TuiApp.dispose()` releases LAST,
+  only after the completed final teardown (keybinding manager, extension
+  host and editor holder all disposed).
+- A second surface whose `start()` runs before the first one's final
+  dispose rejects with a deterministic error — never a silent keybinding
+  collision.
+- Exclusivity is FAIL-CLOSED: if the final teardown throws, the slot
+  stays claimed (a half-torn-down surface must never be publicly
+  replaceable by a new one). `stop()` never releases, so a throwing stop
+  teardown cannot fail open either.
+- The external-editor suspend/resume and ordinary stop/start cycles keep
+  the claim (same generation, same ownership — no trip); fullscreen
+  main/alt-screen swaps stop/start the SCREENS (not the app) and never
+  touch the slot at all.
+
+## Task Center uses one catalog with two presentation surfaces
+
+Quick Tasks is the footer-triggered, Active-scope view; `/tasks` opens the full
+Task Center in All scope. Both surfaces consume the same durable preorder and
+runtime projection. Scope, type, search, selection, and disclosure are
+presentation state, so promoting Quick to Full never reorders or deduplicates
+rows and Esc can restore the prior context. Active scope retains every ancestor
+needed to explain an active descendant but does not promote that descendant to a
+root. Terminal job failures are acknowledged only when a visible Task Center
+row is opened; until then the footer keeps a failure marker and the ↓ affordance.
+The stop action is a confirmed, capability-gated dispatch: continuable running
+children use their durable direct parent authority, while running jobs use the
+public job kill API. The browser never reads job output.

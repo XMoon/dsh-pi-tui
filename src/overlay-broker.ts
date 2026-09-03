@@ -170,6 +170,21 @@ export class OverlayBroker {
     this.dependents.clear()
   }
 
+  /**
+   * FINAL surface teardown: physically unmount every tracked overlay
+   * (running disposeOnHide) WITHOUT restoring dependents — the whole
+   * surface is dying, nothing may flash back. Unlike closeForHost this
+   * bypasses the question-aware graph cleanup and the focus-seat report:
+   * the tracked set holds the RAW screen handles, so hide() runs the
+   * fork's physical unmount + disposeOnHide chain (the owning frame
+   * disposes the panel, which stops its timers exactly once). Idempotent.
+   */
+  disposeAll(): void {
+    for (const handle of this.tracked) handle.hide()
+    this.tracked.clear()
+    this.dependents.clear()
+  }
+
   /** The current graph sizes (headless assertions — the graph is
    * behaviorally invisible; stale entries only leak memory). */
   graphState(): { handles: number; dependents: number } {

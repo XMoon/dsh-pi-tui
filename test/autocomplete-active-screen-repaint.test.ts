@@ -19,10 +19,25 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { afterEach, test } from 'node:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 
 /** Poll until the predicate is true (asserts after a 3s deadline). */
 async function pollUntil(predicate: () => boolean, label: string): Promise<void> {
@@ -42,8 +57,8 @@ function isAutocompleteActive(app: import('../src/tui-app.ts').TuiApp): boolean 
 
 /** A root whose `src/` has THREE children (never single-result auto-apply)
  * and a DISTINCT sibling subtree, so first-layer content is recognizable. */
-function dirFixture(): string {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-ac-repaint-'))
+function dirFixture(life: TestLifecycle): string {
+  const root = life.tempDir('dsh-ac-repaint-')
   mkdirSync(join(root, 'src'))
   writeFileSync(join(root, 'src', 'alpha.ts'), 'x')
   writeFileSync(join(root, 'src', 'beta.ts'), 'x')
@@ -70,10 +85,13 @@ function childrenVisible(view: string): boolean {
 
 // ── @ mention: directory accept must repaint the children dropdown ──────────
 
-test('fullscreen: accepting an @ directory repaints the children dropdown on the alt screen', async () => {
+test('fullscreen: accepting an @ directory repaints the children dropdown on the alt screen', async (t) => {
+  const life = testLifecycle(t)
   const { startApp } = await import('./support/app-harness.ts')
-  const root = dirFixture()
+  const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -96,13 +114,15 @@ test('fullscreen: accepting an @ directory repaints the children dropdown on the
     return draftVisible(view, '@src/') && childrenVisible(view)
   }, 'the children dropdown must be VISIBLE on the fullscreen surface after accepting a directory')
   assert.equal(isAutocompleteActive(app), true, 'the children dropdown stays active')
-  app.stop()
 })
 
-test('regular: accepting an @ directory repaints the children dropdown', async () => {
+test('regular: accepting an @ directory repaints the children dropdown', async (t) => {
+  const life = testLifecycle(t)
   const { startApp } = await import('./support/app-harness.ts')
-  const root = dirFixture()
+  const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('@src')
   await pollUntil(() => {
@@ -115,13 +135,15 @@ test('regular: accepting an @ directory repaints the children dropdown', async (
     const view = vt.getViewport().join('\n')
     return draftVisible(view, '@src/') && childrenVisible(view)
   }, 'the children dropdown must be visible on the regular surface')
-  app.stop()
 })
 
-test('fullscreen: Tab on the visible children dropdown accepts the highlighted child', async () => {
+test('fullscreen: Tab on the visible children dropdown accepts the highlighted child', async (t) => {
+  const life = testLifecycle(t)
   const { startApp } = await import('./support/app-harness.ts')
-  const root = dirFixture()
+  const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -143,13 +165,15 @@ test('fullscreen: Tab on the visible children dropdown accepts the highlighted c
     return draftVisible(view, '@src/alpha.ts')
   }, 'Tab must accept the visible highlighted child and paint it')
   assert.ok(app.seatTextForTest().startsWith('@src/alpha.ts'), `accepted draft: ${app.seatTextForTest()}`)
-  app.stop()
 })
 
-test('fullscreen: a filter keystroke updates the visible dropdown without forced full redraws', async () => {
+test('fullscreen: a filter keystroke updates the visible dropdown without forced full redraws', async (t) => {
+  const life = testLifecycle(t)
   const { startApp } = await import('./support/app-harness.ts')
-  const root = dirFixture()
+  const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -168,15 +192,17 @@ test('fullscreen: a filter keystroke updates the visible dropdown without forced
   // per-keystroke forced-full-redraw bridge must stay gone (render churn
   // must not regress).
   assert.equal(activeScreenForTest(app).fullRedraws, fullRedrawsBefore, 'a dropdown update must not force a full redraw')
-  app.stop()
 })
 
 // ── /image path argument: same lifecycle through the other trigger ──────────
 
-test('fullscreen: accepting a /image directory repaints the children dropdown on the alt screen', async () => {
+test('fullscreen: accepting a /image directory repaints the children dropdown on the alt screen', async (t) => {
+  const life = testLifecycle(t)
   const { startImageApp } = await import('./support/app-harness.ts')
-  const root = dirFixture()
+  const root = dirFixture(life)
   const { vt, app } = startImageApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -192,13 +218,15 @@ test('fullscreen: accepting a /image directory repaints the children dropdown on
     const view = vt.getViewport().join('\n')
     return draftVisible(view, '/image src/') && childrenVisible(view)
   }, 'the children dropdown must be VISIBLE on the fullscreen surface after accepting a directory')
-  app.stop()
 })
 
-test('regular: accepting a /image directory repaints the children dropdown', async () => {
+test('regular: accepting a /image directory repaints the children dropdown', async (t) => {
+  const life = testLifecycle(t)
   const { startImageApp } = await import('./support/app-harness.ts')
-  const root = dirFixture()
+  const root = dirFixture(life)
   const { vt, app } = startImageApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('/image src')
   await pollUntil(() => {
@@ -211,15 +239,17 @@ test('regular: accepting a /image directory repaints the children dropdown', asy
     const view = vt.getViewport().join('\n')
     return draftVisible(view, '/image src/') && childrenVisible(view)
   }, 'the children dropdown must be visible on the regular surface')
-  app.stop()
 })
 
 // ── screen switches with a completion in flight ─────────────────────────────
 
-test('regular -> fullscreen while a completion is in flight: children repaint on the NEW active screen', async () => {
+test('regular -> fullscreen while a completion is in flight: children repaint on the NEW active screen', async (t) => {
+  const life = testLifecycle(t)
   const { startApp } = await import('./support/app-harness.ts')
-  const root = dirFixture()
+  const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // The request enters its 20ms debounce + async discovery HERE; the switch
   // happens synchronously in the same tick, long before the commit.
@@ -229,13 +259,15 @@ test('regular -> fullscreen while a completion is in flight: children repaint on
     const view = vt.getViewport().join('\n')
     return draftVisible(view, '@src/') && childrenVisible(view)
   }, 'the in-flight commit must repaint the fullscreen it lands under')
-  app.stop()
 })
 
-test('fullscreen -> regular while a completion is in flight: children repaint on the NEW active screen', async () => {
+test('fullscreen -> regular while a completion is in flight: children repaint on the NEW active screen', async (t) => {
+  const life = testLifecycle(t)
   const { startApp } = await import('./support/app-harness.ts')
-  const root = dirFixture()
+  const root = dirFixture(life)
   const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -245,15 +277,17 @@ test('fullscreen -> regular while a completion is in flight: children repaint on
     const view = vt.getViewport().join('\n')
     return draftVisible(view, '@src/') && childrenVisible(view)
   }, 'the in-flight commit must repaint the regular screen it lands under')
-  app.stop()
 })
 
 // ── the fast slash-command path must survive without the old microtask bridge
 
-test('fullscreen: async slash-command suggestions paint the fresh list', async () => {
+test('fullscreen: async slash-command suggestions paint the fresh list', async (t) => {
+  const life = testLifecycle(t)
   const { startImageApp } = await import('./support/app-harness.ts')
-  const root = dirFixture()
+  const root = dirFixture(life)
   const { vt, app } = startImageApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -266,18 +300,19 @@ test('fullscreen: async slash-command suggestions paint the fresh list', async (
     return draftVisible(view, '/im') && view.includes('Attach an image file')
   }, 'the fresh command dropdown must be visible in fullscreen')
   assert.equal(isAutocompleteActive(app), true, 'the command dropdown stays active')
-  app.stop()
 })
 
-test('regular: async slash-command suggestions paint the fresh list', async () => {
+test('regular: async slash-command suggestions paint the fresh list', async (t) => {
+  const life = testLifecycle(t)
   const { startImageApp } = await import('./support/app-harness.ts')
-  const root = dirFixture()
+  const root = dirFixture(life)
   const { vt, app } = startImageApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('/im')
   await pollUntil(() => {
     const view = vt.getViewport().join('\n')
     return draftVisible(view, '/im') && view.includes('Attach an image file')
   }, 'the fresh command dropdown must be visible')
-  app.stop()
 })

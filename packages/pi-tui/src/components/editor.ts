@@ -22,14 +22,6 @@ const wordSegmenter = getWordSegmenter();
 /** Regex matching paste markers like `[paste #1 +123 lines]` or `[paste #2 1234 chars]`. */
 const PASTE_MARKER_REGEX = /\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g;
 
-/**
- * Pastes larger than this are NOT stored in the pastes map: a stored paste
- * is cloned into every undo snapshot (structuredClone), so a multi-MB paste
- * multiplies its memory across the whole undo stack. Beyond the cap the
- * marker trade-off reverses — expand inline like ordinary multi-line text.
- */
-const MAX_PASTE_STORED_CHARS = 256 * 1024;
-
 /** Non-global version for single-segment testing. */
 const PASTE_MARKER_SINGLE = /^\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]$/;
 
@@ -37,6 +29,15 @@ const PASTE_MARKER_SINGLE = /^\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]$/;
 function isPasteMarker(segment: string): boolean {
 	return segment.length >= 10 && PASTE_MARKER_SINGLE.test(segment);
 }
+
+/**
+ * Pastes larger than this are NOT stored in the pastes map: a stored paste
+ * is cloned into every undo snapshot, so a multi-MB paste multiplies its
+ * memory across the whole undo stack. Beyond the cap the marker trade-off
+ * reverses — expand inline like ordinary multi-line text.
+ * (dsh-pi-tui divergence X004A.)
+ */
+const MAX_PASTE_STORED_CHARS = 256 * 1024;
 
 /**
  * A segmenter that wraps Intl.Segmenter and merges graphemes that fall
@@ -182,6 +183,7 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 				// re-wrapping it would recurse forever. Keep it as the
 				// current open chunk and let it overflow by one column;
 				// the TUI paint layer truncates overwide lines.
+				// (dsh-pi-tui divergence X034.)
 				currentWidth = gWidth;
 				wrapOppIndex = -1;
 				continue;
@@ -253,14 +255,16 @@ export interface EditorTheme {
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
-	disablePasteBurst?: boolean;
 	/**
-	 * When true, typing `/` after whitespace mid-input also auto-triggers
-	 * autocomplete, so providers can offer inline completions (e.g. inline
-	 * skill selection). The default providers treat such `/` as a path prefix,
-	 * so the default is false to avoid surprising other consumers.
+	 * Disable the non-bracketed paste-burst fallback (dsh-pi-tui divergence
+	 * X038). Default false (the fallback is ON): terminals that lose
+	 * bracketed-paste markers (iTerm2/tmux) deliver pastes as rapid plain
+	 * character streams, and the trailing Enter must insert a newline
+	 * instead of submitting the half-pasted draft. Exposed as an option so
+	 * tests and integrations that legitimately type fast sequences followed
+	 * by Enter can opt out.
 	 */
-	inlineSlashTrigger?: boolean;
+	disablePasteBurst?: boolean;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -340,17 +344,30 @@ export class Editor implements Component, Focusable {
 	private pasteBuffer: string = "";
 	private isInPaste: boolean = false;
 
-	// Non-bracketed paste-burst fallback
-	private pasteBurst = new PasteBurst();
-	private disablePasteBurst: boolean = false;
-	private inlineSlashTrigger: boolean = false;
-
 	// Prompt history for up/down navigation
 	private history: string[] = [];
 	private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 	private historyDraft: EditorState | null = null;
 	private hostHistoryDraft: unknown = undefined;
-	private historyFilter: ((entry: string) => boolean) | null = null;
+
+	/**
+	 * Called when a history entry is recalled, before it is put into the buffer.
+	 * Return the text to display, or `undefined` to use the entry as-is. Lets the
+	 * host decorate entries (e.g. strip a marker) and react to recalls (e.g.
+	 * switch input mode) without touching editor internals. (dsh-pi-tui
+	 * divergence X029.)
+	 */
+	public onRecall?: (entry: string, direction: 1 | -1) => string | undefined;
+	/**
+	 * Called when entering history browsing, to capture host state that should be
+	 * saved alongside the editor draft. The returned value is passed to
+	 * `onHistoryDraftRestore` when the user navigates back to the draft, so the
+	 * host can restore state the editor does not own (e.g. an input mode).
+	 * (dsh-pi-tui divergence X029.)
+	 */
+	public onHistoryDraftSave?: () => unknown;
+	/** Called with the value from `onHistoryDraftSave` when the draft is restored. (dsh-pi-tui divergence X029.) */
+	public onHistoryDraftRestore?: (state: unknown) => void;
 
 	// Kill ring for Emacs-style kill/yank operations
 	private killRing = new KillRing();
@@ -372,36 +389,32 @@ export class Editor implements Component, Focusable {
 	// Undo support
 	private undoStack = new UndoStack<EditorSnapshot>();
 
+	// Non-bracketed paste-burst fallback (dsh-pi-tui divergence X038)
+	private pasteBurst = new PasteBurst();
+	private disablePasteBurst = false;
+
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
-	/**
-	 * Called when a history entry is recalled, before it is put into the buffer.
-	 * Return the text to display, or `undefined` to use the entry as-is. Lets the
-	 * host decorate entries (e.g. strip a marker) and react to recalls (e.g.
-	 * switch input mode) without touching editor internals.
-	 */
-	public onRecall?: (entry: string, direction: 1 | -1) => string | undefined;
-	/**
-	 * Called when entering history browsing, to capture host state that should be
-	 * saved alongside the editor draft. The returned value is passed to
-	 * `onHistoryDraftRestore` when the user navigates back to the draft, so the
-	 * host can restore state the editor does not own (e.g. an input mode).
-	 */
-	public onHistoryDraftSave?: () => unknown;
-	/** Called with the value from `onHistoryDraftSave` when the draft is restored. */
-	public onHistoryDraftRestore?: (state: unknown) => void;
 	public disableSubmit: boolean = false;
+
+	/**
+	 * Toggle the non-bracketed paste-burst fallback at runtime
+	 * (dsh-pi-tui divergence X038). Default: enabled.
+	 */
+	setDisablePasteBurst(disabled: boolean): void {
+		this.disablePasteBurst = disabled;
+		if (disabled) this.pasteBurst.reset();
+	}
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
 		this.tui = tui;
 		this.theme = theme;
 		this.borderColor = theme.borderColor;
+		this.disablePasteBurst = options.disablePasteBurst ?? false;
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
 		this.autocompleteMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
-		this.disablePasteBurst = options.disablePasteBurst ?? false;
-		this.inlineSlashTrigger = options.inlineSlashTrigger ?? false;
 	}
 
 	/** Set of currently valid paste IDs, for marker-aware segmentation. */
@@ -438,25 +451,10 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	setDisablePasteBurst(disabled: boolean): void {
-		this.disablePasteBurst = disabled;
-		if (disabled) {
-			this.pasteBurst.reset();
-		}
-	}
-
 	setAutocompleteProvider(provider: AutocompleteProvider): void {
 		this.cancelAutocomplete();
 		this.autocompleteProvider = provider;
 		this.setAutocompleteTriggerCharacters(provider.triggerCharacters ?? []);
-	}
-
-	/**
-	 * Limit which history entries ↑/↓ navigate. `null` (default) visits every
-	 * entry. The filter is evaluated against each stored entry as-is.
-	 */
-	setHistoryFilter(filter: ((entry: string) => boolean) | null): void {
-		this.historyFilter = filter;
 	}
 
 	/**
@@ -473,17 +471,6 @@ export class Editor implements Component, Focusable {
 		if (this.history.length > 100) {
 			this.history.pop();
 		}
-	}
-
-	/**
-	 * Drop every history entry (up/down recall) and leave browsing state.
-	 * Used by hosts that swap the whole history context (a session switch to
-	 * another workspace must not recall the previous workspace's inputs).
-	 */
-	clearHistory(): void {
-		this.history = [];
-		this.historyIndex = -1;
-		this.historyDraft = null;
 	}
 
 	private isEditorEmpty(): boolean {
@@ -506,35 +493,17 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 		if (this.history.length === 0) return;
 
-		// When entering browse, capture host state up front — before the filter
-		// runs — so the host's filter can read the browse-entry mode rather than a
-		// mode that changes as entries are recalled. The captured value is only
-		// committed to hostHistoryDraft once a matching entry is actually found.
+		// When entering browse, capture host state up front so the host's
+		// draft-save hook reads the browse-entry mode rather than a mode that
+		// changes as entries are recalled. The captured value is only
+		// committed to hostHistoryDraft once an entry is actually found.
 		const entering = this.historyIndex === -1;
 		const pendingHostDraft = entering ? this.onHistoryDraftSave?.() : undefined;
 
-		// Find the next index that passes the filter. Up(-1) increases index,
-		// Down(1) decreases. The draft (-1) is always reachable; stepping past
-		// either end is a no-op.
-		let newIndex = this.historyIndex;
-		let found = false;
-		while (true) {
-			newIndex = newIndex - direction;
-			if (newIndex === -1) {
-				found = true;
-				break;
-			}
-			if (newIndex < -1 || newIndex >= this.history.length) {
-				found = false;
-				break;
-			}
-			const candidate = this.history[newIndex];
-			if (!this.historyFilter || (candidate !== undefined && this.historyFilter(candidate))) {
-				found = true;
-				break;
-			}
-		}
-		if (!found) return;
+		// Up(-1) increases index, Down(1) decreases. The draft (-1) is always
+		// reachable; stepping past either end is a no-op.
+		const newIndex = this.historyIndex - direction;
+		if (newIndex < -1 || newIndex >= this.history.length) return;
 
 		// Capture state when first entering history browsing mode
 		if (entering && newIndex >= 0) {
@@ -576,6 +545,20 @@ export class Editor implements Component, Focusable {
 	}
 
 	private exitHistoryBrowsing(): void {
+		this.historyIndex = -1;
+		this.historyDraft = null;
+		this.hostHistoryDraft = undefined;
+	}
+
+	/**
+	 * Drop every history entry (up/down recall) and leave browsing state.
+	 * Used by hosts that swap the whole history context (a session switch to
+	 * another workspace must not recall the previous workspace's inputs).
+	 * The captured host draft is dropped too, so a stale draft state can
+	 * never be restored into the new context. (dsh-pi-tui divergence X020.)
+	 */
+	clearHistory(): void {
+		this.history = [];
 		this.historyIndex = -1;
 		this.historyDraft = null;
 		this.hostHistoryDraft = undefined;
@@ -647,7 +630,7 @@ export class Editor implements Component, Focusable {
 			const border = createScrollBorder("↑", this.scrollOffset, width);
 			result.push(this.borderColor(border));
 		} else {
-			result.push(horizontal.repeat(Math.max(0, width)));
+			result.push(horizontal.repeat(width));
 		}
 
 		// Render each visible layout line
@@ -704,7 +687,7 @@ export class Editor implements Component, Focusable {
 			const border = createScrollBorder("↓", linesBelow, width);
 			result.push(this.borderColor(border));
 		} else {
-			result.push(horizontal.repeat(Math.max(0, width)));
+			result.push(horizontal.repeat(width));
 		}
 
 		// Add autocomplete list if active
@@ -748,7 +731,6 @@ export class Editor implements Component, Focusable {
 		if (data.includes("\x1b[200~")) {
 			this.isInPaste = true;
 			this.pasteBuffer = "";
-			this.pasteBurst.reset();
 			data = data.replace("\x1b[200~", "");
 		}
 
@@ -763,7 +745,6 @@ export class Editor implements Component, Focusable {
 				this.isInPaste = false;
 				const remaining = this.pasteBuffer.substring(endIndex + 6);
 				this.pasteBuffer = "";
-				this.pasteBurst.reset();
 				if (remaining.length > 0) {
 					this.handleInput(remaining);
 				}
@@ -772,11 +753,28 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		const isEnterKey = data !== "\n" && kb.matches(data, "tui.input.submit");
-		const charCode = data.charCodeAt(0);
-		const printableForBurst = decodePrintableKey(data) ??
-			(data.length === 1 && charCode >= 32 && charCode !== 0x7f ? data : undefined);
-		if (!this.disablePasteBurst && !isEnterKey && printableForBurst === undefined) {
+		// Non-bracketed paste-burst tracking (dsh-pi-tui divergence X038,
+		// kimi-exact semantics): a rapid stream of SINGLE plain characters
+		// followed by Enter is treated as a lost-marker paste. Enter itself
+		// keeps the burst alive; a single printable character feeds it; any
+		// other input (multi-char chunks, arrows, chords, escapes) breaks
+		// it — multi-char reads are ordinary typed-ahead text or an explicit
+		// whole-line injection, not a terminal dribbling a paste one
+		// character at a time. Disabled integrations skip the tracking
+		// entirely.
+		//
+		// The burst's Enter is the PHYSICAL Enter that currently carries
+		// the submit binding (X037 × X038 cross-divergence): a remapped
+		// submit key (e.g. Ctrl+X) is a chord, not a paste's trailing
+		// Enter — it must reset the burst and submit, never be suppressed
+		// into a newline.
+		const isPhysicalSubmitEnter =
+			data !== "\n" &&
+			matchesKey(data, "enter") &&
+			kb.matches(data, "tui.editor.submit");
+		const burstChar = decodePrintableKey(data)
+			?? (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) !== 0x7f ? data : undefined);
+		if (!this.disablePasteBurst && !isPhysicalSubmitEnter && burstChar === undefined) {
 			this.pasteBurst.reset();
 		}
 
@@ -840,11 +838,7 @@ export class Editor implements Component, Focusable {
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
 
-					// Slash-command completions submit on confirm (Enter runs the
-					// command); inline completions marked by the provider (e.g. an
-					// inline skill token mid-prompt) are content edits, so confirm
-					// behaves like Tab and never submits.
-					if (this.autocompletePrefix.startsWith("/") && selected.data?.["inlineSkill"] !== true) {
+					if (this.autocompletePrefix.startsWith("/")) {
 						this.cancelAutocomplete();
 						// Fall through to submit
 					} else {
@@ -946,8 +940,10 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		// Submit (Enter)
-		if (kb.matches(data, "tui.input.submit")) {
+		// Submit (Enter) — the editor consults its OWN submit binding
+		// (tui.editor.submit, X037): a host remap of the editor's
+		// submission must not change what every plain Input submits on.
+		if (kb.matches(data, "tui.editor.submit")) {
 			if (this.disableSubmit) return;
 
 			// Workaround for terminals without Shift+Enter support:
@@ -959,7 +955,19 @@ export class Editor implements Component, Focusable {
 				return;
 			}
 
-			if (!this.disablePasteBurst && this.pasteBurst.shouldInsertNewlineInsteadOfSubmit(Date.now())) {
+			// Paste-burst fallback (dsh-pi-tui divergence X038): this Enter
+			// directly follows a rapid plain-character stream — a lost-marker
+			// paste's trailing Enter. Insert a newline instead of submitting
+			// the half-pasted draft (and keep the window open: a multi-line
+			// paste ends with several Enter-delimited lines). Only a PHYSICAL
+			// Enter that currently carries the submit binding is suppressed
+			// (X037 × X038): a remapped submit chord (Ctrl+X) submits even
+			// mid-burst.
+			if (
+				!this.disablePasteBurst &&
+				isPhysicalSubmitEnter &&
+				this.pasteBurst.shouldInsertNewlineInsteadOfSubmit(Date.now())
+			) {
 				this.addNewLine();
 				this.pasteBurst.extendWindow(Date.now());
 				return;
@@ -1032,18 +1040,14 @@ export class Editor implements Component, Focusable {
 
 		const printable = decodePrintableKey(data);
 		if (printable !== undefined) {
-			if (!this.disablePasteBurst) {
-				this.pasteBurst.onPlainChar(Date.now());
-			}
+			if (!this.disablePasteBurst) this.pasteBurst.onPlainChar(Date.now());
 			this.insertCharacter(printable);
 			return;
 		}
 
 		// Regular characters
 		if (data.charCodeAt(0) >= 32) {
-			if (!this.disablePasteBurst) {
-				this.pasteBurst.onPlainChar(Date.now());
-			}
+			if (!this.disablePasteBurst) this.pasteBurst.onPlainChar(Date.now());
 			this.insertCharacter(data);
 		}
 	}
@@ -1140,13 +1144,57 @@ export class Editor implements Component, Focusable {
 		return this.state.lines.join("\n");
 	}
 
-	private expandPasteMarkers(text: string): string {
-		let result = text;
-		for (const [pasteId, pasteContent] of this.pastes) {
-			const markerRegex = new RegExp(`\\[paste #${pasteId}( (\\+\\d+ lines|\\d+ chars))?\\]`, "g");
-			result = result.replace(markerRegex, () => pasteContent);
+	/**
+	 * ONE pass over the raw document: expand every paste marker in
+	 * document order, producing the expanded text AND the cursor mapping
+	 * in the same walk (X045 robustness). The upstream multi-round
+	 * replace re-scans the output of earlier rounds, so a paste whose
+	 * CONTENT contains a literal marker string for a LATER paste id would
+	 * be re-expanded — corrupting real text and desyncing the expanded
+	 * cursor. Single-pass expansion never re-scans inserted content.
+	 * @param text - the raw document (markers unexpanded).
+	 * @param rawCursor - the raw cursor offset, or undefined for text-only.
+	 * @returns the expanded text and (when rawCursor is given) the mapped
+	 *   cursor: every marker before the cursor grows the offset by its
+	 *   content delta; a cursor inside an atomic marker snaps to that
+	 *   marker's end first.
+	 */
+	private expandPasteMarkersSinglePass(
+		text: string,
+		rawCursor?: number,
+	): { text: string; cursor?: number } {
+		let result = "";
+		let lastIndex = 0;
+		// The cursor mapping compares the RAW cursor against RAW marker
+		// coordinates throughout and accumulates the expansion delta
+		// separately — mixing expanded and raw coordinates (comparing an
+		// already-expanded cursor against later raw marker ends) would
+		// over-count markers the cursor never passed (X045).
+		let delta = 0;
+		let snappedCursor: number | undefined;
+		for (const match of text.matchAll(PASTE_MARKER_REGEX)) {
+			const content = this.pastes.get(Number.parseInt(match[1]!, 10));
+			if (content === undefined) continue; // unknown id: leave the marker as-is
+			const markerStart = match.index!;
+			const markerEnd = markerStart + match[0].length;
+			result += text.slice(lastIndex, markerStart) + content;
+			if (rawCursor !== undefined && snappedCursor === undefined) {
+				if (rawCursor >= markerEnd) {
+					delta += content.length - match[0].length;
+				} else if (rawCursor > markerStart) {
+					// The cursor sits inside an atomic marker: snap to that
+					// marker's EXPANDED end (marker start + the delta
+					// accrued before it + the content length). Every later
+					// marker lies beyond it, so this is the final cursor.
+					snappedCursor = markerStart + delta + content.length;
+				}
+			}
+			lastIndex = markerEnd;
 		}
-		return result;
+		result += text.slice(lastIndex);
+		const cursor =
+			rawCursor === undefined ? undefined : snappedCursor ?? rawCursor + delta;
+		return { text: result, cursor };
 	}
 
 	/**
@@ -1154,7 +1202,26 @@ export class Editor implements Component, Focusable {
 	 * Use this when you need the full content (e.g., for external editor).
 	 */
 	getExpandedText(): string {
-		return this.expandPasteMarkers(this.state.lines.join("\n"));
+		return this.expandPasteMarkersSinglePass(this.state.lines.join("\n")).text;
+	}
+
+	/**
+	 * The cursor offset mapped into getExpandedText()'s coordinate space
+	 * (dsh-pi-tui divergence X045): every paste marker before the cursor
+	 * grows the offset by its content length; a cursor inside an atomic
+	 * marker snaps to that marker's end first. Pairs with
+	 * getExpandedText() for draft HANDOFFS (seat transfers), where both
+	 * the text and the cursor must survive marker expansion. Both use the
+	 * SAME single-pass expansion, so they can never disagree about which
+	 * markers expanded.
+	 */
+	getExpandedCursor(): number {
+		let rawCursor = 0;
+		for (let line = 0; line < this.state.cursorLine; line++) {
+			rawCursor += (this.state.lines[line] ?? "").length + 1;
+		}
+		rawCursor += this.state.cursorCol;
+		return this.expandPasteMarkersSinglePass(this.state.lines.join("\n"), rawCursor).cursor!;
 	}
 
 	getLines(): string[] {
@@ -1165,10 +1232,25 @@ export class Editor implements Component, Focusable {
 		return { line: this.state.cursorLine, col: this.state.cursorCol };
 	}
 
+	setText(text: string): void {
+		this.cancelAutocomplete();
+		this.lastAction = null;
+		this.exitHistoryBrowsing();
+		const normalized = this.normalizeText(text);
+		// Push undo snapshot if content differs (makes programmatic changes undoable)
+		if (this.getText() !== normalized) {
+			this.pushUndoSnapshot();
+		}
+		this.pastes.clear();
+		this.pasteCounter = 0;
+		this.setTextInternal(normalized);
+	}
+
 	/**
 	 * Set the cursor position without changing the document or firing onChange.
 	 * Positions are clamped to a valid line and grapheme boundary so hosts can
 	 * temporarily synchronize an editor before forwarding a key to it.
+	 * (dsh-pi-tui divergence X022.)
 	 */
 	setCursor(cursor: { line: number; col: number }): void {
 		const requestedLine = Number.isFinite(cursor.line) ? Math.floor(cursor.line) : 0;
@@ -1196,6 +1278,7 @@ export class Editor implements Component, Focusable {
 	 * leave history browsing, push an undo snapshot, clear paste markers, or
 	 * fire onChange. Hosts use this narrow seam to stage a replacement-editor
 	 * draft before forwarding one declined key through the normal editor path.
+	 * (dsh-pi-tui divergence X023.)
 	 */
 	setTextAndCursor(text: string, cursor: { line: number; col: number }): void {
 		const normalized = this.normalizeText(text);
@@ -1216,24 +1299,21 @@ export class Editor implements Component, Focusable {
 		this.state.cursorLine = line;
 		this.setCursorCol(col);
 		this.scrollOffset = 0;
+		// The whole document is replaced: PRUNE the paste registry to the
+		// markers that actually survive in the new text. Staged replacement
+		// text (a plugin editor's document) otherwise leaves orphaned
+		// multi-hundred-KB paste entries that can never be expanded again
+		// (dsh-pi-tui divergence X023 tightening — neither "keep all" nor
+		// "clear all": surviving markers keep their content, vanished ones
+		// release theirs).
+		const survivingPasteIds = new Set<number>();
+		for (const match of normalized.matchAll(PASTE_MARKER_REGEX)) {
+			survivingPasteIds.add(Number.parseInt(match[1]!, 10));
+		}
+		for (const pasteId of this.pastes.keys()) {
+			if (!survivingPasteIds.has(pasteId)) this.pastes.delete(pasteId);
+		}
 		this.tui.requestRender();
-	}
-
-
-	setText(text: string, options?: { preservePasteRegistry?: boolean }): void {
-		this.cancelAutocomplete();
-		this.lastAction = null;
-		this.exitHistoryBrowsing();
-		const normalized = this.normalizeText(text);
-		// Push undo snapshot if content differs (makes programmatic changes undoable)
-		if (this.getText() !== normalized) {
-			this.pushUndoSnapshot();
-		}
-		if (!options?.preservePasteRegistry) {
-			this.pastes.clear();
-			this.pasteCounter = 0;
-		}
-		this.setTextInternal(normalized);
 	}
 
 	/**
@@ -1299,10 +1379,16 @@ export class Editor implements Component, Focusable {
 			];
 
 			this.state.cursorLine += insertedLines.length - 1;
-			// Cursor columns are grapheme indices, not code units: an emoji or
-			// combining sequence at the end of the last inserted line must not
-			// land the cursor mid-grapheme.
-			this.setCursorCol([...this.segment(insertedLines[insertedLines.length - 1] || "", "grapheme")].length);
+			// Note: the old X003 divergence wrote a GRAPHEME COUNT here, but
+			// cursorCol is a code-unit offset everywhere else in the editor
+			// (line.slice(0, cursorCol) etc.) — a supplementary-plane
+			// grapheme at the end of the last inserted line (ZWJ family
+			// emoji, combining sequence) landed the cursor MID-grapheme and
+			// the next keystroke split the surrogate pair. Upstream's
+			// code-unit end is correct: the line end is always a grapheme
+			// boundary. (dsh-pi-tui divergence X003 removed — see the
+			// ledger.)
+			this.setCursorCol((insertedLines[insertedLines.length - 1] || "").length);
 		}
 
 		if (this.onChange) {
@@ -1340,11 +1426,8 @@ export class Editor implements Component, Focusable {
 
 		// Check if we should trigger or update autocomplete
 		if (!this.autocompleteState) {
-			// Auto-trigger for "/" at the start of a line (slash commands). When
-			// the editor opts in, also trigger "/" after whitespace mid-input so
-			// the provider can offer inline completions; ordinary prose slashes
-			// (paths, fractions) are left untouched.
-			if (char === "/" && (this.isAtStartOfMessage() || (this.inlineSlashTrigger && this.isAtInlineSlashTrigger()))) {
+			// Auto-trigger for "/" at the start of a line (slash commands)
+			if (char === "/" && this.isAtStartOfMessage()) {
 				this.tryTriggerAutocomplete();
 			}
 			// Auto-trigger for symbol-based completion like @, #, or provider triggers at token boundaries
@@ -1357,7 +1440,7 @@ export class Editor implements Component, Focusable {
 				}
 			}
 			// Also auto-trigger when typing letters in a slash command or symbol completion context
-			else if (/[a-zA-Z0-9.:\-_]/.test(char)) {
+			else if (/[a-zA-Z0-9.\-_]/.test(char)) {
 				const currentLine = this.state.lines[this.state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 				// Check if we're in a slash command (with or without space for arguments)
@@ -1366,12 +1449,6 @@ export class Editor implements Component, Focusable {
 				}
 				// Check if we're in a symbol-based completion context like @, #, or provider triggers
 				else if (this.autocompleteTriggerPattern.test(textBeforeCursor)) {
-					this.tryTriggerAutocomplete();
-				}
-				// Check if we're typing an inline slash token (opt-in trigger):
-				// without this the slash's in-flight request goes stale as the
-				// token grows and no fresh request replaces it.
-				else if (this.isInInlineSlashContext(textBeforeCursor)) {
 					this.tryTriggerAutocomplete();
 				}
 			}
@@ -1476,7 +1553,7 @@ export class Editor implements Component, Focusable {
 	private shouldSubmitOnBackslashEnter(data: string, kb: ReturnType<typeof getKeybindings>): boolean {
 		if (this.disableSubmit) return false;
 		if (!matchesKey(data, "enter")) return false;
-		const submitKeys = kb.getKeys("tui.input.submit");
+		const submitKeys = kb.getKeys("tui.editor.submit");
 		const hasShiftEnter = submitKeys.includes("shift+enter") || submitKeys.includes("shift+return");
 		if (!hasShiftEnter) return false;
 
@@ -1486,7 +1563,7 @@ export class Editor implements Component, Focusable {
 
 	private submitValue(): void {
 		this.cancelAutocomplete();
-		const result = this.expandPasteMarkers(this.state.lines.join("\n")).trim();
+		const result = this.expandPasteMarkersSinglePass(this.state.lines.join("\n")).text.trim();
 
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.pastes.clear();
@@ -1515,7 +1592,7 @@ export class Editor implements Component, Focusable {
 			const graphemes = [...this.segment(beforeCursor, "grapheme")];
 			const lastGrapheme = graphemes[graphemes.length - 1];
 			const graphemeLength = lastGrapheme ? lastGrapheme.segment.length : 1;
-			const isPastedSegmented = PASTE_MARKER_SINGLE.exec(lastGrapheme!.segment);
+			const isPastedSegmented = PASTE_MARKER_SINGLE.exec(lastGrapheme.segment);
 
 			if (isPastedSegmented) {
 				// This contains the id part e.g 4 from [paste #4 +123 lines]
@@ -1614,7 +1691,7 @@ export class Editor implements Component, Focusable {
 		let currentVisualCol: number;
 		if (this.snappedFromCursorCol !== null) {
 			const vlIndex = this.findVisualLineAt(visualLines, currentVL.logicalLine, this.snappedFromCursorCol);
-			currentVisualCol = this.snappedFromCursorCol - visualLines[vlIndex]!.startCol;
+			currentVisualCol = this.snappedFromCursorCol - visualLines[vlIndex].startCol;
 		} else {
 			currentVisualCol = this.state.cursorCol - currentVL.startCol;
 		}
@@ -1657,8 +1734,8 @@ export class Editor implements Component, Focusable {
 					let next = targetVisualLine + 1;
 					while (
 						next < visualLines.length &&
-						visualLines[next]!.logicalLine === targetVL.logicalLine &&
-						visualLines[next]!.startCol < segEnd
+						visualLines[next].logicalLine === targetVL.logicalLine &&
+						visualLines[next].startCol < segEnd
 					) {
 						next++;
 					}
@@ -2241,7 +2318,9 @@ export class Editor implements Component, Focusable {
 		// bodies are immutable, so copying the ARRAY/MAP detaches the
 		// snapshot completely. structuredClone would copy every line's text
 		// AND every stored paste body on every edit — O(document) memory
-		// churn per edit, exploding with multi-MB pastes.
+		// churn per edit, exploding with multi-MB pastes. UndoStack.push
+		// stores the snapshot as-is (no re-clone). (dsh-pi-tui divergence
+		// X004B.)
 		this.undoStack.push({
 			state: {
 				lines: [...this.state.lines],
@@ -2339,38 +2418,6 @@ export class Editor implements Component, Focusable {
 		return beforeCursor.trim() === "" || beforeCursor.trim() === "/";
 	}
 
-	// Helper method to check if "/" was typed after whitespace mid-input, which
-	// providers can use for inline completions while leaving ordinary prose
-	// slashes (e.g. paths, fractions) untouched. Also covers "/" at the start
-	// of a non-first line, so inline completion works across multi-line input.
-	private isAtInlineSlashTrigger(): boolean {
-		if (this.isAtStartOfMessage()) return false;
-
-		const currentLine = this.state.lines[this.state.cursorLine] || "";
-		const beforeCursor = currentLine.slice(0, this.state.cursorCol);
-		if (!beforeCursor.endsWith("/")) return false;
-
-		// "/" at the start of a subsequent line.
-		if (this.state.cursorLine > 0 && beforeCursor.trim() === "/") {
-			return true;
-		}
-
-		const charBeforeSlash = beforeCursor[beforeCursor.length - 2];
-		return charBeforeSlash === " " || charBeforeSlash === "\t";
-	}
-
-	// Whether the token being typed is an inline slash token (opt-in trigger):
-	// a "/" after whitespace mid-input, or a "/" opening a subsequent line —
-	// isSlashMenuAllowed confines the slash-command menu to the first line,
-	// while the inline trigger deliberately covers later lines too. The
-	// leading slash-command context is owned by isInSlashCommandContext.
-	private isInInlineSlashContext(textBeforeCursor: string): boolean {
-		if (!this.inlineSlashTrigger) return false;
-		if (this.isInSlashCommandContext(textBeforeCursor)) return false;
-		if (/[ \t]\/[a-zA-Z0-9.:\-_]*$/.test(textBeforeCursor)) return true;
-		return this.state.cursorLine > 0 && /^\/[a-zA-Z0-9.:\-_]*$/.test(textBeforeCursor);
-	}
-
 	private isInSlashCommandContext(textBeforeCursor: string): boolean {
 		return this.isSlashMenuAllowed() && textBeforeCursor.trimStart().startsWith("/");
 	}
@@ -2438,7 +2485,14 @@ export class Editor implements Component, Focusable {
 		this.requestAutocomplete({ force: true, explicitTab });
 	}
 
-	private requestAutocomplete(options: { force: boolean; explicitTab: boolean }): void {
+	/**
+	 * Request an autocomplete round. PROTECTED (dsh-pi-tui divergence X044):
+	 * a subclass (the host's TuiEditor) drives explicit/context-gated
+	 * completion triggers through this seam — a private method forced the
+	 * host into `as unknown as` casts that survive upstream signature
+	 * changes at runtime instead of failing to compile.
+	 */
+	protected requestAutocomplete(options: { force: boolean; explicitTab: boolean }): void {
 		if (!this.autocompleteProvider) return;
 
 		if (options.force) {
@@ -2479,6 +2533,7 @@ export class Editor implements Component, Focusable {
 		// the old task-chaining design stacked every request behind the
 		// previous one, so an abort that never settled (a provider that
 		// ignores the signal) stalled the whole chain forever.
+		// (dsh-pi-tui divergence X005.)
 		if (startToken !== this.autocompleteStartToken || !this.autocompleteProvider) {
 			return;
 		}
@@ -2498,7 +2553,13 @@ export class Editor implements Component, Focusable {
 			if (!controller.signal.aborted) {
 				console.error("autocomplete request failed", error);
 			}
-			this.autocompleteAbort = undefined;
+			// Only clear OUR controller: an older request's abort rejection can
+			// land after a newer request already installed its own controller
+			// (explicit-Tab/force path runs cancel + start in the same tick),
+			// and clearing that reference would orphan the newer request.
+			if (this.autocompleteAbort === controller) {
+				this.autocompleteAbort = undefined;
+			}
 		}
 	}
 
@@ -2621,7 +2682,14 @@ export class Editor implements Component, Focusable {
 		this.autocompletePrefix = "";
 	}
 
-	private cancelAutocomplete(): void {
+	/**
+	 * Close any open autocomplete UI and abort the pending request.
+	 * PROTECTED (dsh-pi-tui divergence X044): a subclass (the host's
+	 * TuiEditor) cancels stale dropdowns on mode switches and Esc; same
+	 * rationale as requestAutocomplete — the host must not reach internals
+	 * through casts.
+	 */
+	protected cancelAutocomplete(): void {
 		this.cancelAutocompleteRequest();
 		this.clearAutocompleteUi();
 	}

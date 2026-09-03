@@ -5,17 +5,33 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { setKittyProtocolActive, visibleWidth } from '@xmoon76/pi-tui'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { renderTranscriptMarkdown } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
+
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -182,6 +198,8 @@ test('compact thinking holds the title, the latest preview and the hint in exact
   const vt = new VirtualTerminal(40, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   // Three long lines: the compact card shows the LATEST line (truncated).
   app.setTranscript([{
     kind: 'thinking', turn: 0,
@@ -229,9 +247,8 @@ test('thinking keeps its three-row height even with little content', async () =>
 })
 
 test('renderTranscriptMarkdown projects image blocks (review finding 4)', () => {
-  const session = {
-    header: { id: 'session-1' as never, cwd: '/ws', version: 1, createdAt: 0 },
-    events: [
+  // Alpha.4 Session shape: the export reads the log through snapshotEvents.
+  const events = [
       {
         type: 'user/message',
         data: {
@@ -249,9 +266,8 @@ test('renderTranscriptMarkdown projects image blocks (review finding 4)', () => 
           source: { kind: 'user' },
         },
       },
-    ],
-  }
-  const md = renderTranscriptMarkdown(session as never)
+  ]
+  const md = renderTranscriptMarkdown({ header: { id: 'session-1' as never, cwd: '/ws', version: 1, createdAt: 0 }, snapshotEvents: () => events } as never)
   assert.ok(md.includes('> 🖼️ shot.png · 1920×1080 · attachment `att-9`'), 'image line rendered')
   assert.ok(md.includes('> 🖼️ image · 640×480 · attachment `att-10`'), 'image-only message renders')
   assert.ok(md.includes('分析这张图:'), 'text rides along')
@@ -261,9 +277,8 @@ test('renderTranscriptMarkdown never replays surface replacements', () => {
   // A pruned tool result + a summary compaction checkpoint must stay out
   // of the human-facing export: the append-origin originals already render
   // at their log positions (same contract as the transcript fold).
-  const session = {
-    header: { id: 'session-2' as never, cwd: '/ws', version: 1, createdAt: 0 },
-    events: [
+  // Alpha.4 Session shape (same as the image fixture above).
+  const events = [
       {
         type: 'tool/call',
         seq: 0,
@@ -302,9 +317,8 @@ test('renderTranscriptMarkdown never replays surface replacements', () => {
         },
         surfaceOp: { op: 'replace', start: 1, end: 1 },
       },
-    ],
-  }
-  const md = renderTranscriptMarkdown(session as never)
+  ]
+  const md = renderTranscriptMarkdown({ header: { id: 'session-2' as never, cwd: '/ws', version: 1, createdAt: 0 }, snapshotEvents: () => events } as never)
   assert.ok(md.includes('ORIGINAL RESULT'), 'the append-origin result renders')
   assert.ok(!md.includes('PRUNED RESULT'), 'the pruned replacement must never render in the export')
 })

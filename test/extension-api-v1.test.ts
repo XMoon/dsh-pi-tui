@@ -6,7 +6,22 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 test('API v1: the deprecation map is part of the api() contract and empty at v1', async () => {
   // Mount the REAL service (startup + extension host) and read api()
@@ -139,6 +154,7 @@ test('M11: a large transcript with extension renderers stays healthy (plan §23)
   const vt = new VirtualTerminal(120, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // 500 tool messages through the cache + renderer chain.
   const messages = Array.from({ length: 500 }, (_, index) => ({
@@ -182,7 +198,7 @@ test('the runner health bridge is a CAPTURED REF: (slot, id) at invocation start
   try {
     await ctx.plugin(Loader)
     const startup = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startup
     await ctx.plugin(applyExtensionHost)
@@ -259,7 +275,7 @@ test('a captured health ref is a GENERATION FENCE: stale settlements never land 
   try {
     await ctx.plugin(Loader)
     const startup = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startup
     await ctx.plugin(applyExtensionHost)
@@ -344,7 +360,7 @@ test('the theme-unload hook fires with the SOURCE-QUALIFIED selectable value, an
   try {
     await ctx.plugin(Loader)
     const startup = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startup
     await ctx.plugin(applyExtensionHost)
@@ -415,7 +431,7 @@ test('the invocation-time command health capture resolves a command registered A
   try {
     await ctx.plugin(Loader)
     const startup = ctx.plugin((c) => {
-      c.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: '/ws' })
+      c.provide(TUI_STARTUP_SERVICE, {})
     })
     await startup
     await ctx.plugin(applyExtensionHost)

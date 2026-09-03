@@ -30,8 +30,8 @@ import type { FooterCommandConfig } from '../footer/command-runner.ts'
 import type { FooterCustomItemsParseResult } from '../footer/custom-items.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
- * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/focusMode).
- * The old
+ * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/
+ * focusMode/wheelScrollLines). The old
  * `history` field moved to $DSH_HOME/user-history/*.jsonl and is
  * deliberately NOT part of the document anymore. `footerLayout` is the
  * M2 versioned custom layout (nested settings object), absent when not
@@ -68,6 +68,17 @@ export interface TuiSettingsDoc {
   localShellSandbox: string
   homeEndKeys: string
   focusMode: string
+  /** Completion-notification mode: 'unfocused' (default) | 'always' |
+   * 'off' — when the main agent's settlement notifies the terminal. */
+  notificationMode: string
+  /** Completion-notification method: 'auto' (default) | 'osc9' |
+   * 'osc777' | 'bell' — how the notification is delivered. */
+  notificationMethod: string
+  /** The fullscreen mouse-wheel step (`1/2/3/5/8`, default `1`). A
+   * Client preference persisted in the TUI settings document — never a
+   * Session / Agent state; a future Remote adapter round-trips it like
+   * every other TUI setting, with no dedicated RPC. */
+  wheelScrollLines: string
   keybindings?: unknown
 }
 
@@ -111,7 +122,10 @@ export function serializeTuiSettingsMutation<T>(
  * USER layer of the settings document declares the footer command mode
  * AND a trusted command. The adapter owns the settings descriptor access
  * (a Remote adapter replays the same facts from the wire) — the runner
- * never touches the raw settings service for the trust gate. */
+ * never touches the raw settings service for the trust gate. PR D extends
+ * the same read with the SEMANTIC activation projection: the ids the USER
+ * layer authorizes for custom command item execution, derived from the
+ * USER's OWN mode declarations (never the merged value). */
 export interface FooterCommandTrust {
   /** The user layer's declared footer mode ('command' when the user opted
    * in), undefined when the user layer has no opinion. */
@@ -119,15 +133,34 @@ export interface FooterCommandTrust {
   /** The trusted command config (the user layer's footerCommand, bounds
    * validated), undefined when untrusted/absent. */
   readonly command: FooterCommandConfig | undefined
+  /** The ids the USER layer AUTHORIZES to execute custom command items:
+   * the USER custom layout's refs, but ONLY while the USER layer itself
+   * declares `footer: custom`. A stale leftover layout under
+   * `footer: default/compact` authorizes nothing, and `footer: command`
+   * authorizes nothing while the whole-footer surface runs — a project
+   * merged layout can render user:* ids, but it can never activate a
+   * dormant USER command. */
+  readonly userCommandItemActivationIds: ReadonlySet<string>
+  /** The ids authorized for the native FALLBACK surface (a merged
+   * `footer: command` the USER layer does not own). The FULL semantic is
+   * encoded here — no caller can forget the outer mode gate:
+   * `USER footer === 'command'` AND `USER footerFallbackMode === 'custom'`
+   * AND a valid USER layout → its refs, otherwise empty. A USER who never
+   * opted into command mode authorizes nothing even with stale fallback
+   * metadata. */
+  readonly userCommandItemFallbackActivationIds: ReadonlySet<string>
 }
 
-/** The USER-layer Custom Text definition read (PR C). The adapter reads the
- * settings descriptor's user section. `get()` is the safe runtime projection;
- * `rawForPersistence()` is a detached exact USER-layer storage projection and
- * exists only for whole-document round-trips. Merged/project settings never
- * reach either surface. */
+/** The USER-layer Custom Text/Command definition read (PR C + PR D). The
+ * adapter reads the settings descriptor's user section. `get()` is the safe
+ * runtime projection; `rawForPersistence()` is a detached exact USER-layer
+ * storage projection and exists only for whole-document round-trips.
+ * Merged/project settings never reach either surface — a project-layer
+ * `kind:'command'` definition can therefore never reach the command item
+ * runtime (PR D §11: this read is the ONLY executable source). */
 export interface FooterCustomItemsConfig {
-  /** Valid Custom Text definitions plus a fail-soft invalid-entry count. */
+  /** Valid Custom Text/Command definitions plus a fail-soft invalid-entry
+   * count. */
   get(): FooterCustomItemsParseResult
   /** A detached raw value, or `unavailable` when it cannot be read safely. */
   rawForPersistence(): FooterCustomItemsRaw
@@ -297,7 +330,8 @@ export interface AuthorizationConfig {
 }
 
 /** The permission sub-domain: permission preset names, the persisted
- * default, and preset application (/yolo). */
+ * default, preset application (/yolo), and the session's approval-policy
+ * override. */
 export interface PermissionConfig {
   /** The advertised preset names, in the preset table's declaration order. */
   presetNames(): readonly string[]
@@ -306,6 +340,12 @@ export interface PermissionConfig {
   defaultPreset(): string | undefined
   /** Persist the default preset for future sessions. */
   setDefaultPreset(name: string): Promise<void>
+  /** The session's own approval-policy override (the official approval
+   * service's `overrideOf(session)` read — alpha.4; the configured default
+   * is deliberately NOT applied, an override-less session answers
+   * undefined and the consumer shows its own default). Degrades to
+   * undefined when the approval service is absent. */
+  approvalOverrideOf(session: unknown): 'ask' | 'never' | undefined
   /** Apply one permission preset to a live session (/yolo applies
    * `danger-full-access` through the OFFICIAL command line so the switch
    * takes the exact host path — sandbox + approval writer + policy-change
@@ -315,6 +355,32 @@ export interface PermissionConfig {
     presetId: string,
     signal?: AbortSignal,
   ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' }>
+}
+
+/** One official allowed child-LLM route (the exact provider+model pair
+ * the official `subagent-model-selection` section authorizes). */
+export interface SubagentAllowedModelRoute {
+  readonly provider: string
+  readonly model: string
+}
+
+/** The official subagent model-selection preference (the DSH
+ * `subagent-model-selection` settings section, owned Host-side by the
+ * `subagent-model-selection-settings` service). The TUI reads and writes
+ * the OFFICIAL section through this sub-domain — it never maintains a
+ * parallel TUI-owned subagent routing setting. Sampling is per NEW
+ * session composition: a settings change never rewrites the tool schema
+ * of an Agent that is already running. */
+export interface SubagentModelSelectionConfig {
+  /** Whether the Host settings section is present (it registers when the
+   * deployment mounts the subagent-model-selection-settings service). */
+  available(): boolean
+  /** The current official preference (defaults: disabled, empty list). */
+  get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }
+  /** Persist the official section. Rejects with the official validation
+   * error when enabling without at least one route, or when the list
+   * repeats a provider+model pair. */
+  set(value: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }): Promise<void>
 }
 
 /** The saved agent-preset default sub-domain (`/preset default`): the
@@ -350,4 +416,6 @@ export interface ConfigPort {
   readonly permissions: PermissionConfig
   /** The saved default agent preset. */
   readonly presetDefault: PresetDefaultConfig
+  /** The official subagent model-selection preference. */
+  readonly subagentModelSelection: SubagentModelSelectionConfig
 }

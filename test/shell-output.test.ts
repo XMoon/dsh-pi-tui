@@ -8,10 +8,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { StringDecoder } from 'node:string_decoder'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseShellWords } from '../src/shell-words.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import {
   createBoundedOutput,
   createFileCapture,
@@ -304,8 +304,9 @@ test('stdout and stderr use SEPARATE decoders: interleaved streams stay intact',
 
 // --- the bounded full-output file capture ---
 
-test('file capture writes everything up to the cap, then stops and flags truncation', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-capture-'))
+test('file capture writes everything up to the cap, then stops and flags truncation', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-capture-')
   const path = join(dir, 'full.log')
   const capture = createFileCapture(path, 64)
   assert.equal(capture.active, true)
@@ -321,8 +322,9 @@ test('file capture writes everything up to the cap, then stops and flags truncat
   assert.equal(content, 'x'.repeat(40) + 'y'.repeat(24), 'the file keeps the FIRST bytes (the head, unlike the tail)')
 })
 
-test('file capture dispose deletes the file and is idempotent', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-capture-'))
+test('file capture dispose deletes the file and is idempotent', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-capture-')
   const path = join(dir, 'full.log')
   const capture = createFileCapture(path)
   capture.append(Buffer.from('data'))
@@ -333,8 +335,9 @@ test('file capture dispose deletes the file and is idempotent', () => {
   assert.equal(readdirSync(dir).length, 0)
 })
 
-test('file capture close keeps the file for later reading', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-capture-'))
+test('file capture close keeps the file for later reading', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-capture-')
   const path = join(dir, 'full.log')
   const capture = createFileCapture(path)
   capture.append(Buffer.from('hello capture'))
@@ -346,8 +349,9 @@ test('file capture close keeps the file for later reading', () => {
   capture.dispose()
 })
 
-test('file capture open failure yields an inactive capture that is safe to call', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-capture-'))
+test('file capture open failure yields an inactive capture that is safe to call', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-capture-')
   // A path whose parent does not exist cannot be opened.
   const capture = createFileCapture(join(dir, 'missing', 'nested', 'full.log'))
   assert.equal(capture.active, false, 'an unopenable path must be inactive')

@@ -35,6 +35,10 @@ export interface FooterCommandRunnerOptions {
   readonly onOutput: (rows: string[] | undefined) => void
   /** One-shot diagnostics (the first failure of an error generation). */
   readonly onNotifyOnce?: (message: string) => void
+  /** The one-shot failure diagnostic text (PR D: a per-item runner's
+   * failure only makes THAT item unavailable — the whole-footer wording
+   * names the native fallback). Defaults to the whole-footer wording. */
+  readonly failureMessage?: string
   readonly signal: AbortSignal
 }
 
@@ -158,7 +162,13 @@ export class FooterCommandRunner {
    * invalidated and terminated immediately (its result must never commit
    * under the new config), the committed rows of the OLD configuration are
    * cleared at once (stale output must not linger while the new command
-   * runs), then a refresh starts with the new config. */
+   * runs), then a refresh starts with the new config. The re-arm is
+   * IMMEDIATE: the old run's cadence must not delay the first run of the
+   * new command (a 60s refresh would otherwise leave the item unavailable
+   * for almost a minute after every edit). The pending coalesced timer is
+   * dropped and the cadence anchor is reset, so the new config starts
+   * right away and re-arms itself on the NEW interval afterwards. Plain
+   * status-repaint requestRefresh() coalescing is unchanged. */
   setConfig(config: FooterCommandConfig): void {
     this.generation += 1
     this.killChild()
@@ -169,6 +179,14 @@ export class FooterCommandRunner {
     // Direct sink call — no failure accounting (a config change is not
     // a failure).
     this.options.onOutput(undefined)
+    // A config identity change is an explicit re-arm: drop the pending
+    // coalesced timer and reset the cadence anchor so the new command
+    // starts immediately (requestRefresh below sees "never started").
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer)
+      this.timer = undefined
+    }
+    this.lastStartAt = 0
     this.requestRefresh()
   }
 
@@ -215,6 +233,15 @@ export class FooterCommandRunner {
     // writes enough stderr to fill the pipe buffer would BLOCK and get
     // misjudged as a timeout otherwise).
     child.stderr?.on('data', () => {})
+    // Defensive stream-error handling (round-3 finding): the stdout/stderr
+    // read streams carry 'data' listeners but no 'error' listener — an
+    // unhandled EventEmitter 'error' would crash the process, violating
+    // the runner's fail-soft contract. The errors are SWALLOWED, not
+    // settled early: the close/timeout machinery below already settles
+    // every run, and settling from a stream error would clear `this.child`
+    // and let a still-running child escape the timeout's kill.
+    child.stdout?.on('error', () => {})
+    child.stderr?.on('error', () => {})
     let output = ''
     let outputBytes = 0
     // The decoder buffers a PARTIAL multibyte sequence across chunks, so a
@@ -270,6 +297,13 @@ export class FooterCommandRunner {
       this.options.width(),
       this.options.height(),
     ))
+    // An instant-exit child (e.g. `true` via the shell) can close its
+    // stdin before the JSON payload flushes: the async EPIPE on the
+    // parent's stdin stream is an unhandled 'error' event without a
+    // listener and would crash the whole process (the same round-3
+    // finding as the clipboard helper). Swallow it — the child's close
+    // handler settles the result.
+    child.stdin?.on('error', () => {})
     try {
       child.stdin?.write(input)
       child.stdin?.end()
@@ -287,7 +321,7 @@ export class FooterCommandRunner {
     } else {
       this.errorGeneration += 1
       if (this.errorGeneration === 1) {
-        this.options.onNotifyOnce?.('footer command failed — using the native layout')
+        this.options.onNotifyOnce?.(this.options.failureMessage ?? 'footer command failed — using the native layout')
       }
     }
     this.options.onOutput(rows)

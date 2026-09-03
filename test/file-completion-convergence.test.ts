@@ -11,8 +11,8 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { afterEach, test } from 'node:test'
+import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join, win32, sep } from 'node:path'
 import { classifyFileCompletionContext, extractAtPrefix } from '../src/file-completion/context.ts'
@@ -21,6 +21,22 @@ import { scorePathCandidate } from '../src/file-completion/ranking.ts'
 import { presentPathCandidate } from '../src/file-completion/presentation.ts'
 import { MentionProvider } from '../src/mentions.ts'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 
 const abort = new AbortController().signal
 
@@ -41,8 +57,8 @@ function isAutocompleteActive(app: import('../src/tui-app.ts').TuiApp): boolean 
 }
 
 /** A root with workspace + sibling for outside-cwd probes. */
-function outsideCwdFixture(): { root: string; workspace: string; sibling: string } {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-conv-out-'))
+function outsideCwdFixture(life: TestLifecycle): { root: string; workspace: string; sibling: string } {
+  const root = life.tempDir('dsh-conv-out-')
   const workspace = join(root, 'workspace')
   const sibling = join(root, 'sibling')
   mkdirSync(workspace)
@@ -54,8 +70,8 @@ function outsideCwdFixture(): { root: string; workspace: string; sibling: string
 
 /** A workspace whose subtree holds MORE than the fallback scan bound, so a
  * root-level `src/` with a wanted file must still complete after accept. */
-function largeWorkspaceFixture(): { root: string } {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-conv-large-'))
+function largeWorkspaceFixture(life: TestLifecycle): { root: string } {
+  const root = life.tempDir('dsh-conv-large-')
   mkdirSync(join(root, 'src'))
   writeFileSync(join(root, 'src', 'wanted.ts'), 'x')
   const filler = join(root, 'filler')
@@ -66,8 +82,9 @@ function largeWorkspaceFixture(): { root: string } {
   return { root }
 }
 
-test('P1.1: ordinary prompt positions never open the HOST file dropdown', async () => {
-  const { root } = largeWorkspaceFixture()
+test('P1.1: ordinary prompt positions never open the HOST file dropdown', async (t) => {
+  const life = testLifecycle(t)
+  const { root } = largeWorkspaceFixture(life)
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   for (const [line, col] of [
     ['foo', 3],
@@ -84,10 +101,13 @@ test('P1.1: ordinary prompt positions never open the HOST file dropdown', async 
   }
 })
 
-test('P1.1 headless: foo<Tab> opens no dropdown (isShowingAutocomplete stays false)', async () => {
-  const { root } = largeWorkspaceFixture()
+test('P1.1 headless: foo<Tab> opens no dropdown (isShowingAutocomplete stays false)', async (t) => {
+  const life = testLifecycle(t)
+  const { root } = largeWorkspaceFixture(life)
   const { startApp } = await import('./support/app-harness.ts')
   const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('foo')
   await vt.waitForRender()
@@ -105,11 +125,11 @@ test('P1.1 headless: foo<Tab> opens no dropdown (isShowingAutocomplete stays fal
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('wanted.ts'), `foo<Tab> must not list files:\n${view}`)
   assert.equal(app.seatTextForTest(), 'foo', 'the draft is untouched')
-  app.stop()
 })
 
-test('P1.2: scoped @ paths search their OWN directory (outside the cwd)', async () => {
-  const { root, workspace, sibling } = outsideCwdFixture()
+test('P1.2: scoped @ paths search their OWN directory (outside the cwd)', async (t) => {
+  const life = testLifecycle(t)
+  const { root, workspace, sibling } = outsideCwdFixture(life)
   const provider = new MentionProvider([], workspace, new DirectHostFilePort(() => undefined, null))
   const result = await provider.getSuggestions(['@../sibling/sib'], 0, 15, { signal: abort })
   assert.ok(result !== null, `@../sibling/sib must suggest:\n${JSON.stringify(result)}`)
@@ -120,11 +140,12 @@ test('P1.2: scoped @ paths search their OWN directory (outside the cwd)', async 
   void root
 })
 
-test('P1.2: @../../scope resolves outside the cwd by the typed amount', async () => {
+test('P1.2: @../../scope resolves outside the cwd by the typed amount', async (t) => {
+  const life = testLifecycle(t)
   // A REAL ../../ fixture: workspace = /root/alpha/beta/workspace; `../..`
   // resolves to /root/alpha, so `../../alpha` targets /root/alpha/alpha.
   // The file two levels up lives under alpha/alpha/deep.ts.
-  const root = mkdtempSync(join(tmpdir(), 'dsh-conv-upup-'))
+  const root = life.tempDir('dsh-conv-upup-')
   const alpha = join(root, 'alpha')
   const beta = join(alpha, 'beta')
   const workspace = join(beta, 'workspace')
@@ -146,8 +167,9 @@ test('P1.2: @../../scope resolves outside the cwd by the typed amount', async ()
     `nested ../../ value missing:\n${JSON.stringify(nested)}`)
 })
 
-test('P1.2: @~/ resolves through the homedir', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-conv-home-'))
+test('P1.2: @~/ resolves through the homedir', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-conv-home-')
   mkdirSync(join(home, 'pics'))
   writeFileSync(join(home, 'pics', 'a.png'), 'x')
   const saved = process.env.HOME
@@ -163,20 +185,22 @@ test('P1.2: @~/ resolves through the homedir', async () => {
   }
 })
 
-test('P1.2 absolute: @/tmp/ searches the absolute scope', async () => {
-  const root = outsideCwdFixture().root
+test('P1.2 absolute: @/tmp/ searches the absolute scope', async (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).root
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
-  const target = mkdtempSync(join(tmpdir(), 'dsh-conv-abs-'))
+  const target = life.tempDir('dsh-conv-abs-')
   writeFileSync(join(target, 'deep-abs.txt'), 'x')
   const result = await provider.getSuggestions([`@${target}/abs`], 0, `@${target}/abs`.length, { signal: abort })
   assert.ok(result !== null, `absolute must suggest:\n${JSON.stringify(result)}`)
   assert.ok(result.items.some(item => item.value.startsWith(`@${target}`)))
 })
 
-test('§23 matrix: /image shares the scoped forms (../, ~/, absolute, directory continuation)', async () => {
+test('§23 matrix: /image shares the scoped forms (../, ~/, absolute, directory continuation)', async (t) => {
+  const life = testLifecycle(t)
   // ../../ fixture for /image: workspace = /root/alpha/beta/workspace;
   // ../../alpha targets /root/alpha/alpha/pics.
-  const root = mkdtempSync(join(tmpdir(), 'dsh-conv-imgscope-'))
+  const root = life.tempDir('dsh-conv-imgscope-')
   const alpha = join(root, 'alpha')
   const beta = join(alpha, 'beta')
   const workspace = join(beta, 'workspace')
@@ -202,7 +226,7 @@ test('§23 matrix: /image shares the scoped forms (../, ~/, absolute, directory 
   // ~/ scope (homedir has a stable entry).
   const saved = process.env.HOME
   try {
-    const home = mkdtempSync(join(tmpdir(), 'dsh-conv-imghome-'))
+    const home = life.tempDir('dsh-conv-imghome-')
     mkdirSync(join(home, 'pix'))
     writeFileSync(join(home, 'pix', 'h.png'), 'x')
     process.env.HOME = home
@@ -215,9 +239,10 @@ test('§23 matrix: /image shares the scoped forms (../, ~/, absolute, directory 
   }
 })
 
-test('Host @ and Client /image completion keep separate cwd ownership', async () => {
-  const hostRoot = mkdtempSync(join(tmpdir(), 'dsh-conv-host-cwd-'))
-  const localRoot = mkdtempSync(join(tmpdir(), 'dsh-conv-local-cwd-'))
+test('Host @ and Client /image completion keep separate cwd ownership', async (t) => {
+  const life = testLifecycle(t)
+  const hostRoot = life.tempDir('dsh-conv-host-cwd-')
+  const localRoot = life.tempDir('dsh-conv-local-cwd-')
   writeFileSync(join(hostRoot, 'host-only.txt'), 'x')
   writeFileSync(join(localRoot, 'local-only.png'), 'x')
   const provider = new MentionProvider(
@@ -236,8 +261,9 @@ test('Host @ and Client /image completion keep separate cwd ownership', async ()
   assert.ok(!image.items.some(item => item.value.includes('host-only')), 'image completion must not read Host cwd')
 })
 
-test('P1.3: a >2000-entry workspace keeps directory continuation working', async () => {
-  const { root } = largeWorkspaceFixture()
+test('P1.3: a >2000-entry workspace keeps directory continuation working', async (t) => {
+  const life = testLifecycle(t)
+  const { root } = largeWorkspaceFixture(life)
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   // First: @src finds the directory.
   const dirs = await provider.getSuggestions(['@src'], 0, 4, { signal: abort })
@@ -250,8 +276,9 @@ test('P1.3: a >2000-entry workspace keeps directory continuation working', async
   assert.ok(children.items.some(item => item.value === '@src/wanted.ts'), 'the wanted child must appear')
 })
 
-test('P1.4: substring ranking is shared between @ and /image', async () => {
-  const root = outsideCwdFixture().workspace
+test('P1.4: substring ranking is shared between @ and /image', async (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).workspace
   mkdirSync(join(root, 'src'))
   writeFileSync(join(root, 'src', 'deep-nested.ts'), 'x')
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
@@ -274,8 +301,9 @@ test('P1.4: substring ranking is shared between @ and /image', async () => {
     `/image nested must share subtree fuzzy discovery:\n${JSON.stringify(image)}`)
 })
 
-test('P1.5: a stale prefix accept never deletes @-preceding text', () => {
-  const root = outsideCwdFixture().workspace
+test('P1.5: a stale prefix accept never deletes @-preceding text', (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).workspace
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   // Old request prefix `@abcdef`; the draft has since been edited to
   // `hello @ab`. Accepting the old item must leave the draft UNCHANGED.
@@ -292,10 +320,13 @@ test('P1.5: a stale prefix accept never deletes @-preceding text', () => {
   assert.deepEqual(appliedArg.lines, ['/image sub'], 'a stale argument accept must not rewrite the draft')
 })
 
-test('P1.5 headless D: a quick Backspace over a mention leaves the draft intact', async () => {
+test('P1.5 headless D: a quick Backspace over a mention leaves the draft intact', async (t) => {
+  const life = testLifecycle(t)
   const { startApp } = await import('./support/app-harness.ts')
-  const root = outsideCwdFixture().workspace
+  const root = outsideCwdFixture(life).workspace
   const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // Type a mention, then Backspace quickly — no crash, draft keeps the text.
   vt.sendInput('@abcdef')
@@ -309,7 +340,6 @@ test('P1.5 headless D: a quick Backspace over a mention leaves the draft intact'
   vt.sendInput('\x7f')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), '@ab', 'backspace edits the draft')
-  app.stop()
 })
 
 test('§23 matrix: the classifier gates @ and /image only', () => {
@@ -327,8 +357,9 @@ test('§23 matrix: the classifier gates @ and /image only', () => {
   assert.equal(classifyFileCompletionContext('ordinary ./path', set).kind, 'none')
 })
 
-test('§23 matrix: quoted @ completes and stays quoted', async () => {
-  const { workspace } = outsideCwdFixture()
+test('§23 matrix: quoted @ completes and stays quoted', async (t) => {
+  const life = testLifecycle(t)
+  const { workspace } = outsideCwdFixture(life)
   const root = workspace
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   const result = await provider.getSuggestions(['@"loc'], 0, 5, { signal: abort })
@@ -337,8 +368,9 @@ test('§23 matrix: quoted @ completes and stays quoted', async () => {
   assert.ok(result.items.some(item => item.value === '@"local.txt"'))
 })
 
-test('§23 matrix: symlink directories keep the trailing slash', async () => {
-  const { workspace } = outsideCwdFixture()
+test('§23 matrix: symlink directories keep the trailing slash', async (t) => {
+  const life = testLifecycle(t)
+  const { workspace } = outsideCwdFixture(life)
   const root = workspace
   const link = join(root, 'linkdir')
   const target = join(root, 'real')
@@ -351,10 +383,11 @@ test('§23 matrix: symlink directories keep the trailing slash', async () => {
   assert.ok(result.items.some(item => item.value === '@linkdir/'), 'a symlinked dir must complete with /')
 })
 
-test('§22: fd/fdfind detection prefers fd then fdfind', () => {
+test('§22: fd/fdfind detection prefers fd then fdfind', (t) => {
+  const life = testLifecycle(t)
   const saved = process.env.PATH
   try {
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-conv-fd-'))
+    const dir = life.tempDir('dsh-conv-fd-')
     const fd = join(dir, 'fd')
     const fdfind = join(dir, 'fdfind')
     writeFileSync(fd, '#!/bin/sh\nexit 0\n')
@@ -364,7 +397,7 @@ test('§22: fd/fdfind detection prefers fd then fdfind', () => {
     process.env.PATH = dir
     assert.equal(resolveFdPath(), fd, 'fd wins over fdfind')
     // Only fdfind present:
-    const only = mkdtempSync(join(tmpdir(), 'dsh-conv-fdfind-'))
+    const only = life.tempDir('dsh-conv-fdfind-')
     const justFdfind = join(only, 'fdfind')
     writeFileSync(justFdfind, '#!/bin/sh\nexit 0\n')
     chmodSync(justFdfind, 0o755)
@@ -379,8 +412,9 @@ test('§22: fd/fdfind detection prefers fd then fdfind', () => {
   }
 })
 
-test('fd discovery uses full-path matching, NUL records and preserves filename whitespace', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-conv-fd-output-'))
+test('fd discovery uses full-path matching, NUL records and preserves filename whitespace', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-conv-fd-output-')
   mkdirSync(join(root, 'src'))
   writeFileSync(join(root, 'src', 'deep-nested.png'), 'x')
   writeFileSync(join(root, ' leading file.txt'), 'x')
@@ -403,8 +437,9 @@ printf '%s\\0' './src/deep-nested.png' './ leading file.txt'
   assert.ok(args.includes('--print0'), 'fd must emit NUL-delimited records')
 })
 
-test('fd discovery ignores noisy stderr and settles without a pipe deadlock', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-conv-fd-stderr-'))
+test('fd discovery ignores noisy stderr and settles without a pipe deadlock', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-conv-fd-stderr-')
   writeFileSync(join(root, 'visible.txt'), 'x')
   const fakeFd = join(root, 'fd')
   writeFileSync(fakeFd, `#!/bin/sh
@@ -456,8 +491,9 @@ test('the presentation layer quotes spaced values for /image and keeps @ quoting
   assert.equal(atQuoted.value, '@"my file.txt"')
 })
 
-test('review finding 1: a quoted /image argument completes inside the quotes', async () => {
-  const { workspace } = outsideCwdFixture()
+test('review finding 1: a quoted /image argument completes inside the quotes', async (t) => {
+  const life = testLifecycle(t)
+  const { workspace } = outsideCwdFixture(life)
   const root = workspace
   writeFileSync(join(root, 'my file.txt'), 'x')
   const provider = new MentionProvider(
@@ -477,8 +513,9 @@ test('review finding 1: a quoted /image argument completes inside the quotes', a
   assert.ok(spaced.items.some(item => item.value === '"my file.txt"'), `spaced quoted value missing:\n${JSON.stringify(spaced.items)}`)
 })
 
-test('review finding 3: an indented /image command still classifies its argument', async () => {
-  const { workspace } = outsideCwdFixture()
+test('review finding 3: an indented /image command still classifies its argument', async (t) => {
+  const life = testLifecycle(t)
+  const { workspace } = outsideCwdFixture(life)
   const root = workspace
   writeFileSync(join(root, 'file-one.txt'), 'x')
   const provider = new MentionProvider(
@@ -491,8 +528,9 @@ test('review finding 3: an indented /image command still classifies its argument
   assert.ok(result.items.some(item => item.value === 'file-one.txt'), `indented value missing:\n${JSON.stringify(result.items)}`)
 })
 
-test('review finding (round 4): a regex-special filename still completes (fd literal match)', async () => {
-  const root = outsideCwdFixture().workspace
+test('review finding (round 4): a regex-special filename still completes (fd literal match)', async (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).workspace
   writeFileSync(join(root, 'file[1].ts'), 'x')
   writeFileSync(join(root, 'a+b.ts'), 'x')
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
@@ -504,7 +542,8 @@ test('review finding (round 4): a regex-special filename still completes (fd lit
 })
 
 test('review finding (round 5): fd matches case-insensitively (aligned with the ranking contract)', async (t) => {
-  const root = outsideCwdFixture().workspace
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).workspace
   writeFileSync(join(root, 'Foo.txt'), 'x')
   writeFileSync(join(root, 'foo.txt'), 'x')
   // The ranking contract is case-INSENSITIVE (always runs, no fd needed):
@@ -533,13 +572,14 @@ test('review finding (round 5): fd matches case-insensitively (aligned with the 
   )
 })
 
-test('review finding (round 4): failed fd falls back to the bounded scan', async () => {
-  const { workspace, sibling } = outsideCwdFixture()
+test('review finding (round 4): failed fd falls back to the bounded scan', async (t) => {
+  const life = testLifecycle(t)
+  const { workspace, sibling } = outsideCwdFixture(life)
   const root = workspace
   writeFileSync(join(sibling, 'fallback-scan.ts'), 'x')
   // A fake fd that always FAILS (non-zero exit): discovery must fall back
   // to the bounded recursive scan, never report a false "no match".
-  const fakeFd = join(tmpdir(), 'dsh-conv-fdcrash')
+  const fakeFd = join(life.tempDir('dsh-conv-fdcrash-'), 'fd')
   writeFileSync(fakeFd, '#!/bin/sh\nexit 1\n')
   chmodSync(fakeFd, 0o755)
   const port = new DirectHostFilePort(() => undefined, fakeFd)
@@ -549,8 +589,9 @@ test('review finding (round 4): failed fd falls back to the bounded scan', async
   assert.ok(result.items.some(item => item.value.includes('fallback-scan.ts')), `fallback missing:\n${JSON.stringify(result.items)}`)
 })
 
-test('review finding (round 4): scoped listings never present .git', async () => {
-  const root = outsideCwdFixture().workspace
+test('review finding (round 4): scoped listings never present .git', async (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).workspace
   mkdirSync(join(root, '.git'))
   writeFileSync(join(root, '.git', 'config'), 'x')
   writeFileSync(join(root, 'visible.txt'), 'x')
@@ -561,8 +602,9 @@ test('review finding (round 4): scoped listings never present .git', async () =>
   assert.ok(result.items.some(item => item.value === '@visible.txt'))
 })
 
-test('review finding (round 4): null pins the fallback /image source; undefined probes PATH', async () => {
-  const root = outsideCwdFixture().workspace
+test('review finding (round 4): null pins the fallback /image source; undefined probes PATH', async (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).workspace
   writeFileSync(join(root, 'shot.png'), 'x')
   // null → forced fallback (never fd), regardless of PATH.
   const fallbackProvider = new MentionProvider(
@@ -577,8 +619,9 @@ test('review finding (round 4): null pins the fallback /image source; undefined 
   assert.ok(result !== null && result.items.length > 0, `a null-pinned fallback must complete:\n${JSON.stringify(result)}`)
 })
 
-test('review finding (verified): multi-space /image separator applies without duplication', async () => {
-  const { workspace } = outsideCwdFixture()
+test('review finding (verified): multi-space /image separator applies without duplication', async (t) => {
+  const life = testLifecycle(t)
+  const { workspace } = outsideCwdFixture(life)
   const root = workspace
   writeFileSync(join(root, 'file-one.txt'), 'x')
   const provider = new MentionProvider(
@@ -598,8 +641,9 @@ test('review finding (verified): multi-space /image separator applies without du
   assert.equal(applied.lines[0], '/image    file-one.txt', 'the separator count is preserved')
 })
 
-test('review finding: a CLOSED quoted /image token never completes further (no trailing-text deletion)', async () => {
-  const { workspace } = outsideCwdFixture()
+test('review finding: a CLOSED quoted /image token never completes further (no trailing-text deletion)', async (t) => {
+  const life = testLifecycle(t)
+  const { workspace } = outsideCwdFixture(life)
   const root = workspace
   writeFileSync(join(root, 'my file.txt'), 'x')
   const provider = new MentionProvider(
@@ -616,8 +660,9 @@ test('review finding: a CLOSED quoted /image token never completes further (no t
   assert.equal(bare, null, 'a closed quoted token must stay quiet')
 })
 
-test('review finding 2: a stale accept never applies after an unrelated edit', async () => {
-  const root = outsideCwdFixture().workspace
+test('review finding 2: a stale accept never applies after an unrelated edit', async (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).workspace
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   // The request produced a dropdown for `hello @foo` (snapshot captured);
   // the user then edited the LINE START (`hello` → `world`) — the prefix
@@ -634,8 +679,9 @@ test('review finding 2: a stale accept never applies after an unrelated edit', a
   assert.deepEqual(applied.lines, ['look @local'], 'an unrelated edit must also fence the accept')
 })
 
-test('extension suggestion snapshots fence unrelated edits even with the same prefix', () => {
-  const root = outsideCwdFixture().workspace
+test('extension suggestion snapshots fence unrelated edits even with the same prefix', (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).workspace
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   const generation = provider.mintRequestGeneration()
   const suggestion = { items: [{ value: 'world', label: 'world' }], prefix: 'world' }
@@ -650,8 +696,9 @@ test('extension suggestion snapshots fence unrelated edits even with the same pr
   assert.deepEqual(applied.lines, ['changed world'], 'an extension result must not apply after an unrelated edit')
 })
 
-test('review finding (round 8): a fallback scan is async and abort-responsive (never a sync block)', async () => {
-  const root = largeWorkspaceFixture().root
+test('review finding (round 8): a fallback scan is async and abort-responsive (never a sync block)', async (t) => {
+  const life = testLifecycle(t)
+  const root = largeWorkspaceFixture(life).root
   const controller = new AbortController()
   const port = new DirectHostFilePort(() => undefined, null) // forced fallback
   const provider = new MentionProvider([], root, port)
@@ -665,8 +712,9 @@ test('review finding (round 8): a fallback scan is async and abort-responsive (n
   assert.ok(Date.now() - started < 1000, 'the scan must stop promptly on abort')
 })
 
-test('review finding (round 6/8): overlapping delegated requests keep their own snapshots', async () => {
-  const root = outsideCwdFixture().workspace
+test('review finding (round 6/8): overlapping delegated requests keep their own snapshots', async (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).workspace
   writeFileSync(join(root, 'item-a.txt'), 'x')
   writeFileSync(join(root, 'item-b.txt'), 'x')
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
@@ -692,9 +740,10 @@ test('review finding (round 6/8): overlapping delegated requests keep their own 
   assert.equal(applied.lines[0], '@item-b.txt ', 'the fresh request applies normally (the older bind did not fence it)')
 })
 
-test('review finding (round 6): a scope switch mid-flight fences the old session accept', async () => {
-  const rootA = outsideCwdFixture().workspace
-  const rootB = outsideCwdFixture().workspace
+test('review finding (round 6): a scope switch mid-flight fences the old session accept', async (t) => {
+  const life = testLifecycle(t)
+  const rootA = outsideCwdFixture(life).workspace
+  const rootB = outsideCwdFixture(life).workspace
   writeFileSync(join(rootA, 'session-a.txt'), 'x')
   writeFileSync(join(rootB, 'session-b.txt'), 'x')
   let scope: { kind: 'workspace'; cwd: string } = { kind: 'workspace', cwd: rootA }
@@ -735,8 +784,9 @@ test('extractAtPrefix keeps the CJK-glue rule and rejects emails', () => {
   assert.equal(extractAtPrefix('plain'), null)
 })
 
-test('a sessionless @dir/ lists children (direct children listing)', async () => {
-  const { root } = largeWorkspaceFixture()
+test('a sessionless @dir/ lists children (direct children listing)', async (t) => {
+  const life = testLifecycle(t)
+  const { root } = largeWorkspaceFixture(life)
   const port = new DirectHostFilePort(() => undefined, null)
   const provider = new MentionProvider([], root, port)
   // No live agent: workspace scope (sessionless).
@@ -747,10 +797,13 @@ test('a sessionless @dir/ lists children (direct children listing)', async () =>
 
 // ── §24 headless integration: TuiApp + TuiEditor + MentionProvider ─────────
 
-test('§24 A: @src → dropdown → Tab → @src/ → children dropdown', async () => {
+test('§24 A: @src → dropdown → Tab → @src/ → children dropdown', async (t) => {
+  const life = testLifecycle(t)
   const { startApp } = await import('./support/app-harness.ts')
-  const root = largeWorkspaceFixture().root
+  const root = largeWorkspaceFixture(life).root
   const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('@src')
   await pollUntil(() => vt.getViewport().join('\n').includes('src/'), 'the src directory item must appear')
@@ -759,13 +812,15 @@ test('§24 A: @src → dropdown → Tab → @src/ → children dropdown', async 
   await pollUntil(() => app.seatTextForTest() === '@src/', 'Tab accepts the directory')
   assert.equal(app.seatTextForTest(), '@src/', 'Tab accepts the directory')
   await pollUntil(() => vt.getViewport().join('\n').includes('wanted.ts'), 'children must appear after accept')
-  app.stop()
 })
 
-test('§24 B: /image src → dropdown → Tab → /image src/ → children dropdown', async () => {
+test('§24 B: /image src → dropdown → Tab → /image src/ → children dropdown', async (t) => {
+  const life = testLifecycle(t)
   const { startImageApp } = await import('./support/app-harness.ts')
-  const root = largeWorkspaceFixture().root
+  const root = largeWorkspaceFixture(life).root
   const { vt, app } = startImageApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('/image src')
   await pollUntil(() => vt.getViewport().join('\n').includes('src/'), 'the src argument candidate must appear')
@@ -774,13 +829,15 @@ test('§24 B: /image src → dropdown → Tab → /image src/ → children dropd
   await pollUntil(() => app.seatTextForTest() === '/image src/', 'Tab accepts the directory')
   assert.equal(app.seatTextForTest(), '/image src/', 'Tab accepts the directory')
   await pollUntil(() => vt.getViewport().join('\n').includes('wanted.ts'), 'children must appear after accept')
-  app.stop()
 })
 
-test('§24 C: hello ./src<Tab> opens no dropdown', async () => {
+test('§24 C: hello ./src<Tab> opens no dropdown', async (t) => {
+  const life = testLifecycle(t)
   const { startApp } = await import('./support/app-harness.ts')
-  const root = largeWorkspaceFixture().root
+  const root = largeWorkspaceFixture(life).root
   const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('hello ./src')
   await vt.waitForRender()
@@ -797,16 +854,17 @@ test('§24 C: hello ./src<Tab> opens no dropdown', async () => {
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('wanted.ts'), `hello ./src<Tab> must not list files:\n${view}`)
   assert.equal(app.seatTextForTest(), 'hello ./src', 'the draft is untouched')
-  app.stop()
 })
 
-test('§24 E: sessionless @dir/ lists children through the app chain', async () => {
+test('§24 E: sessionless @dir/ lists children through the app chain', async (t) => {
+  const life = testLifecycle(t)
   const { startApp } = await import('./support/app-harness.ts')
-  const root = largeWorkspaceFixture().root
+  const root = largeWorkspaceFixture(life).root
   const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
   await vt.waitForRender()
   // No session was ever created: the workspace scope answers.
   vt.sendInput('@src/')
   await pollUntil(() => vt.getViewport().join('\n').includes('wanted.ts'), 'sessionless children must appear')
-  app.stop()
 })

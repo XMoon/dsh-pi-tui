@@ -36,12 +36,26 @@ export class Box implements Component {
 		if (index !== -1) {
 			this.children.splice(index, 1);
 			this.invalidateCache();
+			// Removal ends ownership: release the child's resources, exactly
+			// like Container.removeChild (dsh-pi-tui divergence X007).
+			component.dispose?.();
 		}
 	}
 
 	clear(): void {
+		for (const child of this.children) child.dispose?.();
 		this.children = [];
 		this.invalidateCache();
+	}
+
+	/**
+	 * Release every child (dsh-pi-tui divergence X007): a Box nested under
+	 * a Container/overlay must forward disposal — without this, only
+	 * box.removeChild/clear released children and a parent-owned Box
+	 * leaked its resource-owning subtree.
+	 */
+	dispose(): void {
+		this.clear();
 	}
 
 	setBgFn(bgFn?: (text: string) => string): void {

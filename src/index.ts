@@ -30,23 +30,25 @@ import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { CallId, ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ToolCallId, ContentBlock } from '@deepseek-ai/dsh-llm'
 // P7d: the subagent registry merge for ctx.subagents (listChildren/interrupt).
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-// P6: the agent-preset roster — ctx.agentPresets, the session preset
-// resolver, and the `agent-preset/selected` session event map.
+import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
+// P6: the agent-preset roster — ctx.agentPresets and the
+// `agent-preset/selected` session projection owned by DSH.
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
-import type {} from './preset-events.ts'
+import type {} from '@deepseek-ai/dsh-tool-todo'
+import { resolvePresetRequest } from './runtime/session-preset.ts'
+import { recordedSessionPreset, sessionPresetOf } from './runtime/direct/session-preset-direct.ts'
+import { DirectModelSelectionOwner, type DefaultModelServiceLike } from './runtime/direct/model-selection-direct.ts'
+import { foldPendingModelSelection, rawSelectionFromRequestHeader } from './model-selection.ts'
 // Empty type imports carry the loader Context merge for the settlement await
 // and the cmdline Context merge for the appExit host value.
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
 // The approval/request waterfall merge: the TUI is the interactive answerer.
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 // The commands service merge: ctx.commands typing for execute()/register().
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -55,11 +57,12 @@ import type {} from '@deepseek-ai/dsh-commands'
 // The skill registry merge for the /skill command.
 import type {} from '@deepseek-ai/dsh-skill'
 // The settings service merge for persisting TUI preferences.
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-settings'
 // The user-questions service merge: ctx.userQuestions for ask_user_question.
 import type {} from '@deepseek-ai/dsh-user-questions'
-// The plan-mode fold for the header badge.
-import { foldPlanMode } from '@deepseek-ai/dsh-plan-mode'
+// The plan-mode merge for the header badge (the fold is local — alpha.2
+// replaced dsh-plan-mode's exported fold with the `plan` projection).
 import type {} from '@deepseek-ai/dsh-plan-mode'
 // The persistence service for the session picker.
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -71,9 +74,10 @@ import type {} from '@deepseek-ai/dsh-jobs'
 import type { JobId } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-permission-presets'
 // The sandbox/mode knob event merge (permission presets fold it too).
-// The VALUE is capability-detected at apply time (see
-// resolveSandboxFold) — a Harness whose dsh-sandbox-policy lacks the
-// effectiveSandboxMode export must degrade, never crash at load.
+// Alpha.4 removed the effectiveSandboxMode fold export: the sandbox fact
+// is read through the official sandboxPolicy service (derive-access), so
+// this import is type-only (the module augmentation) and never a value
+// dependency.
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 // P5e merges: shell capability for `!` mode and credentials for /login.
@@ -82,11 +86,15 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from './present.ts'
-import { childOwnEvents, searchTranscript, textOf, TranscriptFolder } from './transcript.ts'
+import { childOwnEvents, textOf, TranscriptFolder, type TranscriptSearchMatch } from './transcript.ts'
 import type { TranscriptMessage, TranscriptWindow } from './transcript.ts'
 import { TranscriptWindowController } from './transcript-window.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
+import { CompletionNotificationController } from './notification/controller.ts'
+import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
+import { DISABLE_FOCUS_REPORTING, ENABLE_FOCUS_REPORTING, FOCUS_IN_SEQUENCE, FOCUS_OUT_SEQUENCE, TerminalFocusTracker } from './notification/terminal-focus.ts'
+import { guardedStreamWriter, TerminalNotifier } from './notification/terminal-notifier.ts'
 import { formatStats, StatsFolder } from './stats.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
 import { plainSectionEqual } from './status/equal.ts'
@@ -94,14 +102,17 @@ import { deriveRunnerPermission } from './status/derive-permission.ts'
 import { StatusStore } from './status/store.ts'
 import { initialStatusSnapshot } from './status/snapshot.ts'
 import { deriveAccessStatus } from './status/derive-access.ts'
-import { derivePlanStatus } from './status/derive-plan.ts'
+import { derivePlanStatus, projectedPlanActive, type PlanProjectionLike } from './status/derive-plan.ts'
 import { usageFromStats } from './status/derive-usage.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
+import { ContextMeasurementCoordinator, deferInitialContextMeasure, type ContextMeasureReason } from './status/context-measurement.ts'
+import { refreshedSearchState, steppedSearchOverlayState, type SearchOverlayState } from './search-overlay.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
 import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
 import { parseFooterLayout, isFooterLayout, resolveCommandFooterFallback } from './footer/layout.ts'
-import type { FooterCustomItemSettings } from './footer/custom-items.ts'
+import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from './footer/custom-items.ts'
 import { FooterCommandRunner } from './footer/command-runner.ts'
+import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
@@ -111,13 +122,13 @@ import { Text } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import {
-  buildTaskRows, isSubagentRowInterruptible, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessOf, isViewerAccessInteractive,
+  buildTaskRows, isActiveJobStatus, isSubagentRowInterruptible, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessHint, viewerAccessOf, isViewerAccessInteractive,
   type TaskBrowserRow, type ViewerAccess,
 } from './tasks-browser.ts'
-import type { TaskPanelItem } from './task-panel.ts'
+import type { TaskBrowserViewState, TaskPanelItem } from './task-panel.ts'
 import { TaskBrowserRuntime } from './task-browser-runtime.ts'
 import type { TaskBrowserHandle } from './tui-app.ts'
-import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
+import { registerTuiCommands, type DefaultIntentRecord, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
@@ -128,9 +139,12 @@ import { FileHistorySearchSource } from './history-search.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import { DraftImageStore } from './image/draft-store.ts'
 import { ImageInputError } from './image/errors.ts'
-import { clipboardBackendOf, commandOnPath, createClipboardRunner, readClipboardImage, type ClipboardEnvironment } from './image/clipboard.ts'
+import { clipboardBackendOf, commandOnPath, createClipboardRunner, readClipboardImage, readClipboardText, type ClipboardEnvironment } from './image/clipboard.ts'
+import { openExternalUrl } from './open-url.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from './clipboard.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
+import { wheelScrollLinesOf } from './wheel-scroll.ts'
+import { createStartupStatus } from './startup-status.ts'
 import { iconStyleOf } from './icons.ts'
 import { checkImageLimits } from './image/intake.ts'
 import { ImageLoadError } from './image/errors.ts'
@@ -143,9 +157,8 @@ import { mergeDraft, refuseByTransitionFence, steerAll, steerHasPayload, session
 import {
   resolveSubagentSettleTarget,
   viewerCanonicalizeScope,
-  type SubagentFollowupOutcome,
-  type SubagentFollowupReject,
-  type SubagentParentLike,
+  type SubagentPromptOutcome,
+  type SubagentPromptReject,
   type SubagentViewerSubmitRequest,
 } from './subagent-viewer-submit.ts'
 import { createDirectBackend } from './runtime/backend.ts'
@@ -158,7 +171,6 @@ import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from './runtime/direct/config-direct.ts'
 import { serializeTuiSettingsMutation } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
-import type { SubagentFollowupContext } from './runtime/subagent-port.ts'
 import { directAgentOf, ownerHandleOf, type CreateSessionRequest, type ResumeSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
@@ -209,6 +221,16 @@ export const inject = ['agentDefaultModel', 'agents', 'sessions', TUI_STARTUP_SE
 export interface Config {
   /** Resumed session id; a fresh session is created when absent. */
   sessionId?: string
+  /** Test seam: the pre-mount status output (defaults to process.stdout,
+   * TTY-gated). Injectable so the runner tests capture the status writes
+   * without patching the global stdout (which would fight the test
+   * reporter's own writes). STRUCTURAL on purpose: the public Config type
+   * must not reference the internal startup-status module (the public
+   * .d.mts leak gate). */
+  startupStatusOutput?: {
+    readonly isTTY?: boolean
+    write(text: string): unknown
+  }
 }
 
 export const Config: z<Config> = z.object({
@@ -609,10 +631,15 @@ export interface ResolveInitialCatalogOptions {
   /** The context surface the collectors read services from. */
   readonly ctx: SurfaceCatalogContext
   readonly diag: Diag
+  /** Suspend the pre-mount startup status before an ordinary log write
+   * (the status owns the current terminal line; a TTY shares one cursor
+   * between stdout and stderr). Called right before every diag.warn this
+   * function may emit. */
+  readonly onLog?: () => void
 }
 
 export async function resolveInitialCatalog(options: ResolveInitialCatalogOptions): Promise<InitialCatalogResolution> {
-  const { liveAgent, presetId, signal, ctx, diag } = options
+  const { liveAgent, presetId, signal, ctx, diag, onLog } = options
   if (liveAgent !== undefined) {
     try {
       const snapshot = await readSurfaceCatalog(liveAgent, signal, ctx)
@@ -625,6 +652,7 @@ export async function resolveInitialCatalog(options: ResolveInitialCatalogOption
     } catch (error) {
       if (isCancellation(error)) return {}
       const message = safeErrorMessage(error)
+      onLog?.()
       diag.warn('surface catalog unavailable', { phase: 'resume', error: message })
       return { notice: `surface catalog unavailable: ${message}` }
     }
@@ -648,6 +676,7 @@ export async function resolveInitialCatalog(options: ResolveInitialCatalogOption
   } catch (error) {
     if (isCancellation(error)) return {}
     const message = safeErrorMessage(error)
+    onLog?.()
     diag.warn('skill catalog unavailable', { phase: 'cold', error: message })
     return { notice: `skill catalog unavailable: ${message}` }
   }
@@ -1190,6 +1219,25 @@ export function busyAfterTurnBoundary(eventType: 'turn/start' | 'turn/end', comp
   return eventType === 'turn/start' || compacting
 }
 
+/** PR D2 test seam: whether a session event type marks the model-visible
+ * context dirty (re-measure through the SessionReader port) or only
+ * repaints cheaply (cached measurement). The firehose routes every event
+ * through this classification — the single source of truth for the
+ * status/measurement split. `compaction/end` is classified 'measure' but
+ * the firehose deliberately SKIPS it here: a matched compaction settle
+ * re-measures through the fold-outcome path (settleCompactionSurface), so
+ * a STALE compaction/end can never trigger a measurement. */
+export function contextRefreshKind(eventType: string): 'measure' | 'cheap' {
+  switch (eventType) {
+    case 'step/start':
+    case 'turn/end':
+    case 'compaction/end':
+      return 'measure'
+    default:
+      return 'cheap'
+  }
+}
+
 /**
  * The in-flight compaction state a resumed session log implies: the newest
  * compaction bracket decides. A `session/end-seed` boundary makes any
@@ -1235,7 +1283,10 @@ export interface AgentComposition {
  * A deployment with no roster composes nothing and every session shares the
  * host composition, which is the behavior before presets existed.
  * @param ctx - the runner context (services read through `ctx.get`).
- * @param selected - the mutable model selection every setup installs.
+ * @param installSelection - installs a fresh Agent-local model selection ref
+ *   during setup. A ModelSelectionRef is still accepted for source
+ *   compatibility with standalone composition callers; the runner always
+ *   supplies the Agent-local installer.
  * @param presetId - the requested preset, or `undefined` for the default.
  * @param focusState - the shared Focus runtime state (STRUCTURAL on
  *   purpose: the public declaration bundle must not inline src/focus.ts —
@@ -1250,16 +1301,25 @@ export interface AgentComposition {
  */
 export async function composeAgent(
   ctx: Context,
-  selected: ModelSelectionRef,
+  installSelection: ((agentCtx: Context) => void) | ModelSelectionRef,
   presetId?: string,
   focusState?: { enabled: boolean },
   diag?: Diag,
 ): Promise<AgentComposition> {
   const presets = ctx.get('agentPresets')
+  // Keep the old public helper shape usable by headless composition callers,
+  // but make the runner's production path pass an installer that creates a
+  // distinct ref for the Agent being composed.
+  const install = typeof installSelection === 'function'
+    ? installSelection
+    : (agentCtx: Context): void => { installModelSelection(agentCtx, installSelection) }
   if (presets === undefined) {
+    if (presetId === 'code') {
+      throw new Error('preset "code" is unavailable in this deployment; use a configured preset')
+    }
     return {
       setup: (agentCtx: Context): void => {
-        installModelSelection(agentCtx, selected)
+        install(agentCtx)
         // Focus is a TUI surface policy: install it only when the runner
         // supplied the shared state (other callers — the headless tests —
         // keep the plain composition).
@@ -1267,14 +1327,20 @@ export async function composeAgent(
       },
     }
   }
-  const resolvedId = (await presets.resolve(presetId)).id
+  // DSH allows a user preset literally named `code`. Resolve the real roster
+  // entry first; only an omitted persisted default falls back from old pi-tui
+  // `code` data to the canonical `ptc` preset.
+  const resolved = await resolvePresetRequest(presets, presetId)
+  // The resolver returns the concrete roster identity, including a legitimate
+  // custom `code` entry. The only compatibility rewrite is inside the shared
+  // omitted-default resolver above.
   return {
-    agentPreset: resolvedId,
+    agentPreset: resolved.id,
     setup: async (agentCtx: Context): Promise<void> => {
-      installModelSelection(agentCtx, selected)
-      await presets.mount(agentCtx, resolvedId)
+      install(agentCtx)
+      await presets.mount(agentCtx, resolved.id)
       // Focus is a TUI surface policy, installed AFTER the preset mount so
-      // it exists consistently across every preset (standard/code/minimal/
+      // it exists consistently across every preset (standard/ptc/minimal/
       // cordis) without depending on what the preset itself installs
       // (plan §9.1). A preset recompose that only swaps preset-owned rows
       // keeps this outer scoped section; a full agent rebuild re-runs this
@@ -1286,37 +1352,20 @@ export async function composeAgent(
 }
 
 /**
- * The preset a persisted session actually runs, from its log (newest
- * selection winning), or undefined when persistence is absent, the session is
- * unknown, or its log predates the roster.
+ * The preset a persisted session actually runs, resolved by the DSH 0.1.2+
+ * session projection (header initialization plus the latest selection event).
  * @param ctx - the runner context.
  * @param sessionId - the persisted session id.
  * @returns the recorded preset id, or undefined to compose the default.
  */
 export async function recordedPreset(ctx: Context, sessionId: string): Promise<string | undefined> {
-  const persistence = ctx.get('sessionPersistence')
-  if (persistence === undefined) return undefined
-  let header: SessionHeader | undefined
-  try {
-    header = (await persistence.list()).find(candidate => candidate.id === sessionId)
-  } catch {
-    return undefined
-  }
-  if (header === undefined) return undefined
-  let events: readonly SessionEvent[] = []
-  try {
-    events = (await persistence.inspect(SessionId(sessionId))).events
-  } catch {
-    // Header-only fallback: an unreadable log still resumes under the
-    // creation-time preset rather than the deployment default.
-  }
-  return resolveSessionPreset({ header, events })
+  return recordedSessionPreset(ctx, sessionId)
 }
 
 /** The session surface {@link recomposeBlank} needs: its log and the append seam. */
 export interface RecomposableSession {
   readonly id: string
-  readonly events: readonly SessionEvent[]
+  snapshotEvents(): readonly SessionEvent[]
   append(type: 'agent-preset/selected', data: { agentPreset: string }): unknown
 }
 
@@ -1343,7 +1392,7 @@ export async function recomposeBlank(
 ): Promise<RecomposeOutcome> {
   const presets = ctx.get('agentPresets')
   if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
-  if (agent.session.events.some(event => event.type === 'turn/start')) return { kind: 'locked' }
+  if (agent.session.snapshotEvents().some(event => event.type === 'turn/start')) return { kind: 'locked' }
   const preset = await presets.recompose(agent.ctx, id)
   agent.session.append('agent-preset/selected', { agentPreset: preset.id })
   return { kind: 'switched', preset: preset.id }
@@ -1360,12 +1409,16 @@ function setTerminalTitle(title: string): void {
  * mapping). JOB rows keep their status/detail; SUBAGENT rows carry the
  * projected runtime activity as the status word, the durable mode as the
  * non-truncatable suffix, and the tree connector from the catalog depth.
- * The interrupt verb is advertised ONLY for a continuable child with a
+ * The Stop capability is advertised ONLY for a continuable child with a
  * LIVE running driver (`isSubagentRowInterruptible`) — an idle
  * continuable has no driver to stop. `has children` is deliberately NOT
  * a detail line: the tree connector already expresses parenthood.
  */
 function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
+  const labels = new Map<string, string>()
+  for (const row of target) {
+    if (row.kind === 'subagent') labels.set(row.childId, row.label)
+  }
   return target.map(row => row.kind === 'job'
     ? {
         value: row.value,
@@ -1377,7 +1430,13 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
         status: row.status,
         detail: row.detail,
         startedAt: row.startedAt,
+        finishedAt: row.finishedAt,
         group: rowGroup(row),
+        source: 'job' as const,
+        active: isActiveJobStatus(row.status),
+        attention: row.attention ?? (row.status === 'failed' || row.status === 'timed_out' || row.status === 'lost'),
+        canOpen: true,
+        canStop: isActiveJobStatus(row.status),
         // The Tab type filter: job rows filter by their job kind.
         type: row.jobKind,
       }
@@ -1390,9 +1449,19 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
         suffix: row.mode,
         status: row.activity,
         group: rowGroup(row),
+        source: 'subagent' as const,
         type: 'subagent',
+        active: row.activity === 'running',
+        canOpen: true,
+        canStop: isSubagentRowInterruptible(row),
+        parentId: row.parentId === '' ? undefined : `agent:${row.parentId}`,
+        parentLabel: row.parentId === '' ? undefined : labels.get(row.parentId),
+        depth: row.depth,
+        hasChildren: row.hasChildren,
+        mode: row.mode,
+        access: viewerAccessHint(row.mode, viewerAccessOf(row)),
         // Only a continuable row with a LIVE running driver is
-        // interruptible (one-shot ids are accepted no-ops for the
+        // Stop-capable (one-shot ids are accepted no-ops for the
         // interrupt transport; an idle continuable has no driver to
         // stop — the UI must not advertise a dead stop verb).
         interruptible: isSubagentRowInterruptible(row),
@@ -1437,6 +1506,14 @@ export function apply(ctx: Context, config: Config): void {
   // shell) or generation checks (menu latches).
   const lifecycleController = new AbortController()
 
+  // The guarded notification writer is hoisted to the RUNNER scope: both
+  // the startup body and the terminal-total fatal catch (which lives
+  // OUTSIDE the IIFE) must be able to disable terminal focus reporting —
+  // a startup failure after the TUI mount must never leak CSI ? 1004
+  // into the shell. The guarded writer swallows broken-stream async
+  // errors; every use is additionally wrapped for synchronous throws.
+  const notificationWriter = guardedStreamWriter(process.stdout)
+
   void (async () => { // allowlist: startup lifecycle root — see AGENTS.md
     // Loader siblings mount concurrently. Await the complete application before
     // creating an Agent so its scoped tools and adapters are not half-composed.
@@ -1455,7 +1532,7 @@ export function apply(ctx: Context, config: Config): void {
     // (theme/footer/fullscreen/…) still run after the app exists.
     // Theme values: auto | dark | light | custom:<name>.
     const tuiSettings = ctx.get('settings')?.register(
-      settingsNamespace('dsh-pi-tui'),
+      'dsh-pi-tui' as SettingsNamespace,
       z.object({
         theme: z.string(),
         footer: z.string(),
@@ -1528,6 +1605,15 @@ export function apply(ctx: Context, config: Config): void {
         // Focus Mode: 'on' collapses turn-intermediate activity into a
         // live Thought block (default 'off' — Focus OFF == current UI).
         focusMode: z.string(),
+        // Completion notifications: mode = when the main agent's
+        // settlement notifies ('unfocused' default | 'always' | 'off'),
+        // method = how ('auto' default | 'osc9' | 'osc777' | 'bell').
+        notificationMode: z.string(),
+        notificationMethod: z.string(),
+        // Fullscreen mouse-wheel step: '1' (default) | '2' | '3' | '5' |
+        // '8' — the transcript lines moved per wheel event. A Client
+        // preference; wheelScrollLinesOf is the single parsing authority.
+        wheelScrollLines: z.string(),
         // Icon style: 'emoji' (default) or 'symbols' — the first-party
         // structural icon palette (see src/icons.ts). A persisted invalid
         // value fails safe to emoji at consumption.
@@ -1546,7 +1632,7 @@ export function apply(ctx: Context, config: Config): void {
       // The base layout is the builtin default; the schemastery output
       // type is fully-populated, so the cast bridges the sparse literal
       // (the runtime validation accepts missing optional fields).
-      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCustomItems: undefined as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off' } },
+      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCustomItems: undefined as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' } },
     )
     // The ONE authoritative Focus runtime state (plan §5): restored from
     // the persisted document BEFORE the first compose/resume below, mutated
@@ -1554,13 +1640,138 @@ export function apply(ctx: Context, config: Config): void {
     // section and the TUI projection both read THIS object.
     const focusState: FocusState = { enabled: focusModeOf(tuiSettings?.get().focusMode) === 'on' }
 
-    const selection = defaultModel.currentSelection()
-    const agentOptions = { provider: selection.provider, model: selection.model }
-    // P6: compose one preset per session when the roster is mounted; with no
-    // roster this is exactly the headless shape (model-facing rows in the
-    // host plane). The `selected` ref stays process-wide like before.
-    const selected: ModelSelectionRef = { current: selection, assembled: undefined }
-    const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, selected, presetId, focusState, diag)
+    // Completion notifications (plan: Client/TUI presentation capability —
+    // settled detection, focus detection, terminal output and settings
+    // parsing stay separate modules, never a blob in the runner). The
+    // controller consumes the AUTHORITATIVE `agent/status` runtime fact
+    // (same live main agent, observed running → idle) — never `turn/end`,
+    // timers or debounces. The notifier writes through the HOISTED
+    // guarded writer (declared with the runner scope so the fatal catch
+    // can disable focus reporting too); the sink wrapper contains
+    // synchronous throws so a notification failure can never crash the
+    // TUI. The SAME guarded writer carries the focus-reporting mode
+    // writes (enable at mount, disable at cleanup AND on the
+    // startup-failure path).
+    const terminalNotifier = new TerminalNotifier(notificationWriter)
+    const completionController = new CompletionNotificationController((method, title, body) => {
+      try {
+        terminalNotifier.notify(method, title, body)
+      } catch {
+        // A notification failure is Client-local UX: never crash the TUI.
+      }
+    })
+    const terminalFocusTracker = new TerminalFocusTracker()
+    completionController.setMode(parseNotificationMode(tuiSettings?.get().notificationMode))
+    completionController.setMethod(parseNotificationMethod(tuiSettings?.get().notificationMethod))
+
+    // The live Agent is declared before the TUI-facing facade so every read
+    // after a transition follows the current Session rather than a startup
+    // snapshot. It remains undefined for deferred-start surfaces.
+    let liveAgent: Agent | undefined
+    const modelSelections = new DirectModelSelectionOwner(
+      defaultModel as unknown as DefaultModelServiceLike,
+    )
+    // The latest explicit default-model intent: every /model commit
+    // (sessionless or live) records the value a NEW Session should observe
+    // while the global-default save is still in flight. It is TRANSIENT:
+    // a settled save clears it (the next /new reads the persisted default
+    // dynamically), and a failed save walks the operation ancestry back to
+    // the nearest still-pending operation.
+    //
+    // The intent is a small OPERATION CHAIN state machine: each operation
+    // carries its own save status and links the operation that owned the
+    // intent before it (ancestry). A settle reports ONLY the operation id
+    // and outcome; the machine decides whether the intent clears, restores
+    // a pending ancestor, or stays with a newer operation. An operation's
+    // status is retained as long as it is reachable along the chain, so a
+    // deep rollback (C fails → restore B → B fails → restore A) can never
+    // resurrect an already-settled operation as pending.
+    interface DefaultIntentOperation {
+      id: number
+      selection: ModelSelection
+      previous: DefaultIntentOperation | undefined
+      status: 'pending' | 'committed' | 'failed'
+    }
+    let nextIntentId = 0
+    let activeDefaultIntent: DefaultIntentOperation | undefined
+    /** Why the intent is currently unset: 'committed' (the persisted default
+     *  carries the latest committed choice — the blank Session observes it
+     *  dynamically), 'failed' (the latest settle failed and no pending or
+     *  committed operation remains — the deferred-create boundary seeds the
+     *  captured choice), or undefined while an operation is still pending. */
+    let defaultIntentOutcome: 'committed' | 'failed' | undefined
+    const setDefaultIntent = (next: ModelSelection | undefined): void => {
+      // A NEW operation owns the intent: allocate a fresh id and link the
+      // previous operation as ancestry (the rollback chain).
+      if (next === undefined) {
+        activeDefaultIntent = undefined
+      } else {
+        nextIntentId += 1
+        activeDefaultIntent = {
+          id: nextIntentId,
+          selection: next,
+          previous: activeDefaultIntent,
+          status: 'pending',
+        }
+      }
+      defaultIntentOutcome = undefined
+    }
+    const settleIntent = (id: number, outcome: 'committed' | 'failed'): void => {
+      // Find the operation in the active chain (every operation is an
+      // ancestor of the active one).
+      let op: DefaultIntentOperation | undefined = activeDefaultIntent
+      while (op !== undefined && op.id !== id) op = op.previous
+      if (op === undefined) return
+      op.status = outcome
+      if (op !== activeDefaultIntent) return // a newer operation owns the intent
+      if (outcome === 'committed') {
+        // The persisted default carries the choice: the transient intent
+        // settles and the blank Session observes it dynamically.
+        activeDefaultIntent = undefined
+        defaultIntentOutcome = 'committed'
+        return
+      }
+      // The active operation FAILED: walk the ancestry to the nearest
+      // still-pending operation (it keeps its settle authority), skipping
+      // settled ones. A committed ancestor means the persisted default
+      // carries it (no seed); only failed ancestors leave the captured
+      // choice to be seeded by the deferred-create boundary.
+      let settledOutcome: 'committed' | 'failed' = 'failed'
+      let cursor = op.previous
+      while (cursor !== undefined) {
+        if (cursor.status === 'pending') {
+          activeDefaultIntent = cursor
+          defaultIntentOutcome = undefined
+          return
+        }
+        if (cursor.status === 'committed') settledOutcome = 'committed'
+        cursor = cursor.previous
+      }
+      activeDefaultIntent = undefined
+      defaultIntentOutcome = settledOutcome
+    }
+    /** TUI-only facade; this ref is NEVER installed into an Agent context. */
+    const selected: ModelSelectionRef = {
+      get current(): ModelSelection | undefined {
+        return liveAgent === undefined
+          ? activeDefaultIntent?.selection ?? (defaultModel.currentSelection() as ModelSelection | undefined)
+          : modelSelections.current(liveAgent)
+      },
+      set current(next: ModelSelection | undefined) {
+        // The facade write path: a live Session routes to its own selection
+        // (in-memory; the durable commit belongs to the catalog port), a
+        // sessionless surface records the default intent. /model uses the
+        // runner's explicit setDefaultIntent for the durable path.
+        if (liveAgent === undefined) {
+          setDefaultIntent(next)
+          return
+        }
+        modelSelections.setCurrent(liveAgent, next)
+      },
+      assembled: undefined,
+    }
+    const installSessionModelSelection = (agentCtx: Context): void => modelSelections.installForContext(agentCtx)
+    const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, installSessionModelSelection, presetId, focusState, diag)
     const withPresetMeta = (composition: AgentComposition): { agentPreset?: string } =>
       composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }
 
@@ -1575,7 +1786,12 @@ export function apply(ctx: Context, config: Config): void {
       new DirectSessionWriter(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent as never : undefined),
       new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
       new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
-      new DirectCatalogPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
+      new DirectCatalogPort(
+        ctx,
+        (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined,
+        modelSelections,
+        diag,
+      ),
       new DirectConfigPort(ctx, tuiSettings as unknown as import('./runtime/config-port.ts').TuiSettingsConfig | undefined, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
       new DirectHostFilePort((sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
     )
@@ -1757,8 +1973,24 @@ export function apply(ctx: Context, config: Config): void {
     // sessionless (the next input creates a new session); the failure is
     // surfaced as a notify line.
     let resumeFailure: string | undefined
+    // Pre-mount startup status (explicit resume only): the resume
+    // transaction (preflight, lock, DSH resume) and the whenIdle/catalog
+    // barrier run BEFORE the TUI mounts — a single-line TTY hint keeps
+    // the blank terminal from reading as a hang. Pure presentation: it
+    // never owns lifecycle state, and every teardown path (success,
+    // resume reject, abort/signal, HMR unload, startup exception) clears
+    // it — the abort listener covers the teardown paths, the explicit
+    // clear covers the success path.
+    const startupStatus = createStartupStatus(config.startupStatusOutput ?? {
+      isTTY: process.stdout.isTTY === true,
+      write: (text) => process.stdout.write(text),
+    })
+    lifecycleController.signal.addEventListener('abort', () => startupStatus.clear(), { once: true })
     let handle: SessionHandle | undefined
     if (sessionId !== undefined) {
+      // The explicit-resume path is the ONLY pre-mount wait worth
+      // explaining: deferred / sessionless starts have nothing to resume.
+      startupStatus.show('Resuming session…')
       try {
         // The lock file lives next to the session log, whose path needs the
         // session's stored cwd: resolve the header first (best-effort — an
@@ -1811,17 +2043,28 @@ export function apply(ctx: Context, config: Config): void {
         // clear the uncertainty — the session is PINNED immediately
         // (fail-closed; no publication-phase inference, no second fresh
         // fallback).
+        // Agent options are only the creation/resume fallback. The setup
+        // installs an Agent-local selection and reconstructs the target
+        // Session's durable model choice after resume.
+        const fallback = defaultModel.currentSelection()
         handle = await backend.sessionLifecycle.resume({
           resumeSessionId: SessionId(sessionId),
-          provider: agentOptions.provider,
-          model: agentOptions.model,
+          provider: fallback.provider,
+          model: fallback.model,
           // The RESOLVED preset id from the preflight composition — the
           // adapter composes this EXACT id, never a re-resolved default.
           agentPreset: launchComposition.agentPreset,
         })
+        // Suspend the pre-mount status before ANY ordinary log output
+        // (uniform rule): the status owns the current terminal line, and
+        // a logger/diag write on a TTY shares the cursor — the status
+        // must be cleared first so the log line is clean and the later
+        // clear can never erase the wrong line. The 'Preparing
+        // conversation…' stage re-arms it.
+        startupStatus.clear()
         diag.info('resume ok', {
           session: sessionId,
-          seq: (handle.direct!.agent as Agent).session.events.length,
+          seq: Number((handle.direct!.agent as Agent).session.seq),
           preset: launchComposition.agentPreset ?? 'default',
         })
         // A launch-time preset may still apply while the session is blank;
@@ -1831,16 +2074,24 @@ export function apply(ctx: Context, config: Config): void {
             const outcome = await recomposeBlank(ctx, handle.direct!.agent as Agent, launchPreset)
             if (outcome.kind === 'locked') {
               const message = `session ${sessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`
+              startupStatus.clear()
               ctx.logger.warn(`tui-runner: ${message}`)
               diag.warn('preset ignored on resume', { session: sessionId, preset: launchPreset })
             }
           } catch (error) {
             const message = `--preset ${launchPreset} not applied on resume: ${safeErrorMessage(error)}`
+            startupStatus.clear()
             ctx.logger.warn(`tui-runner: ${message}`)
             diag.warn('preset not applied on resume', { session: sessionId, preset: launchPreset, error: message })
           }
         }
       } catch (error) {
+        // Suspend the pre-mount status BEFORE the failure logs: the
+        // status owns the current terminal line, and the logger/diag
+        // writes below share the TTY cursor — without this clear the
+        // warning would interleave with the status and the later
+        // mount-time clear would erase the wrong line.
+        startupStatus.clear()
         // A lock refusal is NOT recoverable: the user asked for a specific
         // held session. Re-throw so the runner exits with the refusal as
         // the message.
@@ -1867,11 +2118,20 @@ export function apply(ctx: Context, config: Config): void {
       // first user message creates it (see ensureSession below).
     }
     let liveHandle = handle?.direct?.ownerHandle as AgentHandle | undefined
-    let liveAgent = handle?.direct?.agent as Agent | undefined
+    liveAgent = handle?.direct?.agent as Agent | undefined
+    // The completion-notification controller follows the live identity:
+    // a resumed idle session must never notify (no observed running).
+    completionController.setLiveAgent(liveAgent?.id)
     if (liveAgent !== undefined) {
       // The committed live session's lease becomes ACTIVE (a successful
       // launch resume must not stay TOUCHED — review round 32).
       leaseManager.markActive(liveAgent.session.id)
+      // The resume transaction succeeded; the remaining pre-mount wait is
+      // the conversation preparation (whenIdle + the catalog ready
+      // barrier) — the second status stage replaces the first in place
+      // and STAYS until the barrier completes (the catalog prefetch can
+      // take seconds; a cleared line would read as a hang again).
+      startupStatus.show('Preparing conversation…')
       await liveAgent.whenIdle()
     }
     // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
@@ -1898,7 +2158,17 @@ export function apply(ctx: Context, config: Config): void {
         if (launched.failure !== undefined) resumeFailure = launched.failure
         effectivePresetId = launched.composition.agentPreset
       } catch (error) {
+        // Suspend the status before the log, then re-arm it ONLY for a
+        // live resumed session: the catalog barrier below is still part
+        // of the pre-mount wait for a resume, but a fresh/deferred start
+        // (or a failed resume) never shows any startup status — the
+        // "fresh start stays silent" contract must hold on this failure
+        // path too.
+        startupStatus.clear()
         diag.warn('preset resolution failed at startup', { error: safeErrorMessage(error) })
+        if (liveAgent !== undefined) {
+          startupStatus.show('Preparing conversation…')
+        }
       }
       const resolution = await resolveInitialCatalog({
         liveAgent,
@@ -1906,6 +2176,10 @@ export function apply(ctx: Context, config: Config): void {
         signal: lifecycleController.signal,
         ctx: ctx as unknown as SurfaceCatalogContext,
         diag,
+        // The catalog read may emit its own failure warn: suspend the
+        // status right before it (the barrier itself keeps the status
+        // on screen).
+        onLog: () => startupStatus.clear(),
       })
       initialSnapshot = resolution.snapshot
       initialSkills = resolution.skills
@@ -1914,7 +2188,18 @@ export function apply(ctx: Context, config: Config): void {
     /** The preset the live agent runs on, when the deployment composes one. */
     const currentPreset = (): string | undefined => {
       if (liveAgent === undefined) return undefined
-      return ctx.get('agentPresets')?.composedPreset(liveAgent.ctx) ?? resolveSessionPreset(liveAgent.session)
+      const presets = ctx.get('agentPresets') as {
+        composedPreset?: (agentCtx: unknown) => unknown
+      } | undefined
+      if (typeof presets?.composedPreset === 'function') {
+        try {
+          const composed = presets.composedPreset(liveAgent.ctx)
+          if (typeof composed === 'string') return composed
+        } catch {
+          // During teardown, fall back to the DSH projection read below.
+        }
+      }
+      return sessionPresetOf(ctx, liveAgent.session)
     }
     // Incremental fold state for the live session's log; reset on switch. A
     // resumed session is hydrated only by initLiveSession below, so startup
@@ -1935,10 +2220,13 @@ export function apply(ctx: Context, config: Config): void {
         app.setWelcomeIdle(true)
         return
       }
+      const current = selected.current
+      const provider = current?.provider ?? liveAgent.options.provider
+      const model = current?.model ?? liveAgent.options.model
       app.setWelcomeCard({
         cwd: sessionCwd(),
         sessionId: liveAgent.session.id,
-        model: `${liveAgent.options.provider}/${liveAgent.options.model}`,
+        model: `${provider}/${model}`,
         version: packageVersion(),
         ...currentPreset() === undefined ? {} : { preset: currentPreset() },
       })
@@ -1964,10 +2252,6 @@ export function apply(ctx: Context, config: Config): void {
     // transition started later can never interleave with a write already
     // awaiting a provider/IO (convergence plan phase 3).
     const operationBarrier = new SessionOperationBarrier()
-    // The writer/transition barrier: transitions freeze TUI writers and
-    // wait for in-flight ones to drain; writers run inside runWriter so a
-    // transition started later can never interleave with a write already
-    // awaiting a provider/IO (convergence plan phase 3).
 
     /**
      * The ONE session-transition transaction, shared by /new, /fork,
@@ -2014,7 +2298,7 @@ export function apply(ctx: Context, config: Config): void {
 // transition agent/handle extraction lives in runtime/session-lifecycle-port.ts
 // (ownerHandleOf / directAgentOf) so the runner AND the contract tests share
 // the exact extraction the transition commit uses.
-    const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
+    const transitionTo = async <T>(steps: TransitionSteps<T> & { inheritSelection?: ModelSelection }): Promise<TransitionOutcome<T>> => {
       const from = liveAgent?.session.id
       const oldHandle = liveHandle
       return runTransitionTo<T>({
@@ -2049,7 +2333,30 @@ export function apply(ctx: Context, config: Config): void {
           bumpSessionGeneration()
           liveHandle = ownerHandleOf(next) as AgentHandle | undefined
           liveAgent = directAgentOf(next) as Agent
+          // Session switch: the notification controller resets with the
+          // new live identity — a late idle from the OLD agent is fenced
+          // out and the new agent must be observed running before it can
+          // ever notify.
+          completionController.setLiveAgent(liveAgent.id)
           leaseManager.markActive((directAgentOf(next) as Agent).session.id)
+          // A fresh target inherits the surface's explicit choice (/new):
+          // the create options carried it, but the installed ref would
+          // otherwise fall back to the global default while the default
+          // save is still in flight (or after it failed). Record it
+          // durably so the first request and any later resume both see it.
+          // A target with durable model history (a resumed Session) keeps
+          // its own reconstruction and is never touched.
+          if (steps.inheritSelection !== undefined) {
+            const target = directAgentOf(next) as Agent
+            // The shared fold decides whether the target carries VALID
+            // durable model history (pending intent or a usable request
+            // header): malformed events are not durable history, and the
+            // fold is null-safe, so a hostile log can never throw here.
+            const folded = foldPendingModelSelection(target.session.snapshotEvents())
+            if (folded.lastUsed === undefined && folded.pending === undefined) {
+              modelSelections.selectForNextRequest(target, steps.inheritSelection)
+            }
+          }
         },
         pinTarget: (sessionId, reason) => {
           leaseManager.pin(sessionId, reason)
@@ -2146,7 +2453,7 @@ export function apply(ctx: Context, config: Config): void {
           if (retired.length > 0) {
             diag.error('transition retire failed (child committed)', { to: (directAgentOf(next) as Agent).session.id, failures: retired })
           }
-          diag.info('switch ok', { from: from ?? '(none)', to: (directAgentOf(next) as Agent).session.id, seq: (directAgentOf(next) as Agent).session.events.length })
+          diag.info('switch ok', { from: from ?? '(none)', to: (directAgentOf(next) as Agent).session.id, seq: Number((directAgentOf(next) as Agent).session.seq) })
         },
         recordFailure: (phase, error) => {
           diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
@@ -2202,10 +2509,14 @@ export function apply(ctx: Context, config: Config): void {
         // Preflight with the resolved composition (see the launch resume
         // note): the adapter re-mounts the EXACT resolved preset id.
         const switchComposition = await compose(recorded)
+        // The target's setup reconstructs its own effective selection. These
+        // values are only the dynamic fallback required by Agent resume; never
+        // copy the old Session's selected ref into the target.
+        const fallback = defaultModel.currentSelection()
         const resumeOptions = {
           resumeSessionId: SessionId(sessionId),
-          provider: liveAgent?.options.provider ?? selection.provider,
-          model: liveAgent?.options.model ?? selection.model,
+          provider: fallback.provider,
+          model: fallback.model,
           agentPreset: switchComposition.agentPreset,
         }
         const result = await transitionTo({
@@ -2354,42 +2665,28 @@ export function apply(ctx: Context, config: Config): void {
       ...dshVersion() === undefined ? {} : { dshVersion: dshVersion() },
       tuiVersion: bundleVersion(),
     })
-    /** The sandbox fold (dsh-sandbox-policy's effectiveSandboxMode),
-     * capability-detected: the VALUE import must not break module load on
-     * a Harness whose dsh-sandbox-policy lacks the export — the derive
-     * degrades to the sandboxPolicy service or an absent fact. The
-     * detection is detached (a bare promise would violate the failure
-     * model); the fold is resolved before the first refresh in practice
-     * and re-read on every status projection. */
-    let sandboxFold: ((events: readonly unknown[]) => string | undefined) | undefined
-    const resolveSandboxFold = async (): Promise<void> => {
-      try {
-        const mod = await import('@deepseek-ai/dsh-sandbox-policy')
-        const fold = (mod as { effectiveSandboxMode?: (events: readonly unknown[]) => string | undefined }).effectiveSandboxMode
-        sandboxFold = typeof fold === 'function' ? fold : undefined
-      } catch {
-        sandboxFold = undefined
-      }
-      // The fold settled (resolved OR definitively absent): repaint the
-      // status once so a first projection that ran before the probe
-      // settled picks up the sandbox fact (review round 25). SKIPPED
-      // when the runner is already torn down (the detached task outlives
-      // the surface — a stale refresh would touch disposed state).
-      if (signal.aborted) return
-      refreshStatus()
-    }
-    runDetached('sandbox fold probe', resolveSandboxFold, { diag })
-    const refreshStatus = (): void => {
+    // PR D2: the session-bound context-measurement cache. The coordinator
+    // owns the value/dirty/session identity; the runner owns the event
+    // classification (which events mark dirty, which only repaint cheaply).
+    const contextMeasurement = new ContextMeasurementCoordinator()
+    const markContextDirty = (): void => { contextMeasurement.markDirty() }
+
+    // PR D2: the cheap status refresh NEVER measures context. UI-only
+    // events (theme, keybinding, permission, focus, resize, search,
+    // credential/llm surface changes, …) read the CACHED measurement; the
+    // only measuring path is refreshContextMeasurement below, driven by
+    // model-visible lifecycle events through the semantic SessionReader
+    // port (never a direct ctx.get('tokenMeter') read — the Direct adapter
+    // owns that coupling).
+    const refreshStatusCheap = (): void => {
       const stats = statsFolder.snapshot()
-      let contextTokens: number | undefined
-      const meter = ctx.get('tokenMeter')
-      if (meter !== undefined && liveAgent !== undefined) {
-        try {
-          contextTokens = meter.measure(liveAgent.session).totalTokens
-        } catch {
-          // Measurement is best-effort; the footer falls back to no context.
-        }
-      }
+      // The CACHED context pressure of the live session (the only measured
+      // subject — never a fresh measurement here). While the subagent
+      // viewer is open, the usage PROJECTION below still refuses to ride
+      // the parent's measurement on the child's stats (same rule as before
+      // the split); the legacy setStatus field keeps carrying the parent's
+      // cached value exactly like the old path.
+      const contextTokens = contextMeasurement.valueFor(liveAgent?.session.id)
       // The footer's [yolo]/[workspace-write]/[read-only]/[custom] mode badge
       // rides the effective preset (derived from the sandbox+approval knob
       // folds).
@@ -2402,7 +2699,6 @@ export function apply(ctx: Context, config: Config): void {
       // SUBJECT's facts feed the sections — while the subagent viewer is
       // open that is the viewed child's own fold and workspace, so the
       // footer layout never changes, only the data source.
-      const events = liveAgent?.session.events ?? []
       const displayCwd = viewing?.cwd ?? liveCwd
       // While the subagent viewer is open the DISPLAY SUBJECT is the
       // viewed CHILD: the parent's session-owned sections (composition/
@@ -2423,15 +2719,13 @@ export function apply(ctx: Context, config: Config): void {
             {
               permissionPresets: permission,
               sandboxPolicy: ctx.get('sandboxPolicy'),
-              approvalFold: effectiveApprovalPolicy,
-              sandboxFold: sandboxFold,
+              approval: ctx.get('approval'),
             },
-            events,
             liveAgent?.session,
           )
         : {}
       const collaboration = viewing === undefined
-        ? { plan: derivePlanStatus(ctx.get('planMode'), liveAgent, events, foldPlanMode) }
+        ? { plan: derivePlanStatus(ctx.get('planMode'), liveAgent, ctx.get('sessionProjections'), liveAgent?.session) }
         : { plan: { effective: false } }
       const workspace = deriveWorkspaceStatus(displayCwd)
       const usage = usageFromStats(viewing?.stats.snapshot() ?? stats, viewing === undefined ? contextTokens : undefined)
@@ -2468,8 +2762,82 @@ export function apply(ctx: Context, config: Config): void {
         // extension snapshot (a state transition where the permission
         // preset service or the live agent is momentarily gone).
         permission: deriveRunnerPermission(permission, liveAgent),
-        ...contextTokens !== undefined ? { contextTokens, contextWindow: stats.contextWindow } : {},
+        // EXPLICITLY CLEAR the legacy context fields when unmeasured: the
+        // TuiApp merge keeps old fields otherwise, and the session
+        // switch / cold-resume window before the deferred measurement
+        // would show the PREVIOUS session's context pressure — exactly the
+        // permission policy above (P1 finding: the previous conditional
+        // spread skipped the fields, leaving session A's measurement on
+        // session B's first frames, indefinitely when B's measurement
+        // fails).
+        contextTokens,
+        contextWindow: contextTokens === undefined ? undefined : stats.contextWindow,
       })
+    }
+
+    // PR D2: the explicit, event-driven context measurement path. Call
+    // sites FIRST mark the cache dirty (markContextDirty — only
+    // model-visible lifecycle events may), then this function measures
+    // through the semantic SessionReader port and repaints cheaply. A
+    // clean cache skips the reader (same-sync-chain dedupe); a failed or
+    // unavailable measurement keeps the last-good value and the footer
+    // falls back — never a dialog, never a stale foreign session value
+    // (the coordinator is session-bound).
+    const refreshContextMeasurement = (_reason: ContextMeasureReason): void => {
+      const session = liveAgent?.session
+      if (session === undefined) return
+      contextMeasurement.bind(session.id)
+      contextMeasurement.measure(session.id, (id) => backend.sessionReader.measureContext(id))
+      refreshStatusCheap()
+    }
+
+    // The /status explicit force: a user asking for status expects the
+    // FRESH context (plan §15.1 — explicit-status may force). Measures now
+    // through the coordinator so the panel AND the cached footer value
+    // agree (round-8 finding: a direct sessionReader read from the command
+    // surface bypassed the cache and could duplicate the deferred initial
+    // measurement).
+    const forceContextMeasurement = (): number | undefined => {
+      const session = liveAgent?.session
+      if (session === undefined) return undefined
+      contextMeasurement.bind(session.id)
+      contextMeasurement.markDirty()
+      const value = contextMeasurement.measure(session.id, (id) => backend.sessionReader.measureContext(id))
+      refreshStatusCheap()
+      return value
+    }
+
+    // The initial/post-switch measurement is deferred one event-loop turn
+    // past the first usable paint: cold resume must never block the first
+    // frame on a long-session context scan (plan §16.2 — setImmediate, not
+    // a microtask). The fence captures the session generation + id: a
+    // switch,/new, viewer swap or dispose before the callback runs makes it
+    // a no-op (a stale deferred measurement can never commit).
+    let cancelDeferredContextMeasure: (() => void) | undefined
+    const scheduleInitialContextMeasure = (agent: Agent): void => {
+      const generation = sessionGeneration
+      const sessionId = agent.session.id
+      cancelDeferredContextMeasure?.()
+      cancelDeferredContextMeasure = deferInitialContextMeasure(
+        (callback) => setImmediate(callback),
+        () => generation === sessionGeneration && liveAgent?.session.id === sessionId,
+        () => {
+          // Bind the captured session BEFORE the dirty guard: on a cold
+          // resume the coordinator is still UNBOUND (reads as not dirty),
+          // and on a switch it is still bound to the PREVIOUS session —
+          // guarding before the bind would turn the deferred initial
+          // measure into a permanent no-op (round-10 finding). Binding a
+          // new identity clears the old value and arms a fresh measure;
+          // binding the same session is a no-op, so an earlier successful
+          // force/lifecycle measurement (dirty cleared) still makes this
+          // deferral redundant (round-9 finding), while a FAILED earlier
+          // attempt (dirty stays) is retried here.
+          contextMeasurement.bind(sessionId)
+          if (!contextMeasurement.isDirty()) return
+          markContextDirty()
+          refreshContextMeasurement('initial')
+        },
+      )
     }
 
     let app: TuiApp
@@ -2593,12 +2961,32 @@ export function apply(ctx: Context, config: Config): void {
     // (guarded by the startup-eager-callback audit in test/rules.test.ts).
     let footerCommandRunner: FooterCommandRunner | undefined
     let footerCommandUnsubscribe: (() => void) | undefined
+    // PR D: the custom command item runtime (one runner per ACTIVE layout
+    // command item). Hoisted with the whole-footer slots for the same TDZ
+    // guards; cleanup disposes it so no child/timer survives a remount.
+    let footerDynamicItemRuntime: FooterDynamicItemRuntime | undefined
     // Idempotent teardown: abort lifecycle loads, stop the TUI, close diag.
     // Shared by /exit, the effect cleanup, and the startup-failure path.
     let cleanedUp = false
     const cleanup = (): void => {
       if (cleanedUp) return
       cleanedUp = true
+      // Fence the completion-notification controller: after teardown a
+      // late `agent/status` idle from the old live agent must never emit
+      // a notification into a dead surface (the identity fence drops
+      // every event once the live id is undefined).
+      completionController.setLiveAgent(undefined)
+      // Disable terminal focus reporting FIRST — before any throwable
+      // teardown step — so the mode can never leak into the shell even
+      // when a later teardown operation throws (idempotent: a startup
+      // failure that never enabled it writes a harmless no-op). The
+      // guarded writer swallows a broken-stream error; a synchronous
+      // throw is contained here so teardown can never crash.
+      try {
+        notificationWriter.write(DISABLE_FOCUS_REPORTING)
+      } catch {
+        // The stream may already be gone during teardown; best effort.
+      }
       // The touched-session physical locks are DELIBERATELY NOT released
       // here (convergence plan phase 7): a clean TUI exit is not a proof
       // that the DSH persistence tree is quiet, so releasing an active /
@@ -2614,6 +3002,10 @@ export function apply(ctx: Context, config: Config): void {
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.
       catalogCoordinator?.dispose()
+      // PR D2: cancel the deferred initial context measure — a stale
+      // callback must never measure/repaint into the disposed surface.
+      cancelDeferredContextMeasure?.()
+      cancelDeferredContextMeasure = undefined
       // M5: release the footer command surface BEFORE the app dies — a
       // late status-store notification must not refresh into a disposed
       // surface. The lifecycle abort above already disposes an armed
@@ -2624,6 +3016,10 @@ export function apply(ctx: Context, config: Config): void {
       footerCommandUnsubscribe = undefined
       footerCommandRunner?.dispose()
       footerCommandRunner = undefined
+      // PR D: release every per-item command runner (children, timers,
+      // abort listeners) before the app dies.
+      footerDynamicItemRuntime?.dispose()
+      footerDynamicItemRuntime = undefined
       localShellController?.abort()
       for (const file of shellTempFiles) {
         try {
@@ -3037,7 +3433,7 @@ export function apply(ctx: Context, config: Config): void {
     // P7d: subagent viewer — while set, the transcript shows another live
     // session's log and Esc returns to the parent session. The target is
     // MODE-AWARE: a continuable child's viewer is INTERACTIVE (the editor
-    // submits follow-ups through ctx.subagents.followup), a one-shot
+    // submits human prompts through ctx.subagents.prompt), a one-shot
     // child's viewer stays read-only. The parent session id is pinned at
     // open time — follow-ups require the exact live direct parent, and
     // the viewer never guesses it from the current live agent.
@@ -3083,14 +3479,33 @@ export function apply(ctx: Context, config: Config): void {
       }, REPAINT_FLUSH_MS)
     }
     // Tool-call arguments by callId, for the approval-preview dialog.
-    const callArgs = new Map<CallId, string>()
+    const callArgs = new Map<ToolCallId, string>()
     // The in-flight compaction's id (paired start/end in the firehose): a
     // stale end must never clear a NEWER compaction's footer/busy state.
     let compactingId: string | undefined
-    // Transcript-search state (see the onSearch* events below).
-    let searchMatches: TranscriptMessage[] = []
+    // Transcript-search state (see the onSearch* events below). Matches are
+    // LIGHTWEIGHT stable identities ({id, turn} — never full message
+    // objects): the full-history search runs over the folder's incremental
+    // projection, so a query change never materializes the grouped
+    // transcript nor re-lowercases history.
+    let searchMatches: TranscriptSearchMatch[] = []
     let searchCurrent = -1
      let searchOrigin: { controller: TranscriptWindowController; state: TranscriptWindowState } | undefined
+    // Query-refinement state (D1): the previous query's matches are reused
+    // only when the new query PREFIX-extends the previous one on the SAME
+    // folder with an UNCHANGED projection revision (the folder validates
+    // both; the folder identity guard keeps a subagent viewer's matches
+    // from ever being reused for the parent session or vice versa).
+    let lastSearchQuery = ''
+    let lastSearchRevision = 0
+    let lastSearchFolder: TranscriptFolder | undefined
+    const resetSearchState = (): void => {
+      searchMatches = []
+      searchCurrent = -1
+      lastSearchQuery = ''
+      lastSearchRevision = 0
+      lastSearchFolder = undefined
+    }
     // Monotonic session generation: bumped on EVERY session swap (switch,
     // resume, deferred creation). Late async work (the skill command
     // catalog refresh, model-menu info, title folds) captures the
@@ -3109,8 +3524,7 @@ export function apply(ctx: Context, config: Config): void {
       // and dead callId→child maps would silently disable the auto-pop.
       pendingSubagentCalls.length = 0
       viewCallToChild.clear()
-      searchMatches = []
-      searchCurrent = -1
+      resetSearchState()
       searchOrigin = undefined
       windowController.latest()
       windowController.setTurns(folder.groupedTurns())
@@ -3129,6 +3543,8 @@ export function apply(ctx: Context, config: Config): void {
       activeTaskBrowser?.close()
       activeTaskBrowser = undefined
       taskRuntime?.reset()
+      app.setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
+      app.setTasks([])
       app.setAgents([])
       taskBrowserRows = []
       // A new session owns the surface: tear down the subagent viewer. The
@@ -3158,22 +3574,43 @@ export function apply(ctx: Context, config: Config): void {
         app.discardFocusViewerScope()
         repaint(app, folder, windowController)
         windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
-        refreshStatus()
+        // The new session's own measurement comes from its initLiveSession
+        // deferred path — the teardown refresh is UI-only.
+        refreshStatusCheap()
       })
       return sessionGeneration
     }
+    // PR D1 P1: while the search overlay is open the transcript keeps
+    // changing (settlements, read-group reflow, new messages), so Next/Prev
+    // must never jump with a stale candidate list or a stale turn. This
+    // re-runs the SAME lightweight query when the active folder's
+    // projection revision moved (or the folder itself changed), recovers
+    // the previously current match by stable id, and clamps the index.
+    const refreshSearchMatchesIfStale = (): void => {
+      const folder = activeFolder()
+      const refreshed = refreshedSearchState(
+        { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
+        folder,
+      )
+      if (!refreshed.changed) return
+      searchMatches = refreshed.matches
+      searchCurrent = refreshed.current
+      lastSearchRevision = refreshed.revision
+      lastSearchFolder = folder
+      app.setSearchResult(searchCurrent + 1, searchMatches.length)
+    }
     const jumpToSearchMatch = (): void => {
+      refreshSearchMatchesIfStale()
       const match = searchMatches[searchCurrent]
       if (match === undefined) return
-      const turn = 'turn' in match ? match.turn : undefined
       // ONE fold snapshot: the anchored message window and the activities
       // come from the same folder call (plan §19 — a jump must never
       // combine a fresh window with stale activity data).
       const folder = activeFolder()
       const controller = activeWindow()
-       if (turn !== undefined) controller.anchorAt(turn)
-       repaint(app, folder, controller)
-       app.scrollToBottom({ disableFollow: !controller.isLatest() })
+      controller.anchorAt(match.turn)
+      repaint(app, folder, controller)
+      app.scrollToBottom({ disableFollow: !controller.isLatest() })
 
       // Focus Mode: the search hits the FULL transcript (hidden process
       // rows included — plan §23), so a jump into a collapsed turn must
@@ -3181,9 +3618,13 @@ export function apply(ctx: Context, config: Config): void {
       // SECONDARY card must full-reveal that card (plan §28; the compact
       // timeline is a FULLSCREEN property — regular Focus full-reveals
       // any expanded root anyway). The disclosure is not reverted when
-      // search closes.
-      if (turn !== undefined && app.isFocusModeEnabled()) {
-        app.revealSearchMatch(match)
+      // search closes. The match resolves to its CURRENT visible card: a
+      // group reflow after the query may have replaced the card object —
+      // resolving by stable id fails soft (the turn jump above already
+      // landed the window; only the exact-card reveal is skipped).
+      if (app.isFocusModeEnabled()) {
+        const message = folder.resolveSearchMatch(match)
+        if (message !== undefined) app.revealSearchMatch(message)
       }
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
@@ -3256,7 +3697,7 @@ export function apply(ctx: Context, config: Config): void {
       // notices included — must never render as the child's transcript.
       const child = sessions.get(childId)
       if (child !== undefined) {
-        const own = childOwnEvents(child.events)
+        const own = childOwnEvents(child.snapshotEvents())
         childFolder.hydrate(own)
         childStats.hydrate(own)
         // The live child's session header carries its workspace (the child
@@ -3344,7 +3785,7 @@ export function apply(ctx: Context, config: Config): void {
       // child's result, the parent's streaming): restore the parent's semantic latest/history position
       // so the pop never loses an intentional history anchor.
       windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
-      refreshStatus()
+      refreshStatusCheap()
       return true
     }
     /** Error sink for a failed session creation: restore the draft and
@@ -3581,7 +4022,7 @@ export function apply(ctx: Context, config: Config): void {
           // instead of re-entering (the official command needs `/plan off`).
           const parsed = parseCommand(text)
           const toggled = parsed?.name === 'plan' && parsed.rawInput.trim() === ''
-            && foldPlanMode(agent.session.events ?? [])
+            && projectedPlanActive(ctx.get('sessionProjections') as PlanProjectionLike | undefined, agent.session) === true
             ? '/plan off'
             : text
           // The command execution is itself an owned workflow: its outcome
@@ -4376,6 +4817,9 @@ export function apply(ctx: Context, config: Config): void {
       isTTY: () => process.stdout.isTTY === true,
       writeOsc52: (text) => process.stdout.write(buildOsc52Sequence(text, (process.env.TMUX ?? '').length > 0)),
     }
+    // The TUI is about to mount: the pre-mount status line must be gone
+    // before the first frame (no stale scrollback line after mount).
+    startupStatus.clear()
     app = startProcessTui({
       onSubmit: (text) => dispatchUserInput(text),
       // The image-only submit gate (plan §11.1): an empty-text draft with
@@ -4513,7 +4957,7 @@ export function apply(ctx: Context, config: Config): void {
             if (permission === undefined) break
             const names = permission.names
             if (names.length === 0) break
-            const current = permission.current(liveAgent.session.events)
+            const current = (permission as { current(session: unknown): string }).current(liveAgent.session)
             const index = names.indexOf(current)
             const next = names[(index + 1) % names.length] ?? names[0]
             if (next === undefined || next === current) break
@@ -4522,7 +4966,7 @@ export function apply(ctx: Context, config: Config): void {
               ? `⚠ ${next} — no approvals`
               : `permission: ${next}`,
             next === 'danger-full-access' ? 'error' : 'info')
-            refreshStatus()
+            refreshStatusCheap()
             break
           }
         }
@@ -4551,6 +4995,23 @@ export function apply(ctx: Context, config: Config): void {
       // the terminal window title policy follows, so a rename/regenerate
       // refreshes the OSC title immediately.
       onTitleChanged: () => refreshTerminalTitle(),
+      // Terminal focus reports (CSI ? 1004): the completion-notification
+      // focus tracker observes them. The report is consumed host-side in
+      // regular mode and passes through in fullscreen (the viewport
+      // listener owns FOCUS_OUT's selection cleanup), so the tracker
+      // only records state.
+      onTerminalFocus: (focused) => {
+        terminalFocusTracker.handleFocusReport(focused ? FOCUS_IN_SEQUENCE : FOCUS_OUT_SEQUENCE)
+        completionController.setFocus(terminalFocusTracker.state)
+      },
+      // Any REAL input (not a focus report) proves the user is operating
+      // the terminal: restore the tracker to 'focused' (a missed FOCUS_IN
+      // must never leave an 'unfocused' tracker that would falsely notify
+      // while the user watches).
+      onUserInput: () => {
+        terminalFocusTracker.markFocused()
+        completionController.setFocus(terminalFocusTracker.state)
+      },
       // Phase 4: the advanced host-state setTheme for a NON-built-in name
       // (a registered plugin theme). The runner resolves the palette
       // through the theme registry; unknown names are a no-op; a throwing
@@ -4627,6 +5088,25 @@ export function apply(ctx: Context, config: Config): void {
         else app.restoreTranscriptViewportAnchor(anchor, 'top')
         return true
       },
+      // Ctrl+Up / Ctrl+Down in fullscreen: single-turn prompt navigation
+      // over the virtual window (the fork's OSC 133 scan finds nothing in
+      // DSH transcripts — the semantic turn list lives HERE).
+      onTranscriptTurnOlder: () => {
+        if (!app.isFullscreen()) return false
+        const controller = activeWindow()
+        if (!controller.turnOlder()) return false
+        repaint(app, activeFolder(), controller)
+        app.scrollToBottom({ disableFollow: true })
+        return true
+      },
+      onTranscriptTurnNewer: () => {
+        if (!app.isFullscreen()) return false
+        const controller = activeWindow()
+        if (!controller.turnNewer()) return false
+        repaint(app, activeFolder(), controller)
+        app.scrollToBottom({ disableFollow: true })
+        return true
+      },
       onTranscriptMoveNewer: () => {
         const anchor = app.captureTranscriptViewportAnchor()
         const controller = activeWindow()
@@ -4645,8 +5125,7 @@ export function apply(ctx: Context, config: Config): void {
         // the search origin before closing the overlay so its close callback
         // cannot restore the historical anchor we are explicitly leaving.
         searchOrigin = undefined
-        searchMatches = []
-        searchCurrent = -1
+        resetSearchState()
         const closedSearch = app.closeTranscriptSearch()
         const controller = activeWindow()
         const changed = controller.latest()
@@ -4670,31 +5149,66 @@ export function apply(ctx: Context, config: Config): void {
         }
       },
       // Transcript search: matches run over the FULL folded
-      // transcript; each jump re-windows the view so the matched turn is
-      // visible (older turns collapse above it into the summary entry).
+      // transcript (lightweight indexed projection — never a full
+      // materialization); each jump re-windows the view so the matched turn
+      // is visible (older turns collapse above it into the summary entry).
       onSearchOpen: () => {
         const controller = activeWindow()
         searchOrigin = { controller, state: controller.state() }
       },
       onSearchQuery: (query) => {
-        searchMatches = searchTranscript(activeFolder(), query)
+        const folder = activeFolder()
+        // Prefix refinement reuses the previous candidate set only when the
+        // query EXTENDS it on the SAME folder; the folder itself also
+        // requires an unchanged projection revision (a live append or group
+        // reflow between queries invalidates the candidates).
+        searchMatches = folder.search(query, lastSearchQuery !== '' && folder === lastSearchFolder
+          ? { previousQuery: lastSearchQuery, previousMatches: searchMatches, revision: lastSearchRevision }
+          : undefined)
+        lastSearchQuery = query
+        lastSearchRevision = folder.searchRevision()
+        lastSearchFolder = folder
         searchCurrent = searchMatches.length > 0 ? 0 : -1
         app.setSearchResult(searchCurrent + 1, searchMatches.length)
         if (searchCurrent >= 0) jumpToSearchMatch()
       },
       onSearchNext: () => {
-        if (searchMatches.length === 0) return
-        searchCurrent = (searchCurrent + 1) % searchMatches.length
+        // PR D1 P1: refresh BEFORE stepping — an empty candidate list
+        // still refreshes (a match that arrived while the overlay stayed
+        // open must be discoverable), and the step is computed on the
+        // REFRESHED list. The policy lives in steppedSearchOverlayState,
+        // shared by both handlers.
+        const folder = activeFolder()
+        const stepped = steppedSearchOverlayState(
+          { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
+          folder,
+          1,
+        )
+        searchMatches = stepped.matches
+        searchCurrent = stepped.current
+        lastSearchRevision = stepped.revision
+        lastSearchFolder = folder
+        app.setSearchResult(searchCurrent + 1, searchMatches.length)
+        if (stepped.current < 0) return
         jumpToSearchMatch()
       },
       onSearchPrev: () => {
-        if (searchMatches.length === 0) return
-        searchCurrent = (searchCurrent - 1 + searchMatches.length) % searchMatches.length
+        const folder = activeFolder()
+        const stepped = steppedSearchOverlayState(
+          { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
+          folder,
+          -1,
+        )
+        searchMatches = stepped.matches
+        searchCurrent = stepped.current
+        lastSearchRevision = stepped.revision
+        lastSearchFolder = folder
+        app.setSearchResult(searchCurrent + 1, searchMatches.length)
+        if (stepped.current < 0) return
         jumpToSearchMatch()
       },
       onSearchClose: () => {
-        searchMatches = []
-        searchCurrent = -1
+        resetSearchState()
         const origin = searchOrigin
         searchOrigin = undefined
         const controller = activeWindow()
@@ -4722,7 +5236,7 @@ export function apply(ctx: Context, config: Config): void {
         if (permission === undefined) return
         const names = permission.names
         if (names.length === 0) return
-        const current = permission.current(liveAgent.session.events)
+        const current = (permission as { current(session: unknown): string }).current(liveAgent.session)
         const index = names.indexOf(current)
         const next = names[(index + 1) % names.length] ?? names[0]
         if (next === undefined || next === current) return
@@ -4731,7 +5245,7 @@ export function apply(ctx: Context, config: Config): void {
           ? `⚠ ${next} — no approvals`
           : `permission: ${next}`,
         next === 'danger-full-access' ? 'error' : 'info')
-        refreshStatus()
+        refreshStatusCheap()
       },
       // Alt+↑: pull every QUEUED USER message back into the editor draft
       // (pi's dequeue). Only user-origin rows are the user's own input —
@@ -4791,7 +5305,7 @@ export function apply(ctx: Context, config: Config): void {
         app.setDraft([recalledText, current].filter(part => part.trim() !== '').join('\n\n'))
         refreshQueue()
       },
-      // ↓ / Ctrl+J with an empty editor: the task browser over BOTH
+      // ↓ with an empty editor: the Quick Tasks browser over BOTH
       // background surfaces. Job rows (bash + background one-shot subagent
       // jobs) are status-only: the bash output read cursor belongs to the
       // model's job_output and a subagent job record carries no child
@@ -4809,24 +5323,31 @@ export function apply(ctx: Context, config: Config): void {
       //
       // The SAME browser is the `/tasks` surface (runner.openTasksBrowser):
       // the merged list + search is the single command-side entry, with
-      // row-level `i` = interrupt on subagent rows (kimi's stop-on-row
+      // row-level `S` = confirmed Stop on capable rows (kimi's stop-on-row
       // pattern; the old /subagents SettingsList-submenu panel is gone).
-      onOpenTasks: () => openTasksBrowser(),
+      onOpenTasks: () => openTasksBrowser('quick'),
       // Enter in an INTERACTIVE (continuable) subagent viewer: deliver the
-      // follow-up through ctx.subagents.followup — the continuation
-      // manager's child inbox (enqueue while running, wake while waiting,
-      // cold resume when absent). NEVER the parent's submit/steer/queue
-      // path. The app already cleared the child draft; a rejection
-      // restores it (merged) into the child's own draft slot.
-      onSubagentSubmit: (request) => {
+      // human prompt through the OFFICIAL ctx.subagents.prompt control
+      // API — the child inbox (a distinct FIFO turn: enqueue while
+      // running, wake while waiting, cold resume when absent), with Host
+      // authority over the exact live parent and official user
+      // provenance/requestId. NEVER `subagents.sendMessage` (the
+      // Agent-authored Steer path) and never the parent's
+      // submit/steer/queue path. The app already cleared the child draft;
+      // a rejection restores it (merged) into the child's own draft slot.
+      onSubagentSubmit: (submit) => {
         const viewerGeneration = app.getViewerGeneration()
-        runOwned('subagent followup', () => backend.subagent.followup(request, {
-          // The exact live direct parent: read at SEND time so a session
-          // switch / /new / /resume that landed while the user typed is a
-          // hard reject (never route the text to a different main Agent).
-          currentParent: () => liveAgent as SubagentParentLike | undefined,
+        // The viewer editor's text becomes the prompt's content parts at
+        // the client boundary (text today; image parts join with the
+        // viewer's image intake).
+        const request: SubagentViewerSubmitRequest = {
+          parentSessionId: submit.parentSessionId,
+          childSessionId: submit.childSessionId,
+          content: [{ type: 'text', text: submit.text }],
+        }
+        runOwned('subagent prompt', () => backend.subagent.prompt(request, {
           // The caller signal owns lookup/materialization/admission only
-          // until inbox acceptance (the DSH continuation contract): a TUI
+          // until inbox acceptance (the official prompt contract): a TUI
           // cleanup / exit, OR the viewer session ending (Esc / child
           // switch / session swap — viewerSessionAbort) cancels a send
           // that has NOT been accepted yet; once accepted the child owns
@@ -4835,9 +5356,6 @@ export function apply(ctx: Context, config: Config): void {
           makeSignal: () => viewerSessionAbort === undefined
             ? lifecycleController.signal
             : AbortSignal.any([lifecycleController.signal, viewerSessionAbort.signal]),
-          // Durable attribution: a plain user-sourced message (the same
-          // source the main editor's messages carry).
-          makeSource: () => ({ kind: 'user' }),
           // Same `@`-file mention canonicalization as the main session's
           // submissions (the editor keeps `@src/foo.ts`, the child model
           // receives the absolute path). The scope is the VIEWED CHILD's
@@ -4852,9 +5370,10 @@ export function apply(ctx: Context, config: Config): void {
         }), {
           diag,
           sessionId: () => liveAgent?.session.id,
-          onResult: (outcome) => settleSubagentSubmit(request, outcome, viewerGeneration),
+          onResult: (outcome) => settleSubagentSubmit(request, submit.text, outcome, viewerGeneration),
           onError: (error) => settleSubagentSubmit(
             request,
+            submit.text,
             { kind: 'rejected', reason: { kind: 'error', message: safeErrorMessage(error) } },
             viewerGeneration,
           ),
@@ -4896,6 +5415,12 @@ export function apply(ctx: Context, config: Config): void {
       // shared policy as /copy (tmux → platform helper → OSC 52) — a bare
       // OSC 52 write is a silent lie under tmux `set-clipboard external`.
       copySelection: (text) => copyToClipboard(text, runCopyCommand, copyEnv),
+      // Fullscreen OSC 8 link clicks + the Windows right-click paste: the
+      // alt screen's mouse capture swallows both native behaviors, so the
+      // host opens http/https links itself and reads the clipboard through
+      // the same platform-aware policy as the image paste probe.
+      openExternalUrl: (url) => openExternalUrl(url),
+      readClipboardText: () => readClipboardText(runClipboardCommand, clipboardEnv),
       // M7: the transcript/tool renderer registry. Renderer failures are
       // isolated per contribution (the registry catches throws and the
       // host falls back); the health sink records them for /status.
@@ -5011,7 +5536,8 @@ export function apply(ctx: Context, config: Config): void {
      */
     const settleSubagentSubmit = (
       request: SubagentViewerSubmitRequest,
-      outcome: SubagentFollowupOutcome,
+      text: string,
+      outcome: SubagentPromptOutcome,
       viewerGeneration: number,
     ): void => {
       // The viewer target is CURRENT only while the SAME child is still
@@ -5041,22 +5567,22 @@ export function apply(ctx: Context, config: Config): void {
         // stale viewer (closed/switched/reopened): map-only (never the
         // current surface).
         if (settleTarget.kind === 'current') {
-          app.setEditorText(mergeDraft(app.getDraft(), request.text))
+          app.setEditorText(mergeDraft(app.getDraft(), text))
         } else {
-          app.restoreSubagentDraft(request.childSessionId, request.text)
+          app.restoreSubagentDraft(request.childSessionId, text)
         }
         return
       }
       if (settleTarget.kind === 'stale') {
-        app.restoreSubagentDraft(request.childSessionId, request.text)
+        app.restoreSubagentDraft(request.childSessionId, text)
         return
       }
-      app.setEditorText(mergeDraft(app.getDraft(), request.text))
-      app.notify(subagentFollowupNotice(reason, settleTarget.label), 'error')
+      app.setEditorText(mergeDraft(app.getDraft(), text))
+      app.notify(subagentPromptNotice(reason, settleTarget.label), 'error')
     }
 
     /** The user-facing reason for a rejected follow-up (plan §18). */
-    const subagentFollowupNotice = (reason: SubagentFollowupReject, label: string): string => {
+    const subagentPromptNotice = (reason: SubagentPromptReject, label: string): string => {
       switch (reason.kind) {
         case 'parent-unavailable': return 'Cannot send: parent session is no longer active'
         case 'stale-child': return 'Cannot continue this subagent'
@@ -5085,10 +5611,17 @@ export function apply(ctx: Context, config: Config): void {
     //
     // The SAME browser is the `/tasks` surface (runner.openTasksBrowser):
     // the merged list + search is the single command-side entry, with
-    // row-level `i` = interrupt on subagent rows (kimi's stop-on-row
-    // pattern; the old /subagents SettingsList-submenu panel is gone).
-    const openTasksBrowser = (): void => {
+    // row-level `S` = confirmed Stop on capable rows (the old /subagents
+    // SettingsList submenu is gone).
+    const openTasksBrowser = (viewMode: 'quick' | 'full' = 'full', restoreState?: TaskBrowserViewState): void => {
       if (liveAgent === undefined) return
+      // The destructive-intent fence is captured at OPEN time: a Stop
+      // confirmed later belongs to THIS surface's session. Comparing the
+      // generation/session AT dispatch against values captured AT dispatch
+      // (as in an earlier revision) could never fail — the intent must be
+      // bound to the browser that hosted the confirmation (PR review P1).
+      const browserGeneration = sessionGeneration
+      const browserSession = liveAgent
       let jobSnapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
       if (jobs !== undefined) {
         try {
@@ -5117,6 +5650,7 @@ export function apply(ctx: Context, config: Config): void {
       const runtime = taskRuntime
       if (runtime !== undefined) {
         runtime.refreshRuntime()
+        taskBrowserRows = [...runtime.rows()]
       } else {
         taskBrowserRows = buildTaskRows(jobSnapshots, [])
       }
@@ -5147,46 +5681,134 @@ export function apply(ctx: Context, config: Config): void {
         }
         openJobView(row.jobId)
       }
-      const actionRow = (value: string, action: 'interrupt'): void => {
+      const actionRow = (value: string, action: 'stop' | 'interrupt'): void => {
+        // `interrupt` is accepted only for pre-refactor embedders. The
+        // production panel emits `stop` after its confirmation dialog.
+        if (action !== 'stop' && action !== 'interrupt') return
         const row = taskBrowserRows.find(candidate => candidate.value === value)
-        // The EXECUTION gate is the SAME predicate as the panel's
-        // advertisement gate (`isSubagentRowInterruptible`): only a
-        // continuable child with a LIVE running driver may fire the stop
-        // verb — a one-shot id is an accepted no-op (a fake action) and an
-        // idle continuable has no driver to stop. One predicate for both
-        // layers, so a panel change can never release an idle interrupt.
-        if (row === undefined || row.kind !== 'subagent' || !isSubagentRowInterruptible(row)) return
-        const service = ctx.get('subagents')
-        if (service === undefined || liveAgent === undefined) {
-          app.notify('subagent service unavailable', 'error')
+        if (row === undefined) return
+        // The SURFACE fence: the user's destructive intent is bound to the
+        // session that owned this browser when it opened. A session that
+        // switched after the browser opened (or while a confirmation was
+        // pending) must never be stopped by the stale confirmation — the
+        // captured browser values, not the dispatch-time values, are the
+        // comparison side that can actually fail.
+        if (sessionGeneration !== browserGeneration || liveAgent !== browserSession) return
+        if (row.kind === 'subagent') {
+          if (!isSubagentRowInterruptible(row)) return
+          // Re-read the live driver at confirmation time; the panel row is
+          // only a snapshot and may have become idle since it was rendered.
+          if (agents?.get(row.childId as SessionId)?.status !== 'running') return
+          const service = ctx.get('subagents')
+          if (service === undefined) {
+            app.notify('subagent service unavailable', 'error')
+            return
+          }
+          // The interrupt authority names the child's DURABLE DIRECT parent;
+          // deep descendants must not be addressed through the main root.
+          const interruptParent = subagentInterruptParent(row, browserSession.session.id) as SessionId
+          try {
+            service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: interruptParent })
+            app.notify(`stopping ${row.label}`, 'info')
+          } catch (error) {
+            app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+          }
           return
         }
-        // The interrupt authority must name the child's DURABLE DIRECT
-        // parent (DSH contract: `{ kind: 'user', parentSessionId }` is the
-        // exact parent; a deep descendant passed with the main session id
-        // is rejected as unauthorized). The row's OWN parentId is the
-        // durable address the tree already carries — a direct child falls
-        // back to the browser root (the live main session).
-        const interruptParent = subagentInterruptParent(row, liveAgent.session.id) as SessionId
-        service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: interruptParent })
-        app.notify(`interrupting ${row.label}`, 'info')
+        // Job stop is capability-gated to an actually active current record.
+        // Pass the live caller to the public registry API; no output/read
+        // cursor is touched by the UI.
+        if (jobs === undefined || !isActiveJobStatus(row.status)) return
+        try {
+          const current = jobs.get(row.jobId as JobId, browserSession)
+          if (current === undefined || !isActiveJobStatus(current.status)) return
+          const result = jobs.kill(row.jobId as JobId, browserSession, 'stopped from Task Center')
+          app.notify(result === 'already-finished' ? `${row.label} already finished` : `stopping ${row.label}`, 'info')
+        } catch (error) {
+          app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+        }
       }
+      const initialScope = restoreState?.scope ?? (viewMode === 'quick' ? 'active' : 'all')
+      const initialQuery = restoreState?.searchQuery ?? ''
+      const initialSelected = restoreState?.selectedId === 'task:view-all' ? undefined : restoreState?.selectedId ?? undefined
+      const initialPreferred = initialSelected
+        ?? taskBrowserRows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
+        ?? taskBrowserRows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
       const handle = app.openTaskBrowser(
         taskPanelItems(taskBrowserRows),
-        // Selection and cancel both close the overlay (the app closes it
-        // before invoking the callback): drop the active-handle reference
-        // so a later runtime refresh cannot repaint a closed browser.
+        // Selection closes the overlay (the app closes it before invoking the
+        // callback): drop the active-handle reference so a later runtime
+        // refresh cannot repaint a closed browser.
         (value) => { activeTaskBrowser = undefined; selectRow(value) },
-        () => { activeTaskBrowser = undefined },
-        { header: 'tasks · subagents', enableSearch: true, onAction: actionRow },
+        () => {
+          const current = activeTaskBrowser?.getViewState?.()
+          activeTaskBrowser = undefined
+          if (viewMode === 'full' && restoreState !== undefined) {
+            // Esc from a promoted full view returns to Quick with the latest
+            // shared context, not the state from the promotion moment.
+            const state = current ?? quickTaskState ?? restoreState
+            openTasksBrowser('quick', state)
+          }
+        },
+        {
+          header: 'Tasks',
+          enableSearch: true,
+          mode: viewMode,
+          openedFrom: viewMode === 'full' && restoreState !== undefined ? 'quick' : 'command',
+          scope: initialScope,
+          typeFilter: restoreState?.typeFilter,
+          initialQuery,
+          initialSearchMode: restoreState?.searchMode,
+          expandedIds: [...(restoreState?.expandedIds ?? [])],
+          collapsedIds: [...(restoreState?.collapsedIds ?? [])],
+          selectedId: initialSelected,
+          preferredValue: initialPreferred,
+          maxVisible: viewMode === 'quick' ? 8 : 18,
+          loading: runtime !== undefined && taskBrowserRows.length === 0,
+          groupLabels: true,
+          onRefresh: () => {
+            if (runtime === undefined) {
+              refreshTasks()
+              return
+            }
+            // Refresh state is SINGLE-OWNER: only the coordinator's
+            // commitRefreshState (fenced by session key + request epoch)
+            // may set loading/ready/stale on the presentation. The runner
+            // must never touch setRefreshState directly — an unfenced
+            // onError here could mark a NEW session's browser as failed
+            // when the OLD session's listing rejects (PR review P1).
+            runOwned('task browser descendants', () => runtime.refreshCatalog(), {
+              diag,
+              sessionId: () => liveAgent?.session.id,
+            })
+          },
+          onViewFull: state => {
+            activeTaskBrowser = undefined
+            quickTaskState = state
+            openTasksBrowser('full', state)
+          },
+          onStop: value => actionRow(value, 'stop'),
+          onViewportExpose: ids => runtime?.acknowledge(ids),
+        },
       )
       activeTaskBrowser = handle
+      // Acknowledging failures is CONTINUOUS, not one-shot-at-open: the
+      // panel reports each attention row the first time it enters the
+      // open viewport (first frame AND every later scroll/page/jump), and
+      // the runtime acknowledges exactly those ids (PR review P1/P2). Only
+      // rows the user can actually see lose their footer attention;
+      // Quick's Active scope leaves terminal failures pending while live
+      // work is present, so its badge stays useful.
       // The open triggers a CATALOG refresh (membership may have drifted
       // since the last listing): the coordinator fences it against a
       // session switch and commits through the ACTIVE handle — a browser
       // closed while the listing is in flight is never repainted. The
       // body above is synchronous, so the `runtime` captured for the
-      // first-frame seed is still the current coordinator.
+      // first-frame seed is still the current coordinator. Refresh state
+      // is single-owner: the coordinator's fenced commitRefreshState is
+      // the ONLY path that sets loading/ready/stale (an unfenced onError
+      // here could mark a new session's browser failed when an old
+      // session's listing rejects — PR review P1).
       if (runtime !== undefined) {
         runOwned('task browser descendants', () => runtime.refreshCatalog(), {
           diag,
@@ -5296,10 +5918,26 @@ export function apply(ctx: Context, config: Config): void {
     // model the user cannot see the process while the UI still shows it in
     // full (review blocker: the two halves of Focus would split).
     app.setFocusMode(focusState.enabled)
+    // Terminal focus reporting (CSI ? 1004) for the completion
+    // notification policy: enabled at TUI mount, disabled in cleanup so
+    // the mode never leaks into the shell after exit. The app already
+    // passes the ESC[I/ESC[O reports through to the runner's tracker.
+    // The guarded writer swallows a broken-stream error; a synchronous
+    // throw is contained so a dead stdout can never fail the TUI mount.
+    try {
+      notificationWriter.write(ENABLE_FOCUS_REPORTING)
+    } catch {
+      // A broken stdout degrades the notification capability silently.
+    }
     // Issue #9: the Home/End navigation preset is applied BEFORE the first
     // fullscreen frame so the first frame and later behavior agree (plan
     // §4.8); an invalid persisted value falls back to `viewport`.
     applyHomeEndKeyMode(homeEndKeysModeOf(tuiSettings?.get().homeEndKeys))
+    // The wheel step is a constructor-time alt-screen option: hand the
+    // preference to the app BEFORE the first fullscreen entry, or the
+    // first alt screen would still scroll 1 line per wheel event (the
+    // order matters — never apply after setFullscreen).
+    app.setWheelScrollLines(wheelScrollLinesOf(tuiSettings?.get().wheelScrollLines))
     if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)
     const storedTheme = tuiSettings?.get().theme
     if (storedTheme === 'auto') {
@@ -5369,6 +6007,10 @@ export function apply(ctx: Context, config: Config): void {
     // the USER layer only — a project-supplied config is refused).
     let footerWarningShown = false
     let customFooterWarningShown = false
+    // PR D: the one-shot trust diagnostic latch — a layout reference to a
+    // command definition that only exists in a non-USER layer is reported
+    // ONCE (bounded), never per repaint.
+    let footerCommandItemWarningShown = false
     // footerCommandRunner / footerCommandUnsubscribe are hoisted ABOVE
     // cleanup (TDZ guard — the startup-eager onTerminalResize callback
     // reads the runner before this block can run); only the warning
@@ -5398,6 +6040,57 @@ export function apply(ctx: Context, config: Config): void {
         customFooterWarningShown = true
         app.notify(`${customResult.invalidCount} custom footer item${customResult.invalidCount === 1 ? '' : 's'} invalid — skipped`, 'error')
       }
+      // The USER-layer footer trust read (mode + command + layout): the
+      // adapter owns the settings descriptor access — a Remote adapter
+      // replays the same facts from the wire.
+      const trust = backend.config.footerCommandTrust
+      // PR D: arm the per-item command runners for the EXECUTABLE ids —
+      // USER trusted definitions ∩ USER-authorized activation ids ∩
+      // currently rendered layout ids. The runtime receives ONLY the
+      // USER-layer trusted definitions (never the merged/project value);
+      // the authorized ids come from the ConfigPort's mode-gated
+      // projection (a stale leftover USER layout under footer:
+      // default/compact authorizes nothing); the rendered intersection
+      // stops a command hidden by the merged layout from running in the
+      // background. The one-shot diagnostic covers the §11.2 attack
+      // shape: a RENDERED layout reference to a command definition that
+      // only exists in a non-USER layer renders unavailable, with ONE
+      // bounded notice.
+      const syncDynamicCommandItems = (authorizedIds: ReadonlySet<string>): void => {
+        const trustedCommands = customResult.items
+          .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
+        if (footerDynamicItemRuntime === undefined) {
+          footerDynamicItemRuntime = new FooterDynamicItemRuntime({
+            snapshot: () => statusStore.snapshot(),
+            width: () => app.getTerminalWidth(),
+            height: () => app.getTerminalHeight(),
+            signal,
+            onValue: (id, value) => app.setFooterCommandItemValue(id, value),
+            onNotifyOnce: (message) => app.notify(message, 'error'),
+          })
+        }
+        const executableIds = executableCommandItemIds(
+          trustedCommands,
+          authorizedIds,
+          app.getEffectiveFooterLayout(),
+        )
+        footerDynamicItemRuntime.sync(trustedCommands, executableIds)
+        if (!footerCommandItemWarningShown) {
+          const mergedCommands = parseFooterCustomItems(doc.footerCustomItems).items
+            .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
+          const trustedIds = new Set(trustedCommands.map(item => item.id))
+          // The diagnostic watches the RENDERED layout (what the user
+          // sees), not the executable set: a rendered ref to a command
+          // definition that only exists in a non-USER layer is
+          // unavailable and reported once.
+          const renderedIds = activeFooterItemIds(app.getEffectiveFooterLayout())
+          const untrustedReferenced = mergedCommands.some(item => renderedIds.has(item.id) && !trustedIds.has(item.id))
+          if (untrustedReferenced) {
+            footerCommandItemWarningShown = true
+            app.notify('a custom command item is not user-configured — not running it', 'error')
+          }
+        }
+      }
       if (doc.footer === 'command') {
         // The native FALLBACK layout must be established from the
         // PERSISTED document, never from whatever the memory happens to
@@ -5425,7 +6118,6 @@ export function apply(ctx: Context, config: Config): void {
         // command (plan §17.4). The trust read goes through the CONFIG
         // PORT (the adapter owns the settings descriptor access — a
         // Remote adapter replays the same facts from the wire).
-        const trust = backend.config.footerCommandTrust
         const config = trust.command
         const userMode = trust.userFooterMode
         if (config === undefined || userMode !== 'command') {
@@ -5437,7 +6129,20 @@ export function apply(ctx: Context, config: Config): void {
           // The native layout is the user's own (default/compact/custom):
           // never reset it — the command surface overrides the composer
           // only while commandRows is set, and the M5 fallback contract
-          // restores the LAST native layout on failure.
+          // restores the LAST native layout on failure. The fallback
+          // layout IS visible, but the authorization follows the USER's
+          // CURRENT mode: only a USER who opted into command mode
+          // (userMode === 'command') may fall back per their own
+          // footerFallbackMode (the fallback property itself is fully
+          // gated — empty for any other mode); a USER whose current mode
+          // is custom authorizes per their current layout, and a
+          // default/compact USER authorizes NOTHING — a PROJECT forcing
+          // the merged command mode can never turn stale fallback
+          // metadata into execution authorization.
+          const authorizedIds = userMode === 'command'
+            ? trust.userCommandItemFallbackActivationIds
+            : trust.userCommandItemActivationIds
+          syncDynamicCommandItems(authorizedIds)
           return
         }
         if (footerCommandRunner === undefined) {
@@ -5459,12 +6164,17 @@ export function apply(ctx: Context, config: Config): void {
         // a failed command (undefined rows) falls back to the user's OWN
         // default/compact/custom layout, never the builtin default.
         footerCommandRunner.requestRefresh()
+        // The whole-footer command surface covers the native items:
+        // per-item command runners must not keep spawning in the
+        // background (plan §7.2 — suspend/dispose).
+        footerDynamicItemRuntime?.sync([], new Set<string>())
         return
       }
       disableFooterCommand()
       if (doc.footer === 'compact') {
         app.setFooterPreset('compact')
         app.setFooterLayout(undefined)
+        syncDynamicCommandItems(trust.userCommandItemActivationIds)
         return
       }
       if (doc.footer === 'custom') {
@@ -5476,15 +6186,27 @@ export function apply(ctx: Context, config: Config): void {
           }
           app.setFooterPreset('full')
           app.setFooterLayout(undefined)
+          // The merged custom layout is invalid: the rendered footer is
+          // the builtin default, and only the USER layer's own
+          // current-mode authorization may activate custom command items.
+          syncDynamicCommandItems(trust.userCommandItemActivationIds)
           return
         }
         app.setFooterPreset('full')
         app.setFooterLayout(parsed)
+        // PR D activation trust: a /footer save's validated layout is the
+        // trusted activation; every other path uses the USER layer's
+        // declared layout — a PROJECT merged layout can render user:*
+        // ids, but it can never activate a dormant USER command.
+        syncDynamicCommandItems(savedCustomItems !== undefined
+          ? activeFooterItemIds(parsed)
+          : trust.userCommandItemActivationIds)
         return
       }
       // 'full' | 'default' | unknown → the builtin default layout.
       app.setFooterPreset('full')
       app.setFooterLayout(undefined)
+      syncDynamicCommandItems(trust.userCommandItemActivationIds)
     }
     const storedFooter = tuiSettings?.get().footer
     applyFooterSettings(tuiSettings?.get())
@@ -5497,7 +6219,7 @@ export function apply(ctx: Context, config: Config): void {
     let legacyHistory: Record<string, readonly string[]> | undefined
     try {
       const descriptor = ctx.get('settings')?.describe()
-        .find(d => d.ns === settingsNamespace('dsh-pi-tui'))
+        .find(d => d.ns === 'dsh-pi-tui')
       const user = descriptor?.user as Record<string, unknown> | undefined
       const value = user?.history
       if (typeof value === 'object' && value !== null) {
@@ -5591,14 +6313,24 @@ export function apply(ctx: Context, config: Config): void {
     let activeTaskBrowser: TaskBrowserHandle | undefined
     let taskBrowserRows: TaskBrowserRow[] = []
     let taskRuntime: TaskBrowserRuntime | undefined
+    /** Context retained only while the full center was promoted from Quick. */
+    let quickTaskState: TaskBrowserViewState | undefined
     const jobs = ctx.get('jobs')
     if (jobs !== undefined) {
       refreshTasks = (): void => {
-        let tasks: { id: string; label: string; status: string; kind?: string }[] = []
+        let tasks: { id: string; label: string; status: string; kind?: string; startedAt?: number; finishedAt?: number }[] = []
         try {
-          tasks = jobs.list(liveAgent)
-            .filter(job => job.status === 'running' || job.status === 'stopping')
-            .map(job => ({ id: job.id, label: job.label, status: job.status, kind: job.kind }))
+          // Keep terminal records in the catalog. Active/total separation is
+          // a presentation fact; dropping completed/failed jobs here made
+          // Full Task Center history and failure attention impossible.
+          tasks = jobs.list(liveAgent).map(job => ({
+            id: job.id,
+            label: job.label,
+            status: job.status,
+            kind: job.kind,
+            startedAt: job.startedAt,
+            finishedAt: job.finishedAt,
+          }))
         } catch {
           // The registry read is best-effort; the dock line just stays stale.
         }
@@ -5667,7 +6399,13 @@ export function apply(ctx: Context, config: Config): void {
           label: entry.label,
           activity: 'running',
         }))),
+        commitSummary: (summary) => app.setTaskSummary(summary),
+        commitRefreshState: (state, error) => activeTaskBrowser?.setRefreshState?.(state, error),
       })
+      // Seed the summary synchronously from jobs before the durable catalog
+      // listing lands; this prevents a terminal/jobs-only first frame from
+      // claiming every record is still running.
+      taskRuntime.refreshRuntime()
       refreshAgents = (): void => {
         if (liveAgent === undefined) {
           app.setAgents([])
@@ -5821,11 +6559,15 @@ export function apply(ctx: Context, config: Config): void {
      * plus every switch await the coordinator refresh themselves.
      */
     const initLiveSession = async (agent: Agent): Promise<void> => {
+      // Setup installs this before publication; the idempotent call also
+      // covers test/direct adapters that hand an already-live Agent back to
+      // the runner. Its fold is the resume source of truth.
+      modelSelections.installForAgent(agent)
       // The session's own workspace joins the known-cwd set (Rule 2 for
       // the all-directory search): a legacy-only history file in this cwd
       // becomes recoverable immediately, even if it predates this process.
       rememberHistoryCwd(agent.session.header.cwd ?? '')
-      const events = agent.session.events
+      const events = agent.session.snapshotEvents()
       // This is the single cold-hydration path for a live session. Do not
       // pre-apply the same event log during runner wiring: a resumed session
       // otherwise pays for two full transcript and stats replays before its
@@ -5846,7 +6588,7 @@ export function apply(ctx: Context, config: Config): void {
       })
       goalText = timedBootstrapScan(diag, 'goal', events.length, () => foldGoal(events))
       const working = timedBootstrapScan(diag, 'working', events.length, () => workingFromLog(events))
-      const planMode = timedBootstrapScan(diag, 'plan', events.length, () => foldPlanMode(events))
+      const planMode = timedBootstrapScan(diag, 'plan', events.length, () => projectedPlanActive(ctx.get('sessionProjections') as PlanProjectionLike | undefined, agent.session) ?? false)
       const title = timedBootstrapScan(diag, 'title', events.length, () => foldSessionTitle(events)?.title)
       app.setPlanMode(planMode)
       app.setWorking(working)
@@ -5879,8 +6621,12 @@ export function apply(ctx: Context, config: Config): void {
       // settlements must notify again.
       notifiedSubagentNotices.clear()
       repaint(app, folder, windowController)
-      refreshStatus()
+      // PR D2: the first usable frame paints with the cached measurement
+      // (or none); the context measure is deferred one event-loop turn so
+      // cold resume never blocks first paint on a long-session scan.
+      refreshStatusCheap()
       refreshQueue()
+      scheduleInitialContextMeasure(agent)
       // Repaint both background channels: the dock/badge are owner-fenced,
       // and a session switch must not leave the previous session's tasks
       // or subagents on screen until the next registry event.
@@ -5938,12 +6684,36 @@ export function apply(ctx: Context, config: Config): void {
           // uncertainty).
           leaseManager.markTouched(String(sessionId))
           try {
+            // Read the sessionless facade at the actual create boundary so a
+            // `/model` choice made while composition was loading is used by
+            // the first deferred Session. The intent and its generation are
+            // captured HERE: the save may settle while the create awaits,
+            // and the seed decision below must know whether the choice was
+            // still pending or failed at this boundary.
+            const creationSelection = selected.current ?? defaultModel.currentSelection()
+            const creationIntent = activeDefaultIntent?.selection
             return await backend.sessionLifecycle.create({
               sessionId: String(sessionId),
               meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
-              provider: agentOptions.provider,
-              model: agentOptions.model,
+              provider: creationSelection?.provider,
+              model: creationSelection?.model,
               agentPreset: composition.agentPreset,
+            }).then(created => {
+              // A sessionless /model choice must seed the first Session's own
+              // selection: the create options carry it, but the installed ref
+              // would otherwise fall back to the global default while the
+              // default save is still in flight (or after it failed). Seed
+              // the NEWEST still-pending intent (a newer /model during the
+              // create wait wins), or the captured choice when its save
+              // FAILED — a successfully settled save leaves the blank Session
+              // observing the persisted default dynamically.
+              const newestPending = activeDefaultIntent?.selection
+              if (newestPending !== undefined) {
+                modelSelections.selectForNextRequest(created.direct!.agent as Agent, newestPending)
+              } else if (creationIntent !== undefined && defaultIntentOutcome === 'failed') {
+                modelSelections.selectForNextRequest(created.direct!.agent as Agent, creationIntent)
+              }
+              return created
             })
           } catch (error) {
             leaseManager.pin(String(sessionId), `first-session creation failed: ${safeErrorMessage(error)}`)
@@ -5973,6 +6743,10 @@ export function apply(ctx: Context, config: Config): void {
         const createdAgent = created.direct!.agent as Agent
         liveHandle = created.direct!.ownerHandle as AgentHandle
         liveAgent = createdAgent
+        // First-session commit: the notification controller resets with
+        // the new live identity (a fresh agent must be observed running
+        // before it can ever notify).
+        completionController.setLiveAgent(createdAgent.id)
         leaseManager.markActive(createdAgent.session.id)
         // The open-time lock was acquired BEFORE the create (above — the
         // createWithLock helper REQUIRED an acquired result, so this record
@@ -6091,7 +6865,7 @@ export function apply(ctx: Context, config: Config): void {
       app.setFocusMode(enabled)
       // The footer's focus-mode item reads the store: repaint it right
       // away (no session event is guaranteed to follow an idle toggle).
-      refreshStatus()
+      refreshStatusCheap()
       const settings = tuiSettings
       if (settings !== undefined) {
         runDetached('settings focus write', () => serializeTuiSettingsMutation(
@@ -6130,7 +6904,7 @@ export function apply(ctx: Context, config: Config): void {
         app.notify('clear the current draft before rewinding', 'info')
         return
       }
-      const candidates = collectRewindCandidates(source.session.events)
+      const candidates = collectRewindCandidates(source.session.snapshotEvents())
       if (candidates.length === 0) {
         app.notify('no completed user turn to rewind', 'info')
         return
@@ -6142,6 +6916,9 @@ export function apply(ctx: Context, config: Config): void {
       const sourceGeneration = sessionGeneration
       const commitHost: RewindCommitHost = {
         sessionCwd: () => sessionCwd(),
+        sessionPreset: (session) => session.id === sourceId
+          ? currentPreset()
+          : sessionPresetOf(ctx, session),
         compose,
         agents: backend.sessionLifecycle,
         liveIdentity: () => ({ sessionId: liveAgent?.session.id, generation: sessionGeneration }),
@@ -6218,8 +6995,22 @@ export function apply(ctx: Context, config: Config): void {
       app,
       diag,
       get liveAgent() { return liveAgent },
+      // Completion-notification preference setters (the /settings panel
+      // writes): the controller applies the parsed value immediately and
+      // the panel persists the raw string through the config port.
+      setNotificationMode: (mode) => completionController.setMode(parseNotificationMode(mode)),
+      setNotificationMethod: (method) => completionController.setMethod(parseNotificationMethod(method)),
       ensureSession,
       get selected() { return selected },
+      // The default selection a NEW Session should observe: the latest
+      // explicit default intent (a /model commit this run), falling back to
+      // the persisted global default.
+      defaultSelection: (): ModelSelection | undefined =>
+        activeDefaultIntent?.selection ?? (defaultModel.currentSelection() as ModelSelection | undefined),
+      get defaultIntent() { return activeDefaultIntent?.selection },
+      get defaultIntentRecord() { return activeDefaultIntent },
+      setDefaultIntent,
+      settleIntent,
       get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
       // /new and /fork create through the session lifecycle port (semantic
       // requests — the Direct adapter resolves the preset composition).
@@ -6234,6 +7025,13 @@ export function apply(ctx: Context, config: Config): void {
       // the title batches, the context measurement and the export read go
       // through the port, never ctx directly.
       sessionReader: backend.sessionReader,
+      // PR D2: the /status explicit force — measure NOW through the
+      // coordinator (mark dirty + semantic reader), repaint the footer
+      // cheaply, and return the fresh (or last-good) value for the panel.
+      // Panel and footer share ONE cached measurement: no duplicate reads
+      // against the coordinator's cache, no stale footer after an explicit
+      // status (round-8 finding).
+      forceContextMeasurement,
       // The session WRITE port (migration M1.4): follow-up delivery, steer,
       // queue pull-back, cancel and title ops go through the port.
       sessionWriter: backend.sessionWriter,
@@ -6312,7 +7110,10 @@ export function apply(ctx: Context, config: Config): void {
       transitionTo,
       currentPreset,
       recomposeBlank: (id) => recomposeBlank(ctx, liveAgent as Agent, id),
-      refreshStatus,
+      // PR D2: the command surface's generic refresh is UI-only (a
+      // measurement-triggering command uses refreshContextMeasurement or
+      // the /status port call directly).
+      refreshStatus: refreshStatusCheap,
       updateWelcomeCard,
       openJobView,
       openTasksBrowser,
@@ -6393,7 +7194,7 @@ export function apply(ctx: Context, config: Config): void {
       await initLiveSession(liveAgent)
     } else {
       app.setWelcomeIdle(true)
-      refreshStatus()
+      refreshStatusCheap()
       refreshTerminalTitle()
     }
     // Command registration is sessionless: it must run on BOTH startup
@@ -6439,6 +7240,27 @@ export function apply(ctx: Context, config: Config): void {
         // main folder below — the viewer never starves the main transcript.
       }
       if (session.id !== liveAgent.session.id) return
+      // Keep the Direct owner in sync with durable model intent and consume a
+      // pending choice only when the exact raw request header was recorded.
+      // The structural check keeps this next-version event compatible with
+      // older public dsh-session declarations.
+      const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
+      if (selectionEvent.type === 'model/selection') {
+        modelSelections.observeSelectionEvent(liveAgent, selectionEvent)
+      } else if (event.type === 'request/header') {
+        // Consume a pending choice only when the exact raw request header was
+        // recorded. The pure helper validates the structural shape, so a
+        // malformed header (or a malformed event data payload) can never
+        // throw inside the event firehose.
+        const data = event.data as unknown
+        const header = typeof data === 'object' && data !== null
+          ? (data as { header?: unknown }).header
+          : undefined
+        const raw = rawSelectionFromRequestHeader(header)
+        if (raw !== undefined) {
+          modelSelections.consumeSelection(liveAgent, raw.provider, raw.model, raw.reasoningEffort)
+        }
+      }
       // Pair approval previews: remember each tool call's arguments by callId.
       if (event.type === 'tool/call') {
         callArgs.set(event.data.callId, typeof event.data.arguments === 'string'
@@ -6468,7 +7290,7 @@ export function apply(ctx: Context, config: Config): void {
         }
       } else if (event.type === 'tool/result') {
         const callId = event.data.message.content[0]?.toolCallId
-        callArgs.delete(callId ?? ('' as CallId))
+        callArgs.delete(callId ?? ('' as ToolCallId))
         // The delegation settled: drop it from the pending list and remember
         // whether the user is viewing the child this call spawned, so after
         // the event lands in the main folder we can pop back to the main
@@ -6507,7 +7329,9 @@ export function apply(ctx: Context, config: Config): void {
       // knob events between turns: refresh the footer mode badge right away
       // instead of waiting for the next step/turn boundary.
       if (isKnob) {
-        refreshStatus()
+        // Knob events are UI-only: the permission badge repaints from
+        // cached facts — never a context measurement.
+        refreshStatusCheap()
       }
       // Every durable inbox mutation (followup, steer, splice) commits
       // an agent/inbox/spliced event. The upstream Inbox commits the event
@@ -6556,9 +7380,21 @@ export function apply(ctx: Context, config: Config): void {
         // turn/end. The working row hands back to the turn state: a
         // turn-enclosed compaction keeps the turn animation, a standalone
         // one clears.
-        settleCompactionSurface(app, refreshStatus, workingFromLog(liveAgent.session.events))
+        // Compaction rewrites the model-visible surface: re-measure NOW
+        // (the footer would otherwise show stale pressure until the next
+        // step/start or turn/end).
+        settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(liveAgent.session.snapshotEvents()))
       }
       if (compacted.notify !== undefined) app.notify(compacted.notify.text, compacted.notify.kind)
+      // PR D2: route the context re-measure decision through the single
+      // classifier (test seam). compaction/end is NOT routed here — its
+      // re-measure is driven by the MATCHED compaction fold above (a stale
+      // compaction/end must never re-measure).
+      const eventType = String(event.type)
+      if (eventType !== 'compaction/end' && contextRefreshKind(eventType) === 'measure') {
+        markContextDirty()
+        refreshContextMeasurement(eventType === 'turn/end' ? 'turn-end' : 'step-start')
+      }
       // Persist each completed turn so a crash loses at most the live turn.
       // The busy indicator follows turn boundaries: on from the moment a
       // turn starts (model wait + tool calls), off when it ends.
@@ -6583,7 +7419,6 @@ export function apply(ctx: Context, config: Config): void {
         // compaction settles) — the single-Esc cancel stays armed.
         app.setBusy(busyAfterTurnBoundary('turn/end', compactingId !== undefined))
         paintNow()
-        refreshStatus()
         // Persist each completed turn so a crash loses at most the live
         // turn. Detached: a flush rejection must never surface as an
         // unhandled rejection in the event firehose. An ENOENT flush (the
@@ -6600,8 +7435,6 @@ export function apply(ctx: Context, config: Config): void {
           ),
           recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
         })
-      } else if (event.type === 'step/start') {
-        refreshStatus()
       }
     })
     // Subagent lifecycle events drive the continuable-children half of the
@@ -6623,9 +7456,16 @@ export function apply(ctx: Context, config: Config): void {
     // only flips of children in the CACHED catalog refresh the surface —
     // the MAIN agent's own per-turn flips (and any stale post-switch
     // event) never repaint, and the coordinator re-projects every child
-    // from the Agent registry at commit time.
-    ctx.on('agent/status', ({ agent }) => {
+    // from the Agent registry at commit time. The MAIN agent's
+    // transitions feed the completion-notification controller instead
+    // (the authoritative settled boundary — running → idle on the SAME
+    // live agent; children never notify).
+    ctx.on('agent/status', ({ agent, status }) => {
       if (liveAgent === undefined) return
+      if (agent.id === liveAgent.id) {
+        completionController.onAgentStatus(agent.id, status)
+        return
+      }
       if (taskRuntime?.has(agent.id) !== true) return
       refreshAgentRuntimeOnly()
     })
@@ -6636,17 +7476,17 @@ export function apply(ctx: Context, config: Config): void {
     // selection. All three events are capability-optional: an absent llm /
     // settings / credentials service never mounts them, and a throwing
     // listener is contained by the event bus (the refresh is best-effort).
-    // dsh 0.1.1-rc.1 split the credential update event into the reference
-    // half and the durable-record half; both change the same surface, so
-    // they share one refresh callback.
-    ctx.on('llm/adapters-updated', () => { refreshStatus(); updateWelcomeCard() })
+    // The credential update surface has reference and durable-record events;
+    // both change the same footer/welcome state, so they share one refresh
+    // callback.
+    ctx.on('llm/adapters-updated', () => { refreshStatusCheap(); updateWelcomeCard() })
     ctx.on('settings/document-updated', (ns) => {
-      if (ns === settingsNamespace('llm-pi-ai') || ns === settingsNamespace('llm-deepseek')) {
-        refreshStatus()
+      if (ns === 'llm-pi-ai' || ns === 'llm-deepseek') {
+        refreshStatusCheap()
         updateWelcomeCard()
       }
     })
-    const refreshCredentialSurface = (): void => { refreshStatus(); updateWelcomeCard() }
+    const refreshCredentialSurface = (): void => { refreshStatusCheap(); updateWelcomeCard() }
     // The credential event wiring is the config port's (migration M1.9):
     // reference- and record-updated both change the same surface. The
     // subscription is DISPOSED on teardown — a remount/HMR must never
@@ -6675,26 +7515,24 @@ export function apply(ctx: Context, config: Config): void {
     })
     // The interactive question answerer: ask_user_question tool calls become
     // dialog flows; the tool receives the structured answers.
-    backend.interaction.registerQuestionProvider({
-        ask: async (request) => {
-          const answers = await app.askQuestions(request.questions.map(question => ({
-            id: question.id,
-            question: question.question,
-            ...question.header !== undefined ? { header: question.header } : {},
-            ...question.detail !== undefined ? { detail: question.detail } : {},
-            ...question.options !== undefined ? { options: question.options } : {},
-            ...question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {},
-            ...question.intent !== undefined ? { intent: question.intent } : {},
-          })), request.signal)
-          return {
-            answers: answers.map(answer => ({
-              id: answer.id,
-              selected: answer.selected,
-              ...answer.custom !== undefined ? { custom: answer.custom } : {},
-            })),
-          }
-        },
-      })
+    backend.interaction.registerQuestionProvider(async (request) => {
+      const answers = await app.askQuestions(request.questions.map(question => ({
+        id: question.id,
+        question: question.question,
+        ...question.header !== undefined ? { header: question.header } : {},
+        ...question.detail !== undefined ? { detail: question.detail } : {},
+        ...question.options !== undefined ? { options: question.options } : {},
+        ...question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {},
+        ...question.intent !== undefined ? { intent: question.intent } : {},
+      })), request.signal)
+      return {
+        answers: answers.map(answer => ({
+          id: answer.id,
+          selected: answer.selected,
+          ...answer.custom !== undefined ? { custom: answer.custom } : {},
+        })),
+      }
+    })
   })().catch((error: unknown) => {
     // Terminal-total final catch of the startup lifecycle root: error
     // observation, logging, abort, dispose and exit are each individually
@@ -6713,6 +7551,18 @@ export function apply(ctx: Context, config: Config): void {
     }
     // Startup failure: cancel every in-flight lifecycle load, then tear
     // down. (The runner-internal cleanup() never ran — the body threw.)
+    // The pre-mount status line is cleared by the lifecycle abort
+    // listener registered at startup (idempotent).
+    // Terminal focus reporting (CSI ? 1004) may already be enabled when
+    // the body threw AFTER the TUI mount — disable it here so the mode
+    // never leaks into the shell on the startup-failure path either
+    // (idempotent when the mount never ran; the guarded writer swallows
+    // broken-stream errors, a synchronous throw is contained).
+    try {
+      notificationWriter.write(DISABLE_FOCUS_REPORTING)
+    } catch {
+      // The stream may already be gone during the fatal path.
+    }
     try {
       lifecycleController.abort()
     } catch {

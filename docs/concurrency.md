@@ -158,6 +158,30 @@ gone, the single-writer boundary is ONLY the open-time owner lock + lease
 surface and pre-lock TUIs are out of scope by design — they are not part
 of this project's ownership model.
 
+## Why release keeps the cooling verifier (the decision, DSH 0.1.2-alpha.1)
+
+The release-barrier convergence plan evaluated replacing the polling
+cooling verifier with a deterministic close barrier:
+`dispose ⇒ final flush durable ⇒ release lease/lock`. The DSH capabilities
+were audited against the pinned source (`0.1.2-alpha.1`, commit `cd5ef814`).
+Present: the awaited store flush entry (`sessions.flush(session)` dispatches
+the awaited `session/flush` durability checkpoint), the write-behind
+quiescent drain with durable batch completion, `Agent.whenIdle()`, and the
+ordered agent dispose (abort admission → `machine.cancel` → `whenIdle` →
+scope dispose). Missing: **an awaitable post-dispose durability barrier**.
+The agent dispose tears down the agent's scope, which detaches the old
+session from the store; the store's flush entry then rejects detached
+sessions, and the persistence coordinator's retirement drain (started by its
+`session/disposed` observer) is deliberately fire-and-forget — session
+disposal is observe-only and the retirement promise is private. Teardown
+events (an interrupted turn's closers are appended while dispose cancels an
+active turn) land after any pre-dispose flush, so flushing before dispose is
+not a sound replacement either. Per the plan's stop condition, the release
+path therefore RETAINS the cooling verifier: owner.lock + process lease +
+cooling remains the release authority on next. Revisit only when DSH exposes
+an awaitable final lifecycle barrier (for example, session detach awaiting
+its final persistence drain, or a public awaited retirement handle).
+
 ## Counting events in a session file (trap)
 
 File rows are the **storage format**, not events. Packed `*-chunks` rows

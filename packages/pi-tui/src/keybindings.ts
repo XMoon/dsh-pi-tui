@@ -34,6 +34,8 @@ export interface Keybindings {
 	"tui.input.submit": true;
 	"tui.input.tab": true;
 	"tui.input.copy": true;
+	// Editor-owned submit (split from tui.input.submit — see X037)
+	"tui.editor.submit": true;
 	// Generic selection actions
 	"tui.select.up": true;
 	"tui.select.down": true;
@@ -142,6 +144,15 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.undo": { defaultKeys: "ctrl+-", description: "Undo" },
 	"tui.input.newLine": { defaultKeys: ["shift+enter", "ctrl+j"], description: "Insert newline" },
 	"tui.input.submit": { defaultKeys: "enter", description: "Submit input" },
+	/**
+	 * The EDITOR's submit key, deliberately separate from
+	 * `tui.input.submit` (dsh-pi-tui divergence X037): keybindings are
+	 * process-global, so a host remapping the editor's submission must not
+	 * leak into every plain `Input` (search boxes, question free-text,
+	 * pickers). The editor consults only this binding; `Input` keeps
+	 * `tui.input.submit`.
+	 */
+	"tui.editor.submit": { defaultKeys: "enter", description: "Submit the editor draft" },
 	"tui.input.tab": { defaultKeys: "tab", description: "Tab / autocomplete" },
 	"tui.input.copy": { defaultKeys: "ctrl+c", description: "Copy selection" },
 	"tui.select.up": { defaultKeys: "up", description: "Move selection up" },
@@ -182,11 +193,11 @@ export const TUI_KEYBINDINGS = {
 		description: "Scroll viewport down one line",
 	},
 	"tui.altScreen.previousPrompt": {
-		defaultKeys: "ctrl+shift+up",
+		defaultKeys: ["ctrl+shift+up", "ctrl+up"],
 		description: "Jump to previous semantic prompt",
 	},
 	"tui.altScreen.nextPrompt": {
-		defaultKeys: "ctrl+shift+down",
+		defaultKeys: ["ctrl+shift+down", "ctrl+down"],
 		description: "Jump to next semantic prompt",
 	},
 	"tui.altScreen.search": {
@@ -280,7 +291,7 @@ export class KeybindingsManager {
 	}
 
 	getDefinition(keybinding: Keybinding): KeybindingDefinition {
-		return this.definitions[keybinding]!;
+		return this.definitions[keybinding];
 	}
 
 	getConflicts(): KeybindingConflict[] {

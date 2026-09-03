@@ -17,19 +17,19 @@
  */
 
 import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, SessionHeader, JsonValue } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
 import type { IconSemantic } from './icons.ts'
-import { firstLine, latestLine } from './present.ts'
+import { firstLine, latestLine, type JsonValue } from './present.ts'
 import { StepUsageAccumulator, totalTokens, type TokenUsageTotals } from './token-usage.ts'
-// The command/run + command/done event merge (SessionEventMap extension).
+// Load the official command event declarations.
 import type {} from '@deepseek-ai/dsh-commands'
-// The subagent/descriptor event merge (SessionEventMap extension).
+// Load the official subagent event declarations.
 import type {} from '@deepseek-ai/dsh-subagent'
-// The workflow run/member event merges (SessionEventMap extension).
+// Load the official workflow event declarations.
 import type {} from '@deepseek-ai/dsh-tool-workflow/types'
-// The llm/retry + llm/retry-started event merges (SessionEventMap extension).
+// Load the official retry event declarations.
 import type {} from '@deepseek-ai/dsh-llm-retry'
 
 /** One renderable message in the TUI transcript. */
@@ -110,6 +110,42 @@ export interface WorkflowMemberView {
   status: 'ok' | 'error' | 'running'
 }
 
+/** Stable identity of one raw transcript item within ONE TranscriptFolder
+ * lifetime. The raw item's index doubles as its id: `items` is strictly
+ * append-only, so an id keeps pointing at the same logical source through
+ * streaming, settlement and read-group reflow — the visible card OBJECT may
+ * be replaced (or merged into a group), the id never is. Ids are
+ * session-local by construction: a new folder starts a fresh namespace.
+ * @see TranscriptSearchMatch
+ */
+export type TranscriptItemId = number
+
+/** One full-history search hit: the CURRENT visible representative of the
+ * matched logical card plus its visible turn. Matches deliberately never
+ * carry `TranscriptMessage` objects: live settlement replaces items and
+ * grouping reflow replaces merged cards, so an object-based match would
+ * pin stale state and break Next/Prev navigation. */
+export interface TranscriptSearchMatch {
+  readonly id: TranscriptItemId
+  readonly turn: number
+}
+
+/** The searchable text of one message — the SINGLE source of truth for the
+ * search corpus (the legacy full-history search semantics: tools search
+ * `name args result`, every other kind searches `text`). `summary` rows
+ * never reach `items`, so the projection never indexes them. */
+export function transcriptSearchText(message: TranscriptMessage): string {
+  if (message.kind === 'tool') return `${message.name} ${message.args} ${message.result}`
+  return message.text ?? ''
+}
+
+/** Normalize search text exactly like the legacy query path did (JS String
+ * `toLowerCase`, no locale options). Applied ONCE per entry at build/refresh
+ * time — never per query. */
+function normalizeSearchText(text: string): string {
+  return text.toLowerCase()
+}
+
 /** The turn-end reason surface Focus reads (structural — never a full
  * dsh type import; the official kind names are kept verbatim). */
 export interface TurnEndReason {
@@ -151,9 +187,11 @@ export interface TurnActivity {
   /** The Think slot: the latest meaningful line of the bounded reasoning
    * tail (compact preview only — never the raw reasoning stream). */
   readonly think?: { readonly text: string }
-  /** The Message slot: the latest meaningful line of the current
-   * candidate / confirmed intermediate assistant text. The FINAL answer
-   * never enters this slot (it renders outside the Thought). */
+  /** The Message slot: the bounded LATEST TAIL of the current candidate /
+   * confirmed intermediate assistant text, kept MULTILINE (the Focus
+   * renderer wraps it to the current width and shows the last three
+   * visual rows — a single-line flatten would destroy that). The FINAL
+   * answer never enters this slot (it renders outside the Thought). */
   readonly message?: { readonly text: string }
   /** The Tool slot: the LATEST real `tool/call` (any name — event-first
    * classification), settled by its own `tool/result` only. */
@@ -218,7 +256,8 @@ interface MutableTurnActivity {
    * — the turn/end final-answer check compares the candidate's step
    * against this. */
   lastAssistantStep?: number
-  /** The materialized Message slot (candidate ?? confirmed, latest line). */
+  /** The materialized Message slot (candidate ?? confirmed, bounded
+   * multiline tail). */
   message?: { text: string }
   /** The Tool slot: the latest real tool/call, settled by its own result. */
   tool?: {
@@ -429,6 +468,26 @@ interface ReadGroupMeta {
   spansTurns: boolean
 }
 
+/** One lightweight searchable entry, index-aligned with `items` (the raw
+ * item index IS the stable {@link TranscriptItemId}). `normalizedText` is
+ * lowercased as a WHOLE string, lazily: a mutation only marks the entry
+ * dirty (O(1) bookkeeping on the live hot path — streaming chunks and
+ * read-group expansions never pay per-chunk/per-member lowercase), and the
+ * next query re-normalizes exactly the dirty entries. A merged read
+ * group's searchable text lives ONLY on its representative entry;
+ * non-representative members are skipped at scan time, so a group
+ * expansion marks exactly one entry. */
+interface TranscriptSearchEntry {
+  /** The CURRENT visible turn of the card this entry mirrors (refreshed
+   * when the entry is normalized). */
+  turn: number
+  /** The normalized searchable text of the CURRENT visible card. For a
+   * merged read group this is the group's text on the representative entry
+   * only; non-representative members keep their own raw text and are
+   * skipped at scan time. */
+  normalizedText: string
+}
+
 export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
   /** The assistant message object per (turn, step); streaming text lands in place. */
@@ -470,6 +529,35 @@ export class TranscriptFolder {
    * groups in one linear pass once the event fold is complete. */
   private hydrating = false
   private groupingDirty = false
+
+  /** The incremental full-history search projection (stage D1): one entry
+   * per raw item, index-aligned with {@link items}. Query-time cost is a
+   * lightweight scan of normalized strings — never `messages()`, never a
+   * per-query lowercase pass over the whole history. */
+  private readonly searchEntries: TranscriptSearchEntry[] = []
+  /** The dirty search entries (raw item indices): the discovery structure
+   * for query-time lazy normalization — a query normalizes exactly these,
+   * never a full-history scan. */
+  private readonly dirtySearchEntries = new Set<number>()
+  /** Bumped on EVERY entry mutation (append, settlement, group reflow):
+   * query refinement must not reuse previous candidates across a revision. */
+  private searchRevisionCounter = 0
+  /** Step key → raw item index, for in-place streaming text updates.
+   * Namespaced by entry kind (`assistant:` / `thinking:`): a step streams
+   * BOTH reasoning and text, and the two entries share the same
+   * stepKey(turn, step) — an un-namespaced map would let one kind's deltas
+   * land on the other kind's searchable entry. */
+  private readonly searchIndexByStepKey = new Map<string, number>()
+  /** Workflow run card indices by runId (run-end fills the result text). */
+  private readonly workflowRunIndex = new Map<string, number>()
+  // Test-only counters exposed by searchDiagnosticsForTest().
+  private searchRefreshCount = 0
+  /** Test-only: the number of dirty entries scanned by lazy normalization
+   * (proves the query path is O(#dirty), never O(history)). */
+  private searchDirtyScanCount = 0
+  private searchFullScanCount = 0
+  private searchRefineCount = 0
+  private groupingRebuildCount = 0
 
   /**
    * Turn index for the display window (stage J): the first item index of
@@ -628,14 +716,16 @@ export class TranscriptFolder {
   }
 
   /** Materialize the Message slot from the candidate (running) or the
-   * resolved candidate/confirmed pair (settled): the latest meaningful
-   * line, bounded. */
+   * resolved candidate/confirmed pair (settled): the bounded MULTILINE
+   * tail — never a single-line flatten. Both sources are already bounded
+   * to MESSAGE_TAIL_CAP, so the slot stays bounded without a second
+   * copy; terminal-width wrapping is the renderer's job (plan: the fold
+   * never wraps, the renderer re-wraps per frame). */
   private syncMessage(activity: MutableTurnActivity): void {
     const candidate = activity.messageCandidate
     const candidateText = candidate?.tail
     const text = candidateText ?? activity.messageConfirmed
-    const line = text === undefined ? undefined : latestLine(text).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
-    activity.message = line === undefined || line === '' ? undefined : { text: line }
+    activity.message = text === undefined || text === '' ? undefined : { text }
   }
 
   /** Resolve the Message slot at turn/end (plan §5.5): for a completed /
@@ -673,9 +763,19 @@ export class TranscriptFolder {
     this.turnValueSet.add(turn)
   }
 
-  /** Append one folded message, maintaining the window projections. */
-  private appendItem(message: TranscriptMessage): void {
+  /** Append one folded message, maintaining the window projections. Returns
+   * the raw item index (the stable search identity). */
+  private appendItem(message: TranscriptMessage): number {
     this.items.push(message)
+    const index = this.items.length - 1
+    // The searchable projection mirrors the item's own text (eager at
+    // append — the cold path); later mutations mark the entry dirty and
+    // re-normalize lazily at the next search.
+    this.searchEntries.push({
+      turn: 'turn' in message ? message.turn : 0,
+      normalizedText: normalizeSearchText(transcriptSearchText(message)),
+    })
+    this.searchRevisionCounter += 1
     const turn = 'turn' in message ? message.turn : undefined
     if (turn !== undefined) {
       if (this.turnValues.length === 0) {
@@ -696,6 +796,65 @@ export class TranscriptFolder {
     }
     if (turn !== undefined) this.addGroupedTurn(turn)
     if (message.kind === 'tool') this.groupedToolCount += 1
+    return index
+  }
+
+  /** Mark ONE search entry dirty (O(1) — the live hot path): the
+   * authoritative text changed; the entry is re-normalized lazily at the
+   * next search. The dirty SET is the discovery structure — a query
+   * normalizes exactly the dirty entries, never a full-history scan. */
+  private markSearchEntryDirty(index: number): void {
+    const entry = this.searchEntries[index]
+    if (entry === undefined) return
+    this.dirtySearchEntries.add(index)
+    this.searchRevisionCounter += 1
+  }
+
+  /** Mark a raw-item range dirty (the DEFENSIVE reflow path — O(run), rare;
+   * the live tail-append path marks only the group representative). */
+  private markSearchRangeDirty(start: number, end: number): void {
+    for (let index = start; index <= end; index += 1) this.markSearchEntryDirty(index)
+  }
+
+  /** Mark the streaming entry of one step key dirty (O(1) per chunk). */
+  private markStreamingEntryDirty(key: string): void {
+    const index = this.searchIndexByStepKey.get(key)
+    if (index !== undefined) this.markSearchEntryDirty(index)
+  }
+
+  /** Query-time lazy normalization: every DIRTY entry is re-normalized as a
+   * WHOLE string from its CURRENT authoritative card (Unicode whole-string
+   * semantics — never per-chunk lowercase, never history). The dirty SET
+   * bounds the work to O(#dirty) — a query with no mutations normalizes
+   * nothing and never scans the history. Non-representative group members
+   * are skipped: the merged group's text lives ONLY on the representative
+   * entry, so a group expansion marks exactly one entry. */
+  private normalizeDirtySearchEntries(): void {
+    for (const index of this.dirtySearchEntries) {
+      this.searchDirtyScanCount += 1
+      const entry = this.searchEntries[index]
+      if (entry === undefined) continue
+      const group = this.groupOf.get(index)
+      if (group !== undefined && this.representativeOf(index) !== index) continue
+      const card = group ?? this.items[index]
+      if (card === undefined) continue
+      entry.turn = 'turn' in card ? card.turn : 0
+      entry.normalizedText = normalizeSearchText(transcriptSearchText(card))
+      this.searchRefreshCount += 1
+    }
+    this.dirtySearchEntries.clear()
+  }
+
+  /** The CURRENT output representative of one raw item id: the first member
+   * of its merged read group when grouped, else the item itself. Search
+   * results are deduplicated by representative so a merged read card yields
+   * exactly ONE visible match no matter how many members hit. */
+  private representativeOf(id: number): number {
+    const group = this.groupOf.get(id)
+    if (group === undefined) return id
+    const members = this.groupMembers.get(group)
+    const first = members === undefined ? undefined : members[0]
+    return first === undefined ? id : first
   }
 
   /** Whether an item is groupable as a consecutive read (settled ok). */
@@ -911,6 +1070,22 @@ export class TranscriptFolder {
       if (built.spansTurns) this.crossTurnGroups += 1
       start = end
     }
+    // The cold finalize rebuilds every group: eagerly normalize each
+    // merged card's REPRESENTATIVE entry to the shared group text (one
+    // normalize per group — the allowed one-time O(history) cost).
+    // Non-representative members keep their own raw entries and are
+    // skipped at scan time.
+    this.groupingRebuildCount += 1
+    for (const [group, members] of this.groupMembers) {
+      const first = members[0]
+      if (first === undefined) continue
+      const entry = this.searchEntries[first]
+      if (entry === undefined) continue
+      entry.turn = group.turn
+      entry.normalizedText = normalizeSearchText(transcriptSearchText(group))
+      this.dirtySearchEntries.delete(first)
+      this.searchRefreshCount += 1
+    }
   }
 
 
@@ -949,6 +1124,15 @@ export class TranscriptFolder {
       this.groupMeta.set(previousGroup, { firstTurn, spansTurns })
       if (!wasCross && spansTurns) this.crossTurnGroups += 1
       this.groupedToolCount -= 1
+      // The merged card's text changed (args count + result): mark the
+      // group REPRESENTATIVE dirty — O(1), never a per-member refresh
+      // (the live tail-append hot path must stay near-constant; the
+      // representative is the FIRST member and never changes on a tail
+      // append, and non-representative members are skipped at scan time).
+      // The lazy normalization reads the CURRENT group card, so the
+      // earlier members' stale text/turn can never leak (round-4
+      // finding).
+      this.markSearchEntryDirty(members[0]!)
       return true
     }
 
@@ -969,6 +1153,9 @@ export class TranscriptFolder {
      this.addGroupedTurn(group.turn)
     if (previous.turn !== item.turn) this.crossTurnGroups += 1
     this.groupedToolCount -= 1
+    // The promoted singleton becomes the new group's representative: its
+    // entry must carry the merged text (lazy — mark dirty, O(1)).
+    this.markSearchEntryDirty(previousIndex)
     return true
   }
 
@@ -1026,6 +1213,11 @@ export class TranscriptFolder {
         this.groupOf.delete(i)
       }
     }
+    // After the detach, the run's items stand alone: mark their search
+    // entries dirty (the rebuilt group below re-marks the representative
+    // when the run still merges). The defensive reflow path is O(run) —
+    // rare, correctness-first.
+    this.markSearchRangeDirty(start, end)
     if (start === end) return
     // Rebuild the whole run as one group. The result is assembled with one
     // final join so a long adjacent-read run stays linear in the cold path.
@@ -1038,6 +1230,10 @@ export class TranscriptFolder {
     // The whole run collapsed into one output card.
     this.groupedToolCount -= built.members.length - 1
     if (built.spansTurns) this.crossTurnGroups += 1
+    // The rebuilt group's representative may have MOVED (a late settle can
+    // extend the run backwards): mark the whole run dirty so the lazy
+    // normalization re-derives every entry from its current card.
+    this.markSearchRangeDirty(start, end)
   }
 
   /** Whether the members at these indices span more than one turn. */
@@ -1080,6 +1276,11 @@ export class TranscriptFolder {
         this.rebuildGrouping()
         this.groupingDirty = false
       }
+      // Seal the search projection: the cold fold marked settlements dirty
+      // (tool results, assistant/message replacements, compaction
+      // summaries) even when no read group formed. Normalize them once —
+      // the COLD path may pay O(history), the live path never does.
+      this.normalizeDirtySearchEntries()
     }
   }
 
@@ -1276,8 +1477,105 @@ export class TranscriptFolder {
     if (maxTurns === undefined || maxTurns <= 0) return this.groupedMessages()
     // The indexed path is group-aware, including cross-turn read cards, and
     // falls back only for genuinely non-monotonic/corrupt logs. Full history
-    // remains available through the no-maxTurns call used by search.
+    // remains available through the no-maxTurns call (search uses the
+    // lightweight projection instead — it never materializes this list).
     return this.window({ maxTurns, ...options }).messages
+  }
+
+  /** The search-projection revision: bumped on EVERY entry mutation
+   * (append, settlement, group reflow). The runner's query refinement must
+   * never reuse previous candidates across a revision — the projection may
+   * hold new matches the old candidate list cannot see. */
+  searchRevision(): number {
+    return this.searchRevisionCounter
+  }
+
+  /** Full-history transcript search over the lightweight projection — same
+   * corpus and ORDER as the legacy full search (`messages()` + filter +
+   * per-message lowercase), but never materializes the grouped transcript
+   * and never re-lowercases history per query. Results are deduplicated by
+   * CURRENT group representative: a merged read card yields exactly ONE
+   * visible match no matter how many members hit, and Next/Prev never loop
+   * on one card. `refinement` (optional) narrows a previous result set when
+   * the new query extends it AND the projection revision is unchanged —
+   * otherwise the full lightweight scan runs.
+   * @param query - the raw query (trimmed + lowercased here, like legacy).
+   * @param refinement - the previous query's matches for prefix refinement;
+   * the folder validates the prefix AND the revision internally.
+   */
+  search(
+    query: string,
+    refinement?: {
+      previousQuery: string
+      previousMatches: readonly TranscriptSearchMatch[]
+      revision: number
+    },
+  ): TranscriptSearchMatch[] {
+    const needle = query.trim().toLowerCase()
+    if (needle === '') return []
+    // Lazy normalization: only DIRTY entries are re-normalized (whole-
+    // string Unicode semantics) — streaming chunks and read-group
+    // expansions never pay per-chunk/per-member lowercase, and a query
+    // after no mutations pays nothing.
+    this.normalizeDirtySearchEntries()
+    const previousNeedle = refinement?.previousQuery.trim().toLowerCase() ?? ''
+    const canRefine = refinement !== undefined
+      && previousNeedle !== ''
+      && needle.startsWith(previousNeedle)
+      && this.searchRevisionCounter === refinement.revision
+    const matches: TranscriptSearchMatch[] = []
+    const seen = new Set<number>()
+    const consider = (id: number): void => {
+      const entry = this.searchEntries[id]
+      if (entry === undefined) return
+      const representative = this.representativeOf(id)
+      // Non-representative group members carry no searchable text: the
+      // merged group's text lives ONLY on the representative entry (a
+      // group expansion marks exactly that one entry dirty).
+      if (representative !== id) return
+      if (!entry.normalizedText.includes(needle)) return
+      if (seen.has(representative)) return
+      seen.add(representative)
+      matches.push({ id: representative, turn: entry.turn })
+    }
+    if (canRefine) {
+      for (const match of refinement.previousMatches) consider(match.id)
+      this.searchRefineCount += 1
+    } else {
+      for (let id = 0; id < this.searchEntries.length; id += 1) consider(id)
+      this.searchFullScanCount += 1
+    }
+    return matches
+  }
+
+  /** Resolve one search match to its CURRENT visible card: the merged read
+   * group when the matched item is a member now, else the raw item. A group
+   * reflow AFTER the query may have replaced the representative card — the
+   * id still resolves (fail-soft; never a throw or a stale object). */
+  resolveSearchMatch(match: TranscriptSearchMatch): TranscriptMessage | undefined {
+    const item = this.items[match.id]
+    if (item === undefined) return undefined
+    return this.groupOf.get(match.id) ?? item
+  }
+
+  /** Test-only structural counters: prove the query path never falls back
+   * to full projection/lowercase work (the 10k-turn complexity gate). */
+  searchDiagnosticsForTest(): {
+    entries: number
+    groupingRebuilds: number
+    normalizedRefreshes: number
+    dirtyScans: number
+    fullScans: number
+    refinedScans: number
+  } {
+    return {
+      entries: this.searchEntries.length,
+      groupingRebuilds: this.groupingRebuildCount,
+      normalizedRefreshes: this.searchRefreshCount,
+      dirtyScans: this.searchDirtyScanCount,
+      fullScans: this.searchFullScanCount,
+      refinedScans: this.searchRefineCount,
+    }
   }
 
   /** Remove one thinking entry from the open-lifecycle index. */
@@ -1304,13 +1602,13 @@ export class TranscriptFolder {
     if (entry === undefined) {
       entry = { kind: 'thinking', turn, text: '', running: true }
       this.thinkingEntries.set(key, entry)
+      this.searchIndexByStepKey.set(`thinking:${key}`, this.appendItem(entry))
       let open = this.openThinkingByTurn.get(turn)
       if (open === undefined) {
         open = new Set()
         this.openThinkingByTurn.set(turn, open)
       }
       open.add(entry)
-      this.appendItem(entry)
     }
     return entry
   }
@@ -1322,7 +1620,7 @@ export class TranscriptFolder {
     if (entry === undefined) {
       entry = { kind: 'assistant', turn, text: '' }
       this.assistantEntries.set(key, entry)
-      this.appendItem(entry)
+      this.searchIndexByStepKey.set(`assistant:${key}`, this.appendItem(entry))
     }
     return entry
   }
@@ -1371,6 +1669,8 @@ export class TranscriptFolder {
       const tokens = data.shadowedTokenCount
       if (Array.isArray(summary)) {
         entry.text = textOf(summary as readonly ContentBlock[])
+        // The summary body became searchable: mark the entry dirty (lazy).
+        this.markSearchEntryDirty(index)
       }
       if (Array.isArray(seqs)) entry.items = seqs.length
       if (typeof tokens === 'number') entry.tokens = tokens
@@ -1505,6 +1805,11 @@ export class TranscriptFolder {
         // once, not twice.
         if (chunk.type === 'text-delta') {
           this.assistantEntry(event.data.turn, step).text += chunk.text
+          // Search projection: O(1) dirty mark — the entry is re-normalized
+          // as a WHOLE string at the next search (Unicode lowercasing is
+          // not chunk-splittable — Greek sigma — but the live streaming
+          // path must never pay per-chunk lowercase).
+          this.markStreamingEntryDirty(`assistant:${stepKey(event.data.turn, step)}`)
           // Focus aggregation: the streaming assistant text feeds the
           // Message candidate IMMEDIATELY (no assistant/message wait —
           // plan §5.2), so the running card previews the intermediate
@@ -1512,6 +1817,8 @@ export class TranscriptFolder {
           this.foldMessageCandidate(this.activityFor(event.data.turn), step, chunk.text)
         } else if (chunk.type === 'reasoning-delta') {
           this.thinkingEntry(event.data.turn, step).text += chunk.text
+          // Search projection: O(1) dirty mark (see the text-delta path).
+          this.markStreamingEntryDirty(`thinking:${stepKey(event.data.turn, step)}`)
           // Focus aggregation: keep a compact reasoning preview (the
           // rolling tail — never the full stream, plan §10.6/§42).
           this.foldThinking(this.activityFor(event.data.turn), chunk.text)
@@ -1539,6 +1846,11 @@ export class TranscriptFolder {
           // The settled full blocks (kept when the step carried images or
           // other non-text blocks — text-only steps stay on the text path).
           if (messageBlocks.some(block => block.type !== 'text')) entry.content = messageBlocks
+          // The settled text REPLACES the streamed tail: the search
+          // projection must mirror the authoritative text, not the chunks
+          // (lazy — mark dirty, O(1)).
+          const searchIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
+          if (searchIndex !== undefined) this.markSearchEntryDirty(searchIndex)
         } else {
           // ALWAYS preserve the entry — an empty settled message with no
           // preceding chunk (replay edge) must still own the exact-last
@@ -1546,7 +1858,11 @@ export class TranscriptFolder {
           // earlier answer (review finding).
           const created: TranscriptMessage = { kind: 'assistant', turn: event.data.turn, text, ...(messageBlocks.some(block => block.type !== 'text') ? { content: messageBlocks } : {}) }
           this.assistantEntries.set(key, created)
-          this.appendItem(created)
+          // The created entry must register its search index too: a later
+          // replay replacement or text delta mutates this entry in place
+          // and must be able to refresh its searchable entry (review
+          // finding — the streaming-created path already registers).
+          this.searchIndexByStepKey.set(`assistant:${key}`, this.appendItem(created))
         }
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.
@@ -1695,6 +2011,10 @@ export class TranscriptFolder {
           card.resultBlocks = block?.content
           card.meta = event.data.meta
           card.error = event.data.error
+          // The result text landed: mark the search entry dirty (lazy
+          // normalization; the grouping hooks below mark the merged
+          // representative when the read joins a group).
+          this.markSearchEntryDirty(pending.index)
           // A settled read may now be groupable: reflow the run it belongs
           // to (bounded by the nearest non-read cards).
           this.scheduleGrouping(pending.index)
@@ -1714,6 +2034,7 @@ export class TranscriptFolder {
               running.resultBlocks = block?.content
               running.meta = event.data.meta
               running.error = event.data.error
+              this.markSearchEntryDirty(runningIndex)
               this.scheduleGrouping(runningIndex)
             }
           } else {
@@ -1728,8 +2049,9 @@ export class TranscriptFolder {
         // After turn/end the Tool slot was settled: a late result (replay
         // artifact) must not mutate it (review finding). The transcript
         // card still settles.
-        if (!activity.completed && activity.tool?.callId === key) {
-          activity.tool.status = status
+        const activeTool = activity.tool
+        if (!activity.completed && activeTool !== undefined && activeTool.callId === key) {
+          activeTool.status = status
           activity.revision += 1
         }
         break
@@ -1801,7 +2123,7 @@ export class TranscriptFolder {
           members: [],
         }
         this.workflowRuns.set(event.data.runId, card)
-        this.appendItem(card)
+        this.workflowRunIndex.set(event.data.runId, this.appendItem(card))
         // Focus aggregation: a workflow run is a durable lifecycle event,
         // NOT a model tool/call — it never touches the Tool slot or the
         // tool count (plan §17).
@@ -1834,10 +2156,14 @@ export class TranscriptFolder {
         if (card !== undefined) {
           card.status = event.data.stopReason === 'completed' ? 'ok' : 'error'
           card.result = `stop: ${event.data.stopReason}`
+          // The run result became searchable: mark the entry dirty (lazy).
+          const index = this.workflowRunIndex.get(event.data.runId)
+          if (index !== undefined) this.markSearchEntryDirty(index)
         }
         // The run's bookkeeping is done: drop the run card and every member
         // card keyed under it so long sessions do not accumulate stale maps.
         this.workflowRuns.delete(event.data.runId)
+        this.workflowRunIndex.delete(event.data.runId)
         for (const memberKey of this.workflowMembers.keys()) {
           if (memberKey.startsWith(`${event.data.runId}/`)) this.workflowMembers.delete(memberKey)
         }
@@ -1898,16 +2224,6 @@ export class TranscriptFolder {
         break
     }
   }
-}
-
-/** Search the complete folded transcript, never a bounded presentation window. */
-export function searchTranscript(folder: TranscriptFolder, query: string): TranscriptMessage[] {
-  const needle = query.trim().toLowerCase()
-  if (needle === '') return []
-  return folder.messages().filter(message => {
-    const text = message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}` : message.text
-    return text.toLowerCase().includes(needle)
-  })
 }
 
 /**
@@ -1975,15 +2291,19 @@ function markdownContent(blocks: readonly ContentBlock[]): string {
 
 export function renderTranscriptMarkdown(session: {
   header: SessionHeader
-  events: readonly SessionEvent[]
+  snapshotEvents(): readonly SessionEvent[]
 }): string {
   const lines: string[] = [
     `# Session ${session.header.id}`,
     `- cwd: ${session.header.cwd ?? 'unknown'}`,
-    ...session.header.agentPreset === undefined ? [] : [`- agent preset: ${session.header.agentPreset}`],
+    ...session.header.agentPreset === undefined
+      ? []
+      : [`- agent preset: ${session.header.agentPreset}`],
     '',
   ]
-  for (const event of session.events) {
+  // Alpha.4 Session shape: the raw log arrives as a snapshot read, never a
+  // live array — the markdown export is a full-log fold by definition.
+  for (const event of session.snapshotEvents()) {
     // The same append-origin contract as the transcript fold: a surface
     // replacement is a model-only rewrite (pruned tool result, compaction
     // summary checkpoint) and must never be replayed in a human-facing

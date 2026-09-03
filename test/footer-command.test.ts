@@ -7,18 +7,77 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { TuiApp } from '../src/tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 import type { FooterLayoutV1 } from '../src/footer/types.ts'
 import type { FooterCustomItemSettings } from '../src/footer/custom-items.ts'
+import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from '../src/footer/dynamic-item-runtime.ts'
 import { serializeTuiSettingsMutation } from '../src/runtime/config-port.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { emptyStatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
+/** Bounded wall-clock spin (setImmediate turns, never a fixed setTimeout):
+ * the repo's headless-test discipline for "wait a bounded window, then
+ * assert the absence that must hold after it". */
+async function spin(ms: number): Promise<void> {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
+}
+
+/** A REAL FooterDynamicItemRuntime for the no-exec save-boundary tests.
+ * The stub applyFooterSettings mirrors the real applyFooterSettings' PR D
+ * sync (trusted definitions + active layout ids), so the tests prove the
+ * SAVE BOUNDARY end to end: the runtime can only ever see definitions a
+ * successful save committed — never a draft, never a failed save. */
+function wireRuntimeApply(app: TuiApp): FooterDynamicItemRuntime {
+  return new FooterDynamicItemRuntime({
+    snapshot: () => emptyStatusSnapshot(),
+    width: () => 100,
+    height: () => 30,
+    signal: new AbortController().signal,
+    onValue: (id, value) => app.setFooterCommandItemValue(id, value),
+  })
+}
+
+/** The PR D part of the real applyFooterSettings: sync the runtime with
+ * the trusted (saved) command definitions + the EXECUTABLE ids (trusted ∩
+ * authorized ∩ rendered). A /footer save's validated layout is both the
+ * authorization and the rendered layout; without one nothing is
+ * executable in these tests (no USER-layer layout is wired). */
+function syncRuntimeApply(
+  runtime: FooterDynamicItemRuntime,
+  app: TuiApp,
+  savedCustomItems: readonly FooterCustomItemSettings[] | undefined,
+  savedLayout: FooterLayoutV1 | undefined,
+): void {
+  const trusted = (savedCustomItems ?? []).filter((item): item is import('../src/footer/custom-items.ts').FooterCustomCommandItemSettings => item.kind === 'command')
+  const authorized = savedLayout === undefined ? new Set<string>() : activeFooterItemIds(savedLayout)
+  const executable = executableCommandItemIds(trusted, authorized, app.getEffectiveFooterLayout())
+  runtime.sync(trusted, executable)
+}
 
 /** A fake commands service capturing registrations. */
 function fakeCommands(): { defs: Array<{ name: string; handler?: unknown }>; service: unknown } {
@@ -57,7 +116,8 @@ function fakeSettings(initial: { footer: string; footerLayout?: unknown; footerF
         busyEnter: 'queue',
         localShellSandbox: 'bypass',
         homeEndKeys: 'viewport',
-        focusMode: 'off',
+        focusMode: 'off', wheelScrollLines: '1',
+        notificationMode: 'unfocused', notificationMethod: 'auto',
       }),
       replace: (next: { footer: string; footerLayout?: unknown; footerFallbackMode?: string; footerCustomItems?: unknown }) => {
         doc.footer = next.footer
@@ -81,7 +141,8 @@ test('footer, focus, and fullscreen writes share one FIFO at the live commit poi
     busyEnter: 'queue',
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
-    focusMode: 'off',
+    focusMode: 'off', wheelScrollLines: '1',
+    notificationMode: 'unfocused', notificationMethod: 'auto',
   }
   const pending: Array<{ next: ReturnType<TuiSettingsLike['get']>; resolve: () => void }> = []
   const settings: TuiSettingsLike = {
@@ -125,7 +186,8 @@ test('a failed whole-document settings write does not block later queued writes'
     busyEnter: 'queue',
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
-    focusMode: 'off',
+    focusMode: 'off', wheelScrollLines: '1',
+    notificationMode: 'unfocused', notificationMethod: 'auto',
   }
   let calls = 0
   let rejectFirst: (error: Error) => void = () => {}
@@ -156,11 +218,15 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const customItems = [{ schemaVersion: 1 as const, id: 'user:environment', kind: 'text' as const, text: 'PROD', tone: 'warning' as const }]
-  const futureCustomItem = { schemaVersion: 1, id: 'user:future', kind: 'command', command: 'echo future' }
-  const persistedCustomItems = [...customItems, futureCustomItem]
+  const futureCustomItem = { schemaVersion: 1, id: 'user:future', kind: 'future-kind', command: 'echo future' }
+  // A KNOWN kind carrying a future field is forward-compatible raw data
+  // too: an unrelated save must never normalize it away (PR D review).
+  const futureFieldCommand = { schemaVersion: 1, id: 'user:future-command', kind: 'command', command: 'echo future', futureField: { version: 2 } }
+  const persistedCustomItems = [...customItems, futureCustomItem, futureFieldCommand]
   app.setFooterCustomItems(customItems)
   const settings = fakeSettings({ footer: 'default', footerCustomItems: persistedCustomItems })
   ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: persistedCustomItems } }] } as never)
@@ -172,9 +238,14 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: settings.value,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
@@ -205,6 +276,8 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
@@ -281,11 +354,12 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const known = { schemaVersion: 1 as const, id: 'user:environment', kind: 'text' as const, text: 'OLD', tone: 'warning' as const }
-  const futureOne = { schemaVersion: 1, id: 'user:future-one', kind: 'command', command: 'one' }
-  const futureTwo = { schemaVersion: 1, id: 'user:future-two', kind: 'command', command: 'two' }
+  const futureOne = { schemaVersion: 1, id: 'user:future-one', kind: 'future-kind', command: 'one' }
+  const futureTwo = { schemaVersion: 1, id: 'user:future-two', kind: 'future-kind', command: 'two' }
   let userRaw: unknown[] = [known, futureOne]
   let currentDoc: ReturnType<TuiSettingsLike['get']> = {
     theme: 'auto',
@@ -295,7 +369,8 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     busyEnter: 'queue',
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
-    focusMode: 'off',
+    focusMode: 'off', wheelScrollLines: '1',
+    notificationMode: 'unfocused', notificationMethod: 'auto',
     footerCustomItems: userRaw,
   }
   const pendingWrites: Array<{ next: ReturnType<TuiSettingsLike['get']>; resolve: () => void }> = []
@@ -324,9 +399,14 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: settings,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
@@ -356,6 +436,8 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
@@ -456,6 +538,7 @@ test('/footer Esc cancels without writing', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const settings = fakeSettings({ footer: 'default' })
@@ -465,9 +548,14 @@ test('/footer Esc cancels without writing', async () => {
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: settings.value,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
@@ -491,7 +579,7 @@ test('/footer Esc cancels without writing', async () => {
     get effectivePresetId() { return undefined },
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
-    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -521,6 +609,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const persisted = {
@@ -533,9 +622,14 @@ test('/footer starts from the persisted custom layout when active', async () => 
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: settings.value,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
@@ -559,7 +653,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
     get effectivePresetId() { return undefined },
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
-    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -591,6 +685,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setFooterPreset('compact')
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
@@ -602,9 +697,14 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: settings.value,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
@@ -627,7 +727,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     get effectivePresetId() { return undefined },
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
-    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -687,13 +787,14 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
   // A settings document whose replace REJECTS (the write fails).
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
+    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }),
     replace: () => { throw new Error('write failed') },
   }
   const applied: Array<{ footer: string }> = []
@@ -702,9 +803,14 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: failingSettings,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
@@ -728,7 +834,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     get effectivePresetId() { return undefined },
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
-    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -767,12 +873,13 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off' }),
+    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }),
     replace: () => { throw new Error('write failed') },
   }
   const applied: Array<{ footer: string }> = []
@@ -783,9 +890,14 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: failingSettings,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
@@ -808,7 +920,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     get effectivePresetId() { return undefined },
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
-    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -841,6 +953,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
@@ -851,9 +964,14 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: settings.value,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
@@ -876,7 +994,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     get effectivePresetId() { return undefined },
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
-    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -918,6 +1036,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const notifications: Array<string> = []
@@ -935,7 +1054,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
     get: () => ({
       theme: 'auto', iconStyle: 'emoji', footer: 'default', fullscreen: 'on',
       busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport',
-      focusMode: 'off', footerCustomItems: [known],
+      focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto', footerCustomItems: [known],
     }),
     replace: () => new Promise<void>((_resolve, reject) => { rejectReplace = reject }),
   }
@@ -948,9 +1067,14 @@ test('/footer save failures notify exactly once (validation and write failures)'
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: settings,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => [], titles: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
@@ -980,6 +1104,8 @@ test('/footer save failures notify exactly once (validation and write failures)'
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
@@ -1025,4 +1151,336 @@ test('/footer save failures notify exactly once (validation and write failures)'
   assert.match(notifications[0]!, /footer layout save failed/)
   assert.equal(applied.length, 0, 'a failed write never applies the memory commit')
   app.stop()
+})
+
+test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Keep Editing, Discard)', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-noexec-')
+  const marker = join(dir, 'pwn')
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  // The REAL runtime, wired exactly like the production applyFooterSettings
+  // syncs it: it can only ever see definitions a successful save commits.
+  const runtime = wireRuntimeApply(app)
+  try {
+    const commands = fakeCommands()
+    ctx.provide('commands', commands.service as never)
+    const settings = fakeSettings({ footer: 'default' })
+    ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
+    const applied: Array<{ footer: string }> = []
+    const runner: TuiCommandRunner = {
+      ctx, app, diag: {} as never,
+      get liveAgent() { return undefined },
+      ensureSession: async () => {},
+      get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
+      tuiSettings: settings.value,
+      agents: {} as never,
+      sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+      sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
+      interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+      catalog: new DirectCatalogPort(ctx as never, () => undefined),
+      config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+      hostFile: new DirectHostFilePort(() => undefined),
+      commandRegistry: ctx.get('commands') as never,
+      cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
+      copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
+      prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+      signal: new AbortController().signal,
+      get sessionGeneration() { return 0 },
+      switchSession: async () => undefined,
+      transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+        await steps.prepare?.()
+        return { ok: true, next: await steps.create() }
+      },
+      currentPreset: () => undefined,
+      get pendingPreset() { return undefined },
+      set pendingPreset(_id: string | undefined) {},
+      get effectivePresetId() { return undefined },
+      refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
+      recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+      refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+      openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
+      sessionTransitionPending: () => false,
+      withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+      withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+      enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
+      applyFooterSettings: (d, savedCustomItems) => {
+        if (d === undefined) return
+        applied.push({ ...d })
+        if (d.footer === 'custom') {
+          app.setFooterPreset('full')
+          app.setFooterLayout(d.footerLayout as never)
+        }
+        syncRuntimeApply(runtime, app, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
+      },
+    }
+    registerTuiCommands(runner)
+    const def = commands.defs.find(entry => entry.name === 'footer')
+    await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+    await vt.waitForRender()
+    // Create a command item that would touch the marker if it ever ran.
+    vt.sendInput('\r') // row
+    vt.sendInput('a') // add
+    vt.sendInput('no-match')
+    vt.sendInput('\x1b[B') // Create Custom Command
+    vt.sendInput('\r') // create-name
+    vt.sendInput('Pwn')
+    vt.sendInput('\r') // create-command
+    vt.sendInput(`touch ${marker}`)
+    vt.sendInput('\r') // create-refresh (5s default)
+    vt.sendInput('\r') // create-timeout (300ms default)
+    vt.sendInput('\r') // create-tone
+    vt.sendInput('\r') // create with Auto
+    await vt.waitForRender()
+    // The draft preview renders through the placeholder path — no spawn.
+    assert.ok(vt.getViewport().join('\n').includes('[command]'), 'the draft preview must show the placeholder')
+    // Resize the terminal (a repaint) — still no spawn.
+    vt.resize(80, 24)
+    await vt.waitForRender()
+    // Esc Keep Editing: dirty selector Esc -> exit-confirm -> Keep Editing.
+    vt.sendInput('\x1b') // row -> selector
+    vt.sendInput('\x1b') // dirty -> exit-confirm
+    vt.sendInput('\x1b[B') // Discard & Exit
+    vt.sendInput('\x1b[B') // Keep Editing
+    vt.sendInput('\r') // back to the selector
+    await vt.waitForRender()
+    // Esc Discard: dirty -> exit-confirm -> Discard & Exit closes.
+    vt.sendInput('\x1b')
+    vt.sendInput('\x1b[B') // Discard & Exit
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    // The marker must never exist: no preview, no repaint, no guard
+    // interaction may execute the draft command.
+    await spin(300)
+    assert.equal(existsSync(marker), false, 'an unsaved draft command must never execute')
+    assert.equal(applied.length, 0, 'no save may have happened')
+  } finally {
+    runtime.dispose()
+    app.stop()
+  }
+})
+
+test('PR D: a FAILED save never executes the new command (draft preserved, marker absent)', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-noexec-fail-')
+  const marker = join(dir, 'pwn')
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  // The REAL runtime: a failed save must never reach it.
+  const runtime = wireRuntimeApply(app)
+  try {
+    const commands = fakeCommands()
+    ctx.provide('commands', commands.service as never)
+    ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
+    const doc = { footer: 'default' as string, footerLayout: undefined as unknown, footerCustomItems: undefined as unknown }
+    const failingSettings: TuiSettingsLike = {
+      get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }),
+      replace: () => { throw new Error('write failed') },
+    }
+    const applied: Array<{ footer: string }> = []
+    const runner: TuiCommandRunner = {
+      ctx, app, diag: {} as never,
+      get liveAgent() { return undefined },
+      ensureSession: async () => {},
+      get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
+      tuiSettings: failingSettings,
+      agents: {} as never,
+      sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+      sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
+      interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+      catalog: new DirectCatalogPort(ctx as never, () => undefined),
+      config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+      hostFile: new DirectHostFilePort(() => undefined),
+      commandRegistry: ctx.get('commands') as never,
+      cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
+      copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
+      prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+      signal: new AbortController().signal,
+      get sessionGeneration() { return 0 },
+      switchSession: async () => undefined,
+      transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+        await steps.prepare?.()
+        return { ok: true, next: await steps.create() }
+      },
+      currentPreset: () => undefined,
+      get pendingPreset() { return undefined },
+      set pendingPreset(_id: string | undefined) {},
+      get effectivePresetId() { return undefined },
+      refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
+      recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+      refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+      openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
+      sessionTransitionPending: () => false,
+      withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+      withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+      enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
+      applyFooterSettings: (d, savedCustomItems) => {
+        if (d === undefined) return
+        applied.push({ ...d })
+        if (d.footer === 'custom') {
+          app.setFooterPreset('full')
+          app.setFooterLayout(d.footerLayout as never)
+        }
+        syncRuntimeApply(runtime, app, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
+      },
+    }
+    registerTuiCommands(runner)
+    const def = commands.defs.find(entry => entry.name === 'footer')
+    await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+    await vt.waitForRender()
+    vt.sendInput('\r') // row
+    vt.sendInput('a') // add
+    vt.sendInput('no-match')
+    vt.sendInput('\x1b[B') // Create Custom Command
+    vt.sendInput('\r') // create-name
+    vt.sendInput('Pwn')
+    vt.sendInput('\r') // create-command
+    vt.sendInput(`touch ${marker}`)
+    vt.sendInput('\r') // create-refresh
+    vt.sendInput('\r') // create-timeout
+    vt.sendInput('\r') // create-tone
+    vt.sendInput('\r') // create with Auto
+    await vt.waitForRender()
+    vt.sendInput('\x1b') // row -> selector
+    await vt.waitForRender()
+    vt.sendInput('s') // save — the write FAILS
+    for (let spin = 0; spin < 50; spin += 1) await new Promise(resolve => setImmediate(resolve))
+    await vt.waitForRender()
+    // The configurator stays open with the draft intact; the marker must
+    // never exist — a failed save must never arm the new command.
+    assert.ok(vt.getViewport().join('\n').includes('Configure Footer'), 'the configurator must stay open after a failed save')
+    assert.equal(applied.length, 0, 'a failed write must not apply')
+    await spin(300)
+    assert.equal(existsSync(marker), false, 'a failed save must never execute the new command')
+  } finally {
+    runtime.dispose()
+    app.stop()
+  }
+})
+
+test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears only after save)', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pi-tui-noexec-ok-')
+  const marker = join(dir, 'pwn')
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  // The REAL runtime, synced exactly like the production
+  // applyFooterSettings: only a successful save's validated definitions
+  // can reach it.
+  const runtime = wireRuntimeApply(app)
+  try {
+    const commands = fakeCommands()
+    ctx.provide('commands', commands.service as never)
+    const settings = fakeSettings({ footer: 'default' })
+    ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
+    const applied: Array<{ footer: string; footerCustomItems?: unknown }> = []
+    const runner: TuiCommandRunner = {
+      ctx, app, diag: {} as never,
+      get liveAgent() { return undefined },
+      ensureSession: async () => {},
+      get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
+      tuiSettings: settings.value,
+      agents: {} as never,
+      sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+      sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
+      interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+      catalog: new DirectCatalogPort(ctx as never, () => undefined),
+      config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+      hostFile: new DirectHostFilePort(() => undefined),
+      commandRegistry: ctx.get('commands') as never,
+      cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
+      copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
+      prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+      signal: new AbortController().signal,
+      get sessionGeneration() { return 0 },
+      switchSession: async () => undefined,
+      transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+        await steps.prepare?.()
+        return { ok: true, next: await steps.create() }
+      },
+      currentPreset: () => undefined,
+      get pendingPreset() { return undefined },
+      set pendingPreset(_id: string | undefined) {},
+      get effectivePresetId() { return undefined },
+      refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
+      recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+      refreshStatus: () => {}, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+      openJobView: () => {}, openTasksBrowser: () => {}, openRewindPicker: () => {},
+      sessionTransitionPending: () => false,
+      withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+      withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+      enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
+      applyFooterSettings: (d, savedCustomItems) => {
+        if (d === undefined) return
+        applied.push({ ...d })
+        if (d.footer === 'custom') {
+          app.setFooterPreset('full')
+          app.setFooterLayout(d.footerLayout as never)
+        }
+        syncRuntimeApply(runtime, app, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
+      },
+    }
+    registerTuiCommands(runner)
+    const def = commands.defs.find(entry => entry.name === 'footer')
+    await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+    await vt.waitForRender()
+    vt.sendInput('\r') // row
+    vt.sendInput('a') // add
+    vt.sendInput('no-match')
+    vt.sendInput('\x1b[B') // Create Custom Command
+    vt.sendInput('\r') // create-name
+    vt.sendInput('Clock')
+    vt.sendInput('\r') // create-command
+    vt.sendInput(`touch ${marker}`)
+    vt.sendInput('\r') // create-refresh
+    vt.sendInput('\r') // create-timeout
+    vt.sendInput('\r') // create-tone
+    vt.sendInput('\r') // create with Auto
+    await vt.waitForRender()
+    // The draft exists and previews, but the marker must NOT exist yet.
+    await spin(300)
+    assert.equal(existsSync(marker), false, 'the draft must not execute before the save')
+    vt.sendInput('\x1b') // row -> selector
+    await vt.waitForRender()
+    vt.sendInput('s') // save
+    await vt.waitForRender()
+    for (let index = 0; index < 20; index += 1) await Promise.resolve()
+    assert.equal(applied.length, 1, 'the save must apply')
+    const saved = settings.doc.footerCustomItems as Array<{ id: string; kind: string; command: string }>
+    assert.ok(saved.some(item => item.id === 'user:Clock' && item.kind === 'command' && item.command === `touch ${marker}`),
+      'the settings document must persist the command definition')
+    assert.ok(app.getFooterCustomItems().some(item => item.id === 'user:Clock' && item.kind === 'command'),
+      'the app catalog must commit the command definition after a successful save')
+    // ONLY now may the command run: the runtime armed the saved definition.
+    const deadline = Date.now() + 8000
+    while (!existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
+    assert.equal(existsSync(marker), true, 'the command may execute ONLY after a successful save')
+  } finally {
+    runtime.dispose()
+    app.stop()
+  }
 })

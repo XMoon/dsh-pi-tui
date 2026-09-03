@@ -1,0 +1,221 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { TaskBrowserPanel, type TaskPanelItem } from '../src/task-panel.ts'
+
+const job = (value: string, status = 'running'): TaskPanelItem => ({
+  value,
+  label: value,
+  status,
+  active: status === 'running' || status === 'stopping',
+  source: 'job',
+  type: 'bash',
+  canStop: status === 'running' || status === 'stopping',
+  startedAt: Date.now(),
+  group: 'jobs',
+})
+
+test('Task Center explicit search owns printable keys and Esc exits search first', () => {
+  const actions: Array<[string, string]> = []
+  const panel = new TaskBrowserPanel([job('stop-me')], 10, {
+    mode: 'full',
+    enableSearch: true,
+    header: 'Tasks',
+    onStop: (value) => actions.push([value, 'stop']),
+  }, () => {}, () => {}, () => {})
+  panel.handleInput('/')
+  for (const key of 'issue') panel.handleInput(key)
+  assert.equal(panel.getFilter(), 'issue')
+  for (const key of ' stop') panel.handleInput(key)
+  assert.equal(panel.getFilter(), 'issue stop')
+  assert.deepEqual(actions, [])
+  panel.handleInput('\x1b')
+  assert.equal(panel.getFilter(), 'issue stop')
+  panel.dispose()
+})
+
+test('Task Center stop is capability-gated and confirmed', () => {
+  const actions: Array<[string, string]> = []
+  const panel = new TaskBrowserPanel([job('running'), job('done', 'completed')], 10, {
+    mode: 'full',
+    enableSearch: true,
+    header: 'Tasks',
+    onStop: (value) => actions.push([value, 'stop']),
+  }, () => {}, () => {}, () => {})
+  panel.handleInput('S')
+  assert.deepEqual(actions, [])
+  assert.match(panel.render(100).join('\n'), /confirm stop/i)
+  panel.handleInput('y')
+  assert.deepEqual(actions, [['running', 'stop']])
+  panel.dispose()
+})
+
+test('Quick Tasks retains active ancestor closure and exposes shared transition state', () => {
+  const parent: TaskPanelItem = {
+    value: 'agent:parent', label: 'parent', status: 'inactive', active: false,
+    source: 'subagent', type: 'subagent', depth: 1, hasChildren: true, group: 'subagents',
+  }
+  const child: TaskPanelItem = {
+    value: 'agent:child', label: 'child', status: 'running', active: true,
+    source: 'subagent', type: 'subagent', depth: 2, parentId: 'agent:parent', group: 'subagents',
+  }
+  let state: ReturnType<TaskBrowserPanel['getViewState']> | undefined
+  const panel = new TaskBrowserPanel([parent, child], 10, {
+    mode: 'quick', enableSearch: true, header: 'Tasks', onViewFull: next => { state = next },
+  }, () => {}, () => {}, () => {})
+  assert.deepEqual(panel.visibleItems().map(item => item.value), ['agent:parent', 'agent:child', 'task:view-all'])
+  assert.equal(panel.visibleItems()[0]!.ancestorContext, true)
+  panel.handleInput('t')
+  assert.equal(state?.scope, 'active')
+  assert.equal(state?.selectedId, 'agent:parent')
+  panel.dispose()
+})
+
+test('explicit search mode: Esc exits search first, a second Esc closes the panel', () => {
+  let cancelled = 0
+  const panel = new TaskBrowserPanel([job('running')], 10, {
+    mode: 'full', enableSearch: true, header: 'Tasks',
+  }, () => {}, () => { cancelled += 1 }, () => {})
+  panel.handleInput('/')
+  panel.handleInput('s')
+  assert.equal(panel.getFilter(), 's')
+  panel.handleInput('\x1b')
+  assert.equal(panel.getFilter(), 's', 'first Esc leaves search mode and keeps the query')
+  assert.equal(cancelled, 0)
+  panel.render(100)
+  panel.handleInput('\x1b')
+  assert.equal(cancelled, 1, 'second Esc (navigation mode) closes the panel')
+  panel.dispose()
+})
+
+test('responsive widths: list-only, inline detail, and two-column detail pane', () => {
+  const items: TaskPanelItem[] = [
+    { ...job('job:1'), label: 'build', detail: 'compile step' },
+    { value: 'agent:a', label: 'planner', status: 'running', active: true, source: 'subagent', type: 'subagent', depth: 1, group: 'subagents', canStop: true },
+  ]
+  for (const width of [60, 80, 100, 120, 160]) {
+    const panel = new TaskBrowserPanel(items, 10, {
+      mode: 'full', enableSearch: true, header: 'Tasks', groupLabels: true,
+    }, () => {}, () => {}, () => {})
+    const lines = panel.render(width)
+    assert.ok(lines.length > 0, `width ${width} must render`)
+    const plain = lines.join('\n')
+    if (width < 70) {
+      assert.ok(!plain.includes('Selected'), `width ${width}: list-only, no detail pane`)
+      assert.ok(!plain.includes('compile step'), `width ${width}: no inline detail below 70`)
+    } else if (width < 110) {
+      assert.ok(/kind\s+bash/.test(plain), `width ${width}: inline detail appears 70-109`)
+      assert.ok(/status\s+running/.test(plain), `width ${width}: inline detail carries status`)
+      assert.ok(!plain.includes('│ Selected'), `width ${width}: no two-column pane below 110`)
+    } else {
+      assert.ok(plain.includes('Selected'), `width ${width}: detail pane appears at 110+`)
+      assert.ok(plain.includes('│'), `width ${width}: pane separator rendered`)
+      assert.ok(plain.includes('kind      bash'), `width ${width}: job detail pane fields`)
+    }
+    panel.dispose()
+  }
+})
+
+test('Quick view-all pseudo-row carries no status tail (review round: cosmetic)', () => {
+  const panel = new TaskBrowserPanel([job('running')], 10, {
+    mode: 'quick', enableSearch: true, header: 'Tasks',
+  }, () => {}, () => {}, () => {})
+  const plain = panel.render(80).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
+  const row = plain.split('\n').find(line => line.includes('Open Task Center'))!
+  assert.ok(row.includes('Open Task Center · 0 agents · 1 job…'),
+    `pseudo-row present with separate agent/job counts:\n${plain}`)
+  assert.ok(!/Open Task Center[^\n]*completed/.test(row), `no completed tail:\n${row}`)
+  panel.dispose()
+})
+
+test('a stale restored type filter snaps to All instead of a dead view', () => {
+  const panel = new TaskBrowserPanel([job('running')], 10, {
+    mode: 'full', enableSearch: true, header: 'Tasks', initialTypeFilter: 'pwsh',
+  }, () => {}, () => {}, () => {})
+  const plain = panel.render(80).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(plain.includes('build') || plain.includes('running'), `restored type must not hide rows:\n${plain}`)
+  assert.ok(!plain.includes('[pwsh]'), `vanished type must not stay active:\n${plain}`)
+  panel.dispose()
+})
+
+test('acknowledge scope is the VIEWPORT, not the whole projection (PR review M1)', () => {
+  // 20 failures, Quick shows the attention projection with maxVisible 8:
+  // opening the browser acknowledges ONLY the first 8 (the ones actually
+  // rendered); the 12 below the fold keep their footer attention.
+  const failures: TaskPanelItem[] = Array.from({ length: 20 }, (_, i) => ({
+    value: `job:f${i}`, label: `failure ${i}`, status: 'failed', active: false, attention: true,
+    source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs',
+  }))
+  const panel = new TaskBrowserPanel(failures, 8, {
+    mode: 'quick', enableSearch: true, header: 'Tasks',
+  }, () => {}, () => {}, () => {})
+  assert.equal(panel.visibleItems().filter(item => item.kind !== 'view-full').length, 20,
+    'the projection holds every failure (plus the quick view-all pseudo-row)')
+  assert.equal(panel.viewportItems().length, 8, 'the viewport renders only maxVisible rows')
+  assert.deepEqual(panel.viewportItems().map(item => item.value),
+    Array.from({ length: 8 }, (_, i) => `job:f${i}`),
+    'the viewport is the scroll window from the top (the pseudo-row is beyond the fold)')
+  assert.ok(panel.viewportItems().every(item => item.attention === true), 'every visible row is an attention row')
+  panel.dispose()
+})
+
+test('scrolling new attention rows into view exposes them exactly once (PR review P1/P2)', () => {
+  // 20 failures in an 8-row viewport: the FIRST frame exposes the top 8,
+  // scrolling exposes the next rows — each row exactly once, and rows
+  // that scroll back out are never re-exposed.
+  const failures: TaskPanelItem[] = Array.from({ length: 20 }, (_, i) => ({
+    value: `job:f${i}`, label: `failure ${i}`, status: 'failed', active: false, attention: true,
+    source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs',
+  }))
+  const exposed: string[] = []
+  const panel = new TaskBrowserPanel(failures, 8, {
+    mode: 'full', enableSearch: true, header: 'Tasks',
+    onViewportExpose: ids => exposed.push(...ids),
+  }, () => {}, () => {}, () => {})
+  // First render: the top of the viewport is exposed.
+  panel.render(80)
+  assert.deepEqual(exposed, Array.from({ length: 8 }, (_, i) => `job:f${i}`))
+  // Scroll down row by row (the scroll window overlaps by maxVisible-1,
+  // so every cursor step admits exactly one NEW row into the viewport):
+  // each newly visible failure is exposed exactly once.
+  for (let step = 0; step < 12; step += 1) {
+    panel.handleInput('\x1b[B')
+    panel.render(80)
+  }
+  assert.deepEqual(exposed,
+    [...Array.from({ length: 8 }, (_, i) => `job:f${i}`), ...Array.from({ length: 5 }, (_, i) => `job:f${i + 8}`)],
+    'rows entering the viewport are exposed exactly once, in order')
+  // Scroll back to the top: previously-seen rows are never re-exposed.
+  for (let step = 0; step < 12; step += 1) {
+    panel.handleInput('\x1b[A')
+    panel.render(80)
+  }
+  assert.equal(exposed.length, 13, 'no re-exposure of already-seen rows')
+  panel.dispose()
+})
+
+test('a STABLE id re-entering failure is exposed again (P2 edge: id reuse)', () => {
+  // The runtime supports stable-id reuse: when the same job id exits the
+  // failure set and later re-enters it, that is a NEW attention event.
+  // The panel's seen-set must forget the old exposure accordingly.
+  const exposed: string[] = []
+  const panel = new TaskBrowserPanel([
+    { ...job('job:j1'), status: 'failed', active: false, attention: true },
+  ], 8, {
+    mode: 'full', enableSearch: true, header: 'Tasks',
+    onViewportExpose: ids => exposed.push(...ids),
+  }, () => {}, () => {}, () => {})
+  panel.render(80)
+  assert.deepEqual(exposed, ['job:j1'], 'first failure is exposed once')
+  // The job leaves the failure set (e.g. it is retried and now runs).
+  panel.setItems([{ ...job('job:j1') }])
+  panel.render(80)
+  assert.equal(exposed.length, 1, 'while not failing, no exposure happens')
+  // The SAME id fails again: a fresh attention event must re-expose it.
+  panel.setItems([
+    { ...job('job:j1'), status: 'failed', active: false, attention: true },
+  ])
+  panel.render(80)
+  assert.deepEqual(exposed, ['job:j1', 'job:j1'],
+    'the second failure of the same id must be exposed again (the runtime treats it as new)')
+  panel.dispose()
+})

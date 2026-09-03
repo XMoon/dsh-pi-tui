@@ -7,9 +7,24 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { UnstableInputRegistry } from '../src/extension/internal/unstable-input.ts'
 import type { UnstableRawInputEvent } from '../src/extension/unstable-types.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** A TuiApp with the unstable raw route wired to a fresh registry. */
 async function appWithUnstableRoute() {
@@ -24,6 +39,7 @@ async function appWithUnstableRoute() {
     unstableFailSafeRelease: () => registry.disposeAll(),
   })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   return { vt, app, registry }
 }

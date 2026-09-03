@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import {
   DSH_REPOSITORY,
   DEV_STATE_FILE,
@@ -30,6 +30,25 @@ import {
 const SHA = 'a'.repeat(40)
 const VERSION = '0.1.2-alpha.1'
 
+// Git repository-local environment variables. When this test file runs
+// inside a git-invoked context (a pre-push hook) or a CI job that exports
+// them, they leak into EVERY spawned `git` command — including the ones
+// scripts/ spawn internally and the worker subprocesses — and redirect
+// them to the OUTER repository instead of the fixture. The fixture must
+// be hermetic: strip them process-wide so `git -C <fixture>` always
+// operates on the fixture alone.
+const GIT_REPO_LOCAL_ENV = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_PREFIX',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_NAMESPACE',
+  'GIT_COMMON_DIR',
+]
+for (const name of GIT_REPO_LOCAL_ENV) delete process.env[name]
+
 function packageJson() {
   return {
     name: 'dev-environment-fixture',
@@ -43,8 +62,8 @@ function packageJson() {
   }
 }
 
-function fixture({ source = false } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-dev-environment-test-'))
+function fixture(life, { source = false, mode } = {}) {
+  const root = life.tempDir('dsh-dev-environment-test-')
   writeFileSync(join(root, 'package.json'), `${JSON.stringify(packageJson(), null, 2)}\n`)
   writeFileSync(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
   if (source) {
@@ -55,11 +74,23 @@ function fixture({ source = false } = {}) {
       expectedVersion: VERSION,
     })}\n`)
   }
+  if (mode !== undefined) {
+    // The resolver reads the mode policy at its tracked default path
+    // (test/compat/dsh-mode.json), unlike the source config which the
+    // tests pass explicitly.
+    mkdirSync(join(root, 'test', 'compat'), { recursive: true })
+    writeFileSync(join(root, 'test', 'compat', 'dsh-mode.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      mode,
+    })}\n`)
+  }
   return root
 }
 
 function git(cwd, args) {
-  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' })
+  const env = { ...process.env }
+  for (const name of GIT_REPO_LOCAL_ENV) delete env[name]
+  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env })
   assert.equal(result.status, 0, `${args.join(' ')} failed: ${result.stderr}`)
   return result.stdout.trim()
 }
@@ -73,8 +104,9 @@ function fakeNpmPackage(root, name, version) {
   symlinkSync(packageDirectory, link, 'dir')
 }
 
-test('development context defaults to npm without a source policy', () => {
-  const root = fixture()
+test('development context defaults to npm without a source policy', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   const context = resolveDshDevContext({ root, environment: { XDG_CACHE_HOME: join(root, 'cache') } })
   assert.equal(context.mode, 'npm')
   assert.equal(context.source, undefined)
@@ -87,7 +119,8 @@ test('development context defaults to npm without a source policy', () => {
   assert.equal(cacheRoot({ XDG_CACHE_HOME: join(root, 'cache') }), join(root, 'cache', 'dsh-pi-tui'))
 })
 
-test('root dependency verification warns while source environments override it', () => {
+test('root dependency verification warns while source environments override it', (t) => {
+  const life = testLifecycle(t)
   const workspace = readFileSync(new URL('../pnpm-workspace.yaml', import.meta.url), 'utf8')
   assert.match(workspace, /verifyDepsBeforeRun:\s*warn/u)
   const environment = sourceEnvironment({})
@@ -97,8 +130,8 @@ test('root dependency verification warns while source environments override it',
   assert.equal(official.PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN, 'false')
   assert.equal(official.pnpm_config_verify_deps_before_run, 'false')
 
-  const root = fixture()
-  const context = resolveDshDevContext({ root, mode: 'npm' })
+  const root = fixture(life)
+  const context = resolveDshDevContext({ root, mode: 'npm', environment: {} })
   bootstrapTest.writeDevelopmentEnvironment(context)
   const generated = readFileSync(context.envPath, 'utf8')
   assert.match(generated, /export DSH_DEV_ROOT=/u)
@@ -144,8 +177,9 @@ test('root dependency verification warns while source environments override it',
   }
 })
 
-test('source mode is selected by an exact source config and can be explicitly overridden', () => {
-  const root = fixture({ source: true })
+test('source mode is selected by an exact source config and can be explicitly overridden', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life, { source: true })
   const config = join(root, 'test-compat-dsh-source.json')
   const source = resolveDshDevContext({ root, config, environment: { XDG_CACHE_HOME: join(root, 'cache') } })
   assert.equal(source.mode, 'source')
@@ -154,7 +188,7 @@ test('source mode is selected by an exact source config and can be explicitly ov
   assert.equal(source.source.expectedVersion, VERSION)
   assert.equal(source.sourcePack, join(root, 'cache', 'dsh-pi-tui', 'source-packs', SHA))
 
-  const npm = resolveDshDevContext({ root, mode: 'npm', config: join(root, 'missing.json') })
+  const npm = resolveDshDevContext({ root, mode: 'npm', config: join(root, 'missing.json'), environment: {} })
   assert.equal(npm.mode, 'npm')
   assert.equal(npm.source, undefined)
 
@@ -166,15 +200,69 @@ test('source mode is selected by an exact source config and can be explicitly ov
   assert.equal(manual.sourceConfigPath, config)
 })
 
-test('generated source environment variables cannot cross worktrees', () => {
-  const mainRoot = fixture()
-  const nextRoot = fixture({ source: true })
+test('the tracked mode policy beats a generated DSH_DEV_MODE (branch flip self-heals)', (t) => {
+  const life = testLifecycle(t)
+  // A worktree whose bootstrap previously materialized SOURCE state
+  // (DSH_DEV_MODE=source in .dsh-dev-env) after the branch flipped its
+  // tracked policy to npm: the generated state must NOT override the
+  // policy, or doctor/bootstrap would keep re-materializing the stale
+  // source mode forever.
+  const root = fixture(life, { source: true, mode: 'npm' })
+  const config = join(root, 'test-compat-dsh-source.json')
+  const generated = {
+    DSH_DEV_ROOT: root,
+    DSH_DEV_MODE: 'source',
+    DSH_SOURCE_CONFIG: config,
+  }
+  const context = resolveDshDevContext({ root, environment: generated })
+  assert.equal(context.mode, 'npm', 'the tracked npm policy must win over the generated source state')
+  assert.equal(context.source, undefined)
+
+  // The reverse flip: policy says source, generated state says npm.
+  const sourceRoot = fixture(life, { source: true, mode: 'source' })
+  const sourceConfig = join(sourceRoot, 'test-compat-dsh-source.json')
+  const source = resolveDshDevContext({
+    root: sourceRoot,
+    environment: { DSH_DEV_ROOT: sourceRoot, DSH_DEV_MODE: 'npm', DSH_SOURCE_CONFIG: sourceConfig },
+  })
+  assert.equal(source.mode, 'source', 'the tracked source policy must win over the generated npm state')
+  assert.equal(source.source.ref, SHA)
+
+  // A USER override (DSH_MODE) still beats the tracked policy.
+  const overridden = resolveDshDevContext({
+    root,
+    environment: { ...generated, DSH_MODE: 'source' },
+  })
+  assert.equal(overridden.mode, 'source', 'DSH_MODE is a user override and stays authoritative')
+})
+
+test('DSH_DEV_MODE still works as the legacy fallback without a mode policy', (t) => {
+  const life = testLifecycle(t)
+  // Older checkouts / main have no dsh-mode.json: the generated
+  // DSH_DEV_MODE keeps its historical meaning.
+  const root = fixture(life, { source: true })
+  const config = join(root, 'test-compat-dsh-source.json')
+  const context = resolveDshDevContext({
+    root,
+    environment: { DSH_DEV_ROOT: root, DSH_DEV_MODE: 'source', DSH_SOURCE_CONFIG: config },
+  })
+  assert.equal(context.mode, 'source', 'without a mode policy the generated state remains the fallback')
+})
+
+test('generated source environment variables cannot cross worktrees', (t) => {
+  const life = testLifecycle(t)
+  const mainRoot = fixture(life)
+  const nextRoot = fixture(life, { source: true })
   const nextConfig = join(nextRoot, 'test-compat-dsh-source.json')
   const next = resolveDshDevContext({
     root: nextRoot,
     config: nextConfig,
     environment: { XDG_CACHE_HOME: join(nextRoot, 'cache') },
   })
+  // The inherited ephemeral generation must actually exist: a shell whose
+  // generation was reclaimed by another bootstrap self-heals instead of
+  // hard-loading the stale path (see the stale-distribution test below).
+  mkdirSync(next.sourcePack, { recursive: true })
   const generated = {
     DSH_DEV_ROOT: nextRoot,
     DSH_DEV_MODE: 'source',
@@ -201,8 +289,54 @@ test('generated source environment variables cannot cross worktrees', () => {
   assert.equal(owned.distribution, next.sourcePack)
 })
 
-test('generated durable source environments keep the canonical cache durable', () => {
-  const root = fixture({ source: true })
+test('a stale inherited ephemeral distribution self-heals to normal resolution', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life, { source: true })
+  const config = join(root, 'test-compat-dsh-source.json')
+  const cacheHome = join(root, 'cache')
+  const base = {
+    XDG_CACHE_HOME: cacheHome,
+    DSH_DEV_ROOT: root,
+    DSH_DEV_MODE: 'source',
+    DSH_SOURCE_CONFIG: config,
+    DSH_DEV_EPHEMERAL: '1',
+  }
+  // A long-lived shell still exports the generation another shell's
+  // bootstrap reclaimed: the stale path must be dropped (falling back to
+  // the committed state / canonical cache) instead of being hard-loaded.
+  const stalePath = join(cacheHome, 'gone-generation', 'pack')
+  const stale = resolveDshDevContext({
+    root,
+    config,
+    environment: { ...base, DSH_SOURCE_DISTRIBUTION: stalePath },
+  })
+  assert.equal(stale.distribution, undefined, 'a reclaimed ephemeral generation must not be hard-loaded')
+  assert.equal(stale.sourcePack, join(cacheHome, 'dsh-pi-tui', 'source-packs', SHA))
+
+  // An explicit --distribution argument stays authoritative even when the
+  // path does not exist — the operator asked for exactly that path.
+  const explicit = resolveDshDevContext({
+    root,
+    config,
+    distribution: stalePath,
+    environment: { XDG_CACHE_HOME: cacheHome },
+  })
+  assert.equal(explicit.distribution, stalePath)
+
+  // An inherited ephemeral generation that still exists stays provided.
+  const liveRoot = join(cacheHome, 'live-generation')
+  mkdirSync(liveRoot, { recursive: true })
+  const live = resolveDshDevContext({
+    root,
+    config,
+    environment: { ...base, DSH_SOURCE_DISTRIBUTION: liveRoot },
+  })
+  assert.equal(live.distribution, liveRoot)
+})
+
+test('generated durable source environments keep the canonical cache durable', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life, { source: true })
   const config = join(root, 'test-compat-dsh-source.json')
   const cacheHome = join(root, 'cache')
   const context = resolveDshDevContext({ root, config, environment: { XDG_CACHE_HOME: cacheHome } })
@@ -227,6 +361,9 @@ test('generated durable source environments keep the canonical cache durable', (
   assert.equal(loaded.distribution, undefined)
   assert.equal(loaded.sourcePack, context.sourcePack)
 
+  // An ephemeral-flagged environment keeps its distribution provided — but
+  // only while that generation actually exists on disk.
+  mkdirSync(context.sourcePack, { recursive: true })
   const explicit = resolveDshDevContext({
     root,
     config,
@@ -269,8 +406,9 @@ test('generated durable source environments keep the canonical cache durable', (
   assert.equal(doctorTest.stateMatches(loadedFromShell, state, loadedFromShell.sourcePack, '11.7.0'), undefined)
 })
 
-test('source config validation rejects non-pinned identities', () => {
-  const root = fixture()
+test('source config validation rejects non-pinned identities', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   const path = join(root, 'invalid.json')
   writeFileSync(path, JSON.stringify({
     schemaVersion: 1,
@@ -281,8 +419,9 @@ test('source config validation rejects non-pinned identities', () => {
   assert.throws(() => loadSourceConfig(path), /repository/u)
 })
 
-test('source identity rejects a checkout from the wrong repository', () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-source-identity-test-'))
+test('source identity rejects a checkout from the wrong repository', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-source-identity-test-')
   mkdirSync(join(root, 'apps', 'cli'), { recursive: true })
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-root', version: VERSION }))
   writeFileSync(join(root, 'apps', 'cli', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: VERSION }))
@@ -300,8 +439,9 @@ test('source identity rejects a checkout from the wrong repository', () => {
   }), /repository remote mismatch/u)
 })
 
-test('source identity rejects an incorrect root package name', () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-source-root-test-'))
+test('source identity rejects an incorrect root package name', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-source-root-test-')
   mkdirSync(join(root, 'apps', 'cli'), { recursive: true })
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@deepseek-ai/not-harness', version: VERSION }))
   writeFileSync(join(root, 'apps', 'cli', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: VERSION }))
@@ -319,8 +459,9 @@ test('source identity rejects an incorrect root package name', () => {
   }), /root package name mismatch/u)
 })
 
-test('doctor is read-only and reports an unmaterialized npm worktree', async () => {
-  const root = fixture()
+test('doctor is read-only and reports an unmaterialized npm worktree', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   const packageBefore = readFileSync(join(root, 'package.json'), 'utf8')
   const lockBefore = readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8')
   const { context, details } = await diagnoseDevelopmentEnvironment({
@@ -336,8 +477,9 @@ test('doctor is read-only and reports an unmaterialized npm worktree', async () 
   assert.equal(details.diagnostics.some(item => item.message.includes(DEV_STATE_FILE)), true)
 })
 
-test('doctor rejects a partial local state instead of treating it as ready', async () => {
-  const root = fixture()
+test('doctor rejects a partial local state instead of treating it as ready', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   const packageRoot = join(root, 'node_modules', '@deepseek-ai')
   mkdirSync(packageRoot, { recursive: true })
   for (const name of ['dsh-agent', 'dsh-tools']) {
@@ -351,18 +493,20 @@ test('doctor rejects a partial local state instead of treating it as ready', asy
   assert.match(details.diagnostics.map(item => item.message).join('\n'), /missing required fields/u)
 })
 
-test('source environment is a warning independent from materialization status', () => {
-  const root = fixture({ source: true })
-  const context = resolveDshDevContext({ root, config: join(root, 'test-compat-dsh-source.json') })
+test('source environment is a warning independent from materialization status', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life, { source: true })
+  const context = resolveDshDevContext({ root, config: join(root, 'test-compat-dsh-source.json'), environment: {} })
   const environment = doctorTest.sourceEnvironmentStatus(context, {})
   assert.equal(environment.ok, false)
   assert.match(environment.message, /not loaded/u)
   assert.equal(doctorTest.bestStatus([]), 'READY')
 })
 
-test('source state marked ephemeral is never accepted as durable READY state', () => {
-  const root = fixture({ source: true })
-  const context = resolveDshDevContext({ root, config: join(root, 'test-compat-dsh-source.json') })
+test('source state marked ephemeral is never accepted as durable READY state', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life, { source: true })
+  const context = resolveDshDevContext({ root, config: join(root, 'test-compat-dsh-source.json'), environment: {} })
   const state = {
     schemaVersion: 1,
     mode: 'source',
@@ -391,14 +535,16 @@ test('source state marked ephemeral is never accepted as durable READY state', (
     root,
     config: join(root, 'test-compat-dsh-source.json'),
     distribution: context.sourcePack,
+    environment: {},
   })
   const explicitResult = doctorTest.stateMatches(explicitContext, { ...state, ephemeral: false }, context.sourcePack, '11.7.0')
   assert.equal(explicitResult.status, 'STALE')
   assert.match(explicitResult.message, /must remain ephemeral/u)
 })
 
-test('an explicitly supplied canonical source pack remains provided and ephemeral', async () => {
-  const root = fixture({ source: true })
+test('an explicitly supplied canonical source pack remains provided and ephemeral', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life, { source: true })
   const sourcePack = join(root, 'cache', 'dsh-pi-tui', 'source-packs', SHA)
   const context = {
     root,
@@ -438,17 +584,21 @@ test('doctor checks the reachable source package set, not every packed package',
   assert.equal(result.problems.length, 0)
 })
 
-test('installed npm DSH versions must satisfy declared ranges', () => {
-  const root = fixture()
-  const context = resolveDshDevContext({ root })
+test('installed npm DSH versions must satisfy declared ranges', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
+  // Isolated environment: a CI source-mode job exports DSH_MODE=source, which
+  // must never leak into this npm-mode fixture's context resolution.
+  const context = resolveDshDevContext({ root, environment: {} })
   for (const name of ['dsh-agent', 'dsh-tools']) fakeNpmPackage(root, `@deepseek-ai/${name}`, '9.9.9')
   const result = inspectNpmResolution(context)
   assert.equal(result.problems.length, 2)
   assert.ok(result.problems.every(item => item.status === 'STALE' && /does not satisfy/u.test(item.message)))
 })
 
-test('npm resolution rejects a package symlink outside pnpm virtual store', () => {
-  const root = fixture()
+test('npm resolution rejects a package symlink outside pnpm virtual store', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   const packageRoot = join(root, 'node_modules', '@deepseek-ai')
   const outside = join(root, 'outside', 'dsh-agent')
   mkdirSync(outside, { recursive: true })
@@ -456,12 +606,13 @@ test('npm resolution rejects a package symlink outside pnpm virtual store', () =
   mkdirSync(packageRoot, { recursive: true })
   symlinkSync(outside, join(packageRoot, 'dsh-agent'), 'dir')
   fakeNpmPackage(root, '@deepseek-ai/dsh-tools', VERSION)
-  const result = inspectNpmResolution(resolveDshDevContext({ root }))
+  const result = inspectNpmResolution(resolveDshDevContext({ root, environment: {} }))
   assert.ok(result.problems.some(item => /pnpm virtual-store/u.test(item.message)))
 })
 
-test('source resolution rejects a fake path that only spoofs the tarball basename', () => {
-  const root = fixture()
+test('source resolution rejects a fake path that only spoofs the tarball basename', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   const fakePackage = join(root, 'fake-dsh-agent.tgz', 'node_modules', '@deepseek-ai', 'dsh-agent')
   mkdirSync(fakePackage, { recursive: true })
   writeFileSync(join(fakePackage, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-agent', version: VERSION }))
@@ -485,15 +636,16 @@ test('source pack rejects source identity changes after the build', () => {
   assert.equal(assertSourceIdentityUnchanged(before, before), before)
 })
 
-test('source pack staging is created beside the final output', () => {
-  const parent = mkdtempSync(join(tmpdir(), 'dsh-source-stage-test-'))
+test('source pack staging is created beside the final output', (t) => {
+  const life = testLifecycle(t)
+  const parent = life.tempDir('dsh-source-stage-test-')
   const staging = sourcePackTest.sourcePackStaging(parent)
   assert.equal(dirname(staging), parent)
-  rmSync(parent, { recursive: true, force: true })
 })
 
-test('source pack output keeps known auxiliary files and rejects unknown entries', () => {
-  const parent = mkdtempSync(join(tmpdir(), 'dsh-source-output-test-'))
+test('source pack output keeps known auxiliary files and rejects unknown entries', (t) => {
+  const life = testLifecycle(t)
+  const parent = life.tempDir('dsh-source-output-test-')
   const allowed = join(parent, 'allowed')
   mkdirSync(allowed)
   writeFileSync(join(allowed, 'publish-order.txt'), 'dsh\n')
@@ -506,12 +658,12 @@ test('source pack output keeps known auxiliary files and rejects unknown entries
   mkdirSync(unknown)
   writeFileSync(join(unknown, 'unexpected.log'), 'unexpected\n')
   assert.throws(() => sourcePackTest.cleanPackOutput(unknown), /unknown entry/u)
-  rmSync(parent, { recursive: true, force: true })
 })
 
-test('source pack refuses to overwrite an existing final output', () => {
-  const source = fixture()
-  const parent = mkdtempSync(join(tmpdir(), 'dsh-source-final-test-'))
+test('source pack refuses to overwrite an existing final output', (t) => {
+  const life = testLifecycle(t)
+  const source = fixture(life)
+  const parent = life.tempDir('dsh-source-final-test-')
   const output = join(parent, 'pack')
   mkdirSync(output)
   assert.throws(() => validateSourcePackOutput(output, source), /already exists/u)
@@ -519,19 +671,19 @@ test('source pack refuses to overwrite an existing final output', () => {
   const dangling = join(parent, 'dangling-pack')
   symlinkSync(join(parent, 'missing-pack'), dangling, 'dir')
   assert.throws(() => validateSourcePackOutput(dangling, source), /already exists/u)
-  rmSync(parent, { recursive: true, force: true })
 })
 
-test('source pack cache rejects a dangling symlink as an existing cache path', () => {
-  const root = fixture()
+test('source pack cache rejects a dangling symlink as an existing cache path', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   const dangling = join(root, 'cache')
   symlinkSync(join(root, 'missing-cache'), dangling, 'dir')
   assert.throws(() => bootstrapTest.existingCachePath(dangling), /must not be a symlink/u)
-  rmSync(root, { recursive: true, force: true })
 })
 
-test('Harness repository and worktree creation reject dangling symlinks', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-harness-path-test-'))
+test('Harness repository and worktree creation reject dangling symlinks', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-harness-path-test-')
   const cacheRoot = join(root, 'cache')
   mkdirSync(cacheRoot)
   const repositoryPath = join(cacheRoot, 'deepseek-harness.git')
@@ -555,7 +707,6 @@ test('Harness repository and worktree creation reject dangling symlinks', async 
     harnessCheckout: worktreePath,
     source: { ref: SHA, repository: DSH_REPOSITORY },
   }, {}), /real directory/u)
-  rmSync(root, { recursive: true, force: true })
 })
 
 test('dirty provided checkouts forward the explicit allow-dirty source-pack flag', () => {
@@ -569,8 +720,9 @@ test('dirty provided checkouts forward the explicit allow-dirty source-pack flag
   assert.deepEqual(bootstrapTest.sourcePackCommandArgs('/root/dsh-source-pack.mjs', '/tmp/harness', '/tmp/source.json', '/tmp/output', false).includes('--allow-dirty'), false)
 })
 
-test('dirty provided distributions are explicitly allowed only for ephemeral preparation', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-dirty-prepare-test-'))
+test('dirty provided distributions are explicitly allowed only for ephemeral preparation', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-dirty-prepare-test-')
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'minimal-source-fixture', private: true, packageManager: 'pnpm@11.7.0' }))
   writeFileSync(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
   writeFileSync(join(root, 'pnpm-workspace.yaml'), 'packages:\n- packages/*\n')
@@ -635,8 +787,9 @@ if (process.argv.includes('install')) {
   assert.match(rejected.stderr, /dirty or non-reproducible/u)
 })
 
-test('source distribution requires a positive reproducibility attestation', () => {
-  const root = fixture({ source: true })
+test('source distribution requires a positive reproducibility attestation', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life, { source: true })
   const directory = join(root, 'distribution')
   mkdirSync(directory)
   const manifest = {
@@ -651,8 +804,9 @@ test('source distribution requires a positive reproducibility attestation', () =
   assert.throws(() => validateSourceDistribution({ manifest, directory, requiredPackages: [] }), /positively attest/u)
 })
 
-test('source distribution rejects source-only dependency specs in package metadata', () => {
-  const root = fixture()
+test('source distribution rejects source-only dependency specs in package metadata', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   const staging = join(root, 'staging')
   const packageDirectory = join(staging, 'package')
   mkdirSync(packageDirectory, { recursive: true })
@@ -694,8 +848,9 @@ test('source distribution rejects source-only dependency specs in package metada
   }), /source leak/u)
 })
 
-test('source-pack lock waiters reuse a pack completed by the lock owner', async () => {
-  const root = fixture({ source: true })
+test('source-pack lock waiters reuse a pack completed by the lock owner', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life, { source: true })
   const config = join(root, 'test-compat-dsh-source.json')
   const context = resolveDshDevContext({ root, config, environment: { XDG_CACHE_HOME: join(root, 'cache') } })
   const helper = {
@@ -724,8 +879,9 @@ test('source-pack lock waiters reuse a pack completed by the lock owner', async 
   assert.equal(second.distribution.sourceSha, SHA)
 })
 
-test('different source SHAs have independent locks and worktree paths', async () => {
-  const root = fixture()
+test('different source SHAs have independent locks and worktree paths', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   const cache = join(root, 'cache')
   const configA = join(root, 'source-a.json')
   const configB = join(root, 'source-b.json')
@@ -749,8 +905,9 @@ test('different source SHAs have independent locks and worktree paths', async ()
   }
 })
 
-test('different SHA source locks remain independent across processes', async () => {
-  const root = fixture()
+test('different SHA source locks remain independent across processes', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   const cache = join(root, 'cache')
   const configA = join(root, 'source-a.json')
   const configB = join(root, 'source-b.json')
@@ -781,8 +938,9 @@ test('different SHA source locks remain independent across processes', async () 
   assert.equal(resultA.harnessRepository, resultB.harnessRepository)
 })
 
-test('different SHA workers create independent exact Git worktrees', async () => {
-  const root = fixture()
+test('different SHA workers create independent exact Git worktrees', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   const seed = join(root, 'harness-seed')
   mkdirSync(seed)
   git(seed, ['init', '-q'])
@@ -841,8 +999,9 @@ test('bootstrap timeout waits through the descendant-kill grace period', async (
   assert.ok(Date.now() - started >= 900)
 })
 
-test('shared source-pack cache rejects a dirty or non-reproducible manifest', () => {
-  const root = fixture({ source: true })
+test('shared source-pack cache rejects a dirty or non-reproducible manifest', (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life, { source: true })
   const config = join(root, 'test-compat-dsh-source.json')
   const context = resolveDshDevContext({ root, config, environment: { XDG_CACHE_HOME: join(root, 'cache') } })
   mkdirSync(context.sourcePack, { recursive: true })
@@ -856,8 +1015,9 @@ test('shared source-pack cache rejects a dirty or non-reproducible manifest', ()
   assert.match(cached.error.message, /clean and reproducible/u)
 })
 
-test('npm bootstrap repairs a missing package despite matching state hashes', async () => {
-  const root = fixture()
+test('npm bootstrap repairs a missing package despite matching state hashes', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixture(life)
   fakeNpmPackage(root, '@deepseek-ai/dsh-agent', VERSION)
   const pnpmScript = join(root, 'fake-pnpm.mjs')
   writeFileSync(pnpmScript, `#!/usr/bin/env node

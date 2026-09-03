@@ -32,6 +32,7 @@ export interface ImageRenderOptions {
 }
 
 let cachedCapabilities: TerminalCapabilities | null = null;
+let capabilityOverrides: Partial<TerminalCapabilities> = {};
 
 // Default cell dimensions - updated by TUI when terminal responds to query
 let cellDimensions: CellDimensions = { widthPx: 9, heightPx: 18 };
@@ -65,17 +66,17 @@ function probeTmuxHyperlinks(): boolean {
 	}
 }
 
-export function detectCapabilities(tmuxForwardsHyperlink: () => boolean = probeTmuxHyperlinks): TerminalCapabilities {
-	const termProgram = process.env['TERM_PROGRAM']?.toLowerCase() || "";
-	const terminalEmulator = process.env['TERMINAL_EMULATOR']?.toLowerCase() || "";
-	const term = process.env['TERM']?.toLowerCase() || "";
-	const colorTerm = process.env['COLORTERM']?.toLowerCase() || "";
+function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean): TerminalCapabilities {
+	const termProgram = process.env.TERM_PROGRAM?.toLowerCase() || "";
+	const terminalEmulator = process.env.TERMINAL_EMULATOR?.toLowerCase() || "";
+	const term = process.env.TERM?.toLowerCase() || "";
+	const colorTerm = process.env.COLORTERM?.toLowerCase() || "";
 	const hasTrueColorHint = colorTerm === "truecolor" || colorTerm === "24bit";
 	const isWindowsConsole = process.platform === "win32";
 
 	// Emit OSC 8 hyperlinks only when tmux confirms it forwards.
 	// Image protocols are unreliable under tmux, so leave `images: null`.
-	if (process.env['TMUX'] || term.startsWith("tmux")) {
+	if (process.env.TMUX || term.startsWith("tmux")) {
 		return { images: null, trueColor: hasTrueColorHint, hyperlinks: tmuxForwardsHyperlink() };
 	}
 
@@ -84,28 +85,28 @@ export function detectCapabilities(tmuxForwardsHyperlink: () => boolean = probeT
 		return { images: null, trueColor: hasTrueColorHint, hyperlinks: false };
 	}
 
-	if (process.env['KITTY_WINDOW_ID'] || termProgram === "kitty") {
+	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty") {
 		return { images: "kitty", trueColor: true, hyperlinks: true };
 	}
 
-	if (termProgram === "ghostty" || term.includes("ghostty") || process.env['GHOSTTY_RESOURCES_DIR']) {
+	if (termProgram === "ghostty" || term.includes("ghostty") || process.env.GHOSTTY_RESOURCES_DIR) {
 		return { images: "kitty", trueColor: true, hyperlinks: true };
 	}
 
-	if (process.env['WEZTERM_PANE'] || termProgram === "wezterm") {
+	if (process.env.WEZTERM_PANE || termProgram === "wezterm") {
 		return { images: "kitty", trueColor: true, hyperlinks: true };
 	}
 
 	// Warp supports the Kitty graphics protocol and OSC 8 hyperlinks.
-	if (termProgram === "warpterminal" || process.env['WARP_SESSION_ID'] || process.env['WARP_TERMINAL_SESSION_UUID']) {
+	if (termProgram === "warpterminal" || process.env.WARP_SESSION_ID || process.env.WARP_TERMINAL_SESSION_UUID) {
 		return { images: "kitty", trueColor: true, hyperlinks: true };
 	}
 
-	if (process.env['ITERM_SESSION_ID'] || termProgram === "iterm.app") {
+	if (process.env.ITERM_SESSION_ID || termProgram === "iterm.app") {
 		return { images: "iterm2", trueColor: true, hyperlinks: true };
 	}
 
-	if (process.env['WT_SESSION']) {
+	if (process.env.WT_SESSION) {
 		return { images: null, trueColor: true, hyperlinks: true };
 	}
 
@@ -135,14 +136,56 @@ export function detectCapabilities(tmuxForwardsHyperlink: () => boolean = probeT
 	return { images: null, trueColor: hasTrueColorHint, hyperlinks: false };
 }
 
+function parseBooleanCapabilityOverride(value: string | undefined): boolean | undefined {
+	return value === "1" ? true : value === "0" ? false : undefined;
+}
+
+export function detectCapabilities(tmuxForwardsHyperlink: () => boolean = probeTmuxHyperlinks): TerminalCapabilities {
+	const hyperlinks = parseBooleanCapabilityOverride(process.env.PI_HYPERLINKS);
+	const detected = detectCapabilitiesFromEnvironment(
+		hyperlinks === undefined ? tmuxForwardsHyperlink : () => hyperlinks,
+	);
+	const imageProtocol = process.env.PI_IMAGE_PROTOCOL?.toLowerCase();
+	const images =
+		imageProtocol === "kitty" || imageProtocol === "iterm2"
+			? imageProtocol
+			: imageProtocol === "none" || imageProtocol === "0"
+				? null
+				: undefined;
+	const trueColor = parseBooleanCapabilityOverride(process.env.PI_TRUE_COLOR);
+	return {
+		...detected,
+		...(images !== undefined ? { images } : {}),
+		...(trueColor !== undefined ? { trueColor } : {}),
+		...(hyperlinks !== undefined ? { hyperlinks } : {}),
+	};
+}
+
 export function getCapabilities(): TerminalCapabilities {
 	if (!cachedCapabilities) {
-		cachedCapabilities = detectCapabilities();
+		const hyperlinks = capabilityOverrides.hyperlinks;
+		cachedCapabilities = {
+			...detectCapabilities(hyperlinks === undefined ? undefined : () => hyperlinks),
+			...capabilityOverrides,
+		};
 	}
 	return cachedCapabilities;
 }
 
 export function resetCapabilitiesCache(): void {
+	cachedCapabilities = null;
+}
+
+/** Override selected auto-detected capabilities. */
+export function setCapabilityOverrides(overrides: Partial<TerminalCapabilities>): void {
+	if (
+		capabilityOverrides.images === overrides.images &&
+		capabilityOverrides.trueColor === overrides.trueColor &&
+		capabilityOverrides.hyperlinks === overrides.hyperlinks
+	) {
+		return;
+	}
+	capabilityOverrides = { ...overrides };
 	cachedCapabilities = null;
 }
 
@@ -351,7 +394,7 @@ export function getKittyImagePlacement(line: string): KittyImagePlacement | unde
 	if (!match || !metadata) return undefined;
 
 	let commandStart = match.index;
-	let commandControls = match[1]!;
+	let commandControls = match[1];
 	let transmissionEnd: number;
 	while (true) {
 		const terminator = line.indexOf("\x1b\\", commandStart + KITTY_PREFIX.length);
@@ -365,7 +408,7 @@ export function getKittyImagePlacement(line: string): KittyImagePlacement | unde
 		commandControls = line.slice(commandStart + KITTY_PREFIX.length, controlsEnd);
 	}
 
-	const controls = match[1]!
+	const controls = match[1]
 		.split(",")
 		.filter((control) => KITTY_PLACEMENT_CONTROL_KEYS.has(control.split("=", 1)[0] ?? ""));
 	const sequence = `\x1b_Ga=p,q=2,${controls.join(",")}\x1b\\`;
@@ -388,7 +431,7 @@ export function cropKittyImageLine(line: string, hiddenRows: number, visibleRows
 	const sourceY = Math.floor((metadata.heightPx * hiddenRows) / metadata.rows);
 	const sourceEnd = Math.ceil((metadata.heightPx * (hiddenRows + croppedRows)) / metadata.rows);
 	const sourceHeight = Math.max(1, Math.min(metadata.heightPx, sourceEnd) - sourceY);
-	const controls = match[1]!.split(",").filter((control) => !/^[yhr]=/.test(control));
+	const controls = match[1].split(",").filter((control) => !/^[yhr]=/.test(control));
 	controls.push(`y=${sourceY}`, `h=${sourceHeight}`, `r=${croppedRows}`);
 	return `${line.slice(0, match.index)}\x1b_G${controls.join(",")};${line.slice(match.index + match[0].length)}`;
 }
@@ -467,7 +510,7 @@ export function getJpegDimensions(base64Data: string): ImageDimensions | null {
 				continue;
 			}
 
-			const marker = buffer[offset + 1]!;
+			const marker = buffer[offset + 1];
 
 			if (marker >= 0xc0 && marker <= 0xc2) {
 				const height = buffer.readUInt16BE(offset + 5);
@@ -541,8 +584,8 @@ export function getWebpDimensions(base64Data: string): ImageDimensions | null {
 			return { widthPx: width, heightPx: height };
 		} else if (chunk === "VP8X") {
 			if (buffer.length < 30) return null;
-			const width = (buffer[24]! | (buffer[25]! << 8) | (buffer[26]! << 16)) + 1;
-			const height = (buffer[27]! | (buffer[28]! << 8) | (buffer[29]! << 16)) + 1;
+			const width = (buffer[24] | (buffer[25] << 8) | (buffer[26] << 16)) + 1;
+			const height = (buffer[27] | (buffer[28] << 8) | (buffer[29] << 16)) + 1;
 			return { widthPx: width, heightPx: height };
 		}
 

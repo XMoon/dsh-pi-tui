@@ -65,6 +65,7 @@ function makeHarness(): {
   commits(): readonly TaskBrowserRow[][]
   preferreds(): readonly (string | undefined)[]
   badges(): readonly ReadonlyArray<{ id: string; label: string }>[]
+  refreshStates(): readonly { state: 'loading' | 'ready' | 'stale'; error?: string }[]
   setKey(key: string | undefined): void
   setStatus(id: string, status: string | undefined): void
   setJobs(jobs: readonly TaskBrowserJobInput[]): void
@@ -82,6 +83,7 @@ function makeHarness(): {
   const commits: TaskBrowserRow[][] = []
   const preferreds: (string | undefined)[] = []
   const badges: ReadonlyArray<{ id: string; label: string }>[] = []
+  const refreshStates: { state: 'loading' | 'ready' | 'stale'; error?: string }[] = []
   const runtime = new TaskBrowserRuntime({
     currentKey: () => key,
     listDescendants: () => {
@@ -98,6 +100,7 @@ function makeHarness(): {
       preferreds.push(preferred)
     },
     commitBadge: (running) => badges.push([...running]),
+    commitRefreshState: (state, error) => refreshStates.push({ state, ...(error === undefined ? {} : { error }) }),
   })
   return {
     runtime,
@@ -105,6 +108,7 @@ function makeHarness(): {
     commits: () => commits,
     preferreds: () => preferreds,
     badges: () => badges,
+    refreshStates: () => refreshStates,
     setKey: (next) => { key = next },
     setStatus: (id, status) => { if (status === undefined) statuses.delete(id); else statuses.set(id, status) },
     setJobs: (next) => { jobs = [...next] },
@@ -299,6 +303,13 @@ test('Case D3: overlapping catalog refreshes commit in REQUEST order (epoch supe
   assert.equal(h.commits().length, 1, 'the superseded listing must not commit')
   assert.equal(h.runtime.has('child-new'), true, 'the cache must keep the newer membership')
   assert.equal(h.runtime.has('child-old'), false, 'the stale membership must never land')
+  // PR review P1 race: the superseded request must not strand the browser
+  // in loading — the LATEST-started request owns the token and must end it.
+  const states = h.refreshStates()
+  assert.equal(states[states.length - 1]!.state, 'ready',
+    'the final refresh state must be ready, never stuck in loading')
+  assert.ok(states.filter(state => state.state === 'ready').length >= 1,
+    'exactly the token-owning request sends ready')
 })
 
 test('Case D4: a FAILED newer request must not invalidate a valid older response', async () => {
@@ -401,18 +412,23 @@ const indexSource = readFileSync(
 )
 
 test('the runner wires agent/status to the membership-gated RUNTIME-only refresh', () => {
-  assert.ok(indexSource.includes("ctx.on('agent/status', ({ agent }) => {"),
+  assert.ok(indexSource.includes("ctx.on('agent/status', ({ agent, status }) => {"),
     'the runner must register the agent/status listener')
   assert.ok(indexSource.includes('if (taskRuntime?.has(agent.id) !== true) return'),
     'the listener must be membership-gated (main-agent flips must never repaint)')
   // The handler must route to the runtime-only refresh — a re-listing
   // here would defeat the whole split (and the membership gate).
-  const marker = "ctx.on('agent/status', ({ agent }) => {"
-  const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 400)
+  const marker = "ctx.on('agent/status', ({ agent, status }) => {"
+  const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 500)
   assert.ok(handler.includes('refreshAgentRuntimeOnly()'),
     'agent/status must refresh RUNTIME only, never refreshAgents()')
   assert.ok(!handler.includes('refreshAgents()'),
     'agent/status must never trigger a catalog re-listing')
+  // The MAIN agent's transitions route to the completion-notification
+  // controller (the settled boundary) BEFORE the child membership gate —
+  // children still never repaint and never notify.
+  assert.ok(handler.includes('completionController.onAgentStatus(agent.id, status)'),
+    'the main agent\'s status must feed the completion controller')
 })
 
 test('a session switch closes the open task browser, CLEARS the badge synchronously and resets the runtime coordinator', () => {
@@ -452,4 +468,130 @@ test('openTasksBrowser seeds the FIRST FRAME from the cached runtime and gates i
     'the interrupt execution gate must use isSubagentRowInterruptible')
   assert.ok(!open.replace(/\/\/.*$/gm, '').includes("row.mode !== 'continuable'"),
     'the interrupt execution gate must not drift back to a mode-only check')
+})
+
+test('Task Center dispatch re-validates session, driver and job state at confirm time (PR review P1)', () => {
+  const marker = 'const actionRow = (value: string, action: \'stop\' | \'interrupt\'): void => {'
+  const start = indexSource.indexOf(marker)
+  const handler = indexSource.slice(start, start + 4000)
+  // The STALE-CONFIRM fence must compare against values captured when the
+  // browser OPENED, never against values captured at dispatch — a
+  // dispatch-time capture can never differ from the current state, so the
+  // real protection is binding the intent to the opening surface.
+  assert.ok(handler.includes("sessionGeneration !== browserGeneration || liveAgent !== browserSession"),
+    'the dispatch must compare the current generation/session against the OPEN-time capture')
+  const openMarker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const openHead = indexSource.slice(indexSource.indexOf(openMarker), indexSource.indexOf(openMarker) + 900)
+  assert.ok(openHead.includes('const browserGeneration = sessionGeneration'),
+    'the browser must capture the generation at open')
+  assert.ok(openHead.includes('const browserSession = liveAgent'),
+    'the browser must capture the live agent at open')
+  assert.ok(!handler.includes('actionGeneration'),
+    'the dispatch must not re-capture the generation at dispatch time')
+  // A subagent stop re-reads the LIVE driver before firing the interrupt.
+  assert.ok(handler.includes("agents?.get(row.childId as SessionId)?.status !== 'running'"),
+    'the dispatch must re-check the live registry driver at confirm time')
+  // A job stop re-reads the current record through the public registry API.
+  assert.ok(handler.includes('jobs.get(row.jobId as JobId, browserSession)'),
+    'the dispatch must re-read the live job record before killing through the surface session')
+  assert.ok(handler.includes('!isActiveJobStatus(current.status)'),
+    'a settled job must not be killable at confirm time')
+})
+
+test('Esc from a promoted full view returns to Quick ONLY for the quick-opener stack (review round)', () => {
+  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
+  const cancelBlock = open.slice(open.indexOf("() => {"), open.indexOf('},', open.indexOf('() => {')) + 3)
+  assert.ok(cancelBlock.includes("viewMode === 'full' && restoreState !== undefined"),
+    'Esc must reopen Quick only when the full view was promoted from Quick')
+  assert.ok(cancelBlock.includes("openTasksBrowser('quick', state)"),
+    'the Esc path must restore the shared context into Quick')
+  assert.ok(cancelBlock.includes('quickTaskState'),
+    'Quick state must be carried across the promote/demote round-trip')
+})
+
+test('the Task Center surface never calls the consuming jobs read API (review round)', () => {
+  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
+  assert.ok(!open.includes('jobs.read('),
+    'the browser must never consume the model-owned job output cursor')
+  assert.ok(open.includes('jobs.get('),
+    'metadata reads through the public get API are the only job access the surface needs')
+})
+
+test('Case E: an old session listing rejecting never marks the NEW session browser stale (PR review P1)', async () => {
+  const h = makeHarness()
+  // Session A starts a catalog refresh (pending listing).
+  const aListing = h.runtime.refreshCatalog()
+  assert.ok(h.refreshStates().some(state => state.state === 'loading'),
+    'the request itself surfaces loading under session A')
+  // The session switches to B before A's listing settles.
+  h.setKey('g2:sess-b')
+  h.setStatus('child-a', 'running')
+  h.runtime.refreshRuntime() // B's browser seeds its first frame
+  // A's listing rejects AFTER B owns the surface.
+  const failure = new Error('session A listing boom')
+  h.rejectListing(0, failure)
+  await assert.rejects(aListing, failure)
+  // The fenced coordinator commits NO stale/ready state after the switch:
+  // loading was the only A-owned transition, and B's seed must NOT have
+  // been followed by a stale marker.
+  const afterSwitch = h.refreshStates()
+  assert.ok(!afterSwitch.some(state => state.state === 'stale'),
+    `the new session must never see the old listing's failure:\n${JSON.stringify(afterSwitch)}`)
+})
+
+test('Case E2: the SAME session listing failure still surfaces stale (the fenced path works)', async () => {
+  const h = makeHarness()
+  const listing = h.runtime.refreshCatalog()
+  h.rejectListing(0, new Error('same-session boom'))
+  await assert.rejects(listing, /same-session boom/)
+  assert.ok(h.refreshStates().some(state => state.state === 'stale' && state.error === 'same-session boom'),
+    'a same-session failure must surface the stale notice')
+})
+
+test('the runner never sets refresh state outside the runtime fence (PR review P1)', () => {
+  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
+  // The open-browser body is the ONLY owner of the panel: an unfenced
+  // onError calling activeTaskBrowser.setRefreshState would let a stale
+  // session's failure mark a NEW session's browser — the fence must be
+  // consulted for every loading/ready/stale commit.
+  assert.ok(!open.includes("onError: (error) => activeTaskBrowser?.setRefreshState?."),
+    'no unfenced setRefreshState may exist in the runner')
+  assert.ok(open.includes("commitRefreshState"),
+    'a fenced commitRefreshState binding must exist for the coordinator')
+})
+
+test('viewport exposure drives acknowledgement continuously, never whole-projection (PR review P1/P2)', () => {
+  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
+  // The runner wires the panel's first-time-viewport callback into the
+  // coordinator's acknowledge — not a one-shot whole-projection read.
+  assert.ok(open.includes('onViewportExpose: ids => runtime?.acknowledge(ids)'),
+    'the panel viewport-expose signal must drive the coordinator acknowledge')
+  assert.ok(!open.replace(/\/\/.*$/gm, '').includes('handle.viewportItems?.()'),
+    'no one-shot viewport ack may remain (the callback covers the first frame too)')
+})
+
+test('Case F: a cross-session overlap cannot strand the NEW session in loading (PR review P1)', async () => {
+  const h = makeHarness()
+  // Session A starts a catalog refresh; it stays pending.
+  const aListing = h.runtime.refreshCatalog()
+  // Session B takes over and its OWN refresh succeeds fully.
+  h.setKey('g2:sess-b')
+  h.setStatus('child-b', 'running')
+  const bListing = h.runtime.refreshCatalog()
+  h.settleListing(1, [child({ id: 'child-b' as SessionId, activity: 'running', depth: 1 })])
+  await bListing
+  const states = h.refreshStates()
+  assert.equal(states[states.length - 1]!.state, 'ready',
+    'session B must reach ready — session A must not hold its loading hostage')
+  // A settles LATE: state-silent (cross-session), and B stays ready.
+  h.settleListing(0, [child({ id: 'child-old' as SessionId, activity: 'running', depth: 1 })])
+  await aListing
+  assert.equal(h.runtime.has('child-b'), true, 'B keeps its membership')
+  assert.equal(h.runtime.has('child-old'), false, 'A never lands on B')
+  assert.equal(h.refreshStates()[h.refreshStates().length - 1]!.state, 'ready',
+    'A settling late must not move B off ready (never a stuck loading)')
 })

@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 import { StatusStore } from '../src/status/store.ts'
@@ -19,10 +19,25 @@ import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts
 type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -88,6 +103,7 @@ test('the custom layout renders the screenshot-like acceptance fixture', async (
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { statusStore: store })
   app.start()
+  startedApps.add(app)
   app.setStatus({
     model: 'deepseek-v4-flash',
     cwd: '/home/x/space4',
@@ -126,13 +142,16 @@ test('the custom layout renders the screenshot-like acceptance fixture', async (
   // The plan's screenshot-like line: model │ cwd │ context │ cache │
   // tokens │ performance │ version ... focus. The M2 items render the
   // structured facts (the plan's exact token spellings are formatter
-  // choices — the pi vocabulary applies, so 2000ms renders `2s`).
+  // choices — the pi vocabulary applies, so 2000ms renders `2s`). The
+  // row is width-pressured at 100 columns, so the low-importance
+  // performance item renders its compact form (`2s 40t/s`) — both recent
+  // facts (TTFB + throughput) survive.
   assert.ok(view.includes('deepseek-v4-flash'), `model missing:\n${view}`)
   assert.ok(view.includes('space4'), `project cwd missing:\n${view}`)
   assert.ok(view.includes('160k/1.0M (16%)'), `context missing:\n${view}`)
   assert.ok(view.includes('C 91.9%'), `cache-hit missing:\n${view}`)
   assert.ok(view.includes('2579/5507'), `token-usage missing:\n${view}`)
-  assert.ok(view.includes('2s 40 tok/s'), `performance missing:\n${view}`)
+  assert.ok(view.includes('2s 40t/s'), `performance missing:\n${view}`)
   assert.ok(view.includes('v0.3.3'), `version missing:\n${view}`)
   assert.ok(view.includes('focus'), `focus-mode missing:\n${view}`)
   app.stop()

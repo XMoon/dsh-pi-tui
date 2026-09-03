@@ -36,6 +36,11 @@ export class ScrollView extends Container {
 	private scrollbarActive = false;
 	private scrollbarHideTimer: NodeJS.Timeout | undefined;
 
+	/** Whether the content currently exceeds the viewport (scrolling is possible). (dsh-pi-tui divergence X028.) */
+	get canScroll(): boolean {
+		return this.contentHeight > this.currentViewportHeight;
+	}
+
 	constructor(component: Component, options: ScrollViewOptions = {}) {
 		super();
 		if (options.axis !== undefined && options.axis !== "vertical") {
@@ -54,11 +59,6 @@ export class ScrollView extends Container {
 
 	get scrollTop(): number {
 		return this.currentScrollTop;
-	}
-
-	/** Whether the content currently exceeds the viewport (scrolling is possible). */
-	get canScroll(): boolean {
-		return this.contentHeight > this.currentViewportHeight;
 	}
 
 	get isFollowingEnd(): boolean {
@@ -213,7 +213,7 @@ export class ScrollView extends Container {
 	 * Release the component's resources: the scrollbar hide timer and the
 	 * layout's render callback. Called by containers on removeChild/clear, so
 	 * a discarded ScrollView neither fires stray renders nor keeps the TUI
-	 * (and itself) alive through the timer closure.
+	 * (and itself) alive through the timer closure. (dsh-pi-tui divergence X007.)
 	 */
 	override dispose(): void {
 		this.hideTransientScrollbar();

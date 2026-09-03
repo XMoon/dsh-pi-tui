@@ -1,27 +1,29 @@
 /**
- * Headless tests for the startup compatibility gate: on a DeepSeek Harness
- * older than the minimum (dsh-v0.1.1-rc.1) the TUI must fail with an
- * ACTIONABLE message — the loader cannot even resolve the authorization row
- * the profile mounts on such a harness, and a raw ERR_MODULE_NOT_FOUND
- * stack would tell the user nothing. The gate prints the friendly message
- * first, then fails the startup row with the same text as its cause.
- * `--help` stays available on any harness (the action never runs).
+ * Headless tests for the startup compatibility notice: on a DeepSeek Harness
+ * older than the minimum (dsh-v0.1.2-alpha.4) the TUI prints ACTIONABLE
+ * upgrade/rollback guidance when it can prove the version, but does not make
+ * concurrent Loader ordering a hard startup contract. The 0.4 line has no
+ * 0.1.1 compatibility shim; the alpha.2/alpha.3 baseline falls back to the
+ * previous published 0.4 line. Future runtime lines are not rejected without
+ * evidence of a break. `--help` stays available on any harness (the action
+ * never runs).
  * @module @xmoon76/dsh-pi-tui/startup.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { apply as applyStartup, TUI_STARTUP_SERVICE, HARNESS_COMPAT, bundleVersionLabel, harnessCompatEntryFor, incompatibleHarnessMessage } from '../src/startup.ts'
 import { versionAtLeast } from '../src/dsh-version.ts'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** Point process.argv[1] at a fabricated @deepseek-ai/dsh package whose
  * version the launcher walk resolves. */
-function fakeLauncher(version: string): { restore: () => void } {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-startup-gate-'))
+function fakeLauncher(life: TestLifecycle, version: string): { restore: () => void } {
+  const root = life.tempDir('dsh-startup-gate-')
   const dshDir = join(root, 'node_modules', '@deepseek-ai', 'dsh')
   mkdirSync(join(dshDir, 'bin'), { recursive: true })
   writeFileSync(join(dshDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version }))
@@ -73,26 +75,29 @@ test('versionAtLeast compares prerelease identifiers the semver way', () => {
 
 // ── the gate itself ────────────────────────────────────────────────────────
 
-test('an older harness fails startup with the actionable message', () => {
-  const launcher = fakeLauncher('0.1.0-rc.8')
+test('an older harness gets actionable guidance without a hard Loader-ordering throw', (t) => {
+  const life = testLifecycle(t)
+  const launcher = fakeLauncher(life, '0.1.0-rc.8')
   const stderr = captureStderr()
   try {
     const ctx = new Context()
     ctx.provide('cmdlineArgs', { get: () => ['--session', 's1'] })
     ctx.provide('appExit', ((code: number) => { void code }) as never)
-    assert.throws(() => applyStartup(ctx), (error: Error) => error.message.includes('requires DeepSeek Harness 0.1.1-rc.1'))
-    assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined, 'the startup service must not be provided on an old harness')
+    assert.doesNotThrow(() => applyStartup(ctx), 'the advisory notice must not block concurrent profile mounting')
+    assert.equal((ctx.get(TUI_STARTUP_SERVICE) as { sessionId: string }).sessionId, 's1')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes(`running dsh 0.1.0-rc.8`), `stderr must name the installed version:\n${joined}`)
-    assert.ok(joined.includes('Upgrade dsh first'), `stderr must give the upgrade path:\n${joined}`)
+    assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.5'), `stderr must give the upgrade path:\n${joined}`)
+    assert.ok(joined.includes('npm install -g @xmoon76/dsh-pi-tui@0.3'), `stderr must give the rollback path:\n${joined}`)
   } finally {
     stderr.restore()
     launcher.restore()
   }
 })
 
-test('the minimum harness version starts normally and provides the service', () => {
-  const launcher = fakeLauncher('0.1.1-rc.1')
+test('the minimum harness version starts normally and provides the service', (t) => {
+  const life = testLifecycle(t)
+  const launcher = fakeLauncher(life, '0.1.2-alpha.4')
   const stderr = captureStderr()
   try {
     const ctx = mountStartup(['--session', 's1'])
@@ -105,13 +110,39 @@ test('the minimum harness version starts normally and provides the service', () 
   }
 })
 
-test('a newer harness line also starts normally', () => {
-  const launcher = fakeLauncher('0.1.1-rc.2')
+test('the previous alpha.3 floor is rejected by the minimum gate', (t) => {
+  const life = testLifecycle(t)
+  // The 0.4 minimum is >=0.1.2-alpha.4: the alpha.2/alpha.3 baseline is
+  // below the floor and must be refused with the previous-0.4-alpha
+  // fallback (the exact minimum-boundary regression — a future code drift
+  // that silently uses alpha.4-only APIs is easier to spot when the floor
+  // contract is pinned on both sides).
+  const launcher = fakeLauncher(life, '0.1.2-alpha.3')
+  const stderr = captureStderr()
   try {
-    const ctx = mountStartup([])
-    assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined)
+    const ctx = mountStartup(['--session', 's1'])
+    assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block concurrent profile mounting')
+    const joined = stderr.lines.join('')
+    assert.ok(joined.includes('running dsh 0.1.2-alpha.3'), `stderr must name the installed version:\n${joined}`)
+    assert.ok(joined.includes('DeepSeek Harness 0.1.2-alpha.4 or later'), `stderr must name the requirement:\n${joined}`)
+    assert.ok(joined.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.5'), `stderr must give the upgrade path:\n${joined}`)
+    assert.ok(joined.includes('npm install -g @xmoon76/dsh-pi-tui@0.4.0-alpha.1'), `stderr must give the 0.4-alpha fallback:\n${joined}`)
   } finally {
+    stderr.restore()
     launcher.restore()
+  }
+})
+
+test('the later alpha and 0.1.2 release line starts normally', (t) => {
+  for (const version of ['0.1.2-alpha.4', '0.1.2', '0.1.3']) {
+    const life = testLifecycle(t)
+    const launcher = fakeLauncher(life, version)
+    try {
+      const ctx = mountStartup([])
+      assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, `${version} should be supported`)
+    } finally {
+      launcher.restore()
+    }
   }
 })
 
@@ -136,23 +167,49 @@ test('incompatibleHarnessMessage is actionable and names both versions', () => {
   // hardcoded), so the assertion reads it the same way.
   const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
   assert.ok(message.includes(`dsh-pi-tui v${pkg.version}`), `must name the bundle version: ${message}`)
-  assert.ok(message.includes('DeepSeek Harness 0.1.1-rc.1 or later'), 'must name the requirement')
+  assert.ok(message.includes('DeepSeek Harness 0.1.2-alpha.2 or later'), 'must name the requirement')
   assert.ok(message.includes('0.1.0-rc.8'), 'must name the installed version')
-  assert.ok(message.includes('npm install -g @deepseek-ai/dsh@0.1.1-rc.1'), 'must give the upgrade command')
+  assert.ok(message.includes('npm install -g @deepseek-ai/dsh@0.1.2-alpha.5'), 'must give the upgrade command')
+  assert.ok(message.includes('npm install -g @xmoon76/dsh-pi-tui@0.3'), 'must give the compatible TUI pin command')
 })
 
 test('bundleVersionLabel falls back to the release line that imposed the requirement', () => {
-  assert.ok(bundleVersionLabel('0.3.0').startsWith('v'), `read version label: ${bundleVersionLabel('0.3.0')}`)
+  assert.ok(bundleVersionLabel('0.4.0-alpha.1').startsWith('v'), `read version label: ${bundleVersionLabel('0.4.0-alpha.1')}`)
 })
 
-test('harnessCompatEntryFor covers the incompatible range and lets newer lines through', () => {
-  const entry = HARNESS_COMPAT.find(candidate => candidate.max === '0.1.1-rc.1')
-  assert.ok(entry !== undefined, 'the pre-rc.1 entry must exist')
-  assert.equal(entry?.since, '0.3.0')
-  assert.equal(harnessCompatEntryFor('0.1.0-rc.8'), entry, 'rc.8 is incompatible')
-  assert.equal(harnessCompatEntryFor('0.1.0-rc.1'), entry, 'rc.1 is incompatible')
-  assert.equal(harnessCompatEntryFor('0.1.1-rc.1'), undefined, 'the floor itself is supported')
-  assert.equal(harnessCompatEntryFor('0.1.1-rc.2'), undefined)
-  assert.equal(harnessCompatEntryFor('0.1.1'), undefined)
+test('DSH peer ranges keep the lower-bound compatibility contract', () => {
+  const packageJson = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as {
+    peerDependencies?: Record<string, string>
+    devDependencies?: Record<string, string>
+  }
+  const dshPeers = Object.entries(packageJson.peerDependencies ?? {})
+    .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
+  assert.ok(dshPeers.length > 0, 'the bundle must declare DSH peers')
+  for (const [name, range] of dshPeers) {
+    assert.equal(range, '>=0.1.2-alpha.4', `${name} must use the lower-bound DSH compatibility contract`)
+    assert.ok(!range.includes('0.1.1'), `${name} must not claim DSH 0.1.1`)
+  }
+  for (const [name, version] of Object.entries(packageJson.devDependencies ?? {})) {
+    if (name.startsWith('@deepseek-ai/dsh')) {
+      assert.equal(version, '0.1.2-alpha.5', `${name} dev dependency must stay exact`)
+    }
+  }
+})
+
+test('harnessCompatEntryFor protects only the too-old runtime boundary', () => {
+  const preAlpha2 = HARNESS_COMPAT.find(candidate => candidate.max === '0.1.2-alpha.2')
+  assert.ok(preAlpha2 !== undefined, 'the pre-alpha.2 entry must exist')
+  assert.equal(preAlpha2?.since, '0.4.0-alpha.1')
+  const preAlpha4 = HARNESS_COMPAT.find(candidate => candidate.max === '0.1.2-alpha.4')
+  assert.ok(preAlpha4 !== undefined, 'the alpha.4 floor entry must exist')
+  assert.equal(preAlpha4?.min, '0.1.2-alpha.2', 'the alpha.4 entry covers only the alpha.2/alpha.3 baseline')
+  assert.equal(harnessCompatEntryFor('0.1.1-rc.2'), preAlpha2, 'the old runtime falls back to the 0.3 line')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.0'), preAlpha2, 'alpha.0 is below the floor')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.1'), preAlpha2, 'the previous alpha.1 floor falls back to the 0.3 line')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.2'), preAlpha4, 'the alpha.2 baseline falls back to the previous 0.4 alpha')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.3'), preAlpha4, 'the alpha.3 baseline falls back to the previous 0.4 alpha')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.4'), undefined, 'the floor itself is supported')
+  assert.equal(harnessCompatEntryFor('0.1.2'), undefined)
+  assert.equal(harnessCompatEntryFor('0.1.3'), undefined, 'future runtimes are not rejected without evidence')
   assert.equal(harnessCompatEntryFor('1.0.0'), undefined)
 })

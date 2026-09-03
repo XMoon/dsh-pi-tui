@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { describe, it } from "node:test";
+import { beforeEach, describe, it } from "node:test";
 import { HStack } from "../src/components/h-stack.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
 import { Text } from "../src/components/text.ts";
@@ -302,5 +302,71 @@ describe("viewport layout", () => {
 
 		assert.strictEqual(first.root.children[0]?.lines?.length, 1);
 		assert.strictEqual(second.root.children[0]?.lines?.length, 3);
+	});
+});
+
+// Re-vendor lifecycle follow-up P2: Stack.dispose() must clear its SECOND
+// `entries` layout representation together with Container.children, or the
+// fullscreen layout engine (which reads [LAYOUT_NODE]().entries) would keep
+// observing disposed children and the stack would keep referencing them.
+describe("Stack dispose clears both representations (X007 follow-up P2)", () => {
+	let disposeCount = 0;
+	const countingChild = {
+		render: () => ["child"],
+		invalidate: () => {},
+		dispose: () => {
+			disposeCount += 1;
+		},
+	};
+	beforeEach(() => {
+		disposeCount = 0;
+	});
+	// The layout entries mirror is the `entries` array the Stack feeds to
+	// [LAYOUT_NODE]().entries (the fullscreen engine's representation).
+	const layoutEntries = (stack: VStack | HStack): unknown[] =>
+		(stack as unknown as { entries: unknown[] }).entries;
+
+	it("VStack.dispose clears children AND the layout entries, disposing the child exactly once", () => {
+		const stack = new VStack([countingChild]);
+		assert.strictEqual(stack.children.length, 1);
+		assert.strictEqual(layoutEntries(stack).length, 1);
+
+		stack.dispose();
+		assert.strictEqual(disposeCount, 1, "the child is disposed exactly once");
+		assert.strictEqual(stack.children.length, 0, "Container.children must be cleared");
+		assert.strictEqual(layoutEntries(stack).length, 0, "the layout entries must be cleared too");
+	});
+
+	it("a repeated dispose is idempotent for both representations", () => {
+		const stack = new VStack([countingChild]);
+		stack.dispose();
+		stack.dispose();
+		assert.strictEqual(disposeCount, 1, "a repeated dispose must not dispose the child again");
+		assert.strictEqual(stack.children.length, 0);
+		assert.strictEqual(layoutEntries(stack).length, 0, "entries stay empty after a repeated dispose");
+	});
+
+	it("HStack.dispose clears the layout entries too", () => {
+		const stack = new HStack([countingChild]);
+		stack.dispose();
+		assert.strictEqual(disposeCount, 1);
+		assert.strictEqual(stack.children.length, 0);
+		assert.strictEqual(layoutEntries(stack).length, 0);
+	});
+
+	it("the fullscreen layout engine never re-layouts disposed stack children", () => {
+		const stack = new VStack([
+			{ component: countingChild, basis: 1, shrink: 0 },
+			{ component: new Text("gone", 0, 0), basis: 1, shrink: 0 },
+		]);
+		stack.dispose();
+		// The disposed stack renders an empty frame — its stale entries can
+		// no longer be observed/layouted by the fullscreen engine.
+		const frame = renderLayoutFrame(stack, 10, 4, () => {});
+		assert.deepStrictEqual(
+			frame.lines.map((line) => line.trimEnd()),
+			["", "", "", ""],
+			"the disposed stack must paint nothing",
+		);
 	});
 });

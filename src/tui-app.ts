@@ -41,6 +41,7 @@ import {
   wrapTextWithAnsi,
   type Component,
   type Focusable,
+  isFocusable,
   type OverlayHandle,
   type OverlayOptions,
   type SelectListTruncatePrimaryContext,
@@ -50,11 +51,13 @@ import {
   type TuiInputListenerResult,
   type KeyId,
 } from '@xmoon76/pi-tui'
+import { claimProcessTuiSlot, releaseProcessTuiSlot } from './process-tui-slot.ts'
 import { ImageThumbnail } from './components/media/image-thumbnail.ts'
 import {
   detectThemeFromBackground,
   detectThemeFromColorFgBg,
   editorTheme,
+  HOST_MARKDOWN_OPTIONS,
   markdownTheme,
   selectListTheme,
   settingsListTheme,
@@ -63,7 +66,9 @@ import {
   type ColorPalette,
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
-import { TaskBrowserPanel, type TaskPanelItem } from './task-panel.ts'
+import { ENABLE_FOCUS_REPORTING, isFocusReport } from './notification/terminal-focus.ts'
+import { TaskBrowserPanel, type TaskBrowserViewState, type TaskPanelItem } from './task-panel.ts'
+import type { TaskBrowserSummary } from './task-browser-runtime.ts'
 import type { StatusStore } from './status/store.ts'
 import type { AccessStatus, CompositionStatus, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
 import { deriveActivityStatus } from './status/derive-activity.ts'
@@ -106,6 +111,9 @@ import {
   GOAL_TOOL_NAMES,
   foldedResultSummaryFor,
   FOLDED_JSON_RESULT_TOOLS,
+  compactToolPresentation,
+  compactToolExpandedLines,
+  isCompactActionTool,
   focusToolDisplay,
   systemContextBody,
   toolCardHeader,
@@ -114,7 +122,8 @@ import {
   type ToolPresenter,
 } from './present.ts'
 import { TranscriptSearchComponent } from './search.ts'
-import { HistoryPanel } from './history-panel.ts'
+import { CompactTextPreview } from './compact-text-preview.ts'
+import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
@@ -145,6 +154,7 @@ import {
 } from './local-shell-card.ts'
 import type { RendererRegistry } from './renderer-registry.ts'
 import { OverlayBroker } from './overlay-broker.ts'
+import { EditorSeatMount } from './editor-seat.ts'
 import { EditorSeatHolder } from './editor-seat-holder.ts'
 import { TuiEditor } from './tui-editor.ts'
 import { serializeEditorInput, serializedDraftHasPayload, shellPrefixForMode, type EditorInputMode } from './editor-input-mode.ts'
@@ -231,6 +241,21 @@ export type CompactionPhase = 'idle' | 'summarizing' | 'applying'
 /** The indeterminate progress-bar frames shown while a compaction runs:
  * width 12 / block 3, the same visual weight as the footer context bar. */
 const COMPACTION_PROGRESS_FRAMES = indeterminateProgressFrames()
+/** The compact todo panel cap: at most this many rows before the panel
+ * gains a DISTINCT full state. With ≤ this many items the compact and
+ * full lists are visually identical, so the state machine skips the
+ * redundant full state entirely (summary ↔ list only). */
+export const TODO_COMPACT_LIMIT = 5
+/** The todo click-coalescing window: rapid clicks on the todo SEMANTIC
+ * target (dock summary + panel rows) within this window are treated as
+ * ONE gesture. The fullscreen layout MUTATES between the clicks — the
+ * first click on the dock summary opens the panel, the dock vanishes and
+ * the panel takes its rows — so Pi's word-based double-click detection
+ * (same row + same word range) cannot see the pair: the second click at
+ * the same coordinate lands on a panel row and immediately undoes the
+ * first (the todo "flashes and vanishes"). Matches Pi's
+ * DOUBLE_CLICK_INTERVAL_MS. */
+const TODO_CLICK_COALESCE_MS = 500
 /** Folded preview lines for tool results; mirrors pi's RESULT_PREVIEW_LINES. */
 export const RESULT_PREVIEW_LINES = 3
 /** Diff-body cap for default-view tool cards; mirrors kimi COMMAND_PREVIEW_LINES. */
@@ -378,6 +403,102 @@ class QuestionFrame extends Frame implements Focusable {
   private lastTermColumns = 0
 }
 
+/**
+ * A Frame that forwards the focused flag to its child (fork X042 / the
+ * IME cursor-marker contract): the fork sets `focused` only on the
+ * component it focuses directly — a plain Frame SWALLOWS the flag, so an
+ * Input-owning child behind it (HistoryPanel, SelectList's search box,
+ * SettingsList, TaskBrowserPanel) never emits the hardware CURSOR_MARKER
+ * and the IME candidate window misplaces itself. Forwarding is a no-op
+ * for non-Focusable children (plain dialogs).
+ */
+class FocusForwardingFrame extends Frame implements Focusable {
+  private readonly focusedChild: Component & Focusable | undefined
+  /** The RAW child: the frame OWNS it regardless of Focusable-ness (round-5
+   * review P2 — a non-Focusable panel behind the frame must still be
+   * disposed on overlay removal). */
+  private readonly ownedChild: Component
+  private disposed = false
+
+  constructor(child: Component, fillWidth = false) {
+    super(child, fillWidth)
+    this.ownedChild = child
+    this.focusedChild = isFocusable(child) ? (child as Component & Focusable) : undefined
+  }
+
+  get focused(): boolean {
+    return this.focusedChild?.focused ?? false
+  }
+
+  set focused(value: boolean) {
+    if (this.focusedChild !== undefined) this.focusedChild.focused = value
+  }
+
+  /**
+   * OWNING, idempotent dispose (X007): overlay removal (disposeOnHide)
+   * releases the panel behind the frame — the frame is the overlay entry,
+   * so the fork calls THIS, not the child. Idempotent so a close path
+   * that already disposed the child can never double-fire.
+   */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.ownedChild.dispose?.()
+  }
+}
+
+/** Geometry passed to a live responsive overlay frame. */
+interface ResponsiveOverlayGeometry {
+  width: number
+  maxHeight: number
+  key: string
+}
+
+/**
+ * A root-owned responsive overlay shell. The fork re-resolves percentage
+ * overlay options each frame, while this shell keeps a first-party frame's
+ * content width and row budget derived from the same current geometry. It
+ * centers a narrower design width inside the full-width overlay canvas, so
+ * no modal handle needs to be replaced during a resize (and its broker graph
+ * remains untouched).
+ */
+class ResponsiveOverlayFrame extends FocusForwardingFrame {
+  private readonly geometryOf: () => ResponsiveOverlayGeometry
+  private readonly onGeometry: ((geometry: ResponsiveOverlayGeometry) => void) | undefined
+  private lastGeometryKey = ''
+
+  constructor(
+    child: Component,
+    geometryOf: () => ResponsiveOverlayGeometry,
+    onGeometry?: (geometry: ResponsiveOverlayGeometry) => void,
+  ) {
+    super(child, true)
+    this.geometryOf = geometryOf
+    this.onGeometry = onGeometry
+    this.syncGeometry()
+  }
+
+  /** Re-run the geometry callback without scheduling a frame. */
+  syncGeometry(): ResponsiveOverlayGeometry {
+    const geometry = this.geometryOf()
+    if (geometry.key !== this.lastGeometryKey) {
+      this.lastGeometryKey = geometry.key
+      this.onGeometry?.(geometry)
+    }
+    return geometry
+  }
+
+  render(width: number): string[] {
+    const geometry = this.syncGeometry()
+    const availableWidth = Math.max(1, Math.floor(width))
+    const frameWidth = Math.max(1, Math.min(availableWidth, Math.floor(geometry.width)))
+    const lines = super.render(frameWidth)
+    if (frameWidth === availableWidth) return lines
+    const left = Math.max(0, Math.floor((availableWidth - frameWidth) / 2))
+    return lines.map(line => `${' '.repeat(left)}${line}${' '.repeat(Math.max(0, availableWidth - left - visibleWidth(line)))}`)
+  }
+}
+
 /** The session head card: identity facts, wrapped to the available width so
  * nothing is truncated, framed with a box whose width matches the editor's
  * border below it (a fixed-width rule looked misaligned next to the frame). */
@@ -473,13 +594,25 @@ class Spacer implements Component {
  * it), and resets the marquee. Zero fork divergence: the SelectList
  * itself is untouched, this wraps it on the consumer side.
  */
-class MarqueeFilterAdapter implements Component {
+class MarqueeFilterAdapter implements Component, Focusable {
   private readonly list: SelectList
   private readonly onFilterChange: () => void
+  private _focused = false
 
   constructor(list: SelectList, onFilterChange: () => void) {
     this.list = list
     this.onFilterChange = onFilterChange
+  }
+
+  /** Focusable (X042): forward to the wrapped SelectList so its search
+   * Input emits the hardware CURSOR_MARKER (IME positioning). */
+  get focused(): boolean {
+    return this._focused
+  }
+
+  set focused(value: boolean) {
+    this._focused = value
+    this.list.focused = value
   }
 
   invalidate(): void {
@@ -502,6 +635,9 @@ class MarqueeFilterAdapter implements Component {
     return this.list.render(width)
   }
 }
+
+/** SGR mouse reports (press/drag/release/wheel) — the alt screen owns them. */
+const MOUSE_SEQUENCE = /^\x1b\[<\d+;\d+;\d+[Mm]$/
 
 /**
  * The transcript surface's RIGHT GUTTER (the transcript right-gutter width contract):
@@ -581,8 +717,8 @@ export class TranscriptGutterComponent implements Component {
  * The prefixed output keeps a REFERENCE-STABLE cache: when the child
  * returns the same array instance (its own text+width cache hit) at the
  * same width, the wrapper returns the same prefixed array — so the fork's
- * per-frame processed-line reuse (fork AGENTS.md divergence 5) keeps
- * hitting on steady frames instead of re-normalizing every line.
+ * per-frame processed-line reuse (packages/pi-tui/DIVERGENCES.md X035)
+ * keeps hitting on steady frames instead of re-normalizing every line.
  */
 export class BulletedComponent implements Component {
   private readonly child: Component
@@ -638,7 +774,8 @@ export class BulletedComponent implements Component {
  * The EMPTY entry renders the bare title — never a fake "No reasoning"
  * row (plan §13.3). The output is REFERENCE-STABLE per width: the same
  * component + same width returns the same array instance, so steady
- * frames keep the fork's per-frame processed-line reuse.
+ * frames keep the fork's per-frame processed-line reuse (DIVERGENCES.md
+ * X035).
  */
 export class ThinkingCompactComponent implements Component {
   private readonly message: Extract<TranscriptMessage, { kind: 'thinking' }>
@@ -813,12 +950,70 @@ function capWrappedToMarker(text: string, width: number, budget: number): { text
   }
 }
 
+/**
+ * The state-free approval content surface. It rebuilds from the original
+ * request when the live width/height budget changes, while keeping the
+ * pending promise and modal handle untouched.
+ */
+class ApprovalDialogSurface implements Component {
+  private readonly request: ApprovalPromptRequest
+  private readonly geometryOf: () => ApprovalOverlayGeometry
+  private readonly build: (request: ApprovalPromptRequest, geometry: ApprovalOverlayGeometry) => Component
+  private cached: Component | undefined
+  private cacheKey = ''
+
+  constructor(
+    request: ApprovalPromptRequest,
+    geometryOf: () => ApprovalOverlayGeometry,
+    build: (request: ApprovalPromptRequest, geometry: ApprovalOverlayGeometry) => Component,
+  ) {
+    this.request = request
+    this.geometryOf = geometryOf
+    this.build = build
+  }
+
+  invalidate(): void {
+    this.cached?.invalidate?.()
+    this.cached = undefined
+    this.cacheKey = ''
+  }
+
+  render(width: number): string[] {
+    const geometry = this.geometryOf()
+    const contentWidth = Math.max(1, Math.floor(width))
+    const key = `${geometry.maxHeight}:${contentWidth}`
+    if (this.cached === undefined || this.cacheKey !== key) {
+      this.cached?.dispose?.()
+      this.cached = this.build(this.request, {
+        ...geometry,
+        contentWidth: Math.min(geometry.contentWidth, contentWidth),
+      })
+      this.cacheKey = key
+    }
+    return this.cached.render(contentWidth)
+  }
+
+  dispose(): void {
+    this.cached?.dispose?.()
+    this.cached = undefined
+  }
+}
+
 /** The live job-output viewer body: a title line + refreshable text panel. */
 class OutputViewerPanel implements Component {
   private readonly title: Text
   private readonly body: Text
   /** Key routing installed by openOutputViewer (Esc closes, `s` stops). */
   handleInput?: (data: string) => void
+  /** The refresh interval. The PANEL owns it (X007 ownership): final
+   * teardown (overlay disposeOnHide → FocusForwardingFrame.dispose →
+   * this.dispose) clears it even when the caller never invokes the
+   * closer — a ref'd interval must not outlive the surface. */
+  private timer: NodeJS.Timeout | undefined
+  private refresh: (() => string) | undefined
+  private requestRender: (() => void) | undefined
+  /** Latched by dispose(): an in-flight tick must not render. */
+  private disposed = false
 
   constructor(title: string, initial: string) {
     this.title = new Text(title, 0, 0)
@@ -834,6 +1029,31 @@ class OutputViewerPanel implements Component {
   setBody(text: string): void {
     this.body.setText(text)
     this.body.invalidate()
+  }
+
+  /** Start the refresh timer (openOutputViewer wires the live callbacks).
+   * The interval is unref'd so a viewer left open never blocks process
+   * exit by itself, and owned by THIS panel so the dispose chain stops
+   * it exactly once. */
+  startRefreshing(refresh: () => string, requestRender: () => void, intervalMs: number): void {
+    this.refresh = refresh
+    this.requestRender = requestRender
+    this.timer = setInterval(() => {
+      if (this.disposed) return
+      this.body.setText(this.refresh!())
+      this.body.invalidate()
+      this.requestRender!()
+    }, intervalMs)
+    this.timer.unref()
+  }
+
+  /** Stop the refresh timer (the overlay is closing / the surface dies). */
+  dispose(): void {
+    this.disposed = true
+    if (this.timer !== undefined) {
+      clearInterval(this.timer)
+      this.timer = undefined
+    }
   }
 
   render(width: number): string[] {
@@ -920,7 +1140,9 @@ export interface SubagentViewerTarget {
 }
 
 /** A semantic follow-up submit from the interactive subagent viewer: the
- * runner's write path is `ctx.subagents.followup(exactParent, …)`, NEVER
+ * runner's write path is the official `ctx.subagents.prompt(…)` human
+ * prompt (a distinct FIFO turn in the child's inbox), NEVER
+ * `ctx.subagents.sendMessage` (the Agent-authored Steer path) and never
  * the main-session submit/steer/queue path. */
 export interface SubagentViewerSubmit {
   readonly parentSessionId: string
@@ -1020,10 +1242,11 @@ export interface TuiAppEventsBase {
   /**
    * A follow-up submit from the INTERACTIVE subagent viewer (Enter while
    * viewing a `continuable` child): the runner delivers the text through
-   * `ctx.subagents.followup(exactLiveParent, childId, …)` — never the
-   * main-session submit/steer/queue path. The draft has ALREADY been
-   * cleared by the app; the runner restores it (merged) when the delivery
-   * is rejected, through the app's viewer-draft API. Optional.
+   * the official `ctx.subagents.prompt(…)` human prompt — never
+   * `subagents.sendMessage` and never the main-session submit/steer/queue
+   * path. The draft has ALREADY been cleared by the app; the runner
+   * restores it (merged) when the delivery is rejected, through the app's
+   * viewer-draft API. Optional.
    */
   onSubagentSubmit?: (request: SubagentViewerSubmit) => void
   /** Fullscreen mode changed (a fullscreen toggle or a settings-panel
@@ -1051,6 +1274,16 @@ export interface TuiAppEventsBase {
   onTranscriptMoveOlder?: (source: 'wheel' | 'page' | 'scrollbar') => boolean
   /** A fullscreen viewport reached the newer edge. */
   onTranscriptMoveNewer?: (source: 'wheel' | 'page' | 'scrollbar') => boolean
+  /**
+   * Prompt-turn navigation (fullscreen Ctrl+Up / Ctrl+Down): move the
+   * virtual transcript window exactly one turn older / newer. The host
+   * claims the fork's `previousPrompt`/`nextPrompt` keys BEFORE the fork's
+   * built-in OSC 133 scan (the DSH transcript emits no OSC 133 markers, so
+   * the fork scan is a permanent no-op — host wiring over X028's seam).
+   */
+  onTranscriptTurnOlder?: () => boolean
+  /** @see onTranscriptTurnOlder */
+  onTranscriptTurnNewer?: () => boolean
   /** Reset the active transcript window to the live tail. */
   onTranscriptJumpLatest?: () => boolean
   /**
@@ -1103,6 +1336,24 @@ export interface TuiAppEventsBase {
    * direct service seam, not a semantic action. Optional.
    */
   onTitleChanged?: () => void
+  /**
+   * A terminal focus report arrived (`CSI ? 1004` focus reporting:
+   * `ESC[I` = focused, `ESC[O` = unfocused). The host's focus tracker
+   * (completion notifications) observes the reports; the report itself
+   * is consumed HOST-side before the editor in regular mode, and passes
+   * through in fullscreen so the viewport listener's FOCUS_OUT
+   * selection cleanup runs (X036 × X043). Optional.
+   */
+  onTerminalFocus?: (focused: boolean) => void
+  /**
+   * Any REAL terminal input that is NOT a focus report arrived (before
+   * the raw stage and plugin routing — even a chunk a capture later
+   * consumes still proves the user is operating the terminal). The
+   * host's focus tracker restores 'focused' on user activity, so a
+   * missed FOCUS_IN can never leave the tracker believing the terminal
+   * is unfocused. Optional.
+   */
+  onUserInput?: () => void
 }
 
 /**
@@ -1141,6 +1392,21 @@ export interface ApprovalPromptRequest {
 
 /** Closed approval outcomes the user can produce at the prompt. */
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled'
+
+/** The live geometry budget for the approval overlay. */
+export interface ApprovalOverlayGeometry {
+  width: number
+  maxHeight: number
+  contentWidth: number
+}
+
+/** Derive approval geometry from the CURRENT terminal dimensions. */
+export function approvalOverlayGeometry(columns: number, rows: number): ApprovalOverlayGeometry {
+  const width = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 1
+  const height = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : 1
+  const maxHeight = Math.max(1, Math.min(height, 16, Math.max(8, height - 2)))
+  return { width, maxHeight, contentWidth: Math.max(1, width - 8) }
+}
 
 /** One todo entry as logged by todo/write; statuses and text verbatim. */
 export interface TodoItem {
@@ -1276,7 +1542,7 @@ export interface PickerOptions {
 
 /** Options for {@link TuiApp.openTaskBrowser}. */
 export interface TaskBrowserOptions {
-  /** Show a search input; typing filters rows by value/label/status/detail. */
+  /** Show explicit `/` search mode when true. */
   enableSearch?: boolean
   /** Title line above the rows (carries live counts). */
   header?: string
@@ -1284,16 +1550,41 @@ export interface TaskBrowserOptions {
   noMatchText?: string
   /** Pre-fill the search input. */
   initialQuery?: string
-  /** Overlay width in cells (default 72). */
-  width?: number
-  /** Overlay max height in rows (default 24). */
-  maxHeight?: number
+  /** Preserve explicit search-mode state during Quick/Full transitions. */
+  initialSearchMode?: boolean
+  /** Overlay width in cells, or a terminal-width percentage. */
+  width?: number | `${number}%`
+  /** Overlay max height in rows, or a terminal-height percentage. */
+  maxHeight?: number | `${number}%`
   /** Rows visible before the list scrolls (default 10). */
   maxVisible?: number
-  /** Row-level action (e.g. `i` = interrupt a subagent). Fires for the
-   * selected row while the search box is closed; the row value carries the
-   * picker identity (`agent:…` / `job:…`). */
+  /** Quick or full presentation mode. Omit for legacy picker behavior. */
+  mode?: 'quick' | 'full'
+  /** Whether Esc from full should return to a Quick Tasks parent. */
+  openedFrom?: 'quick' | 'command'
+  scope?: 'active' | 'all'
+  typeFilter?: string | null
+  expandedIds?: readonly string[]
+  collapsedIds?: readonly string[]
+  selectedId?: string
+  preferredValue?: string
+  /** Initial loading state while the runtime catalog is being fetched. */
+  loading?: boolean
+  /** Cached rows remain visible with this refresh failure. */
+  refreshError?: string
+  /** Use `Subagents / transcripts` and `Jobs / executions` group labels. */
+  groupLabels?: boolean
+  /** Re-list task data. */
+  onRefresh?: () => void
+  /** Quick Tasks → full Task Center transition. */
+  onViewFull?: (state: TaskBrowserViewState) => void
+  /** Legacy row-level action (`i` interrupt) for mode-less direct callers;
+   * the signature is unchanged so typed old embedders keep compiling. */
   onAction?: (value: string, action: 'interrupt') => void
+  /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
+  onStop?: (value: string) => void
+  /** First-time viewport exposure of attention rows (the ack signal). */
+  onViewportExpose?: (ids: readonly string[]) => void
 }
 
 /** Live control of an open picker. */
@@ -1312,6 +1603,13 @@ export interface PickerHandle {
   /** Categorized pickers only: switch to a category by id (re-running its
    * items factory). No-op on a plain picker. */
   setCategory?(id: string): void
+  /** The live search filter (the query the user sees/edits). */
+  getFilter?(): string
+  /** Set the live search filter programmatically (applies to the current
+   * rows; the search input follows). Callers deferring an initial query
+   * until real rows land use this so pre-row STATUS rows (loading,
+   * refusal) are never hidden behind a prefilled filter. */
+  setFilter?(filter: string): void
   /** Host-internal: drop the abort listener (the imperative select
    * broker's settle path — a settled promise must not retain the
    * listener on the caller's signal). */
@@ -1328,6 +1626,14 @@ export interface TaskBrowserHandle {
    * else the first active job; the tree itself never re-sorts for the
    * cursor). */
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void
+  /** Update loading/ready/stale state without replacing cached rows. */
+  setRefreshState?(state: 'loading' | 'ready' | 'stale', error?: string): void
+  /** Read the presentation state for a Quick → Full transition. */
+  getViewState?(): TaskBrowserViewState
+  /** Read projected rows for tests/embedders (the full projection). */
+  visibleItems?(): readonly TaskPanelItem[]
+  /** Read ONLY the rows the open viewport renders (the acknowledge scope). */
+  viewportItems?(): readonly TaskPanelItem[]
 }
 
 /** Footer status data supplied by the runner. */
@@ -1377,6 +1683,8 @@ interface PendingApproval {
   request: ApprovalPromptRequest
   resolve: (outcome: ApprovalOutcome) => void
   handle?: OverlayHandle
+  /** The live geometry wrapper behind the current approval handle. */
+  responsiveFrame?: ResponsiveOverlayFrame
   onAbort?: () => void
   /** Settled once: an abort and a user decision must not double-resolve. */
   settled?: boolean
@@ -1459,6 +1767,20 @@ export interface TuiAppOptions {
    * flash. Optional — absent keeps the vendor's OSC 52 fallback.
    */
   copySelection?: (text: string) => Promise<boolean>
+  /**
+   * Host-owned link activation for fullscreen OSC 8 clicks: the alt
+   * screen's mouse capture swallows the terminal's native click-to-open,
+   * so the host opens http/https URLs itself (src/open-url.ts). Optional
+   * — absent leaves fullscreen link clicks inert.
+   */
+  openExternalUrl?: (url: string) => void
+  /**
+   * Host-owned clipboard READ for the fullscreen right-click paste
+   * (native Windows terminals lose their right-click paste under mouse
+   * capture). Returns the clipboard text, or undefined when no backend
+   * exists. Optional — absent keeps right-click inert.
+   */
+  readClipboardText?: () => Promise<string | undefined>
   /**
    * The empty-editor double-Ctrl+C exit window in ms (issue #8);
    * injectable so headless tests never wait the real 1.5s. The footer
@@ -1658,6 +1980,11 @@ export class TuiApp {
   /** User-owned custom definitions. The active composer reads this source;
    * unsaved configurator drafts use a layered catalog instead. */
   private readonly footerCustomItems: FooterCustomItemCatalog
+  /** PR D: the committed custom command item cache (id → the first
+   * non-empty sanitized output line). The async runtime commits through
+   * setFooterCommandItemValue; the catalog's value source reads it
+   * SYNCHRONOUSLY during render — the render path never spawns. */
+  private readonly footerCommandItemValues = new Map<string, string>()
   /** The footer composer (M1): renders the active layout against the
    * snapshot. */
   private readonly footerComposer: FooterComposer
@@ -1675,13 +2002,29 @@ export class TuiApp {
   /** Latched by dispose(): after the final teardown, interactive
    * capabilities fail benignly instead of touching a dead terminal. */
   private disposed = false
+  /** Re-vendor lifecycle follow-up P3: whether this surface currently
+   * holds the process's single live-TUI slot (claimed at the first
+   * successful start, released only by the FINAL dispose — never by
+   * stop(); see start()/dispose()). */
+  private processTuiSlotClaimed = false
+  /** Re-vendor lifecycle follow-up P3 (review P2): the app's CURRENT
+   * effective editor submit keys (the builtin default until the
+   * HostKeybindingManager's construction callback populates them). The
+   * onEditorSubmitSync callback only caches here; committing to the
+   * process-global fork keybindings requires owning the process slot
+   * (see syncForkEditorSubmitKeys). */
+  private editorSubmitKeys: KeyId[] = ['enter']
   /**
    * The editor's SEAT (kimi's editorContainer): holds the editor normally,
    * the QuestionFrame while a question flow is active — so the dialog
    * renders in the editor's row position (full width, above the footer)
-   * instead of a centered modal that covered the transcript.
+   * instead of a centered modal that covered the transcript. The mount is
+   * NON-OWNING (re-vendor lifecycle follow-up P1): it only projects the
+   * current occupant — the EditorSeatHolder owns the replacement editor /
+   * compiled component lifecycle, the question flow state owns the
+   * QuestionFrame. Replacing the occupant never disposes it.
    */
-  private readonly editorSeat: Container
+  private readonly editorSeat: EditorSeatMount
   private readonly header: Text
   private readonly messagesView: Container
   private readonly footer: Text
@@ -1728,6 +2071,10 @@ export class TuiApp {
   /** Fullscreen click on the todo panel (or the panel's own expand verb):
    * whether the panel shows the FULL list or the compact five rows. */
   private todoExpanded = false
+  /** Until this timestamp, todo-target clicks are coalesced into the
+   * previous gesture (see {@link TODO_CLICK_COALESCE_MS}); a click on
+   * any OTHER target resets it. */
+  private todoClickCoalesceUntil = 0
   /** The todo panel Text; empty when hidden. */
   private readonly todoPanel: Text
   /**
@@ -1740,7 +2087,7 @@ export class TuiApp {
    * rendered only while a goal is set (display-only).
    */
   private readonly goalLine: Text
-  /** Active background tasks for the footer badge (label + status). */
+  /** Job records retained for the footer/runtime compatibility mirror. */
   private dockTasks: readonly { id: string; label: string; status: string; kind?: string }[] = []
   /** Live child subagents (continuable or running one-shot) for the footer badge (never jobs records). */
   private dockAgents: readonly { id: string; label: string; activity: string }[] = []
@@ -1755,6 +2102,17 @@ export class TuiApp {
 
   /** Whether any background task is running/stopping. */
   private tasksActive = false
+  /** Independent Task Center counts; footer consumes this through status. */
+  private taskSummary: TaskBrowserSummary = {
+    runningAgents: 0,
+    totalAgents: 0,
+    runningJobs: 0,
+    totalJobs: 0,
+    failedAttention: 0,
+    failedTotal: 0,
+  }
+  /** Legacy direct setters have no terminal totals; production runtime sets this. */
+  private taskSummaryRich = false
 
   /**
    * The seat currently owning keyboard focus, derived from the ACTUAL
@@ -1791,6 +2149,13 @@ export class TuiApp {
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
+  /** The fullscreen mouse-wheel step (transcript lines per wheel event).
+   * A Client runtime preference: the fork's `wheelScrollLines` is a
+   * constructor-time alt-screen option, so this value feeds the NEXT
+   * TuiAltScreen mount — a change while fullscreen is active applies on
+   * the next fullscreen re-entry (v1 semantics, never a private-field
+   * hack on the live alt screen). */
+  private wheelScrollLines = 1
   /** One shared in-flight autodetect; concurrent callers coalesce onto it
    * (overlapping OSC 11 queries would mis-pair replies by FIFO order). */
   private autoDetectInFlight: Promise<void> | undefined
@@ -1812,6 +2177,8 @@ export class TuiApp {
   private historyPanel: HistoryPanel | undefined
   /** The overlay handle of the history panel (hide() closes it). */
   private historyOverlay: OverlayHandle | undefined
+  /** The responsive shell survives a resize and a fullscreen screen swap. */
+  private historyResponsiveFrame: ResponsiveOverlayFrame | undefined
   /** Footer configurators own paste timers outside the generic overlay
    * disposal path; final surface disposal closes every still-open one. */
   private readonly footerConfiguratorClosers = new Set<() => void>()
@@ -1850,7 +2217,8 @@ export class TuiApp {
    * runner; consulted after host capturing flows + reserved keys). */
   private readonly advancedInputRoute: ((data: string) => 'consumed' | 'passed') | undefined
   /** Phase 3: the UNSTABLE raw input route (wired by the runner; consulted
-   * BEFORE terminal protocol decoding). */
+   * BEFORE Host semantic routing — after the terminal pipeline has
+   * reassembled and normalized the input; see UnstableRawInputEvent). */
   private readonly unstableInputRoute: ((data: string, surfaceId: string) => import('./extension/internal/unstable-input.ts').UnstableRawRouteResult) | undefined
   /** Phase 3: whether any raw capture is live (arms the fail-safe). */
   private readonly unstableInputsLive: (() => boolean) | undefined
@@ -1965,6 +2333,8 @@ export class TuiApp {
    * selection (tmux → platform helper → OSC 52); undefined keeps the
    * vendor's raw OSC 52 write. */
   private readonly copySelection: ((text: string) => Promise<boolean>) | undefined
+  private readonly openExternalUrl: ((url: string) => void) | undefined
+  private readonly readClipboardText: (() => Promise<string | undefined>) | undefined
   /**
    * P1-1: the renderer registry revision observed by the LAST render pass.
    * When the registry revision moves (a renderer registered/unloaded —
@@ -2197,8 +2567,15 @@ export class TuiApp {
     // PR C: user-owned definitions use the ordinary item registry and
     // composer path. The source is replaced atomically by
     // setFooterCustomItems(), so a malformed settings entry cannot reach the
-    // render callback.
+    // render callback. PR D: command items render ONLY the committed cache
+    // (the runtime's onValue sink) — no cache, no placeholder, no spawn.
     this.footerCustomItems = new FooterCustomItemCatalog()
+    this.footerCustomItems.setCommandValueSource({
+      value: (id) => {
+        const text = this.footerCommandItemValues.get(id)
+        return text === undefined ? undefined : { kind: 'value', text }
+      },
+    })
     this.footerItemRegistry.setCustomSource(this.footerCustomItems)
     this.footerComposer = new FooterComposer(this.footerItemRegistry)
     // F-17: an invalidation batch re-bakes the outlets; the host then
@@ -2266,22 +2643,33 @@ export class TuiApp {
       },
       // A user remap/disable of app.input.submit must REALLY move/remove
       // the editor's submission: the fork editor routes the submit key
-      // through its OWN tui.input.submit binding, so we sync the
-      // effective keys there (review finding — the editor path was
-      // previously physical-only and ignored user config). Empty = the
-      // action is disabled (no key submits; plain Enter becomes inert).
+      // through its OWN tui.editor.submit binding (X037 — deliberately NOT
+      // tui.input.submit: keybindings are process-global and a remap there
+      // would leak into every plain Input — search boxes, question
+      // free-text, pickers), so we sync the effective keys there. Empty =
+      // the action is disabled (no key submits; plain Enter becomes inert).
+      // tui.input.submit is reset to its builtin default in the same write:
+      // a pre-X037 instance (or test) may have left a remap behind.
       onEditorSubmitSync: (keys) => {
-        const kb = getKeybindings()
-        kb.setUserBindings({
-          ...kb.getUserBindings(),
-          'tui.input.submit': keys.length === 0 ? [] : keys.length === 1 ? keys[0]! : [...keys],
-        })
+        // Re-vendor lifecycle follow-up P3 (review P2): the callback only
+        // COMPUTES the app's effective submit keys. Committing them to
+        // the PROCESS-GLOBAL fork keybindings is restricted to the owner
+        // of the process slot — a mere CONSTRUCTED app must be
+        // read/compute-only, or the constructor of a second TuiApp would
+        // repaint the singleton (builtin 'enter') under a running app
+        // BEFORE the start() guard rejects it.
+        if (this.disposed) return
+        this.editorSubmitKeys = [...keys]
+        if (!this.processTuiSlotClaimed) return
+        this.syncForkEditorSubmitKeys()
       },
     })
     this.actionDispatcher = new AppActionDispatcher(this.buildActionHost())
     this.renderers = options.renderers
     this.editorRegistry = options.editorRegistry
     this.copySelection = options.copySelection
+    this.openExternalUrl = options.openExternalUrl
+    this.readClipboardText = options.readClipboardText
     this.overlayBroker = new OverlayBroker({
       question: () => this.activeQuestions,
       setFocusSeat: (seat) => this.setFocusSeat(seat),
@@ -2375,7 +2763,14 @@ export class TuiApp {
       // shell-mode draft round-trips through the viewer with its mode.
       const viewer = this.viewerMode
       if (viewer !== undefined && isViewerAccessInteractive(resolveViewerAccess(viewer.mode, viewer.access))) {
-        this.subagentDrafts.set(viewer.childSessionId, this.serializeSeatDraft(this.seatEditor().getText()))
+        // Paste markers must not outlive the live registry: a submit
+        // between mirror and restore clears it, orphaning the marker text
+        // (same class as the external-editor round-trip).
+        const draftSeat = this.seatEditor()
+        this.subagentDrafts.set(
+          viewer.childSessionId,
+          this.serializeSeatDraft(draftSeat.getExpandedText?.() ?? draftSeat.getText()),
+        )
       }
       // P1-11: every HOST-driven editor mutation notifies the seat
       // holder's subscribers (the fork Editor's own typing/editing flows
@@ -2402,10 +2797,18 @@ export class TuiApp {
       // Round-2 P1: a plugin editor's invalidate() recompiles its view and
       // swaps the child in the seat (the M4 compiler caches at
       // construction — a live plugin view needs a recompile to repaint).
+      // Re-vendor lifecycle follow-up P1: THE CAPTURE FENCE — while a
+      // question flow owns the seat, invalidate() may update the HOLDER's
+      // latest compiled component (state may update while captured) but
+      // must never touch the PHYSICAL seat (a remount would evict the
+      // QuestionFrame mid-flow; the latest component mounts on settle).
+      // An approval does NOT occupy the physical seat (it is a host
+      // overlay), so it is deliberately not fenced here — the ownership
+      // graph, not a blanket condition, decides (plan §2.4).
       viewSwap: (component) => {
         if (this.disposed) return
-        this.editorSeat.clear()
-        this.editorSeat.addChild(component)
+        if (this.activeQuestions !== undefined) return
+        this.editorSeat.replace(component)
         this.requestRender()
       },
       actionSink: (action) => {
@@ -2417,27 +2820,26 @@ export class TuiApp {
         // safety.
         switch (action) {
           case 'submit': {
-            const text = this.seatEditor().getText()
-            // Emptiness is judged on the SERIALIZED wire form: a bare `!`
-            // / `!!` shell mode has an empty BODY but a non-empty wire
-            // form, and must reach the existing protocol like the literal
-            // prefix did before the mode feature.
-            if (!serializedDraftHasPayload(this.serializeSeatDraft(text))) return false
+            // Emptiness is judged on the SERIALIZED (marker-expanded) wire
+            // form: a bare `!` / `!!` shell mode has an empty BODY but a
+            // non-empty wire form, and must reach the existing protocol
+            // like the literal prefix did before the mode feature.
+            if (!serializedDraftHasPayload(this.expandedSeatWireDraft())) return false
             this.submitDraft(false)
             return true
           }
           case 'queue-submit': {
-            const text = this.seatEditor().getText()
-            if (!serializedDraftHasPayload(this.serializeSeatDraft(text))) return false
+            if (!serializedDraftHasPayload(this.expandedSeatWireDraft())) return false
             this.submitDraft(true)
             return true
           }
           case 'steer': {
-            const text = this.seatEditor().getText()
             // The shell-editor-mode boundary, like the Ctrl+S path: the
             // wire form leaves the app (identity for a plugin editor,
             // whose document IS the wire form; defensive for a host seat).
-            const serialized = this.serializeSeatDraft(text)
+            // Paste markers are EXPANDED — the steer wire never carries
+            // registry-bound marker text.
+            const serialized = this.expandedSeatWireDraft()
             this.seatEditor().setText('')
             this.editorSeatHolder.notifyChanged()
             this.resetEditorMode()
@@ -2487,12 +2889,13 @@ export class TuiApp {
     // plugin can never touch the editor seat or the root layout.
     this.widgetsAbove = new Text('', 0, 0)
     this.widgetsBelow = new Text('', 0, 0)
-    this.editorSeat = new Container()
-    this.editorSeat.addChild(this.editor)
+    this.editorSeat = new EditorSeatMount()
+    this.editorSeat.replace(this.editor)
     // If a plugin editor already won the registry (registration before
     // the surface), hand off immediately. MUST run after editorSeat
     // exists — the handoff re-mounts the seat child (mountSeatChild
-    // clears/refills this.editorSeat).
+    // replaces this.editorSeat's occupant through the NON-owning mount;
+    // the previous occupant is never disposed by the seat).
     this.reconcileEditorWinner()
     // The working row sits between the todo panel and the editor seat so it
     // is always the row directly above the editor border (pi's
@@ -2539,12 +2942,158 @@ export class TuiApp {
     return this.handleInput(data)
   }
 
-  /** Enter raw mode and start rendering. */
-  start(): void {
-    this.tui.start()
+  /** Commit the app's CURRENT effective submit keys into the
+   * PROCESS-GLOBAL fork keybindings (`getKeybindings().setUserBindings` —
+   * X037: the fork editor routes the submit key through its OWN
+   * tui.editor.submit binding; `tui.input.submit` is reset to its builtin
+   * default in the same write so a pre-X037 instance/test remap cannot
+   * leak into every plain Input). Callable only while this surface owns
+   * the process slot (review P2: the singleton must never be repainted by
+   * a constructed-but-not-started or non-owning TuiApp). */
+  private syncForkEditorSubmitKeys(): void {
+    const kb = getKeybindings()
+    kb.setUserBindings({
+      ...kb.getUserBindings(),
+      'tui.input.submit': 'enter',
+      'tui.editor.submit': this.editorSubmitKeys.length === 0
+        ? []
+        : this.editorSubmitKeys.length === 1
+          ? this.editorSubmitKeys[0]!
+          : [...this.editorSubmitKeys],
+    })
   }
 
-  /** Leave raw mode and stop rendering. */
+  /** Enter raw mode and start rendering. Re-vendor lifecycle follow-up
+   * P3: starting also CLAIMS the process's single live-TUI slot (the fork
+   * keybindings are process-global) — a second concurrently live surface
+   * deterministically rejects here instead of silently sharing keybinding
+   * state. A stop() releases the slot, so start/stop round-trips (the
+   * external-editor suspend, tests) simply re-claim on the next start. */
+  start(): void {
+    // A disposed surface can never become live again (M0 — dispose is
+    // latched). Starting it would claim the process live-TUI slot with no
+    // release path left and poison the whole process (a later fresh app
+    // would be rejected forever); fail loudly instead of silently "not
+    // starting" (re-vendor lifecycle follow-up P3 review finding).
+    if (this.disposed) {
+      throw new Error('cannot start a disposed TuiApp')
+    }
+    const firstStart = !this.processTuiSlotClaimed
+    if (firstStart) {
+      claimProcessTuiSlot(`tui-${Date.now().toString(36)}`)
+      this.processTuiSlotClaimed = true
+      // Review P2: only NOW — after owning the process slot — may the
+      // app commit its effective submit keys into the process-global
+      // fork keybindings (the constructor and any pre-start rebuilds
+      // only cached them).
+      this.syncForkEditorSubmitKeys()
+    }
+    try {
+      this.tui.start()
+    } catch (error) {
+      // A throw must never leak the claimed slot (plan §11).
+      if (firstStart && this.processTuiSlotClaimed) {
+        this.processTuiSlotClaimed = false
+        releaseProcessTuiSlot()
+      }
+      throw error
+    }
+  }
+
+  /**
+   * The fullscreen right-click paste: read the clipboard through the
+   * host's platform policy, then feed the text to the FOCUSED component
+   * as a bracketed paste (both the fork Editor and plain Input understand
+   * the markers; their paste paths clean newlines). The feed bypasses
+   * routeInput deliberately — a synthetic paste is not user input, and
+   * the host ladder must not get a chance to consume it as a shortcut.
+   */
+  private rightClickPasteFromClipboard(): void {
+    const read = this.readClipboardText
+    if (read === undefined) return
+    // Capture the paste TARGET at right-click time (round-2 review P2):
+    // the clipboard read is async, and focus may move while it runs (a
+    // question closes, the user clicks the editor) — pasting into the
+    // CURRENT focus owner would drop the content into the wrong input.
+    // The screen identity is fenced too: a fullscreen toggle during the
+    // read swaps the active screen entirely.
+    const screen = this.activeScreen
+    const target = screen.getFocusedComponent()
+    if (target === null || target === undefined || target.handleInput === undefined) return
+    // Fire-and-forget through the owned-task entry (AGENTS.md hard rule —
+    // never a bare `void promise`): a clipboard-read failure is classified
+    // and logged, never an unhandled rejection; success feeds the paste.
+    this.events.runOwned?.('clipboard paste', async () => {
+      let text: string | undefined
+      try {
+        text = await read()
+      } catch {
+        return // best-effort: no backend / helper failure is user-invisible
+      }
+      if (text === undefined || text === '') return
+      // The right-click target must still be the focused component on the
+      // SAME screen — otherwise the paste is dropped (never misdirected).
+      if (this.disposed || this.activeScreen !== screen || screen.getFocusedComponent() !== target) return
+      // Call THROUGH the target — never cache the method: handleInput is a
+      // prototype method (TuiEditor/Input/FocusForwardingFrame) that reads
+      // `this`; a bare extracted call would run with this === undefined in
+      // strict mode and throw on the first access. The `!` is safe: the
+      // guard above plus the focus-identity re-check guarantee the method
+      // exists on the still-focused component.
+      target.handleInput!(`\x1b[200~${text}\x1b[201~`)
+      screen.requestRender()
+    }, { onCancel: () => {}, onError: () => {} })
+  }
+
+  /**
+   * MINIMAL suspend for the external-editor round-trip (Ctrl+G): stops
+   * ONLY the active screen — a fullscreen surface is stopped with
+   * `preserveScreen` (exit the alt buffer WITHOUT replaying the transcript
+   * into the main buffer; $EDITOR takes the terminal over) and its
+   * renderer INSTANCE survives, so {@link resumeFromExternalEditor} can
+   * re-enter the SAME fullscreen surface. This deliberately replaces the
+   * old `stop()/start()` pair, which dropped `this.fullscreen` entirely:
+   * returning from $EDITOR always landed on the regular screen (P2
+   * lifecycle violation — the external-editor round-trip is documented as
+   * a temporary transition INSIDE one surface generation). Questions,
+   * approvals, the busy indicator and extension registrations all survive
+   * the round-trip (they die only with dispose()).
+   */
+  private suspendForExternalEditor(): void {
+    this.keybindings.cancelLeader()
+    this.clearCtrlCExit()
+    this.lastEscapeAt = undefined
+    if (this.fullscreen !== undefined) {
+      this.fullscreen.stop({ preserveScreen: true })
+    } else {
+      this.tui.stop()
+    }
+  }
+
+  /**
+   * Re-enter the surface {@link suspendForExternalEditor} stopped. Focus
+   * is deliberately NOT reassigned: TuiBase keeps its focusedComponent
+   * across stop/start on the same instance, so whatever owned focus before
+   * the suspend (the seat editor, an active question's QuestionFrame, an
+   * approval overlay) still owns it — forcing the seat editor here would
+   * break a live question's modal focus and IME anchor.
+   */
+  private resumeFromExternalEditor(): void {
+    if (this.fullscreen !== undefined) {
+      this.fullscreen.start()
+      this.fullscreen.requestRender(true)
+    } else {
+      this.tui.start()
+      this.tui.requestRender(true)
+    }
+  }
+
+  /** Leave raw mode and stop rendering. The process live-TUI slot is
+   * deliberately NOT released here (review-loop round 2): a stopped-but-
+   * not-final-disposed surface is still a valid generation whose host
+   * keybinding manager keeps syncing into the PROCESS-GLOBAL fork
+   * keybindings — the slot is held until the FINAL dispose() (see
+   * process-tui-slot.ts). */
   stop(): void {
     this.clearNotify()
     // Issue #8: the exit-chord timer dies with the surface — a stopped
@@ -2558,8 +3107,8 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     this.lastEscapeAt = undefined
     this.working.dispose()
-    // Every pending question flow settles rejected: a stopped TUI must not
-    // leave askQuestions promises hanging forever.
+    // Every pending question flow settles rejected: a stopped TUI must
+    // not leave askQuestions promises hanging forever.
     this.cancelQuestionFlows()
     for (const dispose of this.schemeDisposers) dispose()
     this.schemeDisposers = []
@@ -2580,20 +3129,26 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    // The process live-TUI slot stays CLAIMED through the whole final
+    // teardown (review-loop round 2): every step below still owns the
+    // process-global keybinding namespace (the host keybinding manager
+    // syncs into it until dispose()). The slot is released LAST, only
+    // after the completed teardown — see the tail of this method.
     // The keybinding manager dies FIRST: every later teardown callback
     // (approval settles, extension/editor disposal) could rebuild the
     // keymap and schedule rendering — the disposed manager makes those
     // rebuilds inert (PR review finding).
     this.keybindings.dispose()
-    // Restore the fork's global submit binding to the builtin default:
+    // Restore the fork's global submit bindings to the builtin defaults:
     // the fork keybindings are PROCESS-GLOBAL, and a disposed surface
     // must not leak its remap/disable into a LATER TuiApp instance (PR
     // review finding — remap → stop → new app inherited ctrl+x/inert
     // Enter). The manager's constructor re-syncs the builtin default for
-    // a fresh instance too; this covers the no-new-instance case.
+    // a fresh instance too; this covers the no-new-instance case. Both
+    // the editor binding (X037) and the plain-Input default are restored.
     try {
       const kb = getKeybindings()
-      kb.setUserBindings({ ...kb.getUserBindings(), 'tui.input.submit': 'enter' })
+      kb.setUserBindings({ ...kb.getUserBindings(), 'tui.input.submit': 'enter', 'tui.editor.submit': 'enter' })
     } catch {
       // Best effort: the global keybindings may already be torn down.
     }
@@ -2614,17 +3169,12 @@ export class TuiApp {
     this.approvalQueue.length = 0
     if (this.activeApproval !== undefined) this.settleApproval(this.activeApproval, 'cancelled')
     this.disposeTrackedKeybindingEditors()
-    this.stop()
-    this.generation += 1
-    this.clearNotify()
-    if (this.notifyTimer !== undefined) {
-      clearTimeout(this.notifyTimer)
-      this.notifyTimer = undefined
-    }
-    this.terminalSchemeListeners.clear()
-    this.expandedOverride.clear()
-    this.disposeMessageComponents()
-    this.localMessages.length = 0
+    // Every physical overlay unmount happens BEFORE stop(): removing the
+    // last overlay writes hideCursor, and stop() ends with showCursor —
+    // the reverse order would leave the user's cursor hidden after exit
+    // (the same discipline the approval settles above already follow).
+    // This covers the plugin/advanced/unstable lease closes, the
+    // imperative broker settles and the broker's final disposeAll.
     for (const lease of this.extensionOverlayLeases) lease.close()
     this.extensionOverlayLeases.clear()
     // Phase 2: close every still-owned ADVANCED interactive overlay lease
@@ -2644,10 +3194,26 @@ export class TuiApp {
     this.pendingBrokerSettles.clear()
     // Footer configurators are wrapped in a generic Frame, whose removal
     // does not forward Component.dispose(); close their owned timers before
-    // the broker drops the physical overlay handles.
+    // the broker unmounts the physical overlay handles.
     for (const close of [...this.footerConfiguratorClosers]) close()
     this.footerConfiguratorClosers.clear()
-    this.overlayBroker.clear()
+    // FINAL teardown: physically unmount every still-tracked overlay
+    // (disposeOnHide releases the panels — OutputViewer's refresh
+    // interval, TaskBrowser's tick — exactly once) instead of merely
+    // forgetting the handles. A caller that never invoked its closer must
+    // not leave a ref'd interval firing into the disposed surface.
+    this.overlayBroker.disposeAll()
+    this.stop()
+    this.generation += 1
+    this.clearNotify()
+    if (this.notifyTimer !== undefined) {
+      clearTimeout(this.notifyTimer)
+      this.notifyTimer = undefined
+    }
+    this.terminalSchemeListeners.clear()
+    this.expandedOverride.clear()
+    this.disposeMessageComponents()
+    this.localMessages.length = 0
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
     this.searchOverlay = undefined
@@ -2666,6 +3232,18 @@ export class TuiApp {
     // subscribe, invalidate) becomes inert; a late plugin callback can no
     // longer mutate the seat or dispatch a real submission.
     this.editorSeatHolder.dispose()
+    // Re-vendor lifecycle follow-up P3 (review-loop round 2): release the
+    // process slot ONLY after the completed final teardown — the
+    // ownership covers the process-global keybinding namespace, which
+    // every step above (keybinding manager, extension host, editor
+    // holder) still owned while it ran. Deliberately NOT a finally: if
+    // the final teardown throws, the slot stays claimed (fail-closed — a
+    // half-torn-down surface must never be publicly replaceable by a new
+    // one; the process is dying anyway).
+    if (this.processTuiSlotClaimed) {
+      this.processTuiSlotClaimed = false
+      releaseProcessTuiSlot()
+    }
   }
 
   /** The surface generation (M0): stable across start/stop/fullscreen/
@@ -2813,10 +3391,27 @@ export class TuiApp {
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
-    // Phase 3: the UNSTABLE raw interception stage — BEFORE terminal
-    // protocol decoding (plan §4). A raw capture can see, consume or
-    // rewrite ANY chunk (Enter, Esc, Ctrl+C, paste, CSI-u, terminal-
-    // specific protocols). The Host emergency fail-safe is detected FIRST
+    // Terminal focus reports (CSI ? 1004 — ESC[I/ESC[O) are HOST-RESERVED:
+    // they bypass the unstable raw stage entirely (a raw capture can
+    // never consume, rewrite or starve them) and flow straight to the
+    // host decoder — the focus tracker observes them, and the
+    // screen-aware consumption (handleInputCore) keeps them out of the
+    // editor. They are NOT user activity: the tracker stays as reported.
+    if (isFocusReport(data)) {
+      return this.handleInputCore(data)
+    }
+    // Any REAL (non-focus-report) input proves the user is operating the
+    // terminal: restore the focus tracker to 'focused' BEFORE the raw
+    // stage and plugin routing — even a chunk a capture later consumes
+    // still proves user activity (a missed FOCUS_IN must not leave the
+    // tracker believing the terminal is unfocused).
+    this.events.onUserInput?.()
+    // Phase 3: the UNSTABLE raw interception stage — BEFORE Host
+    // semantic routing (plan §4), after the terminal pipeline has
+    // reassembled and normalized the input (see UnstableRawInputEvent).
+    // A raw capture can see, consume or rewrite any sequence that would
+    // otherwise reach the Host router (Enter, Esc, Ctrl+C, paste, CSI-u).
+    // The Host emergency fail-safe is detected FIRST
     // (host-owned, not rewritable by the Unstable API): triple-Esc within
     // the window releases every raw capture and closes every unstable
     // mount, restoring Host input. The fail-safe is armed only while
@@ -2840,6 +3435,12 @@ export class TuiApp {
       const outcome = this.unstableInputRoute(data, this.extensionHost?.surfaceId ?? 'tui')
       if (outcome.action === 'consume') return { consume: true }
       if (outcome.action === 'rewrite') {
+        // A rewrite INTO a focus-control sequence is refused: focus
+        // reports are HOST-reserved, and the tracker must never be
+        // spoofed into a false focus transition (a synthesized ESC[O
+        // could fire a completion notification while the user watches).
+        // The chunk is consumed — the editor never sees it either.
+        if (isFocusReport(outcome.data)) return { consume: true }
         // The rewritten chunk flows through the host's OWN processing AND
         // propagates to the focused component (the fork's listener-result
         // `data` field). Each terminal chunk passes the interception chain
@@ -2857,6 +3458,35 @@ export class TuiApp {
   /** The host's own input precedence ladder (the raw stage has already
    * run — see {@link handleInput}). */
   private handleInputCore(data: string): TuiInputListenerResult {
+    // MOUSE chunks bypass the host KEY ladder (X043): with the viewport
+    // listener now registered AFTER this router, the ladder sees mouse
+    // sequences first — and a question/approval handler consumes EVERY
+    // key, which would starve the alt screen's selection/click handling
+    // (fullscreen question clicks route through onCellClick, not keys).
+    // Fall through so the viewport listener owns the mouse, exactly as it
+    // did when it was registered first. (Unstable raw captures already ran
+    // BEFORE this point and still see every chunk.)
+    if (MOUSE_SEQUENCE.test(data) || (data.length === 6 && data.startsWith('\x1b[M'))) {
+      return undefined
+    }
+    // FOCUS reports (CSI ? 1004 — ESC[I/ESC[O) are handled HOST-SIDE,
+    // before the key ladder: they can never reach the keybinding
+    // manager, autocomplete or a host action. Screen-aware consumption
+    // (no vendor divergence — the host owns the focus-report
+    // lifecycle):
+    //   Regular — no viewport listener exists: consume here, so the
+    //     report never reaches the editor.
+    //   Fullscreen — pass through: the alt screen's viewport listener
+    //     owns FOCUS_OUT's selection cleanup, and per this fork's
+    //     existing X036 divergence it deliberately does NOT consume,
+    //     so the report keeps flowing to the focused component
+    //     afterwards (the editor ignores ESC-prefixed sequences — that
+    //     is the pre-existing X036 behavior, not a host guarantee).
+    if (data === '\x1b[O' || data === '\x1b[I') {
+      this.events.onTerminalFocus?.(data === '\x1b[I')
+      if (this.fullscreen !== undefined) return undefined
+      return { consume: true }
+    }
     // Kitty-protocol terminals report press, repeat, and release events as
     // separate sequences; the app must act on the PRESS only. A release of
     // Ctrl+O would otherwise double-toggle the fold (press expands, release
@@ -3065,9 +3695,8 @@ export class TuiApp {
       // - 'host' → the Host dispatcher (the only owner that may run the
       //   Host-private app.* actions);
       // - 'editor' → the FORK EDITOR executes (hostResolved: false — the
-      //   editor's tui.input.submit was synced by onEditorSubmitSync, so
-      //   the key really submits there with paste-burst/backslash-newline
-      //   semantics);
+      //   editor's tui.editor.submit was synced by onEditorSubmitSync, so
+      //   the key really submits there with backslash-newline semantics);
       // - 'plugin' → NEVER the AppActionDispatcher: a Stable plugin may
       //   only trigger the PUBLIC TuiAction set, and those execute
       //   through the router's plugin remainder (onExtensionAction).
@@ -3102,8 +3731,8 @@ export class TuiApp {
     // keybindings — an advanced plugin can preempt ordinary editor/panel
     // input, but never a Host question/approval/overlay or a fatal-recovery
     // shortcut (session safety stays Host-owned). The registry normalizes
-    // the raw chunk itself (the shared Host decoder); a consuming capture
-    // stops the event here.
+    // the input sequence itself (the shared Host decoder); a consuming
+    // capture stops the event here.
     if (this.advancedInputRoute !== undefined && this.advancedInputRoute(data) === 'consumed') {
       return { consume: true }
     }
@@ -3181,13 +3810,13 @@ export class TuiApp {
       return true
     }
     if (action === 'app.input.submit' && data !== '') {
-      // The fork editor OWNS the direct submit keys (paste-burst and
-      // backslash-newline semantics live in its tui.input.submit — the
+      // The fork editor OWNS the direct submit keys (backslash-newline
+      // semantics live in its tui.editor.submit — X037; the
       // effective keys are synced there by onEditorSubmitSync). The host
       // ladder never consumes a DIRECT submit key: resolving it here would
       // bypass the editor's full submit logic (PR review finding — a
       // remapped Ctrl+X submitted via submitDraft and skipped the
-      // backslash-newline/paste-burst handling). Fall through so the
+      // backslash-newline handling). Fall through so the
       // editor processes the key natively. The LEADER-activated submit
       // (data === '') is the exception: the leader machine already
       // consumed the completing key, so the host dispatches it.
@@ -3208,7 +3837,7 @@ export class TuiApp {
   /** Whether one raw input is the EFFECTIVE submit key (app.input.submit —
    * a user remap moves submission to the new key; Shift+Enter stays the
    * newline, never a submit). The fork editor owns the actual submit
-   * semantics (paste-burst / backslash-newline); this check drives the
+   * semantics (backslash-newline); this check drives the
    * HOST-owned seams that must mirror it: the continuable viewer's child
    * submit and the replacement-editor Enter forward. */
   private isSubmitKey(data: string): boolean {
@@ -3390,7 +4019,7 @@ export class TuiApp {
           // `!` / `!!` shell mode has an empty BODY but a non-empty wire
           // form, and must reach the queue protocol like the literal
           // prefix did before the mode feature.
-          if (!serializedDraftHasPayload(this.serializeSeatDraft(this.seatEditor().getText()))) return true
+          if (!serializedDraftHasPayload(this.expandedSeatWireDraft())) return true
         }
         this.submitDraft(forceQueue)
         return true
@@ -3404,8 +4033,7 @@ export class TuiApp {
         // editor buffer holds the bare command body, so the wire form is
         // re-serialized here (serializeSeatDraft) and the mode reset with
         // the draft.
-        const draft = this.seatEditor().getText()
-        const serialized = this.serializeSeatDraft(draft)
+        const serialized = this.expandedSeatWireDraft()
         this.seatEditor().setText('')
         this.editorSeatHolder.notifyChanged()
         this.resetEditorMode()
@@ -3619,7 +4247,7 @@ export class TuiApp {
           'tui.editor.deleteWordBackward', 'tui.editor.deleteWordForward',
           'tui.editor.deleteToLineStart', 'tui.editor.deleteToLineEnd',
           'tui.editor.yank', 'tui.editor.yankPop', 'tui.editor.undo',
-          'tui.input.newLine', 'tui.input.submit', 'tui.input.tab', 'tui.input.copy',
+          'tui.input.newLine', 'tui.editor.submit', 'tui.input.tab', 'tui.input.copy',
           'tui.select.up', 'tui.select.down', 'tui.select.pageUp', 'tui.select.pageDown',
           'tui.select.confirm', 'tui.select.cancel',
         ].some(binding => kb.matches(data, binding as never))
@@ -3657,7 +4285,11 @@ export class TuiApp {
    * @param options - overlay sizing/positioning.
    * @returns the handle; hide() also forgets the handle.
    */
-  private showOverlayOnHost(component: Component, options: OverlayOptions): OverlayHandle {
+  private showOverlayOnHost(
+    component: Component,
+    options: OverlayOptions,
+    ownership: { remountable?: boolean } = {},
+  ): OverlayHandle {
     // P1-09: never mount on a finally-disposed surface (the plugin lease
     // path guards earlier; this is the last-chance guard for every other
     // caller — a stopped screen's showOverlay would otherwise revive a
@@ -3668,7 +4300,16 @@ export class TuiApp {
     // M6: an overlay owns the focused component now — any pending leader
     // sequence is cancelled (focus-transition cancellation).
     this.keybindings.cancelLeader()
-    const handle = this.activeScreen.showOverlay(component, options)
+    // X007 ownership: by default an overlay entry OWNS its component —
+    // removal (hide) disposes it (panels stop their timers exactly once,
+    // via the owning frame or the component itself). REMOUNTABLE overlays
+    // (extension/advanced/unstable leases, re-mounted across fullscreen
+    // screen switches) opt out: their component must survive the screen's
+    // teardown; their lease owns the lifecycle instead.
+    const merged: OverlayOptions = ownership.remountable === true
+      ? { ...options, disposeOnHide: false }
+      : { disposeOnHide: true, ...options }
+    const handle = this.activeScreen.showOverlay(component, merged)
     // M8: the stacking graph + suspension rules live in the broker (plan
     // §13 — behavior identical; the existing modal-stacking tests gate
     // the extraction).
@@ -3695,17 +4336,22 @@ export class TuiApp {
   }
 
   /**
-   * Launch the external editor with the current draft. The TUI stops first
-   * (raw mode released) and restarts after the editor returns; a fullscreen
-   * mode is not restored (the editor session ends in regular mode).
+   * Launch the external editor with the current draft. The ACTIVE screen
+   * suspends first (raw mode released) and resumes after the editor
+   * returns — a fullscreen surface is PRESERVED across the round-trip
+   * (suspendForExternalEditor / resumeFromExternalEditor).
    *
    * SINGLE-FLIGHT: only ONE editor ownership exists at a time. The latch is
    * set synchronously at entry and cleared in the OUTERMOST `finally`, so
-   * no stage — draft read, stop, the editor round-trip, draft apply, start —
-   * can throw and leave the latch stuck: every terminal outcome (success,
-   * failure, cancellation, a restart failure) releases it, and a repeated
-   * Ctrl+G in the same input batch, a macro, or a direct caller can never
-   * start a second editor while one is pending.
+   * no stage — draft read, suspend, the editor round-trip, draft apply,
+   * resume — can throw and leave the latch stuck: every terminal outcome
+   * (success, failure, cancellation, a resume failure) releases it, and a
+   * repeated Ctrl+G in the same input batch, a macro, or a direct caller
+   * can never start a second editor while one is pending.
+   *
+   * The round-trip SUSPENDS the active screen (see
+   * suspendForExternalEditor) instead of stopping the app: a fullscreen
+   * surface is preserved across the editor and re-entered afterwards.
    */
   async launchExternalEditor(): Promise<void> {
     const open = this.events.openExternalEditor
@@ -3718,8 +4364,27 @@ export class TuiApp {
       // back through the decode — the user can switch `! ↔ !! ↔ prompt`
       // in $EDITOR and the mode follows. A plugin editor (no mode) keeps
       // identity.
-      const draft = this.serializeSeatDraft(this.seatEditor().getText())
-      this.stop()
+      // P1 (large-paste loss): expand fork paste markers BEFORE the text
+      // leaves the editor — the later restore clears the paste registry,
+      // so $EDITOR (and the re-staged draft) would otherwise keep only the
+      // literal `[paste #N +123 lines]` marker. Plugin editors without a
+      // registry fall back to getText().
+      const seat = this.seatEditor()
+      const draft = this.serializeSeatDraft(seat.getExpandedText?.() ?? seat.getText())
+      // Round-2 review P1: a PARTIALLY-applied suspend (screen state
+      // mutated, then stop() threw) must not leave the TUI permanently
+      // stopped — attempt a best-effort resume before propagating, so the
+      // outer latch release lands on a surface that still runs.
+      try {
+        this.suspendForExternalEditor()
+      } catch (suspendError) {
+        try {
+          this.resumeFromExternalEditor()
+        } catch {
+          // Best effort: the diagnostics path reports the original throw.
+        }
+        throw suspendError
+      }
       try {
         const next = await open(draft)
         if (this.disposed) return
@@ -3730,7 +4395,7 @@ export class TuiApp {
           this.editorSeatHolder.notifyChanged()
         }
       } finally {
-        if (!this.disposed) this.start()
+        if (!this.disposed) this.resumeFromExternalEditor()
       }
     } finally {
       this.externalEditorInFlight = false
@@ -3894,6 +4559,15 @@ export class TuiApp {
     return this.fullscreen !== undefined
   }
 
+  /** Set the fullscreen mouse-wheel step (transcript lines per wheel
+   * event) for the NEXT alt-screen mount. Defensive normalize; never
+   * reads Host settings — a pure Client runtime preference. The live
+   * alt screen keeps its constructor-time value until the next
+   * fullscreen re-entry (v1 semantics — the fork exposes no setter). */
+  setWheelScrollLines(lines: number): void {
+    this.wheelScrollLines = Number.isFinite(lines) ? Math.max(1, Math.floor(lines)) : 1
+  }
+
   /**
    * Enter or leave fullscreen (alt screen), reporting the change through
    * {@link TuiAppEvents.onFullscreenChange} so the host can persist it.
@@ -3907,6 +4581,7 @@ export class TuiApp {
     const active = this.fullscreen !== undefined
     if (enabled === active) return
     const pending = this.activeApproval
+    const history = this.historyPanel
     pending?.handle?.hide()
     this.disposeTrackedKeybindingEditors()
     // overlayHandles holds RAW handles (showOverlayOnHost stores them before
@@ -3928,6 +4603,10 @@ export class TuiApp {
       // click reaches us through its onCellClick callback so cards can be
       // expanded individually, exactly like a web disclosure row.
       const alt = new TuiAltScreen(this.terminal, undefined, undefined, {
+        // The fullscreen mouse-wheel step (Client preference): the fork
+        // reads it at construction, so a change while fullscreen is
+        // active applies on the next re-entry.
+        wheelScrollLines: this.wheelScrollLines,
         onCellClick: (x, y) => this.handleFullscreenClick(x, y),
         // Host transcript actions must win before the fork's own viewport
         // key handling. In particular, the fork's Ctrl+Shift+F search only
@@ -3935,6 +4614,16 @@ export class TuiApp {
         // Suppress the fork search key even after the host action is remapped
         // so an old default never silently re-enables rendered-line search.
         onBeforeViewportInput: (data) => {
+          // Prompt-turn navigation (X028 seam): claim the fork's prompt-nav keys
+          // before its built-in handler — the fork scans for OSC 133
+          // markers, which the DSH transcript never emits (a stable no-op);
+          // the host's virtual window owns the real turn boundaries.
+          if (getKeybindings().matches(data, 'tui.altScreen.previousPrompt')) {
+            return this.events.onTranscriptTurnOlder?.() === true
+          }
+          if (getKeybindings().matches(data, 'tui.altScreen.nextPrompt')) {
+            return this.events.onTranscriptTurnNewer?.() === true
+          }
           if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
             return this.events.onTranscriptJumpLatest?.() === true
           }
@@ -3954,6 +4643,22 @@ export class TuiApp {
         // helpers, OSC 52 last) replaces the vendor's raw OSC 52 write —
         // the alt screen never needs to understand tmux/SSH/Wayland/X11.
         copySelection: this.copySelection,
+        // Fullscreen mouse capture also swallows native OSC 8 link
+        // activation and (on Windows) the native right-click paste — the
+        // host owns both: the opener validates http/https and the paste
+        // reads the clipboard then feeds a bracketed paste to the focused
+        // component.
+        openUrl: this.openExternalUrl,
+        onRightClickPaste: this.readClipboardText === undefined ? undefined : () => {
+          this.rightClickPasteFromClipboard()
+        },
+        // X043: defer the viewport input listener so the host's single
+        // router (installed below) sees every normalized input sequence
+        // BEFORE the viewport consumes wheel/mouse events and semantic
+        // scroll keys — the unstable preHostInput contract
+        // ("see/consume/rewrite ANY sequence") and the host key ladder
+        // must observe the same stream on BOTH screens.
+        deferViewportListener: true,
       })
       // Fullscreen layout: header and todo pinned, the transcript scrolls in
       // the middle (grow), and the editor + footer stay pinned to the bottom
@@ -3973,8 +4678,10 @@ export class TuiApp {
         { component: this.paintProbe, shrink: 0 },
         { component: this.header, shrink: 0 },
         // grow is a stack-entry option: the transcript pane takes all the
-        // height the pinned rows leave behind.
-        { component: this.fullscreenScroll, grow: 1 },
+        // height the pinned rows leave behind. basis: 0 skips the pane's
+        // intrinsic-height measurement pass (the ScrollView's content
+        // height is irrelevant — grow fills whatever remains).
+        { component: this.fullscreenScroll, basis: 0, grow: 1 },
         { component: this.dock, shrink: 0 },
         { component: this.todoPanel, shrink: 0 },
         { component: this.goalLine, shrink: 0 },
@@ -3986,7 +4693,11 @@ export class TuiApp {
         { component: this.footer, shrink: 0 },
       ])
       alt.setLayoutRoot(root)
+      // Registration order IS dispatch order (X043): the host router goes
+      // in FIRST, then the viewport listener takes whatever the ladder
+      // did not consume.
       alt.addInputListener((data) => this.routeInput(data))
+      alt.installViewportListener()
       this.tui.stop()
       alt.start()
       // The alt screen starts with NO focused component: without this, every
@@ -4003,6 +4714,19 @@ export class TuiApp {
       this.fullscreen = undefined
       this.fullscreenScroll = undefined
       this.tui.start()
+      // The alt screen's stop disables focus reporting (?1004l rides the
+      // mouse-disable sequence). The main screen keeps needing focus
+      // events (the host's completion-notification tracker observes
+      // them), so re-assert the mode after the screen swap — the host
+      // owns ?1004 (enabled at TUI mount, disabled at exit). A
+      // synchronously broken stdout must never crash the input path
+      // (the async error path is already swallowed by the runner's
+      // guarded process.stdout listener).
+      try {
+        this.terminal.write(ENABLE_FOCUS_REPORTING)
+      } catch {
+        // A broken stdout degrades focus reporting silently.
+      }
       // Regular never re-reads a fullscreen per-card state: drop the
       // Thinking overrides a fullscreen click (or a search reveal)
       // created, so returning to fullscreen later starts from the bulk
@@ -4027,6 +4751,12 @@ export class TuiApp {
     this.remountExtensionOverlays()
     this.remountAdvancedOverlays()
     this.remountUnstableMounts()
+    // The old screen's raw history handle was removed above without
+    // disposing its remountable panel. Reattach that same stateful panel to
+    // the new screen before restoring any modal that sat above it.
+    this.historyOverlay = undefined
+    this.historyResponsiveFrame = undefined
+    if (history !== undefined) this.mountHistoryOverlay(history)
     if (pending !== undefined) this.renderApprovalDialog(pending)
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
@@ -4098,14 +4828,7 @@ export class TuiApp {
     if (this.historyPanel !== undefined) return
     if (this.historySearchSource === undefined) return
     if (this.disposed) return
-    const columns = this.terminal.columns
-    const rows = this.terminal.rows
-    // The overlay must NEVER exceed the terminal (plan §51): width/height
-    // are clamped to the real columns/rows (a 50×10 terminal must not
-    // request a 60×14 panel). The panel's row budget is the overlay's
-    // maxHeight minus the Frame's two border rows.
-    const width = Math.min(columns - 2, Math.max(20, Math.min(100, columns - 6)))
-    const maxHeight = Math.min(rows - 2, Math.max(8, Math.min(30, rows - 4)))
+    const geometry = historyOverlayGeometry(this.terminal.columns, this.terminal.rows)
     const panel = new HistoryPanel({
       source: this.historySearchSource,
       // Resolve the cwd at OPEN time (session switches move it): the
@@ -4117,7 +4840,7 @@ export class TuiApp {
       // the panel's whole lifetime (a switch while the panel is up keeps
       // the search stable; the next open re-resolves).
       sessionId: this.historySearchSessionId?.(),
-      maxRows: maxHeight - 2, // the Frame adds its two border rows
+      maxRows: geometry.panelRows,
       onResultsChanged: () => this.requestRender(),
       onAccept: (content) => {
         this.closeHistorySearch()
@@ -4130,16 +4853,42 @@ export class TuiApp {
     })
     panel.start()
     this.historyPanel = panel
-    this.historyOverlay = this.showOverlayOnHost(new Frame(panel), { width, maxHeight })
+    this.mountHistoryOverlay(panel)
+  }
+
+  /** Mount an existing history panel on the current physical screen. */
+  private mountHistoryOverlay(panel: HistoryPanel): void {
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const geometry = historyOverlayGeometry(this.terminal.columns, this.terminal.rows)
+      return {
+        width: geometry.width,
+        maxHeight: geometry.maxHeight,
+        key: `${geometry.width}:${geometry.maxHeight}:${geometry.panelRows}`,
+      }
+    }
+    const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
+      panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+    })
+    this.historyResponsiveFrame = frame
+    this.historyOverlay = this.showOverlayOnHost(
+      frame,
+      { width: '100%', maxHeight: '100%' },
+      { remountable: true },
+    )
   }
 
   /** Close the history panel (Esc/Ctrl+C, accept, surface dispose). */
   closeHistorySearch(): void {
-    if (this.historyOverlay === undefined) return
-    this.historyPanel?.dispose()
-    this.historyOverlay.hide()
+    const overlay = this.historyOverlay
+    const panel = this.historyPanel
     this.historyOverlay = undefined
+    this.historyResponsiveFrame = undefined
     this.historyPanel = undefined
+    overlay?.hide()
+    // Remountable history overlays intentionally opt out of disposeOnHide so
+    // fullscreen migration can retain query/results/selection. The final
+    // close owns the panel lifecycle explicitly.
+    panel?.dispose()
   }
 
   /** Publish the current match position for the overlay header (1-based, total). */
@@ -5365,17 +6114,30 @@ export class TuiApp {
     // is hidden while the panel is open, so the dock renders zero rows and
     // this branch is inert — the two regions never fight.
     const dockHeight = this.dock.render(width).length
-    if (dockHeight > 0 && y >= todoTop - dockHeight && y < todoTop) {
-      this.toggleTodoPanel()
+    const inDock = dockHeight > 0 && y >= todoTop - dockHeight && y < todoTop
+    // A click on the todo panel's own rows runs the state loop (compact →
+    // full list → back to the summary row), so the mouse opens AND closes
+    // the panel without the todo-toggle action.
+    const inPanel = todoTop < todoBottom && y >= todoTop && y < todoBottom
+    if (inDock || inPanel) {
+      // The dock and the panel are ONE semantic target, and the first
+      // click MUTATES the layout (the dock vanishes, the panel takes its
+      // rows): a rapid second click at the same coordinate would land on
+      // the panel and immediately undo the first — the todo "flashes and
+      // vanishes". Pi's double-click detection cannot see the pair (the
+      // word range under the coordinate changed), so coalesce the whole
+      // target here: a second todo click inside the window is one gesture.
+      const now = Date.now()
+      if (now < this.todoClickCoalesceUntil) return
+      this.todoClickCoalesceUntil = now + TODO_CLICK_COALESCE_MS
+      if (inDock) this.toggleTodoPanel()
+      else this.handleTodoPanelClick()
       return
     }
-    // A click on the todo panel's own rows runs the three-state loop
-    // (compact → full list → back to the summary row), so the mouse opens
-    // AND closes the panel without the todo-toggle action.
-    if (todoTop < todoBottom && y >= todoTop && y < todoBottom) {
-      this.handleTodoPanelClick()
-      return
-    }
+    // Any other click is a DIFFERENT gesture: the next todo click starts
+    // a fresh coalescing window (a deliberate open after a transcript
+    // click must never be swallowed).
+    this.todoClickCoalesceUntil = 0
     // Fullscreen layout: header row(s), then the transcript scroll pane.
     const scroll = this.fullscreenScroll
     if (scroll === undefined) return
@@ -5793,7 +6555,7 @@ export class TuiApp {
     if (this.viewerMode === undefined) {
       // Preserve the main draft in its SERIALIZED wire form, so a
       // shell-mode draft round-trips through the viewer with its mode.
-      this.mainDraftBeforeViewer = this.serializeSeatDraft(this.seatEditor().getText())
+      this.mainDraftBeforeViewer = this.expandedSeatWireDraft()
       // The viewer renders ONLY the child transcript: the main session's
       // local cards (`!` shell runs) must never leak into it. The runner
       // repaints the child folder right after, so the cleared list is
@@ -5931,7 +6693,7 @@ export class TuiApp {
   private parkSubagentDraft(childSessionId: string): void {
     // The slot stores the SERIALIZED wire form (mode + body), so the
     // visible text is serialized the same way before comparing/folding.
-    const visible = this.serializeSeatDraft(this.seatEditor().getText())
+    const visible = this.expandedSeatWireDraft()
     const slotted = this.subagentDrafts.get(childSessionId)
     if (visible === slotted) return
     if (slotted === undefined || slotted === '') {
@@ -5974,11 +6736,12 @@ export class TuiApp {
     const target = this.viewerMode
     if (target === undefined || target.mode !== 'continuable') return
     if (this.events.onSubagentSubmit === undefined) return
-    const text = this.seatEditor().getText()
     // The shell-editor-mode boundary: the visible body is re-serialized
     // into the wire form before it leaves the app (a shell-mode draft
-    // reaches the child exactly as the user would have typed it).
-    const serialized = this.serializeSeatDraft(text)
+    // reaches the child exactly as the user would have typed it) — with
+    // paste markers EXPANDED (round-2 P1): the child wire must never
+    // carry registry-bound marker text.
+    const serialized = this.expandedSeatWireDraft()
     // Emptiness is judged on the SERIALIZED wire form: a bare `!` / `!!`
     // shell mode has an empty BODY but a non-empty wire form, and must
     // reach the child like the literal prefix did before the mode feature.
@@ -6134,7 +6897,7 @@ export class TuiApp {
       if (closed || raw !== undefined) return
       const compiled = compileView(view)
       const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
-      raw = this.showOverlayOnHost(component, mountOptions)
+      raw = this.showOverlayOnHost(component, mountOptions, { remountable: true })
       if (hiddenByLease) raw.setHidden(true)
     }
     mount()
@@ -6257,7 +7020,7 @@ export class TuiApp {
       )
       wrapper = created
       this.advancedOverlayWrappers.add(created)
-      raw = this.showOverlayOnHost(created, mountOptions)
+      raw = this.showOverlayOnHost(created, mountOptions, { remountable: true })
       if (hiddenByLease) raw.setHidden(true)
     }
     mount()
@@ -6396,9 +7159,9 @@ export class TuiApp {
    * re-register therefore invalidates every earlier press — a stale pair
    * from a previous capture session can never make the first Esc of a
    * new session count as the third press.
-   * @param data - the raw chunk.
+   * @param data - the normalized input sequence.
    * @returns true when the fail-safe fired (the caller must consume the
-   *   chunk and run the release).
+   *   sequence and run the release).
    */
   private unstableFailSafe(data: string): boolean {
     // Only a PRESS counts: Kitty CSI-u release/repeat events
@@ -6445,10 +7208,11 @@ export class TuiApp {
 
   /**
    * Phase 3: mount a low-level component (plan §9 option A) as a capturing
-   * overlay. The plugin renders RAW lines and receives RAW input (the
-   * Unstable contract — no sanitization); the host owns the physical
-   * mount, focus, stacking, fullscreen migration and teardown. The
-   * surface's final dispose closes every still-owned lease.
+   * overlay. The plugin renders RAW lines and receives the normalized
+   * input sequence (the preHostInput contract — no sanitization); the
+   * host owns the physical mount, focus, stacking, fullscreen migration
+   * and teardown. The surface's final dispose closes every still-owned
+   * lease.
    */
   showUnstableMount(
     component: import('./extension/unstable-types.ts').UnstableMountedComponent,
@@ -6487,7 +7251,7 @@ export class TuiApp {
       )
       adapter = created
       this.unstableMountAdapters.add(created)
-      raw = this.showOverlayOnHost(created, mountOptions)
+      raw = this.showOverlayOnHost(created, mountOptions, { remountable: true })
       if (hiddenByLease) raw.setHidden(true)
     }
     mount()
@@ -6902,6 +7666,13 @@ export class TuiApp {
     const editor = this.editor
     return {
       getText: () => editor.getText(),
+      // P1 (large-paste external-editor loss): the draft that LEAVES the
+      // editor context must carry the REAL paste content — getText()
+      // returns `[paste #N +123 lines]` markers whose registry is cleared
+      // by the later restore, so $EDITOR and draft snapshots would keep
+      // only the marker text. The fork Editor expands via its registry.
+      getExpandedText: () => editor.getExpandedText(),
+      getExpandedCursor: () => editor.getExpandedCursor(),
       setText: (text) => editor.setText(text),
       isShowingAutocomplete: () => editor.isShowingAutocomplete(),
       getInputMode: () => editor.getInputMode(),
@@ -7009,9 +7780,17 @@ export class TuiApp {
    * restore their own focus.
    */
   private mountSeatChild(): void {
+    // Re-vendor lifecycle follow-up P1: the CAPTURE FENCE — while a
+    // question flow owns the seat, only the holder state may update (new
+    // winner / recompiled view); the PHYSICAL seat stays with the
+    // QuestionFrame until the flow settles and mounts the LATEST
+    // component. The state-may-update / physical-seat-may-not rule (plan
+    // §2.5). An approval does not occupy the physical seat (host overlay),
+    // so it stays unfenced here — the existing focus fence below already
+    // covers its capture.
+    if (this.activeQuestions !== undefined) return
     const component = this.seatEditor().component
-    this.editorSeat.clear()
-    this.editorSeat.addChild(component)
+    this.editorSeat.replace(component)
     // Focus follows the occupant: if the seat owns input right now (no
     // question/approval/overlay is capturing), the NEW component must be
     // the focused component — otherwise every key after a handoff still
@@ -7048,6 +7827,20 @@ export class TuiApp {
   }
 
   /**
+   * The visible seat draft in WIRE form with fork paste markers EXPANDED
+   * (round-2 review P1): every path where draft text LEAVES the editor's
+   * own context — the wire (submit/steer/queue), draft parking slots, the
+   * viewer submission — must carry the REAL paste content; getText()'s
+   * `[paste #N …]` markers orphan as soon as any later restore clears the
+   * registry, silently replacing the pasted content with the marker text.
+   * Plugin editors without a registry fall back to getText().
+   */
+  private expandedSeatWireDraft(): string {
+    const seat = this.seatEditor()
+    return this.serializeSeatDraft(seat.getExpandedText?.() ?? seat.getText())
+  }
+
+  /**
    * The effective input mode of the VISIBLE seat editor: the host
    * editor's mode, or prompt semantics for a plugin editor (which has no
    * mode). Routing and chrome (the ↓ task-browser gate, the footer hint)
@@ -7061,7 +7854,7 @@ export class TuiApp {
   /**
    * The task-browser trigger semantic — ONE definition shared by the ↓
    * routing gate, the viewer's parent-lock, and the footer's `↓ view`
-   * hint: active background tasks, no overlay entries, an EMPTY VISIBLE
+   * hint: active background tasks or failure attention, no overlay entries, an EMPTY VISIBLE
    * seat editor in PROMPT mode. The visible seat decides (a shell-mode
    * empty body is composing a command; a plugin replacement editor
    * contributes its own text/mode) — the hidden host editor's draft is
@@ -7372,7 +8165,7 @@ export class TuiApp {
 
   /**
    * Whether a HOST build bakes width-dependent truncation into the
-   * component at build time — the FOLDED system / compaction / tool
+   * component at build time — the FOLDED system / compaction / legacy tool
    * cards (their preview rows truncate to the content width once, so a
    * terminal resize must rebuild them at the new width). Render-time
    * width-aware builds (assistant/user markdown and bubbles, Thinking
@@ -7384,7 +8177,8 @@ export class TuiApp {
    */
   private bakesFoldedWidth(message: TranscriptMessage, expanded: boolean): boolean {
     if (expanded) return false
-    return message.kind === 'system' || message.kind === 'compaction' || message.kind === 'tool'
+    return message.kind === 'system' || message.kind === 'compaction'
+      || (message.kind === 'tool' && !isCompactActionTool(message.name, message.args))
   }
 
   /**
@@ -7607,9 +8401,9 @@ export class TuiApp {
       const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
       if (message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined) {
         return this.renderBlockSequence(message.content, (text) =>
-          new BulletedComponent(new Markdown(text, 0, 0, markdownTheme), bullet), message)
+          new BulletedComponent(new Markdown(text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet), message)
       }
-      return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme), bullet)
+      return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
     }
     if (message.kind === 'thinking') {
       // The unified Thinking disclosure card (plan §4/§13): COMPACT is
@@ -7710,7 +8504,7 @@ export class TuiApp {
       if (expanded) {
         if (counts !== '') card.addChild(new Text(color.textDim(counts), 0, 0))
         if (message.text !== '') {
-          card.addChild(new Markdown(message.text, 0, 0, markdownTheme))
+          card.addChild(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS))
         } else if (message.error !== undefined) {
           card.addChild(new Text(color.textDim(message.error), 0, 0))
         }
@@ -7730,7 +8524,13 @@ export class TuiApp {
     // pill keeps its semantic color (ok/error/running).
     const card = new Container()
     const header = toolCardHeader(message.name, message.args, this.workspaceRoot)
-    const summary = header.summary === '' ? '' : ` ${header.summary}`
+    const action = compactToolPresentation(message.name, message.args, message.result, {
+      isError: message.status === 'error',
+      ...(message.error === undefined ? {} : { error: message.error }),
+    })
+    // Action identities use a dot separator (`Send message · child-1`) while
+    // the existing Web-style rows retain their historical space separator.
+    const summary = header.summary === '' ? '' : action !== undefined ? ` · ${header.summary}` : ` ${header.summary}`
     // The glyph resolves through the icon registry against the CURRENT
     // style; iconPrefix drops the separator when the style hides the icon
     // (minimal) — the header starts directly with the title.
@@ -7746,7 +8546,9 @@ export class TuiApp {
     // cannot fill the TUI, expanded only while the expand switch is on.
     const localShell = isLocalShellCard(message)
     if (expanded) {
-      card.addChild(new Text(head, 0, 0))
+      // Action headers and payloads are live width-aware components; every
+      // other host card keeps its existing Text path and cache behavior.
+      card.addChild(action === undefined ? new Text(head, 0, 0) : new CompactTextPreview(head, 1, ''))
       // An explicitly expanded card renders diff bodies in full; the
       // default recent-turn view caps them (kimi parity). The flag is
       // the FULL REVEAL: the per-card override (the fullscreen secondary
@@ -7754,6 +8556,20 @@ export class TuiApp {
       // regular mode would have no mouse affordance to open it.
       this.renderToolBody(card, message, fullReveal)
     } else {
+      if (action !== undefined) {
+        // Action cards deliberately keep the stable header separate from the
+        // payload. CompactTextPreview wraps/truncates at render time, so this
+        // same cached card remains correct after every resize.
+        card.addChild(new CompactTextPreview(head, 1, ''))
+        if (action.payload !== undefined && action.payload !== '') {
+          card.addChild(new CompactTextPreview(color.textDim(action.payload), 2, '  '))
+        }
+        if (action.result !== undefined && action.result !== '') {
+          const result = message.status === 'error' ? color.error(action.result) : color.textDim(action.result)
+          card.addChild(new CompactTextPreview(result, 1, '  '))
+        }
+        return card
+      }
       // Folded cards render 2–3 rows instead of one cramped line: the header
       // row, then the call preview (bash `$ command` / edit-write diff —
       // kimi parity: the command and the change are visible without
@@ -8043,6 +8859,44 @@ export class TuiApp {
       }
       return
     }
+
+    const action = compactToolPresentation(message.name, message.args, message.result, {
+      isError: message.status === 'error',
+      ...(message.error === undefined ? {} : { error: message.error }),
+    })
+    if (action !== undefined && message.name !== 'terminal_send') {
+      // Action bodies are semantic too: send/interrupt cards never expose a
+      // delivery receipt, while list_agents keeps the historical snapshot.
+      const lines = compactToolExpandedLines(message.name, message.args, message.result, {
+        isError: message.status === 'error',
+        ...(message.error === undefined ? {} : { error: message.error }),
+      }) ?? []
+      for (const [index, line] of lines.entries()) {
+        const styled = message.status === 'error' && action.result !== undefined && index === lines.length - 1
+          ? color.error(line)
+          : color.textDim(line)
+        // Reuse the live width-aware wrapper for expanded payload lines too:
+        // long coordination text keeps its two-cell continuation indent, and
+        // original blank lines (paragraph breaks) stay visible.
+        card.addChild(new CompactTextPreview(styled, Number.MAX_SAFE_INTEGER, '  ', true))
+      }
+      return
+    }
+    if (action !== undefined && message.name === 'terminal_send') {
+      // terminal_send may also have a dedicated result presenter. Its sent
+      // text belongs above that existing terminal output; do not replace the
+      // output/exit-code path merely to make the payload visible.
+      if (action.payload !== undefined && action.payload !== '') {
+        for (const line of action.payload.split(/\r\n|\r|\n/)) {
+          card.addChild(new CompactTextPreview(color.textDim(line), Number.MAX_SAFE_INTEGER, '  ', true))
+        }
+      }
+      if (message.status === 'running') return
+      if (message.status === 'error') {
+        if (action.result !== undefined) card.addChild(new CompactTextPreview(color.error(action.result), Number.MAX_SAFE_INTEGER, '  ', true))
+        return
+      }
+    }
     // Workflow run cards: the body is the run's member tree, grouped by phase
     // in arrival order (Web WorkflowRunPanel parity). Rows render even while
     // the run is still streaming (members land incrementally).
@@ -8176,6 +9030,9 @@ export class TuiApp {
       isError: message.status === 'error',
       ...message.meta === undefined ? {} : { meta: message.meta },
     })
+    // A dedicated terminal presenter, when available, remains authoritative
+    // for output and exit status. Without one, the legacy raw-result fallback
+    // below keeps the expanded viewport/wait/session snapshot intact.
     if (resultView !== undefined) {
       switch (resultView.card) {
         case 'read': {
@@ -8533,6 +9390,8 @@ export class TuiApp {
     try {
       const width = this.terminal.columns
       const height = this.terminal.rows
+      const widthChanged = width !== this.lastTranscriptWidth
+      const heightChanged = height !== this.lastAdvancedGeometry.height
       // The transcript folds bake width-dependent truncations at build
       // time (folded tool/system/compaction/local-shell rows): a WIDTH
       // change must rebuild them at the new content width — a stale bake
@@ -8540,9 +9399,16 @@ export class TuiApp {
       // contract (the right-gutter resize matrix). The latch skips the
       // first geometry pass (nothing built yet); the rebuild re-enters
       // requestRender, where the latch is already updated, so no loop.
-      if (width !== this.lastTranscriptWidth) {
+      if (widthChanged) {
         this.lastTranscriptWidth = width
         if (this.messageRows.length > 0) this.rebuildMessages()
+      }
+      if (widthChanged) {
+        // Queue/todo rows are width-baked strings, not merely live-wrapped
+        // components. Rebuild from their raw state before chrome measurement
+        // so fullscreen hit-testing and footer budgets see the new geometry.
+        this.rebuildQueuePane(width)
+        this.rebuildTodoPanel(width)
       }
       // M5: a material WIDTH change refreshes the command surface (the
       // runner coalesces to its interval).
@@ -8560,6 +9426,10 @@ export class TuiApp {
         this.lastAdvancedGeometry = { width, height }
         this.recompileAdvancedOverlays()
       }
+      if (widthChanged || heightChanged) {
+        this.historyResponsiveFrame?.syncGeometry()
+        this.activeApproval?.responsiveFrame?.syncGeometry()
+      }
       // PR #57 review (P1): the footer's physical-line budget derives from
       // the terminal GEOMETRY, the ACTIVE SURFACE and the MEASURED chrome
       // heights — a resize (height AND width), a fullscreen toggle or a
@@ -8575,13 +9445,13 @@ export class TuiApp {
       const host = this.extensionHost
       if (host !== undefined) {
         const current = host.state().surface
-      // focusedSeat derives from the actual focus state (follow-up P1): the
-      // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
-      // question/approval/fullscreen entry; the requestRender mirror only
-      // publishes it here (plus the stale-frame safety net below). The LIVE
-      // focusSeat (not the microtask-published copy) is authoritative — a
-      // publish that changed nothing must still mirror the real seat.
-      this.publishFocusSeat()
+        // focusedSeat derives from the actual focus state (follow-up P1): the
+        // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
+        // question/approval/fullscreen entry; the requestRender mirror only
+        // publishes it here (plus the stale-frame safety net below). The LIVE
+        // focusSeat (not the microtask-published copy) is authoritative — a
+        // publish that changed nothing must still mirror the real seat.
+        this.publishFocusSeat()
         const focusedSeat = this.focusSeat
         if (current.width !== width || current.height !== height || current.focusedSeat !== focusedSeat) {
           host.updateSurface({ width, height, focusedSeat })
@@ -8596,6 +9466,12 @@ export class TuiApp {
           }
         }
       }
+      // Height-only resizes must re-bake the widget row budgets after the
+      // surface snapshot adopted the new height. A width change already
+      // reaches renderWidgets() through refreshChrome() below, so gate the
+      // explicit call on `!widthChanged` to avoid a second identical bake.
+      if (heightChanged && !widthChanged && host !== undefined && host.state().surface.width === width
+        && host.state().surface.height === height) this.renderWidgets()
       // The footer recompose runs LAST: the budget is keyed on the
       // MEASURED effective total (surface + geometry + actual chrome
       // heights), so a widget-zone bake, a resize or a mode switch all
@@ -8660,10 +9536,14 @@ export class TuiApp {
   /**
    * Reflect the todo list in the dock summary line: active (non-completed)
    * count and, when the list is non-empty, the first active item's text.
+   * A list that shrank to the compact cap (or below) has no distinct full
+   * state: the ghost `todoExpanded` is cleared so the panel never shows a
+   * visually identical "full" list (plan: >5 → ≤5 auto-normalizes).
    * @param todos - the latest todo/write snapshot.
    */
   setTodoSummary(todos: readonly TodoItem[]): void {
     this.todoItems = todos
+    if (!this.hasTodoOverflow()) this.todoExpanded = false
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.renderDock()
@@ -8677,6 +9557,10 @@ export class TuiApp {
     // Hiding resets the expansion: the next todo-toggle shows the compact panel.
     if (!this.todoPanelVisible) this.todoExpanded = false
     this.renderTodoPanel()
+    // Any state participating in todoSummaryText() must publish the extension
+    // activity projection when it changes. Visibility hides the builtin-backed
+    // dock summary while the panel is open and restores it when the panel closes.
+    this.syncExtensionState()
     // The dock summary hides while the panel is expanded (it would sit on
     // top of the full list); restore it on collapse.
     this.renderDock()
@@ -8685,22 +9569,46 @@ export class TuiApp {
   }
 
   /** Toggle the todo panel between the compact five rows and the full list
-   * (fullscreen click on the panel's area). */
+   * (fullscreen click on the panel's area). Fail-closed: without overflow
+   * the compact and full lists are visually identical, so the expansion
+   * never enters a meaningless state (other callers cannot manufacture
+   * one either). */
   toggleTodoExpanded(): boolean {
     if (!this.todoPanelVisible) return false
+    if (!this.hasTodoOverflow()) {
+      this.todoExpanded = false
+      return false
+    }
     this.todoExpanded = !this.todoExpanded
     this.renderTodoPanel()
     this.requestRender()
     return this.todoExpanded
   }
 
-  /** The fullscreen click loop over the todo panel's own rows: compact →
-   * full list → back to the summary row (the panel closes). The mouse thus
-   * opens AND closes the panel without Ctrl+T; the dock summary row itself
-   * opens it (handleFullscreenClick's dock region). */
+  /** Whether the todo list exceeds the compact cap (the full state would
+   * actually differ from the compact list). All todos enter the ordered
+   * render list, so the raw length is the renderable count. */
+  private hasTodoOverflow(): boolean {
+    return this.todoItems.length > TODO_COMPACT_LIMIT
+  }
+
+  /** The fullscreen click loop over the todo panel's own rows: with ≤5
+   * items the panel is a two-state summary ↔ list (a second click closes
+   * it — never a visually identical intermediate full state); with >5
+   * items it keeps the three-state summary → compact → full → summary.
+   * The mouse thus opens AND closes the panel without Ctrl+T; the dock
+   * summary row itself opens it (handleFullscreenClick's dock region). */
   private handleTodoPanelClick(): void {
-    if (this.todoExpanded) this.toggleTodoPanel()
-    else this.toggleTodoExpanded()
+    if (this.todoExpanded) {
+      // full -> summary
+      this.toggleTodoPanel()
+    } else if (this.hasTodoOverflow()) {
+      // compact -> full, only when full actually differs
+      this.toggleTodoExpanded()
+    } else {
+      // <=5: list -> summary directly
+      this.toggleTodoPanel()
+    }
   }
 
   /** Whether the todo panel is currently shown. */
@@ -8715,11 +9623,11 @@ export class TuiApp {
 
   /**
    * Rebuild the todo panel text: a border rule + `Todo` title (both indented
-   * one cell) plus up to five rows by default (in_progress first, then
-   * pending, then completed (strikethrough)); the full list when expanded
-   * (fullscreen click on the panel toggles).
+   * one cell) plus up to {@link TODO_COMPACT_LIMIT} rows by default
+   * (in_progress first, then pending, then completed (strikethrough)); the
+   * full list when expanded (fullscreen click on the panel toggles).
    */
-  private renderTodoPanel(): void {
+  private rebuildTodoPanel(width: number): void {
     if (!this.todoPanelVisible) {
       this.todoPanel.setText('')
       return
@@ -8732,9 +9640,9 @@ export class TuiApp {
       ...this.todoItems.filter(todo => todo.status === 'pending'),
       ...this.todoItems.filter(todo => todo.status === 'completed'),
     ]
-    const shown = this.todoExpanded ? ordered : ordered.slice(0, 5)
-    const width = Math.max(1, this.terminal.columns)
-    const border = color.border(` ${'─'.repeat(Math.max(0, width - 2))} `)
+    const shown = this.todoExpanded ? ordered : ordered.slice(0, TODO_COMPACT_LIMIT)
+    const safeWidth = Math.max(1, Math.floor(width))
+    const border = color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)
     // Title: bold, two-cell indent.
     const title = color.textStrong('  Todo')
     if (shown.length === 0) {
@@ -8746,6 +9654,11 @@ export class TuiApp {
       return `${mark(todo)} ${body}`
     })
     this.todoPanel.setText([border, title, ...lines].join('\n'))
+  }
+
+  /** Rebuild the todo panel from the current terminal width. */
+  private renderTodoPanel(): void {
+    this.rebuildTodoPanel(this.terminal.columns)
   }
 
   /** Whether Thinking blocks currently render FULL (true) or COMPACT with
@@ -8844,8 +9757,13 @@ export class TuiApp {
         this.busy,
         {
           queuedCount: this.queueItems.length,
-          taskCount: this.dockTasks.length,
-          childAgentCount: this.dockAgents.length,
+          taskCount: this.taskSummaryRich ? this.taskSummary.runningJobs : this.dockTasks.length,
+          childAgentCount: this.taskSummaryRich ? this.taskSummary.runningAgents : this.dockAgents.length,
+          ...(this.taskSummaryRich ? {
+            taskTotalCount: this.taskSummary.totalJobs,
+            childAgentTotalCount: this.taskSummary.totalAgents,
+            failedTaskCount: this.taskSummary.failedAttention,
+          } : {}),
           todoCount: this.todoItems.length,
         },
       ),
@@ -8878,8 +9796,8 @@ export class TuiApp {
     host.updateActivity({
       working: this.working.isActive(),
       queuedCount: this.queueItems.length,
-      taskCount: this.dockTasks.length,
-      childAgentCount: this.dockAgents.length,
+      taskCount: this.taskSummaryRich ? this.taskSummary.runningJobs : this.dockTasks.length,
+      childAgentCount: this.taskSummaryRich ? this.taskSummary.runningAgents : this.dockAgents.length,
       todoCount: this.todoItems.length,
       // The rendered todo summary (P1-5: the first-party builtin dock item
       // renders it through the public slot API; the host provides the
@@ -9061,13 +9979,22 @@ export class TuiApp {
   }
 
   /**
-   * Replace the active background-task list for the footer badge. Non-empty
-   * sets arm the ↓/Ctrl+J task-browser trigger.
-   * @param tasks - active jobs (id + label + lifecycle status), empty to hide.
+   * Replace the background-job snapshot used by the footer badge. The
+   * runtime-backed caller supplies terminal records too; the rich summary
+   * separates active and total counts. Non-empty active/attention sets arm
+   * the footer ↓ Task Center trigger.
+   * @param tasks - job records (id + label + lifecycle status), empty to hide.
    */
   setTasks(tasks: readonly { id: string; label: string; status: string; kind?: string }[]): void {
     this.dockTasks = tasks
-    this.tasksActive = tasks.length > 0 || this.dockAgents.length > 0
+    // In RICH mode the running/total counts come ONLY from the runtime's
+    // commitSummary (setTaskSummary) — never derived from whatever list a
+    // caller happens to pass here: the badge callback may legitimately
+    // receive a subset (e.g. running-only) and length-based derivation
+    // would corrupt the totals. setTasks/setAgents stay pure UI mirrors.
+    this.tasksActive = this.taskSummaryRich
+      ? this.taskSummary.runningJobs > 0 || this.taskSummary.runningAgents > 0 || this.taskSummary.failedAttention > 0
+      : tasks.length > 0 || this.dockAgents.length > 0
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.syncExtensionState()
@@ -9076,18 +10003,30 @@ export class TuiApp {
   /**
    * Replace the live child-subagent list for the footer badge. Continuable
    * children and foreground one-shot children never register jobs records
-   * (AGENTS.md), so they arm the ↓/Ctrl+J trigger through this channel.
+   * (AGENTS.md), so they arm the footer ↓ trigger through this channel.
    * @param agents - live children (id + label + activity), empty to hide.
    */
   setAgents(agents: readonly { id: string; label: string; activity: string }[]): void {
     this.dockAgents = agents
-    this.tasksActive = this.dockTasks.length > 0 || agents.length > 0
+    // RICH mode: see the setTasks note — counts are commitSummary-owned.
+    this.tasksActive = this.taskSummaryRich
+      ? this.taskSummary.runningJobs > 0 || this.taskSummary.runningAgents > 0 || this.taskSummary.failedAttention > 0
+      : this.dockTasks.length > 0 || agents.length > 0
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.syncExtensionState()
   }
 
-  /** Whether background tasks are active (drives the ↓/Ctrl+J trigger). */
+  /** Commit the runtime-owned Task Center totals and failure attention. */
+  setTaskSummary(summary: TaskBrowserSummary): void {
+    this.taskSummary = { ...summary }
+    this.taskSummaryRich = true
+    this.tasksActive = summary.runningJobs > 0 || summary.runningAgents > 0 || summary.failedAttention > 0
+    this.projectActivity()
+    this.syncExtensionState()
+  }
+
+  /** Whether background tasks or unacknowledged failures are available. */
   isTasksActive(): boolean {
     return this.tasksActive
   }
@@ -9109,21 +10048,20 @@ export class TuiApp {
   /** Notice rows shown in full before the `+N more` fold (user rows are never folded). */
   private static readonly MAX_NOTICE_ROWS = 5
 
-  /** Rebuild the queue pane text from the current inbox rows. */
-  private renderQueuePane(): void {
+  /** Rebuild the queue pane text from the current inbox rows and width. */
+  private rebuildQueuePane(width: number): void {
     const items = this.queueItems
     if (items.length === 0) {
       // An emptied pane must not leave its previously painted rows behind
       // (fork trap): the empty Text renders no lines and the requested
       // frame repaints the region.
       this.queuePane.setText('')
-      this.requestRender()
       return
     }
-    const width = Math.max(1, this.terminal.columns)
+    const safeWidth = Math.max(1, Math.floor(width))
     // Panel border rules indent one cell on each side so the boundary never
     // reads as the editor's full-width border.
-    const lines = [color.border(` ${'─'.repeat(Math.max(0, width - 2))} `)]
+    const lines = [color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)]
     // User-origin rows are the user's OWN queued input: always fully
     // visible, never folded. Notice rows (plugin notifications, subagent
     // reports, injected instructions) are at-a-glance transport only:
@@ -9136,7 +10074,7 @@ export class TuiApp {
     const shownNotices = noticeRows.slice(0, TuiApp.MAX_NOTICE_ROWS)
     for (const item of userRows) {
       const text = item.text.replace(/\s+/g, ' ').trim()
-      const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth('❯ ')), '…')
+      const truncated = truncateToWidth(text, Math.max(1, safeWidth - visibleWidth('❯ ')), '…')
       // User-origin rows carry the SAME brand-blue ❯ as the transcript
       // bubbles and the editor prompt — one marker for the user's own
       // input everywhere (pending here, delivered up there).
@@ -9149,14 +10087,14 @@ export class TuiApp {
       // steer/edit verbs when nothing else is queued.
       const text = item.text.replace(/\s+/g, ' ').trim()
       const lead = iconLead('queue-notice', this.iconStyle)
-      const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth(lead)), '…')
+      const truncated = truncateToWidth(text, Math.max(1, safeWidth - visibleWidth(lead)), '…')
       lines.push(`${color.textDim(lead)}${color.textDim(truncated)}`)
     }
     const folded = noticeRows.length - shownNotices.length
     if (folded > 0) {
       lines.push(color.textDim(truncateToWidth(
         `  +${folded} more notices pending · they deliver as the next turn runs`,
-        Math.max(1, width - 2),
+        Math.max(1, safeWidth - 2),
         '…',
       )))
     }
@@ -9164,8 +10102,13 @@ export class TuiApp {
     const hint = hasSteerable
       ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer all · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to edit all`
       : 'notices deliver after the current task · /tasks to view'
-    lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, width - 2), '…')))
+    lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, safeWidth - 2), '…')))
     this.queuePane.setText(lines.join('\n'))
+  }
+
+  /** Rebuild the queue pane at the current terminal width and repaint. */
+  private renderQueuePane(): void {
+    this.rebuildQueuePane(this.terminal.columns)
     this.requestRender()
   }
 
@@ -9214,9 +10157,9 @@ export class TuiApp {
    * the wire form). */
   getDraft(): string {
     const target = this.viewerMode
-    if (target === undefined) return this.serializeSeatDraft(this.seatEditor().getText())
+    if (target === undefined) return this.expandedSeatWireDraft()
     if (isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
-      return this.serializeSeatDraft(this.seatEditor().getText())
+      return this.expandedSeatWireDraft()
     }
     return this.mainDraftBeforeViewer ?? ''
   }
@@ -9317,7 +10260,7 @@ export class TuiApp {
    * ─ line here visually collides with the editor's own full-width border
    * (user feedback); the summary reads as an info line, and only the
    * EXPANDED todo panel (Ctrl+T) carries a panel border. Background-task and
-   * subagent details live in the footer badge and the ↓/Ctrl+J browser ONLY
+   * subagent details live in the footer badge and the footer ↓ browser ONLY
    * — every fact has exactly one home.
    */
   private renderDock(): void {
@@ -9449,6 +10392,20 @@ export class TuiApp {
     const invalidCount = this.footerCustomItems.replace(input)
     this.renderFooter()
     return invalidCount
+  }
+
+  /** PR D: commit one command item's cached value (undefined clears it) and
+   * repaint the footer. The runtime's ONLY repaint trigger is this cache
+   * change — no snapshot rebuild, no layout rewrite, no settings write. */
+  setFooterCommandItemValue(id: string, value: string | undefined): void {
+    if (value === undefined) this.footerCommandItemValues.delete(id)
+    else this.footerCommandItemValues.set(id, value)
+    this.renderFooter()
+  }
+
+  /** PR D: the synchronous cache read (the catalog's value source). */
+  getFooterCommandItemValue(id: string): string | undefined {
+    return this.footerCommandItemValues.get(id)
   }
 
   /** PR C: detached custom definitions for an unsaved configurator draft or
@@ -9820,7 +10777,17 @@ export class TuiApp {
     // restart the cycle even without a selection move — review P2); with
     // no marquee the list mounts directly, exactly as before.
     const mounted = marquee === undefined ? list : new MarqueeFilterAdapter(list, () => marquee.reset())
-    const handle = this.showOverlayOnHost(new Frame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+    const configuredWidth = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width!)) : 64
+    const configuredMaxHeight = Number.isFinite(options.maxHeight) ? Math.max(1, Math.floor(options.maxHeight!)) : 24
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+      return { width, maxHeight, key: `${width}:${maxHeight}` }
+    }
+    const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
+      list.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+    })
+    const handle = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
     // Phase 4: an abort signal closes the picker and fires onCancel (the
     // imperative select broker's fiber-cancellation path). The listener
     // is removed on a normal select/cancel AND on the handle's close
@@ -9865,6 +10832,11 @@ export class TuiApp {
       },
       setItems: (next) => {
         list.setItems(next.map(item => ({ ...item })))
+        this.requestRender()
+      },
+      getFilter: () => list.getFilter(),
+      setFilter: (filter) => {
+        list.setFilter(filter)
         this.requestRender()
       },
       _removeAbortListener: removeAbortListener,
@@ -9971,7 +10943,17 @@ export class TuiApp {
       // Search edits inside a category must restart the marquee too (the
       // vendored SelectList fires no selection change for query edits).
       const mounted = marquee === undefined ? next : new MarqueeFilterAdapter(next, () => marquee.reset())
-      overlay = this.showOverlayOnHost(new Frame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+      const configuredWidth = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width!)) : 64
+      const configuredMaxHeight = Number.isFinite(options.maxHeight) ? Math.max(1, Math.floor(options.maxHeight!)) : 24
+      const geometryOf = (): ResponsiveOverlayGeometry => {
+        const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+        const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+        return { width, maxHeight, key: `${width}:${maxHeight}` }
+      }
+      const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
+        next.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+      })
+      overlay = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
     }
     // Phase 4 parity: an abort signal closes the CURRENT overlay and fires
     // onCancel. The listener lives once on the signal — category switches
@@ -10022,6 +11004,15 @@ export class TuiApp {
         state.index = index
         activate()
       },
+      getFilter: () => list?.getFilter() ?? '',
+      setFilter: (filter) => {
+        if (list === undefined) return
+        // The internal `query` mirrors the edit so a later category switch
+        // carries the PROGRAMMATIC filter exactly like a typed one.
+        query = filter
+        list.setFilter(filter)
+        this.requestRender()
+      },
       _removeAbortListener: () => {
         if (onAbort !== undefined && options.signal !== undefined) {
           options.signal.removeEventListener('abort', onAbort)
@@ -10032,8 +11023,8 @@ export class TuiApp {
   }
 
   /**
-   * Open the task browser overlay (the ↓ / Ctrl+J trigger with an empty
-   * editor, and /tasks). Unlike the generic {@link openPicker}, rows carry a
+   * Open the task browser overlay (the footer ↓ Quick Tasks trigger or
+   * `/tasks` Full Task Center). Unlike the generic {@link openPicker}, rows carry a
    * status word + start timestamp so the panel can render status dots,
    * right-aligned status/elapsed columns, live counts, and a 1s elapsed
    * tick. Selection calls `onSelect` with the row value and closes; Esc
@@ -10051,6 +11042,22 @@ export class TuiApp {
     onCancel: () => void,
     options: TaskBrowserOptions = {},
   ): TaskBrowserHandle {
+    // A finally-disposed surface must not mint the panel's 1s elapsed
+    // tick: the inert overlay handle would never dispose the panel, so
+    // the unref'd interval would keep firing into the dead panel.
+    if (this.disposed) {
+      return { close: () => {}, setItems: () => {}, setRefreshState: () => {}, getViewState: () => ({
+        mode: options.mode ?? 'full',
+        openedFrom: options.openedFrom ?? 'command',
+        scope: options.scope ?? (options.mode === 'quick' ? 'active' : 'all'),
+        typeFilter: options.typeFilter ?? null,
+        searchMode: options.initialSearchMode ?? false,
+        searchQuery: options.initialQuery ?? '',
+        selectedId: options.selectedId ?? options.preferredValue ?? null,
+        expandedIds: new Set(options.expandedIds ?? []),
+        collapsedIds: new Set(options.collapsedIds ?? []),
+      }), visibleItems: () => [], viewportItems: () => [] }
+    }
     const panel = new TaskBrowserPanel(
       items.map(item => ({ ...item })),
       options.maxVisible ?? 10,
@@ -10059,7 +11066,26 @@ export class TuiApp {
         noMatchText: options.noMatchText,
         enableSearch: options.enableSearch,
         initialQuery: options.initialQuery,
+        initialSearchMode: options.initialSearchMode,
         onAction: options.onAction,
+        onStop: options.onStop,
+        onViewportExpose: options.onViewportExpose,
+        onRefresh: options.onRefresh,
+        onViewFull: state => {
+          close()
+          options.onViewFull?.(state)
+        },
+        mode: options.mode,
+        openedFrom: options.openedFrom,
+        initialScope: options.scope,
+        initialTypeFilter: options.typeFilter,
+        initialExpandedIds: options.expandedIds,
+        initialCollapsedIds: options.collapsedIds,
+        initialSelectedId: options.selectedId,
+        initialPreferredValue: options.preferredValue,
+        loading: options.loading,
+        refreshError: options.refreshError,
+        groupLabels: options.groupLabels,
       },
       (value) => {
         close()
@@ -10071,15 +11097,53 @@ export class TuiApp {
       },
       () => this.requestRender(),
     )
-    const handle = this.showOverlayOnHost(new Frame(panel, true), { width: options.width ?? 72, maxHeight: options.maxHeight ?? 24 })
+    // Sizing contract (TaskBrowserOptions.width/maxHeight accept numbers
+    // AND percentages; an EXPLICIT option always wins, exactly like the
+    // pre-Task-Center mount: `options.width ?? (mode==='full' ? '100%' :
+    // 72)`). The responsive frame's geometry resolver mirrors the fork's
+    // parseSizeValue rules — a percentage resolves against the terminal
+    // dimension, then everything clamps to the margin-inset available
+    // area (full mode keeps the 1-cell margin).
+    const fullMode = options.mode === 'full'
+    // A non-finite numeric option (NaN) falls back to the mode default —
+    // the fork would otherwise resolve the geometry to NaN (review NIT).
+    const widthOption = typeof options.width === 'number' && !Number.isFinite(options.width)
+      ? undefined
+      : options.width
+    const maxHeightOption = typeof options.maxHeight === 'number' && !Number.isFinite(options.maxHeight)
+      ? undefined
+      : options.maxHeight
+    const overlayWidth: number | `${number}%` = widthOption ?? (fullMode ? '100%' : 72)
+    const overlayMaxHeight: number | `${number}%` = maxHeightOption ?? (fullMode ? '100%' : 16)
+    const resolveSize = (value: number | `${number}%`, dimension: number, avail: number): number => {
+      const pixels = typeof value === 'number' ? value : Math.floor((dimension * parseFloat(value)) / 100)
+      return Math.max(1, Math.min(pixels, avail))
+    }
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const marginInset = fullMode ? 2 : 0
+      const availWidth = Math.max(1, this.terminal.columns - marginInset)
+      const availHeight = Math.max(1, this.terminal.rows - marginInset)
+      const width = resolveSize(overlayWidth, this.terminal.columns, availWidth)
+      const maxHeight = resolveSize(overlayMaxHeight, this.terminal.rows, availHeight)
+      return { width, maxHeight, key: `${width}:${maxHeight}` }
+    }
+    const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
+      panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+    })
+    const handle = this.showOverlayOnHost(frame, {
+      width: overlayWidth,
+      maxHeight: overlayMaxHeight,
+      margin: fullMode ? 1 : undefined,
+    })
     // One close path: hide the overlay AND stop the panel's 1s elapsed tick
     // (an unref'd interval must still be cleared — the panel is gone).
     // `close` is a `let` declared before the panel callbacks above reference
     // it; it is assigned here, after `handle` exists. The callbacks only
     // fire on later user input, so the late assignment is safe.
     let close: () => void = () => {}
+    // The owning FocusForwardingFrame + disposeOnHide release the panel
+    // (its 1s elapsed tick) on hide — no manual dispose here (X007).
     close = (): void => {
-      panel.dispose()
       handle.hide()
     }
     return {
@@ -10088,6 +11152,13 @@ export class TuiApp {
         panel.setItems(next.map(item => ({ ...item })), preferredValue)
         this.requestRender()
       },
+      setRefreshState: (state, error) => {
+        panel.setRefreshState(state, error)
+        this.requestRender()
+      },
+      getViewState: () => panel.getViewState(),
+      visibleItems: () => panel.visibleItems(),
+      viewportItems: () => panel.viewportItems(),
     }
   }
 
@@ -10101,13 +11172,21 @@ export class TuiApp {
    * @param onChange - called with (id, newValue) on confirm. The third
    *   argument `revert` restores a row's DISPLAYED value (used by the M5
    *   plugin-settings path when the row's onChange rejects — the fork
-   *   optimistically mutates the row before the callback runs).
+   *   optimistically mutates the row before the callback runs). The
+   *   optional fourth argument `navigate` moves the list cursor to another
+   *   row (the fork's public `selectItem` seam — used to guide the user to
+   *   a prerequisite row instead of failing a write).
    * @param onCancel - called when the user closes without applying.
    * @returns a function that closes the overlay.
    */
   openSettings(
     items: SettingItem[],
-    onChange: (id: string, value: string, revert: (previousValue: string) => void) => void,
+    onChange: (
+      id: string,
+      value: string,
+      revert: (previousValue: string) => void,
+      navigate?: (targetId: string) => void,
+    ) => void,
     onCancel: () => void,
   ): () => void {
     // SettingsList fires onCancel on Esc/ctrl+c; the overlay must close too,
@@ -10124,12 +11203,26 @@ export class TuiApp {
       // panel must not keep the rejected value). The CALLER supplies the
       // previous value (the registry still holds it before apply commits).
       const revert = (previousValue: string): void => settings.updateValue(id, previousValue)
-      onChange(id, value, revert)
+      // The navigate callback rides the fork's PUBLIC selectItem seam (no
+      // private cursor access): a no-op when the target row is filtered out
+      // by an active search — the caller's notice still guides the user.
+      const navigate = (targetId: string): void => settings.selectItem(targetId)
+      onChange(id, value, revert, navigate)
     }, () => {
       handle?.hide()
       onCancel()
     }, { enableSearch: true })
-    handle = this.showOverlayOnHost(new Frame(settings, true), { width: 72, maxHeight: 28 })
+    const configuredWidth = 72
+    const configuredMaxHeight = 28
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+      return { width, maxHeight, key: `${width}:${maxHeight}` }
+    }
+    const frame = new ResponsiveOverlayFrame(settings, geometryOf, geometry => {
+      settings.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+    })
+    handle = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
     return () => handle?.hide()
   }
 
@@ -10147,6 +11240,11 @@ export class TuiApp {
   }
 
   private disposeTrackedKeybindingEditors(): void {
+    // The owning FocusForwardingFrame + disposeOnHide dispose a MOUNTED
+    // panel on overlay hide (X007), but a tracked panel may have NO owning
+    // overlay (trackKeybindingEditor also covers panels nested inside the
+    // SettingsList submenu) — so the tracking set disposes here, and the
+    // panel's own disposed guard makes the later frame-dispose a no-op.
     const panels = [...this.keybindingEditorPanels]
     this.keybindingEditorPanels.clear()
     for (const panel of panels) panel.dispose?.()
@@ -10158,12 +11256,14 @@ export class TuiApp {
   openKeybindingEditor(panel: Component): () => void {
     let handle: OverlayHandle | undefined
     const unregister = this.trackKeybindingEditor(panel)
+    // The owning FocusForwardingFrame + disposeOnHide dispose the panel on
+    // hide (X007); `unregister` still runs first so the tracking set never
+    // holds a closing panel.
     const close = (): void => {
-      panel.dispose?.()
       unregister()
       handle?.hide()
     }
-    handle = this.showOverlayOnHost(new Frame(panel, true), {
+    handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
       width: 88,
       maxHeight: '100%',
     })
@@ -10194,18 +11294,17 @@ export class TuiApp {
     onCancel: () => void
   }): () => void {
     let handle: OverlayHandle | undefined
-    let panel: FooterConfiguratorPanel | undefined
     let closed = false
-    // The generic Frame/overlay stack does not own or forward the panel's
-    // optional Component.dispose(), so every close path owns this cleanup.
+    // The owning FocusForwardingFrame + disposeOnHide dispose the panel on
+    // hide (X007) — the closer only unmounts the overlay; no manual
+    // panel.dispose() (a second dispose would be a double-release).
     const close = (): void => {
       if (closed) return
       closed = true
       this.footerConfiguratorClosers.delete(close)
-      panel?.dispose()
       handle?.hide()
     }
-    panel = new FooterConfiguratorPanel({
+    const panel = new FooterConfiguratorPanel({
       model: options.model,
       registry: options.registry,
       snapshot: () => this.statusStore.snapshot(),
@@ -10236,7 +11335,7 @@ export class TuiApp {
         options.onCancel()
       },
     })
-    handle = this.showOverlayOnHost(new Frame(panel, true), {
+    handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
       width: 88,
       // The overlay's hard cut must never exceed the terminal: the panel
       // budgets its content to rows-2 (Frame borders add 2), so the
@@ -10270,13 +11369,19 @@ export class TuiApp {
     onClose?: () => void
     intervalMs?: number
   }): () => void {
+    // A finally-disposed surface must not mint a live refresh timer: the
+    // inert overlay handle would never dispose the panel, so the unref'd
+    // interval would keep calling options.refresh() forever.
+    if (this.disposed) return () => {}
     const panel = new OutputViewerPanel(options.title, options.initial)
     let closed = false
-    let timer: NodeJS.Timeout | undefined
     const close = (): void => {
       if (closed) return
       closed = true
-      if (timer !== undefined) clearInterval(timer)
+      // The panel OWNS the refresh interval: hide() runs the
+      // disposeOnHide chain (FocusForwardingFrame.dispose →
+      // OutputViewerPanel.dispose → clearInterval), so a final surface
+      // teardown that never calls this closer still stops the timer.
       handle.hide()
       options.onClose?.()
     }
@@ -10287,12 +11392,8 @@ export class TuiApp {
         options.onStop?.()
       }
     }
-    const handle = this.showOverlayOnHost(new Frame(panel, true), { width: 88, maxHeight: 24 })
-    timer = setInterval(() => {
-      if (closed) return
-      panel.setBody(options.refresh())
-      this.requestRender()
-    }, options.intervalMs ?? 1000)
+    const handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), { width: 88, maxHeight: 24 })
+    panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000)
     return close
   }
 
@@ -10517,13 +11618,30 @@ export class TuiApp {
 
   /** Build and mount the approval dialog for one prompt on the active screen. */
   private renderApprovalDialog(pending: PendingApproval): void {
-    // Full terminal width (kimi dialog parity): a fixed 60-wide box on a
-    // narrow terminal left base-content slivers glued to the border (the
-    // "stray characters" report). The Box pads every row to the width, so
-    // the frame spans the whole terminal and the base stays covered.
-    const width = this.terminal.columns
-    const maxHeight = Math.max(8, Math.min(16, this.terminal.rows - 2))
-    const contentWidth = Math.max(1, width - 8)
+    const geometryOf = (): ApprovalOverlayGeometry => approvalOverlayGeometry(
+      this.terminal.columns,
+      this.terminal.rows,
+    )
+    const surface = new ApprovalDialogSurface(
+      pending.request,
+      geometryOf,
+      (request, geometry) => this.buildApprovalDialog(request, geometry),
+    )
+    const frame = new ResponsiveOverlayFrame(surface, () => {
+      const geometry = geometryOf()
+      return {
+        width: geometry.width,
+        maxHeight: geometry.maxHeight,
+        key: `${geometry.width}:${geometry.maxHeight}:${geometry.contentWidth}`,
+      }
+    })
+    pending.responsiveFrame = frame
+    pending.handle = this.showOverlayOnHost(frame, { width: '100%', maxHeight: '100%' })
+  }
+
+  /** Build approval content for the current geometry without mounting it. */
+  private buildApprovalDialog(request: ApprovalPromptRequest, geometry: ApprovalOverlayGeometry): Component {
+    const { maxHeight, contentWidth } = geometry
     // Height budget in WRAPPED rows: the dialog must NEVER lose the key
     // hints or the bottom border to the maxHeight slice. The title and the
     // danger banner are width-cropped so each is exactly ONE display row;
@@ -10531,8 +11649,8 @@ export class TuiApp {
     // (shrunk when the terminal is too small for it). Fixed chrome = 1
     // title + danger + 1 blank spacer + hint rows + 2 Box paddingY
     // (Box(1,1)) + 2 Frame borders — keep in sync with the geometry below.
-    const titleShown = truncateToWidth(`Approve ${pending.request.toolName}?`, contentWidth, '…')
-    const dangerShown = pending.request.danger === true
+    const titleShown = truncateToWidth(`Approve ${request.toolName}?`, contentWidth, '…')
+    const dangerShown = request.danger === true
       ? truncateToWidth('⚠ DANGEROUS COMMAND — confirm carefully', contentWidth, '…')
       : ''
     const HINTS = '[y] allow once   [n] reject   [esc/ctrl+c] cancel'
@@ -10546,7 +11664,7 @@ export class TuiApp {
     // section ends in a `... N more` marker row that rides inside its
     // budget, so the dialog tells the user what was dropped.
     const reasonBudget = Math.max(0, maxHeight - chrome)
-    const reasonRaw = pending.request.reason ?? ''
+    const reasonRaw = request.reason ?? ''
     const reasonShown = capWrappedToMarker(reasonRaw, contentWidth, reasonBudget).text
     const reasonWrapped = reasonShown === '' ? 0 : wrapTextWithAnsi(reasonShown, contentWidth).length
     const previewBudget = Math.max(0, maxHeight - chrome - reasonWrapped)
@@ -10555,11 +11673,11 @@ export class TuiApp {
     if (dangerShown !== '') {
       dialog.addChild(new Text(color.error(dangerShown), 1, 0))
     }
-    if (pending.request.arguments !== undefined && pending.request.arguments !== '' && previewBudget > 0) {
+    if (request.arguments !== undefined && request.arguments !== '' && previewBudget > 0) {
       // Preview the first six argument lines; the marker helper owns ALL
       // truncation (a separate 240-char '…' pre-cap left an uncounted cut
       // when the capped string still fit the budget).
-      const sixLines = pending.request.arguments.split('\n').slice(0, 6).join('\n')
+      const sixLines = request.arguments.split('\n').slice(0, 6).join('\n')
       const previewShown = capWrappedToMarker(sixLines, contentWidth, previewBudget).text
       if (previewShown !== '') {
         dialog.addChild(new Text(color.textDim(previewShown), 1, 0))
@@ -10570,7 +11688,7 @@ export class TuiApp {
     }
     dialog.addChild(new Text(' ', 1, 0))
     dialog.addChild(new Text(hintShown, 1, 0))
-    pending.handle = this.showOverlayOnHost(new Frame(dialog), { width, maxHeight })
+    return dialog
   }
 
   /** Route a key while a prompt is showing; every key is consumed. */
@@ -10596,6 +11714,7 @@ export class TuiApp {
     if (this.activeApproval === pending) {
       this.activeApproval = undefined
       pending.handle?.hide()
+      pending.responsiveFrame = undefined
       this.activeScreen.setFocus(this.seatEditor().component)
       // The approval dialog is gone: the seat is the editor again (or the
       // next queued prompt's — showNextApproval re-derives it) (follow-up P1).
@@ -10693,8 +11812,11 @@ export class TuiApp {
     }
     const frame = new QuestionFrame(state.flow, () => this.terminal.rows)
     state.frame = frame
-    this.editorSeat.clear()
-    this.editorSeat.addChild(frame)
+    // Re-vendor lifecycle follow-up P1: the flow only PROJECTS into the
+    // seat — the previous occupant (the editor's compiled component) stays
+    // ALIVE but detached; the non-owning replace() never disposes it (a
+    // disposed component tree would render empty after the round-trip).
+    this.editorSeat.replace(frame)
     const screen = this.fullscreen ?? this.tui
     screen.setFocus(frame)
     // The question flow owns the seat (follow-up P1).
@@ -10755,8 +11877,10 @@ export class TuiApp {
       state.suspendedOverlays = new Set()
       const frame = new QuestionFrame(next.flow, () => this.terminal.rows)
       next.frame = frame
-      this.editorSeat.clear()
-      this.editorSeat.addChild(frame)
+      // Re-vendor lifecycle follow-up P1: the next flow only PROJECTS into
+      // the seat — the settled flow's frame is simply unmounted (its
+      // lifetime belongs to the settled question state, never the seat).
+      this.editorSeat.replace(frame)
       this.activeQuestions = next
       const screen = this.fullscreen ?? this.tui
       screen.setFocus(frame)
@@ -10769,9 +11893,12 @@ export class TuiApp {
     // Final restoration: the editor FIRST, then the suspended overlays — a
     // restored capturing overlay focuses itself through setHidden(false),
     // so the editor must not be re-focused afterwards. M9: restore the
-    // CURRENT seat occupant (host default or plugin editor).
-    this.mountSeatChild()
+    // CURRENT seat occupant (host default or plugin editor). Re-vendor
+    // lifecycle follow-up P1: the flow releases the seat BEFORE the mount
+    // — mountSeatChild() fences a live question, so the release must
+    // precede it or the editor would never remount (plan §2.6).
     this.activeQuestions = undefined
+    this.mountSeatChild()
     const screen = this.fullscreen ?? this.tui
     // M9 (round-1 finding 5): focus the CURRENT seat occupant (the host
     // default or the plugin editor's component) — never a hardcoded host

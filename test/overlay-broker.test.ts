@@ -6,9 +6,24 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { OverlayBroker } from '../src/overlay-broker.ts'
 import type { OverlayHandle } from '@xmoon76/pi-tui'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+interface DisposableApp { isDisposed(): boolean; dispose(): void }
+const startedApps = new Set<DisposableApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 /** A fake overlay handle recording setHidden/hide calls. */
 function fakeHandle(label: string): OverlayHandle & { label: string; hiddenLog: string[] } {
@@ -102,6 +117,27 @@ test('OverlayBroker: hideAll + clear (fullscreen migration / surface teardown)',
   assert.equal(broker.isTracked(a), false)
 })
 
+test('OverlayBroker: disposeAll physically unmounts every tracked overlay WITHOUT restoring dependents (final teardown)', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const b = fakeHandle('b')
+  broker.track(a)
+  broker.track(b)
+  // b hides a; disposeAll must physically unmount BOTH and never restore
+  // a — the whole surface is dying, nothing may flash back (unlike
+  // closeForHost, which restores dependents).
+  broker.disposeAll()
+  assert.deepEqual(a.hiddenLog, ['hide-temp', 'hide'], 'a is hidden by b, then physically unmounted')
+  assert.deepEqual(b.hiddenLog, ['hide'], 'b is physically unmounted')
+  assert.equal(broker.graphState().handles, 0)
+  assert.equal(broker.isTracked(a), false)
+  assert.equal(broker.isTracked(b), false)
+  // Idempotent: a second disposeAll must not re-hide anything.
+  broker.disposeAll()
+  assert.deepEqual(a.hiddenLog, ['hide-temp', 'hide'])
+  assert.deepEqual(b.hiddenLog, ['hide'])
+})
+
 // ── Surface-level: the managed overlay lease ───────────────────────────────
 
 test('TuiApp: a plugin overlay lease mounts through the broker and closes idempotently', async () => {
@@ -110,6 +146,7 @@ test('TuiApp: a plugin overlay lease mounts through the broker and closes idempo
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   // A plugin overlay via the public lease API.
   const lease = app.showExtensionOverlay({
@@ -147,6 +184,7 @@ test('TuiApp: the surface dispose closes every still-owned plugin overlay lease'
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const lease = app.showExtensionOverlay({
     kind: 'text',
@@ -164,12 +202,96 @@ test('TuiApp: the surface dispose closes every still-owned plugin overlay lease'
   assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0, 'dispose must drop every owned lease')
 })
 
+test('TuiApp: final dispose stops the output viewer refresh timer even without the closer (X007)', async () => {
+  const { mock } = await import('node:test')
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  // Deterministic timer control: only setInterval is mocked (the app's
+  // render scheduling and waitForRender use real setTimeout/nextTick), so
+  // a leaked 10ms interval would fire on tick() regardless of load.
+  mock.timers.enable({ apis: ['setInterval'] })
+  try {
+    const vt = new VirtualTerminal(80, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    startedApps.add(app)
+    await vt.waitForRender()
+    let refreshes = 0
+    app.openOutputViewer({
+      title: 'job output',
+      initial: '',
+      refresh: () => { refreshes += 1; return 'tick' },
+      intervalMs: 10,
+    })
+    mock.timers.tick(10)
+    assert.ok(refreshes >= 1, 'the viewer must refresh while open')
+    // FINAL dispose WITHOUT invoking the closer: the panel-owned interval
+    // must be cleared through the disposeOnHide chain (overlay hide →
+    // FocusForwardingFrame.dispose → OutputViewerPanel.dispose), so the
+    // refresh callback never fires into the disposed surface.
+    app.dispose()
+    const afterDispose = refreshes
+    mock.timers.tick(1000) // a leaked 10ms interval would fire 100 times
+    assert.equal(refreshes, afterDispose, 'the refresh timer must not fire after final dispose')
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('TuiApp: openOutputViewer after final dispose mints no refresh timer (round-1 P1)', async () => {
+  const { mock } = await import('node:test')
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  mock.timers.enable({ apis: ['setInterval'] })
+  try {
+    const vt = new VirtualTerminal(80, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    startedApps.add(app)
+    await vt.waitForRender()
+    app.dispose()
+    let refreshes = 0
+    const closer = app.openOutputViewer({
+      title: 'job output',
+      initial: '',
+      refresh: () => { refreshes += 1; return 'tick' },
+      intervalMs: 10,
+    })
+    closer() // must be inert
+    mock.timers.tick(1000)
+    assert.equal(refreshes, 0, 'a disposed surface must not mint a refresh timer')
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('TuiApp: final dispose leaves the terminal cursor VISIBLE (every overlay unmount runs before stop)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  // An open overlay whose physical hide() writes hideCursor when the
+  // last overlay leaves the stack.
+  app.openOutputViewer({ title: 'job output', initial: '', refresh: () => 'tick' })
+  await vt.waitForRender()
+  app.dispose()
+  // Removing the last overlay writes \x1b[?25l; stop() ends with
+  // showCursor (\x1b[?25h). If any overlay unmount ran AFTER stop, the
+  // final sequence would be the hide — leaving the user's shell cursor
+  // hidden after exit.
+  assert.equal(vt.cursorWrites.at(-1), '\x1b[?25h', 'the final cursor sequence must be SHOW')
+})
+
 test('TuiApp: a plugin overlay lease survives a fullscreen toggle (round-1 finding 2)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const lease = app.showExtensionOverlay({
     kind: 'text',
@@ -212,6 +334,7 @@ test('TuiApp: a LATE showExtensionOverlay after dispose is inert — no new leas
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   app.dispose()
   // The review repro: before dispose 0 owned leases; a late plugin call
@@ -236,6 +359,7 @@ test('TuiApp: an explicitly closed lease is dropped from the owned set (round-1 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   await vt.waitForRender()
   const lease = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'x' }] })
   assert.equal(app.ownedExtensionOverlayLeasesForTest(), 1)

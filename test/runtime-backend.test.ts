@@ -28,12 +28,12 @@ test('the capability vocabulary covers the migration domains', () => {
 
 test('the Direct backend is the current production surface and serves EXACTLY the implemented capabilities', () => {
   const subagent: SubagentPort = {
-    followup: async () => ({ kind: 'rejected', reason: { kind: 'unavailable' } }),
+    prompt: async () => ({ kind: 'rejected', reason: { kind: 'unavailable' } }),
   }
   const sessionReader = {
     list: async () => [],
     search: async () => [],
-    titles: async () => new Map(),
+    projectionBatch: async () => new Map(),
     measureContext: () => undefined,
     readExportData: async () => ({ kind: 'none' as const }),
   }
@@ -60,6 +60,10 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       listProviders: () => [],
       listModels: async () => [],
       resolveModelInfo: async () => ({}),
+      defaultSelection: () => undefined,
+      saveDefaultSelection: async () => {},
+      sessionSelection: () => undefined,
+      selectSessionModel: async (_sessionId: string, selection: { provider: string; model: string }) => selection,
       currentSelection: () => undefined,
       saveSelection: async () => {},
       discoverModels: async () => [],
@@ -84,6 +88,8 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     footerCommandTrust: {
       userFooterMode: undefined,
       command: undefined,
+      userCommandItemActivationIds: new Set<string>(),
+      userCommandItemFallbackActivationIds: new Set<string>(),
     },
     footerCustomItems: {
       get: () => ({ items: [], invalidCount: 0 }),
@@ -116,7 +122,13 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       presetNames: () => [],
       defaultPreset: () => undefined,
       setDefaultPreset: async () => {},
+      approvalOverrideOf: () => undefined,
       applyPermissionPreset: async () => ({ kind: 'applied' as const }),
+    },
+    subagentModelSelection: {
+      available: () => false,
+      get: () => ({ enabled: false, allowedModels: [] }),
+      set: async () => {},
     },
     presetDefault: {
       available: () => true,

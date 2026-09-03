@@ -1,105 +1,130 @@
 /**
- * The interactive subagent viewer's FOLLOW-UP delivery seam — the pure,
+ * The interactive subagent viewer's HUMAN PROMPT delivery seam — the pure,
  * dependency-injected layer between TuiApp's semantic submit event and the
- * DSH continuation runtime (plan §17). It owns validation, the
- * `ctx.subagents.followup(...)` call, and error classification; the runner
- * owns the surface effects (draft restore, notices, stale-viewer guards).
+ * DSH official subagent control API (plan §17; DSH 0.1.2-alpha.4). It owns
+ * validation, the `ctx.subagents.prompt(...)` call, and error
+ * classification; the runner owns the surface effects (draft restore,
+ * notices, stale-viewer guards).
  *
  * The write path is DELIBERATELY narrow:
  *
  * ```text
  * TuiApp (Enter in a continuable viewer)
  *   ↓ onSubagentSubmit({ parentSessionId, childSessionId, text })
- * submitSubagentFollowup(...)
- *   ↓ exact live direct parent check (the DSH continuation contract)
- *   ↓ ctx.subagents.followup(exactParent, childId, content, …)
- *   ↓ continuation manager → child Agent inbox (the ONLY queue)
+ * submitSubagentPrompt(...)
+ *   ↓ canonicalize the TUI @-mention grammar (client-owned, Host-neutral)
+ *   ↓ ctx.subagents.prompt({ requestId, parentSessionId, childSessionId,
+ *                           mode: 'continuable', content }, signal)
+ *   ↓ child Agent inbox (the ONLY queue — a distinct FIFO turn)
  * ```
  *
- * Never a second subagent message queue, never `ctx.agents.get(childId)
- * .followup(...)` (that bypasses the continuation manager, breaks cold
- * resume and the direct-parent authority), and never the parent's
- * submit/steer/queue path.
+ * This is a HUMAN prompt (user provenance, next distinct turn), which is
+ * why the official seam is `subagents.prompt()` — never
+ * `subagents.sendMessage()` (that is the Agent-authored Steer path) and
+ * never the parent session's submit/steer/queue path. Parent authority is
+ * the Host's: the official call rejects a parent that is not the exact
+ * live owner (`subagent/parent-unavailable` / `subagent/unauthorized`).
  *
  * No TUI component is touched here — the module only decides; the caller
  * restores drafts and notifies.
  * @module @xmoon76/dsh-pi-tui/subagent-viewer-submit
  */
 
-/** The semantic follow-up request from the viewer (mirrors
- * SubagentViewerSubmit without importing TuiApp). */
+/** One human-authored content part for a viewer prompt. The DTO mirrors
+ * the official `PromptContentPart` vocabulary (alpha.4's official
+ * `prompt()` admits image parts through the Host attachment store), so the
+ * delivery contract is not locked to text-only — the viewer's image intake
+ * joins in a later milestone without another port change. */
+export type SubagentPromptContentPart =
+  | { readonly type: 'text'; readonly text: string }
+  | {
+    readonly type: 'image'
+    readonly mediaType: string
+    readonly data: string
+    readonly name?: string
+  }
+
+/** The semantic prompt request from the viewer (mirrors
+ * SubagentViewerSubmit without importing TuiApp). The `requestId` and
+ * `mode: 'continuable'` are added at the Host adapter boundary. */
 export interface SubagentViewerSubmitRequest {
   readonly parentSessionId: string
   readonly childSessionId: string
-  readonly text: string
+  readonly content: readonly SubagentPromptContentPart[]
 }
 
-/** The exact live direct parent (structural Agent projection). */
-export interface SubagentParentLike {
-  readonly session: { readonly id: string }
-}
-
-/** The structural `ctx.subagents` followup surface (never a package
- * dependency — the service resolves from the dsh installation). */
-export interface SubagentFollowupService {
-  followup(
-    parent: SubagentParentLike,
-    childId: string,
-    content: readonly { readonly type: 'text'; readonly text: string }[],
-    options: { readonly source: unknown; readonly signal: AbortSignal },
-  ): Promise<unknown>
+/** The official `ctx.subagents.prompt` control surface (structural — never
+ * a package dependency; the service resolves from the dsh installation).
+ * The request shape is the official `SubagentPromptRequest` vocabulary:
+ * caller-minted `requestId`, durable parent/child address, the required
+ * `continuable` discriminator, prompt parts, and the optional browser
+ * zone. */
+export interface SubagentPromptService {
+  prompt(
+    request: {
+      readonly requestId: string
+      readonly parentSessionId: string
+      readonly childSessionId: string
+      readonly mode: 'continuable'
+      readonly content: readonly SubagentPromptContentPart[]
+      readonly clientTimeZone?: string
+    },
+    signal: AbortSignal,
+  ): Promise<{ readonly messageId: unknown }>
 }
 
 /** The dependency surface the submit function needs. */
 export interface SubagentViewerSubmitDeps {
-  /** The CURRENT live main-session agent (may be undefined after a
-   * session switch or teardown). */
-  currentParent(): SubagentParentLike | undefined
   /** The `ctx.subagents` runtime (undefined = continuation unavailable). */
-  subagents(): SubagentFollowupService | undefined
+  subagents(): SubagentPromptService | undefined
   /** A fresh per-call cancellation source (the caller owns aborting it). */
   makeSignal(): AbortSignal
-  /** Build the durable message source for the delivered message. */
-  makeSource(): unknown
+  /** Mint the caller-owned identity for THIS prompt, before the call —
+   * every retry that represents a NEW human submit mints a fresh id (the
+   * Host persists it on the accepted message). */
+  mintRequestId(): string
   /** Canonicalize the final user text BEFORE delivery (the main session's
    * `@`-file mention expansion — `@src/foo.ts` → the absolute path — must
-   * apply to viewer follow-ups too, or the model would see the concise
-   * relative form it cannot resolve). MAY be async (migration M1.10: the
-   * Host-file port's canonicalization); the default passes the text
-   * through untouched; the runner wires the port-backed expansion. */
+   * apply to viewer prompts too, or the model would see the concise
+   * relative form it cannot resolve; this is TUI input grammar, the
+   * official subagent prompt does not own it). MAY be async (migration
+   * M1.10: the Host-file port's canonicalization); the default passes the
+   * text through untouched. */
   canonicalizeText?(text: string): string | Promise<string>
 }
 
-/** Why a follow-up was NOT accepted (the child inbox never received it). */
-export type SubagentFollowupReject =
-  /** The exact live direct parent is gone or is a DIFFERENT session than
-   * the viewer target (switch / new / resume / teardown while sending). */
+/** Why a prompt was NOT accepted (the child inbox never received it). */
+export type SubagentPromptReject =
+  /** The addressed parent session is not live or is not the viewer's
+   * parent anymore (switch / new / resume / teardown while sending). */
   | { readonly kind: 'parent-unavailable' }
   /** The child id no longer carries a supported continuation state
    * (one-shot id, unknown id, not resumable). */
   | { readonly kind: 'stale-child' }
   /** The parent authority / ownership was rejected by the runtime. */
   | { readonly kind: 'unauthorized' }
-  /** The continuation runtime is absent or closing (draining / activation
-   * disposal). */
+  /** The continuation runtime is absent or the child's inbox cannot admit
+   * the message right now (draining / activation disposal). */
   | { readonly kind: 'unavailable' }
   /** The caller's signal aborted the delivery BEFORE inbox acceptance. */
   | { readonly kind: 'cancelled' }
   /** Any other failure (message only; safeErrorMessage-style text). */
   | { readonly kind: 'error'; readonly message: string }
 
-export type SubagentFollowupOutcome =
+export type SubagentPromptOutcome =
   | { readonly kind: 'ok'; readonly messageId: unknown }
-  | { readonly kind: 'rejected'; readonly reason: SubagentFollowupReject }
+  | { readonly kind: 'rejected'; readonly reason: SubagentPromptReject }
 
-/** Whether a settled follow-up may still touch the CURRENT surface: the
+/** Whether a settled prompt may still touch the CURRENT surface: the
  * viewer session that started the send must be unchanged — the SAME
  * child is still being viewed, the viewer generation has not moved (a
  * viewer open/close/switch bumps it, so a close → reopen of the SAME
  * child is stale), and the live parent session is still the one the
  * viewer was opened from. Anything else is a STALE settle: the result
  * may only touch the child's OWN draft slot (map-only), never the
- * visible surface (plan §12). */
+ * visible surface (plan §12). This is CLIENT presentation consistency —
+ * the official `prompt()` validates Host authority, but it cannot keep a
+ * settled UI surface isolated, so this guard stays. */
 export type SubagentSettleTarget =
   | { readonly kind: 'current'; readonly label: string }
   | { readonly kind: 'stale' }
@@ -131,11 +156,11 @@ export function resolveSubagentSettleTarget(
 }
 
 /**
- * The Host-file scope one viewer follow-up canonicalizes against: the
- * VIEWED CHILD's workspace when the viewer knows it (the child may have
- * been born in another directory — rewriting its mentions against the
- * PARENT cwd would resolve them to the wrong tree), the live parent
- * session otherwise (an unknown cold-child cwd). Pure so the race is
+ * The Host-file scope one viewer prompt canonicalizes against: the VIEWED
+ * CHILD's workspace when the viewer knows it (the child may have been born
+ * in another directory — rewriting its mentions against the PARENT cwd
+ * would resolve them to the wrong tree), the live parent session
+ * otherwise (an unknown cold-child cwd). Pure so the race is
  * unit-testable (review finding: parent cwd ≠ child cwd).
  */
 export function viewerCanonicalizeScope(
@@ -148,80 +173,85 @@ export function viewerCanonicalizeScope(
 }
 
 /**
- * Deliver one viewer follow-up to a continuable child, or classify why it
- * could not be delivered. Never throws for a classified rejection; an
- * unexpected throw surfaces as `{ kind: 'error' }`.
+ * Deliver one viewer prompt to a continuable child through the official
+ * subagent control API, or classify why it could not be delivered. Never
+ * throws for a classified rejection; an unexpected throw surfaces as
+ * `{ kind: 'error' }`.
  */
-export async function submitSubagentFollowup(
+export async function submitSubagentPrompt(
   request: SubagentViewerSubmitRequest,
   deps: SubagentViewerSubmitDeps,
-): Promise<SubagentFollowupOutcome> {
+): Promise<SubagentPromptOutcome> {
   try {
-    // 1. The EXACT live direct parent (plan §9.1): the child may only be
-    //    continued by the parent session the viewer was opened from. A
-    //    session switch / /new / /resume while the user typed is a hard
-    //    reject — never route the text to a different main Agent.
-    const parent = deps.currentParent()
-    if (parent === undefined || parent.session.id !== request.parentSessionId) {
-      return { kind: 'rejected', reason: { kind: 'parent-unavailable' } }
-    }
+    // 1. The official control surface, read lazily: the continuation
+    //    runtime may appear/disappear between calls (draining / activation
+    //    disposal).
     const subagents = deps.subagents()
     if (subagents === undefined) {
       return { kind: 'rejected', reason: { kind: 'unavailable' } }
     }
     const signal = deps.makeSignal()
-    // 2. Text-only follow-ups (the viewer phase-1 scope; images are a
-    //    later milestone — the main-session image store is deliberately
-    //    never shared with the child). The text runs through the same
-    //    canonicalization as the main session's submissions (`@`-file
-    //    mention expansion), so the child sees exactly what the parent
-    //    would have sent. The canonicalization MAY be async (migration
-    //    M1.10 — the Host-file port), so the exact live direct parent is
-    //    RE-CHECKED after the await: a switch while the mention resolution
-    //    was in flight must never deliver into a different parent's child
-    //    (the stale-safety rule of the async Host-file seam).
-    const canonical = await deps.canonicalizeText?.(request.text) ?? request.text
-    const parentNow = deps.currentParent()
-    if (parentNow === undefined || parentNow.session.id !== request.parentSessionId) {
-      return { kind: 'rejected', reason: { kind: 'parent-unavailable' } }
+    // 2. The TUI's own @-mention grammar is canonicalized BEFORE delivery
+    //    (the editor keeps `@src/foo.ts`, the child model receives the
+    //    absolute path). The canonicalization MAY be async (migration
+    //    M1.10 — the Host-file port), so the caller signal is re-checked
+    //    after the await: an implementation that does not synchronously
+    //    reject an already-aborted signal must never accept the message
+    //    while the UI already treats the send as stale (the draft is
+    //    restored by the caller). Parent/child authority itself is the
+    //    Host's job — the official prompt() rejects it authoritatively.
+    const canonical: SubagentPromptContentPart[] = []
+    for (const part of request.content) {
+      if (part.type === 'text') {
+        canonical.push({ type: 'text', text: await deps.canonicalizeText?.(part.text) ?? part.text })
+      } else {
+        // Image parts are forwarded VERBATIM: the Host admits and persists
+        // them through the attachment store before delivery (the official
+        // prompt contract) — the TUI never rewrites them, and the
+        // @-mention canonicalization applies to text only.
+        canonical.push(part)
+      }
     }
-    // A signal aborted while the canonicalization was in flight is a
-    // CANCELLED delivery, checked BEFORE the write path: an
-    // implementation that does not synchronously reject an already-aborted
-    // signal must never accept the message while the UI already treats
-    // the send as stale (the draft is restored by the caller).
     if (signal.aborted) return { kind: 'rejected', reason: { kind: 'cancelled' } }
-    const content = [{ type: 'text', text: canonical }] as const
-    // 3. The ONE correct write path: the continuation manager owns the
-    //    child's inbox (enqueue while running, wake while waiting, cold
-    //    resume when absent) and the direct-parent authority.
-    const messageId = await subagents.followup(
-      parent,
-      request.childSessionId,
-      content,
-      { source: deps.makeSource(), signal },
+    // 3. The ONE correct write path: the official browser prompt contract.
+    //    A HUMAN-authored message to a continuable direct child — the
+    //    child inbox queues it as its own distinct FIFO turn (enqueue
+    //    while running, wake while waiting, cold resume when absent), and
+    //    the requestId (minted fresh for THIS submit, before the call) is
+    //    persisted on the accepted message.
+    const receipt = await subagents.prompt(
+      {
+        requestId: deps.mintRequestId(),
+        parentSessionId: request.parentSessionId,
+        childSessionId: request.childSessionId,
+        mode: 'continuable',
+        content: canonical,
+      },
+      signal,
     )
-    return { kind: 'ok', messageId }
+    return { kind: 'ok', messageId: receipt.messageId }
   } catch (error) {
-    return { kind: 'rejected', reason: classifySubagentFollowupError(error) }
+    return { kind: 'rejected', reason: classifySubagentPromptError(error) }
   }
 }
 
 /**
- * Classify a followup failure into the stable reason set (structural error
- * reading — the subagent package stays a type-only import, resolved from
- * the dsh installation at runtime).
+ * Classify an official prompt failure into the stable reason set. The
+ * Direct adapter reads the official RemoteError vocabulary structurally
+ * (the `code` string; the subagent package stays resolvable from the dsh
+ * installation, never an import here).
  */
-export function classifySubagentFollowupError(error: unknown): SubagentFollowupReject {
+export function classifySubagentPromptError(error: unknown): SubagentPromptReject {
   if (isAbortError(error)) return { kind: 'cancelled' }
   const code = typeof error === 'object' && error !== null
     ? (error as { code?: unknown }).code
     : undefined
   if (typeof code === 'string') {
-    if (code === 'UNAUTHORIZED') return { kind: 'unauthorized' }
-    if (code === 'PARENT_UNAVAILABLE') return { kind: 'parent-unavailable' }
-    if (code === 'NOT_RESUMABLE') return { kind: 'stale-child' }
-    if (code === 'DRAINING' || code === 'ACTIVATION_CLOSING') return { kind: 'unavailable' }
+    if (code === 'gateway/cancelled') return { kind: 'cancelled' }
+    if (code === 'subagent/parent-unavailable') return { kind: 'parent-unavailable' }
+    if (code === 'subagent/not-resumable') return { kind: 'stale-child' }
+    if (code === 'subagent/unauthorized') return { kind: 'unauthorized' }
+    if (code === 'subagent/delivery-unavailable') return { kind: 'unavailable' }
   }
   return { kind: 'error', message: safeErrorMessage(error) }
 }

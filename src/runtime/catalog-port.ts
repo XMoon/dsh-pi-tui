@@ -44,7 +44,9 @@ export interface ModelReasoningInfo {
   }
 }
 
-/** The process-wide model selection (provider + model + optional effort).
+/** A detached provider/model/effort selection value. The meaning is
+ * explicit at each port method: it is either the global default used as a
+ * fallback for new Sessions or the effective selection of one Session.
  * `reasoningEffort` is a plain string in the DTO — the caller's branded
  * effort id is structurally assignable. */
 export interface ModelSelectionDto {
@@ -76,9 +78,17 @@ export interface ModelCatalog {
   listModels(providerId: string): Promise<readonly ModelInfoSummary[]>
   /** One model's reasoning-effort metadata. */
   resolveModelInfo(providerId: string, modelId: string): Promise<ModelReasoningInfo>
-  /** The persisted/current process-wide selection (`agentDefaultModel`). */
+  /** The global default used only when a Session has no local selection. */
+  defaultSelection(): ModelSelectionDto | undefined
+  /** Persist the global default (`agentDefaultModel.saveSelection`). */
+  saveDefaultSelection(selection: ModelSelectionDto): Promise<unknown>
+  /** The effective selection of one currently live ordinary Session. */
+  sessionSelection(sessionId: string): ModelSelectionDto | undefined
+  /** Select the next model for one Session and persist the global fallback. */
+  selectSessionModel(sessionId: string, selection: ModelSelectionDto): Promise<ModelSelectionDto>
+  /** @deprecated Use {@link defaultSelection}; retained for source compatibility. */
   currentSelection(): ModelSelectionDto | undefined
-  /** Persist one selection (`agentDefaultModel.saveSelection`). */
+  /** @deprecated Use {@link saveDefaultSelection}; retained for source compatibility. */
   saveSelection(selection: ModelSelectionDto): Promise<unknown>
   /** Probe an endpoint for its advertised models (the add wizard). */
   discoverModels(request: ModelDiscoveryRequest): Promise<readonly ModelInfoSummary[]>

@@ -7,10 +7,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { foldTranscript, searchTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
+import { foldTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
 
 /** Build a minimal event envelope for tests. */
@@ -47,10 +47,10 @@ function toolResult(seq: number, callId: string, text: string, name = 'bash'): S
       role: 'user',
       content: [{
         type: 'tool-result',
-        toolCallId: CallId(callId),
+        toolCallId: ToolCallId(callId),
         content: [{ type: 'text', text }],
       }],
-      source: { kind: 'tool', callId: CallId(callId) },
+      source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, 'append')
 }
@@ -65,10 +65,10 @@ function pruneReplacement(seq: number, callId: string, text: string, originalSeq
       role: 'user',
       content: [{
         type: 'tool-result',
-        toolCallId: CallId(callId),
+        toolCallId: ToolCallId(callId),
         content: [{ type: 'text', text }],
       }],
-      source: { kind: 'tool', callId: CallId(callId) },
+      source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, { op: 'replace', start: originalSeq, end: originalSeq })
 }
@@ -134,7 +134,7 @@ test('assistant/message replaces the streamed text for its step', () => {
 test('pairs tool calls with their results and caps long summaries', () => {
   const long = 'x'.repeat(300)
   const messages = foldTranscript([
-    event('tool/call', { turn: 0, step: 0, callId: CallId('call-1'), name: 'bash', arguments: '{}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('call-1'), name: 'bash', arguments: '{}' }, 0),
     event('tool/result', {
       turn: 0,
       step: 0,
@@ -143,10 +143,10 @@ test('pairs tool calls with their results and caps long summaries', () => {
         role: 'user',
         content: [{
           type: 'tool-result',
-          toolCallId: CallId('call-1'),
+          toolCallId: ToolCallId('call-1'),
           content: [{ type: 'text', text: long }],
         }],
-        source: { kind: 'tool', callId: CallId('call-1') },
+        source: { kind: 'tool', callId: ToolCallId('call-1') },
       },
     }, 1),
   ])
@@ -238,8 +238,8 @@ test('parallel same-name tool calls pair results by callId', () => {
   // card. Name-based pairing would swap them (last running card wins).
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('call-1'), name: 'bash', arguments: '{"cmd":"one"}' }, 1),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('call-2'), name: 'bash', arguments: '{"cmd":"two"}' }, 2),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('call-1'), name: 'bash', arguments: '{"cmd":"one"}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('call-2'), name: 'bash', arguments: '{"cmd":"two"}' }, 2),
     event('tool/result', {
       turn: 0,
       step: 0,
@@ -248,10 +248,10 @@ test('parallel same-name tool calls pair results by callId', () => {
         role: 'user',
         content: [{
           type: 'tool-result',
-          toolCallId: CallId('call-1'),
+          toolCallId: ToolCallId('call-1'),
           content: [{ type: 'text', text: 'out-one' }],
         }],
-        source: { kind: 'tool', callId: CallId('call-1') },
+        source: { kind: 'tool', callId: ToolCallId('call-1') },
       },
     }, 3),
     event('tool/result', {
@@ -262,10 +262,10 @@ test('parallel same-name tool calls pair results by callId', () => {
         role: 'user',
         content: [{
           type: 'tool-result',
-          toolCallId: CallId('call-2'),
+          toolCallId: ToolCallId('call-2'),
           content: [{ type: 'text', text: 'out-two' }],
         }],
-        source: { kind: 'tool', callId: CallId('call-2') },
+        source: { kind: 'tool', callId: ToolCallId('call-2') },
       },
     }, 4),
   ])
@@ -390,13 +390,13 @@ test('windows older turns into one summary entry', () => {
       content: [{ type: 'text', text: 'q0' }],
       source: { kind: 'user' },
     }, 1),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('call-0'), name: 'bash', arguments: '{}' }, 2),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('call-0'), name: 'bash', arguments: '{}' }, 2),
     event('tool/result', {
       turn: 0, step: 0,
       message: {
         id: MessageId('msg-1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('call-0'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('call-0') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('call-0'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('call-0') },
       },
     }, 3),
     // Turn 1: user + assistant.
@@ -477,16 +477,16 @@ test('a cross-turn read group keeps the fast window consistent with the full sca
   const folder = new TranscriptFolder()
   const events: SessionEvent[] = [
     event('turn/start', { turn: 1 }, 0),
-    event('tool/call', { turn: 1, step: 0, callId: CallId('call-1'), name: 'read', arguments: '{}' }, 1),
+    event('tool/call', { turn: 1, step: 0, callId: ToolCallId('call-1'), name: 'read', arguments: '{}' }, 1),
     event('tool/result', {
       turn: 1, step: 0,
-      message: { id: MessageId('msg-1'), role: 'user', content: [{ type: 'tool-result', toolCallId: CallId('call-1'), content: [{ type: 'text', text: 'a' }] }], source: { kind: 'tool', callId: CallId('call-1') } },
+      message: { id: MessageId('msg-1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('call-1'), content: [{ type: 'text', text: 'a' }] }], source: { kind: 'tool', callId: ToolCallId('call-1') } },
     }, 2),
     event('turn/start', { turn: 2 }, 3),
-    event('tool/call', { turn: 2, step: 0, callId: CallId('call-2'), name: 'read', arguments: '{}' }, 4),
+    event('tool/call', { turn: 2, step: 0, callId: ToolCallId('call-2'), name: 'read', arguments: '{}' }, 4),
     event('tool/result', {
       turn: 2, step: 0,
-      message: { id: MessageId('msg-2'), role: 'user', content: [{ type: 'tool-result', toolCallId: CallId('call-2'), content: [{ type: 'text', text: 'b' }] }], source: { kind: 'tool', callId: CallId('call-2') } },
+      message: { id: MessageId('msg-2'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('call-2'), content: [{ type: 'text', text: 'b' }] }], source: { kind: 'tool', callId: ToolCallId('call-2') } },
     }, 5),
     event('turn/start', { turn: 3 }, 6),
     event('user/message', {
@@ -565,10 +565,10 @@ test('non-monotonic raw turn indexes retain every turn for search navigation', (
 
   assert.deepEqual(folder.turns(), [1, 3, 2], 'the raw index must retain a lower turn discovered after monotonicity breaks')
   assert.deepEqual(folder.groupedTurns(), [1, 2, 3])
-  const match = searchTranscript(folder, 'turn 2')
+  const match = folder.search('turn 2')
   assert.equal(match.length, 1)
   const matchMessage = match[0]
-  assert.ok(matchMessage !== undefined && 'turn' in matchMessage)
+  assert.ok(matchMessage !== undefined)
   const controller = new TranscriptWindowController({ windowTurns: 1, stepTurns: 1, turns: folder.turns() })
   assert.equal(controller.anchorAt(matchMessage.turn), true, 'search must anchor a retained non-monotonic turn')
   assert.equal(controller.endTurn(), 2)
@@ -611,17 +611,17 @@ test('the fast window matches the full scan across mixed grouping shapes', () =>
   }
   const read = (turn: number): void => {
     events.push(event('turn/start', { turn }, seq++))
-    events.push(event('tool/call', { turn, step: 0, callId: CallId(`call-${seq}`), name: 'read', arguments: '{}' }, seq++))
+    events.push(event('tool/call', { turn, step: 0, callId: ToolCallId(`call-${seq}`), name: 'read', arguments: '{}' }, seq++))
     events.push(event('tool/result', {
       turn, step: 0,
-      message: { id: MessageId(`msg-${seq}`), role: 'user', content: [{ type: 'tool-result', toolCallId: CallId(`call-${seq}`), content: [{ type: 'text', text: 'file' }] }], source: { kind: 'tool', callId: CallId(`call-${seq}`) } },
+      message: { id: MessageId(`msg-${seq}`), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId(`call-${seq}`), content: [{ type: 'text', text: 'file' }] }], source: { kind: 'tool', callId: ToolCallId(`call-${seq}`) } },
     }, seq++))
   }
   const tool = (turn: number): void => {
-    events.push(event('tool/call', { turn, step: 0, callId: CallId(`call-${seq}`), name: 'bash', arguments: '{}' }, seq++))
+    events.push(event('tool/call', { turn, step: 0, callId: ToolCallId(`call-${seq}`), name: 'bash', arguments: '{}' }, seq++))
     events.push(event('tool/result', {
       turn, step: 0,
-      message: { id: MessageId(`msg-${seq}`), role: 'user', content: [{ type: 'tool-result', toolCallId: CallId(`call-${seq}`), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: CallId(`call-${seq}`) } },
+      message: { id: MessageId(`msg-${seq}`), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId(`call-${seq}`), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId(`call-${seq}`) } },
     }, seq++))
   }
   // turn 0: user + read; turn 1: read (cross-turn merge with turn 0)
@@ -666,13 +666,13 @@ test('the window summary counts grouped read cards from the incremental projecti
       content: [{ type: 'text', text: `q${turn}` }],
       source: { kind: 'user' },
     }, seq++))
-    events.push(event('tool/call', { turn, step: 0, callId: CallId(`call-${turn}`), name: 'read', arguments: '{}' }, seq++))
+    events.push(event('tool/call', { turn, step: 0, callId: ToolCallId(`call-${turn}`), name: 'read', arguments: '{}' }, seq++))
     events.push(event('tool/result', {
       turn, step: 0,
       message: {
         id: MessageId(`msg-${turn}`), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId(`call-${turn}`), content: [{ type: 'text', text: 'file' }] }],
-        source: { kind: 'tool', callId: CallId(`call-${turn}`) },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId(`call-${turn}`), content: [{ type: 'text', text: 'file' }] }],
+        source: { kind: 'tool', callId: ToolCallId(`call-${turn}`) },
       },
     }, seq++))
   }
@@ -735,29 +735,29 @@ test('consecutive read results group into one card', () => {
       role: 'user',
       content: [{
         type: 'tool-result',
-        toolCallId: CallId(callId),
+        toolCallId: ToolCallId(callId),
         content: [{ type: 'text', text }],
       }],
-      source: { kind: 'tool', callId: CallId(callId) },
+      source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq)
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
     readResult(2, 'r1', 'aaa'),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
     readResult(4, 'r2', 'bbb'),
     // A non-read breaks the group.
-    event('tool/call', { turn: 0, step: 0, callId: CallId('b1'), name: 'bash', arguments: '{}' }, 5),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('b1'), name: 'bash', arguments: '{}' }, 5),
     event('tool/result', {
       turn: 0, step: 0,
       message: {
         id: MessageId('msg-6'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('b1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('b1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('b1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('b1') },
       },
     }, 6),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r3'), name: 'read', arguments: '{"file":"c.ts"}' }, 7),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r3'), name: 'read', arguments: '{"file":"c.ts"}' }, 7),
     readResult(8, 'r3', 'ccc'),
   ])
   const tools = messages.filter(message => message.kind === 'tool')
@@ -780,20 +780,20 @@ test('consecutive read grouping spans turn boundaries (incremental projection pa
     message: {
       id: MessageId(`msg-${seq}`),
       role: 'user',
-      content: [{ type: 'tool-result', toolCallId: CallId(callId), content: [{ type: 'text', text }] }],
-      source: { kind: 'tool', callId: CallId(callId) },
+      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text }] }],
+      source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq)
   // Two reads in DIFFERENT turns, applied incrementally.
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
     readResult(2, 'r1', 'aaa'),
   ])
   folder.apply([
     event('turn/start', { turn: 1 }, 3),
-    event('tool/call', { turn: 1, step: 0, callId: CallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 4),
+    event('tool/call', { turn: 1, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 4),
     readResult(5, 'r2', 'bbb'),
   ])
   const tools = folder.messages().filter(message => message.kind === 'tool')
@@ -810,20 +810,20 @@ test('a failed read breaks the group; late settlement preserves reflow counts', 
     message: {
       id: MessageId(`msg-${seq}`),
       role: 'user',
-      content: [{ type: 'tool-result', toolCallId: CallId(callId), content: [{ type: 'text', text }] }],
-      source: { kind: 'tool', callId: CallId(callId) },
+      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text }] }],
+      source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq)
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
     readResult(2, 'r1', 'aaa'),
     // r2 FAILS: the run breaks even though the card is named read.
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
     readResult(4, 'r2', 'bbb', true),
     // r3 is called but its result lands LATE (after the next turn started).
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r3'), name: 'read', arguments: '{"file":"c.ts"}' }, 5),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r3'), name: 'read', arguments: '{"file":"c.ts"}' }, 5),
     event('turn/start', { turn: 1 }, 6),
   ])
   const before = folder.messages().filter(message => message.kind === 'tool')
@@ -841,9 +841,9 @@ test('a failed read breaks the group; late settlement preserves reflow counts', 
   const folder2 = new TranscriptFolder()
   folder2.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
     readResult(2, 'r1', 'aaa'),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
     event('turn/start', { turn: 1 }, 4),
   ])
   folder2.apply([readResult(5, 'r2', 'bbb')])
@@ -856,11 +856,11 @@ test('a failed read breaks the group; late settlement preserves reflow counts', 
   const folder3 = new TranscriptFolder()
   folder3.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{}' }, 1),
     readResult(2, 'r1', 'aaa'),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{}' }, 3),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{}' }, 3),
     readResult(4, 'r2', 'bbb'),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r3'), name: 'read', arguments: '{}' }, 5),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r3'), name: 'read', arguments: '{}' }, 5),
     event('turn/start', { turn: 1 }, 6),
     event('user/message', {
       id: MessageId('late-reflow-user'),
@@ -880,7 +880,7 @@ test('a failed read breaks the group; late settlement preserves reflow counts', 
 test('cold hydrate defers adjacent-read reflow and preserves apply semantics', () => {
   const events: SessionEvent[] = [event('turn/start', { turn: 0 }, 0)]
   for (let index = 0; index < 128; index += 1) {
-    const callId = CallId(`hydrate-read-${index}`)
+    const callId = ToolCallId(`hydrate-read-${index}`)
     events.push(event('tool/call', {
       turn: 0,
       step: 0,
@@ -943,7 +943,7 @@ test('cold hydrate defers adjacent-read reflow and preserves apply semantics', (
 
   // Hydration is a cold-only optimization: a later live suffix still uses the
   // immediate grouping path and retains the same public projection semantics.
-  const nextCall = CallId('hydrate-read-live')
+  const nextCall = ToolCallId('hydrate-read-live')
   hydrated.apply([
     event('tool/call', { turn: 0, step: 0, callId: nextCall, name: 'read', arguments: '{}' }, events.length),
     event('tool/result', {
@@ -1118,7 +1118,7 @@ test('an interrupted turn settles every live thinking entry', () => {
 
 test('tool results keep their content blocks and meta for presentation', () => {
   const messages = foldTranscript([
-    event('tool/call', { turn: 0, step: 0, callId: CallId('call-1'), name: 'read', arguments: '{"file_path":"/ws/src/foo.ts"}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('call-1'), name: 'read', arguments: '{"file_path":"/ws/src/foo.ts"}' }, 0),
     event('tool/result', {
       turn: 0,
       step: 0,
@@ -1127,10 +1127,10 @@ test('tool results keep their content blocks and meta for presentation', () => {
         role: 'user',
         content: [{
           type: 'tool-result',
-          toolCallId: CallId('call-1'),
+          toolCallId: ToolCallId('call-1'),
           content: [{ type: 'text', text: 'hi' }],
         }],
-        source: { kind: 'tool', callId: CallId('call-1') },
+        source: { kind: 'tool', callId: ToolCallId('call-1') },
       },
       meta: { path: '/ws/src/foo.ts', totalLines: 1 },
     }, 1),
@@ -1256,7 +1256,7 @@ test('injected context rows carry a source-kind icon SEMANTIC (never a glyph)', 
 test('Test A: an append-origin tool call/result pair folds into one ok card', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('a1'), name: 'bash', arguments: '{"command":"echo"}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('a1'), name: 'bash', arguments: '{"command":"echo"}' }, 1),
     toolResult(2, 'a1', 'ORIGINAL FULL RESULT'),
   ])
   assert.deepEqual(kinds(messages), ['tool'])
@@ -1266,7 +1266,7 @@ test('Test A: an append-origin tool call/result pair folds into one ok card', ()
   assert.equal(tool.result, 'ORIGINAL FULL RESULT')
   // The running → ok pairing is unchanged (verified via the folder).
   const folder = new TranscriptFolder()
-  folder.apply([event('turn/start', { turn: 0 }, 0), event('tool/call', { turn: 0, step: 0, callId: CallId('a1'), name: 'bash', arguments: '{}' }, 1)])
+  folder.apply([event('turn/start', { turn: 0 }, 0), event('tool/call', { turn: 0, step: 0, callId: ToolCallId('a1'), name: 'bash', arguments: '{}' }, 1)])
   const running = folder.messages()[0]
   assert.ok(running !== undefined && running.kind === 'tool')
   assert.equal(running.status, 'running')
@@ -1279,7 +1279,7 @@ test('Test A: an append-origin tool call/result pair folds into one ok card', ()
 test('Test B: a post-prune replacement tool/result must not add a ghost card', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('a1'), name: 'bash', arguments: '{}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('a1'), name: 'bash', arguments: '{}' }, 1),
     toolResult(2, 'a1', 'ORIGINAL FULL RESULT'),
     // compaction/prune then the replacement copy of the SAME call.
     rawEvent('compaction/prune', {
@@ -1302,7 +1302,7 @@ test('Test C: many prune replacements never change the transcript tail', () => {
   const originalSeqs: number[] = []
   for (let index = 0; index < 13; index += 1) {
     const callId = `call-${index}`
-    events.push(event('tool/call', { turn: 0, step: 0, callId: CallId(callId), name: 'bash', arguments: `{"cmd":"${index}"}` }, seq++))
+    events.push(event('tool/call', { turn: 0, step: 0, callId: ToolCallId(callId), name: 'bash', arguments: `{"cmd":"${index}"}` }, seq++))
     const originalSeq = seq
     originalSeqs.push(originalSeq)
     events.push(toolResult(seq++, callId, `ORIGINAL ${index}`))
@@ -1387,7 +1387,7 @@ test('Test F: legacy unmarked sessions keep their current behavior', () => {
   // tool/call + tool/result WITHOUT surfaceOp (a legacy Harness log).
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('legacy-1'), name: 'bash', arguments: '{}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('legacy-1'), name: 'bash', arguments: '{}' }, 1),
     event('tool/result', {
       turn: 0,
       step: 0,
@@ -1396,10 +1396,10 @@ test('Test F: legacy unmarked sessions keep their current behavior', () => {
         role: 'user',
         content: [{
           type: 'tool-result',
-          toolCallId: CallId('legacy-1'),
+          toolCallId: ToolCallId('legacy-1'),
           content: [{ type: 'text', text: 'legacy result' }],
         }],
-        source: { kind: 'tool', callId: CallId('legacy-1') },
+        source: { kind: 'tool', callId: ToolCallId('legacy-1') },
       },
     }, 2),
   ])
@@ -1422,7 +1422,7 @@ test('Test F: legacy unmarked sessions keep their current behavior', () => {
 test('Test G: cold replay and incremental replay agree on replacement logs', () => {
   const events: SessionEvent[] = [
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('a1'), name: 'bash', arguments: '{}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('a1'), name: 'bash', arguments: '{}' }, 1),
     toolResult(2, 'a1', 'ORIGINAL'),
     rawEvent('compaction/prune', { shadowedRange: { start: 2, end: 2 }, shadowedSeqs: [2], shadowedTokenCount: 1 }, 3),
     pruneReplacement(4, 'a1', 'PRUNED', 2),
@@ -1447,17 +1447,17 @@ test('a replacement does not disturb consecutive-read grouping or the window sum
       role: 'user',
       content: [{
         type: 'tool-result',
-        toolCallId: CallId(callId),
+        toolCallId: ToolCallId(callId),
         content: [{ type: 'text', text }],
       }],
-      source: { kind: 'tool', callId: CallId(callId) },
+      source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, 'append')
   const events: SessionEvent[] = [
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
     readResult(2, 'r1', 'aaa'),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
     readResult(4, 'r2', 'bbb'),
   ]
   const before = foldTranscript(events)
@@ -1486,22 +1486,22 @@ test('window summaries stay identical across a prune replacement', () => {
       role: 'user',
       content: [{
         type: 'tool-result',
-        toolCallId: CallId(callId),
+        toolCallId: ToolCallId(callId),
         content: [{ type: 'text', text }],
       }],
-      source: { kind: 'tool', callId: CallId(callId) },
+      source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, 'append')
   // Three turns: turn 0 = one grouped read pair, turn 1 = a bash call,
   // turn 2 = a user prompt. A maxTurns=2 window collapses turn 0.
   const events: SessionEvent[] = [
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
     readResult(2, 'r1', 'aaa'),
-    event('tool/call', { turn: 0, step: 0, callId: CallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
     readResult(4, 'r2', 'bbb'),
     event('turn/start', { turn: 1 }, 5),
-    event('tool/call', { turn: 1, step: 0, callId: CallId('b1'), name: 'bash', arguments: '{}' }, 6),
+    event('tool/call', { turn: 1, step: 0, callId: ToolCallId('b1'), name: 'bash', arguments: '{}' }, 6),
     toolResult(7, 'b1', 'bash result'),
     event('turn/start', { turn: 2 }, 8),
     surfaceEvent('user/message', {
@@ -1608,6 +1608,96 @@ test('a replacement assistant/message does not mutate Focus activity', () => {
   const assistant = messages[0]
   assert.ok(assistant !== undefined && assistant.kind === 'assistant')
   assert.equal(assistant.text, 'first answer', 'append-origin assistant text must survive')
+})
+
+// ── Focus Message slot: bounded multiline tail (plan: the fold keeps
+// the tail's line structure; the renderer wraps and shows the last rows) ──
+
+test('the Message slot keeps a MULTILINE candidate tail (never flattened to one line)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'line one\nline two\nline three' } }, 1),
+  ])
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.message?.text, 'line one\nline two\nline three',
+    'syncMessage must preserve the multiline tail for the renderer')
+})
+
+test('a confirmed intermediate message keeps its bounded LATEST tail (multiline)', () => {
+  const folder = new TranscriptFolder()
+  const long = 'head\n' + 'x'.repeat(600) + '\ntail marker'
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: long } }, 1),
+    // A tool call confirms the candidate as an intermediate message.
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 2),
+  ])
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  const message = activity.message
+  const length = message?.text.length ?? 0
+  assert.ok(message?.text.endsWith('tail marker'), 'the confirmed slot keeps the newest content')
+  assert.ok(message !== undefined && length <= 400,
+    `the confirmed slot stays bounded to MESSAGE_TAIL_CAP (${length})`)
+  assert.ok(message?.text.includes('\n'), 'the confirmed multiline structure survives')
+})
+
+test('a later authoritative message updates the correct step in place (multiline tail)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'streamed\nfragment' } }, 1),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'settled\nmultiline\nanswer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 2),
+  ])
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.message?.text, 'settled\nmultiline\nanswer',
+    'the authoritative text replaces the streamed tail in place')
+})
+
+test('a stale older step never resurrects the Message slot', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'step zero text' } }, 1),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a0'), role: 'assistant', content: [{ type: 'text', text: 'step zero settled' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 2),
+    event('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: 'step one text' } }, 3),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'step one settled' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 4),
+  ])
+  const before = folder.turnActivity(0)
+  assert.ok(before !== undefined)
+  assert.equal(before.message?.text, 'step one settled', 'the LATEST intermediate wins')
+  // A late replay for the OLDER step must not roll the slot back.
+  folder.apply([event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'stale replay' } }, 5)])
+  const after = folder.turnActivity(0)
+  assert.equal(after?.message?.text, 'step one settled', 'a stale older-step delta never resurrects the slot')
+})
+
+test('the final answer never enters the Message slot (multiline final included)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'final\nanswer\nlines' } }, 1),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'final\nanswer\nlines' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.message, undefined, 'a completed turn whose candidate IS the final leaves the slot empty')
 })
 
 

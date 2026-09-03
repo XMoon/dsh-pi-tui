@@ -22,9 +22,6 @@ export class Text implements Component {
 		this.customBgFn = customBgFn;
 	}
 
-	/** No-op lifecycle hook; subclasses (e.g. Loader) may override it. */
-	dispose(): void {}
-
 	setText(text: string): void {
 		this.text = text;
 		this.cachedText = undefined;
@@ -45,6 +42,9 @@ export class Text implements Component {
 		this.cachedLines = undefined;
 	}
 
+	/** No-op lifecycle hook; subclasses (e.g. Loader) may override it. (dsh-pi-tui divergence X019.) */
+	dispose(): void {}
+
 	render(width: number): string[] {
 		// Check cache
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
@@ -63,15 +63,16 @@ export class Text implements Component {
 		// Replace tabs with 3 spaces
 		const normalizedText = this.text.replace(/\t/g, "   ");
 
-		// Calculate content width (subtract left/right margins)
-		const contentWidth = Math.max(1, width - this.paddingX * 2);
+		// Reduce margins when necessary so content and padding fit within the available width.
+		const paddingX = Math.min(this.paddingX, Math.max(0, Math.floor((width - 1) / 2)));
+		const contentWidth = Math.max(1, width - paddingX * 2);
 
 		// Wrap text (this preserves ANSI codes but does NOT pad)
 		const wrappedLines = wrapTextWithAnsi(normalizedText, contentWidth);
 
 		// Add margins and background to each line
-		const leftMargin = " ".repeat(this.paddingX);
-		const rightMargin = " ".repeat(this.paddingX);
+		const leftMargin = " ".repeat(paddingX);
+		const rightMargin = " ".repeat(paddingX);
 		const contentLines: string[] = [];
 
 		for (const line of wrappedLines) {
@@ -90,7 +91,7 @@ export class Text implements Component {
 		}
 
 		// Add top/bottom padding (empty lines)
-		const emptyLine = " ".repeat(Math.max(0, width));
+		const emptyLine = " ".repeat(width);
 		const emptyLines: string[] = [];
 		for (let i = 0; i < this.paddingY; i++) {
 			const line = this.customBgFn ? applyBackgroundToLine(emptyLine, width, this.customBgFn) : emptyLine;

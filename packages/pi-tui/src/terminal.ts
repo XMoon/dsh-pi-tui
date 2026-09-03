@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { setKittyProtocolActive } from "./keys.ts";
 import { isNativeModifierPressed } from "./native-modifiers.ts";
+import { getNativeModuleCandidates } from "./native-module-path.ts";
 import { StdinBuffer } from "./stdin-buffer.ts";
 
 const cjsRequire = createRequire(import.meta.url);
@@ -38,7 +38,7 @@ function isKeyboardProtocolNegotiationSequencePrefix(sequence: string): boolean 
 }
 
 export function isAppleTerminalSession(): boolean {
-	return process.platform === "darwin" && process.env['TERM_PROGRAM'] === "Apple_Terminal";
+	return process.platform === "darwin" && process.env.TERM_PROGRAM === "Apple_Terminal";
 }
 
 export function normalizeNativeShiftEnterInput(
@@ -110,11 +110,11 @@ const DEFAULT_SSH_ESCAPE_TIMEOUT_MS = 100;
  * another byte, so high-latency transports need a longer reassembly window.
  */
 export function resolveEscapeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
-	const configured = Number(env['PI_TUI_ESC_TIMEOUT']);
+	const configured = Number(env.PI_TUI_ESC_TIMEOUT);
 	if (Number.isFinite(configured) && configured > 0) {
 		return configured;
 	}
-	if (env['SSH_CONNECTION'] || env['SSH_TTY']) {
+	if (env.SSH_CONNECTION || env.SSH_TTY) {
 		return DEFAULT_SSH_ESCAPE_TIMEOUT_MS;
 	}
 	return DEFAULT_ESCAPE_TIMEOUT_MS;
@@ -125,6 +125,10 @@ export function resolveEscapeTimeoutMs(env: NodeJS.ProcessEnv = process.env): nu
  */
 export class ProcessTerminal implements Terminal {
 	private wasRaw = false;
+	/** Whether start() has run without a matching stop(): the FIRST start
+	 * captures the pre-raw stdin state; a repeated start finds stdin
+	 * already raw and must NOT re-capture it (X016). */
+	private started = false;
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
 	private _kittyProtocolActive = false;
@@ -136,7 +140,7 @@ export class ProcessTerminal implements Terminal {
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
 	private writeLogPath = (() => {
-		const env = process.env['PI_TUI_WRITE_LOG'] || "";
+		const env = process.env.PI_TUI_WRITE_LOG || "";
 		if (!env) return "";
 		try {
 			if (fs.statSync(env).isDirectory()) {
@@ -159,16 +163,36 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	start(onInput: (data: string) => void, onResize: () => void): void {
-		// A repeated start() must not stack resize listeners: stop() can only
-		// remove the CURRENT reference, so any earlier listener would leak.
+		// A repeated start() must swap EVERY owned handler safely, not just
+		// the resize listener (dsh-pi-tui divergence X016): stop() can only
+		// remove the CURRENT references, so anything a previous start()
+		// registered must be removed BEFORE it is overwritten, or the old
+		// handler leaks and double-delivers (a stale StdinBuffer callback
+		// and a stale stdin "data" listener both forward into the NEW
+		// inputHandler — one stdin event would reach the TUI twice).
 		if (this.resizeHandler) {
 			process.stdout.removeListener("resize", this.resizeHandler);
 		}
+		if (this.stdinDataHandler) {
+			process.stdin.removeListener("data", this.stdinDataHandler);
+			this.stdinDataHandler = undefined;
+		}
+		if (this.stdinBuffer) {
+			this.stdinBuffer.destroy();
+			this.stdinBuffer = undefined;
+		}
+		this.clearKeyboardProtocolNegotiationBuffer();
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
 
-		// Save previous state and enable raw mode
-		this.wasRaw = process.stdin.isRaw || false;
+		// Save previous state and enable raw mode. Only the FIRST start()
+		// may capture the pre-raw state: a repeated start() finds stdin
+		// already raw, and re-capturing would make the eventual stop()
+		// restore raw mode instead of the original cooked state (X016).
+		if (!this.started) {
+			this.wasRaw = process.stdin.isRaw || false;
+		}
+		this.started = true;
 		if (process.stdin.setRawMode) {
 			process.stdin.setRawMode(true);
 		}
@@ -252,6 +276,12 @@ export class ProcessTerminal implements Terminal {
 	private queryAndEnableKittyProtocol(): void {
 		this.setupStdinBuffer();
 		process.stdin.on("data", this.stdinDataHandler!);
+		// A repeated start() without a stop() must NOT push the keyboard
+		// protocol again: CSI > flags u PUSHES a layer and stop()/drainInput()
+		// pop exactly once (CSI < u) — a second push would leave the
+		// terminal in Kitty enhancement mode after exit (X016). The
+		// negotiated mode is kept as-is; only the parser is rebuilt.
+		if (this.keyboardProtocolPushed) return;
 		this.keyboardProtocolPushed = true;
 		this.clearKeyboardProtocolNegotiationBuffer();
 		process.stdout.write(KITTY_KEYBOARD_PROTOCOL_QUERY);
@@ -375,16 +405,10 @@ export class ProcessTerminal implements Terminal {
 			if (arch !== "x64" && arch !== "arm64") return;
 
 			// Dynamic require so non-Windows and bundled/browser paths never load the
-			// native helper. In the npm package native/ is next to dist/; in compiled
-			// binary archives native/ is copied next to the executable.
-			const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+			// native helper. Installed packages resolve it from pi-tui; standalone
+			// binaries resolve the copy next to the executable.
 			const nativePath = path.join("native", "win32", "prebuilds", `win32-${arch}`, "win32-console-mode.node");
-			const candidates = [
-				path.join(moduleDir, "..", nativePath),
-				path.join(moduleDir, nativePath),
-				path.join(path.dirname(process.execPath), nativePath),
-			];
-			for (const modulePath of candidates) {
+			for (const modulePath of getNativeModuleCandidates(nativePath)) {
 				try {
 					const helper = cjsRequire(modulePath) as { enableVirtualTerminalInput?: () => boolean };
 					helper.enableVirtualTerminalInput?.();
@@ -482,6 +506,9 @@ export class ProcessTerminal implements Terminal {
 		if (process.stdin.setRawMode) {
 			process.stdin.setRawMode(this.wasRaw);
 		}
+		// A later start() is a fresh lifecycle: it re-captures the pre-raw
+		// state (stdin is cooked again after the restore above).
+		this.started = false;
 	}
 
 	write(data: string): void {
@@ -496,11 +523,11 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	get columns(): number {
-		return process.stdout.columns || Number(process.env['COLUMNS']) || 80;
+		return process.stdout.columns || Number(process.env.COLUMNS) || 80;
 	}
 
 	get rows(): number {
-		return process.stdout.rows || Number(process.env['LINES']) || 24;
+		return process.stdout.rows || Number(process.env.LINES) || 24;
 	}
 
 	moveBy(lines: number): void {

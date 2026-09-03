@@ -24,17 +24,32 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { afterEach, test } from 'node:test'
+import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function startApp(columns = 100, rows = 30): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(columns, rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -81,13 +96,13 @@ function settledTurn(turn: number, seqBase: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
     eventAt('assistant/chunk', { turn, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: `reason ${turn} A\nreason ${turn} B` } }, T0 + 2, seqBase + 2),
-    eventAt('tool/call', { turn, step: 0, callId: CallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + 3, seqBase + 3),
+    eventAt('tool/call', { turn, step: 0, callId: ToolCallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + 3, seqBase + 3),
     eventAt('tool/result', {
       turn, step: 0,
       message: {
         id: MessageId(`r${turn}`), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId(`c${turn}`), content: [{ type: 'text', text: lines }] }],
-        source: { kind: 'tool', callId: CallId(`c${turn}`) },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId(`c${turn}`), content: [{ type: 'text', text: lines }] }],
+        source: { kind: 'tool', callId: ToolCallId(`c${turn}`) },
       },
     }, T0 + 4, seqBase + 4),
     eventAt('assistant/message', {
@@ -112,7 +127,7 @@ function runningTurnStart(turn: number, seqBase: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
     eventAt('assistant/chunk', { turn, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: `reason ${turn} A` } }, T0 + 2, seqBase + 2),
-    eventAt('tool/call', { turn, step: 0, callId: CallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + 3, seqBase + 3),
+    eventAt('tool/call', { turn, step: 0, callId: ToolCallId(`c${turn}`), name: 'bash', arguments: JSON.stringify({ command: `cmd ${turn}` }) }, T0 + 3, seqBase + 3),
   ]
 }
 
@@ -240,8 +255,8 @@ test('running Thought + user following the end keeps following (plan §21.3)', a
         turn: 4, step: 0,
         message: {
           id: MessageId('r4'), role: 'user',
-          content: [{ type: 'tool-result', toolCallId: CallId('c4'), content: [{ type: 'text', text: 'fresh output line' }] }],
-          source: { kind: 'tool', callId: CallId('c4') },
+          content: [{ type: 'tool-result', toolCallId: ToolCallId('c4'), content: [{ type: 'text', text: 'fresh output line' }] }],
+          source: { kind: 'tool', callId: ToolCallId('c4') },
         },
       }, T0 + 44000, 900),
     ])

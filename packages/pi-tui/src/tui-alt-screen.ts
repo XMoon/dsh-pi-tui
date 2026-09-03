@@ -66,6 +66,9 @@ const MAX_CACHED_OFFSCREEN_KITTY_IMAGES = 16;
 const MAX_CACHED_OFFSCREEN_KITTY_TRANSMISSION_BYTES = 32 * 1024 * 1024;
 const MAX_CACHED_OFFSCREEN_KITTY_DECODED_BYTES = 64 * 1024 * 1024;
 const DOUBLE_CLICK_INTERVAL_MS = 500;
+// Regular mode delegates double-click selection to the terminal emulator. Fullscreen owns mouse selection,
+// so mirror common terminal word-selection behavior by keeping paths and kebab-case tokens whole.
+const TERMINAL_WORD_SELECTION_JOINERS = new Set(["/", "-"]);
 const wordSegmenter = getWordSegmenter();
 
 interface CachedKittyImage {
@@ -143,22 +146,6 @@ interface SearchHighlightRange {
 export interface TuiAltScreenOptions {
 	/** Number of logical lines moved for each mouse-wheel event. */
 	wheelScrollLines?: number;
-	/**
-	 * Called when a viewport navigation attempt reaches an edge. The callback
-	 * receives -1 for older/upward navigation and +1 for newer/downward
-	 * navigation, plus the input source. Returning true lets the host replace
-	 * the document (for example, by loading another virtual transcript window).
-	 * This is a public boundary seam; consumers never need the private layout or
-	 * ScrollView instance to implement virtualized history.
-	 */
-	onScrollBoundary?: (direction: -1 | 1, source: "wheel" | "page" | "scrollbar") => boolean | void;
-	/**
-	 * Give a host semantic action first refusal of a non-mouse viewport key.
-	 * Returning true consumes the key. This runs before the fork's built-in
-	 * Home/End/Page navigation, which lets a Host action such as Ctrl+End keep
-	 * its meaning even when a Home/End preset maps that chord to bottom-scroll.
-	 */
-	onBeforeViewportInput?: (data: string) => boolean | void;
 	/** Capture mouse events for viewport scrolling and application-owned text selection. */
 	mouse?: boolean;
 	/** Style a non-current transcript search match. */
@@ -169,22 +156,50 @@ export interface TuiAltScreenOptions {
 	openUrl?: (url: string) => void;
 	/** Handle an unmodified secondary-button press for clipboard paste. Currently enabled on Windows only. */
 	onRightClickPaste?: () => void;
+	/** Automatically copy selected text to the clipboard on mouse release (default: true). */
+	copyOnSelect?: boolean;
+	/**
+	 * Copy selected text to the system clipboard. Return `true` on success; the caller flashes
+	 * an error otherwise. When omitted, the selection is copied via an OSC 52 write.
+	 */
+	copySelection?: (text: string) => Promise<boolean>;
+	/**
+	 * Called when a viewport navigation attempt reaches an edge. The callback
+	 * receives -1 for older/upward navigation and +1 for newer/downward
+	 * navigation, plus the input source. Returning true lets the host replace
+	 * the document (for example, by loading another virtual transcript window).
+	 * This is a public boundary seam; consumers never need the private layout or
+	 * ScrollView instance to implement virtualized history. (dsh-pi-tui
+	 * divergence X028.)
+	 */
+	onScrollBoundary?: (direction: -1 | 1, source: "wheel" | "page" | "scrollbar") => boolean | void;
+	/**
+	 * Give a host semantic action first refusal of a non-mouse viewport key.
+	 * Returning true consumes the key. This runs before the fork's built-in
+	 * Home/End/Page navigation, which lets a Host action such as Ctrl+End keep
+	 * its meaning even when a Home/End preset maps that chord to bottom-scroll.
+	 * (dsh-pi-tui divergence X028.)
+	 */
+	onBeforeViewportInput?: (data: string) => boolean | void;
 	/**
 	 * Handle a primary-button click on one cell: a press and release at the
 	 * same cell with no drag in between and no OSC 8 URL under the cursor.
 	 * dsh-pi-tui extension: lets the host react to clicks (e.g. expand one
-	 * transcript card) without reimplementing selection.
+	 * transcript card) without reimplementing selection. (dsh-pi-tui
+	 * divergence X018.)
 	 */
 	onCellClick?: (x: number, y: number) => void;
 	/**
-	 * Host-owned clipboard strategy for a completed drag selection
-	 * (dsh-pi-tui extension, backported from upstream earendil-works/pi#8110
-	 * structure). When provided, the selection text is handed to this
-	 * callback instead of writing a raw OSC 52 sequence; the returned
-	 * boolean drives the `Copied!` / `Copy failed` flash. Absent, the
-	 * original OSC 52 write stays the behavior (other pi-tui consumers).
+	 * Defer the viewport input listener's registration out of the
+	 * constructor (dsh-pi-tui divergence X043). Input listeners run in
+	 * REGISTRATION order, and the constructor registers the viewport
+	 * listener FIRST — so every later host listener (the app's single
+	 * router, raw-capture stages) sees a chunk only AFTER the viewport has
+	 * already consumed wheel/mouse events and semantic scroll keys. With
+	 * this option the host installs its own listeners first, then calls
+	 * {@link TuiAltScreen.installViewportListener} exactly once.
 	 */
-	copySelection?: (text: string) => Promise<boolean>;
+	deferViewportListener?: boolean;
 }
 
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
@@ -214,7 +229,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private selectionAutoScrollTimer?: NodeJS.Timeout;
 	private selectionPressActive = false;
 	private scrollbarDrag?: ScrollbarDrag;
-	private scrollbarBoundaryNotified?: -1 | 1;
 	private scrollbarHover?: ScrollView;
 	private activeSearch?: ActiveSearch;
 	private pressedUrl?: string;
@@ -225,10 +239,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly searchCurrentMatchStyle: (text: string) => string;
 	private readonly openUrl?: (url: string) => void;
 	private readonly onRightClickPaste?: () => void;
-	private readonly onCellClick?: (x: number, y: number) => void;
+	private copyOnSelect: boolean;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
+	private readonly onCellClick?: (x: number, y: number) => void;
 	private readonly onScrollBoundary?: (direction: -1 | 1, source: "wheel" | "page" | "scrollbar") => boolean | void;
 	private readonly onBeforeViewportInput?: (data: string) => boolean | void;
+	private scrollbarBoundaryNotified?: -1 | 1;
 
 	constructor(
 		terminal: Terminal,
@@ -251,12 +267,31 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
-		this.onCellClick = options.onCellClick;
+		this.copyOnSelect = options.copyOnSelect ?? true;
 		this.copySelection = options.copySelection;
+		this.onCellClick = options.onCellClick;
 		this.onScrollBoundary = options.onScrollBoundary;
 		this.onBeforeViewportInput = options.onBeforeViewportInput;
+		if (options.deferViewportListener !== true) {
+			this.viewportListenerInstalled = true;
+			this.addInputListener((data) => this.handleViewportInput(data));
+		}
+	}
+
+	/**
+	 * Register the viewport input listener explicitly — only valid with the
+	 * {@link TuiAltScreenOptions.deferViewportListener} constructor option,
+	 * idempotent afterwards (subsequent calls are no-ops). Registration
+	 * order IS dispatch order: call this AFTER every host listener that
+	 * must see raw chunks first. (dsh-pi-tui divergence X043.)
+	 */
+	installViewportListener(): void {
+		if (this.viewportListenerInstalled) return;
+		this.viewportListenerInstalled = true;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
+
+	private viewportListenerInstalled = false;
 
 	get viewportTop(): number {
 		return this.getPrimaryScrollView().scrollTop;
@@ -266,15 +301,31 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return this.getPrimaryScrollView().isFollowingEnd;
 	}
 
+	getCopyOnSelect(): boolean {
+		return this.copyOnSelect;
+	}
+
+	setCopyOnSelect(enabled: boolean): void {
+		this.copyOnSelect = enabled;
+	}
+
+	/** Whether the fullscreen viewport has a non-empty active text selection. */
+	hasActiveSelection(): boolean {
+		return this.getActiveSelectionText() !== undefined;
+	}
+
+	/** Copy the active fullscreen text selection, if any, using the configured selection clipboard path. */
+	async copyActiveSelectionToClipboard(): Promise<boolean> {
+		const text = this.getActiveSelectionText();
+		if (!text) return false;
+		return this.copyTextToClipboard(text);
+	}
+
 	setLayoutRoot(component: Component | undefined): void {
 		if (this.layoutRoot === component) return;
 		this.layoutRoot = component;
 		this.currentLayout = undefined;
 		this.requestRender();
-	}
-
-	getLayoutRoot(): Component | undefined {
-		return this.layoutRoot;
 	}
 
 	override render(width: number): string[] {
@@ -313,13 +364,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
 		this.resetRenderState();
-		const term = process.env['TERM']?.toLowerCase() ?? "";
+		const term = process.env.TERM?.toLowerCase() ?? "";
 		// Multiplexers can lag when every pointer movement is forwarded. Button-motion
 		// tracking preserves clicks, wheel events, selections, and scrollbar dragging.
 		const mouseSequence =
-			process.env['TMUX'] !== undefined ||
-			process.env['ZELLIJ'] !== undefined ||
-			process.env['STY'] !== undefined ||
+			process.env.TMUX !== undefined ||
+			process.env.ZELLIJ !== undefined ||
+			process.env.STY !== undefined ||
 			term.startsWith("tmux") ||
 			term.startsWith("screen")
 				? ENABLE_BUTTON_MOTION_MOUSE
@@ -489,7 +540,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.requestRender();
 	}
 
-	/** Close the built-in fullscreen transcript search, if one is active. */
+	/** Close the built-in fullscreen transcript search, if one is active. (dsh-pi-tui divergence X028.) */
 	clearSearch(): boolean {
 		if (!this.activeSearch) return false;
 		this.closeSearch();
@@ -577,6 +628,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.flashes.flash(message, durationMs);
 	}
 
+	private shouldDeferViewportInputToOverlay(): boolean {
+		return this.isOverlayFocused() && this.activeSearch?.overlay?.isFocused() !== true;
+	}
+
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (data === FOCUS_OUT) {
 			const hadActiveSelection = this.selectionPressActive;
@@ -604,6 +659,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		const wheelEvent = this.parseWheelEvent(data);
 		if (wheelEvent) {
+			if (this.shouldDeferViewportInputToOverlay()) return undefined;
 			this.routeWheel(wheelEvent);
 			return { consume: true };
 		}
@@ -619,6 +675,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		const keybindings = getKeybindings();
 		const isRelease = isKeyRelease(data);
+		// A focused (non-search) overlay keeps priority over EVERYTHING,
+		// including the host seam: overlay input must never be preempted by
+		// a host-claimed viewport key (Home/End, search chords). The search
+		// overlay is excluded so the host seam below can still suppress the
+		// built-in search key while the search input is focused.
+		if (this.shouldDeferViewportInputToOverlay()) return undefined;
 		if (!isRelease && this.onBeforeViewportInput?.(data) === true) return { consume: true };
 		// When the primary scroll view has nothing to scroll (short content, or a
 		// full-screen component mounted as the layout root), let navigation keys
@@ -708,14 +770,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private parseWheelEvent(data: string): WheelEvent | undefined {
 		const sgr = /^\x1b\[<(\d+);(\d+);(\d+)[Mm]$/.exec(data);
 		if (sgr) {
-			const button = Number.parseInt(sgr[1]!, 10);
+			const button = Number.parseInt(sgr[1], 10);
 			if ((button & 64) === 0) return undefined;
 			const direction = button & 3;
 			if (direction !== 0 && direction !== 1) return undefined;
 			return {
 				direction: direction === 0 ? -1 : 1,
-				x: Number.parseInt(sgr[2]!, 10) - 1,
-				y: Number.parseInt(sgr[3]!, 10) - 1,
+				x: Number.parseInt(sgr[2], 10) - 1,
+				y: Number.parseInt(sgr[3], 10) - 1,
 			};
 		}
 		if (data.length === 6 && data.startsWith("\x1b[M")) {
@@ -751,6 +813,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// scroll view may hit its edge and bubble into an outer view; reporting
 		// the primary edge before that outer view consumes the remainder would
 		// load a virtual page even though the gesture still had somewhere to go.
+		// (dsh-pi-tui divergence X028.)
 		if (primarySeen && remaining < 0) this.onScrollBoundary?.(-1, "wheel");
 		else if (primarySeen && remaining > 0) this.onScrollBoundary?.(1, "wheel");
 		this.updateScrollbarHover(event.x, event.y);
@@ -761,15 +824,21 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const match = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data);
 		if (!match) return undefined;
 		return {
-			button: Number.parseInt(match[1]!, 10),
-			x: Number.parseInt(match[2]!, 10) - 1,
-			y: Number.parseInt(match[3]!, 10) - 1,
+			button: Number.parseInt(match[1], 10),
+			x: Number.parseInt(match[2], 10) - 1,
+			y: Number.parseInt(match[3], 10) - 1,
 			release: match[4] === "m",
 		};
 	}
 
 	private handleRightClickPaste(event: SgrMouseEvent): boolean {
-		if (!this.onRightClickPaste || process.platform !== "win32" || event.release || event.button !== 2) {
+		if (
+			!this.onRightClickPaste ||
+			process.platform !== "win32" ||
+			process.env.TERM_PROGRAM?.toLowerCase() === "vscode" ||
+			event.release ||
+			event.button !== 2
+		) {
 			return false;
 		}
 		try {
@@ -832,6 +901,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					maxThumbOffset === 0 ? 0 : Math.round((thumbOffset / maxThumbOffset) * geometry.maxScrollTop);
 				const scrollView = this.scrollbarDrag.scrollView;
 				scrollView.scrollTo(scrollTop);
+				// Notify the host when dragging the PRIMARY scrollbar to an edge
+				// (virtual transcript paging). (dsh-pi-tui divergence X028.)
 				if (scrollView === this.getPrimaryScrollView() && geometry.maxScrollTop > 0) {
 					if (scrollView.scrollTop <= 0) {
 						if (this.scrollbarBoundaryNotified !== -1) {
@@ -918,18 +989,39 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private getWordSelection(point: SelectionPoint): SelectionRange | undefined {
 		const line = stripTerminalSequences(this.getSelectionSourceLine(point));
+		const segments: Array<{ start: number; end: number; selectable: boolean; joiner: boolean }> = [];
 		let start = 0;
 		for (const segment of wordSegmenter.segment(line)) {
 			const end = start + visibleWidth(segment.segment);
-			if (point.col >= start && point.col < end) {
-				return {
-					start: { ...point, col: start },
-					end: { ...point, col: end, boundary: true },
-				};
-			}
+			const joiner = TERMINAL_WORD_SELECTION_JOINERS.has(segment.segment);
+			segments.push({ start, end, selectable: segment.isWordLike === true || joiner, joiner });
 			start = end;
 		}
-		return undefined;
+		const clickedSegmentIndex = segments.findIndex(
+			(segment) => point.col >= segment.start && point.col < segment.end,
+		);
+		if (clickedSegmentIndex < 0) return undefined;
+
+		const canJoin = (
+			left: { selectable: boolean; joiner: boolean },
+			right: { selectable: boolean; joiner: boolean },
+		): boolean => left.selectable && right.selectable && (left.joiner || right.joiner);
+		let selectionStart = segments[clickedSegmentIndex].start;
+		let selectionEnd = segments[clickedSegmentIndex].end;
+		for (let index = clickedSegmentIndex; index > 0 && canJoin(segments[index - 1], segments[index]); index--) {
+			selectionStart = segments[index - 1].start;
+		}
+		for (
+			let index = clickedSegmentIndex;
+			index < segments.length - 1 && canJoin(segments[index], segments[index + 1]);
+			index++
+		) {
+			selectionEnd = segments[index + 1].end;
+		}
+		return {
+			start: { ...point, col: selectionStart },
+			end: { ...point, col: selectionEnd, boundary: true },
+		};
 	}
 
 	private getLineSelection(point: SelectionPoint): SelectionRange {
@@ -1041,7 +1133,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private handleSelectionMouseEvent(event: SgrMouseEvent): void {
-		if ((event.button & 3) !== 0) return;
+		const button = event.button & 3;
+		if (button !== 0 && !(event.release && button === 3)) return;
 		const anchorScrollView = this.selectionAnchor?.scrollView;
 		const point = this.getSelectionPoint(event, anchorScrollView);
 		if (event.release) {
@@ -1072,7 +1165,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (
 				!this.selectionDragged &&
 				clickedUrl === undefined &&
-				this.selectionAnchor !== undefined &&
 				this.selectionAnchor.row === point.row &&
 				this.selectionAnchor.col === point.col &&
 				// Character granularity = a single click: a double click
@@ -1082,11 +1174,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				// Coordinates are 0-based screen cells (SGR values minus one).
 				// A plain click is a disclosure action, not a selection: skip
 				// the clipboard feedback so the host callback owns the click.
+				// (dsh-pi-tui divergence X018.)
 				this.onCellClick?.(event.x, event.y);
 				this.requestRender();
 				return;
 			}
-			this.copySelectionToClipboard();
+			if (this.copyOnSelect) void this.copySelectionToClipboard();
 			this.requestRender();
 			return;
 		}
@@ -1162,14 +1255,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return { start: Math.max(minColumn, start), end: Math.min(maxColumn, end) };
 	}
 
-	private copySelectionToClipboard(): void {
+	private getActiveSelectionText(): string | undefined {
 		const selection = this.getSelectionBounds();
-		if (!selection) return;
+		if (!selection) return undefined;
 		let sourceLines: readonly string[] = this.previousScreen;
 		if (selection.start.scrollView) {
-			if (!this.currentLayout) return;
+			if (!this.currentLayout) return undefined;
 			const box = getScrollViewBox(this.currentLayout, selection.start.scrollView);
-			if (!box?.scrollContentLines) return;
+			if (!box?.scrollContentLines) return undefined;
 			sourceLines = box.scrollContentLines;
 		}
 		const lines: string[] = [];
@@ -1183,24 +1276,33 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			// head, drop the emoji-column indent (1-3 cells) so copied
 			// transcript lines do not carry the bullet column's padding.
 			// Content indentation of 4+ cells (code blocks) survives;
-			// 1-2 cell content indents are rare and dropped.
+			// 1-2 cell content indents are rare and dropped. (dsh-pi-tui
+			// divergence X024.)
 			lines.push(columns.start === 0 ? sliced.replace(/^ {1,3}/, "") : sliced);
 		}
 		const text = lines.join("\n");
-		if (text.length === 0) return;
+		return text.length === 0 ? undefined : text;
+	}
+
+	private async copySelectionToClipboard(): Promise<boolean> {
+		const text = this.getActiveSelectionText();
+		if (!text) return false;
+		return this.copyTextToClipboard(text);
+	}
+
+	private async copyTextToClipboard(text: string): Promise<boolean> {
+		// Prefer an injected clipboard implementation (native clipboard + platform tools with a
+		// verified success path) when the host app provides one. A bare OSC 52 write can show
+		// "Copied!" while leaving the system clipboard untouched (e.g. macOS Terminal.app, tmux
+		// without OSC 52 clipboard passthrough), so only report success when it actually copies.
 		if (this.copySelection) {
-			// Host-owned clipboard strategy: the callback decides success
-			// and feedback. The input path stays synchronous — the flash
-			// lands when the (async) copy settles, and a throwing callback
-			// must never crash the mouse handler.
-			Promise.resolve()
-				.then(() => this.copySelection!(text))
-				.then((ok) => this.flash(ok ? "Copied!" : "Copy failed"))
-				.catch(() => this.flash("Copy failed"));
-			return;
+			const ok = await this.copySelection(text);
+			this.flash(ok ? "Copied!" : "Copy failed");
+			return ok;
 		}
 		this.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
 		this.flash("Copied!");
+		return true;
 	}
 
 	private applySearchTextHighlight(text: string, current: boolean): string {

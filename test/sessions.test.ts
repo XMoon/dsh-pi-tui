@@ -1,40 +1,43 @@
 /**
- * Headless tests for the `/sessions` picker support: pure row assembly,
- * title loading (sessionQuery batch + persistence fallback), and the
- * searchable picker overlay driven through the virtual terminal.
+ * Headless tests for the `/sessions` picker support: pure row assembly and
+ * the searchable picker overlay driven through the virtual terminal.
+ * Session derived state (titles, presets) is Host-owned and arrives through
+ * the projection port — see session-reader-port.test.ts and
+ * session-picker-projections.test.ts for those contracts.
  * @module @xmoon76/dsh-pi-tui/sessions.test
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
-// Carries the `session/title` event map augmentation into the test program.
-import type {} from '@deepseek-ai/dsh-session-title'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import {
+
+
   MAX_PICKER_SESSIONS,
   findSessionMatch,
   formatSessionAge,
   headerToPickerRow,
-  loadSessionTitles,
   sameWorkspace,
   sessionPickerItem,
   shortSessionId,
   workspaceKey,
   type SessionPickerRow,
 } from '../src/sessions.ts'
-
-/** A title event minimal enough for foldSessionTitle. */
-function titleEvent(title: string, seq = 1, time = 1000): SessionEvent<'session/title'> {
-  return {
-    type: 'session/title',
-    seq,
-    time,
-    data: { title, messageSeqs: [seq], source: { kind: 'user' } },
-  } as SessionEvent<'session/title'>
-}
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 test('shortSessionId strips the prefix and keeps 8 characters', () => {
   assert.equal(shortSessionId('session-0123456789abcdef'), '01234567')
@@ -120,7 +123,7 @@ test('sessionPickerItem marks the current session, subagents, forks, live', () =
 
 test('headerToPickerRow maps a header onto the row shape', () => {
   const row = headerToPickerRow({
-    version: 0,
+    version: 0, isSeeded: false,
     id: SessionId('session-0123456789abcdef'),
     createdAt: 42,
     cwd: '/w',
@@ -137,53 +140,14 @@ test('headerToPickerRow maps a header onto the row shape', () => {
   assert.equal(row.live, true)
 })
 
-test('loadSessionTitles uses the sessionQuery batch when mounted', async () => {
-  const fakeQuery = {
-    readTitleSnapshots: async (ids: readonly string[]) =>
-      ids.map(id => id === 'session-a'
-        ? { sessionId: id, status: 'fulfilled', value: { session: {}, title: { title: 'alpha title' } } }
-        : { sessionId: id, status: 'rejected', reason: new Error('boom') }),
-  }
-  const titles = await loadSessionTitles(
-    fakeQuery as never,
-    undefined,
-    ['session-a', 'session-b'],
-  )
-  assert.equal(titles.get('session-a'), 'alpha title')
-  assert.equal(titles.has('session-b'), false, 'failed reads must be isolated')
-})
-
-test('loadSessionTitles falls back to persistence inspections', async () => {
-  const eventsBy: Record<string, SessionEvent[]> = {
-    'session-a': [titleEvent('alpha title')],
-    'session-b': [],
-  }
-  const fakePersistence = {
-    inspect: async (id: string) => ({ meta: {}, events: eventsBy[id] ?? [] }),
-  }
-  const titles = await loadSessionTitles(
-    undefined,
-    fakePersistence as never,
-    ['session-a', 'session-b', 'session-c'],
-  )
-  assert.equal(titles.get('session-a'), 'alpha title')
-  assert.equal(titles.has('session-b'), false, 'untitled session must be absent')
-  assert.equal(titles.has('session-c'), false, 'missing session must be absent, not throw')
-})
-
-test('loadSessionTitles honors an aborted signal', async () => {
-  const controller = new AbortController()
-  controller.abort()
-  const fakeQuery = {
-    readTitleSnapshots: async (_ids: readonly string[], signal?: AbortSignal) => {
-      signal?.throwIfAborted()
-      return []
-    },
-  }
-  await assert.rejects(
-    loadSessionTitles(fakeQuery as never, undefined, ['session-a'], controller.signal),
-    /abort/i,
-  )
+test('headerToPickerRow preserves code until a roster-aware reader can disambiguate it', () => {
+  const row = headerToPickerRow({
+    version: 0, isSeeded: false,
+    id: SessionId('session-legacy'),
+    createdAt: 42,
+    agentPreset: 'code',
+  }, false)
+  assert.equal(row.preset, 'code')
 })
 
 test('MAX_PICKER_SESSIONS keeps its legacy exported value', () => {
@@ -203,6 +167,7 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; picked: string[] } {
     onExit: () => {},
   })
   app.start()
+  startedApps.add(app)
   return { vt, app, picked }
 }
 

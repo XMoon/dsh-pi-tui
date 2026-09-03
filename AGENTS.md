@@ -1,6 +1,6 @@
 # AGENTS.md
 
-dsh-pi-tui — a third-party TUI mode for DeepSeek Harness (`dsh`), built on a vendored fork of [pi-tui](https://github.com/MoonshotAI/kimi-code/tree/main/packages/pi-tui). Read this file before editing.
+dsh-pi-tui — a third-party TUI mode for DeepSeek Harness (`dsh`), built on a vendored fork of [pi-tui](https://github.com/earendil-works/pi/tree/main/packages/tui). Read this file before editing.
 
 ## Naming (hard rules)
 
@@ -10,7 +10,7 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
 |---|---|---|
 | Repository | `dsh-pi-tui` | repo root (this directory) |
 | Profile (`dsh --profile`) | `pi-tui` | **Never `tui`** — that is reserved territory |
-| Vendored fork package | `@xmoon76/pi-tui` | rescopped from `@moonshot-ai/pi-tui`; `private: true`, **never published** — bundled into the release package at build time |
+| Vendored fork package | `@xmoon76/pi-tui` | rescopped from `@earendil-works/pi-tui`; `private: true`, **never published** — bundled into the release package at build time |
 | Bundle package | `@xmoon76/dsh-pi-tui` | the `dsh.bundle` patch layer; the **only** published package |
 | Plugin row ids | `tui-startup`, `tui-app` | internal Loader ids, fine as-is |
 | Startup service | `tuiStartup` (`TUI_STARTUP_SERVICE`) | |
@@ -53,6 +53,15 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
   entries into the new version section; afterwards, start a fresh
   `[Unreleased]` for the next cycle. Semantic-versioning rules apply: any
   breaking change is a major bump.
+- **Changelog entries are user-facing only (hard rule).** The changelog is
+  the release announcement for end users, not the engineering ledger.
+  Internal implementation details — vendored-fork audits and divergence
+  numbers (X0xx), review rounds, test/tooling hygiene, CI gates, dev
+  dependency syncs, lease/epoch mechanics — never appear in it. If a change
+  has no user-visible outcome, it does not belong in the changelog; if it
+  does, describe the outcome, not the mechanism. Keep entries concise: one
+  bullet per user-visible outcome, merged across review rounds, with the
+  internal detail left to commit messages and `docs/`.
 - **Changelog bilingual sync (hard rule).** `CHANGELOG.md` (简体中文) and
   `CHANGELOG.en.md` (English) must stay in sync, exactly like the
   README pair: every release update to the Chinese changelog must be
@@ -67,11 +76,12 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
 ## Repository layout
 
 ```
-packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork. The vendored version
+packages/pi-tui/    Vendored @earendil-works/pi-tui fork. The vendored version
                     and upstream commit live in ONE place —
-                    packages/pi-tui/package.json `repository.note` (see
-                    that field, never a copy in this file or README). Its
-                    own AGENTS.md (kept from the fork) is the source of
+                    packages/pi-tui/UPSTREAM.json (see that file, never a
+                    copy in this file or README; the package.json
+                    `repository.note` defers to it). Its own AGENTS.md is
+                    the source of
                     record for the local divergence fixes and their
                     guarding tests; re-verify every entry on each
                     re-vendor. native/ prebuilds are NOT vendored; loading
@@ -103,12 +113,12 @@ packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork. The vendored version
    consider flipping the default. Remote attach is a planned capability, but
    it must not bypass DSH's security model or make ordinary local use depend on
    a TCP listener.
-2. **Vendored fork, not npm dependency.** `@moonshot-ai/pi-tui` is not published (npm 404). Vendored from the kimi-code fork (not upstream pi-mono) to keep its local fixes; the earlier "five" (CJK wrap recursion guard, container width clamp, overwide-line truncation instead of throw, negative-width guards, per-frame processed-line reuse) are no longer divergences — the vendored snapshot (kimi-code `44a6c70e`) already contains the first four, and the last never existed in this fork. `packages/pi-tui/AGENTS.md` is the source of record for every divergence and its guarding tests — re-verify each entry on every re-vendor.
-3. **`TuiMainScreen`, not `TUI`.** In this fork the constructible entry is `TuiMainScreen` (main screen + scrollback, `mode: "regular"`); the README's `new TUI(...)` is stale upstream docs. `TuiAltScreen` is the alternative.
+2. **Vendored fork, not npm dependency.** `@earendil-works/pi-tui` is vendored (pinned to v0.84.4 — see `packages/pi-tui/UPSTREAM.json`, the single source of truth). The re-vendor (2026-09) replaced the earlier kimi-code `44a6c70e` snapshot with the pristine Earendil baseline and re-applied only the host-required divergences (ledger X001–X036 in `packages/pi-tui/DIVERGENCES.md`); kimi-only code with no host consumer (PasteBurst, inline slash, etc.) was dropped. The per-frame processed-line reuse was initially dropped as unused, then RESTORED as divergence X035 after the PR-review benchmark showed a 100-500× per-frame regression without it — the host's reference-stable component caches are built around it. `packages/pi-tui/DIVERGENCES.md` is the source of record for every divergence and its guarding tests — re-verify each entry on every re-vendor.
+3. **`TuiMainScreen`, not `TUI`.** In this fork the constructible entry is `TuiMainScreen` (main screen + scrollback, `mode: "regular"`); the vendored Earendil v0.84.4 README documents `new TuiMainScreen(terminal)` correctly. `TuiAltScreen` is the alternative.
 4. **Source exports, built artifacts.** The root bundle and the fork both build with tsdown (`dist/`); the root package bundles the vendored pi-tui fork (`deps.onlyBundle: ['@xmoon76/pi-tui']`, the kimi-code pattern) so the published tarball is self-contained. `exports` point at built files; neither `dist/` is committed — build before installing into a profile. Node 26 refuses type-stripping inside `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so a `.ts`-exporting package cannot load from a profile's node_modules.
 5. **No native prebuilds.** darwin/win32 modifier-key addons are optional; the loader returns `undefined` on other platforms without attempting a load. Revisit only if modifier detection matters on macOS/Windows.
 6. **`chalk` is a runtime dependency** of the root bundle (theme.ts lives in `src`, unlike pi-tui's tests-only chalk).
-7. **Single-package release model.** `@xmoon76/pi-tui` is `private: true` and never published (same as `@moonshot-ai/pi-tui` in kimi-code); `@xmoon76/dsh-pi-tui` is the only registry package and carries the fork inside its dist. Its `dependencies` therefore list pi-tui's runtime deps (`marked`, `get-east-asian-width`) directly, and `@xmoon76/pi-tui` lives in `devDependencies` (build-time only). **Every `@deepseek-ai/*` import is a `peerDependency`, never a `dependency`**: in-box packages resolve from the dsh installation itself, and a duplicate copy in the profile's `node_modules` crashes on the FIRST tool call (`Cannot read properties of undefined (reading prepare)`). After (re)installing the bundle into a profile, verify `node_modules` contains NO `@deepseek-ai` entry. Same rule for dsh context services: type them structurally (`ctx.sessionQuery`), do not add package dependencies for them.
+7. **Single-package release model.** `@xmoon76/pi-tui` is `private: true` and never published (same as the upstream `@earendil-works/pi-tui`); `@xmoon76/dsh-pi-tui` is the only registry package and carries the fork inside its dist. Its `dependencies` therefore list pi-tui's runtime deps (`marked`, `get-east-asian-width`) directly, and `@xmoon76/pi-tui` lives in `devDependencies` (build-time only). **Every `@deepseek-ai/*` import is a `peerDependency`, never a `dependency`**: in-box packages resolve from the dsh installation itself, and a duplicate copy in the profile's `node_modules` crashes on the FIRST tool call (`Cannot read properties of undefined (reading prepare)`). After (re)installing the bundle into a profile, verify `node_modules` contains NO `@deepseek-ai` entry. Same rule for dsh context services: type them structurally (`ctx.sessionQuery`), do not add package dependencies for them.
 8. **Fix in the root dsh-pi-tui bundle first; keep the fork pristine.** Anything achievable on the consumer side must be implemented in the root package — every fork change is a divergence that must be re-verified on every upstream sync (the fork's AGENTS.md lists them with guarding tests). Only touch `packages/pi-tui` when the fix is impossible from the consumer. Example: the autocomplete active-screen repaint bug (async completion commits targeted the editor's captured main screen — stopped in fullscreen — leaving a hidden-but-active dropdown) is fixed consumer-side: `TuiEditor` accepts a `requestRender` route and hands the editor a routing view of its captured TUI whose `requestRender` forwards to `TuiApp.requestRender` (the CURRENT active screen), synchronously at the editor's own state change — no fork change, no microtask/delay guessing. The old `routeInput` double-microtask forced-repaint bridge is gone; guarded by `test/autocomplete-active-screen-repaint.test.ts`.
 9. **Busy-Enter preference mirrors the web's `busyEnter`** (`ui-conversation` submission policy): while the agent is running, plain Enter uses the configured mode (`queue` default | `steer`) and Ctrl+Enter ALWAYS forces queue mode (the anti-steer chord — it only differs from Enter when the configured mode is `steer`). Enter-steer sends the DRAFT ONLY (`steerAll` `onlyDraft`) — explicitly queued messages are never swept along, because already-steered input cannot be pulled back. **Local commands** (the TUI-owned set, `LOCAL_COMMANDS` in index.ts: /status, /settings, ...) always execute directly and are never steered; everything else — plain prompts AND per-skill slash commands — steers as its raw `/name` line, which the host's pre-step listener (dsh-tool-skill) resolves into the injected skill body: web parity, where a skill invocation is a plain `session.prompt` with no command-execution wire. **Skill invocations never drop the user's arguments**: a per-skill wrapper forwards `invocation.rawInput` VERBATIM as a plain user message (the user's own words stay on the original `/name args` line), and the loaded body follows as injected instructions context — rendered by the host's dsh-tool-skill pre-step listener when its `skill` tool is visible to the agent, else injected by the TUI itself as a fallback (official `<skill_content>` rendering + `skill-invocation` source), never both (double injection would duplicate the body). The queue-pane hint and Ctrl+S are unchanged (the steer verb is always advertised).
 10. **Question dialogs live in the editor SEAT, never a centered overlay.** `ask_user_question` renders inside `editorSeat` (kimi's `mountEditorReplacement` pattern): full width, above the footer, capped at 60% of the terminal height when COLLAPSED (8..24 content rows, re-derived on EVERY render by `QuestionFrame` — resize- and queue-safe). The flow is a logical capturing modal: `presentQuestion` suspends visible overlays, `settleQuestions` restores them, and overlays created during a question join the suspension graph (`closeOverlayHandle`) so reverse modal order survives. `QuestionFlow`'s budget math (required-first question row, pinned free-text input, hint) is proven against actual chrome — do not reintroduce a fixed `budget - N` body formula. **The whole page — question, detail, EVERY option with its description, the free-text row — is ONE unified scrollport** (PageUp/PageDown page it; the `↓ N more lines`/`↑ M up` marker reports the remainder), so on any screen size the question starts at the top and every description is reachable by scrolling; cursor moves (↑↓/digits/click) follow the pointer into view. An explicit expand (`e` or a fullscreen click on the marker) grows the frame toward 80% (budget up to 38) — the 60% cap is the DEFAULT, not a hard ceiling — and is a no-op when everything fits; it KEEPS the scroll position (reveals more where the user is looking), and scroll + expand reset on every tab change. The hint fit loop RESERVES `esc cancel` (it always survives; other verbs drop from the end), and empty free-text rows show a dim placeholder instead of a bare cursor block. Fullscreen clicks inside the frame route through the seat's bottom-derived geometry (`QuestionFrame.rows` + footer height) to `QuestionFlow.clickRow`. **↑↓ scroll at the scrollport EDGES** (the less/scrolloff pattern): ↑ on the FIRST row scrolls the body up until the question overview returns, ↓ on the LAST row scrolls it down when the page overflows — without edge scrolling, walking the cursor into the options made the question unreachable (the old cursor wrap stole the ↑). The wrap-around survives when the page fits. Full rationale: `temp/question-dialog.md` (gitignored; on the implementing machine).
@@ -119,7 +129,7 @@ packages/pi-tui/    Vendored @moonshot-ai/pi-tui fork. The vendored version
 15. **Unstable raw stage sits BEFORE everything; the fail-safe is triple-Esc (Phase 3 contract).** The unstable raw interception runs at the TOP of `TuiApp.handleInput` (before protocol filtering, questions, reserved keys — a raw capture can see/consume/rewrite ANY chunk, including Esc/Ctrl+C/CSI-u). The Host emergency fail-safe is detected FIRST (before the captures): three Esc presses within 1.5s release every raw capture and close every unstable mount, restoring Host input. The first two Esc presses pass through (a plugin surface may use Esc); the third is consumed by the Host. The fail-safe is armed only while captures are live, so ordinary Esc behavior is unchanged otherwise. A rewrite re-runs the host's own processing with the replacement AND propagates it to the focused component via the fork's listener-result `data` field — each chunk passes the interception chain at most once (the rewrite never re-enters the raw stage). The low-level surface seam never exposes TuiApp/screens/terminal.
 16. **Phase 4 broker reuses the Host's own modal infrastructure; prompts are fiber-cancelled (Phase 4 contract).** The imperative UI broker (`advanced.ui.select/confirm/input/notify/custom`) is built on the Host's OWN picker/question/notify infrastructure — never a second modal manager. Every prompt is caller-fiber-owned: the service creates an AbortController per call, registers a fiber effect that aborts it (combined with the caller's signal via `AbortSignal.any`), and the app's implementations settle the promise on abort; the surface's final dispose settles every still-open broker promise (`pendingBrokerSettles`). `ui.custom`'s factory receives ONLY the public `AdvancedCustomHost` facade (never a private TUI object) and resolves via `done(result)`/`close()`. The host-state facade (`advanced.host`) is a LIVE override surface — theme persistence stays with the user's `/settings` picker; `setTheme` for a non-built-in name resolves the palette through the theme registry in the runner (unknown names are a no-op).
 17. **Phase 5 examples prove the tiers; the vim editor uses the GETTER pattern (Phase 5 contract).** The real-plugin validation lives in `examples/plugins/` (vim — Advanced editor SDK; questionnaire — Advanced imperative UI broker; interactive-shell — Unstable raw seam), gated by `scripts/examples-plugin-smoke.mjs` against the packed tarball. The vim example's live repaint uses `get component()` on the ExtensionEditor (the seat recompiles `editor.component` on every `host.invalidate()` — the getter returns the CURRENT buffer view; `ExtensionEditor.component` is readonly, so the getter is the clean live-repaint path, never a mutation of a readonly-typed object). The API gap process and the Stable promotion review are recorded in `examples/README.md`; the authoring decision tree lives in `docs/plugin-authoring.md`. Do not expand Stable to make a Phase-5 example work — the tier selection is the point.
-18. **User input = brand-blue bubble; the editor carries a matching `❯ ` prompt (dsh-web parity, consumer-side).** The user's own words render as a floating BLOCK — `UserBubbleComponent` paints the whole row with the `roleUserBg` bubble background (dsh-web `--dsw-specific-bubble` parity: `#2C2C2F` dark / `#E4EDFD` light, DeepSeek brand-blue family) and leads it with a `roleUser`-coloured `❯` (`#679EFE` dark / `#4177E6` light) — NOT kimi's amber text colour, so the user role never collides with kimi or with the assistant's brand-blue whale. The queue pane's `❯` and the editor prompt use the same `roleUser` marker: one brand-blue ❯ for the user's own input everywhere. The host editor is constructed with `paddingX: 2` and `TuiEditor.render` paints the prompt over the first content row's leading padding (kimi's injectPromptSymbol pattern — no fork change; the fork stays pristine per decision 8); the prompt is skipped while the draft is scrolled (the `↑ N more` indicator makes the first visible row a continuation). `roleUserBg` is an OPTIONAL palette token: absent (custom themes) → the bubble collapses to plain rows, and the component is REFERENCE-STABLE like BulletedComponent — same child instance + same width → identical rendered strings, so the differential renderer paints a zero-change frame (no per-frame line cache exists in the fork; do not rely on one). Theme switches stay correct because the per-message component rebuilds on `themeRevision` (the baked ANSI is not frozen). `scripts/preview-role-styles.mts` (scheme comparison) and `scripts/preview-prompt.mts` (live surface) show the effect in a real TTY. Guarded by the bubble and role-colour tests in `test/rendering.test.ts` and the editor-prompt tests in `test/tui-app.test.ts`.
+18. **User input = brand-blue bubble; the editor carries a matching `❯ ` prompt (dsh-web parity, consumer-side).** The user's own words render as a floating BLOCK — `UserBubbleComponent` paints the whole row with the `roleUserBg` bubble background (dsh-web `--dsw-specific-bubble` parity: `#2C2C2F` dark / `#E4EDFD` light, DeepSeek brand-blue family) and leads it with a `roleUser`-coloured `❯` (`#679EFE` dark / `#4177E6` light) — NOT kimi's amber text colour, so the user role never collides with kimi or with the assistant's brand-blue whale. The queue pane's `❯` and the editor prompt use the same `roleUser` marker: one brand-blue ❯ for the user's own input everywhere. The host editor is constructed with `paddingX: 2` and `TuiEditor.render` paints the prompt over the first content row's leading padding (kimi's injectPromptSymbol pattern — no fork change; the fork stays pristine per decision 8); the prompt is skipped while the draft is scrolled (the `↑ N more` indicator makes the first visible row a continuation). `roleUserBg` is an OPTIONAL palette token: absent (custom themes) → the bubble collapses to plain rows, and the component is REFERENCE-STABLE like BulletedComponent — same child instance + same width → identical rendered strings, so the differential renderer paints a zero-change frame (the fork's per-frame processed-line reuse, DIVERGENCES.md X035, only pays off when components keep their output reference-stable — always be). Theme switches stay correct because the per-message component rebuilds on `themeRevision` (the baked ANSI is not frozen). `scripts/preview-role-styles.mts` (scheme comparison) and `scripts/preview-prompt.mts` (live surface) show the effect in a real TTY. Guarded by the bubble and role-colour tests in `test/rendering.test.ts` and the editor-prompt tests in `test/tui-app.test.ts`.
  19. **Injected context rows render their envelopes parsed, never the raw XML (consumer-side, dsh-web row-model parity).** Loading a skill — the TUI fallback OR the host's dsh-tool-skill listener — injects the model-facing `<skill_content>` body as a context row; the skill catalog and workspace instructions similarly bake complete `<system-reminder>` frames into their content (harness caller-owned framing). The expanded labeled system row used to dump those envelopes verbatim (`message.text` — the one leak 56d017c's tool-card fix did not cover, since system rows render `text`, not `result`). `systemContextBody` in present.ts derives the presentation body: a well-formed skill envelope renders its instructions body; a `<system-reminder>`-wrapped producer renders its content with the wrapper tag lines (and the `<available_skills>` markers, only when the pair is present) stripped; a malformed skill envelope renders NO body (never the raw tags); any other text is unchanged (plain context rows keep their raw-body behavior). The model-facing bytes are untouched — presentation only, and the header already names the producer, so the divergence from the web's deliberate framing-verbatim instruction rows is documented here. Folded skill rows gain the tool-card `— N lines of instructions` suffix (reusing `skillFoldedPreview`) so the fold still says what the model received. Subagent viewers and search jumps share the same component path, so the fix covers them transitively. Guarded by the `systemContextBody` and injected-row tests in `test/rendering.test.ts`.
 
 ## Server/client migration guardrails (hard rules)
@@ -370,6 +380,47 @@ pnpm typecheck
 node --import tsx/esm demo.ts   # standalone demo in a real TTY
 ```
 
+### DSH distribution validation
+
+The published package contract is the lower-bound-only DSH peer range
+`>=0.1.2-alpha.4`; do not add `file:`, `link:`, or `workspace:` DSH specs to
+`package.json` or the tracked lockfile. Source Mode is test-only and is
+selected by `test/compat/dsh-mode.json` for `next` pushes and pull requests
+targeting `next` when the exact upstream DSH family is not yet published. It
+checks out the full SHA in `test/compat/dsh-source.json`, runs the official DSH
+build/pack commands, and installs the resulting tarballs through temporary pnpm
+overrides. The `expectedVersion` in `dsh-source.json` is the current validated
+DSH target for both npm and Source Mode. `main` and all tags, including
+`next-v*`, use the frozen registry/npm lane.
+
+### Main / next promotion (hard rules)
+
+`main` is the released npm-backed DSH compatibility line; `next` is the
+long-lived forward-integration line and may switch to Source Mode for
+unpublished DSH work. When a mature `next` snapshot is promoted, branch from
+that exact `next` commit, qualify the published DSH release there, merge the
+promotion into `main` with a real merge commit (**never squash**), complete the
+stable-release work on `main`, then merge the resulting `main` state back into
+`next`. Never reset `next` after a promotion, and never move an unpublished
+`next` DSH target into `main`.
+
+The canonical branch roles, distribution-policy ownership and promotion flow
+live in [docs/local-development.md](docs/local-development.md).
+
+Use the isolated local drivers instead of workspace symlinks:
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
+```
+
+A dirty local DSH checkout is allowed only with a visible reproducibility
+warning; CI requires a clean exact-SHA checkout. Source mode skips the
+published `pi2dsh` ecosystem check with an explicit reason because that bridge
+cannot validate an unpublished source family; npm mode keeps that check
+blocking. See [docs/dsh-compatibility.md](docs/dsh-compatibility.md) and
+[docs/dsh-source-build-debugging.md](docs/dsh-source-build-debugging.md).
+
 ### Installing into the local dsh profile (dev loop)
 
 Two profiles exist. **Never touch `pi-tui`** — it is the real-use profile and
@@ -435,24 +486,24 @@ release range does not touch `packages/pi-tui/`, and the full
 `prepare` script on `pnpm install`; runtime shims in `.husky/_` are
 gitignored):
 
-- **`main` and `v*` release tags** → `pnpm run verify:prepush`, the
+- **`v*` and `next-v*` release tags** → `pnpm run verify:prepush`, the
   CI-equivalent full chain: fork typecheck + fork tests + docs tests +
   naming gate + `pnpm audit --prod --audit-level high` + `pnpm pack:release`
   (prepack build/typecheck/tests + every postpack smoke, including the
   declaration-leak gate). Measured ≈2 min. Some failures are ONLY visible
   in the packed artifact (the settleCompactionSurface declaration leak was
-  exactly this class) — do not skip this for a CI round-trip. When the
+  exactly this class) — do not skip this for a release-tag push. When the
   pushed range does NOT touch `packages/pi-tui/`, the fork's own
   typecheck/tests are skipped (`verify:prepush:nofork`, ≈1:45; the fork
   suite only guards fork changes and CI runs it regardless).
-- **any other branch** → `pnpm typecheck` only (≈15 s), so WIP pushes stay
-  cheap; fork untouched → `pnpm typecheck:bundle` (≈10 s).
-- Output never goes silent: every stage prints a timestamped progress
-  line (`start` / `ok` + elapsed / `FAIL` + elapsed) as it runs, so a long
-  push always shows WHICH stage is live (the ≈2 min full chain, the
-  ≈1:45 nofork chain, or the ≈10–15 s typecheck). The stage list is NOT
-  hard-coded: the hook derives it from the selected package.json script
-  via `scripts/pre-push-stages.mjs` (top-level `&&` split, quote- and
+- **all branch pushes (including main and next) and other tags** → skip the
+  local gate; CI is the verification boundary for those refs.
+- Output never goes silent when a release-tag gate runs: every stage prints a
+  timestamped progress line (`start` / `ok` + elapsed / `FAIL` + elapsed) as
+  it runs, so a long push always shows WHICH stage is live (the ≈2 min full
+  chain or the ≈1:45 nofork chain). The stage list is NOT hard-coded: the
+  hook derives it from the selected package.json script via
+  `scripts/pre-push-stages.mjs` (top-level `&&` split, quote- and
   escape-aware; rejects unterminated quotes and dangling `&&`), so
   `verify:prepush` / `verify:prepush:nofork` remain the single source of
   truth — adding, removing or reordering a stage in those scripts is
@@ -476,7 +527,7 @@ gitignored):
 ## Reusable flow (worth repeating for the next capability)
 
 1. **Read both sides before designing**: the dsh bundle shape (`packages/bundle/web-app`: startup.ts commander row + index.ts glue + `cordis.patch.yml` with `dsh.bundle.patch`), and the library's real API (check `src/index.ts` exports, not the README).
-2. **Vendor**: `rsync -a --exclude native --exclude CHANGELOG.md --exclude node_modules` from the fork; rescope the package name; keep LICENSE + the fork's AGENTS.md; record the upstream commit in `repository.note` (the single source of truth — do not copy the version/commit into root docs); run the fork's own test suite unchanged as the sync gate.
+2. **Vendor**: `rsync -a --exclude native --exclude CHANGELOG.md --exclude node_modules` from the fork; rescope the package name; keep LICENSE + the fork's AGENTS.md; record the upstream commit in `packages/pi-tui/UPSTREAM.json` (the single source of truth — do not copy the version/commit into root docs); run the fork's own test suite unchanged as the sync gate.
 3. **Bundle skeleton**: package with `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`; patch inserts a `*-startup` row (commander via `@deepseek-ai/dsh-cmdline`'s `parseCmdline`, provides a service) and a runner row injecting that service; exports `./startup` and `./cordis.patch.yml`.
 4. **Testable core**: inject the terminal (`Terminal` interface) so tests drive a `VirtualTerminal`; keep the process entry (`ProcessTerminal`) as a thin wrapper.
 5. **Verification matrix** (all passed in the P0 spike): fork's own tests; headless render/input/exit; the full import chain under the tsx ESM hook (dsh source-launch contract, incl. `@deepseek-ai/dsh-cmdline` + commander); non-TTY stdin guard (`setRawMode` existence check); native graceful fallback.
@@ -490,7 +541,7 @@ gitignored):
 - **`TuiInputListener` must return `TuiInputListenerResult`** (or `undefined`) — a bare `void` arrow fails typecheck; return `{ consume: true }` for handled keys like Ctrl+C.
 - **Editor needs a theme** (`EditorTheme`) — pi-tui ships no default; `src/theme.ts` is the palette.
 - **`imports` `#/*` alias** in the fork's package.json: fine for its internal `src` imports under tsx/Node 24+, but any future `dist` build must bundle (tsdown) rather than tsc-emit, or the alias must go.
-- **tmux `send-keys` looks like a paste to the editor**: `send-keys 'text' Enter` delivers the whole batch in a few ms; the editor's `PasteBurst` heuristic (≥8 plain chars within 8ms, Enter suppressed for 120ms) then turns Enter into a newline, so submissions silently "don't work". This is upstream design (protects against non-bracketed-paste terminals), NOT a regression — real keyboards type slower than 8ms/char. When driving the TUI from tmux, type with a pause: `send-keys 'text'`, sleep ≥0.3s, then `send-keys Enter` (full recipe: `docs/tmux-testing.md`).
+- **tmux `send-keys` batches keys — keep the two-step rhythm anyway**: `send-keys 'text' Enter` delivers the whole batch in a few ms. The re-vendored Earendil v0.84.4 editor has no PasteBurst heuristic (removed with the kimi baseline), so a batch Enter submits normally; still, when driving the TUI from tmux, type with a pause: `send-keys 'text'`, sleep ≥0.3s, then `send-keys Enter` (full recipe: `docs/tmux-testing.md`).
 - **`setFullscreen` must refocus the editor**: a fresh `TuiAltScreen` starts with no focused component — after Ctrl+F the app-level listener still handles shortcuts but text and Enter are dropped, making the transcript look frozen. `TuiApp.setFullscreen` sets focus on the alt screen when entering and restores it on the way back; keep that when touching fullscreen (guarded by the "editor input routes to the alt screen" headless test).
 - **Cordis service access: property read without `inject` throws.** In a Cordis context, `ctx.tools` property access throws `cannot get property "tools" without inject` at runtime when the service is not in the component's `inject` list. For services that are optional or not injected, read them with `ctx.get('name')` (e.g. `ctx.get('tools')`, `ctx.get('agentPresets')`), never bare property access.
 - **dsh services are scoped by the live agent OBJECT, not `ctx`.** The tool registry and the skill catalog are keyed by the agent object: `ctx.get('tools')?.get(name, liveAgent)` and `skills.list({ cwd, scope: liveAgent })`. Passing `ctx` as scope (or omitting scope and passing only `cwd`) silently returns `undefined`/empty — the `/skill` list and edit-diff cards both broke exactly this way once.
@@ -519,7 +570,7 @@ gitignored):
   test timing-sensitive and flakes across runs.
 - **Validate serializers against the real consumer's layout rules, not a self round-trip.** A `compressLog` test that asserted "round-trips as one frame" passed while every real dsh reader rejected the output. The round-trip only proves self-consistency; the layout gate is the consumer's own checks.
 - **Never type a public entry export with an internal class (`TuiApp`, registries, …).** The compaction-settle seam was exported as `settleCompactionSurface(app: TuiApp, …)`, and tsdown then inlined the ENTIRE `TuiApp` declaration — plus every module its signature touches (renderer/editor registries, present/transcript/task-panel internals, image modules, and the vendored fork's `Terminal`/`Component`/`Text`/… types) — into the public `dist/index.d.mts` and its shared chunks, tripping the tarball declaration-leak gate (bare `TuiApp` identifiers, non-allowlisted `src/…` regions, `packages/pi-tui` regions). The fix types such seams with a minimal STRUCTURAL interface (three setters) so the declaration bundle stays limited to the public runner surface; the leak gate in `scripts/tarball-smoke.mjs` is the enforcement.
-- **Never flatten a message's Markdown/Text into a static `Text` at build time.** The 5a76526 bullet-alignment change rendered assistant/user messages once at the then-current width and froze the result — a terminal resize then only re-wrapped the frozen lines: markdown tables could never reflow (border lines wrapped as plain text on narrow windows). Keep the child LIVE through a width-aware wrapper that applies the bullet/indent at `render()` time and returns a REFERENCE-STABLE array (same child instance + same width → same prefixed array), so a steady-state frame produces identical rendered strings (the differential renderer then paints nothing — the fork has no per-frame line cache to "hit"). `BulletedComponent` in tui-app.ts is the pattern.
+- **Never flatten a message's Markdown/Text into a static `Text` at build time.** The 5a76526 bullet-alignment change rendered assistant/user messages once at the then-current width and froze the result — a terminal resize then only re-wrapped the frozen lines: markdown tables could never reflow (border lines wrapped as plain text on narrow windows). Keep the child LIVE through a width-aware wrapper that applies the bullet/indent at `render()` time and returns a REFERENCE-STABLE array (same child instance + same width → same prefixed array), so a steady-state frame produces identical rendered strings and the differential renderer paints nothing (the fork's per-frame processed-line reuse, DIVERGENCES.md X035, keys on this reference stability). `BulletedComponent` in tui-app.ts is the pattern.
 - **The busy-Enter opposite chord is Ctrl+Enter, and it needs a terminal that reports modifiers.** Plain Enter + Ctrl+Enter are the same `\r` on legacy terminals; only Kitty CSI u (`\x1b[13;5u`) or xterm modifyOtherKeys distinguishes them. The chord is a convenience (queue mode while busyEnter=steer) — the chord silently falling through to the editor as a plain Enter (i.e. it steers) on legacy terminals is accepted: queue delivery stays one `/settings` flip away (`busyEnter: queue`), documented in /help.
 - **Never compare raw key sequences in dsh-pi-tui components — always `matchesKey`.** `ProcessTerminal` answers the Kitty keyboard-protocol query (`\x1b[>7u\x1b[?u\x1b[c`), and zellij/WezTerm/Windows Terminal/kitty then report arrows, Esc and Tab as CSI-u (`\x1b[1;1B`, `\x1b[27;1u`, `\x1b[9;1u`) instead of legacy (`\x1b[B`, `\x1b`, `\t`). Components that hard-compared raw sequences (`data === '\x1b[A'`) silently dropped every such key: the question card and the task browser both froze for arrows/Esc/Tab while letters and Enter kept working (letters stay raw bytes via the StdinBuffer printable-dedup; Enter matched only the legacy `\r`). `matchesKey(data, 'up'|'down'|'left'|'right'|'escape'|'tab'|'enter'|'pageUp'|'pageDown')` covers legacy + CSI-u + modifyOtherKeys — including modifier bit 128 (super) that zellij reports (`\x1b[1;129B`). The fork's `SelectList`/`SettingsList`/`Editor` all use `kb.matches`/`matchesKey`; QuestionFlow and TaskBrowserPanel were the two raw-compare stragglers (fixed; guarded by the CSI-u tests in `question-flow.test.ts` and `task-panel.test.ts`).
 - **An app-CONSUMED key that mutates UI must request its own frame.** When `handleInput` returns `{ consume: true }`, the fork's `handleTerminalInput` returns early — the focused component never dispatches, so `requestImmediateRender` never fires. The pi-parity Ctrl+C first-press clear called `setText('')` without any render: the draft emptied in memory but the old text stayed on screen until the next keypress (memory empty, screen lying — in tmux the "clear" looked dead, and a hasty second Ctrl+C then exited via the clear-then-exit chord). Every app-consumed key that mutates the editor must end with `this.requestRender()` — the pattern `setDraft`/`submitDraft` already used. Guarded by "Ctrl+C clearing the editor REPAINTS the frame" in `test/cancel.test.ts`; the Ctrl+S and Ctrl+Enter draft clears got the same explicit repaint.
@@ -539,14 +590,15 @@ The rules below must never be broken; the full contracts live in `docs/`.
 
 The repository uses two fixed local worktrees:
 
-- `~/project/dsh-pi-tui` — main, registry-backed DSH (npm mode).
-- `~/project/dsh-pi-tui-next` — next, the exact source distribution pinned by
-  `test/compat/dsh-source.json`.
+- `~/project/dsh-pi-tui` — main, the released DSH baseline in npm mode.
+- `~/project/dsh-pi-tui-next` — next, the forward DSH baseline in its tracked
+  npm or Source Mode.
 
-The main branch intentionally has no source-pin file, so its default remains
-registry/npm. The pin is maintained on the next branch; merging main into next
-must preserve next's existing `test/compat/dsh-source.json` rather than adding
-that policy to main.
+The promotion establishes the invariant that both long-lived branches carry
+`test/compat/dsh-mode.json` and `test/compat/dsh-source.json`: `main` keeps the
+mode at npm, while `next` may switch modes as upstream development requires.
+A `main -> next` merge must preserve the newer next policy and target rather
+than replacing it with the released main target.
 
 When entering either worktree, run `pnpm dev:doctor`. If it reports
 `STALE`, `MISSING`, or `BROKEN`, run `pnpm dev:bootstrap`. The doctor is
@@ -582,6 +634,75 @@ treated as a durable `READY` cache. The source-mode shell can be entered with
 `pnpm dev:shell` when direnv is not available. The source distribution helper
 under `scripts/` is shared by local bootstrap and CI; do not create a second
 source-build implementation.
+
+### Source development environment vs full Source compatibility
+
+The development environment has two distinct Source Mode concepts. Do not
+conflate them:
+
+- **Materialized Source development environment** — the daily environment when
+  the tracked mode is Source, entered via `pnpm dev:doctor` /
+  `pnpm dev:bootstrap` / `pnpm dev:shell`. Once `dev:doctor` reports `READY`,
+  the environment is available; ordinary development must NOT re-run the full
+  compatibility verifier just because the mode is Source Mode.
+- **Full Source compatibility verification** — `pnpm compat:dsh:source`,
+  the CI-equivalent proof: exact upstream DSH source → official build/pack →
+  full DSH family → TUI build/type/test → candidate/fresh install →
+  runtime/preset compatibility. Not a substitute for `pnpm test`.
+
+### Hard rules (do not expand the verification scope)
+
+Local Source Mode and Full Source Compatibility are different operations.
+
+When `next` is in Source Mode, it uses the materialized pinned-DSH
+development environment prepared by `dev:bootstrap`. In npm mode, it uses the
+tracked lockfile and registry DSH family.
+
+If `pnpm dev:doctor` reports READY, reuse that environment.
+
+Do NOT run `pnpm compat:dsh:source` as a routine validation step after
+ordinary TUI changes.
+
+For ordinary development, run the smallest relevant project checks inside
+the existing Source environment, such as targeted tests, `pnpm typecheck`,
+`pnpm test`, `pnpm build`, or `pnpm pack:release` when packaging behavior
+changed.
+
+Full `compat:dsh:source` is a CI-equivalent compatibility proof and should
+only be run locally when the change materially affects the DSH source
+distribution boundary or when explicitly requested.
+
+Pull requests targeting `next` run the compatibility lane selected by
+`dsh-mode.json`: Source Mode builds the pinned family, while npm mode uses the
+frozen registry lane. GitHub CI is authoritative for routine PR compatibility.
+
+### When to run the full Source verifier
+
+Only consider `compat:dsh:source` locally when one of the following applies:
+
+1. The source target changed (`ref` / `expectedVersion` / `repository` in
+   `test/compat/dsh-source.json`).
+2. DSH distribution infrastructure changed (`scripts/dsh-source-pack.mjs`,
+   `scripts/dsh-source-verify.mjs`, `scripts/prepare-dsh-test-environment.mjs`,
+   `scripts/lib/dsh-distribution.mjs`, `scripts/dsh-source-leak-gate.mjs`, or
+   the compatibility manifest / distribution contract).
+3. Source/npm behavior discrepancy (PASS/FAIL, resolution, source-pack
+   artifact, or DSH public export).
+4. Debugging an unpublished DSH commit (exact SHA not yet on npm).
+5. Explicitly requested (full source compatibility run, CI Source Mode
+   reproduction, new DSH source SHA).
+
+Ordinary changes — TUI rendering, editor, footer, keybindings, autocomplete,
+session picker UI, transcript rendering/window, commands, settings UI, local
+presentation logic, tests only, docs only — must NOT default to the full
+verifier. Run targeted tests / `pnpm typecheck` / `pnpm test` / `pnpm build`
+instead, plus `pnpm pack:release` when pack/public artifacts are involved.
+Do not mechanically append `pnpm compat:dsh:source`.
+
+`dev:bootstrap` is environment preparation, not a full compatibility run: it
+reuses a valid per-SHA source pack; only a missing or invalid cache or a
+changed pin rebuilds DSH, while a stale environment only re-materializes the
+worktree. The daily loop lives in docs/local-development.md.
 
 ## Docs
 

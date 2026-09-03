@@ -11,7 +11,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
 import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
-import { decodeStorageRecord } from '@deepseek-ai/dsh-session'
+import { KNOWN_SESSION_EVENT_TYPES, Session, SessionId, decodeStorageRecord, isSurfaceEligibleType } from '@deepseek-ai/dsh-session'
+import { PersistenceCoordinator, SessionFormatUnsupportedError } from '@deepseek-ai/dsh-session-persistence'
 import {
   compressLog,
   decompressFrames,
@@ -24,12 +25,13 @@ import {
   scanZstdLayout,
 } from '../scripts/repair-core.mjs'
 import { writeArtifact, verifyArtifactFile, parseArgs } from '../scripts/repair-session.mjs'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, symlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const HEADER = '{"type":"session","version":0,"id":"session-test","createdAt":1,"cwd":"/work","delegationDepth":0,"agentPreset":"standard"}'
+import { testLifecycle } from './support/temp-lifecycle.ts'
+
+const HEADER = '{"type":"session","version":0,"id":"session-test","createdAt":1,"cwd":"/work","isSeeded":false,"delegationDepth":0,"agentPreset":"standard"}'
 
 /** Build events for a small log; seqs may be overridden for corruption. */
 function buildEvents(seqs) {
@@ -325,8 +327,8 @@ const REPAIR_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scrip
 /** A minimal fake dsh install: a package.json named @deepseek-ai/dsh plus a
  * symlinked @deepseek-ai/dsh-session, so `--dsh-dir` resolves the real
  * storage decoder without touching the machine's dsh. */
-function makeDshStub() {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-stub-'))
+function makeDshStub(life) {
+  const dir = life.tempDir('dsh-stub-')
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.0.0' }))
   const modules = join(dir, 'node_modules', '@deepseek-ai')
   mkdirSync(modules, { recursive: true })
@@ -336,8 +338,8 @@ function makeDshStub() {
 }
 
 /** A fake dsh home with one session artifact. */
-function makeFakeHome(artifactBytes) {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-home-'))
+function makeFakeHome(life, artifactBytes) {
+  const home = life.tempDir('dsh-home-')
   const dir = join(home, 'sessions', 'proj', 'sess-1')
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'session.jsonl.zstd'), artifactBytes)
@@ -417,10 +419,21 @@ test('CLI --help still prints usage and exits 0', () => {
   assert.match(result.stdout, /usage:/)
 })
 
-test('CLI --scan reports a torn tail with byte accounting, never healthy', () => {
-  const stub = makeDshStub()
+test('CLI --help executes through a package-manager symlink', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-repair-link-')
+  const link = join(dir, 'repair-session.mjs')
+  symlinkSync(REPAIR_SCRIPT, link)
+  const result = spawnSync(process.execPath, [link, '--help'], { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /usage:/)
+})
+
+test('CLI --scan reports a torn tail with byte accounting, never healthy', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
-  const home = makeFakeHome(torn)
+  const home = makeFakeHome(life, torn)
   const result = runCli(['--scan', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 1)
   assert.match(result.stdout, /CORRUPT sess-1:/)
@@ -430,10 +443,11 @@ test('CLI --scan reports a torn tail with byte accounting, never healthy', () =>
   assert.ok(!result.stdout.includes('no damaged sessions'))
 })
 
-test('CLI reports a torn tail for a single session without touching the file', () => {
-  const stub = makeDshStub()
+test('CLI reports a torn tail for a single session without touching the file', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
-  const home = makeFakeHome(torn)
+  const home = makeFakeHome(life, torn)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const before = readFileSync(path)
   const result = runCli(['sess-1', '--dsh-dir', stub, '--dsh-home', home])
@@ -469,10 +483,11 @@ function readLikeHarness(path) {
   return { header: JSON.parse(lines[0]), events }
 }
 
-test('CLI dry run reports keep/discard bytes and unknown loss; writes nothing', () => {
-  const stub = makeDshStub()
+test('CLI dry run reports keep/discard bytes and unknown loss; writes nothing', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
-  const home = makeFakeHome(torn)
+  const home = makeFakeHome(life, torn)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const before = readFileSync(path)
   const result = runCli(['sess-1', '--dsh-dir', stub, '--dsh-home', home])
@@ -483,10 +498,11 @@ test('CLI dry run reports keep/discard bytes and unknown loss; writes nothing', 
   assert.deepEqual(readFileSync(path), before, 'dry run must not modify the file')
 })
 
-test('CLI --yes truncates at the complete frame boundary, backs up first, writes 0600', () => {
-  const stub = makeDshStub()
+test('CLI --yes truncates at the complete frame boundary, backs up first, writes 0600', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const torn = tornArtifact(TEXT, JSON.stringify(buildEvents([4])[0]), 5)
-  const home = makeFakeHome(torn)
+  const home = makeFakeHome(life, torn)
   const dir = join(home, 'sessions', 'proj', 'sess-1')
   const path = join(dir, 'session.jsonl.zstd')
   const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
@@ -518,9 +534,10 @@ test('CLI --yes truncates at the complete frame boundary, backs up first, writes
   assert.match(rescan.stdout, /nothing to repair/)
 })
 
-test('CLI refuses a torn tail with no salvageable prefix (damage at byte 0)', () => {
-  const stub = makeDshStub()
-  const home = makeFakeHome(Buffer.from([0x28, 0xb5]))
+test('CLI refuses a torn tail with no salvageable prefix (damage at byte 0)', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
+  const home = makeFakeHome(life, Buffer.from([0x28, 0xb5]))
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 1)
@@ -529,8 +546,9 @@ test('CLI refuses a torn tail with no salvageable prefix (damage at byte 0)', ()
   assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup for a refused repair')
 })
 
-test('writeArtifact verifies the tmp BEFORE the replace: a failing verify leaves the target untouched', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'repair-write-'))
+test('writeArtifact verifies the tmp BEFORE the replace: a failing verify leaves the target untouched', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('repair-write-')
   const path = join(dir, 'session.jsonl')
   const original = `${HEADER}\n`
   writeFileSync(path, original)
@@ -548,8 +566,9 @@ test('writeArtifact verifies the tmp BEFORE the replace: a failing verify leaves
   assert.deepEqual(leftovers, [], 'the tmp file must be removed on failure')
 })
 
-test('writeArtifact replaces atomically on success: 0600 target, backup kept, no tmp leftovers', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'repair-write-'))
+test('writeArtifact replaces atomically on success: 0600 target, backup kept, no tmp leftovers', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('repair-write-')
   const path = join(dir, 'session.jsonl')
   writeFileSync(path, 'old content\n')
   const good = `${HEADER}\n{"type":"user/message","seq":0,"time":1,"data":{}}\n`
@@ -565,8 +584,9 @@ test('writeArtifact replaces atomically on success: 0600 target, backup kept, no
   assert.equal(verifyArtifactFile(path, 'none', () => []), undefined)
 })
 
-test('writeArtifact verifies the zstd layout of the tmp before the replace', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'repair-write-'))
+test('writeArtifact verifies the zstd layout of the tmp before the replace', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('repair-write-')
   const path = join(dir, 'session.jsonl.zstd')
   const original = compressLog(encodeLog(HEADER, buildEvents([0, 1])), zstdCompressSync)
   writeFileSync(path, original)
@@ -582,11 +602,12 @@ test('writeArtifact verifies the zstd layout of the tmp before the replace', () 
   assert.equal(verifyArtifactFile(path, 'zstd', decodeStorageRecord), undefined)
 })
 
-test('CLI repair result passes the real dsh reader on a duplicate-seq log', () => {
-  const stub = makeDshStub()
+test('CLI repair result passes the real dsh reader on a duplicate-seq log', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = buildEvents([0, 1, 2, 2, 3])
   const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
-  const home = makeFakeHome(buffer)
+  const home = makeFakeHome(life, buffer)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 0, result.stdout + result.stderr)
@@ -775,12 +796,13 @@ test('explicit strategies are stable and repeatable', () => {
   assert.equal(encodeLog(HEADER, first.events), encodeLog(HEADER, second.events))
 })
 
-test('CLI refuses an ambiguous duplicate-seq log by default without writing', () => {
-  const stub = makeDshStub()
+test('CLI refuses an ambiguous duplicate-seq log by default without writing', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = buildEvents([0, 1, 2, 2, 3])
   events[4].data = { sourceEventSeqs: [2] }
   const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
-  const home = makeFakeHome(buffer)
+  const home = makeFakeHome(life, buffer)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const before = readFileSync(path)
   const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
@@ -792,12 +814,13 @@ test('CLI refuses an ambiguous duplicate-seq log by default without writing', ()
   assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup for a refused repair')
 })
 
-test('CLI --duplicate-reference first applies the strategy and prints the plan', () => {
-  const stub = makeDshStub()
+test('CLI --duplicate-reference first applies the strategy and prints the plan', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = buildEvents([0, 1, 2, 2, 3])
   events[4].data = { sourceEventSeqs: [2] }
   const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
-  const home = makeFakeHome(buffer)
+  const home = makeFakeHome(life, buffer)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const result = runCli(['sess-1', '--yes', '--duplicate-reference', 'first', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 0, result.stdout + result.stderr)
@@ -812,12 +835,13 @@ test('CLI --duplicate-reference first applies the strategy and prints the plan',
   assert.match(rescan.stdout, /nothing to repair/)
 })
 
-test('CLI accepts the README = form (--duplicate-reference=first)', () => {
-  const stub = makeDshStub()
+test('CLI accepts the README = form (--duplicate-reference=first)', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = buildEvents([0, 1, 2, 2, 3])
   events[4].data = { sourceEventSeqs: [2] }
   const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
-  const home = makeFakeHome(buffer)
+  const home = makeFakeHome(life, buffer)
   const result = runCli(['sess-1', '--yes', '--duplicate-reference=first', '--dsh-dir', stub, '--dsh-home', home])
   assert.equal(result.status, 0, result.stdout + result.stderr)
   assert.match(result.stdout, /resolved as first/)
@@ -825,16 +849,17 @@ test('CLI accepts the README = form (--duplicate-reference=first)', () => {
   assert.equal(read.events.length, 5)
 })
 
-test('CLI --duplicate-reference=segment refuses a same-frame conflict and reports it', () => {
+test('CLI --duplicate-reference=segment refuses a same-frame conflict and reports it', (t) => {
   // compressLog produces ONE content frame: every event shares the writer
   // segment, so both occurrences of seq 2 sit in the referencing event's
   // frame — the segment binding cannot be unique and the CLI must refuse
   // with the same-frame conflict report, never guess.
-  const stub = makeDshStub()
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
   const events = buildEvents([0, 1, 2, 2, 3])
   events[4].data = { sourceEventSeqs: [2] }
   const buffer = compressLog(encodeLog(HEADER, events), zstdCompressSync)
-  const home = makeFakeHome(buffer)
+  const home = makeFakeHome(life, buffer)
   const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
   const before = readFileSync(path)
   const result = runCli(['sess-1', '--yes', '--duplicate-reference', 'segment', '--dsh-dir', stub, '--dsh-home', home])
@@ -844,4 +869,203 @@ test('CLI --duplicate-reference=segment refuses a same-frame conflict and report
   assert.match(result.stdout, /no write was performed/)
   assert.deepEqual(readFileSync(path), before, 'a same-frame conflict must never be rewritten')
   assert.equal(readdirSync(join(home, 'sessions', 'proj', 'sess-1')).length, 1, 'no backup for a refused repair')
+})
+
+// --- SessionEvent.ignorable alpha.2 round-trip (plan T10/T11/T12) ---
+//
+// alpha.2 restored the `SessionEvent.ignorable?: true` envelope marker: an
+// unknown event type MAY be skipped by a reader when the marker is present,
+// and MUST refuse reconstruction when it is absent. The repair layer must
+// carry the marker through every repair shape (healthy no-op, duplicate-seq
+// renumber, re-frame, torn-tail salvage) without touching `data` and without
+// inventing a `surfaceOp` (unknown ignorable events are NOT surface events).
+
+/** An unknown-but-ignorable third-party event (alpha.2 envelope marker). */
+function ignorableEvent(seq, time, data = { foo: 'bar' }) {
+  return { type: 'third-party/custom-info', seq, time, ignorable: true, data }
+}
+
+/** Assert the alpha.2 envelope contract of one repaired ignorable event. */
+function assertIgnorableIntact(event, expectedSeq) {
+  assert.equal(event.type, 'third-party/custom-info')
+  assert.equal(event.seq, expectedSeq)
+  assert.equal(event.ignorable, true, 'the ignorable marker must survive repair')
+  assert.deepEqual(event.data, { foo: 'bar' }, 'the event data must survive repair verbatim')
+  assert.equal(event.surfaceOp, undefined, 'an unknown ignorable event is not surface-eligible and must never carry surfaceOp')
+}
+
+test('ignorable event: healthy scan and no-op repair preserve the marker, data, and no surfaceOp', () => {
+  const events = [...buildEvents([0, 1, 2]), ignorableEvent(3, 1003)]
+  const text = encodeLog(HEADER, events)
+  const { events: scanned, issue } = scanEvents(text, decodeStorageRecord)
+  assert.equal(issue, undefined)
+  const plan = repairEvents(scanned, issue)
+  assert.equal(plan.action, 'none')
+  const again = scanEvents(encodeLog(HEADER, plan.events), decodeStorageRecord)
+  assert.equal(again.issue, undefined)
+  assertIgnorableIntact(again.events[3], 3)
+})
+
+test('ignorable event: duplicate-seq renumber preserves the marker and corrects its seq', () => {
+  const events = [...buildEvents([0, 1, 2, 2]), ignorableEvent(3, 1004)]
+  const text = encodeLog(HEADER, events)
+  const { issue } = scanEvents(text, decodeStorageRecord)
+  assert.equal(issue.kind, 'duplicate')
+  const plan = repairEvents(events, issue)
+  assert.equal(plan.action, 'renumber')
+  const again = scanEvents(encodeLog(HEADER, plan.events), decodeStorageRecord)
+  assert.equal(again.issue, undefined)
+  assertIgnorableIntact(again.events[4], 4)
+})
+
+test('ignorable event: CLI re-frame keeps the marker and the repaired artifact re-scans clean', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
+  const events = [...buildEvents([0, 1]), ignorableEvent(2, 1002)]
+  // Whole-log single frame: structurally valid zstd, rejected by the dsh
+  // layout (first frame must be exactly one header line) — the repair
+  // re-frames it into the dsh layout.
+  const singleFrame = zstdCompressSync(Buffer.from(encodeLog(HEADER, events), 'utf8'))
+  const home = makeFakeHome(life, singleFrame)
+  const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
+  const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stdout, /re-frame/)
+  const read = readLikeHarness(path)
+  assert.equal(read.events.length, 3)
+  assertIgnorableIntact(read.events[2], 2)
+})
+
+test('ignorable event: CLI torn-tail repair keeps the marker on the salvaged prefix', (t) => {
+  const life = testLifecycle(t)
+  const stub = makeDshStub(life)
+  const events = [...buildEvents([0, 1]), ignorableEvent(2, 1002), ...buildEvents([3, 4])]
+  const text = encodeLog(HEADER, events)
+  const lines = text.trimEnd().split('\n')
+  // Frame 0: header alone (dsh layout); frame 1: events 0..2; frame 2:
+  // events 3..4 truncated mid-frame (magic + descriptor only).
+  const buffer = Buffer.concat([
+    zstdCompressSync(Buffer.from(`${lines[0]}\n`, 'utf8')),
+    zstdCompressSync(Buffer.from(`${lines.slice(1, 4).join('\n')}\n`, 'utf8')),
+    zstdCompressSync(Buffer.from(`${lines.slice(4).join('\n')}\n`, 'utf8')).subarray(0, 5),
+  ])
+  const layout = scanFrameLayout(buffer, zstdDecompressSync)
+  assert.equal(layout.status, 'torn-tail')
+  const home = makeFakeHome(life, buffer)
+  const path = join(home, 'sessions', 'proj', 'sess-1', 'session.jsonl.zstd')
+  const result = runCli(['sess-1', '--yes', '--dsh-dir', stub, '--dsh-home', home])
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stdout, /torn tail/)
+  const read = readLikeHarness(path)
+  assert.equal(read.events.length, 3, 'the torn tail is dropped, the complete prefix is kept')
+  assertIgnorableIntact(read.events[2], 2)
+})
+
+/**
+ * Drive the REAL DSH persistence read path (the coordinator's `inspect`)
+ * over one stored log, so the fail-closed vocabulary gate is exercised
+ * exactly as the harness enforces it: `assertEventsSupported` refuses any
+ * event type outside `KNOWN_SESSION_EVENT_TYPES` unless the event carries
+ * `ignorable: true`. The minimal ctx/backend stubs only feed the stored
+ * record; the coordinator's own validation does the rest.
+ */
+function readLikePersistence(events, header = JSON.parse(HEADER)) {
+  const ctx = {
+    sessions: {
+      get: () => undefined,
+      list: () => [],
+      prepare: (_id, { seed, meta }) => ({ header: meta, events: seed }),
+    },
+    effect: () => () => {},
+    on: () => () => {},
+    logger: { warn: () => {} },
+  }
+  const backend = {
+    name: 'test-backend',
+    loadStored: async () => ({ meta: header, events, revision: 0 }),
+    readStoredRevision: async () => 0,
+    locate: () => undefined,
+  }
+  return new PersistenceCoordinator(ctx, backend).inspect(SessionId(String(header.id)))
+}
+
+test('ignorable event: the repaired log passes the alpha.2 Session envelope read', async () => {
+  // alpha.2's envelope validation accepts the `ignorable` key (alpha.1
+  // rejected it as an invalid envelope field), so a successful
+  // Session.fromRestore is the alpha.2-specific envelope gate. The events are
+  // non-surface (permission/preset + turn/start) so no surfaceOp is required.
+  const events = [
+    { type: 'permission/preset', seq: 0, time: 1000, data: { preset: 'workspace-write' } },
+    { type: 'turn/start', seq: 1, time: 1001, data: {} },
+    ignorableEvent(2, 1002),
+  ]
+  const { events: scanned } = scanEvents(encodeLog(HEADER, events), decodeStorageRecord)
+  const session = Session.fromRestore(SessionId('session-test'), scanned, JSON.parse(HEADER))
+  // Alpha.4 Session shape: the restored log is served through the snapshot
+  // reads (`events` was removed as a public getter).
+  assertIgnorableIntact(session.snapshotEvents()[2], 2)
+  // The official persistence read path accepts the same log: the unknown
+  // type is covered by the ignorable marker, so the coordinator's vocabulary
+  // gate passes and the marker/data survive the read.
+  const inspection = await readLikePersistence(scanned)
+  assertIgnorableIntact(inspection.events[2], 2)
+})
+
+test('required unknown event: repair never auto-marks, deletes, or header-falls-back (fail closed)', async () => {
+  // An unknown event WITHOUT the ignorable marker is a REQUIRED event: the
+  // DSH read path refuses the log. The repair layer must not "fix" it —
+  // no auto-added ignorable:true, no deletion, no header-only fallback —
+  // so the durable compatibility refusal survives the round-trip. The
+  // surrounding events are non-surface (permission/preset + turn/start) so
+  // the coordinator's vocabulary gate is the ONLY rejection reason.
+  const unknown = { type: 'third-party/custom-info', seq: 2, time: 1002, data: { foo: 'bar' } }
+  const events = [
+    { type: 'permission/preset', seq: 0, time: 1000, data: { preset: 'workspace-write' } },
+    { type: 'turn/start', seq: 1, time: 1001, data: {} },
+    unknown,
+  ]
+  const text = encodeLog(HEADER, events)
+  const { events: scanned, issue } = scanEvents(text, decodeStorageRecord)
+  assert.equal(issue, undefined, 'the repair scanner does not know the vocabulary')
+  const plan = repairEvents(scanned, issue)
+  assert.equal(plan.action, 'none')
+  const again = scanEvents(encodeLog(HEADER, plan.events), decodeStorageRecord)
+  assert.equal(again.issue, undefined)
+  const kept = again.events[2]
+  assert.equal(kept.type, 'third-party/custom-info')
+  assert.equal(kept.ignorable, undefined, 'repair must never auto-add the ignorable marker')
+  assert.deepEqual(kept.data, { foo: 'bar' })
+  assert.equal(kept.surfaceOp, undefined)
+  // The DSH read path's vocabulary gate: the type is unknown to this build
+  // and the event is unmarked, so the official persistence read MUST reject
+  // the repaired log (fail closed) — not merely "the repair left it alone".
+  assert.equal(KNOWN_SESSION_EVENT_TYPES.has(kept.type), false)
+  await assert.rejects(
+    readLikePersistence(again.events),
+    error => error instanceof SessionFormatUnsupportedError
+      && error.message.includes('third-party/custom-info')
+      && error.message.includes('not marked ignorable'),
+    'the official DSH read path must refuse the repaired log',
+  )
+})
+
+test('surface fixture contract: only the three message types are surface-eligible', () => {
+  // DSH 0.1.2 surface rule: user/message, assistant/message, tool/result are
+  // the ONLY surface-eligible types. Everything else — including unknown
+  // ignorable events — must never carry surfaceOp in a fixture.
+  for (const type of ['user/message', 'assistant/message', 'tool/result']) {
+    assert.equal(isSurfaceEligibleType(type), true, `${type} must be surface-eligible`)
+  }
+  for (const type of ['assistant/chunk', 'turn/start', 'step/start', 'step/end', 'turn/end', 'third-party/custom-info']) {
+    assert.equal(isSurfaceEligibleType(type), false, `${type} must not be surface-eligible`)
+  }
+  // The repair fixtures honor the contract: the ignorable event carries no
+  // surfaceOp, and a surface-eligible fixture event carries its marker.
+  const events = [
+    { type: 'user/message', seq: 0, time: 1000, surfaceOp: 'append', data: { message: { id: 'm1', role: 'user', source: { kind: 'input' }, content: [] } } },
+    ignorableEvent(1, 1001),
+  ]
+  const { events: scanned } = scanEvents(encodeLog(HEADER, events), decodeStorageRecord)
+  assert.equal(scanned[0].surfaceOp, 'append')
+  assert.equal(scanned[1].surfaceOp, undefined)
 })

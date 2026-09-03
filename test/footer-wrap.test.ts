@@ -14,7 +14,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Text } from '@xmoon76/pi-tui'
 import { TuiApp, type StatusData } from '../src/tui-app.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
@@ -23,10 +23,25 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { FOOTER_MAX_PHYSICAL_LINES } from '../src/footer/types.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function startApp(columns: number): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(columns, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -47,7 +62,7 @@ const SHORT_STATUS: StatusData = {
   // M1: the footer composes the stats line from the STRUCTURED usage.
   usage: {
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+    performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
     turns: 3,
     steps: 7,
   },
@@ -135,6 +150,7 @@ test('extension footer segments still merge into the wrapped footer', async () =
     const host = new SurfaceHost(ledger, () => app.requestRender())
     app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
     app.start()
+    startedApps.add(app)
     host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
       surfaceId: host.surfaceId,
       generation: 1,
@@ -159,19 +175,31 @@ test('extension footer segments still merge into the wrapped footer', async () =
     assert.ok(view.includes('[EXT-SEG]'), `the extension segment must merge into the footer:\n${view}`)
     assert.ok(view.includes('deepseek/flash'), `host state must survive beside the segment:\n${view}`)
   } finally {
-    wide.app.stop()
+    wide.app.dispose()
   }
-  // Narrower: the segment (importance 0) participates in the responsive
-  // layout — under pressure it drops FIRST (importance order), never
-  // overflowing or breaking the composed rows.
+  // Narrower: the responsive compact pass shortens the host items FIRST
+  // (ww/flash/proj/ctx 10%) — at 40 columns that frees enough room for
+  // the segment (importance 0) to SURVIVE; the compact-before-drop
+  // discipline only sacrifices it when compact alone cannot fit the row.
   const narrow = await startExtApp(40)
   try {
     const view = narrow.vt.getViewport().join('\n')
-    assert.ok(!view.includes('[EXT-SEG]'), `the low-importance segment must drop under pressure:\n${view}`)
-    assert.ok(view.includes('workspace-write'), `high-importance state must survive:\n${view}`)
+    assert.ok(view.includes('[EXT-SEG]'), `the segment must survive once compact frees the room:\n${view}`)
+    assert.ok(view.includes('workspace-write') || view.includes('ww'), `high-importance state must survive:\n${view}`)
     assert.ok(view.includes('12.3s'), `the stats row must survive:\n${view}`)
   } finally {
-    narrow.app.stop()
+    narrow.app.dispose()
+  }
+  // Extreme narrow: the segment (importance 0) drops FIRST (importance
+  // order), never overflowing or breaking the composed rows.
+  const extreme = await startExtApp(30)
+  try {
+    const view = extreme.vt.getViewport().join('\n')
+    assert.ok(!view.includes('[EXT-SEG]'), `the low-importance segment must drop under extreme pressure:\n${view}`)
+    assert.ok(view.includes('workspace-write') || view.includes('ww'), `high-importance state must survive:\n${view}`)
+    assert.ok(view.includes('12.3s'), `the stats row must survive:\n${view}`)
+  } finally {
+    extreme.app.dispose()
   }
 })
 
@@ -186,6 +214,7 @@ test('below-editor widget rows are NEVER counted as footer rows', async () => {
   const host = new SurfaceHost(ledger, () => app.requestRender())
   app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
   app.start()
+  startedApps.add(app)
   host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
     surfaceId: host.surfaceId,
     generation: 1,

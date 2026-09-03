@@ -1,5 +1,5 @@
 import { getKeybindings } from "../keybindings.ts";
-import type { Component } from "../tui.ts";
+import type { Component, Focusable } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
 import { Input } from "./input.ts";
 
@@ -51,8 +51,9 @@ export interface SelectListLayoutOptions {
 export interface SelectListOptions {
 	/**
 	 * Show a search input above the list. Typing filters items by a
-	 * case-insensitive substring over value, label, and description (the
-	 * plain `setFilter` prefix match is kept for callers that want it).
+	 * case-insensitive substring over value, label, and description.
+	 * Note: `setFilter` is redefined to the same substring filter (it no
+	 * longer prefix-matches value only — upstream semantics).
 	 * (dsh-pi-tui extension.)
 	 */
 	enableSearch?: boolean;
@@ -76,13 +77,27 @@ export interface SelectListOptions {
 	initialQuery?: string;
 }
 
-export class SelectList implements Component {
+export class SelectList implements Component, Focusable {
 	private items: SelectItem[] = [];
 	private filteredItems: SelectItem[] = [];
+	/**
+	 * The CANONICAL filter query. One source of truth for getFilter(),
+	 * setItems() re-application and the rendered search box: a programmatic
+	 * setFilter(), a setItems() refresh and user typing all write through
+	 * applyFilter(), so they can never drift apart (a setFilter that only
+	 * narrowed filteredItems left getFilter() reading a stale search box and
+	 * the next keystroke silently dropping the programmatic query).
+	 * (dsh-pi-tui divergence X041; upstream has no search at all.)
+	 */
+	private filterQuery = "";
 	/** Lowercased value+label+description per item, rebuilt on setItems. */
 	private searchTexts = new Map<SelectItem, string>();
 	private selectedIndex: number = 0;
+	/** Caller-configured item cap; the host may lower it for a short frame. */
+	private configuredMaxVisible: number;
 	private maxVisible: number = 5;
+	/** Inner row budget supplied by a root-owned responsive overlay. */
+	private maxRows = Number.POSITIVE_INFINITY;
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
 	private options: SelectListOptions;
@@ -92,6 +107,22 @@ export class SelectList implements Component {
 	public onSelect?: (item: SelectItem) => void;
 	public onCancel?: () => void;
 	public onSelectionChange?: (item: SelectItem) => void;
+
+	/**
+	 * Focusable (dsh-pi-tui divergence X042): the focused flag propagates to
+	 * the search Input so it emits the hardware CURSOR_MARKER for IME
+	 * candidate-window positioning. The wrapper contract: every component
+	 * owning an Input/Editor must forward focus; a plain Component swallows
+	 * the flag and the IME misplaces its candidate window.
+	 */
+	private _focused = false;
+	get focused(): boolean {
+		return this._focused;
+	}
+	set focused(value: boolean) {
+		this._focused = value;
+		if (this.searchInput !== undefined) this.searchInput.focused = value;
+	}
 
 	constructor(
 		items: SelectItem[],
@@ -103,7 +134,8 @@ export class SelectList implements Component {
 		this.items = items;
 		this.filteredItems = items;
 		this.searchTexts = this.buildSearchTexts(items);
-		this.maxVisible = maxVisible;
+		this.configuredMaxVisible = Math.max(1, Math.floor(maxVisible));
+		this.maxVisible = this.configuredMaxVisible;
 		this.theme = theme;
 		this.layout = layout;
 		this.options = options;
@@ -118,6 +150,24 @@ export class SelectList implements Component {
 		}
 	}
 
+	/** Update the live inner row budget without resetting filter or selection. */
+	setMaxRows(rows: number): void {
+		this.maxRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : Number.POSITIVE_INFINITY;
+		this.recomputeVisibleBudget();
+	}
+
+	/** Reserve the list chrome before deriving the item count. */
+	private recomputeVisibleBudget(): void {
+		const prefix = (this.options.header === undefined ? 0 : 2) + (this.searchEnabled ? 2 : 0);
+		const hint = this.options.showHint === true || this.searchEnabled ? 2 : 0;
+		const indicator = this.filteredItems.length > 1 ? 1 : 0;
+		const group = this.filteredItems.some(item => item.group !== undefined) ? 1 : 0;
+		const budget = this.maxRows === Number.POSITIVE_INFINITY
+			? this.configuredMaxVisible
+			: this.maxRows - prefix - hint - indicator - group;
+		this.maxVisible = Math.max(1, Math.min(this.configuredMaxVisible, budget));
+	}
+
 	/**
 	 * Replace the item list while the picker is open (e.g. enriching rows
 	 * with titles as they load). The active search query is re-applied; the
@@ -128,15 +178,26 @@ export class SelectList implements Component {
 	setItems(items: SelectItem[]): void {
 		this.items = items;
 		this.searchTexts = this.buildSearchTexts(items);
-		this.applyFilter(this.searchInput?.getValue() ?? "", true);
+		// Re-apply the CANONICAL query (not the search box's value): a
+		// programmatic setFilter() must survive an async row refresh.
+		this.applyFilter(this.filterQuery, true);
 	}
 
-	/** The current search query (empty when search is disabled). */
+	/** The current search query (the CANONICAL query — X041: with search
+	 * disabled a programmatic setFilter() still narrows the list, so this
+	 * returns the canonical query, not "empty when search is disabled"). */
 	getFilter(): string {
-		return this.searchInput?.getValue() ?? "";
+		return this.filterQuery;
 	}
 
 	setFilter(filter: string): void {
+		// Sync the search box so the box, the filter and getFilter() can
+		// never diverge; the setValue cursor lands at the end so the user's
+		// next keystroke APPENDS to the programmatic query instead of
+		// prepending in front of it.
+		if (this.searchEnabled && this.searchInput !== undefined && this.searchInput.getValue() !== filter) {
+			this.searchInput.setValue(filter);
+		}
 		this.applyFilter(filter);
 	}
 
@@ -167,17 +228,76 @@ export class SelectList implements Component {
 		if (this.filteredItems.length === 0) {
 			lines.push(this.theme.noMatch(this.options.noMatchText ?? "  No matching commands"));
 			if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, width);
-			return lines;
+			return this.finalizeEmpty(lines);
 		}
 
 		const primaryColumnWidth = this.getPrimaryColumnWidth();
+		const showHint = this.options.showHint === true || this.searchEnabled;
+		const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY;
+		const hintRows = showHint ? 2 : 0;
+
+		let visibleCount = this.maxVisible;
+		let window = this.renderItemWindow(width, primaryColumnWidth, visibleCount);
+		// Group headers consume physical rows beyond the reserved one: a
+		// window spanning k groups renders k headers, so the assembled list
+		// can exceed the host-granted row budget. Shrink the WINDOW (still
+		// selection-centered) until the whole list fits; the hint is the
+		// non-negotiable tail (setMaxRows contract). Only the local
+		// `visibleCount` shrinks — `maxVisible` stays the budget-derived
+		// baseline, so a later selection move can use the full grant again
+		// (a render-time ratchet would permanently shrink PageUp/PageDown).
+		while (Number.isFinite(this.maxRows)
+			&& lines.length + window.length + hintRows > this.maxRows
+			&& visibleCount > 1) {
+			visibleCount -= 1;
+			window = this.renderItemWindow(width, primaryColumnWidth, visibleCount);
+		}
+		lines.push(...window);
+		if (showHint) this.addHintLine(lines, width);
+		if (Number.isFinite(this.maxRows) && lines.length > this.maxRows) {
+			// Degenerate tiny grants: keep the tail (the hint plus as many
+			// trailing rows as fit) instead of letting the compositor slice
+			// the hint away.
+			return lines.slice(lines.length - this.maxRows);
+		}
+		return lines;
+	}
+
+	/** Finalize the empty/no-match assembly against the live grant. The
+	 * setMaxRows contract covers every path: `render().length <= maxRows`
+	 * with the semantic priority search input > no-match message > hint >
+	 * header > blank spacers, so the hint survives whenever the grant
+	 * physically allows it. */
+	private finalizeEmpty(lines: string[]): string[] {
+		if (!Number.isFinite(this.maxRows)) return lines;
+		const limit = Math.max(1, Math.floor(this.maxRows));
+		if (lines.length <= limit) return lines;
+		// Blank spacers are the lowest-value rows: drop them first (the
+		// content stays together and keeps its visual order).
+		const compact = lines.filter(line => line !== "");
+		if (compact.length <= limit) return compact;
+		// The header is chrome: yield it before any content (priority:
+		// hint > header).
+		const withoutHeader = this.options.header === undefined ? compact : compact.slice(1);
+		if (withoutHeader.length <= limit) return withoutHeader;
+		// Extreme grant: keep the head of the HEADER-FREE rows — the search
+		// input, then the no-match message. Slicing `compact` here would
+		// re-introduce the header and drop the message, which the declared
+		// priority places ABOVE the header.
+		return withoutHeader.slice(0, limit);
+	}
+
+	/** Render the item window (group headers + item rows + scroll indicator)
+	 * at `visibleCount`, centered on the selected row. */
+	private renderItemWindow(width: number, primaryColumnWidth: number, visibleCount: number): string[] {
+		const lines: string[] = [];
 
 		// Calculate visible range with scrolling
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
+			Math.min(this.selectedIndex - Math.floor(visibleCount / 2), this.filteredItems.length - visibleCount),
 		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
+		const endIndex = Math.min(startIndex + visibleCount, this.filteredItems.length);
 
 		// Group counts over the full (filtered) sequence, so a header inside
 		// the visible window can show how many items its group holds.
@@ -217,14 +337,32 @@ export class SelectList implements Component {
 			lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")));
 		}
 
-		if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, width);
-
 		return lines;
 	}
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
-		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
+		// Navigation/selection always operates on the FILTERED list (which
+		// tracks the live query whether or not search is enabled): with
+		// search disabled, setFilter narrows filteredItems, so bounds over
+		// the raw items would walk into invisible rows. (dsh-pi-tui
+		// divergence X001; upstream semantics restored.)
+		const displayItems = this.filteredItems;
+		// Zero-match invariant: with nothing to navigate, every navigation
+		// key is a no-op — selectedIndex must stay 0 (a wrap on an empty
+		// list would otherwise produce -1/1 and break the invariant).
+		// Search keys still reach the search box below (typing refines the
+		// query), so the guard sits on the navigation branches only.
+		if (displayItems.length === 0) {
+			if (
+				kb.matches(keyData, "tui.select.up") ||
+				kb.matches(keyData, "tui.select.down") ||
+				kb.matches(keyData, "tui.select.pageUp") ||
+				kb.matches(keyData, "tui.select.pageDown")
+			) {
+				return;
+			}
+		}
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.selectedIndex = this.selectedIndex === 0 ? displayItems.length - 1 : this.selectedIndex - 1;
@@ -268,6 +406,7 @@ export class SelectList implements Component {
 	 * survives the filter — used by setItems, where the query did not change
 	 * and snapping back to the top would fight the user's cursor. */
 	private applyFilter(query: string, preserveSelection = false): void {
+		this.filterQuery = query;
 		const previousValue = preserveSelection ? this.filteredItems[this.selectedIndex]?.value : undefined;
 		if (query === "") {
 			this.filteredItems = this.items;
@@ -282,6 +421,7 @@ export class SelectList implements Component {
 					: searchable.includes(needle);
 			});
 		}
+		this.recomputeVisibleBudget();
 		if (previousValue !== undefined) {
 			const index = this.filteredItems.findIndex(item => item.value === previousValue);
 			if (index !== -1) {

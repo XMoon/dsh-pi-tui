@@ -257,6 +257,292 @@ describe("ProcessTerminal progress", () => {
 	});
 });
 
+describe("ProcessTerminal resize listener (dsh-pi-tui divergence X016)", () => {
+	it("repeated start() calls swap the resize listener instead of stacking it", () => {
+		const terminal = new ProcessTerminal();
+		const resizeListeners: (() => void)[] = [];
+
+		const previousWrite = process.stdout.write;
+		const previousStdoutOn = process.stdout.on;
+		const previousStdoutRemoveListener = process.stdout.removeListener;
+		const previousStdinOn = process.stdin.on;
+		const previousStdinSetEncoding = process.stdin.setEncoding;
+		const previousStdinResume = process.stdin.resume;
+		const previousStdinPause = process.stdin.pause;
+		const previousSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+
+		process.stdout.write = ((_chunk: string | Uint8Array) => true) as typeof process.stdout.write;
+		process.stdout.on = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+			if (event === "resize") resizeListeners.push(listener as () => void);
+			return process.stdout;
+		}) as typeof process.stdout.on;
+		process.stdout.removeListener = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+			if (event === "resize") {
+				const index = resizeListeners.lastIndexOf(listener);
+				if (index >= 0) resizeListeners.splice(index, 1);
+			}
+			return process.stdout;
+		}) as typeof process.stdout.removeListener;
+		process.stdin.on = (() => process.stdin) as typeof process.stdin.on;
+		process.stdin.setEncoding = (() => process.stdin) as typeof process.stdin.setEncoding;
+		process.stdin.resume = (() => process.stdin) as typeof process.stdin.resume;
+		process.stdin.pause = (() => process.stdin) as typeof process.stdin.pause;
+		Object.defineProperty(process.stdin, "setRawMode", {
+			value: () => process.stdin,
+			configurable: true,
+		});
+
+		try {
+			const callsA: number[] = [];
+			const callsB: number[] = [];
+			terminal.start(
+				() => {},
+				() => callsA.push(1),
+			);
+			terminal.start(
+				() => {},
+				() => callsB.push(1),
+			);
+
+			// Only the CURRENT handler may stay registered: a stacked stale
+			// listener fires a resize into a dead screen (and leaks per restart).
+			assert.equal(resizeListeners.length, 1);
+			for (const listener of [...resizeListeners]) listener();
+			assert.deepEqual(callsA, []);
+			assert.deepEqual(callsB, [1]);
+
+			terminal.stop();
+			assert.equal(resizeListeners.length, 0);
+		} finally {
+			process.stdout.write = previousWrite;
+			process.stdout.on = previousStdoutOn;
+			process.stdout.removeListener = previousStdoutRemoveListener;
+			process.stdin.on = previousStdinOn;
+			process.stdin.setEncoding = previousStdinSetEncoding;
+			process.stdin.resume = previousStdinResume;
+			process.stdin.pause = previousStdinPause;
+			if (previousSetRawModeDescriptor) {
+				Object.defineProperty(process.stdin, "setRawMode", previousSetRawModeDescriptor);
+			} else {
+				Reflect.deleteProperty(process.stdin, "setRawMode");
+			}
+			setKittyProtocolActive(false);
+		}
+	});
+
+	it("repeated start() calls swap the stdin data handler instead of stacking it (X016)", () => {
+		const terminal = new ProcessTerminal();
+		const stdinDataListeners: ((data: string) => void)[] = [];
+
+		const previousWrite = process.stdout.write;
+		const previousStdoutOn = process.stdout.on;
+		const previousStdoutRemoveListener = process.stdout.removeListener;
+		const previousStdinOn = process.stdin.on;
+		const previousStdinRemoveListener = process.stdin.removeListener;
+		const previousStdinSetEncoding = process.stdin.setEncoding;
+		const previousStdinResume = process.stdin.resume;
+		const previousStdinPause = process.stdin.pause;
+		const previousSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+
+		process.stdout.write = ((_chunk: string | Uint8Array) => true) as typeof process.stdout.write;
+		process.stdout.on = (() => process.stdout) as typeof process.stdout.on;
+		process.stdout.removeListener = (() => process.stdout) as typeof process.stdout.removeListener;
+		process.stdin.on = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+			if (event === "data") stdinDataListeners.push(listener as (data: string) => void);
+			return process.stdin;
+		}) as typeof process.stdin.on;
+		process.stdin.removeListener = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+			if (event === "data") {
+				const index = stdinDataListeners.lastIndexOf(listener as (data: string) => void);
+				if (index >= 0) stdinDataListeners.splice(index, 1);
+			}
+			return process.stdin;
+		}) as typeof process.stdin.removeListener;
+		process.stdin.setEncoding = (() => process.stdin) as typeof process.stdin.setEncoding;
+		process.stdin.resume = (() => process.stdin) as typeof process.stdin.resume;
+		process.stdin.pause = (() => process.stdin) as typeof process.stdin.pause;
+		Object.defineProperty(process.stdin, "setRawMode", {
+			value: () => process.stdin,
+			configurable: true,
+		});
+
+		try {
+			const inputsA: string[] = [];
+			const inputsB: string[] = [];
+			terminal.start(
+				(data) => inputsA.push(data),
+				() => {},
+			);
+			terminal.start(
+				(data) => inputsB.push(data),
+				() => {},
+			);
+
+			// Only the CURRENT stdin handler may stay registered: a stacked
+			// stale handler would forward the same stdin event twice (its
+			// StdinBuffer callback and the new one both call inputHandler).
+			assert.equal(stdinDataListeners.length, 1);
+			stdinDataListeners[0]!("x");
+			assert.deepEqual(inputsA, [], "the stale handler must never deliver");
+			assert.deepEqual(inputsB, ["x"], "one stdin event must reach the current handler exactly once");
+
+			terminal.stop();
+			assert.equal(stdinDataListeners.length, 0, "stop() must remove the current handler");
+		} finally {
+			process.stdout.write = previousWrite;
+			process.stdout.on = previousStdoutOn;
+			process.stdout.removeListener = previousStdoutRemoveListener;
+			process.stdin.on = previousStdinOn;
+			process.stdin.removeListener = previousStdinRemoveListener;
+			process.stdin.setEncoding = previousStdinSetEncoding;
+			process.stdin.resume = previousStdinResume;
+			process.stdin.pause = previousStdinPause;
+			if (previousSetRawModeDescriptor) {
+				Object.defineProperty(process.stdin, "setRawMode", previousSetRawModeDescriptor);
+			} else {
+				Reflect.deleteProperty(process.stdin, "setRawMode");
+			}
+			setKittyProtocolActive(false);
+		}
+	});
+
+	it("repeated start() keeps the ORIGINAL raw state so stop() restores cooked mode (X016)", () => {
+		const terminal = new ProcessTerminal();
+		const rawModeCalls: boolean[] = [];
+		let isRaw = false;
+
+		const previousWrite = process.stdout.write;
+		const previousStdoutOn = process.stdout.on;
+		const previousStdoutRemoveListener = process.stdout.removeListener;
+		const previousStdinOn = process.stdin.on;
+		const previousStdinSetEncoding = process.stdin.setEncoding;
+		const previousStdinResume = process.stdin.resume;
+		const previousStdinPause = process.stdin.pause;
+		const previousIsRawDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isRaw");
+		const previousSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+
+		process.stdout.write = ((_chunk: string | Uint8Array) => true) as typeof process.stdout.write;
+		process.stdout.on = (() => process.stdout) as typeof process.stdout.on;
+		process.stdout.removeListener = (() => process.stdout) as typeof process.stdout.removeListener;
+		process.stdin.on = (() => process.stdin) as typeof process.stdin.on;
+		process.stdin.setEncoding = (() => process.stdin) as typeof process.stdin.setEncoding;
+		process.stdin.resume = (() => process.stdin) as typeof process.stdin.resume;
+		process.stdin.pause = (() => process.stdin) as typeof process.stdin.pause;
+		Object.defineProperty(process.stdin, "isRaw", {
+			get: () => isRaw,
+			configurable: true,
+		});
+		Object.defineProperty(process.stdin, "setRawMode", {
+			value: (raw: boolean) => {
+				rawModeCalls.push(raw);
+				isRaw = raw;
+				return process.stdin;
+			},
+			configurable: true,
+		});
+
+		try {
+			terminal.start(
+				() => {},
+				() => {},
+			);
+			terminal.start(
+				() => {},
+				() => {},
+			);
+			terminal.stop();
+
+			// The FIRST start captured wasRaw=false; the second start finds
+			// stdin already raw and must NOT re-capture it, so the final
+			// stop() restores the ORIGINAL cooked state. Re-capturing would
+			// leave the terminal in raw mode after stop.
+			assert.deepEqual(rawModeCalls, [true, true, false], "start(raw), start(raw), stop(cooked)");
+		} finally {
+			process.stdout.write = previousWrite;
+			process.stdout.on = previousStdoutOn;
+			process.stdout.removeListener = previousStdoutRemoveListener;
+			process.stdin.on = previousStdinOn;
+			process.stdin.setEncoding = previousStdinSetEncoding;
+			process.stdin.resume = previousStdinResume;
+			process.stdin.pause = previousStdinPause;
+			if (previousIsRawDescriptor) {
+				Object.defineProperty(process.stdin, "isRaw", previousIsRawDescriptor);
+			} else {
+				Reflect.deleteProperty(process.stdin, "isRaw");
+			}
+			if (previousSetRawModeDescriptor) {
+				Object.defineProperty(process.stdin, "setRawMode", previousSetRawModeDescriptor);
+			} else {
+				Reflect.deleteProperty(process.stdin, "setRawMode");
+			}
+			setKittyProtocolActive(false);
+		}
+	});
+
+	it("repeated start() pushes the Kitty keyboard protocol exactly once (X016)", () => {
+		const terminal = new ProcessTerminal();
+		const writes: string[] = [];
+
+		const previousWrite = process.stdout.write;
+		const previousStdoutOn = process.stdout.on;
+		const previousStdoutRemoveListener = process.stdout.removeListener;
+		const previousStdinOn = process.stdin.on;
+		const previousStdinSetEncoding = process.stdin.setEncoding;
+		const previousStdinResume = process.stdin.resume;
+		const previousStdinPause = process.stdin.pause;
+		const previousSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+		process.stdout.on = (() => process.stdout) as typeof process.stdout.on;
+		process.stdout.removeListener = (() => process.stdout) as typeof process.stdout.removeListener;
+		process.stdin.on = (() => process.stdin) as typeof process.stdin.on;
+		process.stdin.setEncoding = (() => process.stdin) as typeof process.stdin.setEncoding;
+		process.stdin.resume = (() => process.stdin) as typeof process.stdin.resume;
+		process.stdin.pause = (() => process.stdin) as typeof process.stdin.pause;
+		Object.defineProperty(process.stdin, "setRawMode", {
+			value: () => process.stdin,
+			configurable: true,
+		});
+
+		try {
+			terminal.start(
+				() => {},
+				() => {},
+			);
+			terminal.start(
+				() => {},
+				() => {},
+			);
+			terminal.stop();
+
+			// CSI > flags u PUSHES a keyboard-protocol layer and CSI < u
+			// pops exactly one: a repeated start() must not push again, or
+			// the terminal stays in Kitty enhancement mode after exit.
+			const pushes = writes.filter((w) => w.includes("\x1b[>7u")).length;
+			const pops = writes.filter((w) => w.includes("\x1b[<u")).length;
+			assert.equal(pushes, 1, "the keyboard protocol must be pushed exactly once");
+			assert.equal(pops, 1, "stop() must pop exactly once");
+		} finally {
+			process.stdout.write = previousWrite;
+			process.stdout.on = previousStdoutOn;
+			process.stdout.removeListener = previousStdoutRemoveListener;
+			process.stdin.on = previousStdinOn;
+			process.stdin.setEncoding = previousStdinSetEncoding;
+			process.stdin.resume = previousStdinResume;
+			process.stdin.pause = previousStdinPause;
+			if (previousSetRawModeDescriptor) {
+				Object.defineProperty(process.stdin, "setRawMode", previousSetRawModeDescriptor);
+			} else {
+				Reflect.deleteProperty(process.stdin, "setRawMode");
+			}
+			setKittyProtocolActive(false);
+		}
+	});
+});
+
 describe("ProcessTerminal dimensions", () => {
 	it("falls back to COLUMNS and LINES before default dimensions", () => {
 		const previousColumnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");

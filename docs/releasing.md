@@ -42,17 +42,42 @@ supported while M2–M8 remain unfinished.
 
 ## 2. Update release metadata and documentation
 
-For version `X.Y.Z` on release date `YYYY-MM-DD`:
+If a stable release is based on a mature `next` snapshot, first promote that
+snapshot into `main` as described in
+[docs/local-development.md](local-development.md). Complete this release
+checklist on `main`, then merge the resulting released `main` state back into
+`next` as the final promotion step.
+
+Choose exactly one release channel before editing metadata:
+
+- **Stable:** branch `main`, tag `vX.Y.Z`, npm dist-tag `latest`, and a stable
+  SemVer package version.
+- **Prerelease:** branch `next`, tag `next-vX.Y.Z-alpha.N` (or another
+  prerelease identifier), npm dist-tag `next`, and the same prerelease version
+  in `package.json`.
+
+The tag's commit must already be an ancestor of its required branch. A
+`next-v...` tag on `main`, or a stable `v...` tag on `next`, is a release error;
+the CI `release-context` and ancestry gates enforce these rules again.
+
+For the selected package version `X.Y.Z` (including any prerelease suffix) on
+release date `YYYY-MM-DD`:
 
 1. Change the root `package.json` version to `X.Y.Z`.
 2. In both changelogs, add `## [X.Y.Z] - YYYY-MM-DD` immediately below the
    empty `## [Unreleased]` heading, then move the accumulated entries under
    that version. Leave a fresh empty `[Unreleased]` section at the top.
-3. Update both changelog reference blocks:
+3. Update both changelog reference blocks. Use the matching channel prefix for
+   both links:
 
    ```text
+   # stable
    [Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/vX.Y.Z...HEAD
    [X.Y.Z]: https://github.com/XMoon/dsh-pi-tui/compare/v<previous>...vX.Y.Z
+
+   # prerelease
+   [Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-vX.Y.Z...HEAD
+   [X.Y.Z]: https://github.com/XMoon/dsh-pi-tui/compare/next-v<previous>...next-vX.Y.Z
    ```
 
 4. Keep the Chinese and English changelog sections in the same order and make
@@ -75,12 +100,25 @@ The release metadata script must pass before a release commit is made. It
 checks the tag format, package version, both changelog sections, matching
 version/date headings, and non-empty release content:
 
+Stable:
+
 ```sh
 node scripts/release-notes.mjs vX.Y.Z /tmp/dsh-pi-tui-release-notes-X.Y.Z.md
 ```
 
-Review the generated file if the release body matters. A failure here means
-the release section, date, or package version is incomplete; do not bypass it.
+Prerelease:
+
+```sh
+node scripts/release-notes.mjs next-vX.Y.Z-alpha.N /tmp/dsh-pi-tui-release-notes-X.Y.Z-alpha.N.md
+```
+
+The script compares the parsed tag version (without the `next-` channel
+marker) with `package.json` and verifies both dated bilingual sections. Review
+the generated file if the release body matters. For the 0.4 migration line,
+the dated sections must also include the DSH/TUI pairing and copy-paste
+installation commands: that extracted file is the GitHub Release body, not an
+optional summary. A failure here means the release channel, section, date,
+package version, or installation guidance is incomplete; do not bypass it.
 
 ## 4. Run the appropriate verification gate
 
@@ -124,41 +162,56 @@ git status --short --branch
 Only after all metadata and verification checks pass:
 
 ```sh
-git add package.json README.md README.en.md CHANGELOG.md CHANGELOG.en.md docs/releasing.md docs/README.md AGENTS.md
+git add package.json pnpm-lock.yaml README.md README.en.md CHANGELOG.md CHANGELOG.en.md docs/releasing.md docs/README.md
 git diff --cached --check
-git commit -m "chore: release vX.Y.Z"
-git tag vX.Y.Z
-git show --stat --oneline HEAD
-git show --no-patch --format='%h %s' vX.Y.Z
+git commit -m "chore: release <channel>-<version>"
 ```
 
-The project uses a commit-pointing `vX.Y.Z` tag. If the tag has not been
-pushed and the release commit needs correction, delete and recreate it locally
-rather than force-moving a published tag:
+Create the tag that matches the selected channel, without pushing it:
 
 ```sh
-git tag -d vX.Y.Z
+# stable channel
+git tag vX.Y.Z
+
+# prerelease channel
+git tag next-vX.Y.Z-alpha.N
+```
+
+The project uses commit-pointing tags. If an unpushed tag needs correction,
+delete and recreate it locally rather than force-moving a published tag:
+
+```sh
+git tag -d vX.Y.Z                 # or next-vX.Y.Z-alpha.N
 ```
 
 ## 6. Push only after explicit confirmation
 
-Do not push automatically. Once the user confirms the commit and tag:
+Do not push automatically. Once the user confirms the commit and tag, push the
+matching branch and tag:
 
 ```sh
+# stable channel
 git push origin main vX.Y.Z
+
+# prerelease channel
+git push origin next next-vX.Y.Z-alpha.N
 ```
 
-The push invokes the Husky pre-push gate for `main` and the release tag. A tag
-push starts `.github/workflows/ci.yml`:
+The push skips the Husky gate for the branch and runs the full gate for the
+release tag. The tag starts `.github/workflows/ci.yml`:
 
-1. source checks, build/pack, compatibility and ecosystem smoke jobs, and the
-   production dependency audit run in parallel;
-2. release metadata extracts the bilingual changelog body and blocks on a
-   version/date mismatch;
-3. `publish` downloads the exact tarball produced and tested by CI, verifies
-   its embedded version against the tag, and runs `npm publish` with OIDC;
-4. `release` runs only after publish succeeds, then creates or updates the
-   GitHub Release and uploads the tarball plus its SHA-256 file.
+1. the parser selects `latest`/`main` for `v...`, or `next`/`next` for
+   `next-v...`, and the ancestry gate checks the tag's required branch;
+2. source checks, build/pack, compatibility and ecosystem smoke jobs, the old
+   runtime boundary, and the production dependency audit run in parallel;
+3. release metadata extracts the bilingual changelog body and checks parsed
+   tag version/date parity;
+4. `publish` downloads the exact tested tarball, verifies its embedded version
+   against the parsed release version, and runs `npm publish` with the selected
+   npm dist-tag via OIDC;
+5. `release` runs only after publish succeeds, then creates or updates the
+   GitHub Release with the correct prerelease state and uploads the tarball plus
+   its SHA-256 file.
 
 No `NPM_TOKEN` or local npm credential is used. If a tag workflow fails, fix
 the cause and rerun the workflow when appropriate; do not force-move a tag
@@ -166,15 +219,26 @@ that has already reached the remote.
 
 ## 7. Verify the published release
 
-After CI completes, verify the remote tag, npm version, GitHub Release, and
-artifact. If a release is not meant to be published yet, stop after the local
-commit and tag and leave the tag unpushed.
+After CI completes, verify the remote tag, package version, npm channel, GitHub
+Release, and artifact. If a release is not meant to be published yet, stop after
+the local commit and tag and leave the tag unpushed.
 
 ```sh
+# stable channel
 git ls-remote --tags origin vX.Y.Z
-npm view @xmoon76/dsh-pi-tui version
+npm view @xmoon76/dsh-pi-tui@latest version
 gh release view vX.Y.Z --repo XMoon/dsh-pi-tui
+
+# prerelease channel
+git ls-remote --tags origin next-vX.Y.Z-alpha.N
+npm view @xmoon76/dsh-pi-tui@next version
+gh release view next-vX.Y.Z-alpha.N --repo XMoon/dsh-pi-tui
 ```
 
-For the next cycle, `[Unreleased]` is intentionally empty and its comparison
-link starts at `vX.Y.Z`.
+Inspect the visible Release body as well. For the 0.4 line it must show the
+matching `@deepseek-ai/dsh` command, the matching TUI channel, and the legacy
+0.3 fallback note; these are sourced from the bilingual dated changelog section
+and must not be replaced by a manually edited summary.
+
+For the next cycle, `[Unreleased]` is intentionally empty. Its comparison link
+should use the tag prefix of the channel being continued (`v...` or `next-v...`).

@@ -1,33 +1,38 @@
 /**
  * Session performance statistics folded from the event log, mirroring pi's
- * footer usage line: turns/steps, LLM wall time, first-token latency,
- * output tokens per second, cache hit rate, and token totals.
- * Pure and deterministic for headless tests.
+ * footer usage line: turns/steps, LLM wall time, recent first-token
+ * latency, recent effective output throughput, cache hit rate, and token
+ * totals. Pure and deterministic for headless tests.
  *
  * Accounting follows the Web's sessionStats/tokenUsage projections:
  * - the FIRST TOKEN is any non-empty token delta — text, reasoning, or a
- *   tool-call delta (the Web's isTokenDelta). Stamping only text-delta made
- *   the decode window start at the first VISIBLE token, which is much later
- *   than the first model token on reasoning models — tok/s came out
- *   systematically high and TTFB too. The whole step's timing (LLM wall,
- *   TTFT, decode window) settles at assistant/message, exactly like the
- *   projection; a step that never produced a message (cancelled/failed)
- *   contributes no timing at all;
+ *   tool-call delta (the Web's isTokenDelta). The whole step's timing (LLM
+ *   wall, TTFT) settles at assistant/message, exactly like the projection;
+ *   a step that never produced a message (cancelled/failed) contributes no
+ *   timing at all;
  * - usage is counted ONCE per step at step/end — the assistant/message
  *   usage replaces the streaming `usage` chunk (both carry the same
  *   assembler value; adding both would double the totals), and a step with
  *   only a usage chunk still counts (the projection's tokenUsage is
  *   step-keyed, not message-gated);
  * - turns/steps count at step/end (unique turns), like the projection;
- * - decode throughput samples only steps that carry BOTH a decode window
- *   (first token delta → assistant/message) and usage, so reasoning-only or
- *   tool-only steps never inflate the rate;
+ * - the STATUS performance metrics (firstTokenMsAvg / tokensPerSec) are
+ *   RECENT-window figures over the last {@link RECENT_PERFORMANCE_SAMPLE_LIMIT}
+ *   valid completed steps, not session-lifetime averages. A throughput
+ *   sample is Σ output / Σ FULL LLM wall (step/start → assistant/message),
+ *   so CPA burst tool-call delivery (hundreds of tokens delivered within
+ *   milliseconds after a multi-second request) counts as
+ *   `400 tokens / 10s whole request = 40 tok/s` instead of ratcheting a
+ *   lifetime "observable decode window" rate into the hundreds. A route
+ *   (provider + model) change clears both recent windows;
+ * - `llmMs` remains the session LIFETIME LLM wall — kept for debug,
+ *   /stats and session analysis, no longer shown in the default footer;
  * - billed input = uncached + cache-read + cache-write (the Web's
  *   billedInputTokens), and the cache-hit share divides by that sum.
  * @module @xmoon76/dsh-pi-tui/stats
  */
 
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { isReplacementSurfaceEvent, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { formatTokens, StepUsageAccumulator, type UsageLike } from './token-usage.ts'
 
 /** Aggregated session statistics. */
@@ -36,11 +41,17 @@ export interface SessionStats {
   turns: number
   /** Model requests (steps). */
   steps: number
-  /** Total model wall time (step/start → assistant/message), ms. */
+  /** Total model wall time (step/start → assistant/message), ms — the
+   * session LIFETIME total (debug/stats surfaces; the default footer no
+   * longer shows it). */
   llmMs: number
-  /** Average time from step/start to the first text delta, ms. */
+  /** Average time from step/start to the first token over the RECENT
+   * window (the last {@link RECENT_PERFORMANCE_SAMPLE_LIMIT} completed
+   * first-token steps), ms. */
   firstTokenMsAvg: number
-  /** Output tokens per second over the sampled decode phases. */
+  /** Recent effective output throughput: Σ outputTokens / Σ full LLM wall
+   * over the RECENT window (the last {@link RECENT_PERFORMANCE_SAMPLE_LIMIT}
+   * valid completed steps), tok/s. */
   tokensPerSec: number
   /** Cache-read share of billed input tokens, 0–100. */
   cacheHitPct: number
@@ -69,6 +80,26 @@ const EMPTY: SessionStats = {
   cacheWriteTokens: 0,
 }
 
+/** The recent performance window's step count (plan §2.3): last-1 is too
+ * jittery across tool-call / reasoning / short-text steps; a session
+ * lifetime mixes in stale history; wall-clock windows go empty across
+ * long tool gaps. Five completed steps smooth the agent tool loop while
+ * staying responsive. */
+export const RECENT_PERFORMANCE_SAMPLE_LIMIT = 5
+
+/** How many throughput CANDIDATES the window physically retains (the
+ * derived metric still pools only {@link RECENT_PERFORMANCE_SAMPLE_LIMIT}
+ * of them — derive takes the latest five VALID samples). The extra
+ * candidates exist so an authoritative invalidation of one of the latest
+ * five BACKFILLS correctly: the window's contract is "the latest 5 valid
+ * samples", and a sample invalidated by a late duplicate stops being
+ * valid, letting the next-older retained candidate rejoin. Twice the
+ * window covers the worst case of every derived sample being
+ * invalidated; a duplicate older than the candidate buffer is a replay
+ * artifact beyond the recent contract. TTFT needs no candidates — its
+ * samples have no invalidation path. */
+const RECENT_PERFORMANCE_CANDIDATE_LIMIT = RECENT_PERFORMANCE_SAMPLE_LIMIT * 2
+
 /** Key identifying one step's model output (turn + step). */
 function stepKey(turn: number, step: number): string {
   return `${turn}/${step}`
@@ -81,7 +112,7 @@ function turnOfStepKey(key: string): number {
 }
 
 /** One step's timing accumulation, resolved at its boundaries. The usage
- * field feeds the decode-throughput sampling (settleStep); the token
+ * field feeds the recent performance sampling (settleStep); the token
  * ACCOUNTING itself lives in the shared {@link StepUsageAccumulator}, so
  * the footer and the Focus per-turn projection can never drift. */
 interface StepTiming {
@@ -91,9 +122,143 @@ interface StepTiming {
   usage?: UsageLike
   /** One step may have at most one timing settlement. */
   settled?: boolean
-  /** The already-accounted decode sample, when usage was available. */
-  sampledDuration?: number
-  sampledOutputTokens?: number
+  /** The completion's position in the recent window (assigned at the
+   * FIRST settlement; a late usage replacement reuses it). */
+  completionOrdinal?: number
+  /** The performance route the step's samples joined (provider + model)
+   * — a late replacement must not cross back into a reset window. */
+  routeKey?: string
+  /** The route LIFECYCLE epoch at settlement. The route STRING alone
+   * cannot gate a late replacement: A → B → A returns to an equal string
+   * while the window's samples belong to the SECOND A lifecycle — only
+   * an epoch match proves the same route generation. */
+  routeEpoch?: number
+}
+
+/** One recent effective-throughput sample: the step's FULL LLM wall
+ * (step/start → assistant/message) against its authoritative output
+ * tokens — never a burst-delivery "observable decode window". */
+interface RecentThroughputSample {
+  key: string
+  ordinal: number
+  wallMs: number
+  outputTokens: number
+}
+
+/** One recent TTFT sample (step/start → first token delta). */
+interface RecentTtftSample {
+  key: string
+  ordinal: number
+  ttftMs: number
+}
+
+/**
+ * The bounded recent performance window shared by both folds (plan §6.1):
+ * the latest {@link RECENT_PERFORMANCE_SAMPLE_LIMIT} VALID samples per
+ * metric, keyed by step, ordered by completion ordinal (throughput keeps
+ * {@link RECENT_PERFORMANCE_CANDIDATE_LIMIT} candidates so an
+ * invalidation backfills). A late authoritative usage replacement UPSERTS
+ * its step's sample (same ordinal) instead of appending a fake "newest"
+ * one — or REMOVES it when the replacement invalidates the sample. The
+ * window is route-scoped: the first settled message that clearly
+ * identifies a new provider + model clears both windows (bumping the
+ * route epoch) before its own samples join.
+ */
+class RecentPerformanceWindow {
+  /** The route (provider + model) the current window belongs to. */
+  routeKey: string | undefined
+  /** The current route LIFECYCLE generation — bumped on every REAL route
+   * change (A → B → A bumps twice). Samples and settled steps carry the
+   * epoch they joined, so a late replacement can only mutate the window
+   * of its own generation, never a later one with an equal route string. */
+  routeEpoch = 0
+  private nextOrdinal = 0
+  private throughput: RecentThroughputSample[] = []
+  private ttft: RecentTtftSample[] = []
+
+  /** Claim the next completion ordinal (exactly once per step, at its
+   * first settlement). */
+  claimOrdinal(): number {
+    return this.nextOrdinal++
+  }
+
+  /** Observe a settled message's route key. The FIRST observation adopts
+   * it; a CHANGE clears both windows (and bumps the route epoch) so the
+   * new route's metrics start clean. A MISSING key never resets anything
+   * (fail-soft). */
+  observeRoute(routeKey: string | undefined): void {
+    if (routeKey !== undefined) {
+      if (this.routeKey === undefined) this.routeKey = routeKey
+      else if (this.routeKey !== routeKey) {
+        this.throughput = []
+        this.ttft = []
+        this.routeKey = routeKey
+        this.routeEpoch += 1
+      }
+    }
+  }
+
+  /** Upsert the step's TTFT sample (a replacement keeps its ordinal). */
+  upsertTtft(key: string, ordinal: number, ttftMs: number): void {
+    upsertSample(this.ttft, { key, ordinal, ttftMs }, RECENT_PERFORMANCE_SAMPLE_LIMIT)
+  }
+
+  /** Upsert the step's effective-throughput sample. */
+  upsertThroughput(key: string, ordinal: number, wallMs: number, outputTokens: number): void {
+    upsertSample(this.throughput, { key, ordinal, wallMs, outputTokens }, RECENT_PERFORMANCE_CANDIDATE_LIMIT)
+  }
+
+  /** Drop the step's throughput sample (an authoritative replacement that
+   * invalidates the sample — e.g. outputTokens corrected to 0 — must not
+   * leave the superseded value in the window). No-op when absent. */
+  removeThroughput(key: string): void {
+    this.throughput = this.throughput.filter(sample => sample.key !== key)
+  }
+
+  /** The derived recent metrics (the ONE helper both folds share — plan
+   * §6.4). No samples → 0, the established compat behavior. */
+  derive(): { firstTokenMsAvg: number; tokensPerSec: number } {
+    const ttft = latestSamples(this.ttft)
+    const firstTokenMsAvg = ttft.length > 0
+      ? ttft.reduce((sum, sample) => sum + sample.ttftMs, 0) / ttft.length
+      : 0
+    const throughput = latestSamples(this.throughput)
+    const wallMs = throughput.reduce((sum, sample) => sum + sample.wallMs, 0)
+    const outputTokens = throughput.reduce((sum, sample) => sum + sample.outputTokens, 0)
+    const tokensPerSec = wallMs > 0 ? Math.round((outputTokens * 1000) / wallMs) : 0
+    return { firstTokenMsAvg, tokensPerSec }
+  }
+}
+
+/** Insert-or-replace by step key, then trim to the LATEST ordinals within
+ * the caller's retention limit (a late-valid old step joins at its
+ * ORIGINAL ordinal and may immediately fall out of the derived window —
+ * it is an old step, not a newest one). */
+function upsertSample<T extends { key: string; ordinal: number }>(samples: T[], sample: T, limit: number): void {
+  const index = samples.findIndex(existing => existing.key === sample.key)
+  if (index >= 0) samples[index] = sample
+  else samples.push(sample)
+  if (samples.length > limit) {
+    samples.sort((a, b) => a.ordinal - b.ordinal)
+    samples.splice(0, samples.length - limit)
+  }
+}
+
+/** The window's latest-N samples in completion order. */
+function latestSamples<T extends { ordinal: number }>(samples: readonly T[]): T[] {
+  return [...samples].sort((a, b) => a.ordinal - b.ordinal).slice(-RECENT_PERFORMANCE_SAMPLE_LIMIT)
+}
+
+/** The performance route key of a settled message: the (provider, model)
+ * TUPLE, encoded unambiguously — plain '/' concatenation would collide
+ * `("a/b", "c")` with `("a", "b/c")` and miss a real route change. A
+ * message without a clear model-source identity yields undefined — the
+ * window never resets on a missing key (fail-soft). */
+function routeKeyOf(message: { source?: unknown }): string | undefined {
+  const source = (message as { source?: { kind?: unknown; provider?: unknown; model?: unknown } }).source
+  if (source?.kind !== 'model') return undefined
+  if (typeof source.provider !== 'string' || typeof source.model !== 'string') return undefined
+  return JSON.stringify([source.provider, source.model])
 }
 
 /** Advance the late-replay fence and clear the previous turn once. */
@@ -118,8 +283,8 @@ function advanceTimingTurn(
 /**
  * The Web's first-token predicate (dsh-llm `isTokenDelta`): any non-empty
  * text or reasoning delta, or a tool-call delta carrying content. The TUI
- * must stamp the SAME boundary or its decode window starts at the first
- * visible token and tok/s inflates on reasoning models.
+ * must stamp the SAME boundary or its TTFT starts at the first
+ * visible token and inflates on reasoning models.
  */
 function isTokenDelta(chunk: { type: string; text?: string; argumentsDelta?: string; name?: unknown }): boolean {
   switch (chunk.type) {
@@ -131,18 +296,6 @@ function isTokenDelta(chunk: { type: string; text?: string; argumentsDelta?: str
     default:
       return false
   }
-}
-
-/** Timing/throughput accumulators shared by the fold and the folder. */
-interface Throughput {
-  /** Total decode-window duration (ms) of sampled steps. */
-  outputMsTotal: number
-  /** Output tokens over the same sampled steps. */
-  decodeTokens: number
-  /** Summed TTFT over first-token steps. */
-  firstTokenTotal: number
-  /** Steps carrying a recorded first token. */
-  firstTokenCount: number
 }
 
 /**
@@ -160,9 +313,9 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
   // Step boundaries are idempotent within the active turn; older boundaries
   // are stale once the timing fence advances.
   const endedSteps = new Set<string>()
-  const throughput: Throughput = { outputMsTotal: 0, decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
+  const recent = new RecentPerformanceWindow()
   const usage = new StepUsageAccumulator()
-  const completedTurns = new Set<number>()
+  let completedTurnFence: number | undefined
   let lastTurn: number | undefined
   let settledTurn: number | undefined
   const enterSettledTurn = (turn: number): void => {
@@ -170,13 +323,16 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
   }
 
   for (const event of events) {
+    // Replacement surface events belong to the model-visible compaction view,
+    // not the human transcript or its performance totals.
+    if (isReplacementSurfaceEvent(event)) continue
     // The same lifecycle policy as the Focus fold: after turn/end a late
     // step/usage/message event of that turn is a replay artifact and is
     // ignored, so the footer and the Focus per-turn totals can never
     // diverge (review finding).
-    if (event.type !== 'turn/end' && event.type !== 'request/context'
-      && completedTurns.has((event.data as { turn?: unknown }).turn as number)) {
-      continue
+    if (event.type !== 'turn/end' && event.type !== 'request/context') {
+      const eventTurn = (event.data as { turn?: unknown }).turn
+      if (typeof eventTurn === 'number' && completedTurnFence !== undefined && eventTurn <= completedTurnFence) continue
     }
     switch (event.type) {
       case 'turn/start': {
@@ -186,7 +342,10 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
         break
       }
       case 'turn/end': {
-        completedTurns.add(event.data.turn)
+        if (completedTurnFence === undefined || event.data.turn > completedTurnFence) completedTurnFence = event.data.turn
+        // Turn/end can arrive out of order in replayed logs. Advance the shared
+        // usage fence before finalizing so older open steps settle only once.
+        usage.onTurnStart(event.data.turn)
         // Finalize any still-open steps so the session total agrees with
         // the Focus per-turn total (review finding).
         usage.onTurnEnd(event.data.turn)
@@ -248,7 +407,7 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
             timing.usage = chunk.usage
           }
         } else if (isTokenDelta(chunk)) {
-          // The FIRST token delta of the step stamps the decode-window start
+          // The FIRST token delta of the step stamps the TTFT start
           // (Web firstTokenTime). Reasoning and tool-call deltas count too.
           const timing = settledTurn === event.data.turn
             ? perStep.get(stepKey(event.data.turn, event.data.step))
@@ -266,19 +425,19 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
           ? perStep.get(key) ?? settledPerStep.get(key)
           : undefined
         if (timing !== undefined) {
-          // The message time is the step's decode end and its usage is the
+          // The message time is the step's LLM wall end and its usage is the
           // authoritative one; the whole step settles HERE (projection
           // semantics) — step/end only counts turns/steps and the usage.
           // A duplicate authoritative message may replace token usage, but it
-          // must never add a second wall-time or throughput sample.
+          // must never add a second wall-time or performance sample.
           if (timing.settled !== true) {
             timing.completed = event.time
             if (event.data.usage !== undefined) timing.usage = event.data.usage
-            settleStep(stats, timing, throughput)
+            settleStep(stats, key, timing, recent, routeKeyOf(event.data.message))
             timing.settled = true
           } else if (event.data.usage !== undefined) {
             timing.usage = event.data.usage
-            replaceSampledUsage(timing, event.data.usage, throughput)
+            replaceRecentThroughput(key, timing, event.data.usage, recent)
           }
         }
         usage.onAssistantMessage(event.data.turn, event.data.step, event.data.usage)
@@ -293,9 +452,7 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
     }
   }
 
-  if (throughput.firstTokenCount > 0) stats.firstTokenMsAvg = throughput.firstTokenTotal / throughput.firstTokenCount
-  const streamMs = throughput.outputMsTotal
-  if (streamMs > 0) stats.tokensPerSec = Math.round((throughput.decodeTokens * 1000) / streamMs)
+  applyDerivedPerformance(stats, recent)
   const totals = usage.sessionTotals()
   stats.inputTokens = totals.inputTokens
   stats.outputTokens = totals.outputTokens
@@ -306,42 +463,85 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
   return stats
 }
 
-/** Replace the output-token side of an already-accounted decode sample.
- * Assistant/message usage is authoritative and can replace an earlier value;
- * the decode window itself still belongs to the first settled message. */
-function replaceSampledUsage(timing: StepTiming, usage: UsageLike, throughput: Throughput): void {
-  const first = timing.firstDelta
-  const completed = timing.completed
-  if (timing.sampledDuration === undefined) {
-    if (first === undefined || completed === undefined) return
-    timing.sampledDuration = Math.max(0, completed - first)
-    throughput.outputMsTotal += timing.sampledDuration
-  } else {
-    throughput.decodeTokens -= timing.sampledOutputTokens ?? 0
-  }
-  throughput.decodeTokens += usage.outputTokens
-  timing.sampledOutputTokens = usage.outputTokens
+/** Write the recent window's derived metrics onto the stats (the ONE
+ * shared derive path for both folds — plan §6.4). */
+function applyDerivedPerformance(stats: SessionStats, recent: RecentPerformanceWindow): void {
+  const derived = recent.derive()
+  stats.firstTokenMsAvg = derived.firstTokenMsAvg
+  stats.tokensPerSec = derived.tokensPerSec
 }
 
-/** Settle one step's TIMING at its assistant/message boundary. A step with
- * no message (cancelled/failed) never reaches here — the projection counts
- * no timing for it. Usage is NOT settled here; step/end adds it once. */
-function settleStep(stats: SessionStats, timing: StepTiming, throughput: Throughput): void {
+/** Settle one step's TIMING at its assistant/message boundary: the
+ * lifetime LLM wall, its completion ordinal, the route observation, and
+ * the recent TTFB / effective-throughput samples. A step with no message
+ * (cancelled/failed) never reaches here. Usage is NOT settled here;
+ * step/end adds it once. */
+function settleStep(
+  stats: SessionStats,
+  key: string,
+  timing: StepTiming,
+  recent: RecentPerformanceWindow,
+  routeKey: string | undefined,
+): void {
   const completed = timing.completed
   if (completed === undefined) return
   const start = timing.start
   if (start !== undefined) stats.llmMs += Math.max(0, completed - start)
+  // One completion ordinal per step; the route check runs BEFORE the
+  // samples join, so a model/provider switch starts a clean window.
+  const ordinal = recent.claimOrdinal()
+  timing.completionOrdinal = ordinal
+  recent.observeRoute(routeKey)
+  timing.routeKey = recent.routeKey
+  timing.routeEpoch = recent.routeEpoch
   const first = timing.firstDelta
-  if (first !== undefined) {
-    // TTFT: step/start → first token (the projection's ttftMs).
-    throughput.firstTokenTotal += Math.max(0, first - (start ?? completed))
-    throughput.firstTokenCount += 1
-    // Sampled throughput: the decode window enters the denominator only when
-    // the step also reported usage, and vice versa (projection sampled
-    // semantics) — a reasoning-only or usage-less step skews neither side.
-    const usage = timing.usage
-    if (usage !== undefined) replaceSampledUsage(timing, usage, throughput)
+  if (first !== undefined && start !== undefined) {
+    // TTFT: step/start → first token (the projection's ttftMs). A latency
+    // sample — never token-weighted.
+    recent.upsertTtft(key, ordinal, Math.max(0, first - start))
   }
+  const usage = timing.usage
+  if (usage !== undefined && start !== undefined) {
+    // Effective throughput: Σ output / Σ FULL LLM wall. The sample
+    // conditions (valid usage, a wall to divide by) need no multi-delta
+    // streaming — a burst-delivered tool-call step samples on its whole
+    // request wall (plan §2.2).
+    const wallMs = Math.max(0, completed - start)
+    if (usage.outputTokens > 0 && wallMs > 0) {
+      recent.upsertThroughput(key, ordinal, wallMs, usage.outputTokens)
+    }
+  }
+}
+
+/** Replace the throughput sample of an already-settled step from a late
+ * authoritative usage (assistant/message duplicate). The sample keeps its
+ * original completion ordinal — it replaces, never appends; llmMs and
+ * TTFB are never re-added; and a message belonging to a route the window
+ * has moved past must not resurrect its sample into the current window.
+ * The EPOCH is the authoritative gate: A → B → A returns to an equal
+ * route STRING while the window belongs to the second A lifecycle, so
+ * only `timing.routeEpoch === recent.routeEpoch` admits the replacement.
+ * A replacement that turns the sample INVALID (outputTokens corrected to
+ * 0) removes it: the superseded tokens must not keep feeding the recent
+ * rate. */
+function replaceRecentThroughput(
+  key: string,
+  timing: StepTiming,
+  usage: UsageLike,
+  recent: RecentPerformanceWindow,
+): void {
+  if (timing.routeKey !== undefined && recent.routeKey !== undefined && timing.routeKey !== recent.routeKey) return
+  if (timing.routeEpoch !== undefined && timing.routeEpoch !== recent.routeEpoch) return
+  if (timing.completionOrdinal === undefined) return
+  const start = timing.start
+  const completed = timing.completed
+  if (start === undefined || completed === undefined) return
+  const wallMs = Math.max(0, completed - start)
+  if (usage.outputTokens <= 0 || wallMs <= 0) {
+    recent.removeThroughput(key)
+    return
+  }
+  recent.upsertThroughput(key, timing.completionOrdinal, wallMs, usage.outputTokens)
 }
 
 /** Token totals from one usage record (cache fields counted separately). */
@@ -367,13 +567,12 @@ export class StatsFolder {
   // are stale once the timing fence advances.
   private readonly endedSteps = new Set<string>()
   private settledTurn: number | undefined
-  private readonly throughput: Throughput = { outputMsTotal: 0, decodeTokens: 0, firstTokenTotal: 0, firstTokenCount: 0 }
+  private readonly recent = new RecentPerformanceWindow()
   /** The shared per-step usage accounting (same class as the Focus fold). */
   private readonly usage = new StepUsageAccumulator()
-  /** Turns finalized by turn/end: late events of theirs are replay
-   * artifacts and are ignored (the same lifecycle policy as the Focus
-   * fold — the footer and the Focus per-turn totals never diverge). */
-  private readonly completedTurns = new Set<number>()
+  /** Highest turn finalized by turn/end; older events are replay artifacts.
+   * A monotonic fence keeps lifecycle memory bounded across long sessions. */
+  private completedTurnFence: number | undefined
   private lastTurn: number | undefined
 
   /**
@@ -396,9 +595,7 @@ export class StatsFolder {
   /** The derived stats as of the last applied event. */
   snapshot(): SessionStats {
     const derived: SessionStats = { ...this.stats }
-    if (this.throughput.firstTokenCount > 0) derived.firstTokenMsAvg = this.throughput.firstTokenTotal / this.throughput.firstTokenCount
-    const streamMs = this.throughput.outputMsTotal
-    if (streamMs > 0) derived.tokensPerSec = Math.round((this.throughput.decodeTokens * 1000) / streamMs)
+    applyDerivedPerformance(derived, this.recent)
     const totals = this.usage.sessionTotals()
     derived.inputTokens = totals.inputTokens
     derived.outputTokens = totals.outputTokens
@@ -415,9 +612,12 @@ export class StatsFolder {
   }
 
   private applyEvent(event: SessionEvent): void {
-    if (event.type !== 'turn/end' && event.type !== 'request/context'
-      && this.completedTurns.has((event.data as { turn?: unknown }).turn as number)) {
-      return
+    // Keep incremental stats on the same append-origin event stream as the
+    // transcript and Focus folds; compaction replacements are model-only.
+    if (isReplacementSurfaceEvent(event)) return
+    if (event.type !== 'turn/end' && event.type !== 'request/context') {
+      const eventTurn = (event.data as { turn?: unknown }).turn
+      if (typeof eventTurn === 'number' && this.completedTurnFence !== undefined && eventTurn <= this.completedTurnFence) return
     }
     switch (event.type) {
       case 'turn/start': {
@@ -427,7 +627,10 @@ export class StatsFolder {
         break
       }
       case 'turn/end': {
-        this.completedTurns.add(event.data.turn)
+        if (this.completedTurnFence === undefined || event.data.turn > this.completedTurnFence) this.completedTurnFence = event.data.turn
+        // Turn/end can arrive out of order in replayed logs. Advance the shared
+        // usage fence before finalizing so older open steps settle only once.
+        this.usage.onTurnStart(event.data.turn)
         // Finalize any still-open steps so the session total agrees with
         // the Focus per-turn total (review finding).
         this.usage.onTurnEnd(event.data.turn)
@@ -503,17 +706,18 @@ export class StatsFolder {
           ? this.perStep.get(key) ?? this.settledPerStep.get(key)
           : undefined
         if (timing !== undefined) {
-          // Keep timing and throughput idempotent if a malformed/replayed log
-          // carries the same authoritative message more than once. The shared
-          // usage accumulator still applies replacement semantics below.
+          // Keep timing and performance sampling idempotent if a
+          // malformed/replayed log carries the same authoritative message
+          // more than once. The shared usage accumulator still applies
+          // replacement semantics below.
           if (timing.settled !== true) {
             timing.completed = event.time
             if (event.data.usage !== undefined) timing.usage = event.data.usage
-            settleStep(this.stats, timing, this.throughput)
+            settleStep(this.stats, key, timing, this.recent, routeKeyOf(event.data.message))
             timing.settled = true
           } else if (event.data.usage !== undefined) {
             timing.usage = event.data.usage
-            replaceSampledUsage(timing, event.data.usage, this.throughput)
+            replaceRecentThroughput(key, timing, event.data.usage, this.recent)
           }
         }
         this.usage.onAssistantMessage(event.data.turn, event.data.step, event.data.usage)
@@ -540,10 +744,28 @@ function formatSeconds(ms: number): string {
   return `${trimDecimal(ms / 1000)}s`
 }
 
+/** Format a DURATION for the detail stats surface: `8.1s` under a minute,
+ * `27m54s` under an hour, `1h06m05s` beyond — the lifetime LLM wall grows
+ * into minutes and hours, where plain seconds stop being readable. */
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000)
+  if (totalSeconds < 60) return formatSeconds(ms)
+  const seconds = totalSeconds % 60
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) return `${totalMinutes}m${String(seconds).padStart(2, '0')}s`
+  const minutes = totalMinutes % 60
+  const hours = Math.floor(totalMinutes / 60)
+  return `${hours}h${String(minutes).padStart(2, '0')}m${String(seconds).padStart(2, '0')}s`
+}
+
 /**
- * Render the stats line in pi abbreviation vocabulary:
- * `↑34k ↓8.1k R520k CH93.9% | LLM 138.8s · TTFB 2.6s · 659 tok/s`
+ * Render the DETAILED stats line (the /status Stats row and the
+ * statusLine payload) in pi abbreviation vocabulary:
+ * `↑34k ↓8.1k R520k CH93.9% | LLM 27m54s · TTFB 2.6s · 51 tok/s`
  * Cost (`$0.164`) is omitted: dsh's TokenUsage carries no price data.
+ * The performance tail keeps BOTH windows, each labeled: the LIFETIME
+ * `LLM ...` wall (this is the detail surface that still shows it — the
+ * footer's stats row dropped it) beside the RECENT TTFB and throughput.
  * Context pressure lives in the footer's first line (progress bar), so it
  * is not repeated here. Turn/step counters live there too.
  * @param stats - the folded statistics.
@@ -558,7 +780,7 @@ export function formatStats(stats: SessionStats): string {
     stats.cacheReadTokens > 0 || stats.cacheWriteTokens > 0 ? `CH${stats.cacheHitPct.toFixed(1)}%` : '',
   ].filter(part => part !== '')
   const ownParts = [
-    `LLM ${formatSeconds(stats.llmMs)}`,
+    `LLM ${formatDuration(stats.llmMs)}`,
     `TTFB ${formatSeconds(stats.firstTokenMsAvg)}`,
     `${stats.tokensPerSec} tok/s`,
   ]

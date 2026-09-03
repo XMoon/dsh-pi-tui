@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { FooterComposer } from '../src/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
@@ -16,6 +16,20 @@ import { StatusStore } from '../src/status/store.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 const composer = new FooterComposer(createBuiltinFooterRegistry())
 const CONTEXT = { taskBrowserAvailable: true, extensionFooterText: '[EXT]' }
@@ -48,7 +62,7 @@ function enterViewer(snap: StatusSnapshot, mode: 'one-shot' | 'continuable', act
   mutable.workspace = { cwd: '/child/ws', project: 'ws' }
   mutable.usage = {
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    performance: { llmMs: 12300, firstTokenMs: 0, tokensPerSec: 0 },
+    performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
     turns: 3,
     steps: 5,
   }
@@ -63,7 +77,7 @@ test('the viewer footer composes the SAME preset with the child data (one-shot)'
   assert.ok(text.includes('inactive'), `activity missing:\n${text}`)
   assert.ok(text.includes('ws'), `child cwd missing:\n${text}`)
   assert.ok(text.includes('t3/s5'), `child counters missing:\n${text}`)
-  assert.ok(text.includes('LLM 12.3s'), `child stats line missing:\n${text}`)
+  assert.ok(text.includes('TTFB 12.3s'), `child stats line missing:\n${text}`)
   // The parent's main-only facts never leak in.
   assert.ok(!text.includes('parent'), `the parent model must not leak:\n${text}`)
   assert.ok(!text.includes('[yolo]'), `the parent permission must not leak:\n${text}`)
@@ -86,7 +100,7 @@ test('the compact preset drops the child stats row while viewing', () => {
   enterViewer(snap, 'one-shot', 'inactive')
   const text = composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
   assert.ok(text.includes('[subagent · one-shot]'), `viewer badge missing:\n${text}`)
-  assert.ok(!text.includes('LLM 12.3s'), `compact must drop the stats line:\n${text}`)
+  assert.ok(!text.includes('TTFB 12.3s'), `compact must drop the stats line:\n${text}`)
 })
 
 test('returning to the main subject restores the parent footer', () => {
@@ -111,6 +125,7 @@ test('the FIRST frame after entering the viewer already shows the child subject'
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setStatus({ model: 'p/m', cwd: '/parent-ws', turns: 2, steps: 3 })
   await vt.waitForRender()
   const before = vt.getViewport().join('\n')
@@ -157,6 +172,7 @@ test('the viewer transition is ATOMIC in the StatusStore: no observer ever reads
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { statusStore: store })
   app.start()
+  startedApps.add(app)
   app.setStatus({ model: 'p/m', cwd: '/parent-ws', turns: 2, steps: 3 })
   const parentCwd = '/parent-ws'
   const childCwd = '/child-ws'
@@ -195,6 +211,7 @@ test('a legacy parent setStatus while viewing never clobbers the child workspace
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   // The runner's store update first: the child's workspace lands in the
   // store (the app's statusStore is internal, so setViewerFooter plays
   // the same role — it projects the child facts).
@@ -230,6 +247,7 @@ test('absent child usage never leaks the PARENT token figures into the child sta
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   // Paint the parent's STRUCTURED usage facts first (real token figures) —
   // these are what the stats-line item composes from.
   app.setStatus({ model: 'p/m', cwd: '/parent-ws', turns: 2, steps: 3, statsLine: 'x', usage: {

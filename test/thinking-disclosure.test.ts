@@ -14,8 +14,8 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { afterEach, test } from 'node:test'
+import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
 import { visibleWidth } from '@xmoon76/pi-tui'
@@ -30,10 +30,25 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function startApp(width = 100, height = 30): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(width, height)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -55,7 +70,7 @@ function runningTurn(seqBase: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'locating the transcript path…' } }, T0 + 2, seqBase + 2),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/transcript.ts' }) }, T0 + 3, seqBase + 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/transcript.ts' }) }, T0 + 3, seqBase + 3),
   ]
 }
 
@@ -92,13 +107,13 @@ function noReasoningTurn(seqBase: number): SessionEvent[] {
       content: [{ type: 'text', text: 'just run it' }],
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 2, seqBase + 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 2, seqBase + 2),
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 3, seqBase + 3),
     eventAt('assistant/message', {
@@ -505,6 +520,7 @@ function setupSettings() {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
   ctx.provide('commands', {
     register: (def: { name: string; handler?: unknown }): (() => void) => {
@@ -523,13 +539,18 @@ function setupSettings() {
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
     tuiSettings: settings.value,
     applyFooterSettings: () => {},
     agents: {} as never,
     sessionReader: {
       list: async () => [],
       search: async () => [],
-      titles: async () => new Map(),
+      projectionBatch: async () => new Map(),
       measureContext: () => undefined,
       readExportData: async () => ({ kind: 'none' as const }),
     },
@@ -573,6 +594,8 @@ function setupSettings() {
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {},
@@ -704,6 +727,7 @@ test('P1: an override on a Thinking card OUTSIDE the visible window is still cle
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setFullscreen(true)
   await vt.waitForRender()
   const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
@@ -761,6 +785,7 @@ test('P2a: a wide → narrow resize re-derives the compact Thinking rows (no sta
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview that must re-truncate' }])
   await vt.waitForRender()
   let lines = vt.getViewport()
@@ -791,6 +816,7 @@ test('P2b: a narrow → wide resize restores the untruncated preview', async () 
   const vt = new VirtualTerminal(8, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview line' }])
   await vt.waitForRender()
   let lines = vt.getViewport()
@@ -821,6 +847,7 @@ test('P2c: fullscreen resize keeps the compact rows stable and the click map ali
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setFullscreen(true)
   app.setTranscript([
     { kind: 'thinking', turn: 0, text: 'one\ntwo\nthree' },
@@ -893,6 +920,7 @@ test('P2: the compact Thinking card never wraps on a narrow terminal', async () 
   const vt = new VirtualTerminal(8, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a very long reasoning line that would wrap' }])
   await vt.waitForRender()
   const lines = vt.getViewport()
@@ -916,6 +944,7 @@ test('P2e: the compact card survives the 100 → 8 → 100 resize matrix inside 
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'a fairly long reasoning preview line that must survive both resizes' }])
   await vt.waitForRender()
   const rowsOf = (): string[] => {
@@ -959,6 +988,7 @@ test('L3: an Alt+T expanded transition rebuilds the plugin-rendered component to
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
   app.start()
+  startedApps.add(app)
   app.setTranscript([{ kind: 'thinking', turn: 0, text: 'one\ntwo', running: true }])
   await vt.waitForRender()
   assert.ok(calls.length >= 1, 'the plugin renderer must run once')

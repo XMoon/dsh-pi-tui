@@ -1,84 +1,95 @@
 /**
- * TaskBrowserPanel — the visual layer over the task-browser row model
- * (tasks-browser.ts). Rendered as an overlay inside a Frame (the ↓ / Ctrl+J
- * trigger with an empty editor, and /tasks), it replaces the generic
- * SelectList with a dsh-web JobListAction-style list: status dots, aligned
- * kind · label / status · elapsed columns, group headers, live 1s elapsed
- * ticking, and type-to-filter search.
+ * Task Center presentation component.
  *
- * The row MODEL stays in tasks-browser.ts (buildTaskRows / taskRowLabel /
- * describeTaskRow / rowGroup) — this component only presents it.
+ * TaskBrowserPanel owns only presentation state (scope, search, disclosure,
+ * selection and confirmation). Runtime truth is supplied as row-shaped input
+ * and is never reordered or mutated here. Quick Tasks and the full Task Center
+ * use the same component with different layout/default options.
+ *
  * @module @xmoon76/dsh-pi-tui/task-panel
  */
 
-import { Input, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { componentKeymap } from './keybindings/component-keymap.ts'
 import { color, taskStatusColor } from './theme.ts'
 import { SelectedMarquee } from './marquee.ts'
+import {
+  isTaskItemActive,
+  isTaskItemFailure,
+  projectTaskItems,
+  type TaskPanelItem,
+  type TaskScope,
+} from './task-presentation.ts'
 
-/** One row of the task browser (the app layer's PickerItem equivalent). */
-export interface TaskPanelItem {
-  /** Stable picker value (agent:… / job:…). */
-  value: string
-  /** Primary label (`bash · pnpm build` / `subagent · research`). */
-  label: string
-  /** An always-visible TAIL appended after the label (`continuable` /
-   * `one-shot`): truncation applies to the label only, so a narrow screen
-   * or a long label can never silently cut the mode off (the viewer's
-   * interactivity must be readable before Enter). */
-  suffix?: string
-  /** Status word (running / completed / …). */
-  status: string
-  /** Optional detail line (job detail / has-children note). */
-  detail?: string
-  /** Optional start timestamp (ms) — the panel derives a live elapsed. */
-  startedAt?: number
-  /** Group header label (subagents / jobs), rendered as a dim divider. */
-  group?: string
-  /** The row's type for the Tab filter: `subagent` or the job kind
-   * (bash / pwsh / …). Absent rows never match a type filter and only
-   * appear under All. */
-  type?: string
-  /** Whether the row supports the `i` interrupt action (a CONTINUABLE
-   * subagent only — `ctx.subagents.interrupt` on a one-shot id is an
-   * accepted no-op, so a one-shot row must never advertise or fire it).
-   * Absent = not interruptible. */
-  interruptible?: boolean
-  /**
-   * The fixed TREE-CONNECTOR region of a subagent row (plan §6.7): the
-   * indentation + branch glyph derived from the descendant `depth`. This
-   * region is layout-FIXED — it never truncates, never wraps, and never
-   * scrolls with the selected label (the M4 marquee moves only the label
-   * text). Absent = no connector (job rows, flat rows).
-   */
-  treePrefix?: string
+export type { TaskPanelItem, TaskScope } from './task-presentation.ts'
+
+/** The state carried when Quick Tasks opens the full Task Center. */
+export interface TaskBrowserViewState {
+  readonly mode: 'quick' | 'full'
+  readonly openedFrom: 'quick' | 'command'
+  readonly scope: TaskScope
+  readonly typeFilter: string | null
+  readonly searchMode: boolean
+  readonly searchQuery: string
+  readonly selectedId: string | null
+  readonly expandedIds: ReadonlySet<string>
+  readonly collapsedIds: ReadonlySet<string>
 }
 
 /** Options for {@link TaskBrowserPanel}. */
 export interface TaskPanelOptions {
-  /** Header line (title + live counts). */
+  /** Header title. The panel adds scope/type/count chips in explicit mode. */
   header?: string
   /** Rendered when the (filtered) list is empty. */
   noMatchText?: string
-  /** Show a search input; typing filters rows by value/label/status/detail. */
+  /** Whether the `/` search action is available. */
   enableSearch?: boolean
-  /** Pre-fill the search input. */
+  /** Pre-fill the search input. A non-empty value enters search mode. */
   initialQuery?: string
-  /** Row-level action: `i` on a selected row while the search box is
-   * closed (a subagent interrupt; `i` stays a search letter when the box
-   * is open, same rule as the `k`/`j` navigation aliases). */
+  /** Preserve whether the search editor was active across Quick/Full. */
+  initialSearchMode?: boolean
+  /**
+   * Legacy row-level action: `i` on a selected row while search is closed
+   * (mode-less direct callers only). The signature is deliberately UNCHANGED
+   * so a strictly-typed old embedder keeps compiling. The production Task
+   * Center never passes this — it uses {@link onStop}.
+   */
   onAction?: (value: string, action: 'interrupt') => void
-  /** Test hook: the selected-row marquee's clock (a fake clock in tests
-   * so the label's scroll motion is deterministic; production defaults to
-   * Date.now). */
+  /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
+  onStop?: (value: string) => void
+  /**
+   * Called ONCE per attention row the first time it enters the open
+   * viewport (scroll window), with the fresh ids. The runner uses it to
+   * acknowledge failures the user has actually seen — including rows
+   * scrolled into view AFTER the panel opened (PR review P1/P2).
+   */
+  onViewportExpose?: (ids: readonly string[]) => void
+  /** Re-list the runtime catalog. */
+  onRefresh?: () => void
+  /** Quick Tasks → full Task Center. */
+  onViewFull?: (state: TaskBrowserViewState) => void
+  /** Production mode enables explicit navigation/search behavior. */
+  mode?: 'quick' | 'full'
+  openedFrom?: 'quick' | 'command'
+  initialScope?: TaskScope
+  initialTypeFilter?: string | null
+  initialExpandedIds?: readonly string[]
+  initialCollapsedIds?: readonly string[]
+  initialSelectedId?: string
+  /** Initial preferred row (normally the first running row). */
+  initialPreferredValue?: string
+  /** Show a loading state until the first refresh commits. */
+  loading?: boolean
+  /** Cached rows are still usable, but the latest refresh failed. */
+  refreshError?: string
+  /** Use the long group names in the Task Center; legacy callers keep theirs. */
+  groupLabels?: boolean
+  /** Test hook: the selected-row marquee's clock. */
   marqueeNow?: () => number
 }
 
-/**
- * Render the `status · elapsed` tail: elapsed is humanized as `2s` / `1m5s` /
- * `1h2m` (dsh-web duration parity), omitted when absent.
- */
+/** Render elapsed seconds as `2s`, `1m5s`, or `1h2m`. */
 export function formatElapsed(elapsed: number | undefined): string {
   if (elapsed === undefined || !Number.isFinite(elapsed)) return ''
   const total = Math.max(0, Math.floor(elapsed))
@@ -92,44 +103,81 @@ export function formatElapsed(elapsed: number | undefined): string {
 
 const POINTER = '→'
 const DOT = '●'
+const PSEUDO_VIEW_ALL = 'task:view-all'
+
+function displayGroup(group: string | undefined, longLabels: boolean): string | undefined {
+  if (!longLabels || group === undefined) return group
+  if (group === 'subagents') return 'Subagents / transcripts'
+  if (group === 'jobs') return 'Jobs / executions'
+  return group
+}
+
+function stateGlyph(item: TaskPanelItem): string {
+  if (item.status === 'stopping') return '◐'
+  if (isTaskItemFailure(item.status)) return '×'
+  if (item.status === 'completed') return '○'
+  return isTaskItemActive(item) ? DOT : '○'
+}
 
 /**
- * The task browser surface: a searchable, live-updating list of task rows
- * with status dots and aligned columns. Owns its own scroll window so the
- * list can grow beyond the overlay height.
+ * The shared Quick/Full Task Center list.
+ *
+ * When `mode` is omitted the component keeps its historical direct-call
+ * behavior (search-on-open and `i` callback) for embedders that have not yet
+ * migrated. The application always supplies `mode`, so user-facing behavior
+ * uses explicit search mode and confirmed `S` stop actions.
  */
 export class TaskBrowserPanel implements Component, Focusable {
   private items: TaskPanelItem[] = []
-  /** The filtered view (search query + type filter applied). */
   private filtered: TaskPanelItem[] = []
   private selected = 0
-  /** Scroll offset into the filtered list. */
   private scroll = 0
-  /** The active type filter (null = All). */
-  private activeType: string | null = null
-  /** Distinct row types in first-appearance order (the Tab cycle). */
+  private activeType: string | null
   private typeOrder: string[] = []
-  /** Whether the user moved the selection since the panel opened (nav
-   * keys or search typing). Until then, an async setItems enrichment may
-   * re-focus the list head — the plan's "preferred initial selection". */
+  private scope: TaskScope
+  private readonly mode: 'quick' | 'full'
+  private readonly openedFrom: 'quick' | 'command'
+  private readonly explicitMode: boolean
+  private searchMode: boolean
   private selectionTouched = false
-  private readonly maxVisible: number
+  private readonly expandedIds: Set<string>
+  private readonly collapsedIds: Set<string>
+  /** Caller-configured item cap; the live terminal budget may lower it. */
+  private readonly configuredMaxVisible: number
+  private maxVisible: number
+  /** Total inner rows granted by the surrounding Frame. */
+  private maxRows = Number.POSITIVE_INFINITY
+  /** The ACTUAL viewport the last render painted (after the fit loop
+   * shrunk the budget estimate): the ack scope for viewportItems()/
+   * onViewportExpose and the PageUp/PageDown step — never the budget
+   * baseline, which detail rows / the sidebar can undershoot. */
+  private lastRenderedStart = 0
+  private lastRenderedCount = 0
+  /** Whether render() recorded a painted viewport yet. Until the first
+   * paint no row was ever seen, so the pre-paint default (0 rows) must
+   * not over-claim; setMaxRows still bounds it to the live grant. */
+  private hasRenderedViewport = false
   private readonly options: TaskPanelOptions
   private readonly searchInput = new Input()
   private searchEnabled: boolean
   private readonly onSelect: (value: string) => void
   private readonly onCancel: () => void
   private readonly onAction: ((value: string, action: 'interrupt') => void) | undefined
-  /** Live tick: bumped every second while a running row is visible. */
+  private readonly onStop: ((value: string) => void) | undefined
+  private readonly onViewportExpose: ((ids: readonly string[]) => void) | undefined
+  private readonly exposedAttention = new Set<string>()
+  private readonly onRefresh: (() => void) | undefined
+  private readonly onViewFull: ((state: TaskBrowserViewState) => void) | undefined
   private now = Date.now()
   private tickTimer: NodeJS.Timeout | undefined
-  /** Latched by dispose(): an in-flight tick callback must not render. */
   private disposed = false
   private readonly requestRender: () => void
-  /** The selected-row label marquee (plan §7): ONE per panel, armed only
-   * while a selected overflowing row is visible, disposed with the panel. */
   private readonly marquee: SelectedMarquee
   private _focused = false
+  private pendingStopValue: string | undefined
+  private loading: boolean
+  private refreshError: string | undefined
+  private preferredValue: string | undefined
 
   constructor(
     items: readonly TaskPanelItem[],
@@ -140,121 +188,521 @@ export class TaskBrowserPanel implements Component, Focusable {
     requestRender: () => void,
   ) {
     this.items = [...items]
-    this.filtered = [...items]
-    this.rebuildTypeCycle()
-    this.maxVisible = Math.max(1, maxVisible)
+    this.configuredMaxVisible = Math.max(1, Math.floor(maxVisible))
+    this.maxVisible = this.configuredMaxVisible
+    // Pre-render default: the configured window (direct embedders have no
+    // frame to tighten it). A framed mount's setMaxRows bounds it to the
+    // live grant before the first paint; the first render overwrites it
+    // with the ACTUAL painted window.
+    this.lastRenderedCount = this.maxVisible
     this.options = options
     this.onSelect = onSelect
     this.onCancel = onCancel
     this.onAction = options.onAction
+    this.onStop = options.onStop
+    this.onViewportExpose = options.onViewportExpose
+    this.onRefresh = options.onRefresh
+    this.onViewFull = options.onViewFull
     this.requestRender = requestRender
+    this.mode = options.mode ?? 'full'
+    this.openedFrom = options.openedFrom ?? 'command'
+    this.explicitMode = options.mode !== undefined
+    this.searchEnabled = options.enableSearch ?? false
+    this.scope = options.initialScope ?? (this.explicitMode && this.mode === 'quick' ? 'active' : this.explicitMode ? 'all' : 'all')
+    this.activeType = options.initialTypeFilter ?? null
+    this.expandedIds = new Set(options.initialExpandedIds ?? [])
+    this.collapsedIds = new Set(options.initialCollapsedIds ?? [])
+    this.loading = options.loading ?? false
+    this.refreshError = options.refreshError
+    this.preferredValue = options.initialPreferredValue ?? options.initialSelectedId
+    this.searchMode = options.initialSearchMode ?? (!this.explicitMode || (options.initialQuery ?? '') !== '')
     this.marquee = new SelectedMarquee({
       requestRender: () => this.requestRender(),
       now: options.marqueeNow,
     })
-    this.searchEnabled = options.enableSearch ?? false
-    this.searchInput.onEscape = () => this.onCancel()
-    this.searchInput.onSubmit = (value) => {
-      const item = this.filtered[this.selected]
-      if (item !== undefined) this.onSelect(item.value)
+    this.searchInput.onEscape = () => {
+      if (this.explicitMode && this.searchMode) {
+        this.exitSearchMode()
+      } else {
+        this.onCancel()
+      }
     }
+    this.searchInput.onSubmit = () => this.openSelected()
     const initial = options.initialQuery ?? ''
-    if (initial !== '') {
-      this.searchInput.setValue(initial)
-      this.applyFilter(initial)
-    }
+    if (initial !== '') this.searchInput.setValue(initial)
+    this.rebuildTypeCycle()
+    // A restored type filter that no row satisfies produces a dead view;
+    // validate it against the initial row set exactly like setItems does.
+    if (this.activeType !== null && !this.typeOrder.includes(this.activeType)) this.activeType = null
+    this.reproject(false)
+    this.selectPreferred()
     this.startTick()
   }
 
-  /** Replace the row list; the active search query + type filter re-apply.
-   * Selection policy (plan §6.6 — the TREE must never re-sort for the
-   * cursor):
-   * - the USER moved the selection → the original value survives when it
-   *   is still present (never stolen by an enrichment);
-   * - an UNTOUCHED selection honors the caller's `preferredValue` (the
-   *   first running subagent, else the first active job — computed by the
-   *   runner from the row facts) — the /tasks async-merge race: the
-   *   browser opens on the jobs half, the subagent catalog lands later,
-   *   and the cursor must land on the preferred row without ever moving
-   *   the row itself (tree order is immutable);
-   * - neither exists → the fresh list's head.
-   */
+  /** Update the live inner row budget without resetting selection, filters
+   * or disclosure state (the responsive frame calls this on every resize;
+   * the recompute uses the CURRENT chrome: header + search + hint tail +
+   * indicator + optional refresh-error line). */
+  setMaxRows(rows: number): void {
+    this.maxRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : Number.POSITIVE_INFINITY
+    this.recomputeVisibleBudget()
+    this.ensureVisible()
+    // Before the first paint the recorded viewport is the live grant (the
+    // configured cap may be larger than what the frame allows); after a
+    // render the PAINTED window is authoritative and untouched here.
+    if (!this.hasRenderedViewport) this.lastRenderedCount = this.maxVisible
+  }
+
+  /** Derive the item window from the current chrome and row budget. */
+  private recomputeVisibleBudget(): void {
+    const searchOn = this.explicitMode ? this.searchMode : this.searchEnabled
+    const prefix = (this.options.header === undefined ? 0 : 2) + (searchOn ? 2 : 0)
+    const trailing = 2 // blank separator + navigation hint
+    const refreshLine = this.refreshError !== undefined ? 1 : 0
+    const group = this.filtered.some(item => item.group !== undefined) ? 1 : 0
+    const budget = this.maxRows === Number.POSITIVE_INFINITY
+      ? this.configuredMaxVisible
+      : this.maxRows - prefix - trailing - refreshLine - group
+    this.maxVisible = Math.max(1, Math.min(this.configuredMaxVisible, budget))
+  }
+
+  /** Replace rows while preserving the selected identity where possible. */
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void {
     const previousValue = this.filtered[this.selected]?.value
     this.items = [...items]
-    this.rebuildTypeCycle()
-    if (this.activeType !== null && !this.typeOrder.includes(this.activeType)) {
-      // The filtered type vanished from the row set: fall back to All
-      // instead of showing a permanently empty list.
-      this.activeType = null
-    }
-    this.applyFilter(this.searchInput.getValue() ?? '')
-    if (this.selectionTouched) {
-      if (previousValue !== undefined) {
-        const index = this.filtered.findIndex(item => item.value === previousValue)
-        if (index !== -1) this.selected = index
+    this.loading = false
+    // Forget exposures whose row left the attention set: a STABLE id can
+    // exit failure and later re-enter it, and the runtime treats that as a
+    // NEW attention event (it clears the acknowledged set when the failure
+    // id disappears). The panel must mirror that — otherwise the second
+    // failure of the same id would never re-expose (P2 edge case).
+    if (this.exposedAttention.size > 0) {
+      const currentAttention = new Set(this.items
+        .filter(item => item.attention === true)
+        .map(item => item.value))
+      for (const id of [...this.exposedAttention]) {
+        if (!currentAttention.has(id)) this.exposedAttention.delete(id)
       }
-    } else if (preferredValue !== undefined) {
-      const index = this.filtered.findIndex(item => item.value === preferredValue)
+    }
+    if (preferredValue !== undefined) this.preferredValue = preferredValue
+    this.rebuildTypeCycle()
+    if (this.activeType !== null && !this.typeOrder.includes(this.activeType)) this.activeType = null
+    this.reproject(false)
+    if (this.pendingStopValue !== undefined && !this.canStop(this.items.find(item => item.value === this.pendingStopValue))) {
+      this.pendingStopValue = undefined
+    }
+    if (this.selectionTouched && previousValue !== undefined) {
+      const index = this.filtered.findIndex(item => item.value === previousValue)
       if (index !== -1) {
         this.selected = index
         this.ensureVisible()
+        return
       }
+    }
+    if (!this.selectionTouched) this.selectPreferred()
+  }
+
+  /** Set the async refresh state without discarding cached rows. */
+  setRefreshState(state: 'loading' | 'ready' | 'stale', error?: string): void {
+    this.loading = state === 'loading'
+    this.refreshError = state === 'stale' ? error ?? 'Refresh failed' : undefined
+    if (state === 'ready') this.loading = false
+    // A stale banner row changes the chrome: re-derive the budget now, so
+    // paging/ack do not keep the pre-banner window until the next projection.
+    this.recomputeVisibleBudget()
+    this.requestRender()
+  }
+
+  /** Current rows after scope/type/search/disclosure projection. */
+  visibleItems(): readonly TaskPanelItem[] {
+    return this.filtered
+  }
+
+  /** ONLY the rows the CURRENT painted viewport actually rendered (the
+   * ack scope: a failure the user never physically saw was never "seen").
+   * Reflects the render-time fit (detail rows / the sidebar can shrink
+   * the painted window below the budget baseline), never `maxVisible`. */
+  viewportItems(): readonly TaskPanelItem[] {
+    return this.filtered.slice(this.lastRenderedStart, this.lastRenderedStart + this.lastRenderedCount)
+  }
+
+  /**
+   * Report attention rows that entered the open viewport for the first
+   * time (deduped per row identity). Runs on every render — scrolling,
+   * paging, running-jump and row replacements all re-render — so a
+   * failure "scrolled into view" after the panel opened is acknowledged
+   * exactly once (the runtime's acknowledge is idempotent anyway).
+   */
+  private exposeViewport(): void {
+    if (this.onViewportExpose === undefined) return
+    const fresh: string[] = []
+    for (const item of this.viewportItems()) {
+      if (item.attention !== true || this.exposedAttention.has(item.value)) continue
+      this.exposedAttention.add(item.value)
+      fresh.push(item.value)
+    }
+    if (fresh.length > 0) this.onViewportExpose(fresh)
+  }
+
+  /** Current view state used by Quick → Full. */
+  getViewState(): TaskBrowserViewState {
+    return {
+      mode: this.mode,
+      openedFrom: this.openedFrom,
+      scope: this.scope,
+      typeFilter: this.activeType,
+      searchMode: this.searchMode,
+      searchQuery: this.getFilter(),
+      selectedId: this.filtered[this.selected]?.value ?? null,
+      expandedIds: new Set(this.expandedIds),
+      collapsedIds: new Set(this.collapsedIds),
     }
   }
 
-  /** Rebuild the Tab type cycle from the current rows (first-appearance
-   * order, never derived from label strings). */
+  getFilter(): string {
+    return this.searchInput.getValue() ?? ''
+  }
+
+  get filteredCount(): number {
+    return this.filtered.length
+  }
+
   private rebuildTypeCycle(): void {
     const seen: string[] = []
     for (const item of this.items) {
+      if (item.kind === 'view-full') continue
       if (item.type !== undefined && !seen.includes(item.type)) seen.push(item.type)
     }
     this.typeOrder = seen
   }
 
-  /** Tab: cycle the type filter All → subagent → bash → pwsh → … → All. */
-  private cycleType(): void {
-    const order = this.typeOrder
-    if (order.length === 0) return
-    const index = this.activeType === null ? -1 : order.indexOf(this.activeType)
-    if (index === -1) {
-      // All → the first type.
-      this.activeType = order[0]!
-    } else if (index + 1 >= order.length) {
-      // Last type → back to All.
-      this.activeType = null
-    } else {
-      this.activeType = order[index + 1]!
+  private reproject(resetSelection: boolean): void {
+    const query = this.getFilter()
+    const projection = projectTaskItems(this.items, {
+      scope: this.scope,
+      typeFilter: this.activeType,
+      query,
+      expandedIds: this.expandedIds,
+      collapsedIds: this.collapsedIds,
+      autoExpandRunning: true,
+      includeAttentionInActive: this.mode === 'quick' && !this.items.some(isTaskItemActive),
+    })
+    this.filtered = [...projection.rows]
+    // Quick's pseudo-row is deliberately outside the business projection. It
+    // is hidden while refining a search/type filter so it cannot be mistaken
+    // for a task match.
+    if (this.mode === 'quick' && query === '' && this.activeType === null) {
+      // "Open Task Center", not "View all N tasks": the transition keeps
+      // the current scope (it is a context-preserving promotion, never a
+      // scope reset), and agents/jobs are counted SEPARATELY because a
+      // background one-shot legitimately occupies one row in each registry
+      // — a summed "task" count would double-count it (PR review).
+      const real = this.items.filter(item => item.kind !== 'view-full')
+      const agents = real.filter(item => item.source === 'subagent').length
+      const jobs = real.filter(item => item.source === 'job').length
+      const failures = real.filter(item => item.attention === true || isTaskItemFailure(item.status)).length
+      const stats = [`${agents} agent${agents === 1 ? '' : 's'}`, `${jobs} job${jobs === 1 ? '' : 's'}`]
+      if (failures > 0) stats.push(`${failures} failed`)
+      this.filtered.push({
+        value: PSEUDO_VIEW_ALL,
+        kind: 'view-full',
+        label: `Open Task Center · ${stats.join(' · ')}…`,
+        status: 'completed',
+        canOpen: true,
+      })
     }
-    // Cycling the type filter is a USER interaction with the list: a later
-    // async enrichment must not re-focus the head over the user's scope
-    // (round-1 review finding).
+    // The projection changed the row set: re-derive the live item budget
+    // (the group/chrome estimate follows the current view).
+    this.recomputeVisibleBudget()
+    if (resetSelection) {
+      this.selected = 0
+      this.scroll = 0
+      this.marquee.reset()
+    } else {
+      this.selected = Math.min(this.selected, Math.max(0, this.filtered.length - 1))
+      this.ensureVisible()
+    }
+  }
+
+  private selectPreferred(): void {
+    const target = this.preferredValue
+    if (target === undefined) return
+    const index = this.filtered.findIndex(item => item.value === target)
+    if (index === -1) return
+    this.selected = index
+    this.ensureVisible()
+  }
+
+  private cycleType(): void {
+    if (this.typeOrder.length === 0) return
+    const index = this.activeType === null ? -1 : this.typeOrder.indexOf(this.activeType)
+    this.activeType = index === -1 || index + 1 >= this.typeOrder.length ? (index === -1 ? this.typeOrder[0]! : null) : this.typeOrder[index + 1]!
     this.selectionTouched = true
-    this.applyFilter(this.searchInput.getValue() ?? '')
+    this.reproject(true)
   }
 
-  /** The current search query. */
-  getFilter(): string {
-    return this.searchInput.getValue() ?? ''
+  private toggleScope(): void {
+    this.scope = this.scope === 'active' ? 'all' : 'active'
+    this.selectionTouched = true
+    this.reproject(true)
   }
 
-  /** The number of rows currently visible (after filtering). */
-  get filteredCount(): number {
-    return this.filtered.length
+  private enterSearchMode(): void {
+    if (!this.searchEnabled || this.searchMode) return
+    this.searchMode = true
+    this.searchInput.focused = this._focused
+    this.selectionTouched = true
+    // The search chrome (2 rows) enters the budget estimate immediately.
+    this.recomputeVisibleBudget()
+    this.requestRender()
+  }
+
+  private exitSearchMode(): void {
+    if (!this.searchMode) return
+    this.searchMode = false
+    this.searchInput.focused = false
+    // The search chrome (2 rows) leaves the budget estimate immediately.
+    this.recomputeVisibleBudget()
+    this.requestRender()
+  }
+
+  private move(delta: number): void {
+    if (this.filtered.length === 0) return
+    this.pendingStopValue = undefined
+    this.selectionTouched = true
+    this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + delta))
+    this.ensureVisible()
+  }
+
+  private page(direction: -1 | 1): void {
+    if (this.filtered.length === 0) return
+    this.pendingStopValue = undefined
+    this.selectionTouched = true
+    // Page by the ACTUAL last-rendered window (the fit loop may have
+    // shrunk it below the budget baseline), so a page never skips rows
+    // the user just saw.
+    const pageSize = Math.max(1, this.lastRenderedCount)
+    this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + direction * pageSize))
+    this.ensureVisible()
+  }
+
+  private selectedItem(): TaskPanelItem | undefined {
+    return this.filtered[this.selected]
+  }
+
+  private canStop(item: TaskPanelItem | undefined): boolean {
+    if (item === undefined || item.kind === 'view-full') return false
+    return item.canStop ?? item.interruptible ?? false
+  }
+
+  private openSelected(): void {
+    const item = this.selectedItem()
+    if (item === undefined) return
+    if (item.kind === 'view-full') {
+      this.onViewFull?.(this.getViewState())
+      return
+    }
+    this.onSelect(item.value)
+  }
+
+  private requestStop(): void {
+    const item = this.selectedItem()
+    if (!this.canStop(item)) return
+    this.pendingStopValue = item!.value
+    this.requestRender()
+  }
+
+  private confirmStop(): void {
+    const value = this.pendingStopValue
+    this.pendingStopValue = undefined
+    if (value === undefined) return
+    const item = this.items.find(candidate => candidate.value === value)
+    if (!this.canStop(item)) return
+    this.onStop?.(value)
+  }
+
+  private treeExpand(): void {
+    const item = this.selectedItem()
+    if (item === undefined || item.kind === 'view-full' || !item.hasChildren) return
+    if (!item.expanded) {
+      this.collapsedIds.delete(item.value)
+      this.expandedIds.add(item.value)
+      this.reproject(false)
+      return
+    }
+    const child = this.filtered.find(candidate => candidate.parentId === item.value)
+    if (child !== undefined) {
+      this.selectionTouched = true
+      this.selected = this.filtered.indexOf(child)
+      this.ensureVisible()
+    }
+  }
+
+  private treeCollapse(): void {
+    const item = this.selectedItem()
+    if (item === undefined || item.kind === 'view-full') return
+    if (item.expanded) {
+      this.expandedIds.delete(item.value)
+      this.collapsedIds.add(item.value)
+      this.reproject(false)
+      return
+    }
+    const parentId = item.parentId
+    if (parentId === undefined) return
+    const parentIndex = this.filtered.findIndex(candidate => candidate.value === parentId)
+    if (parentIndex !== -1) {
+      this.pendingStopValue = undefined
+      this.selectionTouched = true
+      this.selected = parentIndex
+      this.ensureVisible()
+    }
+  }
+
+  private runningMove(direction: 1 | -1): void {
+    const running = this.filtered.filter(item => item.kind !== 'view-full' && isTaskItemActive(item))
+    if (running.length === 0) return
+    const current = this.selectedItem()
+    const currentIndex = current === undefined ? -1 : running.findIndex(item => item.value === current.value)
+    const next = currentIndex === -1
+      ? (direction > 0 ? running[0]! : running[running.length - 1]!)
+      : running[(currentIndex + direction + running.length) % running.length]!
+    const index = this.filtered.findIndex(item => item.value === next.value)
+    if (index === -1) return
+    this.pendingStopValue = undefined
+    this.selectionTouched = true
+    this.selected = index
+    this.ensureVisible()
+  }
+
+  /** Input ownership is forwarded by FocusForwardingFrame. */
+  handleInput(data: string): void {
+    if (this.pendingStopValue !== undefined) {
+      if (matchesKey(data, 'escape')) {
+        this.pendingStopValue = undefined
+        this.requestRender()
+        return
+      }
+      if (matchesKey(data, 'y') || data === 'Y') {
+        this.confirmStop()
+        return
+      }
+      // A navigation gesture changes selection and therefore invalidates the
+      // destructive confirmation. Other keys are ignored, never dispatched.
+      if (componentKeymap.matches(data, 'tasks.cursorUp')) this.move(-1)
+      else if (componentKeymap.matches(data, 'tasks.cursorDown')) this.move(1)
+      else if (componentKeymap.matches(data, 'tasks.pageUp')) this.page(-1)
+      else if (componentKeymap.matches(data, 'tasks.pageDown')) this.page(1)
+      return
+    }
+
+    if (this.explicitMode && this.searchMode) {
+      if (componentKeymap.matches(data, 'tasks.search.exit')) {
+        this.exitSearchMode()
+        return
+      }
+      if (componentKeymap.matches(data, 'tasks.cursorUp')) { this.move(-1); return }
+      if (componentKeymap.matches(data, 'tasks.cursorDown')) { this.move(1); return }
+      if (componentKeymap.matches(data, 'tasks.pageUp')) { this.page(-1); return }
+      if (componentKeymap.matches(data, 'tasks.pageDown')) { this.page(1); return }
+      if (componentKeymap.matches(data, 'tasks.open')) { this.openSelected(); return }
+      if (componentKeymap.matches(data, 'tasks.type.next')) { this.cycleType(); return }
+      // In search mode arrows/editing remain with Input. In particular S, A,
+      // R, N and every other printable character are query text, never an
+      // action with side effects.
+      this.selectionTouched = true
+      this.searchInput.handleInput(data)
+      this.reproject(true)
+      return
+    }
+
+    if (this.explicitMode && componentKeymap.matches(data, 'tasks.search.enter')) {
+      this.enterSearchMode()
+      return
+    }
+    if (this.explicitMode && componentKeymap.matches(data, 'tasks.scope.toggle')) {
+      this.toggleScope()
+      return
+    }
+    if (this.explicitMode && componentKeymap.matches(data, 'tasks.tree.expand')) {
+      this.treeExpand()
+      return
+    }
+    if (this.explicitMode && componentKeymap.matches(data, 'tasks.tree.collapse')) {
+      this.treeCollapse()
+      return
+    }
+    if (this.explicitMode && componentKeymap.matches(data, 'tasks.running.next')) {
+      this.runningMove(1)
+      return
+    }
+    if (this.explicitMode && componentKeymap.matches(data, 'tasks.running.previous')) {
+      this.runningMove(-1)
+      return
+    }
+    if (this.explicitMode && componentKeymap.matches(data, 'tasks.stop')) {
+      this.requestStop()
+      return
+    }
+    if (this.explicitMode && componentKeymap.matches(data, 'tasks.view.full') && this.mode === 'quick') {
+      this.onViewFull?.(this.getViewState())
+      return
+    }
+    if (this.explicitMode && componentKeymap.matches(data, 'tasks.refresh')) {
+      this.onRefresh?.()
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.type.next')) {
+      this.cycleType()
+      return
+    }
+
+    const isNavUp = componentKeymap.matches(data, 'tasks.cursorUp') || (!this.searchEnabled && data === 'k')
+    const isNavDown = componentKeymap.matches(data, 'tasks.cursorDown') || (!this.searchEnabled && data === 'j')
+    const isPageUp = componentKeymap.matches(data, 'tasks.pageUp')
+    const isPageDown = componentKeymap.matches(data, 'tasks.pageDown')
+
+    // Compatibility only: old direct embedders used i. The application passes
+    // `mode`, so production has no printable interrupt binding at all.
+    if (!this.explicitMode && this.onAction !== undefined && matchesKey(data, 'i')) {
+      // Preserve the historical direct-call behavior only for an empty
+      // query. Once the legacy search contains text, i is ordinary query
+      // input; production explicit mode has no i path at all.
+      if (this.getFilter() === '') {
+        const item = this.selectedItem()
+        if (item?.interruptible === true) this.onAction(item.value, 'interrupt')
+      } else {
+        this.selectionTouched = true
+        this.searchInput.handleInput(data)
+        this.reproject(true)
+      }
+      return
+    }
+
+    if (!this.explicitMode && this.searchEnabled && !isNavUp && !isNavDown && !isPageUp && !isPageDown
+      && !componentKeymap.matches(data, 'tasks.open') && !componentKeymap.matches(data, 'tasks.search.exit')) {
+      this.selectionTouched = true
+      this.searchInput.handleInput(data)
+      this.reproject(true)
+      return
+    }
+    if (isNavUp) { this.move(-1); return }
+    if (isNavDown) { this.move(1); return }
+    if (isPageUp) { this.page(-1); return }
+    if (isPageDown) { this.page(1); return }
+    if (componentKeymap.matches(data, 'tasks.open')) { this.openSelected(); return }
+    if (componentKeymap.matches(data, 'tasks.search.exit')) this.onCancel()
+  }
+
+  private ensureVisible(): void {
+    if (this.selected < this.scroll) this.scroll = this.selected
+    else if (this.selected >= this.scroll + this.maxVisible) this.scroll = this.selected - this.maxVisible + 1
+    this.scroll = Math.max(0, Math.min(this.scroll, Math.max(0, this.filtered.length - this.maxVisible)))
   }
 
   private startTick(): void {
-    // The 1s elapsed tick only matters while a live row is visible (a
-    // startedAt timestamp whose number is moving); the interval is cheap
-    // and the render is a no-op change when nothing moved. unref() so the
-    // timer never keeps the process alive (tests, /exit).
     this.tickTimer = setInterval(() => {
-      // A callback already past this point when dispose() runs must not
-      // request a render for a dead panel.
       if (this.disposed) return
-      const hasLive = this.items.some(item =>
-        item.startedAt !== undefined && (item.status === 'running' || item.status === 'stopping'))
+      const hasLive = this.items.some(item => item.startedAt !== undefined && isTaskItemActive(item))
       if (!hasLive) return
       this.now = Date.now()
       this.requestRender()
@@ -262,7 +710,6 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.tickTimer.unref()
   }
 
-  /** Stop the tick (the overlay is closing). */
   dispose(): void {
     this.disposed = true
     if (this.tickTimer !== undefined) clearInterval(this.tickTimer)
@@ -276,306 +723,377 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   set focused(value: boolean) {
     this._focused = value
-    this.searchInput.focused = value
+    this.searchInput.focused = value && this.searchMode
   }
 
   invalidate(): void {
     this.searchInput.invalidate()
   }
 
-  handleInput(data: string): void {
-    // Navigation keys always move the list; Enter confirms; Esc cancels.
-    // Every OTHER key (printable, backspace, ctrl+w/u, cursor-left/right
-    // inside the query, …) goes to the search Input while search is on —
-    // the SelectList pattern: a filter box must be editable, not just
-    // typeable.
-    //
-    // All key matches go through the component keymap (M5): the semantic
-    // tasks.* actions resolve through matchesKey (never raw sequence
-    // compares) — it recognizes legacy AND Kitty CSI-u / modifyOtherKeys
-    // encodings, so terminals that report CSI-u (zellij + Kitty-protocol,
-    // Windows Terminal, WezTerm, kitty…) keep the panel navigable — the
-    // raw compares ('\x1b[A' etc.) silently dropped every arrow/page key
-    // there.
-    //
-    // The `k`/`j` vim aliases for ↑/↓ apply ONLY when search is OFF: with a
-    // search box up, `k`/`j` are ordinary letters a query may contain
-    // ("task", "jq") — routing them as navigation would make those queries
-    // untruncatable.
-    const isNavUp = componentKeymap.matches(data, 'tasks.cursorUp') || (!this.searchEnabled && data === 'k')
-    const isNavDown = componentKeymap.matches(data, 'tasks.cursorDown') || (!this.searchEnabled && data === 'j')
-    const isPage = componentKeymap.matches(data, 'tasks.pageUp') || componentKeymap.matches(data, 'tasks.pageDown')
-    // Row-level interrupt (`i`): fires while the search box is CLOSED, or
-    // while it is open but EMPTY and the selection sits on an
-    // INTERRUPTIBLE row (a continuable subagent — the only kind
-    // `ctx.subagents.interrupt` can actually stop). An empty query means
-    // no filtering is in progress — `i` on a continuable row is the
-    // interrupt intent, not a query letter. One-shot subagents and job
-    // rows are NOT interruptible: with them selected, `i` stays a search
-    // character exactly like `k`/`j` while search is on.
-    const interruptibleSelected = (): boolean => {
-      const item = this.filtered[this.selected]
-      return item !== undefined && item.interruptible === true
-    }
-    if (componentKeymap.matches(data, 'tasks.interrupt') && this.onAction !== undefined && !this.searchEnabled && interruptibleSelected()) {
-      const item = this.filtered[this.selected]
-      if (item !== undefined) this.onAction(item.value, 'interrupt')
-      return
-    }
-    if (
-      componentKeymap.matches(data, 'tasks.interrupt') && this.onAction !== undefined && this.searchEnabled
-      && (this.searchInput.getValue() ?? '') === ''
-      && interruptibleSelected()
-    ) {
-      const item = this.filtered[this.selected]
-      if (item !== undefined) this.onAction(item.value, 'interrupt')
-      return
-    }
-    // Tab cycles the type filter (All → subagent → bash → pwsh → …).
-    // Consumed before the search input so a query can never contain a tab.
-    if (componentKeymap.matches(data, 'tasks.cycleType')) {
-      this.cycleType()
-      return
-    }
-    if (!isNavUp && !isNavDown && !isPage && !componentKeymap.matches(data, 'tasks.confirm') && !componentKeymap.matches(data, 'tasks.cancel') && this.searchEnabled) {
-      // Typing a search query is a user interaction with the list: a later
-      // enrichment must not re-focus the head over the user's filter.
-      this.selectionTouched = true
-      this.searchInput.handleInput(data)
-      this.applyFilter(this.searchInput.getValue() ?? '')
-      return
-    }
-    if (isNavUp) {
-      if (this.filtered.length === 0) return
-      this.selectionTouched = true
-      this.selected = Math.max(0, this.selected - 1)
-      this.ensureVisible()
-      return
-    }
-    if (isNavDown) {
-      if (this.filtered.length === 0) return
-      this.selectionTouched = true
-      this.selected = Math.min(this.filtered.length - 1, this.selected + 1)
-      this.ensureVisible()
-      return
-    }
-    if (isPage) {
-      if (this.filtered.length === 0) return
-      this.selectionTouched = true
-      if (componentKeymap.matches(data, 'tasks.pageUp')) this.selected = Math.max(0, this.selected - this.maxVisible)
-      else this.selected = Math.min(this.filtered.length - 1, this.selected + this.maxVisible)
-      this.ensureVisible()
-      return
-    }
-    if (componentKeymap.matches(data, 'tasks.confirm')) {
-      const item = this.filtered[this.selected]
-      if (item !== undefined) this.onSelect(item.value)
-      return
-    }
-    if (componentKeymap.matches(data, 'tasks.cancel')) {
-      this.onCancel()
-    }
-  }
-
-  private ensureVisible(): void {
-    if (this.selected < this.scroll) this.scroll = this.selected
-    else if (this.selected >= this.scroll + this.maxVisible) this.scroll = this.selected - this.maxVisible + 1
-    this.scroll = Math.max(0, Math.min(this.scroll, Math.max(0, this.filtered.length - this.maxVisible)))
-  }
-
-  private applyFilter(query: string): void {
-    const typeActive = this.activeType !== null
-    if (query === '' && !typeActive) {
-      this.filtered = this.items
-    } else {
-      const needle = query.toLowerCase()
-      this.filtered = this.items.filter(item =>
-        (!typeActive || item.type === this.activeType)
-        && (query === '' || `${item.value}\n${item.label}\n${item.suffix ?? ''}\n${item.status}\n${item.detail ?? ''}\n${item.group ?? ''}`.toLowerCase().includes(needle)))
-    }
-    this.selected = 0
-    this.scroll = 0
-    // A filter/type change is a NEW view: the selected row (whatever it
-    // is) must restart its marquee cycle from the fresh anchor, even when
-    // the SAME row survives the filter with an unchanged identity
-    // (review round 3 — the identity check alone would let the marquee
-    // continue mid-cycle across a search/type change).
-    this.marquee.reset()
-  }
-
   render(width: number): string[] {
+    this.now = Date.now()
     const safeWidth = Math.max(1, width)
     const lines: string[] = []
-
-    if (this.options.header !== undefined) {
-      const counts = this.counts()
-      // The active type filter shows as a chip so a type-filtered list
-      // never looks like a broken search ("where did the jobs go?").
-      const chip = this.activeType === null ? '' : `  [${this.activeType}]`
-      const headerText = counts === '' ? `${this.options.header}${chip}` : `${this.options.header}${chip}  ${counts}`
-      lines.push(color.textStrong(truncateToWidth(headerText, safeWidth, '…')))
-      lines.push('')
-    }
-
-    if (this.searchEnabled) {
+    const explicit = this.explicitMode
+    const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
+    const hintLine = color.textMuted(`  ${this.hint()}`)
+    const searchOn = explicit ? this.searchMode : this.searchEnabled
+    // Hoisted chrome texts: the short-grant degradation rebuilds from
+    // them without the unconditionally-kept blank spacers.
+    const headerText = this.options.header === undefined ? undefined
+      : truncateToWidth(explicit ? this.headerText() : this.legacyHeaderText(), safeWidth, '…')
+    const searchEmpty = this.getFilter() === ''
+    const searchRowText = !searchOn ? '' : (() => {
       const searchLine = this.searchInput.render(Math.max(1, safeWidth - 2))[0] ?? ''
       const stripped = searchLine.startsWith('> ') ? searchLine.slice(2) : searchLine
-      lines.push(this.searchInput.getValue() === '' ? color.textDim(' search…') : ` ${stripped}`)
+      return searchEmpty ? (explicit ? ' / search…' : ' search…') : ` ${stripped}`
+    })()
+
+    if (headerText !== undefined) {
+      lines.push(color.textStrong(headerText))
       lines.push('')
     }
 
-    if (this.filtered.length === 0) {
-      lines.push(color.textDim(this.options.noMatchText ?? 'no active tasks'))
+    if (this.loading && this.items.length === 0) {
+      lines.push(color.textDim('Loading tasks…'))
+      if (this.refreshError !== undefined) lines.push(color.textMuted(`${this.refreshError} · R retry`))
       lines.push('')
-      lines.push(color.textMuted(`  ${this.hint()}`))
-      return lines
+      lines.push(hintLine)
+      this.lastRenderedStart = 0
+      this.lastRenderedCount = 0
+      this.hasRenderedViewport = true
+      return this.finalizeEmpty(lines)
+    }
+
+    if (searchOn) {
+      lines.push(searchEmpty ? color.textDim(searchRowText) : searchRowText)
+      lines.push('')
+    }
+
+    const rows = this.filtered
+    if (rows.length === 0) {
+      lines.push(color.textDim(this.refreshError === undefined ? (this.options.noMatchText ?? 'No matching tasks') : 'Could not load tasks'))
+      if (this.refreshError !== undefined) lines.push(color.textMuted(`${this.refreshError} · R retry`))
+      lines.push('')
+      lines.push(hintLine)
+      this.lastRenderedStart = 0
+      this.lastRenderedCount = 0
+      this.hasRenderedViewport = true
+      return this.finalizeEmpty(lines)
     }
 
     this.ensureVisible()
-    const start = this.scroll
-    const end = Math.min(this.filtered.length, start + this.maxVisible)
-    let lastGroup: string | undefined
-    for (let i = start; i < end; i++) {
-      const item = this.filtered[i]
-      if (item === undefined) continue
-      if (item.group !== lastGroup) {
-        if (item.group !== undefined) {
-          lines.push(color.textMuted(`── ${item.group} ──`))
+    const listWidth = safeWidth >= 110 ? Math.max(40, Math.floor((safeWidth - 3) * 0.58)) : safeWidth
+    let itemCount = Math.min(rows.length, this.maxVisible)
+    let start = this.scroll
+    const buildWindow = (count: number, from: number): string[] => {
+      const end = Math.min(rows.length, from + count)
+      const visibleRows = rows.slice(from, end)
+      const listLines: string[] = []
+      let lastGroup: string | undefined
+      for (let i = 0; i < visibleRows.length; i += 1) {
+        const item = visibleRows[i]!
+        const group = displayGroup(item.group, this.options.groupLabels === true)
+        if (group !== lastGroup) {
+          if (group !== undefined) listLines.push(color.textMuted(`── ${group} ──`))
+          lastGroup = group
         }
-        lastGroup = item.group
+        const selected = from + i === this.selected
+        listLines.push(...this.renderRow(item, selected, listWidth))
+        if (safeWidth >= 70 && safeWidth < 110 && selected && item.kind !== 'view-full') {
+          listLines.push(...this.renderInlineDetail(item, safeWidth))
+        }
       }
-      lines.push(...this.renderRow(item, i === this.selected, safeWidth))
+      return listLines
+    }
+    let listLines = buildWindow(itemCount, start)
+    const assemble = (): string[] => {
+      const out = [...lines]
+      if (safeWidth >= 110) {
+        const detail = this.detailLines(this.selectedItem())
+        const merged: string[] = []
+        const detailWidth = Math.max(24, safeWidth - listWidth - 3)
+        const max = Math.max(listLines.length, detail.length)
+        for (let i = 0; i < max; i += 1) {
+          const left = truncateToWidth(listLines[i] ?? '', listWidth, '…')
+          const leftPad = ' '.repeat(Math.max(0, listWidth - visibleWidth(left)))
+          const right = truncateToWidth(detail[i] ?? '', detailWidth, '…')
+          merged.push(`${left}${leftPad} ${color.border('│')} ${right}`)
+        }
+        out.push(...merged)
+      } else {
+        out.push(...listLines)
+      }
+      if (rows.length > itemCount) out.push(color.textMuted(`  ${this.selected + 1}/${rows.length}`))
+      if (this.refreshError !== undefined) out.push(color.textMuted(`  ${this.refreshError} · R retry`))
+      out.push('')
+      out.push(hintLine)
+      return out
+    }
+    let candidate = assemble()
+    // Details, group headers and the detail pane consume physical rows
+    // beyond the item count: shrink the selected-preserving window until
+    // the whole component fits the live grant, instead of letting the
+    // compositor clip the hint or the selected row.
+    while (candidate.length > limit && itemCount > 1) {
+      itemCount -= 1
+      const desired = Math.max(0, this.selected - Math.floor(itemCount / 2))
+      start = Math.min(desired, Math.max(0, rows.length - itemCount))
+      this.scroll = start
+      listLines = buildWindow(itemCount, start)
+      candidate = assemble()
+    }
+    if (candidate.length <= limit) {
+      // The ACTUAL viewport is the window the fit left. Record it BEFORE
+      // the exposure ack so viewportItems()/onViewportExpose and the
+      // PageUp/PageDown step agree with the rows physically painted — the
+      // budget baseline can be larger than what details/sidebar allow.
+      this.lastRenderedStart = start
+      this.lastRenderedCount = itemCount
+      this.hasRenderedViewport = true
+      this.exposeViewport()
+      return candidate
     }
 
-    // Scroll indicator (position within the filtered list).
-    if (this.filtered.length > this.maxVisible) {
-      lines.push(color.textMuted(`  ${this.selected + 1}/${this.filtered.length}`))
-    }
-
-    lines.push('')
-    lines.push(color.textMuted(`  ${this.hint()}`))
-    return lines
+    // Very short grants: true semantic degradation — search input
+    // (searchMode) > selected main > hint > header > group > detail >
+    // indicator > blank spacers. The selected main row is never squeezed
+    // out by decorative blanks or the header (this path does not keep the
+    // chrome prefix unconditionally). The final layout is decided BEFORE
+    // the exposure ack: an extreme grant can drop the selected row
+    // entirely (a 1-row grant + search mode paints only the search
+    // input), and only rows the FINAL layout actually paints may be
+    // acknowledged.
+    const entries = this.windowEntries(start, itemCount, listWidth)
+    const selectedEntry = entries.find(entry => entry.selected)
+    const degraded = this.degradedFallback(
+      selectedEntry,
+      searchRowText,
+      searchEmpty,
+      headerText,
+      rows.length > itemCount ? `  ${this.selected + 1}/${rows.length}` : undefined,
+      limit,
+      hintLine,
+    )
+    this.lastRenderedStart = degraded.paintsSelectedMain ? start : 0
+    this.lastRenderedCount = degraded.paintsSelectedMain ? 1 : 0
+    this.hasRenderedViewport = true
+    this.exposeViewport()
+    return degraded.lines
   }
 
-  private counts(): string {
-    // Under a TYPE filter the counts describe the VISIBLE scope (the
-    // header chip already names it — counting the hidden rows would
-    // mislead); without one the full surface totals stay (search alone
-    // keeps the pre-existing behavior, round-1 review finding).
-    const scope = this.activeType === null ? this.items : this.filtered
-    const running = scope.filter(item => item.status === 'running' || item.status === 'stopping').length
-    const done = scope.filter(item => item.status === 'completed').length
-    const failed = scope.filter(item => item.status === 'failed' || item.status === 'killed' || item.status === 'timed_out' || item.status === 'lost').length
-    const parts: string[] = []
-    if (running > 0) parts.push(color.primary(`${running} running`))
-    if (done > 0) parts.push(color.textDim(`${done} done`))
-    if (failed > 0) parts.push(color.error(`${failed} failed`))
-    if (parts.length === 0) parts.push(color.textDim(`${scope.length} total`))
-    return parts.join(' · ')
+  /** True semantic degradation for very short grants. The declared
+   * priority (search input > selected main > hint > header > group >
+   * detail > indicator) is enforced by INCLUSION — the chrome prefix is
+   * rebuilt from the hoisted texts and only kept when it fits after the
+   * mandatory content, so the selected main row cannot lose to two
+   * decorative blanks + the header. Returns whether the selected main row
+   * is actually painted, so the callers ack only what the user saw. */
+  private degradedFallback(
+    selectedEntry: { group: string | undefined; main: string; details: string[] } | undefined,
+    searchRowText: string,
+    searchEmpty: boolean,
+    headerText: string | undefined,
+    indicatorText: string | undefined,
+    limit: number,
+    hintLine: string,
+  ): { lines: string[]; paintsSelectedMain: boolean } {
+    const mainRow = selectedEntry?.main
+    const groupRow = selectedEntry !== undefined && selectedEntry.group !== undefined
+      ? color.textMuted(`── ${selectedEntry.group} ──`)
+      : undefined
+    const detailRows = selectedEntry?.details ?? []
+    // A typed query renders plain (the placeholder dims) — main-path parity.
+    const searchShown = searchRowText === '' ? '' : (searchEmpty ? color.textDim(searchRowText) : searchRowText)
+    // Mandatory content (priority 1-2): search row, then the selected
+    // main row; the hint text follows (priority 3).
+    const content: string[] = []
+    if (searchShown !== '') content.push(searchShown)
+    if (mainRow !== undefined) content.push(mainRow)
+    if (content.length >= limit) {
+      const kept = content.slice(0, limit)
+      return { lines: kept, paintsSelectedMain: mainRow !== undefined && kept.includes(mainRow) }
+    }
+    const hintIncluded = content.length + 1 <= limit
+    let used = content.length + (hintIncluded ? 1 : 0)
+    // Optional chrome (priority 4-7) fills the leftover rows.
+    let headerShown = false
+    if (headerText !== undefined && used + 1 <= limit) { headerShown = true; used += 1 }
+    let groupShown = false
+    if (groupRow !== undefined && used + 1 <= limit) { groupShown = true; used += 1 }
+    const detailsShown: string[] = []
+    for (const detail of detailRows) {
+      if (used + 1 > limit) break
+      detailsShown.push(detail)
+      used += 1
+    }
+    let indicatorShown = false
+    if (indicatorText !== undefined && used + 1 <= limit) { indicatorShown = true; used += 1 }
+    // Blank spacers last: only the hint's leading blank rides along.
+    const hintBlank = used + 1 <= limit
+    const out: string[] = []
+    if (headerShown) out.push(color.textStrong(headerText!))
+    if (searchShown !== '') out.push(searchShown)
+    if (groupShown) out.push(groupRow!)
+    if (mainRow !== undefined) out.push(mainRow)
+    out.push(...detailsShown)
+    if (indicatorShown) out.push(color.textMuted(indicatorText!))
+    if (hintIncluded) out.push(...(hintBlank ? ['', hintLine] : [hintLine]))
+    // The main row is always painted in this branch (the extreme branch
+    // above was the only path that could drop it).
+    return { lines: out, paintsSelectedMain: mainRow !== undefined }
+  }
+
+  /** The visible window as STRUCTURED rows (main + detail lines kept
+   * apart), so a tiny-grant fallback can prioritize the selected main row
+   * over its detail lines instead of tail-slicing a flat array. The
+   * compact-layout inline detail (70-110 wide, selected row only) rides
+   * with its entry; the wide-layout side pane is not part of the window. */
+  private windowEntries(start: number, count: number, width: number): Array<{
+    group: string | undefined
+    main: string
+    details: string[]
+    selected: boolean
+  }> {
+    const entries: Array<{
+      group: string | undefined
+      main: string
+      details: string[]
+      selected: boolean
+    }> = []
+    const end = Math.min(this.filtered.length, start + count)
+    for (let index = start; index < end; index += 1) {
+      const item = this.filtered[index]
+      if (item === undefined) continue
+      const main = this.renderRow(item, index === this.selected, width)[0]!
+      const details = index === this.selected && item.kind !== 'view-full'
+        ? this.renderInlineDetail(item, width)
+        : []
+      entries.push({ group: item.group, main, details, selected: index === this.selected })
+    }
+    return entries
+  }
+
+  /** Finalize the empty/no-match assembly against the live grant
+   * (setMaxRows contract covers every path): `render().length <= maxRows`
+   * with priority search input > no-match message > hint > header > blank
+   * spacers, so the hint survives whenever the grant physically allows it
+   * (a head-keep slice would cut the hint on a short terminal). */
+  private finalizeEmpty(lines: string[]): string[] {
+    if (!Number.isFinite(this.maxRows)) return lines
+    const limit = Math.max(1, Math.floor(this.maxRows))
+    if (lines.length <= limit) return lines
+    // Blank spacers are the lowest-value rows: drop them first.
+    const compact = lines.filter(line => line !== '')
+    if (compact.length <= limit) return compact
+    // The header is chrome: yield it before any content.
+    const withoutHeader = this.options.header === undefined ? compact : compact.slice(1)
+    if (withoutHeader.length <= limit) return withoutHeader
+    // Extreme grant: keep the head of the HEADER-FREE rows — the search
+    // input, then the no-match message. Slicing `compact` here would
+    // re-introduce the header and drop the message, which the declared
+    // priority places ABOVE the header.
+    return withoutHeader.slice(0, limit)
+  }
+
+
+  private legacyHeaderText(): string {
+    const chip = this.activeType === null ? '' : `  [${this.activeType}]`
+    const rows = this.filtered.filter(item => item.kind !== 'view-full')
+    const running = rows.filter(isTaskItemActive).length
+    const done = rows.filter(item => item.status === 'completed').length
+    const failed = rows.filter(item => isTaskItemFailure(item.status)).length
+    const counts = [
+      running > 0 ? `${running} running` : '',
+      done > 0 ? `${done} done` : '',
+      failed > 0 ? `${failed} failed` : '',
+    ].filter(part => part !== '').join(' · ')
+    return `${this.options.header ?? ''}${chip}${counts === '' ? '' : `  ${counts}`}`
+  }
+
+  private headerText(): string {
+    const real = this.items.filter(item => item.kind !== 'view-full')
+    const visible = this.filtered.filter(item => item.kind !== 'view-full').length
+    const active = real.filter(isTaskItemActive).length
+    const done = real.filter(item => item.status === 'completed').length
+    const failed = real.filter(item => isTaskItemFailure(item.status)).length
+    const chips = [`[${this.scope.toUpperCase()}]`]
+    if (this.activeType !== null) chips.push(`[${this.activeType}]`)
+    if (this.getFilter() !== '') chips.push(`[search: ${this.getFilter()}]`)
+    const stats = [`${active} active`]
+    if (done > 0) stats.push(`${done} done`)
+    if (failed > 0) stats.push(`${failed} failed`)
+    stats.push(`${visible}/${real.length} shown`)
+    return `${this.options.header ?? 'Tasks'} ${chips.join(' ')}  ${stats.join(' · ')}`
   }
 
   private renderRow(item: TaskPanelItem, selected: boolean, width: number): string[] {
-    const dot = taskStatusColor(item.status)(DOT)
+    const dot = taskStatusColor(item.status)(this.explicitMode ? stateGlyph(item) : DOT)
+    const attention = item.attention === true ? color.error('!') : ''
     const pointer = selected ? color.primary(POINTER) : ' '
-    // Left column: pointer + dot + tree connector + label.
-    const leftPrefix = `${pointer} ${dot} `
-    const leftWidth = visibleWidth(leftPrefix)
-    // The tree connector is a FIXED layout region (plan §6.7): it never
-    // truncates, wraps, or scrolls with the label — the selected label's
-    // marquee window starts after it. Rows without a prefix (jobs, flat
-    // rows) keep the classic layout.
+    const leftPrefix = `${pointer} ${attention}${dot} `
     const tree = item.treePrefix ?? ''
     const treeWidth = visibleWidth(tree)
-
-    // Right column: status + elapsed, right-aligned. The tail reserves its
-    // width on the right; the label wraps to the rest (2-cell gap minimum).
-    const statusText = taskStatusColor(item.status)(item.status)
-    const elapsedSeconds = item.startedAt === undefined ? undefined : Math.max(0, Math.floor((this.now - item.startedAt) / 1000))
-    const elapsedText = elapsedSeconds === undefined ? '' : color.textMuted(formatElapsed(elapsedSeconds))
+    const statusText = item.kind === 'view-full' ? '' : taskStatusColor(item.status)(item.status)
+    const elapsedSeconds = item.startedAt === undefined ? undefined : Math.max(0, Math.floor(((item.finishedAt ?? this.now) - item.startedAt) / 1000))
+    const elapsedText = item.kind === 'view-full' || elapsedSeconds === undefined ? '' : color.textMuted(formatElapsed(elapsedSeconds))
     const tail = [statusText, elapsedText].filter(part => part !== '').join(' ')
     const tailWidth = visibleWidth(tail)
-    const available = width - leftWidth
     const suffix = item.suffix === undefined || item.suffix === '' ? '' : ` · ${item.suffix}`
     const suffixWidth = visibleWidth(suffix)
-    if (suffix === '') {
-      // No mode suffix: the classic single-column layout (the tail reserves
-      // its width; the tree connector + label truncate to the rest; the
-      // whole line is truncated as the final backstop).
-      const labelBudget = Math.max(0, available - tailWidth - 2 - treeWidth)
-      // The SELECTED label marquees inside its fixed budget (plan §7.5);
-      // unselected rows keep the ellipsis. The tree connector, suffix and
-      // tail are separate fixed regions — they never move.
-      const labelWindow = this.marquee.render({
-        key: item.value,
-        text: item.label,
-        maxWidth: labelBudget,
-        selected,
-      })
-      const leftFinal = leftPrefix + tree + (selected ? color.textStrong(labelWindow) : color.text(labelWindow))
-      const pad = Math.max(1, available - visibleWidth(leftFinal) - tailWidth)
-      const line = leftFinal + ' '.repeat(pad) + tail
-      const out = [truncateToWidth(line, width, '…')]
-      if (item.detail !== undefined && item.detail !== '') {
-        const indent = ' '.repeat(leftWidth)
-        const detailLines = wrapTextWithAnsi(color.textDim(item.detail), Math.max(1, width - leftWidth))
-        for (const wrapped of detailLines.slice(0, 2)) {
-          out.push(truncateToWidth(indent + wrapped, width, '…'))
-        }
-      }
-      return out
+    const leftWidth = visibleWidth(leftPrefix)
+    const available = Math.max(1, width - leftWidth)
+    const labelBudget = Math.max(0, available - treeWidth - suffixWidth - tailWidth - 1)
+    const label = this.marquee.render({ key: item.value, text: item.label, maxWidth: labelBudget, selected })
+    const tone = item.ancestorContext === true ? color.textDim : selected ? color.textStrong : color.text
+    const left = leftPrefix + tree + tone(label) + (selected ? color.textStrong(suffix) : color.text(suffix))
+    const tailPart = tailWidth <= width - visibleWidth(left) ? tail : (labelBudget === 0 ? truncateToWidth(tail, Math.max(1, width - visibleWidth(left)), '…') : '')
+    const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(tailPart))
+    return [truncateToWidth(left + ' '.repeat(pad) + tailPart, width, '…')]
+  }
+
+  private detailLines(item: TaskPanelItem | undefined): string[] {
+    if (item === undefined || item.kind === 'view-full') return ['Selected', 'No task selected']
+    const elapsed = item.startedAt === undefined ? undefined : Math.max(0, Math.floor(((item.finishedAt ?? this.now) - item.startedAt) / 1000))
+    const lines = ['Selected', item.label]
+    if (item.source === 'subagent' || item.mode !== undefined) {
+      if (item.mode !== undefined) lines.push(`mode      ${item.mode}`)
+      lines.push(`activity  ${item.status}`)
+      if (elapsed !== undefined) lines.push(`duration  ${formatElapsed(elapsed)}`)
+      if (item.parentLabel !== undefined) lines.push(`parent    ${item.parentLabel}`)
+      else if (item.parentId !== undefined && item.parentId !== '') lines.push(`parent    ${item.parentId}`)
+      if (item.depth !== undefined) lines.push(`depth     ${item.depth}`)
+      if (item.access !== undefined) lines.push(`access    ${item.access}`)
+    } else {
+      if (item.type !== undefined) lines.push(`kind      ${item.type}`)
+      lines.push(`status    ${item.status}`)
+      if (elapsed !== undefined) lines.push(`elapsed   ${formatElapsed(elapsed)}`)
+      if (item.startedAt !== undefined) lines.push(`started   ${new Date(item.startedAt).toISOString()}`)
+      if (item.detail !== undefined && item.detail !== '') lines.push(`detail    ${item.detail}`)
     }
-    // The mode suffix is a HARD layout contract (plan §4.0): the mode must
-    // stay readable on ANY width that physically fits it. The suffix is
-    // reserved FIRST; the status tail (the activity dimension — mode and
-    // activity are independent, never traded) keeps its full width next;
-    // only the LABEL compresses (its truncation budget is whatever the
-    // suffix and tail leave). The tail is dropped entirely only when the
-    // label is already at zero and the mode would otherwise be cut.
-    const labelLimit = Math.max(0, available - treeWidth - suffixWidth - tailWidth - 1)
-    const labelWindow = this.marquee.render({
-      key: item.value,
-      text: item.label,
-      maxWidth: labelLimit,
-      selected,
-    })
-    const leftFinal = leftPrefix
-      + tree
-      + (selected ? color.textStrong(labelWindow) : color.text(labelWindow))
-      + (selected ? color.textStrong(suffix) : color.text(suffix))
-    const leftFinalWidth = visibleWidth(leftFinal)
-    const tailPart = tailWidth <= width - leftFinalWidth
-      ? tail
-      : (labelLimit === 0 && width - leftFinalWidth > 0
-          ? truncateToWidth(tail, width - leftFinalWidth, '…')
-          : '')
-    const pad = Math.max(0, width - leftFinalWidth - visibleWidth(tailPart))
-    const line = leftFinal + ' '.repeat(pad) + tailPart
-    const out = [truncateToWidth(line, width, '…')]
-    if (item.detail !== undefined && item.detail !== '') {
-      const indent = ' '.repeat(leftWidth)
-      const detailLines = wrapTextWithAnsi(color.textDim(item.detail), Math.max(1, width - leftWidth))
-      for (const wrapped of detailLines.slice(0, 2)) {
-        out.push(truncateToWidth(indent + wrapped, width, '…'))
-      }
-    }
-    return out
+    if (this.pendingStopValue === item.value) lines.push(`Stop ${item.label}?  Y confirm · Esc cancel`)
+    return lines
+  }
+
+  private renderInlineDetail(item: TaskPanelItem, width: number): string[] {
+    const detail = this.detailLines(item).slice(1, 4).join(' · ')
+    return [truncateToWidth(`    ${color.textDim(detail)}`, width, '…')]
   }
 
   private hint(): string {
-    const search = this.searchEnabled ? 'type to filter · ' : ''
-    // Tab cycles the type filter; advertise the verb only when the cycle
-    // has at least two entries (All + one type — a single-kind list would
-    // advertise a no-op toggle).
-    const typeHint = this.typeOrder.length > 1 ? 'tab type · ' : ''
-    // The interrupt verbatim shows only while an INTERRUPTIBLE row is
-    // selectable (a continuable subagent — the only kind the interrupt
-    // transport can actually stop): `i` on a job row or a one-shot row
-    // is a search letter, so advertising it unconditionally would lie.
-    // Without the hint the merged /tasks surface hid its only terminate
-    // entry — the old /subagents submenu is gone (ec74c9b).
-    const interrupt = this.filtered.some(item => item.interruptible === true)
-      ? 'i interrupt · '
-      : ''
-    return `${search}${typeHint}${interrupt}↑↓ navigate · enter open · esc close`
+    if (this.pendingStopValue !== undefined) return 'Y confirm stop · Esc cancel'
+    if (!this.explicitMode) {
+      const search = this.searchEnabled ? 'type to filter · ' : ''
+      const type = this.typeOrder.length > 1 ? 'tab type · ' : ''
+      const interrupt = this.filtered.some(item => item.interruptible === true) ? 'i interrupt · ' : ''
+      return `${search}${type}${interrupt}↑↓ navigate · enter open · esc close`
+    }
+    const parts: string[] = []
+    if (this.searchMode) parts.push('search mode')
+    else if (this.searchEnabled) parts.push('/ search')
+    parts.push('A active/all', 'Tab type', '←→ tree', 'N next running', 'S stop', 'Enter open', 'R refresh')
+    if (this.mode === 'quick') parts.push('T Task Center')
+    parts.push('Esc back')
+    return parts.join(' · ')
   }
 }

@@ -21,7 +21,7 @@
 
 import { Container, HStack, Markdown, Spacer, VStack, type Component } from '@xmoon76/pi-tui'
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
-import { color, markdownTheme } from '../../theme.ts'
+import { color, HOST_MARKDOWN_OPTIONS, markdownTheme } from '../../theme.ts'
 import type { ExtensionView, StyledSpan, TextView } from '../public-types.ts'
 import { renderSpans, sanitizeSpanText } from './slot-outlet.ts'
 
@@ -138,7 +138,7 @@ class CompiledMarkdown implements Component {
     this.cachedWidth = width
     // Zero padding: the host pads widget rows; the fork's default 1-cell
     // padding would double it.
-    this.cached = new Markdown(this.markdown, 0, 0, markdownTheme).render(width)
+    this.cached = new Markdown(this.markdown, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS).render(width)
     return this.cached
   }
 }

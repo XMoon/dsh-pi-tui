@@ -10,11 +10,23 @@
 `dsh-pi-tui` 作为独立的 dsh bundle 安装到 profile 中，提供流式对话、工具调用、会话管理、Subagent、历史搜索、Shell、审批与设置等终端交互。模型、工具、Session、权限、Skills、Plan、Goal、Subagent 等运行时能力仍由 DeepSeek Harness 提供。
 
 ```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 
 ![dsh-pi-tui](docs/dsh-pi-tui.png)
+
+## DSH 兼容性与源码验证
+
+发布包通过 `package.json` peer contract 使用 DSH `>=0.1.2-alpha.4`；源码验证不会修改这个发布契约，也不会把 DSH vendor 进本仓库。
+
+当目标 DSH 版本尚未发布到 npm 时，可以用固定 commit 的官方源码包做本地验证：
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+```
+
+CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。`next` 的两种 lane 都从 `test/compat/dsh-source.json` 读取当前 validated DSH target；Source Mode 会验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界，npm Mode 则运行冻结的 registry lane。对于尚未发布的 source family，已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md)。
 
 ## 功能
 
@@ -82,7 +94,7 @@ Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应
 
 ### Subagent 与后台任务
 
-`/tasks` 提供当前 Session 的任务浏览器。
+`/tasks` 打开完整 Task Center（当前 Session 的所有后台工作）；Footer 的 `↓` 直接打开轻量 Quick Tasks（只看正在运行的工作）。
 
 Subagent 按完整 lineage 显示，包括嵌套创建的 descendant：
 
@@ -101,11 +113,18 @@ main
 * nested descendant
 * 后台 Job
 
+两个视图共享同一份运行时状态：`A` 切换 Active / All scope，`Tab` 切换类型过滤，`/` 进入搜索，`S`（确认后）停止所选任务，`N` / `Shift+N` 在运行中的任务间跳转，Quick 内 `T` 或底部 "View all" 行进入完整 Task Center，`Esc` 逐层返回。
+
 已经结束的 one-shot Subagent 仍可以打开并查看持久化 Transcript。
 
-对于当前 Session 的直接 `continuable` Child，可以进入交互式 Viewer，并直接向该 Subagent 发送后续消息。Child 使用自己的 Transcript、Draft 和运行状态，不会修改主 Session 的输入。
+对于当前 Session 的直接 `continuable` Child，可以进入交互式 Viewer，并直接向该 Subagent 发送后续消息（走 DSH 官方 `subagents.prompt()` 人类输入通道——按顺序排队为 Child 自己的下一个 turn，并保留 user 来源）。Child 使用自己的 Transcript、Draft 和运行状态，不会修改主 Session 的输入。
 
 更深层的 nested Subagent 默认以只读方式查看。
+
+官方 Subagent 模型选择（DSH `subagent-model-selection` 设置）可在 `/settings`
+中开关并维护 allowlist：开启后**新建** Session 的官方 `subagent` 工具可以按调用
+选择子 Agent 的 provider/model（受 allowlist 限制）。设置在 Session 组合时采样，
+不会改写已在运行的 Session 的工具。
 
 ### Shell
 
@@ -170,118 +189,25 @@ TUI 使用 DSH 提供的模型和设置服务。
 
 ### Footer 自定义
 
-状态行是一个**可组合表面**——常见场景无需插件或 shell。
+`/footer` 提供交互式 Footer 编辑器。你可以组合内置状态条目，调整左右位置、顺序、Style、Tone、Prefix/Suffix 和 Importance，也可以创建自己的 Footer 条目。
 
-`/settings` → Status line(或 `dsh-pi-tui` 设置文档中的 `footer` 键)
-选择预设:
+支持四类条目：
 
-| 值 | 含义 |
-|---|---|
-| `default`(旧名 `full`) | 经典两行 Footer(状态 + 统计) |
-| `compact` | 仅状态行(隐藏统计行) |
-| `custom` | 版本化 `footerLayout`(见下) |
-| `command` | 用户配置的命令渲染状态表面(见下) |
+- **Builtin Item**：Model、Context、Token、Tasks、Git branch 等内置状态；
+- **Custom Text**：用户创建的固定文本；
+- **Custom Command Item**：用户创建的动态命令输出，可和其他条目一起排列；
+- **Extension Item**：插件通过 Stable Extension API 提供的 Footer 条目。
 
-前三个值可在 `/settings` 面板选择;`command` **不在面板中**——它只能
-通过 USER 层设置文档(`footer: "command"` + `footerCommand`)启用,
-`/settings` 的 Status line 行只有 `default / compact / custom` 三个选项。
+在窄终端中，支持 compact 的内置条目会先自动缩短；空间仍不足时再按 Importance 隐藏低优先级内容。运行时 compact 不会修改你保存的 Style。
 
-`/footer` 是层级式交互配置器:先选行(Row Selector),再编辑该行的
-条目——`↑/↓` 在整行条目间顺序移动(Left/Right 只是视觉分组),
-`←/→` 左右换侧,`Space` 移除,`A` 打开可搜索的 Add Picker(按
-label / id / 描述过滤,选中项下方显示描述),`M` 进入 Move Mode
-排序,`Enter` 打开 Item Editor(Style 候选以条目的真实渲染作示例;
-Tone 语义色;Advanced 编辑 prefix / suffix / importance 并可一键
-Reset)。预览由真实 Footer 引擎合成,与 contextual help 一起固定在
-面板顶部,任何终端尺寸下都不会随列表滚动消失。Row Selector 页 `S`
-保存(持久化),`Esc` 逐页返回、在首页关闭且不影响当前生效布局。存在未保存改动时，
-`Esc` 会先显示 Save & Exit、Discard & Exit 或 Keep Editing；保存会等待设置写入成功。
-无会话时也可使用。
+`/footer` 的 Custom Command Item 和 `footer: command` 是两种不同能力：前者只是一个可以与 Model、Context 等混排的动态条目；后者把整个 Footer 状态表面交给一个用户命令。
 
-Add Picker 的末尾还可以选择 `+ Create Custom Text`,创建用户自定义的静态文本条目。创建后可编辑文本、默认语义色、显示名称,也可以删除;条目定义只从 USER 层读取并持久化。定义 Tone 与布局中的放置 Tone 分开,条目仍可在 `/footer` 中显示/隐藏、移动和排序。
+完整的 `/footer` 使用方法、Custom Text / Command、YAML 配置、安全模型和排错说明见：
 
-`footerLayout` 是嵌套设置对象(schemaVersion 1,1–2 行,左/右区域,
-分隔符,有限 formatter,语义 tone,prefix/suffix,importance)。
-`/footer` 配置器可交互地构建它;YAML 形状如下:
+- [Footer 自定义完整指南](docs/footer-customization.md)
+- [Extension API（插件作者）](docs/extension-api.md)
 
-```yaml
-footer: custom
-footerLayout:
-  schemaVersion: 1
-  rows:
-    - left:
-        - id: agent-preset
-          format: compact
-        - id: model
-        - id: project
-        - id: context
-          format: full
-        - id: cache-hit
-        - id: token-usage
-          format: io
-        - id: performance
-          format: speed
-        - id: version
-          format: tui
-      right:
-        - id: focus-mode
-      separator:
-        text: " │ "
-        tone: textDim
-```
-
-内置 format 是有限集合,继续使用现有的 `format` 字段(不新增第二套
-style schema):Model 为 `badge` / `plain` / `compact`;Permission preset
-为 `badge` / `plain` / `compact`;Plan state 为 `badge` / `plain`;Working
-directory 为 `short` / `basename` / `full`;Git branch 为 `plain` / `label`;
-Context 为 `bar` / `percent` / `full`;Token usage 为 `io` / `total` /
-`compact`;Cache hit 为 `full` / `compact`;Performance 为 `full` / `speed` /
-`latency`(平均首 token 时间);Turns/steps 为 `both` / `turns` / `steps`;
-Version 保留 `tui` / `dsh` / `both`。省略 `format` 时仍使用各条目的旧默认值。
-
-内置条目 id:`agent-preset`、`model`、`reasoning`、
-`permission-preset`、`sandbox-mode`、`approval-policy`、`plan-state`、
-`focus-mode`、`focused-seat`、`view-scope`、`cwd`、`project`、
-`git-branch`、`run-state`、`queue`、`tasks`、`agents`、`todo`、
-`context`、`cache-hit`、`token-usage`、`performance`、`turns-steps`、
-`stats-line`、`version`、`ext:*`(旧扩展段)。非法的 `footerLayout`
-会警告一次并回退到默认布局——TUI 始终能启动。
-
-`footer: command` 把状态表面交给用户配置的命令(Claude/Kimi 风格):
-当前状态快照以 JSON 序列化到命令的 stdin(schemaVersion 1——不含
-secret、凭据、提示词),命令的 stdout(经过净化:仅保留 SGR 颜色与
-OSC 8 超链接)渲染状态表面。Host 的指令表面(如 Ctrl+C 退出提示)
-始终叠加在最上层。
-
-```yaml
-footer: command
-footerCommand:
-  schemaVersion: 1
-  command: "~/.config/dsh/statusline.sh"
-  timeoutMs: 300        # 默认 300,最大 1000
-  refreshIntervalMs: 1000  # 最小 1000
-  maxRows: 1            # 1..2
-```
-
-**安全:** 只有当命令位于你的设置文档的 USER 层时才会被执行。
-仓库/项目提供的 `footerCommand` 永远不会被执行——命令模式被禁用并
-回退到原生布局。命令按 `refreshIntervalMs` 周期刷新,每次最多输出 2 行;失败(空输出、非零退出、超时)自动回退到原生布局。
-
-### 扩展 Footer 条目
-
-插件可以通过 Stable 扩展 API(`@xmoon76/dsh-pi-tui/extensions`)贡献
-**可配置的 Footer 条目**:在 `chrome.footer.item` 槽位注册一个
-`FooterItemContribution`——包含 label 与纯数据 `segment`(带样式的
-span;Host 会剥离任何终端控制序列,插件永远不能直接给终端上样式)。
-用户可在 `/footer` 中像内置条目一样开关、排序、左右放置。注册前请
-先 feature-detect `slot.chrome.footer.item` 能力(该能力在任何 surface
-存在之前就已声明)。条目的配置身份是规范键 `ext:<owner>/<id>`,其中
-owner 是插件的稳定名称——**跨 HMR 稳定**:引用已卸载插件条目的布局
-保留引用,插件重载后自动恢复。npm scoped 插件名(`@scope/name`)合法:
-其 `/` 在键中按 `encodeURIComponent` 百分号编码(`ext:%40scope%2Fname/<id>`);
-id 本身不得包含 `/`。旧的 `chrome.footer.status` 槽位不变:
-其 segment 聚合为单一的 `ext:*` 条目。完整作者指南:
-[docs/extension-api.md](docs/extension-api.md)。
+`/statusline` 是 `/footer` 的别名。
 
 ## 常用按键
 
@@ -378,14 +304,52 @@ dsh-pi-tui:
 * DeepSeek Harness
 * Node.js `^22.19.0 || >=24`
 
-项目当前跟随 DeepSeek Harness `0.1.1-rc.x` 版本线开发。
+### DSH 与 TUI 版本对应（重要）
+
+| TUI 包版本 | 对应 DSH 版本 | 说明 |
+|---|---|---|
+| `0.4.x-alpha`（`@next`） | `>=0.1.2-alpha.4` | 当前预发布线；按每个发布版本的具体 DSH family 验证 |
+| `0.4.0-alpha.2`（已发布） | `>=0.1.2-alpha.4` | 上一条 0.4 预发布线；其发布版本按 alpha.4/alpha.5 family 验证 |
+| `0.4.0-alpha.1`（已发布） | `>=0.1.2-alpha.2` | 更早的 0.4 预发布线；接受 alpha.2/alpha.3 运行时 |
+| `0.3.x`（`@0.3`） | `0.1.1-rc.2` | 旧运行时兼容线 |
+
+不要把两条线混装：DSH 0.1.1 不在 0.4 的 peer 支持范围内，运行时会在
+正常的不兼容边界以非零状态失败。启动行会在 Loader 并发挂载顺序允许时打印
+升级和回退提示，但该友好提示是 best-effort，不是启动顺序保证；保留 DSH
+0.1.1 时请使用 0.3，保留 alpha.2/alpha.3 时请使用
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.1`。当前 0.4 预发布线的推荐安装顺序如下
+（先装 DSH，再把 TUI 装入 profile）：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-alpha.5
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+如果需要保留旧 DSH：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
+dsh --profile pi-tui
+```
+
+`0.4` 当前线的声明支持范围是 `>=0.1.2-alpha.4`；每个发布版本都会验证
+具体的 DSH family。仅执行 `npm install -g @xmoon76/dsh-pi-tui` 不会把插件安装进
+DSH profile，实际使用仍应执行上面的 `dsh plugin` 命令。
+
+新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
+`code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
+旧数据中省略请求的 `code` default/session 值只有在确认 roster 不含 `code` 后
+才会回退到 `ptc`。
 
 ### npm
 
-推荐使用单独的 `pi-tui` profile：
+推荐使用单独的 `pi-tui` profile。稳定版发布后，使用与 DSH 版本匹配的
+TUI channel（稳定版用 `@latest`，预发布版用 `@next`）：
 
 ```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 
@@ -393,6 +357,15 @@ dsh --profile pi-tui
 
 ```sh
 dsh --profile pi-tui --session <session-id>
+```
+
+### Source Mode（仅验证）
+
+Source Mode 是 `next` CI 按跟踪策略选用的、并可用于本地兼容性检查的验证专用 distribution。它从 `test/compat/dsh-source.json` 的完整 commit SHA 构建官方 DSH tarball family，通过临时 pnpm overrides 安装，并在完成后清理临时状态。不要把 DSH 源码路径、`file:` 依赖或 workspace symlink 写入发布 package。
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
 ```
 
 安装包已经包含运行所需的 Pi TUI fork，不需要额外安装内部的 TUI package。

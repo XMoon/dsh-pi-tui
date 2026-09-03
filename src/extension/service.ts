@@ -406,7 +406,8 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   /** Phase 3: the UNSTABLE raw input capture registry. Registrations are
    * caller-fiber-owned; the registry is service-lifetime — captures
    * survive surface recreate and are consulted by the CURRENT surface's
-   * input path BEFORE terminal protocol decoding. */
+   * input path BEFORE Host semantic routing (after terminal
+   * reassembly/normalization — see UnstableRawInputEvent). */
   readonly unstableInputs: UnstableInputRegistry
   /** Phase 3: the UNSTABLE low-level surface seam (wired by the runner;
    * the host owns the screens). SURFACE-scoped like the other seams. */
@@ -1683,10 +1684,13 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     }
   }
 
-  /** Consult the raw captures for one chunk. The Host's input path calls
-   * this BEFORE terminal protocol decoding (plan §4) — a capture can see,
-   * consume or rewrite ANY raw chunk. The returned outcome is applied
-   * exactly once (a rewrite goes straight to the Host decoder). */
+  /** Consult the raw captures for one normalized input sequence. The
+   * Host's input path calls this BEFORE Host semantic routing (plan §4) —
+   * after the terminal pipeline has reassembled and normalized the input
+   * (see UnstableRawInputEvent), a capture can see, consume or rewrite
+   * any sequence that would otherwise reach the Host router. The
+   * returned outcome is applied exactly once (a rewrite goes straight to
+   * the Host decoder). */
   _unstableInputRoute(data: string, surfaceId: string): import('./internal/unstable-input.ts').UnstableRawRouteResult {
     return this.unstableInputs.route({ data, surfaceId })
   }

@@ -21,7 +21,16 @@
  * @module @xmoon76/dsh-pi-tui/footer/configurator-model
  */
 
-import { FooterCustomItemCatalog, type FooterCustomItemSettings, customItemId, customItemName } from './custom-items.ts'
+import {
+  DEFAULT_CUSTOM_COMMAND_REFRESH_MS,
+  FooterCustomItemCatalog,
+  type FooterCustomItemSettings,
+  customItemId,
+  customItemName,
+  effectiveCustomCommandRefreshMs,
+  effectiveCustomCommandTimeoutMs,
+} from './custom-items.ts'
+import { DEFAULT_COMMAND_TIMEOUT_MS } from './command-runner.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
 import { MAX_ITEMS_PER_ROW, stripControlChars } from './layout.ts'
 import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from './presets.ts'
@@ -39,8 +48,14 @@ export type FooterConfiguratorMode =
   | 'add'
   | 'create-name'
   | 'create-text'
+  | 'create-command'
+  | 'create-refresh'
+  | 'create-timeout'
   | 'create-tone'
   | 'custom-text'
+  | 'custom-command'
+  | 'custom-refresh'
+  | 'custom-timeout'
   | 'custom-tone'
   | 'custom-name'
   | 'custom-delete'
@@ -94,6 +109,15 @@ export interface FooterConfiguratorState {
   readonly customName: string
   /** The text currently being created. */
   readonly customText: string
+  /** The kind of the custom item being created (the Add picker's two
+   * create actions: Custom Text / Custom Command). */
+  readonly customKind: 'text' | 'command'
+  /** The command currently being created. */
+  readonly customCommand: string
+  /** The refresh interval (ms) currently being created. */
+  readonly customRefresh: number
+  /** The timeout (ms) currently being created. */
+  readonly customTimeout: number
   /** The tone currently being created. */
   readonly customTone: FooterTone | 'auto'
   /** A fail-soft validation message for the current custom-item flow. */
@@ -233,15 +257,28 @@ export function sameFooterLayout(a: FooterLayoutV1, b: FooterLayoutV1): boolean 
   return a.rows.every((row, index) => sameFooterRow(row, b.rows[index]!))
 }
 
-function sameFooterCustomItem(
+/** Structural definition equality (PR D §13.1): a discriminated switch per
+ * kind. Command definitions compare their EFFECTIVE refresh/timeout (an
+ * absent default and an explicit default are the same fact — a no-op
+ * editor round-trip must never read as dirty). Exported so the
+ * configurator's draft value source can gate a committed command cache on
+ * definition equality. */
+export function sameFooterCustomItem(
   a: FooterCustomItemSettings,
   b: FooterCustomItemSettings,
 ): boolean {
-  return a.schemaVersion === b.schemaVersion
-    && a.id === b.id
-    && a.kind === b.kind
-    && a.text === b.text
-    && normalizeToneForCompare(a.tone) === normalizeToneForCompare(b.tone)
+  if (a.schemaVersion !== b.schemaVersion || a.id !== b.id || a.kind !== b.kind) return false
+  if (a.kind === 'text' && b.kind === 'text') {
+    return a.text === b.text
+      && normalizeToneForCompare(a.tone) === normalizeToneForCompare(b.tone)
+  }
+  if (a.kind === 'command' && b.kind === 'command') {
+    return a.command === b.command
+      && effectiveCustomCommandRefreshMs(a) === effectiveCustomCommandRefreshMs(b)
+      && effectiveCustomCommandTimeoutMs(a) === effectiveCustomCommandTimeoutMs(b)
+      && normalizeToneForCompare(a.tone) === normalizeToneForCompare(b.tone)
+  }
+  return false
 }
 
 /** Structural definition-catalog equality in PERSISTED ORDER (the order is
@@ -319,31 +356,68 @@ export function flatLengthOf(row: FooterRowLayout): number {
 }
 
 /** One item-editor menu entry (Style appears only for items with more
- * than one finite format — a single format has nothing to pick). Custom Text
- * definitions expose their definition-owned text/default-tone controls and
- * name/delete actions alongside the shared placement-tone and Advanced
- * controls. */
+ * than one finite format — a single format has nothing to pick). Custom
+ * definitions expose their definition-owned controls (text/command,
+ * refresh/timeout, default tone) and name/delete actions alongside the
+ * shared placement-tone and Advanced controls. */
 export type ItemMenuEntry =
   | { readonly kind: 'style' }
   | { readonly kind: 'tone' }
   | { readonly kind: 'advanced' }
   | { readonly kind: 'custom-text' }
+  | { readonly kind: 'custom-command' }
+  | { readonly kind: 'custom-refresh' }
+  | { readonly kind: 'custom-timeout' }
   | { readonly kind: 'custom-tone' }
   | { readonly kind: 'custom-name' }
   | { readonly kind: 'custom-delete' }
 
+/** The refresh-interval choices for a custom command item (PR D §13.3):
+ * the picker's finite set, in ms. */
+export const CUSTOM_COMMAND_REFRESH_CHOICES_MS: readonly number[] = [1000, 5000, 10000, 30000, 60000]
+/** The timeout choices for a custom command item, in ms. */
+export const CUSTOM_COMMAND_TIMEOUT_CHOICES_MS: readonly number[] = [100, 300, 500, 1000]
+
+/** The refresh choices for one item's CURRENT effective refresh: the
+ * finite set, plus — when the definition carries a legal but UNLISTED
+ * persisted value — that exact value, so a hand-edited refresh is never
+ * displayed as the nearest choice and never silently replaced by a
+ * fake-pick apply. */
+export function customCommandRefreshChoices(current: number): readonly number[] {
+  return CUSTOM_COMMAND_REFRESH_CHOICES_MS.includes(current)
+    ? CUSTOM_COMMAND_REFRESH_CHOICES_MS
+    : [...CUSTOM_COMMAND_REFRESH_CHOICES_MS, current]
+}
+
+/** The timeout choices for one item's CURRENT effective timeout (same
+ * unlisted-value rule as the refresh choices). */
+export function customCommandTimeoutChoices(current: number): readonly number[] {
+  return CUSTOM_COMMAND_TIMEOUT_CHOICES_MS.includes(current)
+    ? CUSTOM_COMMAND_TIMEOUT_CHOICES_MS
+    : [...CUSTOM_COMMAND_TIMEOUT_CHOICES_MS, current]
+}
+
 /** The item editor's menu for one definition (undefined = an unknown id:
- * its format set is unknowable, so Style is hidden). */
-export function itemMenuFor(formats: readonly string[] | undefined, custom = false): ItemMenuEntry[] {
+ * its format set is unknowable, so Style is hidden). `custom` names the
+ * definition kind when the edited ref is a user-owned definition. */
+export function itemMenuFor(
+  formats: readonly string[] | undefined,
+  custom: 'text' | 'command' | undefined,
+): ItemMenuEntry[] {
   const entries: ItemMenuEntry[] = []
   if (formats !== undefined && formats.length > 1) entries.push({ kind: 'style' })
-  if (custom) {
+  if (custom === 'text') {
     entries.push({ kind: 'custom-text' })
+    entries.push({ kind: 'custom-tone' })
+  } else if (custom === 'command') {
+    entries.push({ kind: 'custom-command' })
+    entries.push({ kind: 'custom-refresh' })
+    entries.push({ kind: 'custom-timeout' })
     entries.push({ kind: 'custom-tone' })
   }
   entries.push({ kind: 'tone' })
   entries.push({ kind: 'advanced' })
-  if (custom) {
+  if (custom !== undefined) {
     entries.push({ kind: 'custom-name' })
     entries.push({ kind: 'custom-delete' })
   }
@@ -365,6 +439,10 @@ export class FooterConfiguratorModel {
   private editBuffer = ''
   private customName = ''
   private customText = ''
+  private customKind: 'text' | 'command' = 'text'
+  private customCommand = ''
+  private customRefresh = DEFAULT_CUSTOM_COMMAND_REFRESH_MS
+  private customTimeout = DEFAULT_COMMAND_TIMEOUT_MS
   private customTone: FooterTone | 'auto' = 'auto'
   private customError = ''
   /** The Row Selector's cursor (Row N, or the trailing Save action). */
@@ -421,6 +499,10 @@ export class FooterConfiguratorModel {
       editBuffer: this.editBuffer,
       customName: this.customName,
       customText: this.customText,
+      customKind: this.customKind,
+      customCommand: this.customCommand,
+      customRefresh: this.customRefresh,
+      customTimeout: this.customTimeout,
       customTone: this.customTone,
       customError: this.customError,
       homeCursor: this.homeCursor,
@@ -429,15 +511,13 @@ export class FooterConfiguratorModel {
     }
   }
 
-  /** The registry ids NOT present in the draft layout (addable items —
-   * builtin and extension items alike). */
+  /** The registry's DEFINITION CATALOG (the Add picker's addable items —
+   * builtin and extension items alike). A definition may be PLACED any
+   * number of times: adding an already-placed id appends an independent
+   * placement (its own format/tone/prefix/suffix/importance), so the
+   * catalog is never filtered by what the draft layout already uses. */
   availableIds(): string[] {
-    const present = new Set<string>()
-    for (const row of this.draft.rows) {
-      for (const ref of row.left) present.add(ref.id)
-      for (const ref of row.right) present.add(ref.id)
-    }
-    return this.registry.ids().filter(id => !present.has(id))
+    return this.registry.ids()
   }
 
   /** Detached custom definitions in their persisted order. */
@@ -518,11 +598,13 @@ export class FooterConfiguratorModel {
     if (query === '') return all
     return all.filter(id => {
       const def = this.registry.get(id)
+      const custom = this.customItems.get(id)
       const haystack = [
         id,
         def?.label ?? '',
         def?.description ?? '',
-        this.customItems.get(id)?.text ?? '',
+        custom?.kind === 'text' ? custom.text : '',
+        custom?.kind === 'command' ? custom.command : '',
       ].join('\n').toLowerCase()
       return haystack.includes(query)
     })
@@ -573,11 +655,17 @@ export class FooterConfiguratorModel {
       case 'style':
       case 'tone':
       case 'custom-tone':
+      case 'custom-refresh':
+      case 'custom-timeout':
         this.pickerIndex = Math.max(0, this.pickerIndex - 1)
         return
       case 'create-tone':
         this.pickerIndex = Math.max(0, this.pickerIndex - 1)
         this.customTone = FOOTER_TONE_CHOICES[this.pickerIndex]?.value ?? 'auto'
+        return
+      case 'create-refresh':
+      case 'create-timeout':
+        this.pickerIndex = Math.max(0, this.pickerIndex - 1)
         return
       case 'advanced':
         if (!this.editing) this.advancedField = ADVANCED_FIELDS[Math.max(0, this.advancedFieldIndex() - 1)]!
@@ -618,9 +706,21 @@ export class FooterConfiguratorModel {
       case 'custom-tone':
         this.pickerIndex = Math.min(this.customToneChoices().length - 1, this.pickerIndex + 1)
         return
+      case 'custom-refresh':
+        this.pickerIndex = Math.min(this.customRefreshChoices().length - 1, this.pickerIndex + 1)
+        return
+      case 'custom-timeout':
+        this.pickerIndex = Math.min(this.customTimeoutChoices().length - 1, this.pickerIndex + 1)
+        return
       case 'create-tone':
         this.pickerIndex = Math.min(FOOTER_TONE_CHOICES.length - 1, this.pickerIndex + 1)
         this.customTone = FOOTER_TONE_CHOICES[this.pickerIndex]?.value ?? 'auto'
+        return
+      case 'create-refresh':
+        this.pickerIndex = Math.min(CUSTOM_COMMAND_REFRESH_CHOICES_MS.length - 1, this.pickerIndex + 1)
+        return
+      case 'create-timeout':
+        this.pickerIndex = Math.min(CUSTOM_COMMAND_TIMEOUT_CHOICES_MS.length - 1, this.pickerIndex + 1)
         return
       case 'advanced':
         if (!this.editing) {
@@ -628,7 +728,7 @@ export class FooterConfiguratorModel {
         }
         return
       case 'add':
-        this.pickerIndex = Math.min(this.addMatches().length, this.pickerIndex + 1)
+        this.pickerIndex = Math.min(this.addMatches().length + 1, this.pickerIndex + 1)
         return
       case 'exit-confirm':
         this.exitConfirmCursor = Math.min(2, this.exitConfirmCursor + 1)
@@ -652,21 +752,52 @@ export class FooterConfiguratorModel {
   }
 
   private itemMenu(): ItemMenuEntry[] {
-    return itemMenuFor(this.itemFormats(), this.editedCustomItem() !== undefined)
+    return itemMenuFor(this.itemFormats(), this.editedCustomItem()?.kind)
   }
 
   private customToneChoices(): ReadonlyArray<{ readonly value: FooterTone | 'auto'; readonly label: string }> {
     return toneChoicesFor(this.editedCustomItem()?.tone ?? 'auto')
   }
 
-  /** The add picker has one non-item action after its filtered matches. */
-  addOptionCount(): number {
-    return this.addMatches().length + 1
+  /** The refresh choices for the EDITED command item's current effective
+   * refresh (the finite set plus a legal-but-unlisted persisted value). */
+  private customRefreshChoices(): readonly number[] {
+    const item = this.editedCustomItem()
+    const current = item?.kind === 'command'
+      ? effectiveCustomCommandRefreshMs(item)
+      : DEFAULT_CUSTOM_COMMAND_REFRESH_MS
+    return customCommandRefreshChoices(current)
   }
 
-  /** True when the highlighted add option is the create action. */
+  /** The timeout choices for the EDITED command item's current effective
+   * timeout. */
+  private customTimeoutChoices(): readonly number[] {
+    const item = this.editedCustomItem()
+    const current = item?.kind === 'command'
+      ? effectiveCustomCommandTimeoutMs(item)
+      : DEFAULT_COMMAND_TIMEOUT_MS
+    return customCommandTimeoutChoices(current)
+  }
+
+  /** The add picker has two non-item actions after its filtered matches
+   * (Create Custom Text / Create Custom Command). */
+  addOptionCount(): number {
+    return this.addMatches().length + 2
+  }
+
+  /** True when the highlighted add option is a create action. */
   isCreateOption(): boolean {
     return this.mode === 'add' && this.pickerIndex >= this.addMatches().length
+  }
+
+  /** The create action the add picker's cursor highlights (undefined when
+   * the cursor is on a real item). */
+  createActionKind(): 'text' | 'command' | undefined {
+    if (this.mode !== 'add') return undefined
+    const offset = this.pickerIndex - this.addMatches().length
+    if (offset === 0) return 'text'
+    if (offset === 1) return 'command'
+    return undefined
   }
 
   /** The edited item's id (the flat cursor's ref; '' when the row is
@@ -828,10 +959,25 @@ export class FooterConfiguratorModel {
           this.pickerIndex = this.currentToneIndex()
         } else if (entry.kind === 'custom-text') {
           const item = this.editedCustomItem()
-          if (item === undefined) return
+          if (item === undefined || item.kind !== 'text') return
           this.mode = 'custom-text'
           this.editing = true
           this.editBuffer = item.text
+          this.customError = ''
+        } else if (entry.kind === 'custom-command') {
+          const item = this.editedCustomItem()
+          if (item === undefined || item.kind !== 'command') return
+          this.mode = 'custom-command'
+          this.editing = true
+          this.editBuffer = item.command
+          this.customError = ''
+        } else if (entry.kind === 'custom-refresh') {
+          this.mode = 'custom-refresh'
+          this.pickerIndex = this.currentCustomRefreshIndex()
+          this.customError = ''
+        } else if (entry.kind === 'custom-timeout') {
+          this.mode = 'custom-timeout'
+          this.pickerIndex = this.currentCustomTimeoutIndex()
           this.customError = ''
         } else if (entry.kind === 'custom-tone') {
           this.mode = 'custom-tone'
@@ -879,9 +1025,30 @@ export class FooterConfiguratorModel {
         this.mode = 'item'
         return
       }
+      case 'custom-refresh': {
+        const choices = this.customRefreshChoices()
+        const choice = choices[Math.min(this.pickerIndex, choices.length - 1)]
+        if (choice !== undefined) this.applyCustomRefresh(choice)
+        this.mode = 'item'
+        return
+      }
+      case 'custom-timeout': {
+        const choices = this.customTimeoutChoices()
+        const choice = choices[Math.min(this.pickerIndex, choices.length - 1)]
+        if (choice !== undefined) this.applyCustomTimeout(choice)
+        this.mode = 'item'
+        return
+      }
       case 'custom-text':
         if (this.editing) {
           this.commitCustomText()
+          return
+        }
+        this.mode = 'item'
+        return
+      case 'custom-command':
+        if (this.editing) {
+          this.commitCustomCommand()
           return
         }
         this.mode = 'item'
@@ -920,7 +1087,7 @@ export class FooterConfiguratorModel {
           return
         }
         this.customError = ''
-        this.mode = 'create-text'
+        this.mode = this.customKind === 'command' ? 'create-command' : 'create-text'
         return
       }
       case 'create-text':
@@ -932,11 +1099,41 @@ export class FooterConfiguratorModel {
         this.mode = 'create-tone'
         this.pickerIndex = 0
         return
+      case 'create-command':
+        if (this.customCommand.trim() === '') {
+          this.customError = 'Command is required.'
+          return
+        }
+        this.customError = ''
+        this.mode = 'create-refresh'
+        // The picker opens on the DEFAULT refresh (5s), not the first
+        // choice — an unchanged Enter creates the documented default.
+        this.pickerIndex = Math.max(0, CUSTOM_COMMAND_REFRESH_CHOICES_MS.indexOf(DEFAULT_CUSTOM_COMMAND_REFRESH_MS))
+        return
+      case 'create-refresh': {
+        const choice = CUSTOM_COMMAND_REFRESH_CHOICES_MS[Math.min(this.pickerIndex, CUSTOM_COMMAND_REFRESH_CHOICES_MS.length - 1)]
+        if (choice === undefined) return
+        this.customRefresh = choice
+        this.mode = 'create-timeout'
+        // The picker opens on the DEFAULT timeout (300ms).
+        this.pickerIndex = Math.max(0, CUSTOM_COMMAND_TIMEOUT_CHOICES_MS.indexOf(DEFAULT_COMMAND_TIMEOUT_MS))
+        return
+      }
+      case 'create-timeout': {
+        const choice = CUSTOM_COMMAND_TIMEOUT_CHOICES_MS[Math.min(this.pickerIndex, CUSTOM_COMMAND_TIMEOUT_CHOICES_MS.length - 1)]
+        if (choice === undefined) return
+        this.customTimeout = choice
+        this.mode = 'create-tone'
+        this.pickerIndex = 0
+        return
+      }
       case 'create-tone': {
         const choices = FOOTER_TONE_CHOICES
         const choice = choices[Math.min(this.pickerIndex, choices.length - 1)]
         if (choice === undefined) return
-        const created = this.customItems.create(this.customName, this.customText, choice.value)
+        const created = this.customKind === 'command'
+          ? this.customItems.createCommand(this.customName, this.customCommand, this.customRefresh, this.customTimeout, choice.value)
+          : this.customItems.create(this.customName, this.customText, choice.value)
         if (created.item === undefined) {
           this.customError = created.error ?? 'Custom footer item could not be created.'
           return
@@ -969,8 +1166,14 @@ export class FooterConfiguratorModel {
         const matches = this.addMatches()
         if (this.pickerIndex >= matches.length) {
           if (this.flatCount() >= MAX_ITEMS_PER_ROW) return
+          // The trailing actions: Create Custom Text, then Create Custom
+          // Command (PR D §13.3).
+          this.customKind = this.pickerIndex - matches.length === 1 ? 'command' : 'text'
           this.customName = ''
           this.customText = ''
+          this.customCommand = ''
+          this.customRefresh = DEFAULT_CUSTOM_COMMAND_REFRESH_MS
+          this.customTimeout = DEFAULT_COMMAND_TIMEOUT_MS
           this.customTone = 'auto'
           this.customError = ''
           this.editBuffer = ''
@@ -997,12 +1200,12 @@ export class FooterConfiguratorModel {
   /** Esc: navigate back. Returns false exactly when the configurator
    * should CLOSE (Esc on a clean Row Selector). */
   cancel(): boolean {
-    if ((this.mode === 'advanced' || this.mode === 'custom-text' || this.mode === 'custom-name') && this.editing) {
+    if ((this.mode === 'advanced' || this.mode === 'custom-text' || this.mode === 'custom-command' || this.mode === 'custom-name') && this.editing) {
       // First Esc inside an inline edit cancels the edit, not the page.
       this.editing = false
       this.editBuffer = ''
       this.customError = ''
-      if (this.mode === 'custom-text' || this.mode === 'custom-name') this.mode = 'item'
+      if (this.mode === 'custom-text' || this.mode === 'custom-command' || this.mode === 'custom-name') this.mode = 'item'
       return true
     }
     switch (this.mode) {
@@ -1036,6 +1239,9 @@ export class FooterConfiguratorModel {
         return true
       case 'create-name':
       case 'create-text':
+      case 'create-command':
+      case 'create-refresh':
+      case 'create-timeout':
       case 'create-tone':
         // Creation is a child flow of the Add picker; cancellation never
         // closes the whole configurator and never mutates the draft catalog.
@@ -1045,10 +1251,13 @@ export class FooterConfiguratorModel {
         return true
       case 'custom-delete':
       case 'custom-tone':
+      case 'custom-refresh':
+      case 'custom-timeout':
         this.mode = 'item'
         this.customError = ''
         return true
       case 'custom-text':
+      case 'custom-command':
       case 'custom-name':
         this.mode = 'item'
         this.customError = ''
@@ -1095,8 +1304,9 @@ export class FooterConfiguratorModel {
     this.mode = 'row-move'
   }
 
-  /** Space (Edit Row page): remove the cursor's item (it returns to the
-   * Add picker's pool — Available is derived, never stored). */
+  /** Space (Edit Row page): remove the cursor's item placement (the
+   * picker's catalog is derived from the registry — the DEFINITION stays
+   * addable, and a second placement of the same id may remain placed). */
   removeActive(): void {
     if (this.mode !== 'row') return
     const at = this.refAt(this.cursor)
@@ -1125,9 +1335,11 @@ export class FooterConfiguratorModel {
   }
 
   /** Add one available item to a side of the edited row (appended at the
-   * end; the cursor lands on it). Returns false — with NO mutation —
-   * when the edited row is already at the parser's per-row item cap: a
-   * 33rd item would make every future save fail to parse. */
+   * end; the cursor lands on it). The same id may be added REPEATEDLY —
+   * each call appends an independent placement whose format/tone/prefix/
+   * suffix/importance later diverge freely. Returns false — with NO
+   * mutation — when the edited row is already at the parser's per-row
+   * item cap: a 33rd item would make every future save fail to parse. */
   addAvailable(id: string, zone: 'left' | 'right'): boolean {
     const row = this.editedRow()
     if (row.left.length + row.right.length >= MAX_ITEMS_PER_ROW) return false
@@ -1170,6 +1382,29 @@ export class FooterConfiguratorModel {
     return index < 0 ? 0 : index
   }
 
+  /** The refresh picker opens on the edited command item's current
+   * EFFECTIVE refresh (an unlisted persisted value resolves to its appended
+   * row — never a fake nearest choice). */
+  private currentCustomRefreshIndex(): number {
+    const item = this.editedCustomItem()
+    const current = item?.kind === 'command'
+      ? effectiveCustomCommandRefreshMs(item)
+      : DEFAULT_CUSTOM_COMMAND_REFRESH_MS
+    const index = this.customRefreshChoices().indexOf(current)
+    return index < 0 ? 0 : index
+  }
+
+  /** The timeout picker opens on the edited command item's current
+   * EFFECTIVE timeout. */
+  private currentCustomTimeoutIndex(): number {
+    const item = this.editedCustomItem()
+    const current = item?.kind === 'command'
+      ? effectiveCustomCommandTimeoutMs(item)
+      : DEFAULT_COMMAND_TIMEOUT_MS
+    const index = this.customTimeoutChoices().indexOf(current)
+    return index < 0 ? 0 : index
+  }
+
   /** Printable text: the add picker, custom-definition fields, or the
    * advanced inline editor's buffer. Everything else ignores it. */
   text(data: string): void {
@@ -1190,9 +1425,16 @@ export class FooterConfiguratorModel {
       this.customError = ''
       return
     }
-    if (this.mode === 'custom-text' || this.mode === 'custom-name') {
-      const limit = this.mode === 'custom-text' ? 256 : 64
-      this.editBuffer = [...this.editBuffer + clean].slice(0, limit).join('')
+    if (this.mode === 'create-command') {
+      this.customCommand = this.customCommand + clean
+      this.customError = ''
+      return
+    }
+    if (this.mode === 'custom-text' || this.mode === 'custom-command' || this.mode === 'custom-name') {
+      const limit = this.mode === 'custom-text' ? 256 : this.mode === 'custom-name' ? 64 : Infinity
+      this.editBuffer = limit === Infinity
+        ? this.editBuffer + clean
+        : [...this.editBuffer + clean].slice(0, limit).join('')
       this.customError = ''
       return
     }
@@ -1224,7 +1466,12 @@ export class FooterConfiguratorModel {
       this.customError = ''
       return
     }
-    if ((this.mode === 'custom-text' || this.mode === 'custom-name') && this.editing) {
+    if (this.mode === 'create-command') {
+      this.customCommand = [...this.customCommand].slice(0, -1).join('')
+      this.customError = ''
+      return
+    }
+    if ((this.mode === 'custom-text' || this.mode === 'custom-command' || this.mode === 'custom-name') && this.editing) {
       this.editBuffer = [...this.editBuffer].slice(0, -1).join('')
       this.customError = ''
       return
@@ -1294,6 +1541,36 @@ export class FooterConfiguratorModel {
     this.mode = 'item'
   }
 
+  /** Commit the custom command definition's command string (PR D). */
+  private commitCustomCommand(): void {
+    const id = this.editedRefId()
+    const result = this.customItems.updateCommand(id, this.editBuffer)
+    if (!result.ok) {
+      this.customError = result.error ?? 'Command is invalid.'
+      return
+    }
+    this.customError = ''
+    this.editing = false
+    this.editBuffer = ''
+    this.mode = 'item'
+  }
+
+  /** Persist a command definition's refresh interval in the draft catalog. */
+  private applyCustomRefresh(refreshIntervalMs: number): void {
+    const id = this.editedRefId()
+    const result = this.customItems.updateRefresh(id, refreshIntervalMs)
+    if (!result.ok) this.customError = result.error ?? 'Refresh is invalid.'
+    else this.customError = ''
+  }
+
+  /** Persist a command definition's timeout in the draft catalog. */
+  private applyCustomTimeout(timeoutMs: number): void {
+    const id = this.editedRefId()
+    const result = this.customItems.updateTimeout(id, timeoutMs)
+    if (!result.ok) this.customError = result.error ?? 'Timeout is invalid.'
+    else this.customError = ''
+  }
+
   /** Commit a custom definition rename and update every layout reference so
    * no dangling old `user:*` id remains. */
   private commitCustomName(): void {
@@ -1332,6 +1609,10 @@ export class FooterConfiguratorModel {
   private resetCustomFlow(): void {
     this.customName = ''
     this.customText = ''
+    this.customKind = 'text'
+    this.customCommand = ''
+    this.customRefresh = DEFAULT_CUSTOM_COMMAND_REFRESH_MS
+    this.customTimeout = DEFAULT_COMMAND_TIMEOUT_MS
     this.customTone = 'auto'
     this.customError = ''
     this.editing = false
@@ -1373,6 +1654,10 @@ export class FooterConfiguratorModel {
     this.editBuffer = ''
     this.customName = ''
     this.customText = ''
+    this.customKind = 'text'
+    this.customCommand = ''
+    this.customRefresh = DEFAULT_CUSTOM_COMMAND_REFRESH_MS
+    this.customTimeout = DEFAULT_COMMAND_TIMEOUT_MS
     this.customTone = 'auto'
     this.customError = ''
     // The home selection returns to the first row: the layout identity

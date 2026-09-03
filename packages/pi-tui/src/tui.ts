@@ -48,7 +48,7 @@ export interface Component {
 	/**
 	 * Release resources (timers, listeners, render callbacks) when the
 	 * component is removed from a container. Containers call this on
-	 * removeChild/clear.
+	 * removeChild/clear. (dsh-pi-tui divergence X007.)
 	 */
 	dispose?(): void;
 }
@@ -121,7 +121,7 @@ function parseSizeValue(value: SizeValue | undefined, referenceSize: number): nu
 	// Parse percentage string like "50%"
 	const match = value.match(/^(\d+(?:\.\d+)?)%$/);
 	if (match) {
-		return Math.floor((referenceSize * parseFloat(match[1]!)) / 100);
+		return Math.floor((referenceSize * parseFloat(match[1])) / 100);
 	}
 	return undefined;
 }
@@ -166,6 +166,15 @@ export interface OverlayOptions {
 	visible?: (termWidth: number, termHeight: number) => boolean;
 	/** If true, don't capture keyboard focus when shown */
 	nonCapturing?: boolean;
+	/**
+	 * Dispose the component when the overlay is permanently removed
+	 * (hide() / hideOverlay()) — ownership ends with the removal
+	 * (dsh-pi-tui divergence X007). DEFAULT FALSE (upstream behavior):
+	 * hide() only unregisters, so an integrator that re-mounts the SAME
+	 * component elsewhere (fullscreen screen migration) keeps it alive.
+	 * Set true when this overlay's entry is the component's sole owner.
+	 */
+	disposeOnHide?: boolean;
 }
 
 /** Options for {@link OverlayHandle.unfocus}. */
@@ -235,8 +244,18 @@ export class Container implements Component {
 		this.children = [];
 	}
 
+	/**
+	 * Release every child exactly once (dsh-pi-tui divergence X007
+	 * hardening): the children are detached BEFORE disposal, so a second
+	 * dispose() is a no-op instead of double-disposing the children.
+	 * Deliberately NOT `this.clear()` — ScrollView overrides clear() to
+	 * throw (its child cannot be cleared), and dispose() must stay valid
+	 * for every Container subclass.
+	 */
 	dispose(): void {
-		for (const child of this.children) child.dispose?.();
+		const children = this.children;
+		this.children = [];
+		for (const child of children) child.dispose?.();
 	}
 
 	invalidate(): void {
@@ -248,6 +267,7 @@ export class Container implements Component {
 	render(width: number): string[] {
 		// Extremely narrow terminals can report tiny or even non-positive
 		// column counts; never propagate a width below 1 into components.
+		// (dsh-pi-tui divergence X032.)
 		width = Math.max(1, width);
 		const lines: string[] = [];
 		for (const child of this.children) {
@@ -357,8 +377,8 @@ export abstract class TuiBase extends Container implements TUI {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
-	private showHardwareCursor = process.env['PI_HARDWARE_CURSOR'] === "1";
-	private clearOnShrink = process.env['PI_CLEAR_ON_SHRINK'] === "1";
+	private showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
+	private clearOnShrink = process.env.PI_CLEAR_ON_SHRINK === "1";
 	protected fullRedrawCount = 0;
 	protected stopped = false;
 	private pendingOsc11BackgroundReplies = 0;
@@ -379,7 +399,7 @@ export abstract class TuiBase extends Container implements TUI {
 	constructor(terminal: Terminal, showHardwareCursor?: boolean, logDirectory?: string) {
 		super();
 		this.terminal = terminal;
-		this.logDirectory = logDirectory ?? process.env['PI_CODING_AGENT_DIR'] ?? path.join(os.homedir(), ".pi", "agent");
+		this.logDirectory = logDirectory ?? process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
 		if (showHardwareCursor !== undefined) {
 			this.showHardwareCursor = showHardwareCursor;
 		}
@@ -586,6 +606,12 @@ export abstract class TuiBase extends Container implements TUI {
 					this.clearOverlayFocusRestoreFor(entry);
 					this.retargetOverlayPreFocus(entry);
 					this.overlayStack.splice(index, 1);
+					// Opt-in ownership end (dsh-pi-tui divergence X007): with
+					// disposeOnHide the removal releases the component's
+					// resources. The stack-guard makes this run exactly once
+					// per removal; the default (no flag) keeps upstream
+					// behavior so re-mountable integrations stay alive.
+					if (options?.disposeOnHide === true) component.dispose?.();
 					// Restore focus if this overlay had focus
 					if (this.focusedComponent === component) {
 						const topVisible = this.getTopmostVisibleOverlay();
@@ -664,6 +690,9 @@ export abstract class TuiBase extends Container implements TUI {
 		this.clearOverlayFocusRestoreFor(overlay);
 		this.retargetOverlayPreFocus(overlay);
 		this.overlayStack.pop();
+		// Opt-in ownership end (dsh-pi-tui divergence X007, same contract
+		// as OverlayHandle.hide's disposeOnHide).
+		if (overlay.options?.disposeOnHide === true) overlay.component.dispose?.();
 		if (this.focusedComponent === overlay.component) {
 			// Find topmost visible overlay, or fall back to preFocus
 			const topVisible = this.getTopmostVisibleOverlay();
@@ -676,6 +705,13 @@ export abstract class TuiBase extends Container implements TUI {
 	/** Check if there are any visible overlays */
 	hasOverlay(): boolean {
 		return this.overlayStack.some((o) => this.isOverlayVisible(o));
+	}
+
+	/** Check if the focused component is a visible overlay */
+	protected isOverlayFocused(): boolean {
+		return this.overlayStack.some(
+			(entry) => entry.component === this.focusedComponent && this.isOverlayVisible(entry),
+		);
 	}
 
 	/** Check if an overlay entry is currently visible */
@@ -839,6 +875,15 @@ export abstract class TuiBase extends Container implements TUI {
 		if (this.consumeTerminalColorSchemeReport(data)) {
 			return;
 		}
+		// Consume terminal cell size responses BEFORE the input listeners
+		// (dsh-pi-tui divergence X046): every terminal-owned protocol reply
+		// is filtered before the host/raw listeners run, so a listener that
+		// consumes every chunk (a question/approval modal, an unstable raw
+		// capture) can never swallow the reply and leave the cell
+		// dimensions stale. Upstream consumes it after the listeners.
+		if (this.consumeCellSizeResponse(data)) {
+			return;
+		}
 
 		if (this.inputListeners.size > 0) {
 			let current = data;
@@ -855,11 +900,6 @@ export abstract class TuiBase extends Container implements TUI {
 				return;
 			}
 			data = current;
-		}
-
-		// Consume terminal cell size responses without blocking unrelated input.
-		if (this.consumeCellSizeResponse(data)) {
-			return;
 		}
 
 		// Global debug key handler (Shift+Ctrl+D)
@@ -913,9 +953,11 @@ export abstract class TuiBase extends Container implements TUI {
 	private consumeOsc11BackgroundResponse(data: string): boolean {
 		// A reply that arrives after its query timed out must still be
 		// swallowed: it is a terminal protocol response, never editor input.
+		// (dsh-pi-tui divergence X008.)
 		if (!isOsc11BackgroundColorResponse(data)) {
 			return false;
 		}
+
 		if (this.pendingOsc11BackgroundReplies <= 0) {
 			return true;
 		}
@@ -954,8 +996,8 @@ export abstract class TuiBase extends Container implements TUI {
 			return false;
 		}
 
-		const heightPx = parseInt(match[1]!, 10);
-		const widthPx = parseInt(match[2]!, 10);
+		const heightPx = parseInt(match[1], 10);
+		const widthPx = parseInt(match[2], 10);
 		if (heightPx <= 0 || widthPx <= 0) {
 			return true;
 		}
@@ -1022,7 +1064,7 @@ export abstract class TuiBase extends Container implements TUI {
 				const match = opt.row.match(/^(\d+(?:\.\d+)?)%$/);
 				if (match) {
 					const maxRow = Math.max(0, availHeight - effectiveHeight);
-					const percent = parseFloat(match[1]!) / 100;
+					const percent = parseFloat(match[1]) / 100;
 					row = marginTop + Math.floor(maxRow * percent);
 				} else {
 					// Invalid format, fall back to center
@@ -1044,7 +1086,7 @@ export abstract class TuiBase extends Container implements TUI {
 				const match = opt.col.match(/^(\d+(?:\.\d+)?)%$/);
 				if (match) {
 					const maxCol = Math.max(0, availWidth - width);
-					const percent = parseFloat(match[1]!) / 100;
+					const percent = parseFloat(match[1]) / 100;
 					col = marginLeft + Math.floor(maxCol * percent);
 				} else {
 					// Invalid format, fall back to center
@@ -1158,8 +1200,8 @@ export abstract class TuiBase extends Container implements TUI {
 					// Defensive: truncate overlay line to declared width before compositing
 					// (components should already respect width, but this ensures it)
 					const truncatedOverlayLine =
-						visibleWidth(overlayLines[i]!) > w ? sliceByColumn(overlayLines[i]!, 0, w, true) : overlayLines[i]!;
-					result[idx] = this.compositeLineAt(result[idx]!, truncatedOverlayLine, col, w, termWidth);
+						visibleWidth(overlayLines[i]) > w ? sliceByColumn(overlayLines[i], 0, w, true) : overlayLines[i];
+					result[idx] = this.compositeLineAt(result[idx], truncatedOverlayLine, col, w, termWidth);
 				}
 			}
 		}
@@ -1170,7 +1212,7 @@ export abstract class TuiBase extends Container implements TUI {
 	protected applyLineResets(lines: string[]): string[] {
 		const reset = SEGMENT_RESET;
 		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i]!;
+			const line = lines[i];
 			if (!isImageLine(line)) {
 				lines[i] = normalizeTerminalOutput(line) + reset;
 			}
@@ -1200,7 +1242,7 @@ export abstract class TuiBase extends Container implements TUI {
 		// Only scan the bottom `height` lines (visible viewport)
 		const viewportTop = Math.max(0, lines.length - height);
 		for (let row = lines.length - 1; row >= viewportTop; row--) {
-			const line = lines[row]!;
+			const line = lines[row];
 			const markerIndex = line.indexOf(CURSOR_MARKER);
 			if (markerIndex !== -1) {
 				// Calculate visual column (width of text before marker)
@@ -1235,18 +1277,18 @@ export abstract class TuiBase extends Container implements TUI {
 				}
 				query.settled = true;
 				query.timer = undefined;
+				query.resolve?.(undefined);
+				query.resolve = undefined;
 				// The reply may still arrive late. Drop the query from the queue so
 				// the pending counter stays in sync: without this, every timed-out
 				// query leaked +1 into pendingOsc11BackgroundReplies, which made
 				// later unrelated input get consumed as replies and shifted the
-				// queue/counter pair out of alignment.
+				// queue/counter pair out of alignment. (dsh-pi-tui divergence X008.)
 				const index = this.pendingOsc11BackgroundQueries.indexOf(query);
 				if (index !== -1) {
 					this.pendingOsc11BackgroundQueries.splice(index, 1);
 					this.pendingOsc11BackgroundReplies -= 1;
 				}
-				query.resolve?.(undefined);
-				query.resolve = undefined;
 			}, timeoutMs);
 			this.pendingOsc11BackgroundQueries.push(query);
 			this.pendingOsc11BackgroundReplies += 1;

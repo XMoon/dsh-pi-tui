@@ -27,7 +27,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentRegistry, { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -36,6 +36,7 @@ import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SkillRegistry, { type SkillProvider } from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -69,6 +70,7 @@ function fixtureProvider(): SkillProvider {
 async function mountRuntime(): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(Loader)
+  ctx.baseUrl = pathToFileURL(`${process.cwd()}/`).href
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, {})
@@ -77,9 +79,13 @@ async function mountRuntime(): Promise<Context> {
   await ctx.plugin(AgentLoop)
   await ctx.plugin(CommandRuntime)
   await ctx.plugin(SkillRegistry, {})
+  // alpha.2 agent-presets registers its projection unit at construction and
+  // requires the shared projection registry to be composed first.
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentPresets, {
     default: 'fixture',
     roots: [{ path: FIXTURE_ROOT, trust: 'system' }],
+    includeShippedRoot: false,
     includeUserRoot: false,
   })
   return ctx
@@ -156,7 +162,7 @@ test('the standing mount is reused: the same key object on re-resolution and aft
       await handle.agent.whenIdle()
       const key3 = await presets.standingKeyFor('fixture')
       assert.equal(key3, key1, 'the real Agent must join the existing standing generation, not mount a second one')
-      assert.equal(handle.agent.session.events.length, 0, 'the fixture composition stays zero-event')
+      assert.equal(Number(handle.agent.session.seq), 0, 'the fixture composition stays zero-event')
     } finally {
       await handle.dispose()
     }

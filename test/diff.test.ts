@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { computeDiffLines, renderDiffView } from '../src/diff.ts'
+import { computeDiffLines, renderDiffView, type AnchoredFileDiff } from '../src/diff.ts'
 
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 
@@ -57,7 +57,7 @@ test('renderDiffView clusters changes and elides unchanged middle runs', () => {
   const oldText = Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n')
   const newText = Array.from({ length: 20 }, (_, i) => (i === 2 ? `line ${i} CHANGED` : i === 17 ? `line ${i} CHANGED` : `line ${i}`)).join('\n')
   const lines = renderDiffView([{ path: 'f.ts', oldText, newText }]).map(strip)
-  assert.ok(lines.some(line => line.startsWith('     … ') && line.includes('unchanged line')), `elision missing:\n${lines.join('\n')}`)
+  assert.ok(lines.some(line => line.startsWith('… ') && line.includes('unchanged line')), `elision missing:\n${lines.join('\n')}`)
   assert.ok(lines.some(line => line.includes('+ line 2 CHANGED')), `first change missing:\n${lines.join('\n')}`)
   assert.ok(lines.some(line => line.includes('+ line 17 CHANGED')), `second change missing:\n${lines.join('\n')}`)
 })
@@ -78,4 +78,86 @@ test('renderDiffView shows only new lines for a create and only old lines for a 
   const deleted = renderDiffView([{ path: 'gone.ts', oldText: 'x\ny', newText: '' }]).map(strip)
   assert.equal(deleted[0], '-2 gone.ts')
   assert.ok(!deleted.some(line => line.startsWith('+ ')), `deletion must not render additions:\n${deleted.join('\n')}`)
+})
+
+// ── absolute line-number anchors (plan: hide the gutter, never guess) ───
+
+/** Whether a rendered body row carries a gutter (a padded absolute line
+ * number before the diff marker). */
+function hasGutter(line: string): boolean {
+  return /^\s*\d+\s/.test(line)
+}
+
+test('no anchor: the body renders WITHOUT a fake absolute gutter (Case A)', () => {
+  const lines = renderDiffView([{ path: 'foo.ts', oldText: 'a\nold\nc', newText: 'a\nnew\nc' }]).map(strip)
+  assert.equal(lines[0], '+1 -1 foo.ts', 'the +N -M header stays')
+  assert.ok(lines.some(line => line.includes('- old')), `delete row missing:\n${lines.join('\n')}`)
+  assert.ok(lines.some(line => line.includes('+ new')), `add row missing:\n${lines.join('\n')}`)
+  const body = lines.slice(1)
+  assert.ok(!body.some(hasGutter),
+    `a hunk without anchors must never render a fake absolute gutter:\n${lines.join('\n')}`)
+})
+
+test('with anchors: the real absolute line numbers render (Case B)', () => {
+  const lines = renderDiffView([{
+    path: 'foo.ts',
+    oldText: 'a\nold\nc',
+    newText: 'a\nnew\nc',
+    oldStart: 830,
+    newStart: 830,
+  } as AnchoredFileDiff]).map(strip)
+  assert.equal(lines[0], '+1 -1 foo.ts')
+  const deleteRow = lines.find(line => line.includes('- old'))
+  const addRow = lines.find(line => line.includes('+ new'))
+  assert.ok(deleteRow !== undefined && hasGutter(deleteRow), `anchored delete must carry a gutter:\n${lines.join('\n')}`)
+  assert.ok(addRow !== undefined && hasGutter(addRow), `anchored add must carry a gutter:\n${lines.join('\n')}`)
+  // LCS alignment: context 'a' = 830, the delete is the OLD side line 831,
+  // the add the NEW side line 831, the trailing context 'c' advances to 832.
+  assert.match(deleteRow, /^\s*831\s+- old/, `old-side anchor wrong: ${deleteRow}`)
+  assert.match(addRow, /^\s*831\s+\+ new/, `new-side anchor wrong: ${addRow}`)
+  const contextRow = lines.find(line => line.includes('  c'))
+  assert.ok(contextRow !== undefined && /^\s*832\s+/.test(contextRow), `context must advance past the anchor: ${contextRow}`)
+})
+
+test('anchors are validated: a missing or malformed anchor falls back to no gutter', () => {
+  const base = { path: 'foo.ts', oldText: 'a\nold\nc', newText: 'a\nnew\nc' }
+  for (const hunk of [
+    { ...base, oldStart: 0, newStart: 0 },
+    { ...base, oldStart: 1.5, newStart: 1 },
+    { ...base, oldStart: 1 },
+    { ...base, oldStart: 1, newStart: undefined },
+  ]) {
+    const lines = renderDiffView([hunk]).map(strip)
+    assert.ok(!lines.slice(1).some(hasGutter),
+      `malformed anchors must not render a gutter: ${JSON.stringify(hunk)}\n${lines.join('\n')}`)
+  }
+})
+
+test('create/delete with anchors: only the present side gets real numbers (Cases C/D)', () => {
+  const created = renderDiffView([{ path: 'new.ts', oldText: null, newText: 'x\ny', oldStart: 1, newStart: 40 } as AnchoredFileDiff]).map(strip)
+  assert.equal(created[0], '+2 new.ts')
+  assert.ok(created.some(line => /^\s*40\s+\+ x/.test(line)), `create new-side anchor missing:\n${created.join('\n')}`)
+  assert.ok(created.some(line => /^\s*41\s+\+ y/.test(line)), `create new-side advance missing:\n${created.join('\n')}`)
+  const deleted = renderDiffView([{ path: 'gone.ts', oldText: 'x\ny', newText: '', oldStart: 77, newStart: 1 } as AnchoredFileDiff]).map(strip)
+  assert.equal(deleted[0], '-2 gone.ts')
+  assert.ok(deleted.some(line => /^\s*77\s+- x/.test(line)), `delete old-side anchor missing:\n${deleted.join('\n')}`)
+  assert.ok(deleted.some(line => /^\s*78\s+- y/.test(line)), `delete old-side advance missing:\n${deleted.join('\n')}`)
+})
+
+test('no anchor: create/delete render no gutter at all (Cases C/D)', () => {
+  const created = renderDiffView([{ path: 'new.ts', oldText: null, newText: 'x\ny' }]).map(strip)
+  assert.ok(!created.slice(1).some(hasGutter), `create without anchors must not render a gutter:\n${created.join('\n')}`)
+  const deleted = renderDiffView([{ path: 'gone.ts', oldText: 'x\ny', newText: '' }]).map(strip)
+  assert.ok(!deleted.slice(1).some(hasGutter), `delete without anchors must not render a gutter:\n${deleted.join('\n')}`)
+})
+
+test('anchored elision and truncation footers align with the gutter column', () => {
+  const oldText = Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n')
+  const newText = Array.from({ length: 20 }, (_, i) => (i === 2 ? `line ${i} CHANGED` : i === 17 ? `line ${i} CHANGED` : `line ${i}`)).join('\n')
+  const anchored = renderDiffView([{ path: 'f.ts', oldText, newText, oldStart: 100, newStart: 100 } as AnchoredFileDiff]).map(strip)
+  assert.ok(anchored.some(line => line.startsWith('     … ') && line.includes('unchanged line')),
+    `anchored elision must keep the gutter-column indent:\n${anchored.join('\n')}`)
+  const plain = renderDiffView([{ path: 'f.ts', oldText, newText }]).map(strip)
+  assert.ok(plain.some(line => line.startsWith('… ') && line.includes('unchanged line')),
+    `unanchored elision must start at column 0:\n${plain.join('\n')}`)
 })

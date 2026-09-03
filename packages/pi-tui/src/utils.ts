@@ -47,7 +47,11 @@ const terminalSpacingMarkRegex =
 	/^(?:[\p{Spacing_Mark}--[\u1734\u302E\u302F]]|[\u065F\u0F7F\u102B\u102C\u1031\u1033-\u1035\u1038\u103A-\u103E])+$/v;
 const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
 
-// Cache for non-ASCII strings
+// Cache for non-ASCII strings. 4096 (dsh-pi-tui divergence X039, kimi-era
+// value): the host renders CJK-heavy transcripts where a 512-entry FIFO
+// thrashes on width changes / theme invalidations / cold renders that
+// re-measure many non-ASCII lines; the entry cost is a short string key.
+// (Upstream 0.84.4 uses 512.)
 const WIDTH_CACHE_SIZE = 4096;
 const widthCache = new Map<string, number>();
 
@@ -563,7 +567,7 @@ class AnsiCodeTracker {
 		const match = ansiCode.match(/\x1b\[([\d;]*)m/);
 		if (!match) return;
 
-		const params = match[1]!;
+		const params = match[1];
 		if (params === "" || params === "0") {
 			// Full reset
 			this.reset();
@@ -574,7 +578,7 @@ class AnsiCodeTracker {
 		const parts = params.split(";");
 		let i = 0;
 		while (i < parts.length) {
-			const code = Number.parseInt(parts[i]!, 10);
+			const code = Number.parseInt(parts[i], 10);
 
 			// Handle 256-color and RGB codes which consume multiple parameters
 			if (code === 38 || code === 48) {
@@ -742,6 +746,7 @@ class AnsiCodeTracker {
 	 * style. The background is deliberately LEFT OPEN: padding must keep the
 	 * cell's background. Active OSC 8 hyperlinks are closed and re-opened on
 	 * the next line. Returns empty string if no attributes need closing.
+	 * (dsh-pi-tui divergence X021.)
 	 */
 	getLineEndReset(): string {
 		let result = "";
@@ -943,7 +948,7 @@ function wrapSingleLine(line: string, width: number): string[] {
 			for (let i = 0; i < broken.length - 1; i++) {
 				wrapped.push(broken[i]!);
 			}
-			currentLine = broken[broken.length - 1]!;
+			currentLine = broken[broken.length - 1];
 			currentVisibleLength = visibleWidth(currentLine);
 			continue;
 		}
@@ -980,6 +985,7 @@ function wrapSingleLine(line: string, width: number): string[] {
 		// Close non-background attributes at the end of the final line too, so
 		// every emitted physical line is self-contained: content appended after
 		// the wrap (cell padding, table borders) cannot inherit the color.
+		// (dsh-pi-tui divergence X021.)
 		const lineEndReset = tracker.getLineEndReset();
 		if (lineEndReset) {
 			currentLine += lineEndReset;

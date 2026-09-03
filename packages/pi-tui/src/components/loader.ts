@@ -40,7 +40,7 @@ export class Loader extends Text {
 		this.setIndicator(indicator);
 	}
 
-	override render(width: number): string[] {
+	render(width: number): string[] {
 		return ["", ...super.render(width)];
 	}
 
@@ -56,15 +56,15 @@ export class Loader extends Text {
 		}
 	}
 
-	/** Release the animation timer; containers call this on removal. */
-	override dispose(): void {
-		this.stop();
-		super.dispose();
-	}
-
 	setMessage(message: string): void {
 		this.message = message;
 		this.updateDisplay();
+	}
+
+	/** Release the animation timer; containers call this on removal. (dsh-pi-tui divergence X007.) */
+	override dispose(): void {
+		this.stop();
+		super.dispose();
 	}
 
 	setIndicator(indicator?: LoaderIndicatorOptions): void {
@@ -72,12 +72,7 @@ export class Loader extends Text {
 		this.frames = indicator?.frames !== undefined ? [...indicator.frames] : [...DEFAULT_FRAMES];
 		this.intervalMs = indicator?.intervalMs && indicator.intervalMs > 0 ? indicator.intervalMs : DEFAULT_INTERVAL_MS;
 		this.currentFrame = 0;
-		// Reconfigure WITHOUT restarting a stopped loader: setIndicator after
-		// stop() must stay stopped (the old code unconditionally re-started).
-		if (this.intervalId !== null) {
-			this.restartAnimation();
-		}
-		this.updateDisplay();
+		this.start();
 	}
 
 	private restartAnimation(): void {

@@ -114,7 +114,7 @@ test('the Direct config-port trust read resolves the same USER-layer facts', asy
 test('the Direct custom-item read separates USER raw storage from the safe runtime projection', async () => {
   const userRaw: unknown[] = [
     { schemaVersion: 1, id: 'user:user-owned', kind: 'text', text: 'USER' },
-    { schemaVersion: 1, id: 'user:future-command', kind: 'command', command: 'date', payload: { nested: ['preserve'] } },
+    { schemaVersion: 1, id: 'user:future-command', kind: 'future-kind', command: 'date', payload: { nested: ['preserve'] } },
   ]
   const projectRaw: unknown[] = [{ schemaVersion: 1, id: 'user:project-owned', kind: 'text', text: 'PROJECT' }]
   const port = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
@@ -209,6 +209,7 @@ test('TuiSettingsDoc round-trip: a whole-document replace never wipes the truste
     localShellSandbox: 'bypass',
     homeEndKeys: 'input',
     focusMode: 'off',
+    wheelScrollLines: '1',
     keybindings: { version: 1, bindings: {} },
   }
   const port = new DirectConfigPort({ get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', user: { footerCommand } }] }) } as never, {
@@ -226,4 +227,84 @@ test('TuiSettingsDoc round-trip: a whole-document replace never wipes the truste
     'footerCommand must survive a whole-document replace')
   assert.deepEqual(reread.footerCustomItems, footerCustomItems,
     'footerCustomItems must survive a whole-document replace')
+})
+
+test('the USER-layer activation ids are mode-gated (PR D activation trust)', async () => {
+  const userLayout = { schemaVersion: 1, rows: [{ left: [{ id: 'user:clock' }], right: [] }] }
+  // The PROJECT (merged) layer supplies footer: custom + a layout
+  // referencing user:clock; the USER layer declares footer: default and
+  // no layout → the authorization is EMPTY.
+  const port = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'custom', footerLayout: userLayout },
+      user: { footer: 'default' },
+    }] }),
+  } as never, undefined, () => undefined)
+  assert.equal(port.footerCommandTrust.userCommandItemActivationIds.size, 0,
+    'a project merged layout must never authorize USER command items')
+
+  // A STALE leftover layout under footer: default authorizes nothing even
+  // though the layout itself is present and valid (the /settings switch
+  // keeps the old layout).
+  const stalePort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'custom', footerLayout: userLayout },
+      user: { footer: 'default', footerLayout: userLayout },
+    }] }),
+  } as never, undefined, () => undefined)
+  assert.equal(stalePort.footerCommandTrust.userCommandItemActivationIds.size, 0,
+    'a stale layout under footer: default must authorize nothing')
+
+  // The USER layer declaring custom + a valid layout IS the authorization.
+  const userPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'custom', footerLayout: userLayout },
+      user: { footer: 'custom', footerLayout: userLayout },
+    }] }),
+  } as never, undefined, () => undefined)
+  assert.deepEqual([...userPort.footerCommandTrust.userCommandItemActivationIds], ['user:clock'])
+
+  // An INVALID user layout authorizes nothing (fail-safe).
+  const invalidPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      user: { footer: 'custom', footerLayout: { schemaVersion: 1, rows: 'junk' } },
+    }] }),
+  } as never, undefined, () => undefined)
+  assert.equal(invalidPort.footerCommandTrust.userCommandItemActivationIds.size, 0)
+
+  // The FALLBACK authorization follows the USER's own footerFallbackMode:
+  // custom + a valid layout → its refs; default → empty.
+  const fallbackPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'command', footerFallbackMode: 'custom', footerLayout: userLayout },
+      user: { footer: 'command', footerFallbackMode: 'custom', footerLayout: userLayout },
+    }] }),
+  } as never, undefined, () => undefined)
+  assert.deepEqual([...fallbackPort.footerCommandTrust.userCommandItemFallbackActivationIds], ['user:clock'])
+  const defaultFallbackPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      user: { footer: 'command', footerFallbackMode: 'default', footerLayout: userLayout },
+    }] }),
+  } as never, undefined, () => undefined)
+  assert.equal(defaultFallbackPort.footerCommandTrust.userCommandItemFallbackActivationIds.size, 0)
+
+  // The fallback property encodes the FULL semantic itself: a USER who
+  // never opted into command mode (footer: default) authorizes NOTHING
+  // even with stale footerFallbackMode: custom + a stale layout — no
+  // caller can forget the outer mode gate.
+  const staleFallbackPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
+    get: () => ({ describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footer: 'command', footerFallbackMode: 'custom', footerLayout: userLayout },
+      user: { footer: 'default', footerFallbackMode: 'custom', footerLayout: userLayout },
+    }] }),
+  } as never, undefined, () => undefined)
+  assert.equal(staleFallbackPort.footerCommandTrust.userCommandItemFallbackActivationIds.size, 0,
+    'stale fallback metadata under footer: default must authorize nothing')
 })

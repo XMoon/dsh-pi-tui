@@ -10,17 +10,32 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { afterEach, test } from 'node:test'
+import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -44,13 +59,13 @@ function longThoughtTurn(seqBase: number): SessionEvent[] {
       source: { kind: 'user' },
     }, T0 + 1, seqBase + 1),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the projection…' } }, T0 + 2, seqBase + 2),
-    eventAt('tool/call', { turn: 1, step: 0, callId: CallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'seq 1 120' }) }, T0 + 3, seqBase + 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'seq 1 120' }) }, T0 + 3, seqBase + 3),
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
         id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: lines }] }],
-        source: { kind: 'tool', callId: CallId('c1') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: lines }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, seqBase + 4),
     eventAt('assistant/message', {
@@ -137,6 +152,7 @@ test('clicking an expanded SECONDARY body collapses only the secondary (plan §3
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(longThoughtTurn(0))
   app.setFocusMode(true)
@@ -216,6 +232,7 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(longThoughtTurn(0))
   app.setFocusMode(true)
@@ -308,6 +325,7 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
     imageTheme: { fallbackColor: (text) => text },
   })
   app.start()
+  startedApps.add(app)
   /** The alt screen treats a fast repeat at the same cell as a double-click
    * (word selection) — pause between attachment clicks like the existing
    * collapse test. */
@@ -341,7 +359,7 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
       source: { kind: 'user' },
     }, T0 + 1, 101),
     eventAt('assistant/chunk', { turn: 2, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'inspecting…' } }, T0 + 2, 102),
-    eventAt('tool/call', { turn: 2, step: 0, callId: CallId('c2'), name: 'read', arguments: JSON.stringify({ path: 'src/x.ts' }) }, T0 + 3, 103),
+    eventAt('tool/call', { turn: 2, step: 0, callId: ToolCallId('c2'), name: 'read', arguments: JSON.stringify({ path: 'src/x.ts' }) }, T0 + 3, 103),
   ])
   app.setFocusMode(true)
   show(app, folder)
@@ -392,13 +410,13 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
       content: [{ type: 'text', text: 'make it big' }],
       source: { kind: 'user' },
     }, T0 + 1, 201),
-    eventAt('tool/call', { turn: 3, step: 0, callId: CallId('c3'), name: 'bash', arguments: JSON.stringify({ command: 'seq 1 3' }) }, T0 + 2, 202),
+    eventAt('tool/call', { turn: 3, step: 0, callId: ToolCallId('c3'), name: 'bash', arguments: JSON.stringify({ command: 'seq 1 3' }) }, T0 + 2, 202),
     eventAt('tool/result', {
       turn: 3, step: 0,
       message: {
         id: MessageId('r3'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: CallId('c3'), content: [{ type: 'text', text: '1\n2\n3' }] }],
-        source: { kind: 'tool', callId: CallId('c3') },
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c3'), content: [{ type: 'text', text: '1\n2\n3' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c3') },
       },
     }, T0 + 3, 203),
     eventAt('assistant/message', {
@@ -467,6 +485,7 @@ test('resize keeps the click map aligned: secondary closes first, then the root 
   const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply(longThoughtTurn(0))
   app.setFocusMode(true)

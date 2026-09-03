@@ -6,9 +6,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { createDiag, diagFromEnv, diagLevelFromEnv, formatDiagTime, type DiagSink } from '../src/diag.ts'
 
 /** Collect every written line. */
@@ -58,20 +58,17 @@ test('stderrLevel off suppresses nothing else; diagFromEnv resolves the file lev
   diag.dispose()
 })
 
-test('file sink appends to the configured path and applies the file level', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'diag-test-'))
-  try {
-    const path = join(dir, 'tui.log')
-    const diag = createDiag({ fileLevel: 'info', stderrLevel: 'off', filePath: path })
-    diag.debug('dropped by the info threshold')
-    diag.info('boot', { pid: 7 })
-    diag.dispose()
-    const content = readFileSync(path, 'utf8')
-    assert.match(content, / INFO boot pid=7\n$/)
-    assert.ok(!content.includes('dropped by the info threshold'), 'debug line must be filtered out of the file')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('file sink appends to the configured path and applies the file level', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('diag-test-')
+  const path = join(dir, 'tui.log')
+  const diag = createDiag({ fileLevel: 'info', stderrLevel: 'off', filePath: path })
+  diag.debug('dropped by the info threshold')
+  diag.info('boot', { pid: 7 })
+  diag.dispose()
+  const content = readFileSync(path, 'utf8')
+  assert.match(content, / INFO boot pid=7\n$/)
+  assert.ok(!content.includes('dropped by the info threshold'), 'debug line must be filtered out of the file')
 })
 
 test('a hostile field value never throws: circular + hostile toString both degrade', () => {

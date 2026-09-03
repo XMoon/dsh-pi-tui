@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import test from 'node:test'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import {
   assertNoCompatibilityFailures,
+  assertOfficialPresetHeader,
   candidateArgument,
   compatibilityFailureLine,
   fixtureImportViolations,
@@ -13,11 +15,21 @@ import {
   isRetryableRegistryFailure,
   redact,
   requireExactVersion,
+  resolveTarball,
   retryDiagnostic,
   RESIZE_FAILURE_PHASE,
+  classifyConsumerMetadata,
+  failConsumerMetadata,
   validateCandidatePackageData,
+  validateConsumerMetadata,
   validateFixturePackageData,
   validateManifest,
+  validateTargetDshManifest,
+  smokeOfficialPresetMounts,
+  officialPresetStatusCommand,
+  officialPresetStatusVisible,
+  settingsSearchSnapshot,
+  presetDegradationLine,
   CI_ECOSYSTEM_TIMEOUT_MS,
   CLEANUP_BUDGET_MS,
   GATE_BUDGET_MS,
@@ -34,10 +46,23 @@ test('pi2dsh smoke isolates credential-bearing parent environment variables', ()
     assert.equal(env.HOME, '/tmp/compat-home', 'the TUI must receive the temporary HOME')
     assert.equal(env.DSH_HOME, '/tmp/compat-dsh', 'the TUI must receive the temporary DSH_HOME')
     assert.equal(env.PI2DSH_COMPAT_EVIDENCE, '/tmp/evidence.json', 'the TUI must receive the isolated evidence path')
+    assert.equal(env.PI2DSH_COMPAT_HEADER_EVIDENCE, '/tmp/compat-work/header-evidence.json', 'the TUI must receive the isolated durable-header evidence path')
+    assert.equal(env.PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN, 'false')
+    assert.equal(env.PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS, 'false')
   } finally {
     if (previous === undefined) delete process.env[canary]
     else process.env[canary] = previous
   }
+})
+
+test('pi2dsh smoke rejects a symlinked candidate tarball', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('dsh-pi2dsh-candidate-link-')
+  const target = join(directory, 'external.tgz')
+  const candidate = join(directory, 'candidate.tgz')
+  writeFileSync(target, 'not a tarball')
+  symlinkSync(target, candidate)
+  assert.throws(() => resolveTarball(candidate), /candidate tarball not found/u)
 })
 
 test('pi2dsh smoke accepts pnpm separator arguments and enforces installed versions', () => {
@@ -50,11 +75,194 @@ test('pi2dsh smoke accepts pnpm separator arguments and enforces installed versi
   assert.throws(() => validateCandidatePackageData({ name: '@xmoon76/dsh-pi-tui', version: '0.3.3' }, { name: '@xmoon76/dsh-pi-tui', version: '0.3.4' }), /candidate package mismatch/u)
 })
 
-test('pi2dsh smoke pins the required published compatibility baseline', () => {
+test('pi2dsh smoke treats the compatibility manifest as its version source of truth', () => {
   const manifest = JSON.parse(readFileSync(join(process.cwd(), 'test', 'compat', 'pi2dsh.json'), 'utf8'))
   assert.doesNotThrow(() => validateManifest(manifest))
-  assert.throws(() => validateManifest({ ...manifest, pi2dshVersion: '0.20.1' }), /must pin 0\.20\.0/u)
-  assert.throws(() => validateManifest({ ...manifest, dshVersion: '0.1.1-rc.3' }), /must pin 0\.1\.1-rc\.2/u)
+  assert.throws(() => validateManifest({ ...manifest, pi2dshVersion: 'not-a-version' }), /exact pi2dsh version/u)
+  assert.throws(() => validateManifest({ ...manifest, dshVersion: 'not-a-version' }), /exact target DSH version/u)
+})
+
+test('official preset validation is independent of pi2dsh consumer metadata', () => {
+  assert.equal(validateTargetDshManifest({ dshVersion: '0.1.2-alpha.1' }), '0.1.2-alpha.1')
+  assert.doesNotThrow(() => validateTargetDshManifest({ dshVersion: '0.1.2-alpha.1', consumer: 'unreleased-bridge' }))
+  assert.throws(() => validateTargetDshManifest({ dshVersion: 'not-a-version' }), /exact target DSH version/u)
+  assert.equal(typeof smokeOfficialPresetMounts, 'function', 'the real official matrix must be independently callable')
+  assert.equal(officialPresetStatusCommand(), '/preset status')
+  assert.equal(officialPresetStatusVisible('ptc', 'preset: ptc · default: ptc'), true)
+  assert.equal(officialPresetStatusVisible('ptc', 'preset: standard · default: ptc'), false)
+})
+
+test('pi2dsh metadata preflight blocks an unsupported consumer contract', () => {
+  const manifest = { dshVersion: '0.1.2-alpha.1' }
+  const candidate = { name: '@xmoon76/dsh-pi-tui', version: '0.4.0-alpha.1' }
+  const supported = {
+    name: 'pi2dsh',
+    version: '0.23.0',
+    peerDependencies: {
+      '@xmoon76/dsh-pi-tui': '^0.4.0-alpha.1',
+      '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1',
+      '@deepseek-ai/dsh-commands': '>=0.1.2-alpha.1',
+    },
+  }
+  assert.doesNotThrow(() => validateConsumerMetadata(supported, manifest, candidate))
+
+  // A DSH peer mismatch and a missing dsh-peer set stay BLOCKING.
+  for (const consumerPackage of [
+    { ...supported, peerDependencies: { ...supported.peerDependencies, '@deepseek-ai/dsh-agent': '^0.1.1' } },
+    { ...supported, peerDependencies: { '@xmoon76/dsh-pi-tui': '^0.4.0-alpha.1' } },
+  ]) {
+    assert.throws(
+      () => validateConsumerMetadata(consumerPackage, manifest, candidate),
+      error => error?.name === 'CompatFailure'
+        && error?.phase === 'ECOSYSTEM_CONTRACT_BLOCKER'
+        && error.message.includes('DSH 0.1.2-alpha.1')
+        && error.message.includes('@xmoon76/dsh-pi-tui 0.4.0-alpha.1'),
+    )
+  }
+})
+
+test('pi2dsh metadata preflight classifies the four peer-declaration cases', () => {
+  const manifest = { dshVersion: '0.1.2-alpha.1' }
+  const candidate = { name: '@xmoon76/dsh-pi-tui', version: '0.4.0-alpha.1' }
+  const base = {
+    name: 'pi2dsh',
+    version: '0.24.0',
+    peerDependencies: {
+      '@xmoon76/dsh-pi-tui': '^0.4.0-alpha.1',
+      '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1',
+      '@deepseek-ai/dsh-commands': '>=0.1.2-alpha.1',
+    },
+  }
+
+  // 1. TUI peer current + DSH peers covering → ok.
+  assert.equal(classifyConsumerMetadata(base, manifest, candidate).kind, 'ok')
+
+  // 2. TUI peer stale ONLY (DSH peers still cover) → stale-tui-peer, not thrown.
+  const stale = { ...base, peerDependencies: { ...base.peerDependencies, '@xmoon76/dsh-pi-tui': '^0.3.3' } }
+  const classification = validateConsumerMetadata(stale, manifest, candidate)
+  assert.equal(classification.kind, 'stale-tui-peer')
+  assert.equal(classification.tuiRange, '^0.3.3')
+  // The narrow allowance is required: without it the preflight still blocks.
+  assert.throws(
+    () => failConsumerMetadata(stale, manifest, candidate, [`  @xmoon76/dsh-pi-tui: ${classification.tuiRange}`]),
+    error => error?.name === 'CompatFailure' && error?.phase === 'ECOSYSTEM_CONTRACT_BLOCKER',
+  )
+
+  // 3. TUI peer MISSING entirely → block (never a stale range: "declared too
+  // old" can be proven stale by the runtime smoke, "never declared" cannot).
+  const missing = { ...base, peerDependencies: { '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1' } }
+  const missingClassification = classifyConsumerMetadata(missing, manifest, candidate)
+  assert.equal(missingClassification.kind, 'block')
+  assert.match(missingClassification.problems.join('\n'), /@xmoon76\/dsh-pi-tui: \(missing\)/)
+
+  // 4. DSH peer mismatch → block, never classified as stale.
+  const dshMismatch = classifyConsumerMetadata(
+    { ...base, peerDependencies: { ...base.peerDependencies, '@deepseek-ai/dsh-agent': '^0.1.1' } },
+    manifest,
+    candidate,
+  )
+  assert.equal(dshMismatch.kind, 'block')
+})
+
+test('pi2dsh preset checks inspect the filtered /help frame rather than stale pane text', () => {
+  const goalPane = [
+    'transcript mentioned /goal before the overlay',
+    '╭────────────────────────╮',
+    '│ > goal                 │',
+    '│                        │',
+    '│ ❯ /goal               │',
+    '│                        │',
+    '│ Type to search · Enter/Space to change · Esc to cancel │',
+    '╰────────────────────────╯',
+  ].join('\n')
+  assert.deepEqual(settingsSearchSnapshot(goalPane), {
+    searchVisible: true,
+    query: 'goal',
+    commandRows: ['/goal'],
+    noMatches: false,
+  })
+
+  const minimalPane = [
+    'transcript mentioned /goal before the overlay',
+    '╭────────────────────────╮',
+    '│ > goal                 │',
+    '│ No matching settings   │',
+    '│ Type to search · Enter/Space to change · Esc to cancel │',
+    '╰────────────────────────╯',
+  ].join('\n')
+  assert.deepEqual(settingsSearchSnapshot(minimalPane), {
+    searchVisible: true,
+    query: 'goal',
+    commandRows: [],
+    noMatches: true,
+  })
+
+  // A capturing overlay is composited over the host frame, so the overlay's
+  // left border can share a line with stale host text. The parser must slice
+  // the inner frame before looking for query text or command rows.
+  const compositedPane = [
+    '╭──────────────────────────────────────────────────────────────────────────────╮',
+    '│ 🐋  session session-1                                                        │',
+    '│ de╭──────────────────────────────────────────────────────────────────────╮   │',
+    '│ /h│ >                                                                    │   │',
+    '╰───│                                                                      │───╯',
+    '    │   (1/48)                                                             │',
+    '────│   Type to search · Enter/Space to change · Esc to cancel             │────',
+    '❯   ╰──────────────────────────────────────────────────────────────────────╯',
+  ].join('\n')
+  assert.deepEqual(settingsSearchSnapshot(compositedPane), {
+    searchVisible: true,
+    query: '',
+    commandRows: [],
+    noMatches: false,
+  })
+
+  const compositedGoalPane = [
+    '╭──────────────────────────────────────────────────────────────────────────────╮',
+    '│ 🐋  session session-1                                                        │',
+    '│ de╭──────────────────────────────────────────────────────────────────────╮   │',
+    '│ /h│ > goal                                                               │   │',
+    '╰───│ ›/goal                                                             │───╯',
+    '    │                                                                      │',
+    '────│   Type to search · Enter/Space to change · Esc to cancel             │────',
+    '❯   ╰──────────────────────────────────────────────────────────────────────╯',
+  ].join('\n')
+  assert.deepEqual(settingsSearchSnapshot(compositedGoalPane), {
+    searchVisible: true,
+    query: 'goal',
+    commandRows: ['/goal'],
+    noMatches: false,
+  })
+})
+
+test('pi2dsh preset degradation diagnostics never count as a healthy mount', () => {
+  assert.equal(presetDegradationLine('preset mounted successfully'), undefined)
+  assert.equal(
+    presetDegradationLine('tui-runner: launch preset unavailable; falling back to default'),
+    'tui-runner: launch preset unavailable; falling back to default',
+  )
+  assert.equal(
+    presetDegradationLine('skill catalog unavailable for preset standard'),
+    'skill catalog unavailable for preset standard',
+  )
+})
+
+test('pi2dsh preset smoke requires a durable canonical session header', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('pi2dsh-compat-header-')
+  const evidencePath = join(directory, 'header.json')
+  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'minimal' }))
+  assert.doesNotThrow(() => assertOfficialPresetHeader('minimal', evidencePath))
+  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'standard' }))
+  assert.throws(
+    () => assertOfficialPresetHeader('minimal', evidencePath),
+    error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header mismatch'),
+  )
+  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', error: 'inspect failed' }))
+  assert.throws(
+    () => assertOfficialPresetHeader('minimal', evidencePath),
+    error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header probe failed'),
+  )
 })
 
 test('pi2dsh smoke classifies resize failures as surface failures', () => {
@@ -153,20 +361,17 @@ test('pi2dsh smoke detects published fallback diagnostics without false positive
   assert.ok(compatibilityFailureLine('surface degraded to inert') !== undefined, 'explicit surface inert degradation must fail the gate')
 })
 
-test('pi2dsh smoke rechecks late lifecycle diagnostics', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'pi2dsh-compat-diagnostics-'))
+test('pi2dsh smoke rechecks late lifecycle diagnostics', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('pi2dsh-compat-diagnostics-')
   const logPath = join(directory, 'tui.log')
-  try {
-    for (const phase of ['raw input', 'resize', 'dispose']) {
-      writeFileSync(logPath, `${phase}: surface degraded to inert\n`)
-      assert.throws(
-        () => assertNoCompatibilityFailures(logPath, { capturePane: () => '' }),
-        error => error?.phase === 'COMPAT_BOOT_FAILURE',
-        `${phase} diagnostics must fail the compatibility check`,
-      )
-    }
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
+  for (const phase of ['raw input', 'resize', 'dispose']) {
+    writeFileSync(logPath, `${phase}: surface degraded to inert\n`)
+    assert.throws(
+      () => assertNoCompatibilityFailures(logPath, { capturePane: () => '' }),
+      error => error?.phase === 'COMPAT_BOOT_FAILURE',
+      `${phase} diagnostics must fail the compatibility check`,
+    )
   }
 })
 
@@ -176,46 +381,43 @@ test('pi2dsh smoke bounds a hung subprocess', () => {
   assert.equal(result.error?.code, 'ETIMEDOUT', 'a hung child must be classified as a timeout')
 })
 
-test('pi2dsh smoke terminates descendants of a timed-out subprocess', { skip: process.platform === 'win32' }, async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'pi2dsh-compat-process-'))
+test('pi2dsh smoke terminates descendants of a timed-out subprocess', { skip: process.platform === 'win32' }, async (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('pi2dsh-compat-process-')
   const childPidPath = join(directory, 'child.pid')
   let childPid
-  try {
-    const childCode = [
-      "const { spawn } = require('node:child_process')",
-      "const { writeFileSync } = require('node:fs')",
-      "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], { stdio: 'ignore' })",
-      'writeFileSync(process.argv[1], String(child.pid))',
-      'setInterval(() => {}, 10000)',
-    ].join(';')
-    const result = run(process.execPath, ['-e', childCode, childPidPath], { timeout: 500 })
-    assert.equal(result.error?.code, 'ETIMEDOUT', 'the parent process must time out')
-    childPid = Number(readFileSync(childPidPath, 'utf8'))
-    assert.ok(Number.isInteger(childPid) && childPid > 0, 'the timed-out child must have started a descendant')
+  const childCode = [
+    "const { spawn } = require('node:child_process')",
+    "const { writeFileSync } = require('node:fs')",
+    "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], { stdio: 'ignore' })",
+    'writeFileSync(process.argv[1], String(child.pid))',
+    'setInterval(() => {}, 10000)',
+  ].join(';')
+  const result = run(process.execPath, ['-e', childCode, childPidPath], { timeout: 500 })
+  assert.equal(result.error?.code, 'ETIMEDOUT', 'the parent process must time out')
+  childPid = Number(readFileSync(childPidPath, 'utf8'))
+  life.defer(() => {
+    try {
+      process.kill(childPid, 'SIGKILL')
+    } catch {
+      // The descendant was already terminated by the process-group cleanup.
+    }
+  })
+  assert.ok(Number.isInteger(childPid) && childPid > 0, 'the timed-out child must have started a descendant')
 
-    const deadline = Date.now() + 2_000
-    let alive = true
-    while (Date.now() < deadline) {
-      try {
-        process.kill(childPid, 0)
-      } catch (error) {
-        if (error?.code === 'ESRCH') {
-          alive = false
-          break
-        }
-        throw error
+  const deadline = Date.now() + 2_000
+  let alive = true
+  while (Date.now() < deadline) {
+    try {
+      process.kill(childPid, 0)
+    } catch (error) {
+      if (error?.code === 'ESRCH') {
+        alive = false
+        break
       }
-      await new Promise(resolve => setTimeout(resolve, 10))
+      throw error
     }
-    assert.equal(alive, false, 'a timed-out process group must not leave its descendant running')
-  } finally {
-    if (childPid !== undefined) {
-      try {
-        process.kill(childPid, 'SIGKILL')
-      } catch {
-        // The descendant was already terminated by the process-group cleanup.
-      }
-    }
-    rmSync(directory, { recursive: true, force: true })
+    await new Promise(resolve => setTimeout(resolve, 10))
   }
+  assert.equal(alive, false, 'a timed-out process group must not leave its descendant running')
 })

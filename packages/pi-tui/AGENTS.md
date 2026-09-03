@@ -1,46 +1,68 @@
 # pi-tui Agent Guide
 
-`packages/pi-tui` is a vendored copy of pi-tui from the upstream pi-mono project (baseline: upstream 0.80.2, see commit `7859b0af`), snapshotted from the kimi-code fork at commit `44a6c70e` (v0.84.3, see `repository.note`). It is no longer patched via pnpm patches — all local fixes are applied directly to the source. The differential-rendering behavior in `src/tui.ts` matches upstream: the fork's viewport/scrollback rendering patches were reverted; the only remaining divergences are listed below.
+`packages/pi-tui` is a vendored copy of pi-tui from the upstream pi-mono
+project, pinned to Earendil `v0.84.4` (see `UPSTREAM.json` — the single
+source of truth for the baseline; do not copy the version/commit into other
+docs). It is no longer patched via pnpm patches — all local fixes are applied
+directly to the source. The differential-rendering behavior in `src/tui.ts`
+matches upstream; the only remaining divergences are listed in
+`DIVERGENCES.md`.
 
-> **Ledger history (re-vendor audit, 2025-11):** the original ledger also listed eight entries that are NOT divergences against the vendored snapshot and have been removed: the `wordWrapLine` single-grapheme recursion guard, the `Container.render` width clamp, the overwide-line truncation, the negative-width `repeat` guards, and the `CjkBoundaryUrlTokenizer` CJK autolink boundary are all already present in the vendored kimi-code `44a6c70e` code itself (they landed upstream before the snapshot); the inline slash autocomplete and the autocomplete `data`/Enter-non-submit semantics are likewise upstream. The per-frame processed-line reuse never existed in this fork. Do not re-add these to the ledger or re-verify them on sync.
+## Hard rules
 
-## Local divergences from upstream (must be preserved on every re-vendor)
+- **Never overwrite this directory wholesale when syncing from upstream.**
+  Each local divergence must be re-verified after a sync; all of them are
+  guarded by tests (see `DIVERGENCES.md`).
+- **Read `DIVERGENCES.md` before editing any file under `src/`.** Every
+  divergence has an ID, category, consumer, upstream status and guarding
+  tests. Do not re-add removed kimi-only code; do not delete a hard seam
+  without a host-side replacement.
+- **Source ownership:** `src/`, `test/`, `README.md` are upstream-owned
+  (Earendil baseline + re-applied divergences). `package.json`,
+  `tsconfig.json`, `tsdown.config.ts`, `UPSTREAM.json`, `DIVERGENCES.md`,
+  `AGENTS.md` are XMoon-owned package shell — never overwrite them from
+  upstream.
+- **Package shell contract:** name stays `@xmoon76/pi-tui`, `private: true`,
+  tsdown build producing `dist/index.mjs` + `dist/index.d.mts`. Do not
+  switch to the upstream tsgo contract. Native prebuilds are deliberately NOT
+  vendored (supported surface: Linux/WSL/SSH into Linux). "Degrade" is
+  input-capability loss, not a crash: without the prebuilds Shift+Tab is
+  indistinguishable from Tab and the Windows/Apple Terminal Shift+Enter
+  modifier fallback is unavailable — `terminal.ts` falls back to sequence
+  heuristics only. If Windows/macOS become supported platforms, vendor the
+  matching `native/` prebuilds from the pinned upstream tarball.
+- **When an upstream file conflicts with a local divergence, the Earendil
+  file is the base** — re-apply the necessary patch on top. Never go the
+  other direction (local file as base, cherry-picking upstream code back).
 
-Never overwrite this directory wholesale when syncing from upstream. Each of the following local fixes must be re-verified after a sync; all of them are guarded by tests:
+## Hard gates (re-vendor acceptance)
 
-1. **`src/components/select-list.ts` — searchable, grouped picker list (local extension, not an upstream fix)**: `SelectList` gains an optional 5th constructor argument `SelectListOptions` with `enableSearch` (a search `Input` renders above the list; typing filters by case-insensitive substring over `value` + `label` + `description`, replacing the old value-prefix-only `setFilter` semantics), `header` (a title line that also carries the live `filtered/total` counts when search is on), `noMatchText`, `showHint` (the `↑↓ navigate` footer renders only when search is enabled or `showHint` is set, so the editor autocomplete keeps its compact height), and `initialQuery` (pre-fills the search box). `SelectItem` gains an optional `group` label: a non-interactive header row with the group's count renders before the first item of each group (ungrouped items form an implicit anonymous group). `setItems()` replaces the item list while the picker is open, re-applying the active query (used by the dsh-pi-tui `/sessions` picker to enrich rows with titles as they load). PageUp/PageDown move the selection by a visible page. The 4th `layout` argument and the existing theme contract are unchanged; `SelectListTheme.groupHeader` is an optional addition. Guarding tests: the "search", "group headers", and "page keys" describes in `test/select-list.test.ts`.
-2. **`src/components/select-list.ts` — `setItems` keeps the selection; search text cached**: replacing the item list keeps the current selection when the row identity survives (the `/sessions` picker enriches rows with titles as they load without jumping the cursor), and the search filter keeps its text across re-renders. Guarding tests: the `setItems` and search describes in `test/select-list.test.ts`.
-3. **`src/components/editor.ts` — multi-line insert cursor by grapheme**: inserting multi-line text (paste) places the cursor by grapheme count, not code units, so CJK/ZWJ content lands on the right cell. Guarding tests: the grapheme-cursor describes (e.g. "Right arrow should move one grapheme at a time") in `test/editor.test.ts`.
-4. **`src/components/editor.ts` — bounded paste memory, no whole-document undo clones**: the paste buffer is capped (`MAX_PASTE_STORED_CHARS`) instead of growing unboundedly, and undo no longer clones the whole document per step (line arrays and paste maps are shallow-copied; the strings inside are immutable). Guarding tests: the PasteBurst/undo describes in `test/editor.test.ts`.
-5. **`src/components/editor.ts` — autocomplete requests are latest-wins**: autocomplete uses requestId + text/cursor snapshot rejection (no serial task chain), so an abort that never settles (a provider ignoring the signal) cannot stall the chain forever. No dedicated guarding test; the editor autocomplete describes in `test/editor.test.ts` cover the surrounding behavior.
-6. **`src/word-navigation.ts` — word-forward skips punctuation at the segment start**: `wordForward` skips leading punctuation of the next segment instead of stopping on it (CJK-aware). Guarding tests: the word-navigation describes in `test/word-navigation.test.ts`.
-7. **`src/tui.ts` / `src/components/scroll-view.ts` — component `dispose()` lifecycle**: `Component` gains an optional `dispose()`; `Container.removeChild`/`clear`/`dispose` release child resources, and `ScrollView` disposes its hide timer and render callback when removed. No dedicated guarding test (the ScrollView describes in `test/layout.test.ts` cover rendering, not disposal).
-8. **`src/tui.ts` — timed-out OSC 11 queries drop from the queue**: a timed-out background-color query is removed from the pending queue so the reply counter stays in sync — a late reply is swallowed as a terminal protocol response instead of leaking +1 and misaligning the queue/counter pair (later unrelated input would get consumed as replies). Guarding test: `test/osc11-query.test.ts` (timed-out queries never leak into the reply counter).
-9. **`src/tui-main-screen.ts` — no stray spacer blank on the final row when exiting**: `beforeTerminalStop` writes the spacer blank only when the cursor must actually move; on the final row a stray blank would stay visible after the TUI exits. No dedicated guarding test.
-10. **`src/tui-main-screen.ts` / `src/stdin-buffer.ts` — width state sync; capped ESC-prefix scans**: the main screen's width state stays in sync across resizes, and the stdin buffer caps ESC-prefix scanning (`MAX_ESCAPE_SEQUENCE_LENGTH`) so a never-terminating ESC prefix degrades to a plain character instead of an O(n²) reslice. Guarding tests: the ESC/sequence describes in `test/stdin-buffer.test.ts`.
-11. **`src/components/input.ts` — prompt clips on extremely narrow widths**: `Input` clips its prompt instead of overflowing at tiny widths. No dedicated guarding test (the fork's narrow-width renders are exercised by the editor/settings describes).
-12. **`src/fuzzy.ts` — deterministic tie sort**: `fuzzyFilter`'s sort order is deterministic on score ties (stable by input order). Guarding tests: the ordering describes (e.g. "sorts results by match quality") in `test/fuzzy.test.ts`.
-13. **`src/components/loader.ts` — `setIndicator` never revives a stopped loader**: setting the indicator on a stopped loader leaves it stopped. No dedicated guarding test.
-14. **`src/layout.ts` — scrollbar thumb pad clamped; measured line widths cached**: the scrollbar thumb never renders negative or overlong, and measured line widths are cached per (component, width). Guarding tests: the scrollbar describes (e.g. "renders a transient proportional scrollbar") in `test/layout.test.ts`.
-15. **`src/keys.ts` — dead `_lastEventType` state removed**: no behavior change; the field is simply gone. No dedicated guarding test (pure removal).
-16. **`src/terminal.ts` — `start()` must not stack resize listeners**: restarting `ProcessTerminal` re-registers the resize handler only once. No dedicated guarding test (the `test/terminal.test.ts` describes cover input rewriting, not restart).
-17. **`src/tui-alt-screen.ts` — regular mode owns no mouse; clicks live in fullscreen**: mouse handling (wheel scroll, drag selection, right-click paste) lives on the alt screen; the regular surface stays mouse-free. Guarding test: `test/tui-alt-screen.test.ts`.
-18. **`src/tui-alt-screen.ts` — click granularity guard**: the `onCellClick` disclosure fires only for character-granularity (single) clicks — a double click selects a word (native behavior) instead of disclosing, and a plain click skips the clipboard feedback so the host callback owns the click. Guarding test: `test/tui-alt-screen.test.ts`.
-19. **`src/components/text.ts` — no-op `dispose()`**: `Text` gets a no-op `dispose()` so `Loader`'s override typechecks (a pre-existing typecheck failure in the vendored fork).
-20. **`src/components/editor.ts` — `clearHistory()`**: drops every prompt-history entry (and browsing state) so a host can swap the whole history context on a session/workspace switch. Not an upstream fix — a local extension like divergence 1. No dedicated guarding test (the editor-history keybindings describes in `test/editor.test.ts` cover the recall path; the new method is a state reset).
-21. **`src/utils.ts` — wrapped lines are foreground-balanced**: `AnsiCodeTracker.getLineEndReset()` closes EVERY non-background attribute (bold, dim, italic, underline, blink, inverse, hidden, strikethrough, foreground) at the end of each wrapped physical line (previously only underline + OSC 8 hyperlinks, and only on intermediate lines), and `wrapSingleLine` now closes them on the final line too. The background stays open so cell padding keeps its background. A long styled token split across lines no longer leaves the foreground open, so content appended after a wrapped line (table cell padding, `│` borders) cannot inherit the color. Guarding tests: the "should close foreground color at the end of every wrapped line" and "should close foreground at line end while preserving background" cases in `test/wrap-ansi.test.ts`, and "should not leak wrapped inline-code color into table borders" in `test/markdown.test.ts`.
-22. **`src/components/editor.ts` — public cursor synchronization**: `Editor.setCursor({ line, col })` clamps the requested position to an existing line and grapheme boundary without firing `onChange`, then requests a repaint. This is a local host-fallback seam used by `@xmoon76/dsh-pi-tui` to synchronize the hidden host editor with a replacement editor before forwarding a declined key. Guarding test: `sets and clamps the cursor without firing onChange` in `test/editor.test.ts`.
-23. **`src/components/editor.ts` — side-effect-free text/cursor staging**: `Editor.setTextAndCursor(text, cursor)` normalizes line endings/tabs, replaces the document and cursor without firing `onChange`, cancelling autocomplete, leaving history browsing, pushing undo, or clearing the paste registry. The consumer's replacement-editor fallback uses it to stage visible replacement state before one normal host `handleInput()` call; the host adapter converts its flat replacement offset against the same normalization rules. Guarding tests: the public staging/normalization tests in `test/editor.test.ts` and the declined replacement fallback tests in `test/editor-registry.test.ts`.
-24. **`src/tui-alt-screen.ts` — line-head selections copy without the emoji-column indent**: `copySelectionToClipboard` strips 1-3 leading spaces from a copied line when the selection starts at its head (column 0), so dsh-pi-tui transcript lines copied via fullscreen drag selection no longer carry the bullet column's padding (`❯ ` / `🐋  ` / `🐳  ` continuation indent). Content indentation of 4+ cells (code blocks) survives; 1-2 cell content indents are rare and accepted as dropped. Selections starting mid-line are untouched, and the first (emoji-bearing) line is untouched because it starts with a non-space. Guarding tests: the "copies line-head selections without the emoji-column indent" and "keeps leading spaces when the selection starts mid-line" cases in `test/tui-alt-screen.test.ts`.
-25. **`tsdown.config.ts` — explicit build config (root-package migration)**: tsdown discovers configs by walking up from the CWD, so after the dsh-pi-tui bundle moved to the repository root, the root's `tsdown.config.ts` would shadow this package's build (its entries would resolve against the fork's `src/` and fail). The config reproduces the tsdown defaults the fork previously built with (entry `src/index.ts`, ESM, `dist/`, declarations). Guarding test: the fork's own build (`pnpm --dir packages/pi-tui build`) must produce `dist/index.mjs` + `dist/index.d.mts` — exercised by the root build and the bundle's typecheck/tests.
-26. **`src/tui-alt-screen.ts` — injectable selection clipboard handler**: `TuiAltScreenOptions` gains `copySelection?: (text: string) => Promise<boolean>`; when provided, a completed drag selection is handed to the callback (the returned boolean drives the `Copied!` / `Copy failed` flash) instead of writing a raw OSC 52 sequence, which stays the fallback for consumers without the callback. Backported from the structure of upstream `earendil-works/pi#8110`; the local purpose is the host-owned clipboard strategy (tmux-aware, platform helpers, OSC 52 last) in `@xmoon76/dsh-pi-tui`'s `src/clipboard.ts`. Re-vendor check: whether upstream already carries an equivalent seam. Guarding tests: the `copySelection` describes in `test/tui-alt-screen.test.ts`.
-27. **`src/autocomplete.ts` — fd directory typing never relies on the trailing separator**: `typeDirectoryOutputLines` classifies fd's plain-text stdout lines with `statSync` (which follows symlinks, so a symlink to a directory still completes with `/`), keeping the trailing separator only as a fallback when the stat fails. fd's default print format does NOT guarantee a trailing `/` on directories (a long-standing fd feature request), so the old `endsWith("/")` check misclassified bare directory lines as files: `@src<Tab>` completed to a file-style `@src` with a trailing space and the next Tab could never descend. Result paths are normalized WITHOUT a trailing separator, and the two consumers that used to `path.slice(0, -1)` on directories no longer slice (the old slice cut the last character whenever fd omitted the slash). Guarding tests: the `typeDirectoryOutputLines` describe in `test/autocomplete.test.ts` (bare lines, slash normalization, symlink-to-directory, missing-path tolerance) plus the fd-backed `@` describes.
-28. **`src/tui-alt-screen.ts` — host viewport boundary, pre-input, and search-reset seams**: `onScrollBoundary` reports final unconsumed wheel/page/primary-scrollbar edge attempts, `onBeforeViewportInput` lets a host claim semantic viewport keys before built-in Home/End/Page handling, and `clearSearch()` lets a host reset the built-in fullscreen transcript search when it owns the semantic latest action. These public seams keep virtual history and host actions out of private layout internals. Guarding tests: the boundary/overscroll/page/scrollbar/search cases in `test/tui-alt-screen.test.ts` and the fullscreen Home/End cases in the bundle.
-## Acceptance after syncing from upstream
+```bash
+pnpm --dir packages/pi-tui typecheck   # fork typecheck
+pnpm --dir packages/pi-tui test        # fork suite (node --test)
+pnpm --dir packages/pi-tui build       # fork build (dist/index.mjs + dist/index.d.mts)
+pnpm gate:pi-surface-compat            # bundle: component lifecycle compat gate
+```
 
-- `pnpm --filter @xmoon76/pi-tui test` must pass in full; any failure among the guarding tests above means a local divergence was overwritten and lost.
+`gate:pi-surface-compat` is a re-vendor hard gate, not an optional smoke.
+
+## Re-vendor flow
+
+1. Read `UPSTREAM.json` for the pinned baseline (repository, package, tag,
+   commit).
+2. Fetch the pinned upstream package; copy upstream-owned files
+   (`src/`, `test/`, `README.md`) over the local ones.
+3. Re-apply every `HARD_HOST_API` / `BUGFIX_MISSING_UPSTREAM` divergence
+   from `DIVERGENCES.md` (never wholesale-copy an old local file back).
+4. Re-verify each guarding test; update `DIVERGENCES.md` (a divergence that
+   upstream absorbed becomes `ABSORBED_UPSTREAM`; a dead entry becomes
+   `STALE_LEDGER` and is fixed in place).
+5. Run the hard gates above, then the bundle gates
+   (`pnpm build`, `pnpm typecheck`, `pnpm test:bundle`).
 
 ## Testing
 
-- This package's tests run with `node --test` (`pnpm --filter @xmoon76/pi-tui test`). The repo has no vitest anywhere (the scaffold-era `vitest.config.ts` was deleted).
-- Prefer adding new narrow-width tests to the existing test file of the corresponding component.
+- This package's tests run with `node --test` (`pnpm --dir packages/pi-tui
+  test`). The repo has no vitest anywhere.
+- Prefer adding new narrow-width tests to the existing test file of the
+  corresponding component.

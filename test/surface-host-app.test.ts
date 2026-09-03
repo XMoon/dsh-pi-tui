@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { Text } from '@xmoon76/pi-tui'
@@ -20,11 +20,26 @@ import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 function makeApp(ledger: ExtensionLedger): { vt: VirtualTerminal; app: TuiApp; host: SurfaceHost } {
   const vt = new VirtualTerminal(80, 24)
   const host = new SurfaceHost(ledger, () => app.requestRender())
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
   app.start()
+  startedApps.add(app)
   return { vt, app, host }
 }
 
@@ -261,7 +276,7 @@ test('a Cordis plugin registering through the real service renders into the surf
     await ctx.plugin(Loader)
     // Mount a minimal tuiStartup provider + the extension host + a plugin.
     const startupFiber = ctx.plugin((c) => {
-      c.provide('tuiStartup', { shippedPresetRoot: '/ws' })
+      c.provide('tuiStartup', {})
     })
     await startupFiber
     const hostFiber = ctx.plugin(applyExtensionHost)
@@ -282,6 +297,7 @@ test('a Cordis plugin registering through the real service renders into the surf
     const host = new SurfaceHost(service._ledger(), () => app.requestRender())
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
     host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
       surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
@@ -449,7 +465,7 @@ test('a Cordis plugin registering BEFORE attach renders once the surface attache
   try {
     await ctx.plugin(Loader)
     const startupFiber = ctx.plugin((c) => {
-      c.provide('tuiStartup', { shippedPresetRoot: '/ws' })
+      c.provide('tuiStartup', {})
     })
     await startupFiber
     const hostFiber = ctx.plugin(applyExtensionHost)
@@ -467,6 +483,7 @@ test('a Cordis plugin registering BEFORE attach renders once the surface attache
     const host = new SurfaceHost(service._ledger(), () => app.requestRender())
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
     app.start()
+    startedApps.add(app)
     await vt.waitForRender()
     // Attach AFTER the registration: attach re-bakes the outlets from the
     // current ledger, so the pre-attach badge renders immediately.
@@ -542,8 +559,10 @@ test('runner permission projection clears on service/agent absence (runner-level
   // live agent must yield EXPLICIT undefined (never the stale value) —
   // that explicit undefined is what clears the extension snapshot.
   const { deriveRunnerPermission } = await import('../src/status/derive-permission.ts')
-  const agent = { session: { events: [{ kind: 'session/created' }] } }
-  const presets = { current: (events: unknown) => (events as unknown[]).length > 0 ? 'workspace-write' : undefined }
+  // Alpha.4: `permission.current(session)` reads the session's own knob
+  // state — the service surface is session-oriented, never an event list.
+  const agent = { session: { id: 'session-a' } }
+  const presets = { current: (session: unknown) => (session as { id?: string })?.id !== undefined ? 'workspace-write' : undefined }
   assert.equal(deriveRunnerPermission(presets, agent as never), 'workspace-write')
   assert.equal(deriveRunnerPermission(undefined, agent as never), undefined,
     'a missing permission service must yield undefined (clear)')

@@ -26,8 +26,12 @@ import xterm from '@xterm/headless'
 import { TuiApp } from '../src/tui-app.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { StatsFolder } from '../src/stats.ts'
+import { TranscriptWindowController } from '../src/transcript-window.ts'
+import { ContextMeasurementCoordinator } from '../src/status/context-measurement.ts'
+import { usageFromStats } from '../src/status/derive-usage.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TranscriptMessage } from '../src/transcript.ts'
+import type { SessionStats } from '../src/stats.ts'
 
 const XtermTerminal = xterm.Terminal
 
@@ -269,6 +273,51 @@ function buildTextHeavyEvents(turns: number, assistantChars: number, resultChars
         id: `text-heavy-result-${turn}`,
         role: 'user',
         content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: repeatedText(resultChars) }] }],
+        source: { kind: 'tool', callId },
+      },
+    })
+    pushEvent(events, 'turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  return events
+}
+
+/** Build a search-focused log: every turn hits a COMMON needle, one early
+ * turn holds a RARE needle, and no turn holds the MISS needle. */
+function buildSearchEvents(turns: number): SessionEvent[] {
+  const events: SessionEvent[] = []
+  for (let turn = 0; turn < turns; turn += 1) {
+    pushEvent(events, 'turn/start', { turn })
+    pushEvent(events, 'user/message', {
+      id: `search-user-${turn}`,
+      role: 'user',
+      content: [{ type: 'text', text: `user prompt ${turn} with needle ${turn} and filler text` }],
+      source: { kind: 'user' },
+    })
+    pushEvent(events, 'assistant/message', {
+      turn,
+      step: 0,
+      message: {
+        id: `search-answer-${turn}`,
+        role: 'assistant',
+        content: [{ type: 'text', text: `assistant answer ${turn} with a common needle phrase and ${turn === 0 ? 'the-rare-needle sits here' : 'ordinary tail'}` }],
+        source: { kind: 'model', provider: 'bench', model: 'bench' },
+      },
+    })
+    const callId = `search-tool-${turn}`
+    pushEvent(events, 'tool/call', {
+      turn,
+      step: 0,
+      callId,
+      name: 'read',
+      arguments: JSON.stringify({ file: `src/file-${turn}.ts` }),
+    })
+    pushEvent(events, 'tool/result', {
+      turn,
+      step: 0,
+      message: {
+        id: `search-result-${turn}`,
+        role: 'user',
+        content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: `read output for turn ${turn} with needle payload` }] }],
         source: { kind: 'tool', callId },
       },
     })
@@ -576,6 +625,179 @@ async function main(): Promise<void> {
   for (let index = 0; index < 100; index += 1) batcher.invalidate()
   await Promise.resolve()
   row('invalidation burst coalescing (100 in one tick)', `${flushCount} flush(es)`)
+
+  // 6. PR D1 — indexed full-history search: cold index build (allowed
+  //    O(history)), then query classes over the LIGHTWEIGHT projection
+  //    (never messages()/grouping/materialization), plus the incremental
+  //    typing sequence with refinement. The structural counters prove the
+  //    query path does not rebuild projection work.
+  {
+    const SEARCH_SAMPLES = FAST ? 100 : 400
+    for (const turns of [100, 1000, 10_000]) {
+      const folder = new TranscriptFolder()
+      folder.hydrate(buildSearchEvents(turns))
+      const messages = folder.messages()
+      const diag = folder.searchDiagnosticsForTest()
+      const cold = timeIt(1, () => {
+        const candidate = new TranscriptFolder()
+        candidate.hydrate(buildSearchEvents(turns))
+      })
+      const q = (query: string): number[] => timeIt(SEARCH_SAMPLES, () => { folder.search(query) })
+      const miss = q('unlikely-needle-not-present')
+      const common = q('needle')
+      const rare = q('the-rare-needle')
+      const afterQueries = folder.searchDiagnosticsForTest()
+      row(`search ${turns} turns (${messages.length} logical messages, ${afterQueries.entries} entries)`, `common hits ${folder.search('needle').length} · fullScans ${afterQueries.fullScans - diag.fullScans}`)
+      row('  cold hydrate + index build', fmtMs(cold[0]!))
+      // Plan §8.3 structural counters: the REAL full-projection size
+      // (search entries — one per raw item), the logical-card count, the
+      // one-time normalized rebuild work at hydrate, and the grouping
+      // rebuild count (all MUST stay flat across queries — the query rows
+      // above prove it).
+      row('  cold projection counters (fullProjectionEntries / logicalMessages / normalizedRebuilds / groupingRebuilds)', `${diag.entries} / ${messages.length} / ${diag.normalizedRefreshes} / ${diag.groupingRebuilds}`)
+      row(`  query miss ×${SEARCH_SAMPLES}`, fmt(stats(miss)))
+      row(`  query common ×${SEARCH_SAMPLES}`, fmt(stats(common)))
+      row(`  query rare ×${SEARCH_SAMPLES}`, fmt(stats(rare)))
+      row(`  normalized text recomputes during queries`, `${afterQueries.normalizedRefreshes - diag.normalizedRefreshes} (must stay 0)`)
+    }
+    // Incremental typing with prefix refinement, the plan §8.2 sequence:
+    // n -> ne -> nee -> need -> needl -> needle. EACH sample starts from a
+    // FRESH 'n' full scan and refines the five extensions (a sample that
+    // carried the previous sample's final candidates would measure a
+    // cheaper, unreal typing sequence — the candidates must always be the
+    // previous prefix's).
+    for (const turns of [1000, 10_000]) {
+      const folder = new TranscriptFolder()
+      folder.hydrate(buildSearchEvents(turns))
+      const diag = folder.searchDiagnosticsForTest()
+      const sequence = timeIt(FAST ? 10 : 20, () => {
+        let matches = folder.search('n')
+        let revision = folder.searchRevision()
+        for (const partial of ['ne', 'nee', 'need', 'needl', 'needle']) {
+          matches = folder.search(partial, { previousQuery: partial.slice(0, -1), previousMatches: matches, revision })
+          revision = folder.searchRevision()
+        }
+      })
+      const after = folder.searchDiagnosticsForTest()
+      const samples = FAST ? 10 : 20
+      row(`incremental typing ${turns} turns (6 queries ×${samples} samples, refined)`, `${fmt(stats(sequence))} · fullScans ${after.fullScans - diag.fullScans} (${samples} fresh 'n' scans) · refinedScans ${after.refinedScans - diag.refinedScans}`)
+    }
+  }
+
+  // 7. PR C navigation baseline (unchanged by D1/D2 — recorded so a
+  //    regression in grouped/window indexes or a D2 measurement leak into
+  //    navigation stays visible): moveOlder ×50 + moveNewer ×50.
+  {
+    const NAV_SAMPLES = FAST ? 20 : 50
+    for (const turns of [100, 1000, 10_000]) {
+      const folder = new TranscriptFolder()
+      folder.hydrate(buildEvents(turns))
+      const controller = new TranscriptWindowController({ turns: folder.groupedTurns() })
+      const older = timeIt(NAV_SAMPLES, () => {
+        const c = new TranscriptWindowController({ turns: folder.groupedTurns() })
+        for (let i = 0; i < 50; i += 1) c.moveOlder()
+      })
+      const newer = timeIt(NAV_SAMPLES, () => {
+        const c = new TranscriptWindowController({ turns: folder.groupedTurns() })
+        for (let i = 0; i < 50; i += 1) c.moveNewer()
+      })
+      void controller
+      row(`window nav ×50 older / ×50 newer @${turns} turns`, `older ${fmt(stats(older))} · newer ${fmt(stats(newer))}`)
+    }
+  }
+
+  // 8. PR D2 — status/context measurement decoupling: cheap status refresh
+  //    (cached facts + usage projection) must NEVER call the measurement
+  //    reader; lifecycle triggers measure a bounded number of times; the
+  //    explicit measurement cost is exposed separately (it is real work —
+  //    the point is that UI-only refreshes no longer pay it).
+  {
+    const CHEAP_SAMPLES = FAST ? 200 : 1000
+    const sessionStats: SessionStats = {
+      turns: 5000,
+      steps: 12_000,
+      llmMs: 900_000,
+      firstTokenMsAvg: 2100,
+      tokensPerSec: 14,
+      cacheHitPct: 62,
+      inputTokens: 48_000_000,
+      outputTokens: 2_100_000,
+      cacheReadTokens: 30_000_000,
+      cacheWriteTokens: 9_000_000,
+      contextWindow: 128_000,
+    }
+    const coordinator = new ContextMeasurementCoordinator()
+    coordinator.bind('bench-session')
+    let measureCalls = 0
+    // The Direct tokenMeter scan walks the live session's requests: model
+    // it as a scan proportional to the historical context (synthetic but
+    // non-trivial — the point is the cost is paid ONLY on explicit
+    // measures, never on cheap refreshes).
+    const history = new Array<number>(10_000).fill(1)
+    const reader = (_sessionId: string): number => {
+      measureCalls += 1
+      let scanned = 0
+      for (let i = 0; i < history.length; i += 1) scanned += history[i]!
+      return 81_000 + scanned
+    }
+    // Cheap-only phase: measure once (initial), then 1000 UI-only refreshes.
+    coordinator.measure('bench-session', reader)
+    const cheap = timeIt(CHEAP_SAMPLES, () => {
+      usageFromStats(sessionStats, coordinator.valueFor('bench-session'))
+    })
+    row(`cheap status refresh ×${CHEAP_SAMPLES} (cached measurement)`, `${fmt(stats(cheap))} · measureContextCalls ${measureCalls - 1} (must stay 0)`)
+    // Mixed realistic loop: 100 UI-only refreshes + 10 lifecycle triggers.
+    const lifecycle = new ContextMeasurementCoordinator()
+    lifecycle.bind('bench-session')
+    let mixedMeasureCalls = 0
+    for (let i = 0; i < 100; i += 1) {
+      usageFromStats(sessionStats, lifecycle.valueFor('bench-session'))
+      if (i % 10 === 0) {
+        lifecycle.markDirty()
+        lifecycle.measure('bench-session', () => { mixedMeasureCalls += 1; return 82_000 })
+      }
+    }
+    row('mixed loop (100 UI-only + 10 lifecycle refreshes)', `measureContextCalls ${mixedMeasureCalls} (expect 10, never 110)`)
+    // Explicit measurement cost, exposed separately (the Direct reader scan).
+    const explicit = timeIt(FAST ? 20 : 50, () => {
+      coordinator.markDirty()
+      coordinator.measure('bench-session', reader)
+    })
+    row(`explicit measureContext ×${FAST ? 20 : 50} (dirty each call)`, fmt(stats(explicit)))
+  }
+
+  // 9. PR D1 LIVE hot-path maintenance (the review's P1 blockers): the
+  //    search projection must NOT make streaming or read-grouping
+  //    quadratic. The acceptance is the GROWTH CURVE, not a millisecond
+  //    threshold: size x10 must not come close to x100 time. (A 1 MiB
+  //    assistant streamed in 1 KiB chunks used to pay ~512 MiB of
+  //    lowercase work; a 1000-read group used to re-scan the whole merged
+  //    text per append.)
+  {
+    // Streaming: one growing assistant message, fixed 1 KiB chunks.
+    for (const totalKiB of [10, 100, 1000]) {
+      const events: SessionEvent[] = []
+      pushEvent(events, 'turn/start', { turn: 0 })
+      const chunk = 'x'.repeat(1024)
+      for (let i = 0; i < totalKiB; i += 1) {
+        pushEvent(events, 'assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: i, text: chunk } })
+      }
+      const apply = warmedP50(FAST ? 3 : 5, () => {
+        const folder = new TranscriptFolder()
+        folder.apply(events)
+      })
+      row(`streaming search-index maintenance (${totalKiB} KiB assistant, 1 KiB chunks)`, fmtMs(apply))
+    }
+    // Live adjacent read grouping: one growing merged read group.
+    for (const reads of [10, 100, 1000]) {
+      const events = buildReadHeavyEvents(1, reads)
+      const apply = warmedP50(FAST ? 3 : 5, () => {
+        const folder = new TranscriptFolder()
+        folder.apply(events)
+      })
+      row(`live read-group append (${reads} adjacent reads)`, fmtMs(apply))
+    }
+  }
 
   console.log(rows.join('\n'))
 }

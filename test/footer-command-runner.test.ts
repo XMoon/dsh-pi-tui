@@ -6,15 +6,29 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { afterEach, test } from 'node:test'
+import { readFileSync } from 'node:fs'
 import { getEventListeners } from 'node:events'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { FooterCommandRunner, KILL_GRACE_MS, type FooterCommandConfig } from '../src/footer/command-runner.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 const CONFIG: FooterCommandConfig = {
   command: 'node -e "process.stdout.write(\'hello\\n\')"',
@@ -65,6 +79,33 @@ test('empty output falls back to the native surface (undefined)', async () => {
 test('a non-zero exit falls back', async () => {
   const rows = await runOnce(CONFIG, 'process.exit(1)')
   assert.equal(rows, undefined)
+})
+
+test('an instant-exit child cannot crash the runner with an unhandled stdin EPIPE (round-3 finding)', async () => {
+  // `true` via the shell exits BEFORE the JSON payload flushes: the async
+  // EPIPE on the parent's stdin stream used to be an unhandled 'error'
+  // event and crashed the whole process (the same class as the clipboard
+  // helper's round-3 finding — the try/catch around write() only catches
+  // SYNCHRONOUS throws). The runner must settle every run to the native
+  // fallback and survive the batch; with the bug, the process dies with
+  // an uncaughtException and this test fails.
+  for (let run = 0; run < 60; run += 1) {
+    const rows = await new Promise<string[] | undefined>((resolve) => {
+      const runner = new FooterCommandRunner({
+        config: { ...CONFIG, command: 'true', timeoutMs: 10000 },
+        snapshot: () => emptyStatusSnapshot(),
+        width: () => 100,
+        height: () => 30,
+        onOutput: (result) => {
+          runner.dispose()
+          resolve(result)
+        },
+        signal: new AbortController().signal,
+      })
+      runner.requestRefresh()
+    })
+    assert.equal(rows, undefined, `run ${run} must settle to the native fallback`)
+  }
 })
 
 test('a timeout kills the child and falls back', async () => {
@@ -127,13 +168,14 @@ test('a NUL byte in the command degrades to the fallback — requestRefresh neve
   }
 })
 
-test('a TERM-resistant child is HARD-killed after the grace period (no detached orphan)', async () => {
+test('a TERM-resistant child is HARD-killed after the grace period (no detached orphan)', async (t) => {
   // The child traps TERM and would run forever: a plain SIGTERM (the old
   // killChild) leaves it running as a detached orphan — the runner must
   // escalate to SIGKILL within KILL_GRACE_MS. The child records its own
   // pid (the detached group leader) so the test can PROVE the process is
   // actually gone — this assertion fails against the old implementation.
-  const dir = mkdtempSync(join(tmpdir(), 'footer-kill-'))
+  const life = testLifecycle(t)
+  const dir = life.tempDir('footer-kill-')
   const marker = join(dir, 'child.pid')
   const rows = await new Promise<string[] | undefined>((resolve) => {
     const runner = new FooterCommandRunner({
@@ -180,15 +222,15 @@ test('a TERM-resistant child is HARD-killed after the grace period (no detached 
     }
   }
   assert.ok(dead, `the TERM-resistant child must be hard-killed (no orphan), pid ${pid} still alive`)
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('repeated TERM-resistant children are each hard-killed (the termination ledger cleans up between cycles)', async () => {
+test('repeated TERM-resistant children are each hard-killed (the termination ledger cleans up between cycles)', async (t) => {
   // The round-2 review catch: the terminating set never removed closed
   // children. Behaviourally: a SECOND TERM-resistant child must still be
   // escalated and killed after the first one completed its cycle — the
   // ledger entry of the first child must not block or leak into the next.
-  const dir = mkdtempSync(join(tmpdir(), 'footer-kill-loop-'))
+  const life = testLifecycle(t)
+  const dir = life.tempDir('footer-kill-loop-')
   // A DISTINCT marker per cycle: a stale first-cycle pid must never be
   // mistaken for the second child's (the round-3 review catch).
   let pid = -1
@@ -249,17 +291,17 @@ test('repeated TERM-resistant children are each hard-killed (the termination led
     }
     assert.ok(dead, `cycle child pid ${victim} must be hard-killed (no orphan, no ledger leak)`)
   }
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('a TERM-resistant DESCENDANT is hard-killed even when the group LEADER exits on TERM (group-scoped escalation)', async () => {
+test('a TERM-resistant DESCENDANT is hard-killed even when the group LEADER exits on TERM (group-scoped escalation)', async (t) => {
   // The review's P1b scenario: the command starts a BACKGROUND descendant
   // that traps TERM and redirects its stdio; the OUTER shell (the group
   // leader) receives TERM and exits NORMALLY — Node's 'close' fires — but
   // the descendant keeps the process group alive. A leader-bound
   // escalation would be cancelled by that close and leak the descendant;
   // the escalation must probe the WHOLE GROUP.
-  const dir = mkdtempSync(join(tmpdir(), 'footer-desc-'))
+  const life = testLifecycle(t)
+  const dir = life.tempDir('footer-desc-')
   const leaderMarker = join(dir, 'leader.pid')
   const descendantMarker = join(dir, 'descendant.pid')
   const rows = await new Promise<string[] | undefined>((resolve) => {
@@ -314,7 +356,6 @@ test('a TERM-resistant DESCENDANT is hard-killed even when the group LEADER exit
     }
     assert.ok(dead, `pid ${victim} must be dead (no descendant orphan): leader=${leader} descendant=${descendant}`)
   }
-  rmSync(dir, { recursive: true, force: true })
 })
 
 test('huge stdout is capped at 16 KiB', async () => {
@@ -500,6 +541,7 @@ test('the app renders the command surface; the Host instruction still merges on 
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setFooterCommandRows(['\x1b[31mred\x1b[0m line'])
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
@@ -777,4 +819,42 @@ test('dispose REMOVES the abort listener (a process-wide signal must not retain 
   assert.equal(listenersAfter, 0, 'dispose must release the abort listener')
   // An abort after dispose is a harmless no-op (idempotent dispose).
   controller.abort()
+})
+
+test('setConfig re-arms IMMEDIATELY: a config change never waits out the old cadence', async () => {
+  // The review's P2: setConfig used to requestRefresh() against the OLD
+  // run's lastStartAt — with a 60s refresh, an edited command would not
+  // run for almost a minute (the item unavailable the whole time). A
+  // config identity change is an explicit re-arm: the new command must
+  // start promptly, then re-arm on the NEW interval.
+  const outputs: Array<string[] | undefined> = []
+  const runner = new FooterCommandRunner({
+    config: { ...CONFIG, refreshIntervalMs: 60000, timeoutMs: 10000, command: 'node -e "process.stdout.write(\'old\\n\')"' },
+    snapshot: () => emptyStatusSnapshot(),
+    width: () => 100,
+    height: () => 30,
+    onOutput: (rows) => outputs.push(rows),
+    signal: new AbortController().signal,
+  })
+  try {
+    runner.requestRefresh()
+    const deadline = Date.now() + 5000
+    while (outputs.length < 1 && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(outputs[0], ['old'])
+    // Change the command: the clearing write (undefined) lands
+    // synchronously, then the NEW value must commit PROMPTLY — never
+    // after the 60s cadence.
+    runner.setConfig({ ...CONFIG, refreshIntervalMs: 60000, timeoutMs: 10000, command: 'node -e "process.stdout.write(\'new\\n\')"' })
+    const deadline2 = Date.now() + 5000
+    while (!outputs.some(rows => rows?.[0] === 'new') && Date.now() < deadline2) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.ok(outputs.some(rows => rows?.[0] === 'new'),
+      `the new command must run promptly after a config change (got ${JSON.stringify(outputs)})`)
+    // The old generation must never commit after the change.
+    const oldAfterChange = outputs.slice(1).some(rows => rows?.[0] === 'old')
+    assert.equal(oldAfterChange, false, 'the old generation must never commit under the new config')
+  } finally {
+    runner.dispose()
+  }
 })

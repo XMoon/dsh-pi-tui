@@ -13,6 +13,16 @@ interface InputState {
 	cursor: number;
 }
 
+/** Cursor placement options for {@link Input.setValue}. */
+export interface InputSetValueOptions {
+	/**
+	 * Where the cursor lands after the value is replaced. Defaults to
+	 * `"end"` (prefill semantics — the next keystroke appends); `"preserve"`
+	 * keeps the historical clamped-cursor behavior.
+	 */
+	cursor?: "end" | "preserve";
+}
+
 /**
  * Input component - single-line text input with horizontal scrolling
  */
@@ -40,9 +50,18 @@ export class Input implements Component, Focusable {
 		return this.value;
 	}
 
-	setValue(value: string): void {
+	setValue(value: string, options?: InputSetValueOptions): void {
 		this.value = value;
-		this.cursor = Math.min(this.cursor, value.length);
+		// Prefill cursor semantics (dsh-pi-tui divergence X040; upstream and
+		// the kimi snapshot only clamp): the cursor lands at the END of the new
+		// value so the next typed character APPENDS. Every existing caller
+		// pre-fills a query/draft the user continues typing; a fresh Input's
+		// cursor 0 made `setValue("foo")` + "x" produce "xfoo". Pass
+		// { cursor: "preserve" } for the historical clamped-cursor behavior
+		// (mid-edit value replacement).
+		this.cursor = options?.cursor === "preserve"
+			? Math.min(this.cursor, value.length)
+			: value.length;
 	}
 
 	handleInput(data: string): void {
@@ -383,7 +402,7 @@ export class Input implements Component, Focusable {
 		if (availableWidth <= 0) {
 			// Extremely narrow: clip the prompt itself instead of emitting a
 			// line wider than the terminal (the frame's truncation would
-			// otherwise hide the input entirely).
+			// otherwise hide the input entirely). (dsh-pi-tui divergence X011.)
 			return [truncateToWidth(prompt, Math.max(1, width), "")];
 		}
 

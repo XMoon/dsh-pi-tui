@@ -9,17 +9,35 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
-import { FooterConfiguratorModel } from '../src/footer/configurator-model.ts'
+import { FooterComposer } from '../src/footer/composer.ts'
+import { FooterConfiguratorModel, sameFooterCustomItem } from '../src/footer/configurator-model.ts'
+import { FooterCustomItemCatalog } from '../src/footer/custom-items.ts'
+import { FooterItemRegistry } from '../src/footer/item-registry.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
 import type { StatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
 
 function startApp(cols = 100, rows = 30): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(cols, rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   return { vt, app }
 }
 
@@ -188,8 +206,10 @@ test('A opens the Add picker; typing filters; Enter adds and closes', async () =
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('Add Item → Row 1 · Left'), `picker title missing (the add side is shown):\n${view}`)
   assert.ok(view.includes('Search:'), `search line missing:\n${view}`)
-  // Type to filter (one chunk — the paste-burst path).
-  vt.sendInput('cache')
+  // Type to filter (one chunk — the paste-burst path). The label 'cache
+  // hit' pins the match: the unfiltered catalog also carries stats-line,
+  // whose description contains 'cache'.
+  vt.sendInput('cache hit')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('Cache hit'), `the search must filter to the match:\n${view}`)
@@ -202,14 +222,16 @@ test('A opens the Add picker; typing filters; Enter adds and closes', async () =
   assert.equal(model.state().mode, 'row', 'a successful add closes the picker')
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('Edit Row 1'), `the picker must close back into the row editor:\n${view}`)
-  // Reopen: the query is FRESH, and the added item has left the pool.
+  // Reopen: the query is FRESH, and the added definition is STILL offered
+  // (a definition may be placed repeatedly — another Add appends an
+  // independent placement).
   vt.sendInput('a')
   await vt.waitForRender()
   assert.equal(model.state().addQuery, '')
-  vt.sendInput('cache')
+  vt.sendInput('cache hit')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('(no matching items)'), `the pool must drop the added item:\n${view}`)
+  assert.ok(view.includes('Cache hit'), `the placed definition stays addable:\n${view}`)
   // Esc clears the search first, then returns to the row editor.
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -218,6 +240,37 @@ test('A opens the Add picker; typing filters; Enter adds and closes', async () =
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(model.state().mode, 'row')
+  app.stop()
+})
+
+test('the Row Editor distinguishes the default row\'s two Performance placements by style', async () => {
+  const { vt, app } = startApp()
+  app.setStatus({
+    model: 'deepseek/flash',
+    cwd: '/home/x/proj',
+    usage: {
+      tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
+      performance: { llmMs: 8100, firstTokenMs: 2_600, tokensPerSec: 40 },
+      turns: 2,
+      steps: 5,
+    },
+  })
+  const model = openDefault(app)
+  await vt.waitForRender()
+  // Enter the DEFAULT stats row (Row 2): its duplicate performance
+  // placements must be distinguishable through the existing style column
+  // — same label, different Style (Latency vs Speed).
+  vt.sendInput('\x1b[B') // Row 2
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  const rowEditor = view.split('\n').filter(line => line.includes('Performance'))
+  assert.equal(rowEditor.length, 2, `two Performance placements must be listed:\n${view}`)
+  assert.ok(rowEditor.some(line => line.includes('Latency')), `the latency placement must show its style:\n${view}`)
+  assert.ok(rowEditor.some(line => line.includes('Speed')), `the speed placement must show its style:\n${view}`)
+  // The draft kept both placements (the duplicate id is legal data).
+  assert.equal(model.preview().rows[1]!.left.filter(ref => ref.id === 'performance').length, 2)
   app.stop()
 })
 
@@ -413,8 +466,8 @@ test('bracketed paste split across terminal chunks buffers until the end marker'
   vt.sendInput('a')
   await vt.waitForRender()
   // Start/content/end split across chunks (slow terminals deliver paste
-  // in pieces). 'cach' filters to Cache hit (context is already IN the
-  // default layout, so the pool wouldn't list it).
+  // in pieces). 'cach' filters to Cache hit (the definition catalog lists
+  // every item; the substring still isolates the match).
   vt.sendInput('\x1b[200~c')
   await vt.waitForRender()
   vt.sendInput('ac')
@@ -677,6 +730,7 @@ test('resizing the terminal LARGER after opening does not clip the configurator'
   const vt = new VirtualTerminal(40, 10)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
   openDefault(app)
   await vt.waitForRender()
@@ -887,6 +941,7 @@ test('the whole-footer composer preview is sanitized too (SGR survives, OSC/CSI 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
   const model = new FooterConfiguratorModel({
     schemaVersion: 1,
@@ -996,6 +1051,7 @@ for (const rows of [3, 4, 6, 40]) {
     const vt = new VirtualTerminal(100, rows)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
+    startedApps.add(app)
     openDefault(app)
     await vt.waitForRender()
     const view = vt.getViewport()
@@ -1014,6 +1070,7 @@ for (const cols of [40, 80, 120]) {
       const vt = new VirtualTerminal(cols, rows)
       const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
       app.start()
+      startedApps.add(app)
       app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
       openDefault(app)
       await vt.waitForRender()
@@ -1048,6 +1105,7 @@ test('a 4-physical-row preview cannot eat the editable body (10-row terminal)', 
   const vt = new VirtualTerminal(40, 10)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   app.setStatus({ model: `a-very-long-model-name/${'x'.repeat(120)}`, cwd: '/home/x/proj' })
   const model = openDefault(app)
   await vt.waitForRender()
@@ -1169,7 +1227,7 @@ test('PR E: Save & Exit saves; Discard & Exit closes without saving', async () =
     assert.equal(saved, 1)
     assert.equal(cancelled, 0)
     assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the overlay closed after success')
-    app.stop()
+    app.dispose()
   }
   // Discard & Exit.
   {
@@ -1275,6 +1333,7 @@ test('PR E: the exit guard keeps all three actions visible at 40x10', async () =
   const vt = new VirtualTerminal(40, 10)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   let cancelled = 0
   openWith(app, { onCancel: () => { cancelled += 1 } })
   await vt.waitForRender()
@@ -1333,6 +1392,7 @@ test('PR E: closing during an in-flight save is safe (no unhandled rejection)', 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   let attempts = 0
   let release: (() => void) | undefined
   const gate = new Promise<void>(resolve => { release = resolve })
@@ -1359,6 +1419,7 @@ test('PR E: the Save row stays visible at 40x10 and Saving… survives a resize'
   const vt = new VirtualTerminal(40, 10)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+  startedApps.add(app)
   let attempts = 0
   let release: (() => void) | undefined
   const gate = new Promise<void>(resolve => { release = resolve })
@@ -1378,5 +1439,131 @@ test('PR E: the Save row stays visible at 40x10 and Saving… survives a resize'
   await settle()
   await vt.waitForRender()
   assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the released save closes on success')
+  app.stop()
+})
+// ── PR D: custom command item UI ─────────────────────────────────────────
+
+/** Open the configurator with a draft catalog whose value source mirrors
+ * the real /footer wiring (commands.ts): the committed cache shows ONLY
+ * while the draft definition is unchanged, the dim [command] placeholder
+ * otherwise. */
+function openWithCommand(
+  app: TuiApp,
+  committed: readonly import('../src/footer/custom-items.ts').FooterCustomItemSettings[],
+  draft?: import('../src/footer/custom-items.ts').FooterCustomItemCatalog,
+): void {
+  const registry = new FooterItemRegistry(app.getFooterItemRegistry())
+  const customItems = draft ?? new FooterCustomItemCatalog(committed)
+  customItems.setCommandValueSource({
+    value: (id) => {
+      const d = customItems.get(id)
+      if (d === undefined || d.kind !== 'command') return undefined
+      const c = committed.find(item => item.id === id)
+      if (c === undefined || !sameFooterCustomItem(d, c)) return { kind: 'placeholder' }
+      const text = app.getFooterCommandItemValue(id)
+      return text === undefined ? { kind: 'placeholder' } : { kind: 'value', text }
+    },
+  })
+  registry.setCustomSource(customItems)
+  const model = new FooterConfiguratorModel(
+    { schemaVersion: 1, rows: [{ left: [{ id: 'user:clock' }], right: [] }] },
+    registry,
+    customItems,
+  )
+  app.openFooterConfigurator({
+    model,
+    registry,
+    composer: new FooterComposer(registry),
+    onSave: () => {},
+    onCancel: () => {},
+  })
+}
+
+test('PR D: the Add picker offers Create Custom Command and the flow creates + previews it', async () => {
+  const { vt, app } = startApp()
+  openWithCommand(app, [])
+  await vt.waitForRender()
+  vt.sendInput('\r') // row
+  vt.sendInput('a') // add
+  vt.sendInput('no-match')
+  await vt.waitForRender()
+  const addView = vt.getViewport().join('\n')
+  assert.ok(addView.includes('+ Create Custom Text'), `the text create action must stay:\n${addView}`)
+  assert.ok(addView.includes('+ Create Custom Command'), `the command create action must appear:\n${addView}`)
+  assert.ok(addView.includes('Create a user-defined static footer item.'))
+  vt.sendInput('\x1b[B') // down: Create Custom Command
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Create a user-defined command item.'))
+  vt.sendInput('\r') // create-name
+  vt.sendInput('Clock')
+  vt.sendInput('\r') // create-command
+  vt.sendInput('date +%H:%M')
+  vt.sendInput('\r') // create-refresh (opens on the 5s default)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Refresh'))
+  vt.sendInput('\r') // create-timeout (opens on the 300ms default)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Timeout'))
+  vt.sendInput('\r') // create-tone
+  vt.sendInput('\r') // create with Auto
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Clock'), `the created item must appear in the row:\n${view}`)
+  assert.ok(view.includes('[command]'), `the draft command preview must show the dim placeholder:\n${view}`)
+  app.stop()
+})
+
+test('PR D: the item editor exposes Command/Refresh/Timeout for a command item', async () => {
+  const { vt, app } = startApp()
+  openWithCommand(app, [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }])
+  await vt.waitForRender()
+  vt.sendInput('\r') // row
+  vt.sendInput('\r') // item
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Command'), `the command editor entry missing:\n${view}`)
+  assert.ok(view.includes('Refresh'), `the refresh entry missing:\n${view}`)
+  assert.ok(view.includes('Timeout'), `the timeout entry missing:\n${view}`)
+  assert.ok(view.includes('Default tone'), `the definition tone entry missing:\n${view}`)
+  assert.ok(view.includes('Rename definition'), `the rename entry missing:\n${view}`)
+  assert.ok(view.includes('Delete definition'), `the delete entry missing:\n${view}`)
+  app.stop()
+})
+
+test('PR D: the preview shows the dim [command] placeholder for a draft and the committed cache when unchanged', async () => {
+  const { vt, app } = startApp()
+  const committed = [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }]
+  openWithCommand(app, committed)
+  await vt.waitForRender()
+  // No committed cache yet: the row preview shows the placeholder.
+  assert.ok(vt.getViewport().join('\n').includes('[command]'), 'the draft preview must show the placeholder')
+  // The runtime commits a cache: the unchanged draft now shows the value.
+  app.setFooterCommandItemValue('user:clock', '14:30')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('14:30'), `the committed cache must preview:\n${view}`)
+  assert.ok(!view.includes('[command]'), 'the placeholder must disappear once the cache exists')
+  app.stop()
+})
+
+test('PR D: a modified draft command never shows the old committed cache', async () => {
+  const { vt, app } = startApp()
+  const committed = [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }]
+  const draft = new FooterCustomItemCatalog(committed)
+  openWithCommand(app, committed, draft)
+  app.setFooterCommandItemValue('user:clock', '14:30')
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('14:30'))
+  // Edit the command in the draft: the preview must fall back to the
+  // placeholder — never pretend the old cache is the new command's result.
+  vt.sendInput('\r') // row
+  vt.sendInput('\r') // item
+  vt.sendInput('\r') // Command editor
+  vt.sendInput('!')
+  vt.sendInput('\r') // commit
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[command]'), `a modified draft must show the placeholder:\n${view}`)
+  assert.ok(!view.includes('14:30'), 'the stale cache must not be shown for a modified draft')
   app.stop()
 })

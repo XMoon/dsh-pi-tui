@@ -6,19 +6,37 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
-import { CallId, MessageId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, MessageId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { toolPresenterFrom } from '../src/present.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { Text, visibleWidth } from '@xmoon76/pi-tui'
+import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
+import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/process-tui-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
 
 function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; get exits(): number } {
   const vt = new VirtualTerminal(80, 24)
@@ -29,8 +47,15 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; ge
     onExit: () => { exits += 1 },
   })
   app.start()
+  startedApps.add(app)
   // `exits` is a number: returning it by value would copy 0, so expose a getter.
   return { vt, app, submitted, get exits(): number { return exits } }
+}
+
+/** Pause longer than the todo click-coalescing window (500ms): a
+ * deliberate second todo click must be a NEW gesture, never coalesced. */
+function sleepBeyondTodoCoalesce(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 550))
 }
 
 test('renders the header and the editor frame', async () => {
@@ -137,6 +162,8 @@ test('notify is transient: cleared by its auto-clear timeout', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { notifyDurationMs: 200 })
   app.start()
+
+  startedApps.add(app)
   app.notify('transient note')
   await new Promise(resolve => setTimeout(resolve, 40))
   await vt.waitForRender()
@@ -162,110 +189,109 @@ test('notify defaults to info and errors opt in explicitly', async () => {
   assert.ok(view.includes('✗ resume failed'), `error-style notify missing:\n${view}`)
 })
 
-test('tool cards present through the real registry: read shows the relativized path', async () => {
+test('tool cards present through the real registry: read shows the relativized path', async (t) => {
+  const life = testLifecycle(t)
   // A real workspace with a real file under a src/ subdirectory.
-  const dir = await mkdtemp(join(tmpdir(), 'dsh-pi-tui-read-'))
+  const dir = life.tempDir('dsh-pi-tui-read-')
+  await mkdir(join(dir, 'src'), { recursive: true })
+  const filePath = join(dir, 'src', 'foo.ts')
+  await writeFile(filePath, 'const answer = 42')
+
+  // A real Cordis context with the real tool registry, plus a fake read
+  // tool whose presentation contract mirrors @deepseek-ai/dsh-tool-fs.
+  const ctx = new Context()
+  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('systemPrompt', {
+    tools: () => {},
+    section: () => () => {},
+  })
+  new ToolRuntime(ctx)
+  const unregister = ctx.tools.register(defineTool({
+    name: 'read',
+    description: 'Read a UTF-8 text file (test fake).',
+    parameters: {
+      file_path: { type: 'string', required: true, description: 'Path to read.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          path: { type: 'string', required: true },
+          text: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.text }],
+      presentationMeta: (_args, value) => ({
+        path: value.path,
+        lines: value.text.split('\n').map((text, index) => ({ number: index + 1, text })),
+        totalLines: value.text.split('\n').length,
+      }),
+    },
+    execute: async (args) => ({
+      path: args.file_path,
+      text: await readFile(args.file_path, 'utf8'),
+    }),
+    presentCall: (args) => ({
+      card: 'generic',
+      title: 'Read ' + args.file_path,
+      kind: 'read',
+      locations: [{ path: args.file_path, line: 1 }],
+    }),
+    presentResult: (args, result) => {
+      const meta = result.meta as { path: string; lines: { number: number; text: string }[]; totalLines: number }
+      return { card: 'read', path: meta.path, offset: 1, lines: meta.lines, totalLines: meta.totalLines, content: result.content }
+    },
+  }))
   try {
-    await mkdir(join(dir, 'src'), { recursive: true })
-    const filePath = join(dir, 'src', 'foo.ts')
-    await writeFile(filePath, 'const answer = 42')
-
-    // A real Cordis context with the real tool registry, plus a fake read
-    // tool whose presentation contract mirrors @deepseek-ai/dsh-tool-fs.
-    const ctx = new Context()
-    ;(ctx as unknown as { provide(name: string, value: object): void }).provide('systemPrompt', {
-      tools: () => {},
-      section: () => () => {},
-    })
-    new ToolRuntime(ctx)
-    const unregister = ctx.tools.register(defineTool({
-      name: 'read',
-      description: 'Read a UTF-8 text file (test fake).',
-      parameters: {
-        file_path: { type: 'string', required: true, description: 'Path to read.' },
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            path: { type: 'string', required: true },
-            text: { type: 'string', required: true },
-          },
-        },
-        render: (_args, value) => [{ type: 'text', text: value.text }],
-        presentationMeta: (_args, value) => ({
-          path: value.path,
-          lines: value.text.split('\n').map((text, index) => ({ number: index + 1, text })),
-          totalLines: value.text.split('\n').length,
-        }),
-      },
-      execute: async (args) => ({
-        path: args.file_path,
-        text: await readFile(args.file_path, 'utf8'),
-      }),
-      presentCall: (args) => ({
-        card: 'generic',
-        title: 'Read ' + args.file_path,
-        kind: 'read',
-        locations: [{ path: args.file_path, line: 1 }],
-      }),
-      presentResult: (args, result) => {
-        const meta = result.meta as { path: string; lines: { number: number; text: string }[]; totalLines: number }
-        return { card: 'read', path: meta.path, offset: 1, lines: meta.lines, totalLines: meta.totalLines, content: result.content }
-      },
-    }))
-    try {
-      const callId = CallId('call-1')
-      // The mock stream: a tool/call event, then the real loop executes the
-      // registered tool for real, then its outcome lands as tool/result.
-      const callEvent: SessionEvent = {
-        type: 'tool/call',
-        seq: 0,
-        time: 1_700_000_000_000,
-        data: { turn: 0, step: 0, callId, name: 'read', arguments: JSON.stringify({ file_path: filePath }) },
-      }
-      const outcome = await ctx.tools.execute({
-        callId,
-        name: 'read',
-        arguments: { file_path: filePath },
-        signal: new AbortController().signal,
-      })
-      assert.equal(outcome.isError, false)
-      const resultEvent: SessionEvent = {
-        type: 'tool/result',
-        seq: 1,
-        time: 1_700_000_000_001,
-        data: {
-          turn: 0,
-          step: 0,
-          message: createToolResultMessage({ callId, content: outcome.content, isError: outcome.isError }),
-          ...outcome.meta === undefined ? {} : { meta: outcome.meta },
-        },
-      }
-
-      const vt = new VirtualTerminal(100, 24)
-      const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
-        workspaceRoot: dir,
-        present: toolPresenterFrom(name => ctx.tools.get(name)),
-      })
-      app.start()
-      app.setToolOutputExpanded(true)
-      const folder = new TranscriptFolder()
-      folder.apply([callEvent, resultEvent])
-      app.setTranscript(folder.messages())
-      await vt.waitForRender()
-      const view = vt.getViewport().join('\n')
-      assert.ok(view.includes('Read src/foo.ts [ok]'), `read card header missing:\n${view}`)
-      assert.ok(view.includes('path: src/foo.ts'), `relativized path missing:\n${view}`)
-      assert.ok(view.includes('total lines: 1'), `line count missing:\n${view}`)
-      assert.ok(!view.includes(dir), `workspace root leaked into the viewport:\n${view}`)
-      app.stop()
-    } finally {
-      unregister()
+    const callId = ToolCallId('call-1')
+    // The mock stream: a tool/call event, then the real loop executes the
+    // registered tool for real, then its outcome lands as tool/result.
+    const callEvent: SessionEvent = {
+      type: 'tool/call',
+      seq: SessionSeq(0),
+      time: 1_700_000_000_000,
+      data: { turn: 0, step: 0, callId, name: 'read', arguments: JSON.stringify({ file_path: filePath }) },
     }
+    const outcome = await ctx.tools.execute({
+      callId,
+      name: 'read',
+      arguments: { file_path: filePath },
+      signal: new AbortController().signal,
+    })
+    assert.equal(outcome.isError, false)
+    const resultEvent: SessionEvent = {
+      type: 'tool/result',
+      seq: SessionSeq(1),
+      time: 1_700_000_000_001,
+      data: {
+        turn: 0,
+        step: 0,
+        message: createToolResultMessage({ callId, content: outcome.content, isError: outcome.isError }),
+        ...outcome.meta === undefined ? {} : { meta: outcome.meta },
+      },
+    }
+
+    const vt = new VirtualTerminal(100, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      workspaceRoot: dir,
+      present: toolPresenterFrom(name => ctx.tools.get(name)),
+    })
+    app.start()
+
+    startedApps.add(app)
+    life.defer(() => app.stop())
+    app.setToolOutputExpanded(true)
+    const folder = new TranscriptFolder()
+    folder.apply([callEvent, resultEvent])
+    app.setTranscript(folder.messages())
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.ok(view.includes('Read src/foo.ts [ok]'), `read card header missing:\n${view}`)
+    assert.ok(view.includes('path: src/foo.ts'), `relativized path missing:\n${view}`)
+    assert.ok(view.includes('total lines: 1'), `line count missing:\n${view}`)
+    assert.ok(!view.includes(dir), `workspace root leaked into the viewport:\n${view}`)
   } finally {
-    await rm(dir, { recursive: true, force: true })
+    unregister()
   }
 })
 
@@ -298,6 +324,8 @@ test('shift+tab with no overlay cycles the permission through the host', async (
   let cycled = 0
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCyclePermission: () => { cycled += 1 } })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x1b[Z') // shift+tab
   await vt.waitForRender()
@@ -425,6 +453,347 @@ test('notice rows beyond the fold collapse into a +N more line; user rows never 
   assert.ok(view.includes('❯ my first queued message'), `user row must survive the drain:\n${view}`)
 })
 
+test('queue pane reflows from raw items across a narrow-to-wide resize', async () => {
+  const { vt, app } = startApp()
+  const fullNotice = 'NOTICE-RESIZE ' + 'the original notice survives the narrow frame '.repeat(2)
+  app.setQueueItems([{ id: 'notice-1', text: fullNotice, mode: 'steer', notice: true }])
+  await vt.waitForRender()
+  vt.resize(40, 24)
+  await vt.waitForRender()
+  let lines = vt.getViewport()
+  const narrowNotice = lines.findIndex(line => line.includes('NOTICE-RESIZE'))
+  assert.ok(narrowNotice > 0, `notice must remain visible after narrowing:\n${lines.join('\n')}`)
+  let borderRows = 0
+  for (let index = narrowNotice - 1; index >= 0 && lines[index]!.includes('─'); index -= 1) borderRows += 1
+  assert.equal(borderRows, 1, `a narrow queue must have one border row, not stale wrapped rows:\n${lines.join('\n')}`)
+  assert.equal(visibleWidth(lines[narrowNotice - 1]!), 40)
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  lines = vt.getViewport()
+  assert.ok(lines.some(line => line.includes(fullNotice)), `the wide queue must recover the raw notice:\n${lines.join('\n')}`)
+})
+
+test('todo panel rebuilds its border from the live width', async () => {
+  const { vt, app } = startApp()
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  app.setTodoSummary(Array.from({ length: 8 }, (_, index) => ({
+    content: `todo ${index}`,
+    status: 'pending' as const,
+  })))
+  app.toggleTodoPanel()
+  await vt.waitForRender()
+  const borderRowsBefore = (width: number): number => {
+    const lines = vt.getViewport()
+    const title = lines.findIndex(line => line.includes('Todo'))
+    assert.ok(title > 0, `todo title missing at ${width} columns:\n${lines.join('\n')}`)
+    let count = 0
+    for (let index = title - 1; index >= 0 && lines[index]!.includes('─'); index -= 1) count += 1
+    assert.equal(visibleWidth(lines[title - 1]!), width)
+    return count
+  }
+  assert.equal(borderRowsBefore(120), 1)
+  vt.resize(40, 24)
+  await vt.waitForRender()
+  assert.equal(borderRowsBefore(40), 1, 'the narrow todo border must not retain stale wrapped rows')
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  assert.equal(borderRowsBefore(120), 1)
+})
+
+test('height-only resize refreshes the extension widget row budget', async () => {
+  const vt = new VirtualTerminal(80, 16)
+  const ledger = new ExtensionLedger()
+  let app!: TuiApp
+  const host = new SurfaceHost(ledger, () => app.requestRender())
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
+  startedApps.add(app)
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: host.surfaceId,
+    generation: 1,
+    width: 80,
+    height: 16,
+    fullscreen: false,
+    focusedSeat: 'editor',
+    themeId: 'dark',
+    themeRevision: 0,
+  })
+  ledger.register('input.widget.below', { id: 'resize-widget' }, {
+    view: { kind: 'rows', rows: [
+      { kind: 'text', spans: [{ text: 'row one' }] },
+      { kind: 'text', spans: [{ text: 'row two' }] },
+      { kind: 'text', spans: [{ text: 'row three' }] },
+    ] },
+  }, 'resize-test')
+  host.refreshOutlets()
+  app.start()
+  const widgetRows = (): number => host.widgetsBelowText().split('\n').filter(line => line !== '').length
+  await vt.waitForRender()
+  assert.equal(widgetRows(), 3)
+  vt.resize(80, 7)
+  await vt.waitForRender()
+  assert.equal(widgetRows(), 1, `height-only shrink must reduce the below-widget budget (surface=${JSON.stringify(host.state().surface)})`)
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  assert.equal(widgetRows(), 2)
+  vt.resize(80, 16)
+  await vt.waitForRender()
+  assert.equal(widgetRows(), 3)
+})
+
+test('history overlay reflows geometry without restarting its search state', async () => {
+  const rows = [
+    { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
+    { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
+  ]
+  const source: import('../src/history-search.ts').HistorySearchSource = {
+    search: async () => ({ results: rows, exhausted: true }),
+  }
+  const vt = new VirtualTerminal(50, 10)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  app.start()
+  startedApps.add(app)
+  app.openHistorySearch()
+  await vt.waitForRender()
+  vt.sendInput('x')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('x'), `history query missing before resize:\n${view}`)
+  assert.ok(view.includes('entry beta'), `history selection missing before resize:\n${view}`)
+  vt.resize(120, 40)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('entry beta'), `history selection lost after grow:\n${view}`)
+  // The overlay design width is capped at 100 and the Frame consumes 4 of
+  // its columns, so the panel inner width (≤ 96) never reaches the 100-wide
+  // split threshold — the grown layout stays stacked. Assert the frame
+  // actually reflowed to span the grown width instead of a split marker.
+  const stripAnsi = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const frameTop = vt.getViewport().map(stripAnsi).find(line => line.includes('╭'))
+  assert.ok(frameTop !== undefined && visibleWidth(frameTop.trimEnd()) >= 100,
+    `history frame must span the grown terminal:\n${view}`)
+  assert.ok(view.includes('Current directory'), `history tabs did not reflow after grow:\n${view}`)
+  vt.resize(50, 10)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('╭') && view.includes('╰'), `history frame must survive shrink:\n${view}`)
+  assert.ok(view.includes('type filter') && view.includes('╰'), `history footer must survive shrink:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('task browser no-match state fits a short terminal without clipping the hint', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 8)
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    [{ value: 'job:1', label: 'bash · build', status: 'running', group: 'jobs' }],
+    () => {},
+    () => {},
+    { header: 'Tasks', enableSearch: true, noMatchText: 'no matching tasks' },
+  )
+  await vt.waitForRender()
+  for (const key of 'zzzz') vt.sendInput(key) // no match
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('no matching tasks'), `no-match message must survive:\n${view}`)
+  assert.ok(view.includes('esc close'), `no-match hint must survive:\n${view}`)
+  assert.ok(view.includes('╰'), `frame bottom must not be clipped:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('Task Center full mode keeps the selected task on a very short terminal', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 8)
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    Array.from({ length: 20 }, (_, index) => ({
+      value: `task-${index}`,
+      label: `task ${index}`,
+      status: 'running',
+      group: 'jobs',
+    })),
+    () => {},
+    () => {},
+    { mode: 'full', header: 'Tasks', maxVisible: 10 },
+  )
+  await vt.waitForRender()
+  for (let index = 0; index < 3; index += 1) vt.sendInput('\x1b[B') // select task 3
+  await vt.waitForRender()
+  // 80x8 full mode: margin 2 + frame borders 2 leave a 4-row panel grant.
+  // The semantic degradation must keep the SELECTED task row (header and
+  // hint may share the grant, but never squeeze the main row out).
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('task 3'), `selected task must survive the 4-row grant:\n${view}`)
+  assert.ok(view.includes('╰'), `frame bottom must not be clipped:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('Task Center full mode keeps search input and the selected task at 10 rows', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    Array.from({ length: 20 }, (_, index) => ({
+      value: `task-${index}`,
+      label: `task ${index}`,
+      status: 'running',
+      group: 'jobs',
+    })),
+    () => {},
+    () => {},
+    { mode: 'full', header: 'Tasks', maxVisible: 10, initialSearchMode: true },
+  )
+  await vt.waitForRender()
+  for (let index = 0; index < 2; index += 1) vt.sendInput('\x1b[B') // select task 2
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes(' / search…'), `search input must survive the 6-row grant:\n${view}`)
+  assert.ok(view.includes('task 2'), `selected task must survive the 6-row grant:\n${view}`)
+  assert.ok(view.includes('╰'), `frame bottom must not be clipped:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('openTaskBrowser honors percentage width and maxHeight (fork sizing rules)', async () => {
+  const items = [{ value: 'job:1', label: 'bash · build', status: 'running', group: 'jobs' }]
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').trim()
+  // width '50%' of a 100-column terminal → the frame spans exactly 50.
+  {
+    const vt = new VirtualTerminal(100, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    startedApps.add(app)
+    app.openTaskBrowser(items, () => {}, () => {}, { width: '50%' })
+    await vt.waitForRender()
+    const lines = vt.getViewport().map(strip)
+    const top = lines.findIndex(line => line.includes('╭'))
+    assert.ok(top >= 0, `percentage width must render a frame:\n${lines.join('\n')}`)
+    assert.equal(visibleWidth(lines[top]!), 50, 'width 50% must resolve to 50 columns')
+    app.dispose()
+  }
+  // maxHeight '70%' of a 40-row terminal → the frame is at most 28 rows.
+  {
+    const vt = new VirtualTerminal(80, 40)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    startedApps.add(app)
+    app.openTaskBrowser(items, () => {}, () => {}, { maxHeight: '70%' })
+    await vt.waitForRender()
+    const lines = vt.getViewport().map(strip)
+    const top = lines.findIndex(line => line.includes('╭'))
+    const bottom = lines.findIndex(line => line.includes('╰'))
+    assert.ok(top >= 0 && bottom >= top, `maxHeight 70% must render a frame:\n${lines.join('\n')}`)
+    assert.ok(bottom - top + 1 <= 28, `frame must be capped at 28 rows (${bottom - top + 1})`)
+    app.dispose()
+  }
+})
+
+test('openTaskBrowser full mode honors explicit numeric width and maxHeight', async () => {
+  const items = [{ value: 'job:1', label: 'bash · build', status: 'running', group: 'jobs' }]
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').trim()
+  const vt = new VirtualTerminal(120, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  // Explicit options always win, even in full mode: 100 wide / 20 tall
+  // (clamped by the margin-inset available area, never forced to 100%).
+  app.openTaskBrowser(items, () => {}, () => {}, { mode: 'full', width: 100, maxHeight: 20 })
+  await vt.waitForRender()
+  const lines = vt.getViewport().map(strip)
+  const top = lines.findIndex(line => line.includes('╭'))
+  const bottom = lines.findIndex(line => line.includes('╰'))
+  assert.ok(top >= 0 && bottom >= top, `full-mode explicit size must render a frame:\n${lines.join('\n')}`)
+  assert.equal(visibleWidth(lines[top]!), 100, 'explicit width 100 must win over the full-mode default')
+  assert.ok(bottom - top + 1 <= 20, `explicit maxHeight 20 must cap the frame (${bottom - top + 1})`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  app.dispose()
+})
+
+test('task browser keeps the selected row and hint visible after a height shrink', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 30)
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    Array.from({ length: 24 }, (_, index) => ({
+      value: `task-${index}`,
+      label: `task ${index}`,
+      status: 'running',
+      group: 'jobs',
+      // Real task rows carry detail lines under the main row; a tiny-grant
+      // fallback must keep the SELECTED MAIN row, not its detail tail.
+      detail: `detail line ${index}`,
+    })),
+    () => {},
+    () => {},
+    { header: 'Tasks', maxVisible: 10, enableSearch: true },
+  )
+  await vt.waitForRender()
+  for (let index = 0; index < 17; index += 1) vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('task 17'), `selected task main row must remain visible after shrink:\n${view}`)
+  assert.ok(view.includes('esc close'), `task hint must remain visible after shrink:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('generic picker preserves its selected row and hint after a short resize', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 30)
+  await vt.waitForRender()
+  app.openPicker(
+    Array.from({ length: 24 }, (_, index) => ({ value: `choice-${index}`, label: `choice ${index}` })),
+    () => {},
+    () => {},
+    { header: 'Choices', showHint: true },
+  )
+  await vt.waitForRender()
+  for (let index = 0; index < 17; index += 1) vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('choice 17'), `selected picker row must remain visible:\n${view}`)
+  assert.ok(view.includes('esc close'), `picker hint must remain visible:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('settings list preserves its selected row and hint after a short resize', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 30)
+  await vt.waitForRender()
+  app.openSettings(
+    Array.from({ length: 24 }, (_, index) => ({
+      id: `setting-${index}`,
+      label: `setting ${index}`,
+      currentValue: 'on',
+      values: ['on', 'off'],
+    })),
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  for (let index = 0; index < 17; index += 1) vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('setting 17'), `selected settings row must remain visible:\n${view}`)
+  assert.ok(view.includes('Esc to cancel'), `settings hint must remain visible:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
 test('down opens the task browser only with active tasks and an empty editor; ctrl+j is inert', async () => {
   const vt = new VirtualTerminal(80, 24)
   let opened = 0
@@ -435,6 +804,8 @@ test('down opens the task browser only with active tasks and an empty editor; ct
     onOpenTasks: () => { opened += 1; app.requestRender() },
   })
   app.start()
+
+  startedApps.add(app)
   const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
   await vt.waitForRender()
   // No active tasks: ↓ is inert.
@@ -494,6 +865,8 @@ test('live continuable subagents arm the task browser trigger through setAgents'
     onOpenTasks: () => { opened += 1; app.requestRender() },
   })
   app.start()
+
+  startedApps.add(app)
   const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
   await vt.waitForRender()
   // No live agents: inert.
@@ -563,8 +936,10 @@ test('fullscreen click on the todo panel toggles its compact/full expansion', as
   // 80x24 terminal: footer (2) + editor seat (3) at the bottom, so the
   // expanded panel (11 rows) spans 0-based rows 8..19 — click row 17 (a
   // different row from the first click, so the fork never reads a
-  // double-click).
+  // double-click). Paced beyond the todo click-coalescing window: this is
+  // a DELIBERATE second gesture, not a rapid double-click.
   await vt.waitForRender()
+  await sleepBeyondTodoCoalesce()
   vt.sendInput('\x1b[<0;30;18M')
   vt.sendInput('\x1b[<0;30;18m')
   await vt.waitForRender()
@@ -601,7 +976,9 @@ test('fullscreen click on the todo summary dock row opens the todo panel', async
   assert.ok(view.includes('todo item 0'), `compact panel must show after the click:\n${view}`)
   // With the panel open the summary is hidden and the panel owns rows
   // 12..19 — the same cell is now a panel row, so the next click runs the
-  // compact → full step of the loop.
+  // compact → full step of the loop. Paced beyond the todo click-coalescing
+  // window: a DELIBERATE second gesture, not a rapid double-click.
+  await sleepBeyondTodoCoalesce()
   vt.sendInput('\x1b[<0;20;19M')
   vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
@@ -640,9 +1017,11 @@ test('a tiny terminal clamps the todo click geometry to the visible screen', asy
   const vt = new VirtualTerminal(80, 6)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   const todos = Array.from({ length: 3 }, (_, i) => ({
-    id: `t-${i}`, content: `todo item ${i}`,
+    content: `todo item ${i}`,
     status: i === 0 ? ('in_progress' as const) : ('pending' as const),
   }))
   app.setTodoSummary(todos)
@@ -652,17 +1031,209 @@ test('a tiny terminal clamps the todo click geometry to the visible screen', asy
   assert.ok(!app.isTodoPanelExpanded(), 'starts compact')
   // Row 0 (SGR y=1) sits inside the clamped region [0, todoBottom): with
   // the footer (2) + editor seat (3) on the 6-row terminal, todoBottom
-  // clamps to 1 — expand.
+  // clamps to 1. With 3 todos (≤5) the panel is a two-state summary ↔
+  // list — the click CLOSES it directly (no redundant full state).
   vt.sendInput('\x1b[<0;40;1M')
   vt.sendInput('\x1b[<0;40;1m')
   await vt.waitForRender()
-  assert.ok(app.isTodoPanelExpanded(), 'a click inside the clamped region must expand')
-  // Row 5 (SGR y=6) sits in the editor/footer rows below the region: ignored.
+  assert.ok(!app.isTodoPanelVisible(), 'a click inside the clamped region closes the ≤5 panel (list → summary)')
+  // Reopen, then row 5 (SGR y=6) sits in the editor/footer rows below the
+  // region: ignored.
+  app.toggleTodoPanel()
+  await vt.waitForRender()
   vt.sendInput('\x1b[<0;40;6M')
   vt.sendInput('\x1b[<0;40;6m')
   await vt.waitForRender()
-  assert.ok(app.isTodoPanelExpanded(), 'a click outside the clamped region must be ignored')
+  assert.ok(app.isTodoPanelVisible(), 'a click outside the clamped region must be ignored')
   app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: ≤5 items is a two-state summary ↔ list (no redundant full state)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 5 }, (_, i) => ({
+    content: `todo item ${i}`,
+    status: i === 0 ? ('in_progress' as const) : ('pending' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal; the closed panel renders
+  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
+  // row). Click it: summary → list.
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
+  assert.ok(!app.isTodoPanelExpanded(), 'opens compact (visually identical to full at ≤5)')
+  // With the panel open (border + title + 5 rows = rows 15..21) the same
+  // cell is a panel row: a DELIBERATE second click (paced beyond the
+  // coalescing window) must close the panel DIRECTLY — the second click
+  // returns to the summary, no third click needed, and no intermediate
+  // todoExpanded state exists.
+  await sleepBeyondTodoCoalesce()
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'second click closes the panel (list → summary)')
+  assert.ok(!app.isTodoPanelExpanded(), 'no ghost expanded state at ≤5')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo rapid double-click at the SAME coordinate is ONE gesture (no flash open/close)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 5 }, (_, i) => ({
+    content: `todo item ${i}`,
+    status: i === 0 ? ('in_progress' as const) : ('pending' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // The dock summary row sits at 0-based row 18. Two press/release groups
+  // at the SAME coordinate, the first render landing between them, both
+  // inside the double-click window (no pacing): the first click opens the
+  // panel, the layout mutates (the dock vanishes, the panel takes its
+  // rows), and the second click would land on a panel row — WITHOUT the
+  // todo coalescing it would immediately close the panel (the todo
+  // "flashes and vanishes"). The coalesced pair must leave the todo in
+  // the state the FIRST click produced.
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'fixture: the first click opens the panel')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'the rapid second click must be coalesced — the panel stays open')
+  assert.ok(!app.isTodoPanelExpanded(), 'and stays in the first click\'s state (compact)')
+  // A click on the TRANSCRIPT (a different target) resets the coalescing:
+  // the next todo click is a fresh gesture and closes the panel.
+  vt.sendInput('\x1b[<0;40;5M')
+  vt.sendInput('\x1b[<0;40;5m')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'after a different-target click the next todo click works')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: 1 item also closes on the second click (boundary)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary([{ content: 'only todo', status: 'in_progress' }])
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
+  // Deliberate second gesture (paced beyond the coalescing window).
+  await sleepBeyondTodoCoalesce()
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'second click closes the 1-item panel')
+  assert.ok(!app.isTodoPanelExpanded(), 'no expanded state with 1 item')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: 0 items never shows an empty full state', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary([])
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'the empty panel can open (border + title only)')
+  assert.ok(!app.isTodoPanelExpanded(), 'no full state with 0 items')
+  // A panel-row click with 0 items closes the panel (no overflow → no
+  // expansion step).
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'a click on the empty panel closes it')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: >5 items keeps summary → compact → full → summary', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 6 }, (_, i) => ({
+    content: `todo item ${i}`,
+    status: i === 0 ? ('in_progress' as const) : ('pending' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('todo item 0'), `compact panel shows the first rows:\n${view}`)
+  assert.ok(!view.includes('todo item 5'), `compact panel hides the 6th row:\n${view}`)
+  assert.ok(!app.isTodoPanelExpanded(), 'starts compact')
+  // Compact panel (border + title + 5 rows = 7) occupies rows 15..21 —
+  // click row 18: compact → full.
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelExpanded(), 'click must expand (compact → full)')
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('todo item 5'), `expanded panel shows the full list:\n${view}`)
+  // Full panel (8 rows) occupies rows 14..21 — click a DIFFERENT row
+  // (17): full → summary. Paced beyond the todo click-coalescing window:
+  // a DELIBERATE third gesture, not a rapid double-click.
+  await sleepBeyondTodoCoalesce()
+  vt.sendInput('\x1b[<0;30;18M')
+  vt.sendInput('\x1b[<0;30;18m')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'third click closes the panel (full → summary)')
+  assert.ok(!app.isTodoPanelExpanded(), 'closing resets the expansion')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: a >5 → ≤5 shrink clears the ghost expanded state', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const six = Array.from({ length: 6 }, (_, i) => ({
+    content: `todo item ${i}`,
+    status: i === 0 ? ('in_progress' as const) : ('pending' as const),
+  }))
+  app.setTodoSummary(six)
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Expand to full.
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelExpanded(), 'fixture: the 6-item panel is full')
+  // The host updates the list to 5: the ghost expansion must clear.
+  app.setTodoSummary(six.slice(0, 5))
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelExpanded(), 'a shrink to the compact cap clears todoExpanded')
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('todo item 0'), 'the panel still renders the list')
+  assert.ok(!view.includes('todo item 5'), 'the 6th item is gone')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('todo state machine: toggleTodoExpanded is fail-closed without overflow', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary([{ content: 'one', status: 'in_progress' }])
+  app.toggleTodoPanel()
+  await vt.waitForRender()
+  assert.equal(app.toggleTodoExpanded(), false, 'no overflow → the toggle refuses to expand')
+  assert.ok(!app.isTodoPanelExpanded(), 'no meaningless expanded state')
   app.stop()
 })
 
@@ -716,6 +1287,8 @@ test('alt+up with no overlay reaches the dequeue host', async () => {
   let dequeued = 0
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onDequeue: () => { dequeued += 1 } })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x1b[1;3A') // alt+up
   await vt.waitForRender()
@@ -807,6 +1380,8 @@ test('fixed-width overlays fill the declared width: no border-external mask regi
     const vt = new VirtualTerminal(columns, 24)
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
+
+    startedApps.add(app)
     app.openTaskBrowser(
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
       () => {},
@@ -837,7 +1412,7 @@ test('fixed-width overlays fill the declared width: no border-external mask regi
       assert.equal(line[left + declared - 1], line[left] === '╭' ? '╮' : line[left] === '╰' ? '╯' : '│',
         `frame right edge must sit at column ${left + declared - 1} (declared ${declared}) at ${columns} cols:\n${box.join('\n')}`)
     }
-    app.stop()
+    app.dispose()
   }
   for (const cols of [40, 80, 120, 200]) await run(cols)
 })
@@ -846,6 +1421,8 @@ test('a fixed-width overlay keeps its frame geometry across fullscreen, resize a
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const openBrowser = (): void => {
     app.openTaskBrowser(
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
@@ -949,21 +1526,21 @@ function diffCallArgs(): string {
 function diffCallEvent(seq: number, callId: string): SessionEvent {
   return {
     type: 'tool/call',
-    seq,
+    seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
-    data: { turn: 0, step: 0, callId: CallId(callId), name: 'edit', arguments: diffCallArgs() },
+    data: { turn: 0, step: 0, callId: ToolCallId(callId), name: 'edit', arguments: diffCallArgs() },
   }
 }
 
 function diffResultEvent(seq: number, callId: string, text: string): SessionEvent {
   return {
     type: 'tool/result',
-    seq,
+    seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
     data: {
       turn: 0,
       step: 0,
-      message: createToolResultMessage({ callId: CallId(callId), content: [{ type: 'text', text }], isError: false }),
+      message: createToolResultMessage({ callId: ToolCallId(callId), content: [{ type: 'text', text }], isError: false }),
     },
   }
 }
@@ -971,22 +1548,22 @@ function diffResultEvent(seq: number, callId: string, text: string): SessionEven
 function subagentRouteCallEvent(seq: number, callId: string, args: string): SessionEvent {
   return {
     type: 'tool/call',
-    seq,
+    seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
-    data: { turn: 0, step: 0, callId: CallId(callId), name: 'subagent_route', arguments: args },
+    data: { turn: 0, step: 0, callId: ToolCallId(callId), name: 'subagent_route', arguments: args },
   }
 }
 
 function subagentRouteResultEvent(seq: number, callId: string): SessionEvent {
   return {
     type: 'tool/result',
-    seq,
+    seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
     data: {
       turn: 0,
       step: 0,
       message: createToolResultMessage({
-        callId: CallId(callId),
+        callId: ToolCallId(callId),
         content: [{ type: 'text', text: 'started background subagent job job-1' }],
         isError: false,
       }),
@@ -1008,6 +1585,8 @@ test('a running edit card renders its call-time diff', async () => {
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-1')])
@@ -1024,6 +1603,8 @@ test('subagent-family tool cards show the model/provider line when the call carr
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   // A running subagent_route dispatch with an explicit model/provider.
   const args = JSON.stringify({ description: 'research', prompt: 'look it up', provider: 'ollama', model: 'deepseek-v4' })
@@ -1047,6 +1628,8 @@ test('subagent-family cards without an explicit model render unchanged (compatib
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   // The official subagent tool never carries model/provider in the args
   // (deployment config owns the route): no model line, no extra row.
@@ -1075,6 +1658,8 @@ test('a completed diff card renders the applied result diffs', async () => {
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-2'), diffResultEvent(1, 'call-diff-2', 'The file src/foo.ts has been updated successfully.')])
@@ -1101,6 +1686,8 @@ test('a completed diff card without a result view falls back to the call-time di
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-3'), diffResultEvent(1, 'call-diff-3', 'The file src/foo.ts has been updated successfully.')])
@@ -1128,6 +1715,8 @@ test('a big diff card caps in the default view with an expand hint', async () =>
     },
   })
   app.start()
+
+  startedApps.add(app)
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-4')])
@@ -1149,6 +1738,8 @@ test('the one-shot subagent viewer covers the editor, consumes input, and restor
     onSingleEscape: () => { singleEscapes += 1; return true },
   })
   app.start()
+
+  startedApps.add(app)
   const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
   app.setDraft('my precious draft')
   await vt.waitForRender()
@@ -1188,6 +1779,8 @@ test('ctrl+o still folds the viewed transcript while the viewer is up', async ()
     onExit: () => {},
   })
   app.start()
+
+  startedApps.add(app)
   app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'child-1', label: 'research', mode: 'one-shot', activity: 'running' })
   await vt.waitForRender()
   app.setToolOutputExpanded(false)
@@ -1362,6 +1955,8 @@ test('submitDraft with an empty draft and a staged image submits (image-only gat
     isImageDraft: () => true,
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   // The runner resolves the placeholders to image blocks (plan §11.1): an
   // empty-text draft with images is NOT empty.
@@ -1380,6 +1975,8 @@ test('submitDraft with an empty draft and no image stays a no-op even with the g
     isImageDraft: () => false,
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   app.submitDraft(false)
   await vt.waitForRender()
@@ -1396,6 +1993,8 @@ test('HOST EDITOR Enter with an image-only draft still submits (empty gate mirro
     isImageDraft: () => true,
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   // Physical Enter on the host editor with an empty body + staged images:
   // the empty guard must NOT swallow it — the image verdict is consulted
@@ -1416,6 +2015,8 @@ test('HOST EDITOR Enter with NO image and an empty body stays a no-op (isImageDr
     isImageDraft: () => false,
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -1432,6 +2033,8 @@ test('ctrl+v routes to onClipboardPaste and consumes the key', async () => {
     onClipboardPaste: () => { pasted += 1 },
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('\x16') // legacy Ctrl+V byte
   await vt.waitForRender()
@@ -1461,6 +2064,8 @@ test('a multimodal submission refused by shouldRememberInput never recalls (revi
     shouldRememberInput: (text) => !text.includes('[image #'),
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('分析 [image #1 (800×600)]')
   await vt.waitForRender()
@@ -1484,6 +2089,8 @@ test('a plain-text submission still recalls through the editor history', async (
     shouldRememberInput: (text) => !text.includes('[image #'),
   })
   app.start()
+
+  startedApps.add(app)
   await vt.waitForRender()
   vt.sendInput('plain prompt')
   await vt.waitForRender()
@@ -1504,6 +2111,8 @@ test('fullscreen drag selection copies through the host copySelection policy (is
     copySelection: async (text) => { copied.push(text); return true },
   })
   app.start()
+
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
@@ -1532,6 +2141,8 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
   const vt = new VirtualTerminal(60, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
@@ -1542,7 +2153,7 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
     { type: 'assistant/chunk', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', text: 'think one\nthink two\n' } } } as SessionEvent,
     { type: 'assistant/message', seq: 2, time: 1_700_000_000_002, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'reasoning', text: 'think one\nthink two' }] } } } as SessionEvent,
     { type: 'tool/call', seq: 3, time: 1_700_000_000_003, data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } } as SessionEvent,
-    { type: 'tool/result', seq: 4, time: 1_700_000_000_004, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: CallId('c1'), content: [{ type: 'text', text: 'file.txt' }], isError: false }) } } as SessionEvent,
+    { type: 'tool/result', seq: 4, time: 1_700_000_000_004, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: ToolCallId('c1'), content: [{ type: 'text', text: 'file.txt' }], isError: false }) } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   await vt.waitForRender()
@@ -1564,6 +2175,8 @@ test('applyPluginPalette records the live plugin-theme selection (the unload-fal
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
+
+  startedApps.add(app)
   assert.equal(app.activePluginTheme(), undefined, 'no selection before any plugin theme applies')
   app.applyPluginPalette('Foo', {
     primary: '#000', accent: '#000', text: '#000', textStrong: '#000', textDim: '#000',
