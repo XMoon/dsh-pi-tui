@@ -28,6 +28,13 @@ inventory, and `DIVERGENCES.md` is the generated human report.
   `UNKNOWN` comparison cannot retire; `REMOVED_UNUSED` requires empty audited
   dependency classes plus deletion evidence; and `REDUNDANT_SHIM` requires an
   atomic replacement mapping and evidence.
+- **Audit snapshots:** `UPSTREAM.json` remains the sole vendored baseline
+  source. `verification.referenceSnapshots` records the immutable sources used
+  during an explicit audit; it does not track repository HEAD. Refresh those
+  snapshots only for re-vendor, divergence re-audit, retirement evaluation, or
+  deliberate upstream-equivalence review. Neither field is a repository-HEAD
+  freshness target; `auditedSourceCommit` identifies the local source snapshot
+  audited in that review.
 - **Source ownership:** `src/` and `test/` are upstream-owned (Earendil
   baseline + re-applied divergences). `README.md` keeps the upstream content
   plus the local fork/ledger header, which must be preserved or re-applied

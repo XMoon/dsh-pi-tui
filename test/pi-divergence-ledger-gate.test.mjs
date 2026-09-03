@@ -67,26 +67,34 @@ test('overview metadata preserves category, gate, relocation, and legacy decisio
 
 test('audit snapshot commit refs must be full SHAs', () => {
   const manifest = fixture()
-  manifest.verification.currentKimi.commit = manifest.verification.currentKimi.commit.slice(0, -1)
+  manifest.verification.referenceSnapshots.kimi.commit = manifest.verification.referenceSnapshots.kimi.commit.slice(0, -1)
   const errors = validateManifest(manifest, {
     checkBaseline: false,
     checkReport: false,
     requireInventory: false,
   })
-  assertHasError(errors, 'verification.currentKimi.commit')
+  assertHasError(errors, 'verification.referenceSnapshots.kimi.commit')
+})
+
+test('the upstream reference snapshot remains tied to the baseline repository', () => {
+  const manifest = fixture()
+  manifest.verification.referenceSnapshots.upstream.repository = 'evil/repo'
+  const errors = errorsFor(manifest)
+  assertHasError(errors, 'verification.referenceSnapshots.upstream.repository')
+  assertHasError(errors, 'must match baseline.repository')
 })
 
 test('each per-record upstream comparison is anchored to the audited snapshots', () => {
   const manifest = fixture()
   manifest.divergences.X001.upstream.checkedAgainst = {
     repo: 'evil/repo',
-    ref: 'not-the-pinned-commit',
-    currentRef: 'other',
+    baselineRef: 'not-the-pinned-commit',
+    referenceRef: 'other',
   }
   const errors = errorsFor(manifest)
   assertHasError(errors, 'must match baseline.repository')
   assertHasError(errors, 'must match baseline.commit')
-  assertHasError(errors, 'must match verification.currentUpstream.commit')
+  assertHasError(errors, 'must match verification.referenceSnapshots.upstream.commit')
 })
 
 test('a missing dependency class is a hard ledger error', () => {
@@ -168,7 +176,8 @@ test('report rendering is deterministic and naturally sorts mixed IDs', () => {
   assert.ok(first.indexOf('### X004A') < first.indexOf('### X004B'))
   assert.ok(first.indexOf('### X044') < first.indexOf('### X045'))
   assert.ok(first.indexOf('### X045') < first.indexOf('### X046'))
-  assert.ok(first.includes('- Audited against: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`'))
+  assert.ok(first.includes('- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`'))
+  assert.ok(first.includes('- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`'))
   assert.equal(first.endsWith('\n'), true)
   assert.equal(first.endsWith('\n\n'), false)
   assert.equal(first.includes('\n\n\n'), false)

@@ -9,19 +9,22 @@
   "verification": {
     "auditedAt": "2026-09-03",
     "branch": "feat/vendor-divergence-ledger-hardening",
-    "nextCommit": "e55b6a6a21e6dbb835b6c04c3c579b8625a18c7f",
-    "currentUpstream": {
-      "repository": "earendil-works/pi",
-      "commit": "b8b873b9872db04a938fb4357b5e8e824ddc051c"
-    },
-    "currentKimi": {
-      "repository": "MoonshotAI/kimi-code",
-      "commit": "9e881528a89945a373002b0b229f91735e8f2c4f"
+    "auditedSourceCommit": "90e00164136532282ebe4f97c658bc84f7bc53a1",
+    "referenceSnapshots": {
+      "upstream": {
+        "repository": "earendil-works/pi",
+        "commit": "b8b873b9872db04a938fb4357b5e8e824ddc051c"
+      },
+      "kimi": {
+        "repository": "MoonshotAI/kimi-code",
+        "commit": "9e881528a89945a373002b0b229f91735e8f2c4f"
+      }
     },
     "method": [
       "Compared every local packages/pi-tui/src file with the pinned upstream blob.",
       "Audited vendor-internal, inheritance/structural, host, public/extension, behavioral, and test/runtime ownership evidence.",
       "Checked current local Pi and Kimi source snapshots for semantic comparison; issue and PR references are background only.",
+      "Ran focused deletion experiments for X019, X030, X037, X038, X043, and X044; existing checks caught the first five, while X044 required a compile-only subclass fixture.",
       "Historical removed and absorbed records were retained as explicit records instead of disappearing from the manifest."
     ]
   },
@@ -35,6 +38,7 @@
   },
   "gatePolicy": {
     "sourceCoverage": "Every changed packages/pi-tui/src TypeScript file must be covered by a source-active ledger record.",
+    "referenceSnapshotPolicy": "Reference snapshots and auditedSourceCommit are audit evidence, not continuous views of repository HEAD. Refresh them only during an explicit re-vendor, divergence re-audit, retirement evaluation, or upstream-equivalence review.",
     "staleActive": "Source-active records whose listed source files all match the pinned baseline warn by default and fail in strict mode.",
     "historicalRecords": "ABSORBED_UPSTREAM, MOVED_TO_HOST, SUPERSEDED, and REMOVED_UNUSED records remain auditable but do not provide source coverage; REDUNDANT_SHIM remains source-active until its atomic replacement is proven.",
     "packagingPaths": "Non-src paths such as X025 remain registered in the ledger and are ignored by the src-only diff walk.",
@@ -75,7 +79,7 @@
       "tests": ["packages/pi-tui/test/select-list.test.ts: search, groups, paging, setFilter, and zero-match navigation", "test/session-picker-loading.test.ts and picker integration coverage", "test/session-categories.test.ts: categorized SelectList query carry", "test/sessions.test.ts: PickerHandle.setItems and initialQuery", "test/advanced-broker.test.ts and test/advanced-cordis-lifecycle.test.ts: ui.select picker lifecycle"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/select-list.ts"],
         "relevantIssues": [],
         "semanticDelta": "The pinned and current upstream SelectList do not provide the host's combined search, grouping, dynamic setItems, and row-budget contract; Kimi's SearchableList is a separate state-object design, not an upstream equivalent."
@@ -109,7 +113,7 @@
       "tests": ["packages/pi-tui/test/select-list.test.ts: setItems and selected-by-value/search preservation", "test/session-picker-loading.test.ts: asynchronous title refresh/query preservation", "test/sessions.test.ts: setItems with default selection", "Missing host moved-selection refresh regression; current host tests do not exercise a non-default selected row during enrichment"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/select-list.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream 0.84.4 has no setItems operation with query and selection preservation; the current upstream list still does not provide this contract."
@@ -143,7 +147,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts: supplementary-plane and ZWJ cursor preservation after multi-line insert"],
       "upstream": {
         "equivalence": "YES",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "The upstream code-unit cursor assignment is the safe behavior; reapplying the old grapheme-count patch is not semantically equivalent to the editor's cursor representation."
@@ -177,7 +181,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts: oversize 300 KiB paste inline expansion and undo behavior", "test/editor-registry.test.ts: host replacement and marker ownership"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "The pinned and current upstream Editor stores every accepted paste; neither provides the local admission cap and inline fallback."
@@ -211,7 +215,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts: undo isolation and large-paste snapshot behavior", "packages/pi-tui/src/undo-stack.ts: source-level ownership audited; no standalone undo-stack test file"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts", "packages/tui/src/undo-stack.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream UndoStack.push performs structuredClone on the snapshot; it does not share the local detached-snapshot ownership contract."
@@ -245,7 +249,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts: never-settling provider latest-wins regression", "test/autocomplete-active-screen-repaint.test.ts: current-screen repaint"],
       "upstream": {
         "equivalence": "PARTIAL",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "Current upstream has request identity checks but retains a serial autocomplete task chain; it has not been proven equivalent to the local never-settling latest-wins behavior or host repaint route."
@@ -279,7 +283,7 @@
       "tests": ["packages/pi-tui/test/word-navigation.test.ts: leading punctuation with a custom segmenter", "packages/pi-tui/test/editor.test.ts: word movement integration"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/word-navigation.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned and current upstream stop before a leading punctuation segment in the audited case; the local helper deliberately advances past it."
@@ -313,7 +317,7 @@
       "tests": ["test/pi-component-compat.test.ts: close idempotency, exactly-once disposal, lease invalidation, fullscreen migration", "packages/pi-tui/test/dispose-lifecycle.test.ts: Container and ScrollView ownership", "packages/pi-tui/test/layout.test.ts: Stack entries and disposed layout behavior", "packages/pi-tui/test/overlay-options.test.ts: disposeOnHide ownership"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui.ts", "packages/tui/src/components/scroll-view.ts", "packages/tui/src/components/text.ts", "packages/tui/src/components/loader.ts", "packages/tui/src/components/box.ts", "packages/tui/src/components/settings-list.ts", "packages/tui/src/components/stack.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned upstream has no fork-wide optional dispose ownership graph. Current Pi has isolated disposable components, but not the host's Container/Stack/overlay exactly-once contract."
@@ -347,7 +351,7 @@
       "tests": ["packages/pi-tui/test/osc11-query.test.ts: timed-out query queue/counter alignment", "packages/pi-tui/test/terminal-colors.test.ts: active-screen query routing", "Missing A-timeout/B-pending/late-A ambiguity regression; add before retirement"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream keeps timed-out queries in the pending queue and uses a different counter check; it is not equivalent under a late reply."
@@ -381,7 +385,7 @@
       "tests": ["packages/pi-tui/test/tui-render.test.ts: direct final-row stop cleanup fixture", "Missing integration test through the full terminal exit path; retain the focused fixture until that coverage exists"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-main-screen.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream writes the spacer unconditionally; the local branch avoids a visible final-row artifact."
@@ -415,7 +419,7 @@
       "tests": ["packages/pi-tui/test/stdin-buffer.test.ts: valid ESC sequence, long-prefix, and >1024-byte incomplete-prefix degradation cases"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/stdin-buffer.ts"],
         "relevantIssues": [],
         "semanticDelta": "The pinned and current upstream buffer do not contain the local hard cap for an unterminated ESC prefix."
@@ -449,7 +453,7 @@
       "tests": ["No dedicated X011-only test existed; narrow-width editor, settings, and component render suites exercise the behavior. Add a direct Input test before retirement."],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/input.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream returns the raw prompt when the width is too small; the local component clips it before composing the line."
@@ -483,7 +487,7 @@
       "tests": ["packages/pi-tui/test/fuzzy.test.ts: equal-score ordering and fuzzy result behavior"],
       "upstream": {
         "equivalence": "YES",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/fuzzy.ts", "packages/tui/package.json"],
         "relevantIssues": [],
         "semanticDelta": "With the package's supported Node engine, upstream score-only sort is stable and preserves the same input-order ties. The explicit index comparator is therefore runtime-equivalent, subject to the engine and input-order assumptions recorded here."
@@ -517,7 +521,7 @@
       "tests": ["No dedicated setIndicator regression exists; loader lifecycle/timer ownership was audited separately and no focused package test guards the removed behavior"],
       "upstream": {
         "equivalence": "YES",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/loader.ts"],
         "relevantIssues": [],
         "semanticDelta": "The upstream setIndicator behavior is retained and no vendor or host consumer requires the former stopped-loader behavior."
@@ -551,7 +555,7 @@
       "tests": ["packages/pi-tui/test/layout.test.ts: indirect measure and scrollbar layout correctness", "packages/pi-tui/test/render-churn-bench.ts: total layout/render churn with representative workload", "Missing direct measure-count/cache-hit, invalidation, and cache-versus-no-cache performance assertion"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/layout.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream remeasures visible lines on every measureWidth call; its scrollbar clamp is already baseline and is not part of this divergence."
@@ -585,7 +589,7 @@
       "tests": ["packages/pi-tui/test/keys.test.ts: key release and printable decoding behavior"],
       "upstream": {
         "equivalence": "YES",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/keys.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned and current upstream retain the field and its parser writes, but isKeyRelease currently uses raw-sequence checks rather than reading _lastEventType; the local source matches the upstream baseline."
@@ -619,7 +623,7 @@
       "tests": ["packages/pi-tui/test/terminal.test.ts: repeated resize listener, stdin listener, raw state, and Kitty protocol tests", "test/process-tui-slot.test.ts and fullscreen restart coverage"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/terminal.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream stacks listeners and re-captures state on repeated start; it does not provide the local all-resource swap and negotiation balance."
@@ -653,7 +657,7 @@
       "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: alternate-screen mouse behavior", "bundle fullscreen input tests"],
       "upstream": {
         "equivalence": "YES",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-main-screen.ts", "packages/tui/src/tui-alt-screen.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned and current upstream assign mouse behavior to the alternate screen and leave regular mode mouse-free; local source matches."
@@ -687,7 +691,7 @@
       "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: onCellClick and double-click selection", "test/tui-app.test.ts, test/rendering.test.ts, and test/thinking-disclosure.test.ts: fullscreen click-to-expand host behavior"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-alt-screen.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream has no onCellClick callback and therefore cannot express host fullscreen click ownership."
@@ -721,7 +725,7 @@
       "tests": ["packages/pi-tui/test/dispose-lifecycle.test.ts: Loader cleanup and idempotency", "packages/pi-tui/test/layout.test.ts and test/pi-component-compat.test.ts: component lifecycle contract"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/text.ts", "packages/tui/src/components/loader.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream has neither the local Component disposal contract nor the current Text/Loader shim. Restoring upstream wholesale would remove the broader X007 lifecycle behavior."
@@ -755,7 +759,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts:375-393 clearHistory entries and browsing-state reset", "packages/pi-tui/test/editor-history-keybindings.test.ts: history keybinding behavior", "test/editor-seat-non-owning.test.ts and session/editor switch coverage"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream has no clearHistory method or equivalent host seat reset operation."
@@ -789,7 +793,7 @@
       "tests": ["packages/pi-tui/test/wrap-ansi.test.ts: foreground and background reset behavior", "packages/pi-tui/test/markdown.test.ts: inline-code style does not leak into table borders"],
       "upstream": {
         "equivalence": "PARTIAL",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/utils.ts", "packages/tui/src/components/markdown.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream has table-cell style resets but does not balance all non-background attributes at every wrapped line boundary."
@@ -823,7 +827,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts: setCursor clamping and no onChange", "test/editor-seat-non-owning.test.ts: replacement cursor handoff"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream exposes no public cursor synchronization method with the local side-effect-free contract."
@@ -857,7 +861,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts: public staging and normalization", "test/editor-registry.test.ts: declined fallback preserves autocomplete state and paste-registry pruning", "test/editor-seat-non-owning.test.ts: seat handoff and host stale-autocomplete cancellation"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream has no atomic side-effect-free text/cursor staging operation and no equivalent paste-registry pruning contract."
@@ -891,7 +895,7 @@
       "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: line-head and mid-line selection copy cases", "test/clipboard.test.ts and fullscreen clipboard integration", "Missing dedicated multi-row mid-line/ANSI/wide-grapheme regression; add before retirement"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-alt-screen.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream copySelection receives only flattened text and retains all leading spaces; neither pinned nor current source exposes selection start metadata for this rule."
@@ -925,7 +929,7 @@
       "tests": ["packages/pi-tui/test/native-module-path.test.ts: renamed package lookup and graceful fallback", "pnpm --dir packages/pi-tui build and root bundle build", "scripts/tarball-smoke.mjs package/export checks"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/native-module-path.ts", "packages/tui/package.json"],
         "relevantIssues": [],
         "semanticDelta": "Upstream package metadata and build contract use the Earendil scope/tooling. Copying them would break the private @xmoon76 package shell and root bundle build."
@@ -959,7 +963,7 @@
       "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: selection/copy behavior", "test/clipboard.test.ts: host callback feedback", "test/pi-component-compat.test.ts: public surface"],
       "upstream": {
         "equivalence": "YES",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-alt-screen.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned upstream natively supplies the callback and selection controls required by the host; the local source matches that API and no extra patch is re-applied."
@@ -993,7 +997,7 @@
       "tests": ["packages/pi-tui/test/autocomplete.test.ts: typeDirectoryOutputLines and fd-backed provider cases", "test/file-completion-convergence.test.ts: host file completion is explicitly separate and does not prove fd-path usage"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/autocomplete.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned and current upstream classify plain fd lines by trailing slash and slice directory names; the local path uses stat first and avoids dropping the final character."
@@ -1027,7 +1031,7 @@
       "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: boundary, overscroll, page, scrollbar, and search reset", "packages/pi-tui/test/tui-shrink.test.ts and ScrollView canScroll coverage", "test/home-end-keys.test.ts: bundle Home/End ownership"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-alt-screen.ts", "packages/tui/src/components/scroll-view.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream lacks the host callbacks and canScroll seam; its built-in viewport behavior cannot express virtual transcript paging or host pre-input ownership."
@@ -1061,7 +1065,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts: editor history callbacks and keybindings", "test/editor-input-mode.test.ts: !/!! mode round-trip"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream has no mode-aware history callback properties; Kimi's similar callbacks are design evidence, not upstream equivalence."
@@ -1095,7 +1099,7 @@
       "tests": ["packages/pi-tui/test/keys.test.ts: direct src/index root export smoke and decoder behavior", "test/editor-input-mode.test.ts: !/!! mode codec behavior", "test/keybinding-integration.test.ts and footer configurator tests"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/index.ts", "packages/tui/src/keys.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned and current upstream define decodePrintableKey in keys.ts but do not export it from the package root; the root public entry remains a real host dependency."
@@ -1129,7 +1133,7 @@
       "tests": ["packages/pi-tui/test/markdown.test.ts: CJK and full-width punctuation after bare URLs", "test/rendering.test.ts: transcript Markdown rendering"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/markdown.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned and current upstream marked configuration does not contain the CJK boundary tokenizer; the old landed-upstream note was incorrect."
@@ -1163,7 +1167,7 @@
       "tests": ["packages/pi-tui/test/tui-render.test.ts: width 0, -3, and 5 clamp behavior", "test/frame-tiny.test.ts and narrow host render suites"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream passes non-positive Container widths to child rendering; it does not provide the local entry-point clamp."
@@ -1197,7 +1201,7 @@
       "tests": ["packages/pi-tui/test/tui-render.test.ts: overwide, styled, CJK, and reset ordering", "test/frame-tiny.test.ts and narrow host render coverage"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-main-screen.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream throws on overwide rendered lines; local processing truncates before appending the complete segment reset."
@@ -1231,7 +1235,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts: wordWrapLine and narrow Editor rendering at widths 1-8", "packages/pi-tui/test/tui-render.test.ts: narrow screen clipping"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream recursively rewraps a single overwide grapheme and can overflow the stack; it does not provide the local base case."
@@ -1265,7 +1269,7 @@
       "tests": ["packages/pi-tui/test/tui-render.test.ts: equal primitive-line frame and steady-frame performance regression", "packages/pi-tui/test/render-preprocess-bench.ts: 1k-10k line benchmark", "test/rendering.test.ts: indirect host component-array stability only; it does not prove main-screen cache identity", "Missing direct cache invalidation, cold/cached equivalence, image-ID alignment, and instrumentation assertions"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-main-screen.ts", "packages/tui/src/utils.ts", "packages/tui/src/tui.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned and current upstream reprocess every line each frame. Its bounded writer prevents huge output formation but does not replace value-based per-frame line reuse or the host render-cost contract."
@@ -1299,7 +1303,7 @@
       "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: app listener observes both focus reports and selection cleanup remains", "test/focus-ui.test.ts and notification focus behavior"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-alt-screen.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream consumes both focus reports inside the alt-screen viewport handler; local behavior cleans up FOCUS_OUT and passes both reports through."
@@ -1333,7 +1337,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts: editor submit binding split", "test/keybinding-integration.test.ts: anti-pollution and default restore", "packages/pi-tui/test/keybindings.test.ts: binding registry"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/keybindings.ts", "packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream has only tui.input.submit; it cannot express the editor-only binding or its shared physical-submit semantics."
@@ -1367,7 +1371,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts: PasteBurst fallback and X037 cross tests", "docs/tmux-testing.md: two-step terminal driving guidance", "test/editor-input-mode.test.ts: submit behavior"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned and current upstream have no PasteBurst fallback or disable option. The local editor-internal terminal behavior cannot be judged unused from host imports."
@@ -1401,7 +1405,7 @@
       "tests": ["packages/pi-tui/test/layout.test.ts and wrap-ansi.test.ts: width correctness", "packages/pi-tui/test/render-preprocess-bench.ts: X035 render benchmark with incidental CJK workload", "Missing isolated 4096-vs-512 cache-size assertion and reproducible CJK burst benchmark"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/utils.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned and current upstream use a 512-entry cache; local uses 4096 intending to reduce CJK burst thrashing, but an isolated 4096-versus-512 measurement remains pending."
@@ -1435,7 +1439,7 @@
       "tests": ["packages/pi-tui/test/input.test.ts: X040 cursor semantics", "packages/pi-tui/test/select-list.test.ts: initial query/filter continuation", "Host setValue callsites in history-panel.ts, task-panel.ts, and question.ts were audited; no direct host cursor assertion exists"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/input.ts", "packages/tui/src/components/select-list.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned and current upstream setValue preserves/clamps the existing cursor at zero for a fresh Input; they do not provide the local end-by-default plus explicit preserve option."
@@ -1469,7 +1473,7 @@
       "tests": ["packages/pi-tui/test/select-list.test.ts: canonical filter state", "test/session-picker-loading.test.ts and picker category/filter integration", "Missing categorized-picker clear-then-Tab initialQuery regression; decide whether re-injection is intended before retirement"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/select-list.ts", "packages/tui/src/components/input.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream has no searchable SelectList or canonical filter state. The local query behavior is not present to absorb."
@@ -1503,7 +1507,7 @@
       "tests": ["packages/pi-tui/test/select-list.test.ts and settings-list.test.ts: focus/row-budget behavior", "test/extension-focus-seat.test.ts: SurfaceSnapshot.focusedSeat state only (not SelectList/SettingsList or IME)", "Missing dedicated host submenu focus/IME integration regression for non-Focusable wrappers; add before retirement"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/select-list.ts", "packages/tui/src/components/settings-list.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream lists do not implement the local focus propagation and nested row-budget forwarding contract."
@@ -1537,7 +1541,7 @@
       "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: default/deferred listener registration and idempotent install", "test/unstable-interactive.test.ts and test/unstable-input.test.ts: host raw capture behavior", "test/input-router.test.ts and test/home-end-keys.test.ts: host routing", "Missing exhaustive raw rewrite, wheel/mouse, and semantic-scroll ordering matrix"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-alt-screen.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream always registers the viewport listener in the constructor, making it run before later host/raw listeners; no listener phase/priority contract replaces the local option."
@@ -1568,10 +1572,10 @@
         "publicExtension": {"audited": true, "items": ["Host editor adapter and subclass compatibility surface."], "notes": "Protected is intentionally not a root public method for unrelated consumers."},
         "behavioral": {"audited": true, "items": ["explicit completion uses the same request state", "stale dropdown cancellation stays synchronized with Editor input", "upstream signature changes fail at typecheck instead of silently at runtime"], "notes": "A public wrapper or cast would change the supported structural contract."}
       },
-      "tests": ["packages/pi-tui/test/editor.test.ts: subclass compilation and no-provider protected seam", "test/advanced-editor.test.ts and editor autocomplete integration"],
+      "tests": ["packages/pi-tui/test/protected-autocomplete-compile.ts: compile-only host subclass contract", "packages/pi-tui/test/editor.test.ts: no-provider protected seam", "test/advanced-editor.test.ts and editor autocomplete integration"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "Pinned and current upstream keep both methods private; the host subclass cannot express its supported completion control without the visibility divergence."
@@ -1605,7 +1609,7 @@
       "tests": ["packages/pi-tui/test/editor.test.ts: every raw cursor position, marker collision, and bounded snap", "test/editor-seat-non-owning.test.ts: expanded draft/cursor handoff"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream has getExpandedText but no cursor-pair mapping; its multi-round marker replacement would also rescan marker-like content."
@@ -1639,7 +1643,7 @@
       "tests": ["packages/pi-tui/test/tui-cell-size-input.test.ts: reply before consume-everything listener", "test/unstable-input.test.ts and test/unstable-interactive.test.ts: host raw-capture integration", "Missing dedicated modal-plus-raw-capture cell-size regression; fullscreen image rendering is covered separately but does not assert protocol ordering"],
       "upstream": {
         "equivalence": "NO",
-        "checkedAgainst": {"repo": "earendil-works/pi", "ref": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "currentRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui.ts"],
         "relevantIssues": [],
         "semanticDelta": "Upstream consumes the cell-size response after input listeners; a listener that consumes every chunk can swallow it."
