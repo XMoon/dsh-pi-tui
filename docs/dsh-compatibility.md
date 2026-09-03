@@ -83,12 +83,16 @@ cannot be consulted for unpublished DSH metadata;
 4. installs those tarballs through temporary pnpm overrides before running the
    ordinary TUI, preset, and old-runtime checks.
 
-The CI policy is deliberately explicit: `next` pushes and pull requests whose
-base is `next` use Source Mode; `main` and every tag, including `next-v*`, use
-registry-backed npm mode with a frozen lockfile. The Source Mode ecosystem
-check prints `SKIPPED: requires published compatible DSH/pi2dsh combination`
-because the published `pi2dsh` bridge cannot prove compatibility against an
-unpublished source family. That check remains blocking in npm mode.
+The CI policy is deliberately explicit: pushes to `next` and pull requests
+whose base is `next` follow the tracked `test/compat/dsh-mode.json` policy;
+`main` and every tag, including `next-v*`, always use registry-backed npm mode
+with a frozen lockfile. In either `next` mode, the current validated DSH target
+comes from `test/compat/dsh-source.json`'s `expectedVersion`. Source Mode builds
+and validates that pinned source family; npm mode validates the corresponding
+published family from the registry. The Source Mode ecosystem check prints
+`SKIPPED: requires published compatible DSH/pi2dsh combination` because the
+published `pi2dsh` bridge cannot prove compatibility against an unpublished
+source family. That check remains blocking in npm mode.
 
 For local validation, use the isolated driver rather than workspace symlinks:
 
