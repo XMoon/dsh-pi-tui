@@ -231,8 +231,6 @@ export interface CompactToolPresentation {
   readonly payload?: string
   /** A meaningful settled result, or an error identity. */
   readonly result?: string
-  /** Whether an acknowledgement-only success result should be omitted. */
-  readonly suppressSuccessResult?: boolean
 }
 
 /** Structured failure information available on a transcript tool card. */
@@ -334,15 +332,19 @@ function summarizeAgentEntries(entries: readonly unknown[]): AgentListSummary {
       continue
     }
     // The standard snapshot uses `kind: child`; Agent Teams returns member
-    // rows without a kind. A recognized status is enough for the latter.
+    // rows without a kind. A recognized status is enough for the latter:
+    // provisioning counts as running (spawning), inactive as ready (cold-
+    // resumable), failed as a diagnostic.
     if (value.kind !== undefined && value.kind !== 'child' && value.kind !== 'agent') {
       diagnostics += 1
       continue
     }
     switch (value.status) {
-      case 'running': running += 1; break
+      case 'running':
+      case 'provisioning': running += 1; break
       case 'idle': idle += 1; break
-      case 'ready': ready += 1; break
+      case 'ready':
+      case 'inactive': ready += 1; break
       default: diagnostics += 1; break
     }
   }
@@ -467,6 +469,10 @@ function actionResultSummary(
   if (value === '') return undefined
   if (kind === 'send_message' && /^message\s+(?:delivered|sent|accepted)\b/i.test(value)) return /\bqueued\b/i.test(value) ? 'queued' : undefined
   if (kind === 'interrupt_agent' && /^interrupt\s+requested\s+for\s+agent\b/i.test(value)) return undefined
+  // Bare acknowledgement words are the same receipt class as their JSON
+  // equivalents and never add folded-card information (the terminal_send
+  // branch above already returned for every non-queued result).
+  if (/^(?:ok|accepted|done|success|succeeded|sent|delivered)$/i.test(value)) return undefined
   return firstActionResultDetail(value)
 }
 
@@ -490,7 +496,6 @@ export function compactToolPresentation(
     return {
       title: 'Send message', summary: send.target, payload: send.message,
       ...(resultText === undefined ? {} : { result: resultText }),
-      suppressSuccessResult: true,
     }
   }
 
@@ -503,7 +508,6 @@ export function compactToolPresentation(
     return {
       title: 'Terminal', summary: terminal.sessionId, payload: terminal.text,
       ...(resultText === undefined ? {} : { result: resultText }),
-      suppressSuccessResult: true,
     }
   }
 
@@ -516,7 +520,6 @@ export function compactToolPresentation(
     return {
       title: 'Interrupt agent', summary: interrupt.target,
       ...(resultText === undefined ? {} : { result: resultText }),
-      suppressSuccessResult: true,
     }
   }
 

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import {
   compactToolExpandedLines,
@@ -73,7 +75,6 @@ test('compact action presentations are payload-first and receipt-safe', () => {
     title: 'Send message',
     summary: 'child-1',
     payload: 'Review the CI failure.',
-    suppressSuccessResult: true,
   })
   const accepted = compactToolPresentation(
     'send_message',
@@ -95,7 +96,7 @@ test('compact action presentations are payload-first and receipt-safe', () => {
     'viewport output\n[wait: stdin_read]\n[session: running]',
   )
   assert.deepEqual(terminal, {
-    title: 'Terminal', summary: 'pty-3', payload: 'make test', suppressSuccessResult: true,
+    title: 'Terminal', summary: 'pty-3', payload: 'make test',
   })
   assert.equal(compactToolPresentation(
     'terminal_send',
@@ -108,6 +109,10 @@ test('compact action presentations are payload-first and receipt-safe', () => {
     'interrupt requested for agent reviewer',
   )
   assert.equal(interrupt?.result, undefined)
+  // Bare acknowledgement words are the same receipt class as JSON statuses.
+  assert.equal(compactToolPresentation('send_message', JSON.stringify({ agent_id: 'c', message: 'x' }), 'ok')?.result, undefined)
+  assert.equal(compactToolPresentation('send_message', JSON.stringify({ agent_id: 'c', message: 'x' }), 'accepted')?.result, undefined)
+  assert.equal(compactToolPresentation('interrupt_agent', JSON.stringify({ agent_id: 'c' }), 'done')?.result, undefined)
   const failure = compactToolPresentation(
     'send_message',
     JSON.stringify({ agent_id: 'child-1', message: 'retry' }),
@@ -139,6 +144,16 @@ test('list_agents summarizes structured and rendered historical snapshots', () =
   ]))!), '1 entry · 1 diagnostic')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('1 [running] — a\n2 [idle] — b\n3 [ready] — c')!), '3 agents · 1 running · 1 idle · 1 ready')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('(no subagents)')!), 'no subagents')
+  assert.equal(formatAgentListSummary(summarizeAgentListResult('x [diagnostic: corrupt]')!), '1 entry · 1 diagnostic')
+  // Agent Teams member rows are kind-less with a wider status enum:
+  // provisioning counts as running, inactive as ready, failed as diagnostic.
+  const team = summarizeAgentListResult(JSON.stringify([
+    { id: '1', role: 'teammate', status: 'running' },
+    { id: '2', role: 'teammate', status: 'provisioning' },
+    { id: '3', role: 'lead', status: 'inactive' },
+    { id: '4', role: 'teammate', status: 'failed' },
+  ]))!
+  assert.equal(formatAgentListSummary(team), '4 entries · 2 running · 1 ready · 1 diagnostic')
 
   const list = compactToolPresentation('list_agents', '{}', '1 [running] — a\n2 [idle] — b\n3 [ready] — c')
   assert.equal(list?.title, 'List agents')
@@ -201,13 +216,15 @@ test('expanded action cards keep payloads, historical snapshots, and terminal ou
   app.setToolOutputExpanded(true)
   app.setTranscript([
     actionMessage('send_message', { agent_id: 'child-1', message: 'first line\nsecond line\nthird line' }, 'message delivered to agent child-1'),
-    actionMessage('terminal_send', { sessionId: 'pty-3', text: 'make test' }, 'viewport output\n[wait: stdin_read]'),
+    actionMessage('terminal_send', { sessionId: 'pty-3', text: 'export FOO=1\nmake test' }, 'viewport output\n[wait: stdin_read]'),
     actionMessage('list_agents', { scope: 'children' }, '1 [running] — a\n2 [ready] — b'),
   ])
   const view = await viewport(vt)
   assert.ok(view.includes('first line'), view)
   assert.ok(view.includes('second line'), view)
   assert.ok(view.includes('third line'), view)
+  assert.ok(view.includes('export FOO=1'), view)
+  assert.ok(view.includes('make test'), view)
   assert.ok(view.includes('viewport output'), view)
   assert.ok(view.includes('[wait: stdin_read]'), view)
   assert.ok(view.includes('1 [running] — a'), view)
@@ -275,6 +292,128 @@ test('action errors remain visible in folded cards', async () => {
   assert.ok(view.includes('SubagentError: NOT_INTERRUPTIBLE'), view)
   assert.ok(view.includes('target is not interruptible'), view)
 })
+
+test('folded CJK payloads stay width-safe on a tiny terminal', async () => {
+  const vt = new VirtualTerminal(12, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([actionMessage(
+    'send_message',
+    { agent_id: 'child-1', message: '检查 CI 失败\n对比过渡 fence 行为' },
+    'message delivered to agent child-1',
+  )])
+  const view = await viewport(vt)
+  const clean = view.split('\n').map(stripTerminalSequences)
+  assert.ok(clean.some(line => line.includes('检查')), view)
+  for (const line of clean) {
+    assert.ok(visibleWidth(line) <= 12, `row exceeds 12 cols: ${JSON.stringify(line)}`)
+  }
+})
+
+test('an extension tool renderer still wins over the host action fallback', async () => {
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  registry.registerToolRenderer({
+    id: 'custom-send', toolName: 'send_message',
+    render: () => ({ kind: 'text', spans: [{ text: 'CUSTOM SEND' }] }),
+  }, 'plugin')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([actionMessage('send_message', { agent_id: 'child-1', message: 'x' }, 'receipt')])
+  const view = await viewport(vt)
+  assert.ok(view.includes('CUSTOM SEND'), view)
+  assert.ok(!view.includes('Send message'), view)
+})
+
+test('regular Focus: an expanded root full-reveals the send_message payload, never the receipt', async () => {
+  const { TranscriptFolder } = await import('../src/transcript.ts')
+  const folder = new TranscriptFolder()
+  folder.apply(actionTurnEvents())
+  const vt = new VirtualTerminal(80, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setFocusMode(true)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  app.expandFocusTurn(1)
+  const view = await viewport(vt)
+  assert.ok(view.includes('Send message · child-1 [ok]'), view)
+  assert.ok(view.includes('Review the CI failure.'), view)
+  assert.ok(view.includes('Check the fence.'), view)
+  assert.ok(!view.includes('message delivered to agent'), view)
+})
+
+test('fullscreen Focus: the secondary send_message card stays compact with its payload', async () => {
+  const { TranscriptFolder } = await import('../src/transcript.ts')
+  const folder = new TranscriptFolder()
+  folder.apply(actionTurnEvents())
+  const vt = new VirtualTerminal(80, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  app.expandFocusTurn(1)
+  const view = await viewport(vt)
+  // The collapsed-slot one-liner (`Send message <target> · <first line>`) is
+  // covered by the pure focusToolDisplay assertion; here the expanded root
+  // renders the secondary card COMPACT: identity + two-row payload, no
+  // receipt.
+  assert.ok(view.includes('Send message · child-1 [ok]'), view)
+  assert.ok(view.includes('Review the CI failure.'), view)
+  assert.ok(view.includes('Check the fence.'), view)
+  assert.ok(!view.includes('message delivered to agent'), view)
+})
+
+// A settled turn carrying one send_message call, driven through real events.
+function actionTurnEvents(): SessionEvent[] {
+  const time = Date.now() - 60_000
+  return [
+    { type: 'turn/start', seq: 0, time, data: { turn: 1 } },
+    {
+      type: 'user/message', seq: 1, time: time + 1,
+      data: {
+        id: MessageId('u1'), role: 'user',
+        content: [{ type: 'text', text: 'ping the child' }],
+        source: { kind: 'user' },
+      },
+    },
+    {
+      type: 'tool/call', seq: 2, time: time + 2,
+      data: {
+        turn: 1, step: 0, callId: ToolCallId('c1'), name: 'send_message',
+        arguments: JSON.stringify({ agent_id: 'child-1', message: 'Review the CI failure.\nCheck the fence.' }),
+      },
+    },
+    {
+      type: 'tool/result', seq: 3, time: time + 5000,
+      data: {
+        turn: 1, step: 0,
+        message: {
+          id: MessageId('r1'), role: 'user',
+          content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'message delivered to agent child-1' }] }],
+          source: { kind: 'tool', callId: ToolCallId('c1') },
+        },
+      },
+    },
+    {
+      type: 'assistant/message', seq: 4, time: time + 6000,
+      data: {
+        turn: 1, step: 1,
+        message: {
+          id: MessageId('a1'), role: 'assistant',
+          content: [{ type: 'text', text: 'done.' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+      },
+    },
+    { type: 'turn/end', seq: 5, time: time + 7000, data: { turn: 1, reason: { kind: 'completed' } } },
+  ] as SessionEvent[]
+}
 
 // Keep the imported model type checked as a public data-only contract.
 const _compactModelTypeCheck: CompactToolPresentation | undefined = compactToolPresentation('send_message', '{}')
