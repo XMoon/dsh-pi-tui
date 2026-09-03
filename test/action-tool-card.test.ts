@@ -193,6 +193,17 @@ test('CompactTextPreview is Unicode-safe, capped, and re-derived on resize', () 
   assert.ok(wide.some(line => line.includes('second payload')), `wide render lost later payload: ${wide.join('|')}`)
   for (const line of wide) assert.ok(visibleWidth(line) <= 60, JSON.stringify(line))
   assert.deepEqual(preview.render(12), narrow, 'narrow cache must remain deterministic after a wide render')
+  // Visually empty wrapped rows (blank lines, or rows carrying only style
+  // codes at tiny widths) never surface as blank preview rows.
+  const styled = new CompactTextPreview({
+    text: 'line one\n\nline three',
+    maxVisualRows: 3,
+    indent: '  ',
+  })
+  const rows = styled.render(60)
+  assert.equal(rows.length, 2, `blank middle row must be dropped: ${rows.join('|')}`)
+  assert.ok(rows[0]?.includes('line one'), rows.join('|'))
+  assert.ok(rows[1]?.includes('line three'), rows.join('|'))
 })
 
 test('folded action cards show payloads and suppress successful receipts', async () => {
