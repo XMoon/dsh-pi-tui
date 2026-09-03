@@ -593,7 +593,7 @@ The repository uses two fixed local worktrees:
 - `~/project/dsh-pi-tui-next` — next, the forward DSH baseline in its tracked
   npm or Source Mode.
 
-The promotion invariant is that both long-lived branches carry
+The promotion establishes the invariant that both long-lived branches carry
 `test/compat/dsh-mode.json` and `test/compat/dsh-source.json`: `main` keeps the
 mode at npm, while `next` may switch modes as upstream development requires.
 A `main -> next` merge must preserve the newer next policy and target rather

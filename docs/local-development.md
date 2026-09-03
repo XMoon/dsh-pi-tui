@@ -159,8 +159,9 @@ responsibilities:
   published DSH release is being qualified, then switch to `source` mode when
   development moves on to an unpublished DSH commit.
 
-Both branches carry `test/compat/dsh-mode.json` and
-`test/compat/dsh-source.json`. The two files have separate responsibilities:
+The promotion establishes the invariant that both long-lived branches carry
+`test/compat/dsh-mode.json` and `test/compat/dsh-source.json`. The two files
+have separate responsibilities:
 
 - `dsh-mode.json` selects the branch's normal local/CI development
   distribution.
@@ -191,9 +192,11 @@ next
           |
           +------------------------------> main
                                              |
-                                             +------ merge back ------> next
-                                                                        |
-                                                                        +-- continue with future DSH
+                                             +-- stable release preparation
+                                             |
+                                             +------ merge resulting main ------> next
+                                                                                  |
+                                                                                  +-- continue with future DSH
 ```
 
 Create the promotion branch from the exact `next` commit being promoted:
@@ -222,10 +225,19 @@ squash the promotion. Preserving the ancestry tells Git that the promoted
 synchronization can rediscover equivalent changes as unrelated history and
 produce avoidable conflicts.
 
-After the promotion reaches `main`, merge `main` back into `next` promptly.
-Do not reset `next` to `main`: `next` remains the forward-integration branch.
+After the promotion reaches `main`, complete any stable-release preparation
+that belongs to that promotion, then merge the resulting `main` state back
+into `next`. Follow [docs/releasing.md](releasing.md) for that release
+checklist. If `next` must resume forward development before the release commit
+is ready, an earlier back-merge is allowed, but `main` must be merged forward
+again after the release commit. Do not reset `next` to `main`: `next` remains
+the forward-integration branch.
 
-If `next` continued moving while the promotion was being qualified, preserve
+The final promotion invariant is that the `main` state containing the release
+commit is merged forward into `next`.
+
+If `next` continued moving while the promotion was being qualified or before
+that release commit was ready, preserve
 the newer `next` distribution policy when resolving the back-merge. In
 particular, never replace a newer unpublished `next` source target with the
 older published target merely because it came from `main`.
