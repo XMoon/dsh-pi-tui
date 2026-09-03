@@ -7,6 +7,107 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-03
+
+### 安装与版本对应
+
+当前稳定版建议按以下顺序安装，先安装匹配的 DSH，再将 TUI bundle 加入
+profile：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
+dsh --profile pi-tui
+```
+
+需要保留 DSH `0.1.1-rc.2` 的用户应改用 `@xmoon76/dsh-pi-tui@0.3`；DSH
+`0.1.2-alpha.2`/`alpha.3` 用户应固定 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`，
+alpha.4/alpha.5 用户应固定 `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`。完整版本
+矩阵和更新/卸载命令见 README 的「安装」。
+
+### 新增
+
+- **任务中心（Task Center）。** `/tasks` 重构为三层任务表面：footer 徽标 →
+  Quick Tasks（footer 下方向键，Active 范围）→ 完整任务中心（`/tasks`，
+  All 范围）。支持显式搜索模式（可打印键只作为查询文本，绝不触发破坏性
+  操作，Esc 先退出搜索再关闭面板）；`Stop`（`S` → `Y` 确认）取代原来的裸
+  `i` 中断，并在派发时重新校验会话栅栏与 agent 注册表；footer 徽标分别
+  显示运行/总数与未确认的失败提醒，打开任一表面只确认实际可见的失败行。
+- **终端完成通知。** 主 agent 在终端失焦时完成回合，会通过系统通知提醒
+  （OSC 9 / OSC 777 / 铃声，按终端环境自动选择）。只在真正 settle 时触发，
+  不会在重试、压缩、队列续跑或子代理结束时打扰。`/settings` 新增
+  `Completion notification` 模式（Unfocused / Always / Off）与方式
+  （Auto / OSC 9 / OSC 777 / Bell）两行。
+- **`/settings` 新增 Subagent model selection。** 开关与 "Subagent allowed
+  models" 路由选择器直接读写官方 `subagent-model-selection` 设置（默认
+  关闭；开启需要至少一条路由；在新会话组合时生效，不改写运行中的会话）。
+- **工具卡 action payload 成为一等公民。** 紧凑工具卡直接展示 action 载荷，
+  展开保留空行，窄宽度与零宽行有明确处理。
+- **Footer 自定义命令项。** `/footer` 的 Add picker 新增
+  `+ Create Custom Command`，可创建带刷新间隔、超时与语义色的自定义命令
+  条目；命令只从 USER 层 trusted 来源激活（项目配置永远不能提供或激活
+  命令），渲染路径永不 spawn。
+- **`/model` 选择按 live Agent 持久化。** 每个 live Agent 拥有自己的模型
+  选择引用，footer 与 `/model` 跟随当前 Agent；全局默认与 Session 本地
+  选择分离，latest-wins 栅栏防止迟到操作覆盖新意图。
+- **Focus 展开视图恢复 steer 时间线。** 展开的 Thought 中 initial user
+  保持在 Thought 前，后续 steer/user 回到实际发生位置；折叠 Message 成为
+  第三个 process slot（Think → Tool → Message），显示最新最多 3 行。
+- **全屏鼠标滚轮步长可配置。** `/settings` 新增 `Mouse wheel lines`
+  （1/2/3/5/8，默认 1）。
+- **Todo 面板交互优化。** ≤5 条时两态（summary ↔ list）；快速连点合并为
+  一次手势，不再"一闪就消失"。
+- **长会话搜索改为稳定的索引化投影。** 全屏搜索基于稳定条目身份与单一
+  语料源，查询只遍历脏条目（O(#dirty)），跳转按稳定 turn 锚定。
+- **状态行与 `/status` 上下文读数统一去重。** 普通刷新读缓存，`/status`
+  强制一次测量进缓存，面板与 footer 读数不再分叉。
+
+### 改进
+
+- **`/sessions` 与 `/resume` 更快、可取消。** picker 输入优先打开（加载中
+  Enter 绝不触发 resume）；每个会话只有一次合并投影读取（live 行读内存
+  快照、冷行读持久化缓存、真正的 cache miss 才做有界 observe）；渐进富化
+  可取消，关闭/退出/重开都会中止扫描；`/resume <参数>` 共享同一生命周期。
+- **粘贴处理更可靠。** 大粘贴后 `Ctrl+G` 外部编辑器不再丢内容（`$EDITOR`
+  看到展开后的完整文本）；出站草稿（steer / submit / queue / 子代理提交）
+  统一展开 paste marker，不再把字面 marker 泄漏到 wire。
+- **编辑器提交键独立。** 新增 `tui.editor.submit` 绑定（仅编辑器消费），
+  question/搜索框不再被 `submit: ctrl+x` 类配置误提交。
+
+### 修复
+
+- **终端 resize 后各表面保持状态。** 队列窗格 / Todo 面板 / 历史搜索
+  overlay / 审批弹窗在缩放与全屏切换后重建内容而不丢失组件状态、焦点与
+  叠层语义。
+- **diff 视图不再显示无法证明的行号。** DSH 的 FileDiff 契约不带 hunk
+  锚点时隐藏行号 gutter，绝不猜测绝对行号。
+- **Focus 展开视图的 initial user prompt 保持在 Thought 之前。** 系统行
+  注入不再把首条用户消息挤到 Thought 下方。
+- **Todo 面板关闭后内置 summary 恢复。** 扩展宿主存在时，关闭面板不再让
+  dock 的 todo 摘要永久为空。
+- **稳定性加固。** 进程槽持有至最终 dispose、编辑器挂载/组件 dispose
+  硬化，减少退出与 HMR 场景下的竞态。
+- 显式 cold resume 在 TUI mount 前显示启动进度（`Resuming session…` /
+  `Preparing conversation…`），不再让空白终端看起来像卡死。
+- 搜索 overlay 的 Next/Prev 不再跳过新出现的匹配。
+- 实时尾部追加刷新整个读组，搜索跳转不锚定旧窗口。
+- 立即退出的 footer 命令子进程不再崩溃 TUI（EPIPE 吞掉）。
+
+### 迁移说明与兼容性
+
+- **0.4 线切换到 DeepSeek Harness 0.1.2。** 声明支持范围
+  `>=0.1.2-rc.1`；低于 rc.1 的运行时收到启动提示：alpha.4/alpha.5
+  回退到 `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`，alpha.2/alpha.3
+  回退到 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`，更旧的运行时回退到 0.3。
+- 开发/测试依赖与 Source Mode pin 同步到 `dsh-v0.1.2-rc.1`；发布包
+  peer 下限保持 `>=0.1.2-rc.1`。
+- Agent preset 身份按 roster 解析；旧数据中省略的 `code` 默认值在 roster
+  不含 `code` 时回退到 `ptc`。
+- 上游 alpha 注意事项：DSH 0.1.2-alpha.1 的 subagent dispose 行为仍有
+  上游 caveat。
+
+> **已知限制：** 当前生产默认后端仍为 Direct；remote attach 暂不支持。
+
 ## [0.4.0-alpha.2] - 2026-09-03
 
 ### 安装与版本对应
@@ -482,7 +583,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.2...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...v0.4.0
 [0.4.0-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...next-v0.4.0-alpha.2
 [0.4.0-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...next-v0.4.0-alpha.1
 [0.3.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.5...v0.3.6

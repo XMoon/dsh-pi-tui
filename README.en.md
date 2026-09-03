@@ -18,7 +18,7 @@ dsh --profile pi-tui
 
 ## DSH compatibility and source validation
 
-The published package declares the lower-bound-only DSH peer contract `>=0.1.2-alpha.4`. Source validation does not change that contract or vendor DSH into this repository.
+The published package declares the lower-bound-only DSH peer contract `>=0.1.2-rc.1`. Source validation does not change that contract or vendor DSH into this repository.
 
 When the target DSH version is not yet available from npm, validate against the official checkout pinned by commit SHA:
 
@@ -319,7 +319,8 @@ dsh-pi-tui:
 
 | TUI package line | Matching DSH line | Notes |
 |---|---|---|
-| `0.4.x-alpha` (`@next`) | `>=0.1.2-alpha.4` | Current prerelease; each release validates its concrete DSH family |
+| `0.4.0` (`@latest`) | `>=0.1.2-rc.1` | Current stable; validated against the rc.1 family |
+| `0.4.x-alpha` (`@next`) | `>=0.1.2-rc.1` | Subsequent prerelease; each release validates its concrete DSH family |
 | `0.4.0-alpha.2` (published) | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; its releases validated the alpha.4/alpha.5 family |
 | `0.4.0-alpha.1` (published) | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 runtime |
 | `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
@@ -329,12 +330,14 @@ normal incompatible-runtime boundary will fail. The startup row prints upgrade
 and rollback guidance when concurrent Loader ordering allows it, but that
 friendly notice is best-effort rather than a startup-order guarantee. If you
 keep DSH 0.1.1, use the 0.3 TUI line; if you keep the alpha.2/alpha.3
-baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`. For the current 0.4
-prerelease, install DSH first and then add the TUI to a profile:
+baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`; if you keep the
+alpha.4/alpha.5 baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`. For the
+current 0.4 stable release, install the matching DSH first and then add the
+TUI to a profile:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-alpha.5
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+npm install -g @deepseek-ai/dsh@0.1.2-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
@@ -346,7 +349,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 dsh --profile pi-tui
 ```
 
-The current 0.4 line declares `>=0.1.2-alpha.4`; each release validates
+The current 0.4 line declares `>=0.1.2-rc.1`; each release validates
 its concrete DSH family. Running only `npm install -g @xmoon76/dsh-pi-tui` does
 not install the plugin into a DSH profile; the `dsh plugin` command is still
 required.
@@ -358,12 +361,11 @@ only after the roster proves that no custom `code` preset exists.
 
 ### npm
 
-Using a dedicated `pi-tui` profile is recommended. Once a stable 0.4 release
-exists, use the matching stable TUI channel (`@latest`); use `@next` for the
-prerelease channel:
+Using a dedicated `pi-tui` profile is recommended. Use the TUI channel that
+matches your DSH line: `@latest` for stable releases, `@next` for prereleases:
 
 ```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 

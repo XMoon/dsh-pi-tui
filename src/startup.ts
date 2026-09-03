@@ -124,22 +124,31 @@ export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
   // the first matching entry is the user-facing source of truth for this
   // artifact, and older guidance would recommend an unusable 0.1.1 runtime.
   //
-  // The alpha.4 floor splits the too-old range in two: runtimes on the
-  // alpha.2/alpha.3 baseline fall back to the previous 0.4 alpha that still
-  // accepts them, while everything older belongs on the 0.3 line.
+  // The rc.1 floor splits the too-old range in three: runtimes on the
+  // alpha.4/alpha.5 baseline fall back to the last 0.4 prerelease that
+  // still accepts them, the alpha.2/alpha.3 baseline falls back to
+  // 0.4.0-alpha.1, and everything older belongs on the 0.3 line.
+  {
+    min: '0.1.2-alpha.4',
+    max: '0.1.2-rc.1',
+    since: '0.4.0',
+    requires: 'DeepSeek Harness 0.1.2-rc.1 or later',
+    upgradeDsh: '0.1.2-rc.1',
+    fallbackTui: '0.4.0-alpha.2',
+  },
   {
     min: '0.1.2-alpha.2',
     max: '0.1.2-alpha.4',
     since: '0.4.0-alpha.2',
     requires: 'DeepSeek Harness 0.1.2-alpha.4 or later',
-    upgradeDsh: '0.1.2-alpha.5',
+    upgradeDsh: '0.1.2-rc.1',
     fallbackTui: '0.4.0-alpha.1',
   },
   {
     max: '0.1.2-alpha.2',
     since: '0.4.0-alpha.1',
     requires: 'DeepSeek Harness 0.1.2-alpha.2 or later',
-    upgradeDsh: '0.1.2-alpha.5',
+    upgradeDsh: '0.1.2-rc.1',
     fallbackTui: '0.3',
   },
 ]

@@ -48,21 +48,23 @@ test('release-notes accepts stable v tags and next-v prerelease tags', (t) => {
 })
 
 test('current 0.4 release body carries the DSH/TUI install pairing', () => {
-  // The PUBLISHED 0.4.0-alpha.2 line documents its alpha.5 family while the
-  // peer floor stays alpha.4; the release body must carry the copy-paste
-  // install commands.
+  // The PUBLISHED stable 0.4.0 line documents its rc.1 target while the
+  // peer floor stays rc.1; the release body must carry the copy-paste
+  // install commands. (This test validates the live repository state, so it
+  // follows the current package.json version — the historical prerelease
+  // pairings are pinned by the fixture-based tests below.)
   const output = join(tmpdir(), `dsh-pi-tui-release-notes-${process.pid}.md`)
   try {
     const result = spawnSync(
       process.execPath,
-      [join(repo, 'scripts/release-notes.mjs'), 'next-v0.4.0-alpha.2', output],
+      [join(repo, 'scripts/release-notes.mjs'), 'v0.4.0', output],
       { cwd: repo, encoding: 'utf8' },
     )
     assert.equal(result.status, 0, result.stderr)
     const body = readFileSync(output, 'utf8')
     for (const command of [
-      '@deepseek-ai/dsh@0.1.2-alpha.5',
-      '@xmoon76/dsh-pi-tui@next',
+      '@deepseek-ai/dsh@0.1.2-rc.1',
+      '@xmoon76/dsh-pi-tui@latest',
       '@xmoon76/dsh-pi-tui@0.3',
     ]) {
       assert.ok(body.includes(command), `release body is missing ${command}`)
@@ -76,7 +78,8 @@ test('0.4 release guidance follows the stable or next tag channel', (t) => {
   const life = testLifecycle(t)
   // A fixture on the alpha.4 floor (any 0.4 prerelease after 0.4.0-alpha.1)
   // must document the latest validated alpha.5 pin; the stable 0.4.0 cutover
-  // must not retain prerelease-only guidance.
+  // must document the published rc.1 target instead and must not retain
+  // prerelease-only guidance.
   const prereleaseGuidance = '\n- @deepseek-ai/dsh@0.1.2-alpha.5\n- @xmoon76/dsh-pi-tui@next\n- @xmoon76/dsh-pi-tui@0.3'
   const futurePrerelease = createFixture(life, { version: '0.4.0-alpha.2', guidance: prereleaseGuidance })
   try {
@@ -86,7 +89,7 @@ test('0.4 release guidance follows the stable or next tag channel', (t) => {
     try {
       const result = run(stableWithPrereleaseGuidance, 'v0.4.0')
       assert.notEqual(result.status, 0)
-      assert.match(result.stderr, /@deepseek-ai\/dsh@0\.1\.2/u)
+      assert.match(result.stderr, /@deepseek-ai\/dsh@0\.1\.2-rc\.1/u)
     } finally {
       // testLifecycle cleans the fixture roots.
     }
@@ -94,7 +97,7 @@ test('0.4 release guidance follows the stable or next tag channel', (t) => {
     // testLifecycle cleans the fixture roots.
   }
 
-  const stableGuidance = '\n- @deepseek-ai/dsh@0.1.2\n- @xmoon76/dsh-pi-tui@latest\n- @xmoon76/dsh-pi-tui@0.3'
+  const stableGuidance = '\n- @deepseek-ai/dsh@0.1.2-rc.1\n- @xmoon76/dsh-pi-tui@latest\n- @xmoon76/dsh-pi-tui@0.3'
   const stable = createFixture(life, { version: '0.4.0', guidance: stableGuidance })
   const stableResult = run(stable, 'v0.4.0')
   assert.equal(stableResult.status, 0, stableResult.stderr)

@@ -140,11 +140,14 @@ function containsExactGuidance(content, command) {
   return new RegExp(`${escaped}(?![0-9A-Za-z.+-])`, 'u').test(content)
 }
 
-// The DSH install pin each 0.4 prerelease documents: 0.4.0-alpha.1 shipped
-// on the alpha.3 family; current prerelease guidance uses the latest validated
-// alpha.5 family while the peer floor remains alpha.4. Released changelog
-// sections are immutable, so the requirement follows the version being released.
+// The DSH install pin each 0.4 release documents: 0.4.0-alpha.1 shipped on
+// the alpha.3 family, the alpha train documented its latest validated alpha
+// family while the peer floor stayed at the previous alpha, and the 0.4.0
+// stable cutover pairs with the published rc.1 line (0.1.2 stable is not out
+// yet). Released changelog sections are immutable, so the requirement follows
+// the version being released.
 const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3' : '0.1.2-alpha.5'
+const dshStablePin = version === '0.4.0' ? '0.1.2-rc.1' : '0.1.2'
 if (version.startsWith('0.4.')) {
   const requiredGuidance = channel === 'next'
     ? [
@@ -153,7 +156,7 @@ if (version.startsWith('0.4.')) {
         '@xmoon76/dsh-pi-tui@0.3',
       ]
     : [
-        '@deepseek-ai/dsh@0.1.2',
+        `@deepseek-ai/dsh@${dshStablePin}`,
         '@xmoon76/dsh-pi-tui@latest',
         '@xmoon76/dsh-pi-tui@0.3',
       ]

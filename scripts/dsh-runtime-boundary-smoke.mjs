@@ -30,14 +30,16 @@ const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 // The minimum-supported boundary: every DSH below the 0.4 floor must be
 // rejected. Only PUBLISHED versions can be installed here, and the
 // published lines below the floor are 0.1.1-rc.2 plus the
-// 0.1.2-alpha.2/alpha.3 baseline, so the real-install rejection case is
-// 0.1.1-rc.2 (the oldest reproducible one). The finer alpha floor
-// regressions are pinned by the startup-gate unit tests instead.
+// 0.1.2-alpha.2/alpha.3/alpha.4/alpha.5 baselines, so the real-install
+// rejection case is 0.1.1-rc.2 (the oldest reproducible one). The finer
+// alpha/rc floor regressions are pinned by the startup-gate unit tests
+// instead.
 const OLD_DSH_VERSION = '0.1.1-rc.2'
 const MIN_DSH_VERSION = '0.1.2-alpha.4'
-const TARGET_DSH_VERSION = '0.1.2-alpha.5'
+const TARGET_DSH_VERSION = '0.1.2-rc.1'
 const OLD_TUI_LINE = '0.3'
 const ALPHA23_TUI_LINE = '0.4.0-alpha.1'
+const ALPHA45_TUI_LINE = '0.4.0-alpha.2'
 const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
 const EXPECTED_BOUNDARY_IMPORT = /@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|session|session-persistence|settings)/iu
 
@@ -133,19 +135,27 @@ function installCandidate(invocation, tarball, harnessDir, env) {
 
 // Mirrors src/startup.ts HARNESS_COMPAT (the startup-gate unit tests pin
 // the table itself): runtimes below the alpha.2 baseline fall back to the
-// 0.3 TUI line with the historical alpha.2 requirement text, while the
-// alpha.2/alpha.3 baseline falls back to the previous 0.4 alpha with the
-// alpha.4 requirement.
+// 0.3 TUI line with the historical alpha.2 requirement text, the
+// alpha.2/alpha.3 baseline falls back to 0.4.0-alpha.1 with the alpha.4
+// requirement text, and the alpha.4/alpha.5 baseline falls back to
+// 0.4.0-alpha.2 with the rc.1 requirement text.
 function floorNoticeFor(oldVersion) {
   if (semver.lt(oldVersion, '0.1.2-alpha.2')) {
     return { requires: '0.1.2-alpha.2', upgrade: TARGET_DSH_VERSION, fallbackTui: OLD_TUI_LINE }
   }
-  return { requires: MIN_DSH_VERSION, upgrade: TARGET_DSH_VERSION, fallbackTui: ALPHA23_TUI_LINE }
+  if (semver.lt(oldVersion, '0.1.2-alpha.4')) {
+    return { requires: MIN_DSH_VERSION, upgrade: TARGET_DSH_VERSION, fallbackTui: ALPHA23_TUI_LINE }
+  }
+  if (semver.lt(oldVersion, '0.1.2-rc.1')) {
+    return { requires: TARGET_DSH_VERSION, upgrade: TARGET_DSH_VERSION, fallbackTui: ALPHA45_TUI_LINE }
+  }
+  return undefined
 }
 
 function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION) {
   if (status === 0) throw new Error(`0.4 candidate unexpectedly started on DSH ${oldVersion}`)
   const notice = floorNoticeFor(oldVersion)
+  if (notice === undefined) throw new Error(`no floor notice tier for DSH ${oldVersion}`)
   const friendly = output.includes(`running dsh ${oldVersion}`)
     && output.includes(`DeepSeek Harness ${notice.requires} or later`)
   if (friendly) {

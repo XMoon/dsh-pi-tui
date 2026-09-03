@@ -9,7 +9,7 @@ import {
   resolveDshMode,
 } from '../scripts/dsh-ci-context.mjs'
 
-const nextSha = 'db6bdc3576c2d4e7c965e8e3ed0c2a731eed87f5'
+const nextSha = 'a66e4702047846cdaa10c66c9d3df3951f5ea70d'
 
 /** A temp mode-config file with the given mode (the tracked policy is
  * injectable so the source branch of the resolver is testable without
@@ -65,20 +65,20 @@ test('context uses the current DSH target in every mode and exposes the source p
   const life = testLifecycle(t)
   const npm = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next' })
   assert.equal(npm.mode, 'npm')
-  assert.equal(npm.version, '0.1.2-alpha.5')
+  assert.equal(npm.version, '0.1.2-rc.1')
   assert.equal(npm.sourceRef, '')
   assert.equal(npm.sourceExpectedVersion, '')
 
   const main = resolveDshContext({ eventName: 'push', ref: 'refs/heads/main' })
   assert.equal(main.mode, 'npm')
-  assert.equal(main.version, '0.1.2-alpha.5')
+  assert.equal(main.version, '0.1.2-rc.1')
   assert.equal(main.sourceRef, '')
   assert.equal(main.sourceExpectedVersion, '')
 
   const { path } = tempModeConfig('source', life)
   const source = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: path })
   assert.equal(source.mode, 'source')
-  assert.equal(source.version, '0.1.2-alpha.5')
+  assert.equal(source.version, '0.1.2-rc.1')
   assert.equal(source.sourceRef, nextSha)
-  assert.equal(source.sourceExpectedVersion, '0.1.2-alpha.5')
+  assert.equal(source.sourceExpectedVersion, '0.1.2-rc.1')
 })
