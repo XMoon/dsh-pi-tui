@@ -972,8 +972,11 @@ export class TaskBrowserPanel implements Component, Focusable {
     // The header is chrome: yield it before any content.
     const withoutHeader = this.options.header === undefined ? compact : compact.slice(1)
     if (withoutHeader.length <= limit) return withoutHeader
-    // Extreme grant: keep the head — the search input, then the message.
-    return compact.slice(0, limit)
+    // Extreme grant: keep the head of the HEADER-FREE rows — the search
+    // input, then the no-match message. Slicing `compact` here would
+    // re-introduce the header and drop the message, which the declared
+    // priority places ABOVE the header.
+    return withoutHeader.slice(0, limit)
   }
 
 

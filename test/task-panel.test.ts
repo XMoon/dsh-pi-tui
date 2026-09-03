@@ -60,6 +60,21 @@ function makePanel(
   return { panel, rendered: () => panel.render(100) }
 }
 
+test('the extreme no-match grant keeps the message over the header', () => {
+  const { panel, rendered } = makePanel([runningJob()], { enableSearch: true })
+  // A 2-row panel grant: compact rows are header/search/message/hint; the
+  // header must yield BEFORE the no-match message (declared priority:
+  // search > message > hint > header).
+  panel.setMaxRows(2)
+  for (const key of 'zz') panel.handleInput(key) // no match
+  const lines = rendered().map(strip)
+  const joined = lines.join('\n')
+  assert.ok(lines.length <= 2, `the extreme no-match must fit the grant (${lines.length})`)
+  assert.ok(joined.includes('no active tasks'), `the message must beat the header:\n${joined}`)
+  assert.ok(joined.includes('zz'), 'the search row must survive')
+  assert.ok(!joined.includes('tasks · subagents'), `the header must yield:\n${joined}`)
+})
+
 test('rows render a status dot, kind · label, and right-aligned status + elapsed', () => {
   const now = Date.now()
   const { panel, rendered } = makePanel([
