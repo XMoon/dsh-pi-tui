@@ -9,7 +9,7 @@
   "verification": {
     "auditedAt": "2026-09-03",
     "branch": "feat/vendor-divergence-ledger-hardening",
-    "auditedSourceCommit": "90e00164136532282ebe4f97c658bc84f7bc53a1",
+    "auditedSourceCommit": "f455abd18dfeb5758d0d8b5cf77013562d1f89d6",
     "referenceSnapshots": {
       "upstream": {
         "repository": "earendil-works/pi",
@@ -23,7 +23,7 @@
     "method": [
       "Compared every local packages/pi-tui/src file with the pinned upstream blob.",
       "Audited vendor-internal, inheritance/structural, host, public/extension, behavioral, and test/runtime ownership evidence.",
-      "Checked current local Pi and Kimi source snapshots for semantic comparison; issue and PR references are background only.",
+      "Compared recorded Pi and Kimi reference snapshots for semantic comparison; issue and PR references are background only.",
       "Ran focused deletion experiments for X019, X030, X037, X038, X043, and X044; existing checks caught the first five, while X044 required a compile-only subclass fixture.",
       "Historical removed and absorbed records were retained as explicit records instead of disappearing from the manifest."
     ]
@@ -82,7 +82,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/select-list.ts"],
         "relevantIssues": [],
-        "semanticDelta": "The pinned and current upstream SelectList do not provide the host's combined search, grouping, dynamic setItems, and row-budget contract; Kimi's SearchableList is a separate state-object design, not an upstream equivalent."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference SelectList do not provide the host's combined search, grouping, dynamic setItems, and row-budget contract; Kimi's SearchableList is a separate state-object design, not an upstream equivalent."
       },
       "retirement": {
         "conditions": ["Provide a semantically equivalent upstream searchable/grouped list, or complete a host-owned picker migration covering query, grouping, dynamic rows, selection identity, paging, and advanced ui.select behavior.", "Run host picker, extension surface, narrow-budget, and zero-result interaction tests after the migration."],
@@ -116,7 +116,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/select-list.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Upstream 0.84.4 has no setItems operation with query and selection preservation; the current upstream list still does not provide this contract."
+        "semanticDelta": "Upstream 0.84.4 has no setItems operation with query and selection preservation; the audited upstream reference list still does not provide this contract."
       },
       "retirement": {
         "conditions": ["Retire only together with X001/X041 after a replacement preserves query, selection identity, row enrichment, grouping, and all picker interaction tests."],
@@ -155,7 +155,7 @@
       "retirement": {
         "conditions": ["Keep the upstream implementation and retain the supplementary-plane regression test; never reintroduce the old patch during a re-vendor."],
         "replacementMapping": [],
-        "evidence": ["Pinned and current source snapshots retain the upstream code-unit assignment.", "Deletion experiment was the 2026-09 re-vendor itself: the ZWJ regression passes with the patch absent.", "Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record retired."]
+        "evidence": ["The pinned baseline and the audited reference snapshots retain the upstream code-unit assignment.", "Deletion experiment was the 2026-09 re-vendor itself: the ZWJ regression passes with the patch absent.", "Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record retired."]
       },
       "audit": {
         "lastAuditedAt": "2026-09-03",
@@ -184,7 +184,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
-        "semanticDelta": "The pinned and current upstream Editor stores every accepted paste; neither provides the local admission cap and inline fallback."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference Editor stores every accepted paste; neither provides the local admission cap and inline fallback."
       },
       "retirement": {
         "conditions": ["Retire only when upstream or the editor owner provides an equivalent bounded paste policy with the same marker, undo, and large-input behavior.", "Run memory-sensitive registry and host replacement tests."],
@@ -252,7 +252,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Current upstream has request identity checks but retains a serial autocomplete task chain; it has not been proven equivalent to the local never-settling latest-wins behavior or host repaint route."
+        "semanticDelta": "The audited upstream reference has request identity checks but retains a serial autocomplete task chain; it has not been proven equivalent to the local never-settling latest-wins behavior or host repaint route."
       },
       "retirement": {
         "conditions": ["Upstream must make completion commits latest-wins even when an aborted provider never settles, with the same stale text/cursor fencing.", "Run provider, subclass, and active-screen repaint tests before removing the local path."],
@@ -262,7 +262,7 @@
       "audit": {
         "lastAuditedAt": "2026-09-03",
         "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
-        "notes": "Current upstream source was inspected rather than inferred from issue status. The remaining serial task chain keeps equivalence PARTIAL."
+        "notes": "The audited upstream reference source was inspected rather than inferred from issue status. The remaining serial task chain keeps equivalence PARTIAL."
       }
     },
     "X006": {
@@ -286,7 +286,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/word-navigation.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned and current upstream stop before a leading punctuation segment in the audited case; the local helper deliberately advances past it."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference stop before a leading punctuation segment in the audited case; the local helper deliberately advances past it."
       },
       "retirement": {
         "conditions": ["Retire only when upstream's wordForward has the same segment-start punctuation semantics and the cursor-boundary regression remains green."],
@@ -320,7 +320,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui.ts", "packages/tui/src/components/scroll-view.ts", "packages/tui/src/components/text.ts", "packages/tui/src/components/loader.ts", "packages/tui/src/components/box.ts", "packages/tui/src/components/settings-list.ts", "packages/tui/src/components/stack.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned upstream has no fork-wide optional dispose ownership graph. Current Pi has isolated disposable components, but not the host's Container/Stack/overlay exactly-once contract."
+        "semanticDelta": "The pinned baseline has no fork-wide optional dispose ownership graph. The audited upstream reference has isolated disposable components, but not the host's Container/Stack/overlay exactly-once contract."
       },
       "retirement": {
         "conditions": ["Do not retire in a ledger cleanup. A dedicated lifecycle architecture change must replace every ownership edge and preserve exactly-once teardown, remount behavior, extension lifetime, and final OverlayBroker cleanup.", "Run the full component compatibility, layout, overlay, timer, and extension lifecycle suites."],
@@ -422,7 +422,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/stdin-buffer.ts"],
         "relevantIssues": [],
-        "semanticDelta": "The pinned and current upstream buffer do not contain the local hard cap for an unterminated ESC prefix."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference buffer do not contain the local hard cap for an unterminated ESC prefix."
       },
       "retirement": {
         "conditions": ["Retire only after upstream provides an equivalent bounded parser and valid-sequence compatibility tests cover oversized and corrupt input."],
@@ -584,7 +584,7 @@
         "inheritanceStructural": {"audited": true, "items": [], "notes": "No subclass edge beyond the key parser implementation."},
         "host": {"audited": true, "items": ["Host keybinding and modifier decoding consume key release state indirectly."], "notes": "The removed cleanup is not a host-owned replacement."},
         "publicExtension": {"audited": true, "items": [], "notes": "No extension directly accesses the private field."},
-        "behavioral": {"audited": true, "items": ["key-release behavior remains unchanged", "the retained parser write is dead for isKeyRelease, which scans raw input"], "notes": "The old cleanup is absorbed because the pinned/current source representation is identical; it is not evidence that isKeyRelease consumes _lastEventType."}
+        "behavioral": {"audited": true, "items": ["key-release behavior remains unchanged", "the retained parser write is dead for isKeyRelease, which scans raw input"], "notes": "The old cleanup is absorbed because the pinned baseline/reference source representation is identical; it is not evidence that isKeyRelease consumes _lastEventType."}
       },
       "tests": ["packages/pi-tui/test/keys.test.ts: key release and printable decoding behavior"],
       "upstream": {
@@ -592,12 +592,12 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/keys.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned and current upstream retain the field and its parser writes, but isKeyRelease currently uses raw-sequence checks rather than reading _lastEventType; the local source matches the upstream baseline."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference retain the field and its parser writes, but isKeyRelease currently uses raw-sequence checks rather than reading _lastEventType; the local source matches the upstream baseline."
       },
       "retirement": {
         "conditions": ["Keep the upstream key parser state and do not resurrect the former dead-field cleanup."],
         "replacementMapping": [],
-        "evidence": ["git blob comparison at the pinned commit shows no local source divergence for X015.", "Current upstream source retains the parser write; current isKeyRelease source was checked and does not read _lastEventType directly.", "Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record absorbed."]
+        "evidence": ["git blob comparison at the pinned commit shows no local source divergence for X015.", "The audited upstream reference source retains the parser write; local isKeyRelease source was checked and does not read _lastEventType directly.", "Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record absorbed."]
       },
       "audit": {
         "lastAuditedAt": "2026-09-03",
@@ -660,7 +660,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-main-screen.ts", "packages/tui/src/tui-alt-screen.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned and current upstream assign mouse behavior to the alternate screen and leave regular mode mouse-free; local source matches."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference assign mouse behavior to the alternate screen and leave regular mode mouse-free; local source matches."
       },
       "retirement": {
         "conditions": ["Keep the upstream screen ownership split and recheck it on every re-vendor."],
@@ -733,7 +733,7 @@
       "retirement": {
         "conditions": ["Apply one atomic change: remove Text.dispose and remove Loader's super.dispose call while retaining Loader.dispose and timer cleanup.", "Run lifecycle, Loader timer, layout, surface compatibility, and typecheck gates before changing status."],
         "replacementMapping": ["Atomic replacement: Text.dispose no-op -> no base method; Loader.dispose remains the owning cleanup and calls stop directly without super.dispose."],
-        "evidence": ["Current source proves a live Loader -> Text.dispose -> super.dispose inheritance edge.", "The proposed replacement is local and atomic; no deletion experiment was run in this ledger task."]
+        "evidence": ["Current source proves a live Loader -> Text.dispose -> super.dispose inheritance edge.", "Deletion experiment: temporarily removing Text.dispose made the package typecheck fail in loader.ts with TS4113/TS2339 because Loader's override and super.dispose call lost their base member; the existing lifecycle tests remained green."]
       },
       "audit": {
         "lastAuditedAt": "2026-09-03",
@@ -898,7 +898,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-alt-screen.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Upstream copySelection receives only flattened text and retains all leading spaces; neither pinned nor current source exposes selection start metadata for this rule."
+        "semanticDelta": "Upstream copySelection receives only flattened text and retains all leading spaces; neither the pinned baseline nor the audited upstream reference exposes selection start metadata for this rule."
       },
       "retirement": {
         "conditions": ["Expose selection metadata upstream or remove synthetic padding from selectable text, then map line-head, mid-line, and real-indentation behavior one-for-one.", "Run the selection and clipboard compatibility tests."],
@@ -976,7 +976,7 @@
       "audit": {
         "lastAuditedAt": "2026-09-03",
         "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
-        "notes": "Historical absorbed record rechecked against pinned and current Pi source. It remains a real host capability, but no longer a local divergence."
+        "notes": "Historical absorbed record rechecked against the pinned baseline and recorded Pi source. It remains a real host capability, but no longer a local divergence."
       }
     },
     "X027": {
@@ -992,7 +992,7 @@
         "inheritanceStructural": {"audited": true, "items": ["MentionProvider wraps the fork's CombinedAutocompleteProvider for shell-mode/path positions; the wrapper does not replace the fork classifier."], "notes": "The current host passes fdPath=null to this inner provider for deterministic fallback, so no claim is made that the host's @-mention HostFilePort path exercises fd output."},
         "host": {"audited": true, "items": ["src/mentions.ts delegates shell-mode command/path positions and slash-command-name completion to CombinedAutocompleteProvider", "public AutocompleteProvider consumers may provide an fd-backed provider"], "notes": "The current @ flow uses HostFilePort/discoverMention and the /image path uses completeImageArgument/LocalFileSource; neither is counted as a direct fd consumer of X027."},
         "publicExtension": {"audited": true, "items": ["AutocompleteProvider output is public through editor completion integration", "CombinedAutocompleteProvider accepts an fd-backed path for callers that opt into it"], "notes": "Directory item type and insertion behavior are observable when the fd-backed provider path is used."},
-        "behavioral": {"audited": true, "items": ["bare directory lines remain directories", "symlinks are followed by stat", "failed stat keeps a trailing separator as a fallback"], "notes": "Current upstream also changed nested/fuzzy ordering, which is not part of X027."}
+        "behavioral": {"audited": true, "items": ["bare directory lines remain directories", "symlinks are followed by stat", "failed stat keeps a trailing separator as a fallback"], "notes": "The audited upstream reference also changed nested/fuzzy ordering, which is not part of X027."}
       },
       "tests": ["packages/pi-tui/test/autocomplete.test.ts: typeDirectoryOutputLines and fd-backed provider cases", "test/file-completion-convergence.test.ts: host file completion is explicitly separate and does not prove fd-path usage"],
       "upstream": {
@@ -1000,7 +1000,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/autocomplete.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned and current upstream classify plain fd lines by trailing slash and slice directory names; the local path uses stat first and avoids dropping the final character."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference classify plain fd lines by trailing slash and slice directory names; the local path uses stat first and avoids dropping the final character."
       },
       "retirement": {
         "conditions": ["Retire only when upstream directory completion classifies bare and symlinked directories with the same insertion text and fallback behavior.", "Run fd, symlink, trailing-slash, and host @ completion tests."],
@@ -1102,7 +1102,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/index.ts", "packages/tui/src/keys.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned and current upstream define decodePrintableKey in keys.ts but do not export it from the package root; the root public entry remains a real host dependency."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference define decodePrintableKey in keys.ts but do not export it from the package root; the root public entry remains a real host dependency."
       },
       "retirement": {
         "conditions": ["Upstream must export the same decoder from its package root with compatible declarations, or a deliberate package API migration must update every root consumer and compatibility fixture.", "Do not replace this with a host copy while the package exports map remains root-only."],
@@ -1136,7 +1136,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/markdown.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned and current upstream marked configuration does not contain the CJK boundary tokenizer; the old landed-upstream note was incorrect."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference marked configuration does not contain the CJK boundary tokenizer; the old landed-upstream note was incorrect."
       },
       "retirement": {
         "conditions": ["Retire only when upstream or the Markdown owner provides equivalent CJK/full-width URL boundary and balanced-parenthesis behavior.", "Run Markdown link and transcript rendering tests."],
@@ -1146,7 +1146,7 @@
       "audit": {
         "lastAuditedAt": "2026-09-03",
         "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
-        "notes": "Current pinned and current upstream source were checked; no issue closure was treated as absorption."
+        "notes": "Both the pinned baseline and the audited upstream reference source were checked; no issue closure was treated as absorption."
       }
     },
     "X032": {
@@ -1272,7 +1272,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/tui-main-screen.ts", "packages/tui/src/utils.ts", "packages/tui/src/tui.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned and current upstream reprocess every line each frame. Its bounded writer prevents huge output formation but does not replace value-based per-frame line reuse or the host render-cost contract."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference reprocess every line each frame. Its bounded writer prevents huge output formation but does not replace value-based per-frame line reuse or the host render-cost contract."
       },
       "retirement": {
         "conditions": ["Provide a benchmarked replacement with equal steady-frame CPU and allocation cost at representative transcript sizes.", "Run cold/cached render, image-id, width-invalidation, and host reference-stability tests before removal."],
@@ -1374,7 +1374,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned and current upstream have no PasteBurst fallback or disable option. The local editor-internal terminal behavior cannot be judged unused from host imports."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference have no PasteBurst fallback or disable option. The local editor-internal terminal behavior cannot be judged unused from host imports."
       },
       "retirement": {
         "conditions": ["Retire only if supported terminal environments provide reliable bracketed paste markers or upstream implements an equivalent fallback and opt-out contract.", "Run terminal/tmux timing, remapped submit, and editor input tests."],
@@ -1408,7 +1408,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/utils.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned and current upstream use a 512-entry cache; local uses 4096 intending to reduce CJK burst thrashing, but an isolated 4096-versus-512 measurement remains pending."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference use a 512-entry cache; local uses 4096 intending to reduce CJK burst thrashing, but an isolated 4096-versus-512 measurement remains pending."
       },
       "retirement": {
         "conditions": ["Run a repeatable CJK burst benchmark across cold, theme-change, and width-change paths.", "Retire only if 512 or an upstream replacement is no worse within the agreed performance budget."],
@@ -1442,7 +1442,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/input.ts", "packages/tui/src/components/select-list.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned and current upstream setValue preserves/clamps the existing cursor at zero for a fresh Input; they do not provide the local end-by-default plus explicit preserve option."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference setValue preserves/clamps the existing cursor at zero for a fresh Input; they do not provide the local end-by-default plus explicit preserve option."
       },
       "retirement": {
         "conditions": ["Provide an upstream setValue cursor contract with end-by-default prefills and explicit preserve semantics, then run Input, SelectList, question, and history tests."],
@@ -1578,7 +1578,7 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Pinned and current upstream keep both methods private; the host subclass cannot express its supported completion control without the visibility divergence."
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference keep both methods private; the host subclass cannot express its supported completion control without the visibility divergence."
       },
       "retirement": {
         "conditions": ["Upstream must expose a protected or equivalent subclass-safe completion seam with compatible request/cancel lifecycle.", "Run subclass typecheck and stale-dropdown/autocomplete tests before changing visibility."],
@@ -1588,7 +1588,7 @@
       "audit": {
         "lastAuditedAt": "2026-09-03",
         "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
-        "notes": "Confirmed the subclass edge and kept the seam; current upstream private visibility is not semantically equivalent."
+        "notes": "Confirmed the subclass edge and kept the seam; audited upstream reference private visibility is not semantically equivalent."
       }
     },
     "X045": {
