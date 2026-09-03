@@ -606,6 +606,116 @@ test('task browser no-match state fits a short terminal without clipping the hin
   await vt.waitForRender()
 })
 
+test('Task Center full mode keeps the selected task on a very short terminal', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 8)
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    Array.from({ length: 20 }, (_, index) => ({
+      value: `task-${index}`,
+      label: `task ${index}`,
+      status: 'running',
+      group: 'jobs',
+    })),
+    () => {},
+    () => {},
+    { mode: 'full', header: 'Tasks', maxVisible: 10 },
+  )
+  await vt.waitForRender()
+  for (let index = 0; index < 3; index += 1) vt.sendInput('\x1b[B') // select task 3
+  await vt.waitForRender()
+  // 80x8 full mode: margin 2 + frame borders 2 leave a 4-row panel grant.
+  // The semantic degradation must keep the SELECTED task row (header and
+  // hint may share the grant, but never squeeze the main row out).
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('task 3'), `selected task must survive the 4-row grant:\n${view}`)
+  assert.ok(view.includes('╰'), `frame bottom must not be clipped:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('Task Center full mode keeps search input and the selected task at 10 rows', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    Array.from({ length: 20 }, (_, index) => ({
+      value: `task-${index}`,
+      label: `task ${index}`,
+      status: 'running',
+      group: 'jobs',
+    })),
+    () => {},
+    () => {},
+    { mode: 'full', header: 'Tasks', maxVisible: 10, initialSearchMode: true },
+  )
+  await vt.waitForRender()
+  for (let index = 0; index < 2; index += 1) vt.sendInput('\x1b[B') // select task 2
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes(' / search…'), `search input must survive the 6-row grant:\n${view}`)
+  assert.ok(view.includes('task 2'), `selected task must survive the 6-row grant:\n${view}`)
+  assert.ok(view.includes('╰'), `frame bottom must not be clipped:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('openTaskBrowser honors percentage width and maxHeight (fork sizing rules)', async () => {
+  const items = [{ value: 'job:1', label: 'bash · build', status: 'running', group: 'jobs' }]
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').trim()
+  // width '50%' of a 100-column terminal → the frame spans exactly 50.
+  {
+    const vt = new VirtualTerminal(100, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    startedApps.add(app)
+    app.openTaskBrowser(items, () => {}, () => {}, { width: '50%' })
+    await vt.waitForRender()
+    const lines = vt.getViewport().map(strip)
+    const top = lines.findIndex(line => line.includes('╭'))
+    assert.ok(top >= 0, `percentage width must render a frame:\n${lines.join('\n')}`)
+    assert.equal(visibleWidth(lines[top]!), 50, 'width 50% must resolve to 50 columns')
+    app.dispose()
+  }
+  // maxHeight '70%' of a 40-row terminal → the frame is at most 28 rows.
+  {
+    const vt = new VirtualTerminal(80, 40)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    startedApps.add(app)
+    app.openTaskBrowser(items, () => {}, () => {}, { maxHeight: '70%' })
+    await vt.waitForRender()
+    const lines = vt.getViewport().map(strip)
+    const top = lines.findIndex(line => line.includes('╭'))
+    const bottom = lines.findIndex(line => line.includes('╰'))
+    assert.ok(top >= 0 && bottom >= top, `maxHeight 70% must render a frame:\n${lines.join('\n')}`)
+    assert.ok(bottom - top + 1 <= 28, `frame must be capped at 28 rows (${bottom - top + 1})`)
+    app.dispose()
+  }
+})
+
+test('openTaskBrowser full mode honors explicit numeric width and maxHeight', async () => {
+  const items = [{ value: 'job:1', label: 'bash · build', status: 'running', group: 'jobs' }]
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').trim()
+  const vt = new VirtualTerminal(120, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  // Explicit options always win, even in full mode: 100 wide / 20 tall
+  // (clamped by the margin-inset available area, never forced to 100%).
+  app.openTaskBrowser(items, () => {}, () => {}, { mode: 'full', width: 100, maxHeight: 20 })
+  await vt.waitForRender()
+  const lines = vt.getViewport().map(strip)
+  const top = lines.findIndex(line => line.includes('╭'))
+  const bottom = lines.findIndex(line => line.includes('╰'))
+  assert.ok(top >= 0 && bottom >= top, `full-mode explicit size must render a frame:\n${lines.join('\n')}`)
+  assert.equal(visibleWidth(lines[top]!), 100, 'explicit width 100 must win over the full-mode default')
+  assert.ok(bottom - top + 1 <= 20, `explicit maxHeight 20 must cap the frame (${bottom - top + 1})`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  app.dispose()
+})
+
 test('task browser keeps the selected row and hint visible after a height shrink', async () => {
   const { vt, app } = startApp()
   vt.resize(80, 30)

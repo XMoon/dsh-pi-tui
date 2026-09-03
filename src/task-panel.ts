@@ -147,6 +147,12 @@ export class TaskBrowserPanel implements Component, Focusable {
   private maxVisible: number
   /** Total inner rows granted by the surrounding Frame. */
   private maxRows = Number.POSITIVE_INFINITY
+  /** The ACTUAL viewport the last render painted (after the fit loop
+   * shrunk the budget estimate): the ack scope for viewportItems()/
+   * onViewportExpose and the PageUp/PageDown step — never the budget
+   * baseline, which detail rows / the sidebar can undershoot. */
+  private lastRenderedStart = 0
+  private lastRenderedCount = 1
   private readonly options: TaskPanelOptions
   private readonly searchInput = new Input()
   private searchEnabled: boolean
@@ -180,6 +186,9 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.items = [...items]
     this.configuredMaxVisible = Math.max(1, Math.floor(maxVisible))
     this.maxVisible = this.configuredMaxVisible
+    // Pre-render default: the budget window. The first render's fit loop
+    // overwrites it with the ACTUAL painted window.
+    this.lastRenderedCount = this.maxVisible
     this.options = options
     this.onSelect = onSelect
     this.onCancel = onCancel
@@ -288,6 +297,9 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.loading = state === 'loading'
     this.refreshError = state === 'stale' ? error ?? 'Refresh failed' : undefined
     if (state === 'ready') this.loading = false
+    // A stale banner row changes the chrome: re-derive the budget now, so
+    // paging/ack do not keep the pre-banner window until the next projection.
+    this.recomputeVisibleBudget()
     this.requestRender()
   }
 
@@ -296,10 +308,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     return this.filtered
   }
 
-  /** ONLY the rows the current viewport actually renders (the ack scope:
-   * a failure the user has not scrolled to was never "seen"). */
+  /** ONLY the rows the CURRENT painted viewport actually rendered (the
+   * ack scope: a failure the user never physically saw was never "seen").
+   * Reflects the render-time fit (detail rows / the sidebar can shrink
+   * the painted window below the budget baseline), never `maxVisible`. */
   viewportItems(): readonly TaskPanelItem[] {
-    return this.filtered.slice(this.scroll, this.scroll + this.maxVisible)
+    return this.filtered.slice(this.lastRenderedStart, this.lastRenderedStart + this.lastRenderedCount)
   }
 
   /**
@@ -428,6 +442,8 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.searchMode = true
     this.searchInput.focused = this._focused
     this.selectionTouched = true
+    // The search chrome (2 rows) enters the budget estimate immediately.
+    this.recomputeVisibleBudget()
     this.requestRender()
   }
 
@@ -435,6 +451,8 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (!this.searchMode) return
     this.searchMode = false
     this.searchInput.focused = false
+    // The search chrome (2 rows) leaves the budget estimate immediately.
+    this.recomputeVisibleBudget()
     this.requestRender()
   }
 
@@ -450,7 +468,11 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (this.filtered.length === 0) return
     this.pendingStopValue = undefined
     this.selectionTouched = true
-    this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + direction * this.maxVisible))
+    // Page by the ACTUAL last-rendered window (the fit loop may have
+    // shrunk it below the budget baseline), so a page never skips rows
+    // the user just saw.
+    const pageSize = Math.max(1, this.lastRenderedCount)
+    this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + direction * pageSize))
     this.ensureVisible()
   }
 
@@ -703,10 +725,22 @@ export class TaskBrowserPanel implements Component, Focusable {
     const safeWidth = Math.max(1, width)
     const lines: string[] = []
     const explicit = this.explicitMode
+    const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
+    const hintLine = color.textMuted(`  ${this.hint()}`)
+    const searchOn = explicit ? this.searchMode : this.searchEnabled
+    // Hoisted chrome texts: the short-grant degradation rebuilds from
+    // them without the unconditionally-kept blank spacers.
+    const headerText = this.options.header === undefined ? undefined
+      : truncateToWidth(explicit ? this.headerText() : this.legacyHeaderText(), safeWidth, '…')
+    const searchEmpty = this.getFilter() === ''
+    const searchRowText = !searchOn ? '' : (() => {
+      const searchLine = this.searchInput.render(Math.max(1, safeWidth - 2))[0] ?? ''
+      const stripped = searchLine.startsWith('> ') ? searchLine.slice(2) : searchLine
+      return searchEmpty ? (explicit ? ' / search…' : ' search…') : ` ${stripped}`
+    })()
 
-    if (this.options.header !== undefined) {
-      const header = explicit ? this.headerText() : this.legacyHeaderText()
-      lines.push(color.textStrong(truncateToWidth(header, safeWidth, '…')))
+    if (headerText !== undefined) {
+      lines.push(color.textStrong(headerText))
       lines.push('')
     }
 
@@ -714,35 +748,29 @@ export class TaskBrowserPanel implements Component, Focusable {
       lines.push(color.textDim('Loading tasks…'))
       if (this.refreshError !== undefined) lines.push(color.textMuted(`${this.refreshError} · R retry`))
       lines.push('')
-      lines.push(color.textMuted(`  ${this.hint()}`))
+      lines.push(hintLine)
+      this.lastRenderedStart = 0
+      this.lastRenderedCount = 0
       return this.finalizeEmpty(lines)
     }
 
-    if (this.explicitMode && this.searchMode) {
-      const searchLine = this.searchInput.render(Math.max(1, safeWidth - 2))[0] ?? ''
-      const stripped = searchLine.startsWith('> ') ? searchLine.slice(2) : searchLine
-      lines.push(this.getFilter() === '' ? color.textDim(' / search…') : ` ${stripped}`)
-      lines.push('')
-    } else if (!explicit && this.searchEnabled) {
-      const searchLine = this.searchInput.render(Math.max(1, safeWidth - 2))[0] ?? ''
-      const stripped = searchLine.startsWith('> ') ? searchLine.slice(2) : searchLine
-      lines.push(this.getFilter() === '' ? color.textDim(' search…') : ` ${stripped}`)
+    if (searchOn) {
+      lines.push(searchEmpty ? color.textDim(searchRowText) : searchRowText)
       lines.push('')
     }
 
-    const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
-    const hintLine = color.textMuted(`  ${this.hint()}`)
     const rows = this.filtered
     if (rows.length === 0) {
       lines.push(color.textDim(this.refreshError === undefined ? (this.options.noMatchText ?? 'No matching tasks') : 'Could not load tasks'))
       if (this.refreshError !== undefined) lines.push(color.textMuted(`${this.refreshError} · R retry`))
       lines.push('')
       lines.push(hintLine)
+      this.lastRenderedStart = 0
+      this.lastRenderedCount = 0
       return this.finalizeEmpty(lines)
     }
 
     this.ensureVisible()
-    this.exposeViewport()
     const listWidth = safeWidth >= 110 ? Math.max(40, Math.floor((safeWidth - 3) * 0.58)) : safeWidth
     let itemCount = Math.min(rows.length, this.maxVisible)
     let start = this.scroll
@@ -803,28 +831,83 @@ export class TaskBrowserPanel implements Component, Focusable {
       listLines = buildWindow(itemCount, start)
       candidate = assemble()
     }
+    // The ACTUAL viewport is the window the fit left. Record it BEFORE
+    // the exposure ack so viewportItems()/onViewportExpose and the
+    // PageUp/PageDown step agree with the rows physically painted — the
+    // budget baseline can be larger than what details/sidebar allow.
+    this.lastRenderedStart = start
+    this.lastRenderedCount = itemCount
+    this.exposeViewport()
     if (candidate.length <= limit) return candidate
 
-    // A single detail-rich row can still exceed the grant. Apply the
-    // semantic priority (never tail-slice the flat array, or the selected
-    // MAIN row would yield to its own detail lines):
-    //   selected main row > hint tail > group header > detail > indicator.
-    const tail = limit - lines.length >= 2 ? ['', hintLine] : [hintLine]
-    const budget = Math.max(0, limit - lines.length - tail.length)
+    // Very short grants: true semantic degradation — search input
+    // (searchMode) > selected main > hint > header > group > detail >
+    // indicator > blank spacers. The selected main row is never squeezed
+    // out by decorative blanks or the header (this path does not keep the
+    // chrome prefix unconditionally).
     const entries = this.windowEntries(start, itemCount, listWidth)
     const selectedEntry = entries.find(entry => entry.selected)
-    let kept: string[] = []
-    if (selectedEntry !== undefined) {
-      const group = selectedEntry.group !== undefined && budget >= 2
-        ? [color.textMuted(`── ${selectedEntry.group} ──`)]
-        : []
-      if (budget >= 1) kept = [...group, selectedEntry.main]
-      const rest = budget - kept.length
-      if (rest > 0) kept = [...kept, ...selectedEntry.details.slice(0, rest)]
-    } else {
-      kept = listLines.slice(0, budget)
+    return this.degradedFallback(
+      selectedEntry,
+      searchRowText,
+      headerText,
+      rows.length > itemCount ? `  ${this.selected + 1}/${rows.length}` : undefined,
+      limit,
+      hintLine,
+    )
+  }
+
+  /** True semantic degradation for very short grants. The declared
+   * priority (search input > selected main > hint > header > group >
+   * detail > indicator) is enforced by INCLUSION — the chrome prefix is
+   * rebuilt from the hoisted texts and only kept when it fits after the
+   * mandatory content, so the selected main row cannot lose to two
+   * decorative blanks + the header. */
+  private degradedFallback(
+    selectedEntry: { group: string | undefined; main: string; details: string[] } | undefined,
+    searchRowText: string,
+    headerText: string | undefined,
+    indicatorText: string | undefined,
+    limit: number,
+    hintLine: string,
+  ): string[] {
+    const mainRow = selectedEntry?.main
+    const groupRow = selectedEntry !== undefined && selectedEntry.group !== undefined
+      ? color.textMuted(`── ${selectedEntry.group} ──`)
+      : undefined
+    const detailRows = selectedEntry?.details ?? []
+    // Mandatory content (priority 1-2): search row, then the selected
+    // main row; the hint text follows (priority 3).
+    const content: string[] = []
+    if (searchRowText !== '') content.push(color.textDim(searchRowText))
+    if (mainRow !== undefined) content.push(mainRow)
+    if (content.length >= limit) return content.slice(0, limit)
+    const hintIncluded = content.length + 1 <= limit
+    let used = content.length + (hintIncluded ? 1 : 0)
+    // Optional chrome (priority 4-7) fills the leftover rows.
+    let headerShown = false
+    if (headerText !== undefined && used + 1 <= limit) { headerShown = true; used += 1 }
+    let groupShown = false
+    if (groupRow !== undefined && used + 1 <= limit) { groupShown = true; used += 1 }
+    const detailsShown: string[] = []
+    for (const detail of detailRows) {
+      if (used + 1 > limit) break
+      detailsShown.push(detail)
+      used += 1
     }
-    return [...lines, ...kept, ...tail].slice(0, limit)
+    let indicatorShown = false
+    if (indicatorText !== undefined && used + 1 <= limit) { indicatorShown = true; used += 1 }
+    // Blank spacers last: only the hint's leading blank rides along.
+    const hintBlank = used + 1 <= limit
+    const out: string[] = []
+    if (headerShown) out.push(color.textStrong(headerText!))
+    if (searchRowText !== '') out.push(color.textDim(searchRowText))
+    if (groupShown) out.push(groupRow!)
+    if (mainRow !== undefined) out.push(mainRow)
+    out.push(...detailsShown)
+    if (indicatorShown) out.push(color.textMuted(indicatorText!))
+    if (hintIncluded) out.push(...(hintBlank ? ['', hintLine] : [hintLine]))
+    return out
   }
 
   /** The visible window as STRUCTURED rows (main + detail lines kept
