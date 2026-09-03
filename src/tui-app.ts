@@ -11097,33 +11097,34 @@ export class TuiApp {
       },
       () => this.requestRender(),
     )
-    // Full (Task Center) mode is a margin-inset full-terminal overlay; the
-    // fork resolves '100%' against the inset area, so the live grant is the
-    // terminal minus the two margin rows (the responsive frame re-derives
-    // it on every resize). An ABSENT mode keeps the legacy 72-wide fixed
-    // mount (direct embedders / the historical openTaskBrowser contract).
+    // Sizing contract (TaskBrowserOptions.width/maxHeight accept numbers
+    // AND percentages; an EXPLICIT option always wins, exactly like the
+    // pre-Task-Center mount: `options.width ?? (mode==='full' ? '100%' :
+    // 72)`). The responsive frame's geometry resolver mirrors the fork's
+    // parseSizeValue rules — a percentage resolves against the terminal
+    // dimension, then everything clamps to the margin-inset available
+    // area (full mode keeps the 1-cell margin).
     const fullMode = options.mode === 'full'
-    const numericWidth = typeof options.width === 'number' && Number.isFinite(options.width)
-      ? Math.max(1, Math.floor(options.width))
-      : undefined
-    const numericMaxHeight = typeof options.maxHeight === 'number' && Number.isFinite(options.maxHeight)
-      ? Math.max(1, Math.floor(options.maxHeight))
-      : undefined
+    const overlayWidth: number | `${number}%` = options.width ?? (fullMode ? '100%' : 72)
+    const overlayMaxHeight: number | `${number}%` = options.maxHeight ?? (fullMode ? '100%' : 16)
+    const resolveSize = (value: number | `${number}%`, dimension: number, avail: number): number => {
+      const pixels = typeof value === 'number' ? value : Math.floor((dimension * parseFloat(value)) / 100)
+      return Math.max(1, Math.min(pixels, avail))
+    }
     const geometryOf = (): ResponsiveOverlayGeometry => {
-      const width = fullMode
-        ? this.terminal.columns
-        : Math.max(1, Math.min(this.terminal.columns, numericWidth ?? 72))
-      const maxHeight = fullMode
-        ? Math.max(1, this.terminal.rows - 2)
-        : Math.max(1, Math.min(this.terminal.rows, numericMaxHeight ?? 16))
+      const marginInset = fullMode ? 2 : 0
+      const availWidth = Math.max(1, this.terminal.columns - marginInset)
+      const availHeight = Math.max(1, this.terminal.rows - marginInset)
+      const width = resolveSize(overlayWidth, this.terminal.columns, availWidth)
+      const maxHeight = resolveSize(overlayMaxHeight, this.terminal.rows, availHeight)
       return { width, maxHeight, key: `${width}:${maxHeight}` }
     }
     const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
       panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
     })
     const handle = this.showOverlayOnHost(frame, {
-      width: fullMode ? '100%' : (numericWidth ?? 72),
-      maxHeight: fullMode ? '100%' : (numericMaxHeight ?? 16),
+      width: overlayWidth,
+      maxHeight: overlayMaxHeight,
       margin: fullMode ? 1 : undefined,
     })
     // One close path: hide the overlay AND stop the panel's 1s elapsed tick
