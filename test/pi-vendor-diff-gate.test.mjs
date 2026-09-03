@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from './support/temp-lifecycle.ts'
@@ -66,6 +66,19 @@ function assertGateRanComparison(result) {
   assert.ok(!result.stderr.includes('failed to extract'), 'the tarball must extract cleanly')
 }
 
+/** Build a complete matching upstream tree. Every local source file matches,
+ * so each source-active entry is stale; historical records must stay quiet.
+ * This exercises strict stale detection without changing tracked files. */
+function makeMatchingUpstreamTarball(root) {
+  const tree = join(root, 'pi-matching')
+  const upstreamSrc = join(tree, 'packages', 'tui', 'src')
+  cpSync(join(ROOT, 'packages', 'pi-tui', 'src'), upstreamSrc, { recursive: true })
+  const tarball = join(root, 'matching-upstream.tar.gz')
+  const packed = spawnSync('tar', ['-czf', tarball, '-C', root, 'pi-matching'])
+  assert.equal(packed.status, 0, 'matching fixture tarball must be created')
+  return tarball
+}
+
 test('the tarball fallback extracts a local PI_UPSTREAM_TARBALL hermetically', (t) => {
   const { root, env } = makeEnv(t, {})
   const tarball = makeFakeUpstreamTarball(root)
@@ -82,4 +95,50 @@ test('the curl fallback passes gzip BINARY through to tar (PI_UPSTREAM_CURL)', (
   writeFileSync(fakeCurl, `#!/bin/sh\ncat "${tarball}"\n`)
   chmodSync(fakeCurl, 0o755)
   assertGateRanComparison(runGate({ ...env, PI_UPSTREAM_CURL: fakeCurl }))
+})
+
+test('strict mode rejects a stale active entry but ignores historical records', (t) => {
+  const { root, env } = makeEnv(t, {})
+  const tarball = makeMatchingUpstreamTarball(root)
+  const result = runGate({ ...env, PI_UPSTREAM_TARBALL: tarball, PI_UPSTREAM_REPO: join(root, 'no-such-repo') })
+  assert.equal(result.status, 0, 'default mode reports stale entries as warnings')
+  assert.ok(result.stdout.includes('STALE ledger: X001'), 'active X001 must be reported stale')
+  assert.ok(!result.stdout.includes('STALE ledger: X003'), 'removed X003 must not be treated as an active source entry')
+  assert.ok(!result.stdout.includes('STALE ledger: X015'), 'absorbed X015 must not be treated as an active source entry')
+
+  const strict = spawnSync(process.execPath, [GATE, '--strict'], {
+    cwd: ROOT,
+    env: { ...env, PI_UPSTREAM_TARBALL: tarball, PI_UPSTREAM_REPO: join(root, 'no-such-repo') },
+    encoding: 'utf8',
+  })
+  assert.equal(strict.status, 1, 'strict mode must fail stale active entries')
+  assert.ok(strict.stdout.includes('WARN (strict: failing)'), 'strict output must identify promoted warnings')
+})
+
+test('schema-v2 source coverage fails closed on missing status or files', (t) => {
+  const { root, env } = makeEnv(t, {})
+  const tarball = makeMatchingUpstreamTarball(root)
+  const manifestPath = join(root, 'manifest.json')
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'packages', 'pi-tui', 'vendor-divergences.json'), 'utf8'))
+
+  delete manifest.divergences.X001.status
+  writeFileSync(manifestPath, JSON.stringify(manifest))
+  const missingStatus = runGate({
+    ...env,
+    PI_VENDOR_MANIFEST: manifestPath,
+    PI_UPSTREAM_TARBALL: tarball,
+  })
+  assert.equal(missingStatus.status, 2)
+  assert.ok(missingStatus.stderr.includes('supported schema-v2 status'))
+
+  manifest.divergences.X001.status = 'ACTIVE'
+  manifest.divergences.X001.files = []
+  writeFileSync(manifestPath, JSON.stringify(manifest))
+  const missingFiles = runGate({
+    ...env,
+    PI_VENDOR_MANIFEST: manifestPath,
+    PI_UPSTREAM_TARBALL: tarball,
+  })
+  assert.equal(missingFiles.status, 2)
+  assert.ok(missingFiles.stderr.includes('non-empty files array'))
 })

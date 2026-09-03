@@ -400,6 +400,12 @@ describe("StdinBuffer", () => {
 			processInput(longSeq);
 			assert.deepStrictEqual(emittedSequences, [longSeq]);
 		});
+
+		it("should degrade an incomplete prefix beyond the scan cap", () => {
+			processInput(`\x1b[${"1".repeat(1100)}`);
+			assert.equal(emittedSequences[0], "\x1b");
+			assert.equal(buffer.getBuffer(), "");
+		});
 	});
 
 	describe("Flush", () => {

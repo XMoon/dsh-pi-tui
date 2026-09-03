@@ -3105,9 +3105,9 @@ test('BulletedComponent keeps a live child with reference-stable output', () => 
   const bullet = new BulletedComponent(child, '❯ ')
   const first = bullet.render(40)
   assert.equal(first[0]!.trimEnd(), '❯ hello world', `first line must lead with the bullet:\n${first}`)
-  // Same width: the SAME array reference comes back (the fork's per-frame
-  // processed-line reuse keys on reference identity — a rebuilt array every
-  // frame would degrade divergence 5 for every assistant/user line).
+  // Same width: the SAME array reference comes back. This is a component-level
+  // render optimization; the fork's X035 main-screen line cache separately
+  // compares primitive rendered-line values, not array identity.
   assert.equal(bullet.render(40), first, 'same-width renders must reuse the same array')
   // A narrower width re-renders the live child: wrapped continuation lines
   // indent under the bullet instead of repeating it.

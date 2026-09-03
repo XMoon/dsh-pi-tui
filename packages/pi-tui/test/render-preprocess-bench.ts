@@ -3,12 +3,14 @@
  *
  * Measures the cost of steady frames on TuiMainScreen: render N lines once,
  * then mutate ONLY the trailing spinner line and render repeatedly.
- * Unchanged lines keep their string references across frames, mirroring the
- * host transcript contract (BulletedComponent / ThinkingCompactComponent
- * keep their output reference-stable). The processed-line reuse cache makes
- * such frames O(#changed); without it every frame re-normalizes,
- * re-measures, and re-scans the whole transcript (O(N) with heavy constant
- * factors: ~30-370 ms/frame at 1k-10k lines on a 2026 dev box).
+ * Unchanged lines keep equal primitive string values across frames, even
+ * though this benchmark returns a fresh array each time. Host transcript
+ * components also keep their output arrays reference-stable as an incidental
+ * component-render optimization. The processed-line reuse cache makes such
+ * frames O(#changed); without it every frame would re-normalize, re-measure,
+ * and re-scan the whole transcript (O(N)). This benchmark exercises only the
+ * cached path; it has no checked-in uncached baseline, so historical timing
+ * comparisons are not acceptance evidence.
  *
  * Run from packages/pi-tui: node --import tsx/esm test/render-preprocess-bench.ts
  */

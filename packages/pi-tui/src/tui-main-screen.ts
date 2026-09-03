@@ -126,12 +126,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private previousLines: string[] = [];
 	/**
 	 * Raw (pre-processing) lines of the previous frame, aligned with
-	 * {@link previousLines}. Component render caches return identical string
-	 * references for unchanged content (the host's BulletedComponent /
-	 * ThinkingCompactComponent keep their output reference-stable for exactly
-	 * this contract), which lets each frame reuse the processed output for
-	 * every untouched line instead of re-normalizing, re-measuring, and
-	 * re-scanning the whole transcript. (dsh-pi-tui divergence X035.)
+	 * {@link previousLines}. Equal primitive rendered-line values let each frame
+	 * reuse processed output for every untouched line, even when a component
+	 * returns a fresh array. Host render-array reference stability is an
+	 * incidental component-level optimization, not a prerequisite for this
+	 * cache. (dsh-pi-tui divergence X035.)
 	 */
 	private previousRawLines: string[] = [];
 	/** Per-line kitty image ids of the previous frame, aligned with previousRawLines. */
@@ -301,13 +300,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// line leaks its open style into subsequent rows. (dsh-pi-tui
 		// divergence X033.)
 		//
-		// Lines whose raw string is reference-identical to the previous
-		// frame's reuse their processed output verbatim: component render
-		// caches return the same string references for unchanged content, so
-		// a steady frame only pays for the lines that actually changed
-		// instead of re-normalizing and re-measuring the whole transcript.
-		// (dsh-pi-tui divergence X035.) A width change invalidates every
-		// cached truncation.
+		// Lines whose raw string value equals the previous frame's reuse their
+		// processed output verbatim. JavaScript string equality is value-based,
+		// so a rebuilt array containing equal primitive lines also hits the cache;
+		// a steady frame only pays for lines whose values changed instead of
+		// re-normalizing and re-measuring the whole transcript. (dsh-pi-tui
+		// divergence X035.) A width change invalidates every cached truncation.
 		const rawLines = newLines;
 		const reuseProcessed = !widthChanged && this.previousRawLines.length > 0;
 		const processedLines: string[] = new Array(rawLines.length);
