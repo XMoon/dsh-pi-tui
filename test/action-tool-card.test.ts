@@ -109,6 +109,12 @@ test('compact action presentations are payload-first and receipt-safe', () => {
     'interrupt requested for agent reviewer',
   )
   assert.equal(interrupt?.result, undefined)
+  // A team interrupt carries the previous runtime status as new information.
+  assert.equal(compactToolPresentation(
+    'interrupt_agent',
+    JSON.stringify({ target: 'reviewer' }),
+    JSON.stringify({ previousStatus: 'running' }),
+  )?.result, 'was running')
   // Bare acknowledgement words are the same receipt class as JSON statuses.
   assert.equal(compactToolPresentation('send_message', JSON.stringify({ agent_id: 'c', message: 'x' }), 'ok')?.result, undefined)
   assert.equal(compactToolPresentation('send_message', JSON.stringify({ agent_id: 'c', message: 'x' }), 'accepted')?.result, undefined)
@@ -129,6 +135,9 @@ test('compact action presentations are payload-first and receipt-safe', () => {
     title: 'Terminal', summary: 'pty-3',
   })
   assert.equal(focusToolDisplay({ name: 'send_message', args: JSON.stringify({ target: 'reviewer', message: 'Inspect the card.' }) }), 'Send message reviewer · Inspect the card.')
+  assert.equal(focusToolDisplay({ name: 'terminal_send', args: JSON.stringify({ sessionId: 'pty-3', text: 'make test' }) }), 'Terminal pty-3 · make test')
+  assert.equal(focusToolDisplay({ name: 'interrupt_agent', args: JSON.stringify({ agent_id: 'child-1' }) }), 'Interrupt agent child-1')
+  assert.equal(focusToolDisplay({ name: 'list_agents', args: '{}' }), 'List agents children')
 })
 
 test('list_agents summarizes structured and rendered historical snapshots', () => {
@@ -145,6 +154,12 @@ test('list_agents summarizes structured and rendered historical snapshots', () =
   assert.equal(formatAgentListSummary(summarizeAgentListResult('1 [running] — a\n2 [idle] — b\n3 [ready] — c')!), '3 agents · 1 running · 1 idle · 1 ready')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('(no subagents)')!), 'no subagents')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('x [diagnostic: corrupt]')!), '1 entry · 1 diagnostic')
+  // Descendants rows carry parent/depth position; the status regex must not
+  // confuse them with diagnostics.
+  assert.equal(formatAgentListSummary(summarizeAgentListResult('1 [running] parent=0 depth=1 — a\n2 [ready] parent=1 depth=1 — b')!), '2 agents · 1 running · 1 ready')
+  // An unrecognized bracketed status is NOT silently dropped: it counts as a
+  // diagnostic so `total` never undercounts a mixed snapshot.
+  assert.equal(formatAgentListSummary(summarizeAgentListResult('1 [running] — a\n2 [unknown-state] — b')!), '2 entries · 1 running · 1 diagnostic')
   // Agent Teams member rows are kind-less with a wider status enum:
   // provisioning counts as running, inactive as ready, failed as diagnostic.
   const team = summarizeAgentListResult(JSON.stringify([
@@ -191,6 +206,7 @@ test('folded action cards show payloads and suppress successful receipts', async
     actionMessage('interrupt_agent', { agent_id: 'child-1' }, 'interrupt requested for agent child-1'),
     actionMessage('list_agents', { scope: 'children' }, '1 [running] — a\n2 [idle] — b\n3 [ready] — c'),
     actionMessage('send_message', { target: 'reviewer', message: 'Inspect the failed target.' }, JSON.stringify({ messageId: 'm1', status: 'accepted' })),
+    actionMessage('send_message', { target: 'sleeper', message: 'Wake up.' }, JSON.stringify({ messageId: 'm2', status: 'queued' })),
   ])
   const view = await viewport(vt)
   assert.ok(view.includes('Send message · child-1 [ok]'), view)
@@ -202,6 +218,10 @@ test('folded action cards show payloads and suppress successful receipts', async
   assert.ok(view.includes('List agents · children [ok]'), view)
   assert.ok(view.includes('3 agents · 1 running · 1 idle · 1 ready'), view)
   assert.ok(view.includes('Inspect the failed target.'), view)
+  assert.ok(view.includes('Wake up.'), view)
+  // A team queued state is the one receipt that adds information: it keeps a
+  // short folded row and never leaks the raw JSON.
+  assert.ok(view.includes('queued'), view)
   assert.ok(!view.includes('message delivered to agent'), view)
   assert.ok(!view.includes('interrupt requested for agent'), view)
   assert.ok(!view.includes('viewport output'), view)
@@ -294,20 +314,26 @@ test('action errors remain visible in folded cards', async () => {
 })
 
 test('folded CJK payloads stay width-safe on a tiny terminal', async () => {
-  const vt = new VirtualTerminal(12, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  app.setTranscript([actionMessage(
-    'send_message',
-    { agent_id: 'child-1', message: '检查 CI 失败\n对比过渡 fence 行为' },
-    'message delivered to agent child-1',
-  )])
-  const view = await viewport(vt)
-  const clean = view.split('\n').map(stripTerminalSequences)
-  assert.ok(clean.some(line => line.includes('检查')), view)
-  for (const line of clean) {
-    assert.ok(visibleWidth(line) <= 12, `row exceeds 12 cols: ${JSON.stringify(line)}`)
+  for (const columns of [8, 12]) {
+    const vt = new VirtualTerminal(columns, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    startedApps.add(app)
+    app.setTranscript([actionMessage(
+      'send_message',
+      { agent_id: 'child-1', message: '检查 CI 失败\n对比过渡 fence 行为' },
+      'message delivered to agent child-1',
+    )])
+    const view = await viewport(vt)
+    const clean = view.split('\n').map(stripTerminalSequences)
+    assert.ok(clean.some(line => line.includes('检查')), `width ${columns}: ${view}`)
+    for (const line of clean) {
+      assert.ok(visibleWidth(line) <= columns, `width ${columns} row exceeds: ${JSON.stringify(line)}`)
+    }
+    // The process slot is released only by the final dispose: stop the
+    // surface before the next width starts a new app.
+    startedApps.delete(app)
+    app.dispose()
   }
 })
 
@@ -414,6 +440,26 @@ function actionTurnEvents(): SessionEvent[] {
     { type: 'turn/end', seq: 5, time: time + 7000, data: { turn: 1, reason: { kind: 'completed' } } },
   ] as SessionEvent[]
 }
+
+// Plan §17 guard: the pre-optimized tool families keep their established
+// folded semantics — the action branch must never leak into them.
+test('legacy optimized tool cards are untouched by the action fallback', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([
+    actionMessage('read', { path: 'src/index.ts' }, '<path>src/index.ts</path><type>text</type><content>1: line one\n2: line two</content>'),
+    actionMessage('bash', { command: 'echo hi' }, 'hello from bash'),
+    actionMessage('ask_user_question', { questions: [{ id: 'q', question: 'Go?' }] }, JSON.stringify({ answers: [{ id: 'q', selected: ['y'] }] })),
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Read src/index.ts [ok]'), view)
+  assert.ok(view.includes('— 2 lines'), view)
+  assert.ok(view.includes('$ echo hi'), view)
+  assert.ok(view.includes('Question Go? [ok]'), view)
+  assert.ok(view.includes('— 1/1 answered'), view)
+})
 
 // Keep the imported model type checked as a public data-only contract.
 const _compactModelTypeCheck: CompactToolPresentation | undefined = compactToolPresentation('send_message', '{}')

@@ -369,7 +369,11 @@ export function summarizeAgentListResult(text: string): AgentListSummary | undef
     if (/\[running\](?:\s|$)/.test(line)) { running += 1; matched += 1; continue }
     if (/\[idle\](?:\s|$)/.test(line)) { idle += 1; matched += 1; continue }
     if (/\[ready\](?:\s|$)/.test(line)) { ready += 1; matched += 1; continue }
-    if (/\[diagnostic:\s*[^\]]+\]/.test(line)) { diagnostics += 1; matched += 1 }
+    if (/\[diagnostic:\s*[^\]]+\]/.test(line)) { diagnostics += 1; matched += 1; continue }
+    // Any other bracketed status token is an unrecognized row: count it as a
+    // diagnostic instead of silently dropping it (mirrors the structured
+    // path's default branch, so a mixed snapshot never undercounts `total`).
+    if (/\[[a-z][^\]]*\]/.test(line)) { diagnostics += 1; matched += 1 }
   }
   if (matched === 0) return undefined
   const total = running + idle + ready + diagnostics
