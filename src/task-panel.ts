@@ -843,24 +843,30 @@ export class TaskBrowserPanel implements Component, Focusable {
       listLines = buildWindow(itemCount, start)
       candidate = assemble()
     }
-    // The ACTUAL viewport is the window the fit left. Record it BEFORE
-    // the exposure ack so viewportItems()/onViewportExpose and the
-    // PageUp/PageDown step agree with the rows physically painted — the
-    // budget baseline can be larger than what details/sidebar allow.
-    this.lastRenderedStart = start
-    this.lastRenderedCount = itemCount
-    this.hasRenderedViewport = true
-    this.exposeViewport()
-    if (candidate.length <= limit) return candidate
+    if (candidate.length <= limit) {
+      // The ACTUAL viewport is the window the fit left. Record it BEFORE
+      // the exposure ack so viewportItems()/onViewportExpose and the
+      // PageUp/PageDown step agree with the rows physically painted — the
+      // budget baseline can be larger than what details/sidebar allow.
+      this.lastRenderedStart = start
+      this.lastRenderedCount = itemCount
+      this.hasRenderedViewport = true
+      this.exposeViewport()
+      return candidate
+    }
 
     // Very short grants: true semantic degradation — search input
     // (searchMode) > selected main > hint > header > group > detail >
     // indicator > blank spacers. The selected main row is never squeezed
     // out by decorative blanks or the header (this path does not keep the
-    // chrome prefix unconditionally).
+    // chrome prefix unconditionally). The final layout is decided BEFORE
+    // the exposure ack: an extreme grant can drop the selected row
+    // entirely (a 1-row grant + search mode paints only the search
+    // input), and only rows the FINAL layout actually paints may be
+    // acknowledged.
     const entries = this.windowEntries(start, itemCount, listWidth)
     const selectedEntry = entries.find(entry => entry.selected)
-    return this.degradedFallback(
+    const degraded = this.degradedFallback(
       selectedEntry,
       searchRowText,
       searchEmpty,
@@ -869,6 +875,11 @@ export class TaskBrowserPanel implements Component, Focusable {
       limit,
       hintLine,
     )
+    this.lastRenderedStart = degraded.paintsSelectedMain ? start : 0
+    this.lastRenderedCount = degraded.paintsSelectedMain ? 1 : 0
+    this.hasRenderedViewport = true
+    this.exposeViewport()
+    return degraded.lines
   }
 
   /** True semantic degradation for very short grants. The declared
@@ -876,7 +887,8 @@ export class TaskBrowserPanel implements Component, Focusable {
    * detail > indicator) is enforced by INCLUSION — the chrome prefix is
    * rebuilt from the hoisted texts and only kept when it fits after the
    * mandatory content, so the selected main row cannot lose to two
-   * decorative blanks + the header. */
+   * decorative blanks + the header. Returns whether the selected main row
+   * is actually painted, so the callers ack only what the user saw. */
   private degradedFallback(
     selectedEntry: { group: string | undefined; main: string; details: string[] } | undefined,
     searchRowText: string,
@@ -885,7 +897,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     indicatorText: string | undefined,
     limit: number,
     hintLine: string,
-  ): string[] {
+  ): { lines: string[]; paintsSelectedMain: boolean } {
     const mainRow = selectedEntry?.main
     const groupRow = selectedEntry !== undefined && selectedEntry.group !== undefined
       ? color.textMuted(`── ${selectedEntry.group} ──`)
@@ -898,7 +910,10 @@ export class TaskBrowserPanel implements Component, Focusable {
     const content: string[] = []
     if (searchShown !== '') content.push(searchShown)
     if (mainRow !== undefined) content.push(mainRow)
-    if (content.length >= limit) return content.slice(0, limit)
+    if (content.length >= limit) {
+      const kept = content.slice(0, limit)
+      return { lines: kept, paintsSelectedMain: mainRow !== undefined && kept.includes(mainRow) }
+    }
     const hintIncluded = content.length + 1 <= limit
     let used = content.length + (hintIncluded ? 1 : 0)
     // Optional chrome (priority 4-7) fills the leftover rows.
@@ -924,7 +939,9 @@ export class TaskBrowserPanel implements Component, Focusable {
     out.push(...detailsShown)
     if (indicatorShown) out.push(color.textMuted(indicatorText!))
     if (hintIncluded) out.push(...(hintBlank ? ['', hintLine] : [hintLine]))
-    return out
+    // The main row is always painted in this branch (the extreme branch
+    // above was the only path that could drop it).
+    return { lines: out, paintsSelectedMain: mainRow !== undefined }
   }
 
   /** The visible window as STRUCTURED rows (main + detail lines kept
