@@ -320,7 +320,8 @@ dsh-pi-tui:
 | TUI package line | Matching DSH line | Notes |
 |---|---|---|
 | `0.4.x-alpha` (`@next`) | `>=0.1.2-alpha.4` | Current prerelease; each release validates its concrete DSH family |
-| `0.4.0-alpha.1` (published) | `>=0.1.2-alpha.2` | Previous 0.4 prerelease; its releases validated the alpha.2/alpha.3 family |
+| `0.4.0-alpha.2` (published) | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; its releases validated the alpha.4/alpha.5 family |
+| `0.4.0-alpha.1` (published) | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 runtime |
 | `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
 
 Do not mix the lines: DSH 0.1.1 is outside the 0.4 peer window and the

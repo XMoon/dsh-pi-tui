@@ -48,20 +48,20 @@ test('release-notes accepts stable v tags and next-v prerelease tags', (t) => {
 })
 
 test('current 0.4 release body carries the DSH/TUI install pairing', () => {
-  // The PUBLISHED 0.4.0-alpha.1 line documents its own alpha.3 family; the
-  // alpha.4 floor is recorded in [Unreleased] and lands with the NEXT
-  // version bump (the release commit moves the section).
+  // The PUBLISHED 0.4.0-alpha.2 line documents its alpha.5 family while the
+  // peer floor stays alpha.4; the release body must carry the copy-paste
+  // install commands.
   const output = join(tmpdir(), `dsh-pi-tui-release-notes-${process.pid}.md`)
   try {
     const result = spawnSync(
       process.execPath,
-      [join(repo, 'scripts/release-notes.mjs'), 'next-v0.4.0-alpha.1', output],
+      [join(repo, 'scripts/release-notes.mjs'), 'next-v0.4.0-alpha.2', output],
       { cwd: repo, encoding: 'utf8' },
     )
     assert.equal(result.status, 0, result.stderr)
     const body = readFileSync(output, 'utf8')
     for (const command of [
-      '@deepseek-ai/dsh@0.1.2-alpha.3',
+      '@deepseek-ai/dsh@0.1.2-alpha.5',
       '@xmoon76/dsh-pi-tui@next',
       '@xmoon76/dsh-pi-tui@0.3',
     ]) {

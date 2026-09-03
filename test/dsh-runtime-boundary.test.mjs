@@ -18,7 +18,7 @@ test('runtime boundary rejects explicit and discovered symlinked candidates', (t
 
 test('runtime boundary accepts the friendly advisory notice', () => {
   const output = [
-    'dsh-pi-tui v0.4.0-alpha.1 requires DeepSeek Harness 0.1.2-alpha.2 or later,',
+    'dsh-pi-tui v0.4.0-alpha.2 requires DeepSeek Harness 0.1.2-alpha.2 or later,',
     'but this installation is running dsh 0.1.1-rc.2.',
     'npm install -g @deepseek-ai/dsh@0.1.2-alpha.5',
     'npm install -g @xmoon76/dsh-pi-tui@0.3',
@@ -29,7 +29,7 @@ test('runtime boundary accepts the friendly advisory notice', () => {
 
 test('runtime boundary rejects the previous alpha.1 floor with the same advisory', () => {
   const output = [
-    'dsh-pi-tui v0.4.0-alpha.1 requires DeepSeek Harness 0.1.2-alpha.2 or later,',
+    'dsh-pi-tui v0.4.0-alpha.2 requires DeepSeek Harness 0.1.2-alpha.2 or later,',
     'but this installation is running dsh 0.1.2-alpha.1.',
     'npm install -g @deepseek-ai/dsh@0.1.2-alpha.5',
     'npm install -g @xmoon76/dsh-pi-tui@0.3',
@@ -40,7 +40,7 @@ test('runtime boundary rejects the previous alpha.1 floor with the same advisory
 
 test('runtime boundary rejects the alpha.2/alpha.3 baseline with the 0.4-alpha fallback', () => {
   const output = [
-    'dsh-pi-tui v0.4.0-alpha.1 requires DeepSeek Harness 0.1.2-alpha.4 or later,',
+    'dsh-pi-tui v0.4.0-alpha.2 requires DeepSeek Harness 0.1.2-alpha.4 or later,',
     'but this installation is running dsh 0.1.2-alpha.3.',
     'npm install -g @deepseek-ai/dsh@0.1.2-alpha.5',
     'npm install -g @xmoon76/dsh-pi-tui@0.4.0-alpha.1',

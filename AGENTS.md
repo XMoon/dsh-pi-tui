@@ -53,6 +53,15 @@ Collision-avoidance is a deliberate choice: the official dsh project will plausi
   entries into the new version section; afterwards, start a fresh
   `[Unreleased]` for the next cycle. Semantic-versioning rules apply: any
   breaking change is a major bump.
+- **Changelog entries are user-facing only (hard rule).** The changelog is
+  the release announcement for end users, not the engineering ledger.
+  Internal implementation details — vendored-fork audits and divergence
+  numbers (X0xx), review rounds, test/tooling hygiene, CI gates, dev
+  dependency syncs, lease/epoch mechanics — never appear in it. If a change
+  has no user-visible outcome, it does not belong in the changelog; if it
+  does, describe the outcome, not the mechanism. Keep entries concise: one
+  bullet per user-visible outcome, merged across review rounds, with the
+  internal detail left to commit messages and `docs/`.
 - **Changelog bilingual sync (hard rule).** `CHANGELOG.md` (简体中文) and
   `CHANGELOG.en.md` (English) must stay in sync, exactly like the
   README pair: every release update to the Chinese changelog must be

@@ -8,7 +8,8 @@ boundary.
 | dsh-pi-tui line | DeepSeek Harness line | Policy |
 |---|---|---|
 | `0.3.x` | `0.1.1` | Supported legacy runtime line |
-| `0.4.0-alpha.1` | `>=0.1.2-alpha.2` | Superseded target line; its releases validated the alpha.2/alpha.3 DSH family |
+| `0.4.0-alpha.1` | `>=0.1.2-alpha.2` | Superseded target line; accepts the alpha.2/alpha.3 DSH family |
+| `0.4.0-alpha.2` | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; validated the alpha.4/alpha.5 DSH family |
 | `0.4.x-alpha` | `>=0.1.2-alpha.4` | Supported target line; each release validates the concrete DSH family |
 
 The 0.4 line has no 0.1.1 runtime shim. An old Harness remains outside the
