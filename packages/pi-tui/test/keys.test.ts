@@ -4,6 +4,7 @@
 
 import assert from "node:assert";
 import { describe, it } from "node:test";
+import { decodePrintableKey as decodePrintableKeyFromRoot } from "../src/index.ts";
 import {
 	decodeKittyPrintable,
 	decodePrintableKey,
@@ -524,6 +525,12 @@ describe("decodeKittyPrintable", () => {
 		assert.strictEqual(decodeKittyPrintable("\x1b[57415u"), "=");
 		assert.strictEqual(decodeKittyPrintable("\x1b[57416u"), ",");
 		assert.strictEqual(decodeKittyPrintable("\x1b[57417u"), undefined);
+	});
+});
+
+describe("package-root keyboard exports", () => {
+	it("exports decodePrintableKey through src/index", () => {
+		assert.strictEqual(decodePrintableKeyFromRoot("\x1b[27;2;69~"), "E");
 	});
 });
 

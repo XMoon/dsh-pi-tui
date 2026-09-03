@@ -2,8 +2,9 @@
 
 > **Vendored fork.** This package is `@xmoon76/pi-tui`, a rescoped copy of
 > `@earendil-works/pi-tui` v0.84.4 (see `UPSTREAM.json` for the pinned
-> baseline; the divergence ledger with guarding tests lives in
-> `DIVERGENCES.md`). It is **not** published to npm; the package name in
+> baseline; the authoritative schema-v2 divergence ledger with guarding tests
+> lives in `vendor-divergences.json` and generates `DIVERGENCES.md`). It is
+> **not** published to npm; the package name in
 > the examples below is the upstream name — consumers of this fork import
 > from `@xmoon76/pi-tui`.
 

@@ -1737,7 +1737,8 @@ describe("TuiAltScreen", () => {
 		// Drag from (col 1, row 1) to (col 1, row 4): the selection covers
 		// all four rows from their line heads. Continuation lines carry the
 		// emoji-column padding (3 spaces) — those must be dropped, while a
-		// 4+ space content indent (the code-block case) keeps its extra.
+		// 4+ space content indent (the code-block case) retains residual space
+		// after the bounded 1-to-3-space strip.
 		terminal.sendInput("\x1b[<0;1;1M");
 		terminal.sendInput("\x1b[<32;1;4M");
 		terminal.sendInput("\x1b[<0;1;4m");

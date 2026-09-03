@@ -39,6 +39,18 @@ class InputComponent extends TestComponent {
 	}
 }
 
+class TestableMainScreen extends TuiMainScreen {
+	setStopState(lines: string[], hardwareCursorRow: number): void {
+		const state = this as unknown as { previousLines: string[]; hardwareCursorRow: number };
+		state.previousLines = lines;
+		state.hardwareCursorRow = hardwareCursorRow;
+	}
+
+	invokeBeforeStop(): void {
+		this.beforeTerminalStop({ preserveScreen: false });
+	}
+}
+
 const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
 
 class BoundedWriteTerminal implements Terminal {
@@ -983,15 +995,13 @@ describe("TUI overwide line handling (dsh-pi-tui divergence X033)", () => {
 
 describe("Per-frame processed-line reuse (dsh-pi-tui divergence X035)", () => {
 	it("keeps steady frames near-constant instead of reprocessing every line", () => {
-		// The host transcript keeps unchanged lines reference-stable across
-		// frames (BulletedComponent / ThinkingCompactComponent), and the main
-		// screen's processed-line cache turns that into O(#changed) work per
-		// frame. Without the cache every spinner tick re-normalizes,
-		// re-measures, and re-scans the whole transcript: ~30-370 ms per
-		// frame at 1k-10k rendered lines (measured on the Earendil 0.84.4
-		// base without the reuse). The time budget below is generous (the
-		// cached path needs ~2 ms per frame here; the uncached path needs
-		// seconds), so it only fails on an order-of-magnitude regression.
+		// Equal primitive rendered-line values hit the main-screen cache even
+		// when a component returns a fresh array. Host transcript components
+		// additionally keep arrays reference-stable as a separate render
+		// optimization. Without the cache every spinner tick would re-normalize,
+		// re-measure, and re-scan the whole transcript. The time budget below is
+		// intentionally generous and only fails on an order-of-magnitude
+		// regression; this test does not provide an uncached baseline.
 		const terminal = new BoundedWriteTerminal();
 		terminal.columns = 100;
 		terminal.rows = 30;
@@ -1031,11 +1041,11 @@ describe("Per-frame processed-line reuse (dsh-pi-tui divergence X035)", () => {
 		tui.stop();
 	});
 
-	it("reuses the processed output verbatim for reference-identical raw lines", async () => {
+	it("reuses the processed output for equal raw line values", async () => {
 		const terminal = new LoggingVirtualTerminal(20, 10);
 		const tui = new TuiMainScreen(terminal);
 		const component = new TestComponent();
-		// Same string REFERENCES every frame (a component render-cache hit).
+		// Same primitive string values every frame (a component render-cache hit).
 		const stable = ["\x1b[31mstable row\x1b[0m", "plain row"];
 		component.lines = [...stable];
 		tui.addChild(component);
@@ -1043,7 +1053,7 @@ describe("Per-frame processed-line reuse (dsh-pi-tui divergence X035)", () => {
 		await terminal.waitForRender();
 		terminal.clearWrites();
 
-		// Identical content AND identical references: the differential path
+		// Identical primitive content, even through a rebuilt array: the differential path
 		// must not write anything (neither the preprocessing nor the diff
 		// loop may churn).
 		component.lines = [...stable];
@@ -1052,5 +1062,15 @@ describe("Per-frame processed-line reuse (dsh-pi-tui divergence X035)", () => {
 		assert.strictEqual(terminal.getWrites(), "");
 
 		tui.stop();
+	});
+});
+
+describe("Main-screen final-row stop cleanup (dsh-pi-tui divergence X009)", () => {
+	it("does not write a spacer when the hardware cursor is already on the final row", () => {
+		const terminal = new BoundedWriteTerminal();
+		const tui = new TestableMainScreen(terminal);
+		tui.setStopState(["last rendered row"], 1);
+		tui.invokeBeforeStop();
+		assert.strictEqual(terminal.writes.join(""), "\r\n");
 	});
 });
