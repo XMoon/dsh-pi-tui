@@ -35,12 +35,27 @@ export interface SettingsListOptions {
 	enableSearch?: boolean;
 }
 
+/**
+ * Structural seam: a submenu component that accepts the host's live row
+ * grant. SettingsList forwards its own `setMaxRows` value to an open
+ * submenu that implements this, and re-forwards on every grant change, so
+ * nested lists (e.g. the /model picker) reflow instead of being clipped
+ * by the compositor — without SettingsList knowing the submenu's type.
+ */
+export interface RowBudgetAware {
+	setMaxRows?(rows: number): void;
+}
+
 export class SettingsList implements Component, Focusable {
 	private items: SettingItem[];
 	private filteredItems: SettingItem[];
 	private theme: SettingsListTheme;
 	private selectedIndex = 0;
+	/** Caller-configured item cap; the host may lower it for a short frame. */
+	private configuredMaxVisible: number;
 	private maxVisible: number;
+	/** Inner row budget supplied by a root-owned responsive overlay. */
+	private maxRows = Number.POSITIVE_INFINITY;
 	private onChange: (id: string, newValue: string) => void;
 	private onCancel: () => void;
 	private searchInput?: Input;
@@ -95,7 +110,8 @@ export class SettingsList implements Component, Focusable {
 	) {
 		this.items = items;
 		this.filteredItems = items;
-		this.maxVisible = maxVisible;
+		this.configuredMaxVisible = Math.max(1, Math.floor(maxVisible));
+		this.maxVisible = this.configuredMaxVisible;
 		this.theme = theme;
 		this.onChange = onChange;
 		this.onCancel = onCancel;
@@ -103,6 +119,31 @@ export class SettingsList implements Component, Focusable {
 		if (this.searchEnabled) {
 			this.searchInput = new Input();
 		}
+	}
+
+	/** Update the live inner row budget without resetting selection or submenu. */
+	setMaxRows(rows: number): void {
+		this.maxRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : Number.POSITIVE_INFINITY;
+		this.recomputeVisibleBudget();
+		this.forwardBudgetToSubmenu();
+	}
+
+	/** Forward the current grant to an open submenu that accepts it, so
+	 * nested lists stay within the same row budget on resize. */
+	private forwardBudgetToSubmenu(): void {
+		const child = this.submenuComponent as RowBudgetAware | null;
+		child?.setMaxRows?.(this.maxRows);
+	}
+
+	/** Reserve search, scroll and hint rows before deriving the item count. */
+	private recomputeVisibleBudget(): void {
+		const prefix = this.searchEnabled ? 2 : 0;
+		const indicator = this.filteredItems.length > 1 ? 1 : 0;
+		const hint = 2;
+		const budget = this.maxRows === Number.POSITIVE_INFINITY
+			? this.configuredMaxVisible
+			: this.maxRows - prefix - indicator - hint;
+		this.maxVisible = Math.max(1, Math.min(this.configuredMaxVisible, budget));
 	}
 
 	/** Update an item's currentValue */
@@ -161,25 +202,92 @@ export class SettingsList implements Component, Focusable {
 			if (this.searchEnabled) {
 				this.addHintLine(lines, width);
 			}
-			return lines;
+			return this.finalizeEmpty(lines);
 		}
 
 		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
 		if (displayItems.length === 0) {
 			lines.push(truncateToWidth(this.theme.hint("  No matching settings"), width));
 			this.addHintLine(lines, width);
-			return lines;
+			return this.finalizeEmpty(lines);
 		}
+
+		// Calculate max label width for alignment
+		const maxLabelWidth = Math.min(36, Math.max(...this.items.map((item) => visibleWidth(item.label))));
+
+		let visibleCount = this.maxVisible;
+		let window = this.renderItemWindow(width, maxLabelWidth, displayItems, visibleCount);
+		// The selected row's description (1 blank + k wrapped rows) renders
+		// outside the item window, so it is unaccounted by the budget
+		// reservation. Shrink the WINDOW (selection-centered) until the
+		// assembled list fits the grant with room for the description block
+		// and the hint tail (setMaxRows contract). Only the local
+		// `visibleCount` shrinks — `maxVisible` stays the budget-derived
+		// baseline, so moving to a row without a description restores the
+		// full window (no render-time ratchet on PageUp/PageDown).
+		while (Number.isFinite(this.maxRows)
+			&& lines.length + window.length + this.descriptionRowCount(width, displayItems) + 2 > this.maxRows
+			&& visibleCount > 1) {
+			visibleCount -= 1;
+			window = this.renderItemWindow(width, maxLabelWidth, displayItems, visibleCount);
+		}
+		lines.push(...window);
+
+		// Description for the selected item — wrapped, then capped to the
+		// rows left after the hint, so the hint below always survives.
+		const descBudget = Number.isFinite(this.maxRows)
+			? Math.max(0, this.maxRows - lines.length - 2)
+			: Number.POSITIVE_INFINITY;
+		const selectedItem = displayItems[this.selectedIndex];
+		if (selectedItem?.description && descBudget > 0) {
+			const wrappedDesc = wrapTextWithAnsi(selectedItem.description, width - 4);
+			lines.push("");
+			const keep = descBudget === Number.POSITIVE_INFINITY
+				? wrappedDesc.length
+				: Math.min(wrappedDesc.length, Math.max(0, descBudget - 1));
+			for (const line of wrappedDesc.slice(0, keep)) {
+				lines.push(this.theme.description(`  ${line}`));
+			}
+		}
+
+		// Add hint
+		this.addHintLine(lines, width);
+
+		// Keep the hint tail on degenerate tiny grants (mirrors SelectList):
+		// a head slice would cut the hint, the non-negotiable tail row.
+		if (Number.isFinite(this.maxRows) && lines.length > this.maxRows) {
+			return lines.slice(lines.length - this.maxRows);
+		}
+		return lines;
+	}
+
+	/** Finalize the empty/no-match assembly against the live grant
+	 * (setMaxRows contract covers every path): `render().length <=
+	 * maxRows` with priority search input > no-match message > hint >
+	 * blank spacers. SettingsList has no header, so after the blank
+	 * spacers only an extreme grant needs to yield rows. */
+	private finalizeEmpty(lines: string[]): string[] {
+		if (!Number.isFinite(this.maxRows)) return lines;
+		const limit = Math.max(1, Math.floor(this.maxRows));
+		if (lines.length <= limit) return lines;
+		const compact = lines.filter(line => line !== "");
+		if (compact.length <= limit) return compact;
+		// Extreme grant: keep the head (the search input, then the
+		// message) per priority.
+		return compact.slice(0, limit);
+	}
+
+	/** Render the item window (rows + scroll indicator) at `visibleCount`,
+	 * centered on the selected row. */
+	private renderItemWindow(width: number, maxLabelWidth: number, displayItems: SettingItem[], visibleCount: number): string[] {
+		const lines: string[] = [];
 
 		// Calculate visible range with scrolling
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), displayItems.length - this.maxVisible),
+			Math.min(this.selectedIndex - Math.floor(visibleCount / 2), displayItems.length - visibleCount),
 		);
-		const endIndex = Math.min(startIndex + this.maxVisible, displayItems.length);
-
-		// Calculate max label width for alignment
-		const maxLabelWidth = Math.min(36, Math.max(...this.items.map((item) => visibleWidth(item.label))));
+		const endIndex = Math.min(startIndex + visibleCount, displayItems.length);
 
 		// Render visible items
 		for (let i = startIndex; i < endIndex; i++) {
@@ -210,20 +318,15 @@ export class SettingsList implements Component, Focusable {
 			lines.push(this.theme.hint(truncateToWidth(scrollText, width - 2, "")));
 		}
 
-		// Add description for selected item
-		const selectedItem = displayItems[this.selectedIndex];
-		if (selectedItem?.description) {
-			lines.push("");
-			const wrappedDesc = wrapTextWithAnsi(selectedItem.description, width - 4);
-			for (const line of wrappedDesc) {
-				lines.push(this.theme.description(`  ${line}`));
-			}
-		}
-
-		// Add hint
-		this.addHintLine(lines, width);
-
 		return lines;
+	}
+
+	/** The rendered row count of the selected item's description block
+	 * (1 blank + wrapped lines) at the current width. */
+	private descriptionRowCount(width: number, displayItems: SettingItem[]): number {
+		const selectedItem = displayItems[this.selectedIndex];
+		if (!selectedItem?.description) return 0;
+		return 1 + wrapTextWithAnsi(selectedItem.description, width - 4).length;
 	}
 
 	handleInput(data: string): void {
@@ -298,8 +401,12 @@ export class SettingsList implements Component, Focusable {
 			// The freshly opened submenu becomes the input the user types
 			// into: forward the current focus state so its CURSOR_MARKER
 			// (IME positioning) matches the list's focus (dsh-pi-tui
-			// divergence).
+			// divergence). A submenu that accepts row budgets also inherits
+			// the CURRENT grant immediately (async submenus like /model
+			// open on a loading shell and swap in their list later, so the
+			// forward must also happen on the swap path).
 			this.propagateFocus();
+			this.forwardBudgetToSubmenu();
 		} else if (item.values && item.values.length > 0) {
 			// Cycle through values
 			const currentIndex = item.values.indexOf(item.currentValue);
@@ -334,6 +441,7 @@ export class SettingsList implements Component, Focusable {
 	private applyFilter(query: string): void {
 		this.filteredItems = fuzzyFilter(this.items, query, (item) => item.label);
 		this.selectedIndex = 0;
+		this.recomputeVisibleBudget();
 	}
 
 	private addHintLine(lines: string[], width: number): void {

@@ -142,7 +142,11 @@ export class TaskBrowserPanel implements Component, Focusable {
   private selectionTouched = false
   private readonly expandedIds: Set<string>
   private readonly collapsedIds: Set<string>
-  private readonly maxVisible: number
+  /** Caller-configured item cap; the live terminal budget may lower it. */
+  private readonly configuredMaxVisible: number
+  private maxVisible: number
+  /** Total inner rows granted by the surrounding Frame. */
+  private maxRows = Number.POSITIVE_INFINITY
   private readonly options: TaskPanelOptions
   private readonly searchInput = new Input()
   private searchEnabled: boolean
@@ -174,7 +178,8 @@ export class TaskBrowserPanel implements Component, Focusable {
     requestRender: () => void,
   ) {
     this.items = [...items]
-    this.maxVisible = Math.max(1, maxVisible)
+    this.configuredMaxVisible = Math.max(1, Math.floor(maxVisible))
+    this.maxVisible = this.configuredMaxVisible
     this.options = options
     this.onSelect = onSelect
     this.onCancel = onCancel
@@ -217,6 +222,29 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.reproject(false)
     this.selectPreferred()
     this.startTick()
+  }
+
+  /** Update the live inner row budget without resetting selection, filters
+   * or disclosure state (the responsive frame calls this on every resize;
+   * the recompute uses the CURRENT chrome: header + search + hint tail +
+   * indicator + optional refresh-error line). */
+  setMaxRows(rows: number): void {
+    this.maxRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : Number.POSITIVE_INFINITY
+    this.recomputeVisibleBudget()
+    this.ensureVisible()
+  }
+
+  /** Derive the item window from the current chrome and row budget. */
+  private recomputeVisibleBudget(): void {
+    const searchOn = this.explicitMode ? this.searchMode : this.searchEnabled
+    const prefix = (this.options.header === undefined ? 0 : 2) + (searchOn ? 2 : 0)
+    const trailing = 2 // blank separator + navigation hint
+    const refreshLine = this.refreshError !== undefined ? 1 : 0
+    const group = this.filtered.some(item => item.group !== undefined) ? 1 : 0
+    const budget = this.maxRows === Number.POSITIVE_INFINITY
+      ? this.configuredMaxVisible
+      : this.maxRows - prefix - trailing - refreshLine - group
+    this.maxVisible = Math.max(1, Math.min(this.configuredMaxVisible, budget))
   }
 
   /** Replace rows while preserving the selected identity where possible. */
@@ -359,6 +387,9 @@ export class TaskBrowserPanel implements Component, Focusable {
         canOpen: true,
       })
     }
+    // The projection changed the row set: re-derive the live item budget
+    // (the group/chrome estimate follows the current view).
+    this.recomputeVisibleBudget()
     if (resetSelection) {
       this.selected = 0
       this.scroll = 0
@@ -684,7 +715,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       if (this.refreshError !== undefined) lines.push(color.textMuted(`${this.refreshError} · R retry`))
       lines.push('')
       lines.push(color.textMuted(`  ${this.hint()}`))
-      return lines
+      return this.finalizeEmpty(lines)
     }
 
     if (this.explicitMode && this.searchMode) {
@@ -699,59 +730,152 @@ export class TaskBrowserPanel implements Component, Focusable {
       lines.push('')
     }
 
+    const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
+    const hintLine = color.textMuted(`  ${this.hint()}`)
     const rows = this.filtered
     if (rows.length === 0) {
       lines.push(color.textDim(this.refreshError === undefined ? (this.options.noMatchText ?? 'No matching tasks') : 'Could not load tasks'))
       if (this.refreshError !== undefined) lines.push(color.textMuted(`${this.refreshError} · R retry`))
       lines.push('')
-      lines.push(color.textMuted(`  ${this.hint()}`))
-      return lines
+      lines.push(hintLine)
+      return this.finalizeEmpty(lines)
     }
 
     this.ensureVisible()
     this.exposeViewport()
-    const start = this.scroll
-    const end = Math.min(rows.length, start + this.maxVisible)
-    const visibleRows = rows.slice(start, end)
     const listWidth = safeWidth >= 110 ? Math.max(40, Math.floor((safeWidth - 3) * 0.58)) : safeWidth
-    const listLines: string[] = []
-    let lastGroup: string | undefined
-    for (let i = 0; i < visibleRows.length; i += 1) {
-      const item = visibleRows[i]!
-      const group = displayGroup(item.group, this.options.groupLabels === true)
-      if (group !== lastGroup) {
-        if (group !== undefined) listLines.push(color.textMuted(`── ${group} ──`))
-        lastGroup = group
+    let itemCount = Math.min(rows.length, this.maxVisible)
+    let start = this.scroll
+    const buildWindow = (count: number, from: number): string[] => {
+      const end = Math.min(rows.length, from + count)
+      const visibleRows = rows.slice(from, end)
+      const listLines: string[] = []
+      let lastGroup: string | undefined
+      for (let i = 0; i < visibleRows.length; i += 1) {
+        const item = visibleRows[i]!
+        const group = displayGroup(item.group, this.options.groupLabels === true)
+        if (group !== lastGroup) {
+          if (group !== undefined) listLines.push(color.textMuted(`── ${group} ──`))
+          lastGroup = group
+        }
+        const selected = from + i === this.selected
+        listLines.push(...this.renderRow(item, selected, listWidth))
+        if (safeWidth >= 70 && safeWidth < 110 && selected && item.kind !== 'view-full') {
+          listLines.push(...this.renderInlineDetail(item, safeWidth))
+        }
       }
-      const selected = start + i === this.selected
-      listLines.push(...this.renderRow(item, selected, listWidth))
-      if (safeWidth >= 70 && safeWidth < 110 && selected && item.kind !== 'view-full') {
-        listLines.push(...this.renderInlineDetail(item, safeWidth))
-      }
+      return listLines
     }
-
-    if (safeWidth >= 110) {
-      const detail = this.detailLines(this.selectedItem())
-      const merged: string[] = []
-      const detailWidth = Math.max(24, safeWidth - listWidth - 3)
-      const max = Math.max(listLines.length, detail.length)
-      for (let i = 0; i < max; i += 1) {
-        const left = truncateToWidth(listLines[i] ?? '', listWidth, '…')
-        const leftPad = ' '.repeat(Math.max(0, listWidth - visibleWidth(left)))
-        const right = truncateToWidth(detail[i] ?? '', detailWidth, '…')
-        merged.push(`${left}${leftPad} ${color.border('│')} ${right}`)
+    let listLines = buildWindow(itemCount, start)
+    const assemble = (): string[] => {
+      const out = [...lines]
+      if (safeWidth >= 110) {
+        const detail = this.detailLines(this.selectedItem())
+        const merged: string[] = []
+        const detailWidth = Math.max(24, safeWidth - listWidth - 3)
+        const max = Math.max(listLines.length, detail.length)
+        for (let i = 0; i < max; i += 1) {
+          const left = truncateToWidth(listLines[i] ?? '', listWidth, '…')
+          const leftPad = ' '.repeat(Math.max(0, listWidth - visibleWidth(left)))
+          const right = truncateToWidth(detail[i] ?? '', detailWidth, '…')
+          merged.push(`${left}${leftPad} ${color.border('│')} ${right}`)
+        }
+        out.push(...merged)
+      } else {
+        out.push(...listLines)
       }
-      lines.push(...merged)
+      if (rows.length > itemCount) out.push(color.textMuted(`  ${this.selected + 1}/${rows.length}`))
+      if (this.refreshError !== undefined) out.push(color.textMuted(`  ${this.refreshError} · R retry`))
+      out.push('')
+      out.push(hintLine)
+      return out
+    }
+    let candidate = assemble()
+    // Details, group headers and the detail pane consume physical rows
+    // beyond the item count: shrink the selected-preserving window until
+    // the whole component fits the live grant, instead of letting the
+    // compositor clip the hint or the selected row.
+    while (candidate.length > limit && itemCount > 1) {
+      itemCount -= 1
+      const desired = Math.max(0, this.selected - Math.floor(itemCount / 2))
+      start = Math.min(desired, Math.max(0, rows.length - itemCount))
+      this.scroll = start
+      listLines = buildWindow(itemCount, start)
+      candidate = assemble()
+    }
+    if (candidate.length <= limit) return candidate
+
+    // A single detail-rich row can still exceed the grant. Apply the
+    // semantic priority (never tail-slice the flat array, or the selected
+    // MAIN row would yield to its own detail lines):
+    //   selected main row > hint tail > group header > detail > indicator.
+    const tail = limit - lines.length >= 2 ? ['', hintLine] : [hintLine]
+    const budget = Math.max(0, limit - lines.length - tail.length)
+    const entries = this.windowEntries(start, itemCount, listWidth)
+    const selectedEntry = entries.find(entry => entry.selected)
+    let kept: string[] = []
+    if (selectedEntry !== undefined) {
+      const group = selectedEntry.group !== undefined && budget >= 2
+        ? [color.textMuted(`── ${selectedEntry.group} ──`)]
+        : []
+      if (budget >= 1) kept = [...group, selectedEntry.main]
+      const rest = budget - kept.length
+      if (rest > 0) kept = [...kept, ...selectedEntry.details.slice(0, rest)]
     } else {
-      lines.push(...listLines)
+      kept = listLines.slice(0, budget)
     }
-
-    if (rows.length > this.maxVisible) lines.push(color.textMuted(`  ${this.selected + 1}/${rows.length}`))
-    if (this.refreshError !== undefined) lines.push(color.textMuted(`  ${this.refreshError} · R retry`))
-    lines.push('')
-    lines.push(color.textMuted(`  ${this.hint()}`))
-    return lines
+    return [...lines, ...kept, ...tail].slice(0, limit)
   }
+
+  /** The visible window as STRUCTURED rows (main + detail lines kept
+   * apart), so a tiny-grant fallback can prioritize the selected main row
+   * over its detail lines instead of tail-slicing a flat array. The
+   * compact-layout inline detail (70-110 wide, selected row only) rides
+   * with its entry; the wide-layout side pane is not part of the window. */
+  private windowEntries(start: number, count: number, width: number): Array<{
+    group: string | undefined
+    main: string
+    details: string[]
+    selected: boolean
+  }> {
+    const entries: Array<{
+      group: string | undefined
+      main: string
+      details: string[]
+      selected: boolean
+    }> = []
+    const end = Math.min(this.filtered.length, start + count)
+    for (let index = start; index < end; index += 1) {
+      const item = this.filtered[index]
+      if (item === undefined) continue
+      const main = this.renderRow(item, index === this.selected, width)[0]!
+      const details = index === this.selected && item.kind !== 'view-full'
+        ? this.renderInlineDetail(item, width)
+        : []
+      entries.push({ group: item.group, main, details, selected: index === this.selected })
+    }
+    return entries
+  }
+
+  /** Finalize the empty/no-match assembly against the live grant
+   * (setMaxRows contract covers every path): `render().length <= maxRows`
+   * with priority search input > no-match message > hint > header > blank
+   * spacers, so the hint survives whenever the grant physically allows it
+   * (a head-keep slice would cut the hint on a short terminal). */
+  private finalizeEmpty(lines: string[]): string[] {
+    if (!Number.isFinite(this.maxRows)) return lines
+    const limit = Math.max(1, Math.floor(this.maxRows))
+    if (lines.length <= limit) return lines
+    // Blank spacers are the lowest-value rows: drop them first.
+    const compact = lines.filter(line => line !== '')
+    if (compact.length <= limit) return compact
+    // The header is chrome: yield it before any content.
+    const withoutHeader = this.options.header === undefined ? compact : compact.slice(1)
+    if (withoutHeader.length <= limit) return withoutHeader
+    // Extreme grant: keep the head — the search input, then the message.
+    return compact.slice(0, limit)
+  }
+
 
   private legacyHeaderText(): string {
     const chip = this.activeType === null ? '' : `  [${this.activeType}]`

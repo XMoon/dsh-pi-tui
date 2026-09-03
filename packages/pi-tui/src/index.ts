@@ -31,7 +31,7 @@ export {
 	type SelectListTheme,
 	type SelectListTruncatePrimaryContext,
 } from "./components/select-list.ts";
-export { type SettingItem, SettingsList, type SettingsListTheme } from "./components/settings-list.ts";
+export { type SettingItem, SettingsList, type RowBudgetAware, type SettingsListTheme } from "./components/settings-list.ts";
 export { Spacer } from "./components/spacer.ts";
 export { Text } from "./components/text.ts";
 export { TruncatedText } from "./components/truncated-text.ts";

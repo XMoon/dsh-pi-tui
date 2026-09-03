@@ -229,6 +229,74 @@ describe("SelectList", () => {
 			const rendered = list.render(80);
 			assert.ok(!rendered.some((line) => line.includes("navigate")), "hint must not render by default");
 		});
+
+		it("reflows to a live row budget without losing selection or hint", () => {
+			const list = new SelectList(
+				Array.from({ length: 12 }, (_, index) => ({ value: `v${index}`, label: `item ${index}` })),
+				10,
+				testTheme,
+				{},
+				{ header: "items", showHint: true },
+			);
+			for (let index = 0; index < 8; index++) list.handleInput(String.fromCharCode(0x1b) + "[B");
+			list.setMaxRows(8);
+			const rendered = list.render(80);
+			assert.ok(rendered.some((line) => line.includes("item 8")), "selected item must remain visible");
+			assert.ok(rendered.some((line) => line.includes("esc close")), "hint must remain visible");
+			assert.ok(rendered.length <= 8, "list must fit the live row budget");
+		});
+
+		it("keeps the hint when a grouped window exceeds a small row budget", () => {
+			const items = Array.from({ length: 9 }, (_, index) => ({
+				value: `v${index}`,
+				label: `item ${index}`,
+				group: index < 3 ? "alpha" : index < 6 ? "beta" : "gamma",
+			}));
+			const list = new SelectList(items, 10, testTheme, {}, { header: "items", showHint: true });
+			// 6-row grant: header(2) + hint(2) + indicator(1) + group(1)
+			// leaves a zero item budget; the render must still fit the grant
+			// and keep the hint plus the selected row.
+			list.setMaxRows(6);
+			list.handleInput(String.fromCharCode(0x1b) + "[B"); // select item 1 (still alpha)
+			const rendered = list.render(80);
+			assert.ok(rendered.length <= 6, `grouped list must fit the grant (${rendered.length})`);
+			assert.ok(rendered.some((line) => line.includes("esc close")), "hint must remain visible");
+			assert.ok(rendered.some((line) => line.includes("item 1")), "selected item must remain visible");
+		});
+
+		it("restores the full window after a selection move (no render-time ratchet)", () => {
+			// Runs: a[0,1], b[2-6], c[7,8], d[9-11]. At selection 0 the
+			// window straddles a/b and shrinks; moving into the b run must
+			// restore the full 4-item window — the render-time shrink is a
+			// LOCAL adjustment, never a persistent maxVisible ratchet.
+			const groups = ["a", "a", "b", "b", "b", "b", "b", "c", "c", "d", "d", "d"];
+			const items = groups.map((group, index) => ({ value: `v${index}`, label: `item ${index}`, group }));
+			const list = new SelectList(items, 10, testTheme, {}, { header: "items", showHint: true });
+			list.setMaxRows(10); // budget: header 2 + hint 2 + indicator 1 + group 1 -> 4
+			const first = list.render(80);
+			assert.ok(first.some((line) => line.includes("item 1")), "first window must show the selected region");
+			for (let index = 0; index < 4; index++) list.handleInput(String.fromCharCode(0x1b) + "[B"); // -> item 4
+			const second = list.render(80);
+			assert.ok(second.some((line) => line.includes("item 2")),
+				`the full 4-item window must return inside the b run (${JSON.stringify(second)})`);
+			assert.ok(second.some((line) => line.includes("item 5")), "the window must reach item 5");
+		});
+
+		it("fits the no-match state to the row grant, keeping the message and hint", () => {
+			const list = new SelectList(
+				[{ value: "a", label: "alpha" }, { value: "b", label: "beta" }],
+				10,
+				testTheme,
+				{},
+				{ header: "items", enableSearch: true },
+			);
+			list.setMaxRows(6); // header 2 + search 2 + message 1 + hint 2 = 7 > 6
+			list.handleInput("zzz"); // no match
+			const rendered = list.render(80);
+			assert.ok(rendered.length <= 6, `no-match must fit the grant (${rendered.length})`);
+			assert.ok(rendered.some((line) => line.includes("No matching")), "message must survive");
+			assert.ok(rendered.some((line) => line.includes("esc close")), "hint must survive");
+		});
 	});
 
 	describe("group headers (dsh-pi-tui extension)", () => {

@@ -23,7 +23,7 @@
  * @module @xmoon76/dsh-pi-tui/subagent-model-menu
  */
 
-import { SettingsList, Text, matchesKey, type Component } from '@xmoon76/pi-tui'
+import { SettingsList, Text, matchesKey, type Component, type RowBudgetAware } from '@xmoon76/pi-tui'
 import type { OwnedTaskOptions } from './detached.ts'
 import type { SubagentAllowedModelRoute, SubagentModelSelectionConfig } from './runtime/config-port.ts'
 import { settingsListTheme } from './theme.ts'
@@ -95,6 +95,17 @@ export class SubagentModelAllowlistSubmenu implements Component {
    * slow earlier write can never land after a newer one (the review's
    * concurrent-toggle race). */
   private mutationChain: Promise<void> = Promise.resolve()
+  /** The last host row grant, re-applied to each swapped-in inner list. */
+  private rowGrant = Number.POSITIVE_INFINITY
+
+  /** Host row-budget seam: keep the grant and forward it to the inner
+   * list, so a list swapped in asynchronously after a resize still
+   * reflows (the outer SettingsList forwards through this seam). */
+  setMaxRows(rows: number): void {
+    this.rowGrant = rows
+    const inner = this.inner as RowBudgetAware
+    inner.setMaxRows?.(rows)
+  }
 
   constructor(deps: AllowlistSubmenuDeps) {
     const current = deps.selection.get()
@@ -108,6 +119,7 @@ export class SubagentModelAllowlistSubmenu implements Component {
       deps.done(selected)
     }
     this.inner = this.providerList(deps, close)
+    this.setMaxRows(this.rowGrant)
   }
 
   private providerList(deps: AllowlistSubmenuDeps, close: (selected?: string) => void): Component {
@@ -145,6 +157,7 @@ export class SubagentModelAllowlistSubmenu implements Component {
       this.modelListProvider = undefined
       this.modelListIds = []
       this.inner = this.providerList(deps, close)
+      this.setMaxRows(this.rowGrant)
       this.requestRender()
     }
     this.inner = new EscDismissText('Loading models…', backToProviders)
@@ -176,6 +189,8 @@ export class SubagentModelAllowlistSubmenu implements Component {
         this.modelListProvider = providerId
         this.modelListIds = models.map(model => model.id)
         this.inner = list
+        // The async list lands AFTER any resize: re-apply the last grant.
+        this.setMaxRows(this.rowGrant)
         this.requestRender()
       },
       onError: () => {

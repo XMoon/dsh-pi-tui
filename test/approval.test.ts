@@ -76,6 +76,47 @@ test('approval prompt with long args and reason keeps the frame and key hints in
   assert.equal(await decision, 'rejected')
 })
 
+test('approval dialog rebuilds original content across a wide-to-narrow-to-wide resize', async () => {
+  const { vt, app } = startApp()
+  vt.resize(120, 30)
+  await viewport(vt)
+  const marker = 'WIDE_APPROVAL_CONTENT_RESTORED'
+  const decision = app.showApprovalPrompt({
+    toolName: 'bash',
+    reason: 'wide reason '.repeat(8) + marker,
+    arguments: 'arg one\narg two\narg three',
+  })
+  let view = await viewport(vt)
+  assert.ok(view.includes(marker), `wide approval content missing before shrink:\n${view}`)
+  vt.resize(50, 10)
+  view = await viewport(vt)
+  assertDialogIntact(view)
+  vt.resize(120, 30)
+  view = await viewport(vt)
+  assert.ok(view.includes(marker), `wide approval content was not restored:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('approval dialog reflows a narrow-open prompt when the terminal grows', async () => {
+  const { vt, app } = startApp()
+  vt.resize(50, 10)
+  await viewport(vt)
+  const marker = 'NARROW_OPEN_APPROVAL_RESTORED'
+  const decision = app.showApprovalPrompt({
+    toolName: 'edit_file',
+    reason: 'narrow reason '.repeat(24) + marker,
+    arguments: 'first argument\nsecond argument',
+  })
+  let view = await viewport(vt)
+  assertDialogIntact(view)
+  vt.resize(120, 30)
+  view = await viewport(vt)
+  assert.ok(view.includes(marker), `grown approval content missing:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
 test('dangerous approval with long content keeps hints and both borders', async () => {
   const { vt, app } = startApp()
   const decision = app.showApprovalPrompt({

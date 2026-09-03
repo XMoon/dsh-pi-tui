@@ -123,7 +123,7 @@ import {
 } from './present.ts'
 import { TranscriptSearchComponent } from './search.ts'
 import { CompactTextPreview } from './compact-text-preview.ts'
-import { HistoryPanel } from './history-panel.ts'
+import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
@@ -444,6 +444,58 @@ class FocusForwardingFrame extends Frame implements Focusable {
     if (this.disposed) return
     this.disposed = true
     this.ownedChild.dispose?.()
+  }
+}
+
+/** Geometry passed to a live responsive overlay frame. */
+interface ResponsiveOverlayGeometry {
+  width: number
+  maxHeight: number
+  key: string
+}
+
+/**
+ * A root-owned responsive overlay shell. The fork re-resolves percentage
+ * overlay options each frame, while this shell keeps a first-party frame's
+ * content width and row budget derived from the same current geometry. It
+ * centers a narrower design width inside the full-width overlay canvas, so
+ * no modal handle needs to be replaced during a resize (and its broker graph
+ * remains untouched).
+ */
+class ResponsiveOverlayFrame extends FocusForwardingFrame {
+  private readonly geometryOf: () => ResponsiveOverlayGeometry
+  private readonly onGeometry: ((geometry: ResponsiveOverlayGeometry) => void) | undefined
+  private lastGeometryKey = ''
+
+  constructor(
+    child: Component,
+    geometryOf: () => ResponsiveOverlayGeometry,
+    onGeometry?: (geometry: ResponsiveOverlayGeometry) => void,
+  ) {
+    super(child, true)
+    this.geometryOf = geometryOf
+    this.onGeometry = onGeometry
+    this.syncGeometry()
+  }
+
+  /** Re-run the geometry callback without scheduling a frame. */
+  syncGeometry(): ResponsiveOverlayGeometry {
+    const geometry = this.geometryOf()
+    if (geometry.key !== this.lastGeometryKey) {
+      this.lastGeometryKey = geometry.key
+      this.onGeometry?.(geometry)
+    }
+    return geometry
+  }
+
+  render(width: number): string[] {
+    const geometry = this.syncGeometry()
+    const availableWidth = Math.max(1, Math.floor(width))
+    const frameWidth = Math.max(1, Math.min(availableWidth, Math.floor(geometry.width)))
+    const lines = super.render(frameWidth)
+    if (frameWidth === availableWidth) return lines
+    const left = Math.max(0, Math.floor((availableWidth - frameWidth) / 2))
+    return lines.map(line => `${' '.repeat(left)}${line}${' '.repeat(Math.max(0, availableWidth - left - visibleWidth(line)))}`)
   }
 }
 
@@ -898,6 +950,55 @@ function capWrappedToMarker(text: string, width: number, budget: number): { text
   }
 }
 
+/**
+ * The state-free approval content surface. It rebuilds from the original
+ * request when the live width/height budget changes, while keeping the
+ * pending promise and modal handle untouched.
+ */
+class ApprovalDialogSurface implements Component {
+  private readonly request: ApprovalPromptRequest
+  private readonly geometryOf: () => ApprovalOverlayGeometry
+  private readonly build: (request: ApprovalPromptRequest, geometry: ApprovalOverlayGeometry) => Component
+  private cached: Component | undefined
+  private cacheKey = ''
+
+  constructor(
+    request: ApprovalPromptRequest,
+    geometryOf: () => ApprovalOverlayGeometry,
+    build: (request: ApprovalPromptRequest, geometry: ApprovalOverlayGeometry) => Component,
+  ) {
+    this.request = request
+    this.geometryOf = geometryOf
+    this.build = build
+  }
+
+  invalidate(): void {
+    this.cached?.invalidate?.()
+    this.cached = undefined
+    this.cacheKey = ''
+  }
+
+  render(width: number): string[] {
+    const geometry = this.geometryOf()
+    const contentWidth = Math.max(1, Math.floor(width))
+    const key = `${geometry.maxHeight}:${contentWidth}`
+    if (this.cached === undefined || this.cacheKey !== key) {
+      this.cached?.dispose?.()
+      this.cached = this.build(this.request, {
+        ...geometry,
+        contentWidth: Math.min(geometry.contentWidth, contentWidth),
+      })
+      this.cacheKey = key
+    }
+    return this.cached.render(contentWidth)
+  }
+
+  dispose(): void {
+    this.cached?.dispose?.()
+    this.cached = undefined
+  }
+}
+
 /** The live job-output viewer body: a title line + refreshable text panel. */
 class OutputViewerPanel implements Component {
   private readonly title: Text
@@ -1292,6 +1393,21 @@ export interface ApprovalPromptRequest {
 /** Closed approval outcomes the user can produce at the prompt. */
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled'
 
+/** The live geometry budget for the approval overlay. */
+export interface ApprovalOverlayGeometry {
+  width: number
+  maxHeight: number
+  contentWidth: number
+}
+
+/** Derive approval geometry from the CURRENT terminal dimensions. */
+export function approvalOverlayGeometry(columns: number, rows: number): ApprovalOverlayGeometry {
+  const width = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 1
+  const height = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : 1
+  const maxHeight = Math.max(1, Math.min(height, 16, Math.max(8, height - 2)))
+  return { width, maxHeight, contentWidth: Math.max(1, width - 8) }
+}
+
 /** One todo entry as logged by todo/write; statuses and text verbatim. */
 export interface TodoItem {
   content: string
@@ -1567,6 +1683,8 @@ interface PendingApproval {
   request: ApprovalPromptRequest
   resolve: (outcome: ApprovalOutcome) => void
   handle?: OverlayHandle
+  /** The live geometry wrapper behind the current approval handle. */
+  responsiveFrame?: ResponsiveOverlayFrame
   onAbort?: () => void
   /** Settled once: an abort and a user decision must not double-resolve. */
   settled?: boolean
@@ -2059,6 +2177,8 @@ export class TuiApp {
   private historyPanel: HistoryPanel | undefined
   /** The overlay handle of the history panel (hide() closes it). */
   private historyOverlay: OverlayHandle | undefined
+  /** The responsive shell survives a resize and a fullscreen screen swap. */
+  private historyResponsiveFrame: ResponsiveOverlayFrame | undefined
   /** Footer configurators own paste timers outside the generic overlay
    * disposal path; final surface disposal closes every still-open one. */
   private readonly footerConfiguratorClosers = new Set<() => void>()
@@ -4461,6 +4581,7 @@ export class TuiApp {
     const active = this.fullscreen !== undefined
     if (enabled === active) return
     const pending = this.activeApproval
+    const history = this.historyPanel
     pending?.handle?.hide()
     this.disposeTrackedKeybindingEditors()
     // overlayHandles holds RAW handles (showOverlayOnHost stores them before
@@ -4630,6 +4751,12 @@ export class TuiApp {
     this.remountExtensionOverlays()
     this.remountAdvancedOverlays()
     this.remountUnstableMounts()
+    // The old screen's raw history handle was removed above without
+    // disposing its remountable panel. Reattach that same stateful panel to
+    // the new screen before restoring any modal that sat above it.
+    this.historyOverlay = undefined
+    this.historyResponsiveFrame = undefined
+    if (history !== undefined) this.mountHistoryOverlay(history)
     if (pending !== undefined) this.renderApprovalDialog(pending)
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
@@ -4701,14 +4828,7 @@ export class TuiApp {
     if (this.historyPanel !== undefined) return
     if (this.historySearchSource === undefined) return
     if (this.disposed) return
-    const columns = this.terminal.columns
-    const rows = this.terminal.rows
-    // The overlay must NEVER exceed the terminal (plan §51): width/height
-    // are clamped to the real columns/rows (a 50×10 terminal must not
-    // request a 60×14 panel). The panel's row budget is the overlay's
-    // maxHeight minus the Frame's two border rows.
-    const width = Math.min(columns - 2, Math.max(20, Math.min(100, columns - 6)))
-    const maxHeight = Math.min(rows - 2, Math.max(8, Math.min(30, rows - 4)))
+    const geometry = historyOverlayGeometry(this.terminal.columns, this.terminal.rows)
     const panel = new HistoryPanel({
       source: this.historySearchSource,
       // Resolve the cwd at OPEN time (session switches move it): the
@@ -4720,7 +4840,7 @@ export class TuiApp {
       // the panel's whole lifetime (a switch while the panel is up keeps
       // the search stable; the next open re-resolves).
       sessionId: this.historySearchSessionId?.(),
-      maxRows: maxHeight - 2, // the Frame adds its two border rows
+      maxRows: geometry.panelRows,
       onResultsChanged: () => this.requestRender(),
       onAccept: (content) => {
         this.closeHistorySearch()
@@ -4733,17 +4853,42 @@ export class TuiApp {
     })
     panel.start()
     this.historyPanel = panel
-    this.historyOverlay = this.showOverlayOnHost(new FocusForwardingFrame(panel), { width, maxHeight })
+    this.mountHistoryOverlay(panel)
+  }
+
+  /** Mount an existing history panel on the current physical screen. */
+  private mountHistoryOverlay(panel: HistoryPanel): void {
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const geometry = historyOverlayGeometry(this.terminal.columns, this.terminal.rows)
+      return {
+        width: geometry.width,
+        maxHeight: geometry.maxHeight,
+        key: `${geometry.width}:${geometry.maxHeight}:${geometry.panelRows}`,
+      }
+    }
+    const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
+      panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+    })
+    this.historyResponsiveFrame = frame
+    this.historyOverlay = this.showOverlayOnHost(
+      frame,
+      { width: '100%', maxHeight: '100%' },
+      { remountable: true },
+    )
   }
 
   /** Close the history panel (Esc/Ctrl+C, accept, surface dispose). */
   closeHistorySearch(): void {
-    if (this.historyOverlay === undefined) return
-    // The owning FocusForwardingFrame + disposeOnHide release the panel's
-    // debounce timer/controller on hide (X007).
-    this.historyOverlay.hide()
+    const overlay = this.historyOverlay
+    const panel = this.historyPanel
     this.historyOverlay = undefined
+    this.historyResponsiveFrame = undefined
     this.historyPanel = undefined
+    overlay?.hide()
+    // Remountable history overlays intentionally opt out of disposeOnHide so
+    // fullscreen migration can retain query/results/selection. The final
+    // close owns the panel lifecycle explicitly.
+    panel?.dispose()
   }
 
   /** Publish the current match position for the overlay header (1-based, total). */
@@ -9245,6 +9390,8 @@ export class TuiApp {
     try {
       const width = this.terminal.columns
       const height = this.terminal.rows
+      const widthChanged = width !== this.lastTranscriptWidth
+      const heightChanged = height !== this.lastAdvancedGeometry.height
       // The transcript folds bake width-dependent truncations at build
       // time (folded tool/system/compaction/local-shell rows): a WIDTH
       // change must rebuild them at the new content width — a stale bake
@@ -9252,9 +9399,16 @@ export class TuiApp {
       // contract (the right-gutter resize matrix). The latch skips the
       // first geometry pass (nothing built yet); the rebuild re-enters
       // requestRender, where the latch is already updated, so no loop.
-      if (width !== this.lastTranscriptWidth) {
+      if (widthChanged) {
         this.lastTranscriptWidth = width
         if (this.messageRows.length > 0) this.rebuildMessages()
+      }
+      if (widthChanged) {
+        // Queue/todo rows are width-baked strings, not merely live-wrapped
+        // components. Rebuild from their raw state before chrome measurement
+        // so fullscreen hit-testing and footer budgets see the new geometry.
+        this.rebuildQueuePane(width)
+        this.rebuildTodoPanel(width)
       }
       // M5: a material WIDTH change refreshes the command surface (the
       // runner coalesces to its interval).
@@ -9272,6 +9426,10 @@ export class TuiApp {
         this.lastAdvancedGeometry = { width, height }
         this.recompileAdvancedOverlays()
       }
+      if (widthChanged || heightChanged) {
+        this.historyResponsiveFrame?.syncGeometry()
+        this.activeApproval?.responsiveFrame?.syncGeometry()
+      }
       // PR #57 review (P1): the footer's physical-line budget derives from
       // the terminal GEOMETRY, the ACTIVE SURFACE and the MEASURED chrome
       // heights — a resize (height AND width), a fullscreen toggle or a
@@ -9287,13 +9445,13 @@ export class TuiApp {
       const host = this.extensionHost
       if (host !== undefined) {
         const current = host.state().surface
-      // focusedSeat derives from the actual focus state (follow-up P1): the
-      // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
-      // question/approval/fullscreen entry; the requestRender mirror only
-      // publishes it here (plus the stale-frame safety net below). The LIVE
-      // focusSeat (not the microtask-published copy) is authoritative — a
-      // publish that changed nothing must still mirror the real seat.
-      this.publishFocusSeat()
+        // focusedSeat derives from the actual focus state (follow-up P1): the
+        // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
+        // question/approval/fullscreen entry; the requestRender mirror only
+        // publishes it here (plus the stale-frame safety net below). The LIVE
+        // focusSeat (not the microtask-published copy) is authoritative — a
+        // publish that changed nothing must still mirror the real seat.
+        this.publishFocusSeat()
         const focusedSeat = this.focusSeat
         if (current.width !== width || current.height !== height || current.focusedSeat !== focusedSeat) {
           host.updateSurface({ width, height, focusedSeat })
@@ -9308,6 +9466,12 @@ export class TuiApp {
           }
         }
       }
+      // Height-only resizes must re-bake the widget row budgets after the
+      // surface snapshot adopted the new height. A width change already
+      // reaches renderWidgets() through refreshChrome() below, so gate the
+      // explicit call on `!widthChanged` to avoid a second identical bake.
+      if (heightChanged && !widthChanged && host !== undefined && host.state().surface.width === width
+        && host.state().surface.height === height) this.renderWidgets()
       // The footer recompose runs LAST: the budget is keyed on the
       // MEASURED effective total (surface + geometry + actual chrome
       // heights), so a widget-zone bake, a resize or a mode switch all
@@ -9463,7 +9627,7 @@ export class TuiApp {
    * (in_progress first, then pending, then completed (strikethrough)); the
    * full list when expanded (fullscreen click on the panel toggles).
    */
-  private renderTodoPanel(): void {
+  private rebuildTodoPanel(width: number): void {
     if (!this.todoPanelVisible) {
       this.todoPanel.setText('')
       return
@@ -9477,8 +9641,8 @@ export class TuiApp {
       ...this.todoItems.filter(todo => todo.status === 'completed'),
     ]
     const shown = this.todoExpanded ? ordered : ordered.slice(0, TODO_COMPACT_LIMIT)
-    const width = Math.max(1, this.terminal.columns)
-    const border = color.border(` ${'─'.repeat(Math.max(0, width - 2))} `)
+    const safeWidth = Math.max(1, Math.floor(width))
+    const border = color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)
     // Title: bold, two-cell indent.
     const title = color.textStrong('  Todo')
     if (shown.length === 0) {
@@ -9490,6 +9654,11 @@ export class TuiApp {
       return `${mark(todo)} ${body}`
     })
     this.todoPanel.setText([border, title, ...lines].join('\n'))
+  }
+
+  /** Rebuild the todo panel from the current terminal width. */
+  private renderTodoPanel(): void {
+    this.rebuildTodoPanel(this.terminal.columns)
   }
 
   /** Whether Thinking blocks currently render FULL (true) or COMPACT with
@@ -9879,21 +10048,20 @@ export class TuiApp {
   /** Notice rows shown in full before the `+N more` fold (user rows are never folded). */
   private static readonly MAX_NOTICE_ROWS = 5
 
-  /** Rebuild the queue pane text from the current inbox rows. */
-  private renderQueuePane(): void {
+  /** Rebuild the queue pane text from the current inbox rows and width. */
+  private rebuildQueuePane(width: number): void {
     const items = this.queueItems
     if (items.length === 0) {
       // An emptied pane must not leave its previously painted rows behind
       // (fork trap): the empty Text renders no lines and the requested
       // frame repaints the region.
       this.queuePane.setText('')
-      this.requestRender()
       return
     }
-    const width = Math.max(1, this.terminal.columns)
+    const safeWidth = Math.max(1, Math.floor(width))
     // Panel border rules indent one cell on each side so the boundary never
     // reads as the editor's full-width border.
-    const lines = [color.border(` ${'─'.repeat(Math.max(0, width - 2))} `)]
+    const lines = [color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)]
     // User-origin rows are the user's OWN queued input: always fully
     // visible, never folded. Notice rows (plugin notifications, subagent
     // reports, injected instructions) are at-a-glance transport only:
@@ -9906,7 +10074,7 @@ export class TuiApp {
     const shownNotices = noticeRows.slice(0, TuiApp.MAX_NOTICE_ROWS)
     for (const item of userRows) {
       const text = item.text.replace(/\s+/g, ' ').trim()
-      const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth('❯ ')), '…')
+      const truncated = truncateToWidth(text, Math.max(1, safeWidth - visibleWidth('❯ ')), '…')
       // User-origin rows carry the SAME brand-blue ❯ as the transcript
       // bubbles and the editor prompt — one marker for the user's own
       // input everywhere (pending here, delivered up there).
@@ -9919,14 +10087,14 @@ export class TuiApp {
       // steer/edit verbs when nothing else is queued.
       const text = item.text.replace(/\s+/g, ' ').trim()
       const lead = iconLead('queue-notice', this.iconStyle)
-      const truncated = truncateToWidth(text, Math.max(1, width - visibleWidth(lead)), '…')
+      const truncated = truncateToWidth(text, Math.max(1, safeWidth - visibleWidth(lead)), '…')
       lines.push(`${color.textDim(lead)}${color.textDim(truncated)}`)
     }
     const folded = noticeRows.length - shownNotices.length
     if (folded > 0) {
       lines.push(color.textDim(truncateToWidth(
         `  +${folded} more notices pending · they deliver as the next turn runs`,
-        Math.max(1, width - 2),
+        Math.max(1, safeWidth - 2),
         '…',
       )))
     }
@@ -9934,8 +10102,13 @@ export class TuiApp {
     const hint = hasSteerable
       ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer all · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to edit all`
       : 'notices deliver after the current task · /tasks to view'
-    lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, width - 2), '…')))
+    lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, safeWidth - 2), '…')))
     this.queuePane.setText(lines.join('\n'))
+  }
+
+  /** Rebuild the queue pane at the current terminal width and repaint. */
+  private renderQueuePane(): void {
+    this.rebuildQueuePane(this.terminal.columns)
     this.requestRender()
   }
 
@@ -10604,7 +10777,17 @@ export class TuiApp {
     // restart the cycle even without a selection move — review P2); with
     // no marquee the list mounts directly, exactly as before.
     const mounted = marquee === undefined ? list : new MarqueeFilterAdapter(list, () => marquee.reset())
-    const handle = this.showOverlayOnHost(new FocusForwardingFrame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+    const configuredWidth = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width!)) : 64
+    const configuredMaxHeight = Number.isFinite(options.maxHeight) ? Math.max(1, Math.floor(options.maxHeight!)) : 24
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+      return { width, maxHeight, key: `${width}:${maxHeight}` }
+    }
+    const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
+      list.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+    })
+    const handle = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
     // Phase 4: an abort signal closes the picker and fires onCancel (the
     // imperative select broker's fiber-cancellation path). The listener
     // is removed on a normal select/cancel AND on the handle's close
@@ -10760,7 +10943,17 @@ export class TuiApp {
       // Search edits inside a category must restart the marquee too (the
       // vendored SelectList fires no selection change for query edits).
       const mounted = marquee === undefined ? next : new MarqueeFilterAdapter(next, () => marquee.reset())
-      overlay = this.showOverlayOnHost(new FocusForwardingFrame(mounted, true), { width: options.width ?? 64, maxHeight: options.maxHeight ?? 24 })
+      const configuredWidth = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width!)) : 64
+      const configuredMaxHeight = Number.isFinite(options.maxHeight) ? Math.max(1, Math.floor(options.maxHeight!)) : 24
+      const geometryOf = (): ResponsiveOverlayGeometry => {
+        const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+        const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+        return { width, maxHeight, key: `${width}:${maxHeight}` }
+      }
+      const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
+        next.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+      })
+      overlay = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
     }
     // Phase 4 parity: an abort signal closes the CURRENT overlay and fires
     // onCancel. The listener lives once on the signal — category switches
@@ -10904,10 +11097,34 @@ export class TuiApp {
       },
       () => this.requestRender(),
     )
-    const handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
-      width: options.width ?? (options.mode === 'full' ? '100%' : 72),
-      maxHeight: options.maxHeight ?? (options.mode === 'full' ? '100%' : 16),
-      margin: options.mode === 'full' ? 1 : undefined,
+    // Full (Task Center) mode is a margin-inset full-terminal overlay; the
+    // fork resolves '100%' against the inset area, so the live grant is the
+    // terminal minus the two margin rows (the responsive frame re-derives
+    // it on every resize). An ABSENT mode keeps the legacy 72-wide fixed
+    // mount (direct embedders / the historical openTaskBrowser contract).
+    const fullMode = options.mode === 'full'
+    const numericWidth = typeof options.width === 'number' && Number.isFinite(options.width)
+      ? Math.max(1, Math.floor(options.width))
+      : undefined
+    const numericMaxHeight = typeof options.maxHeight === 'number' && Number.isFinite(options.maxHeight)
+      ? Math.max(1, Math.floor(options.maxHeight))
+      : undefined
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = fullMode
+        ? this.terminal.columns
+        : Math.max(1, Math.min(this.terminal.columns, numericWidth ?? 72))
+      const maxHeight = fullMode
+        ? Math.max(1, this.terminal.rows - 2)
+        : Math.max(1, Math.min(this.terminal.rows, numericMaxHeight ?? 16))
+      return { width, maxHeight, key: `${width}:${maxHeight}` }
+    }
+    const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
+      panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+    })
+    const handle = this.showOverlayOnHost(frame, {
+      width: fullMode ? '100%' : (numericWidth ?? 72),
+      maxHeight: fullMode ? '100%' : (numericMaxHeight ?? 16),
+      margin: fullMode ? 1 : undefined,
     })
     // One close path: hide the overlay AND stop the panel's 1s elapsed tick
     // (an unref'd interval must still be cleared — the panel is gone).
@@ -10986,7 +11203,17 @@ export class TuiApp {
       handle?.hide()
       onCancel()
     }, { enableSearch: true })
-    handle = this.showOverlayOnHost(new FocusForwardingFrame(settings, true), { width: 72, maxHeight: 28 })
+    const configuredWidth = 72
+    const configuredMaxHeight = 28
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+      return { width, maxHeight, key: `${width}:${maxHeight}` }
+    }
+    const frame = new ResponsiveOverlayFrame(settings, geometryOf, geometry => {
+      settings.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+    })
+    handle = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
     return () => handle?.hide()
   }
 
@@ -11382,13 +11609,30 @@ export class TuiApp {
 
   /** Build and mount the approval dialog for one prompt on the active screen. */
   private renderApprovalDialog(pending: PendingApproval): void {
-    // Full terminal width (kimi dialog parity): a fixed 60-wide box on a
-    // narrow terminal left base-content slivers glued to the border (the
-    // "stray characters" report). The Box pads every row to the width, so
-    // the frame spans the whole terminal and the base stays covered.
-    const width = this.terminal.columns
-    const maxHeight = Math.max(8, Math.min(16, this.terminal.rows - 2))
-    const contentWidth = Math.max(1, width - 8)
+    const geometryOf = (): ApprovalOverlayGeometry => approvalOverlayGeometry(
+      this.terminal.columns,
+      this.terminal.rows,
+    )
+    const surface = new ApprovalDialogSurface(
+      pending.request,
+      geometryOf,
+      (request, geometry) => this.buildApprovalDialog(request, geometry),
+    )
+    const frame = new ResponsiveOverlayFrame(surface, () => {
+      const geometry = geometryOf()
+      return {
+        width: geometry.width,
+        maxHeight: geometry.maxHeight,
+        key: `${geometry.width}:${geometry.maxHeight}:${geometry.contentWidth}`,
+      }
+    })
+    pending.responsiveFrame = frame
+    pending.handle = this.showOverlayOnHost(frame, { width: '100%', maxHeight: '100%' })
+  }
+
+  /** Build approval content for the current geometry without mounting it. */
+  private buildApprovalDialog(request: ApprovalPromptRequest, geometry: ApprovalOverlayGeometry): Component {
+    const { maxHeight, contentWidth } = geometry
     // Height budget in WRAPPED rows: the dialog must NEVER lose the key
     // hints or the bottom border to the maxHeight slice. The title and the
     // danger banner are width-cropped so each is exactly ONE display row;
@@ -11396,8 +11640,8 @@ export class TuiApp {
     // (shrunk when the terminal is too small for it). Fixed chrome = 1
     // title + danger + 1 blank spacer + hint rows + 2 Box paddingY
     // (Box(1,1)) + 2 Frame borders — keep in sync with the geometry below.
-    const titleShown = truncateToWidth(`Approve ${pending.request.toolName}?`, contentWidth, '…')
-    const dangerShown = pending.request.danger === true
+    const titleShown = truncateToWidth(`Approve ${request.toolName}?`, contentWidth, '…')
+    const dangerShown = request.danger === true
       ? truncateToWidth('⚠ DANGEROUS COMMAND — confirm carefully', contentWidth, '…')
       : ''
     const HINTS = '[y] allow once   [n] reject   [esc/ctrl+c] cancel'
@@ -11411,7 +11655,7 @@ export class TuiApp {
     // section ends in a `... N more` marker row that rides inside its
     // budget, so the dialog tells the user what was dropped.
     const reasonBudget = Math.max(0, maxHeight - chrome)
-    const reasonRaw = pending.request.reason ?? ''
+    const reasonRaw = request.reason ?? ''
     const reasonShown = capWrappedToMarker(reasonRaw, contentWidth, reasonBudget).text
     const reasonWrapped = reasonShown === '' ? 0 : wrapTextWithAnsi(reasonShown, contentWidth).length
     const previewBudget = Math.max(0, maxHeight - chrome - reasonWrapped)
@@ -11420,11 +11664,11 @@ export class TuiApp {
     if (dangerShown !== '') {
       dialog.addChild(new Text(color.error(dangerShown), 1, 0))
     }
-    if (pending.request.arguments !== undefined && pending.request.arguments !== '' && previewBudget > 0) {
+    if (request.arguments !== undefined && request.arguments !== '' && previewBudget > 0) {
       // Preview the first six argument lines; the marker helper owns ALL
       // truncation (a separate 240-char '…' pre-cap left an uncounted cut
       // when the capped string still fit the budget).
-      const sixLines = pending.request.arguments.split('\n').slice(0, 6).join('\n')
+      const sixLines = request.arguments.split('\n').slice(0, 6).join('\n')
       const previewShown = capWrappedToMarker(sixLines, contentWidth, previewBudget).text
       if (previewShown !== '') {
         dialog.addChild(new Text(color.textDim(previewShown), 1, 0))
@@ -11435,7 +11679,7 @@ export class TuiApp {
     }
     dialog.addChild(new Text(' ', 1, 0))
     dialog.addChild(new Text(hintShown, 1, 0))
-    pending.handle = this.showOverlayOnHost(new Frame(dialog), { width, maxHeight })
+    return dialog
   }
 
   /** Route a key while a prompt is showing; every key is consumed. */
@@ -11461,6 +11705,7 @@ export class TuiApp {
     if (this.activeApproval === pending) {
       this.activeApproval = undefined
       pending.handle?.hide()
+      pending.responsiveFrame = undefined
       this.activeScreen.setFocus(this.seatEditor().component)
       // The approval dialog is gone: the seat is the editor again (or the
       // next queued prompt's — showNextApproval re-derives it) (follow-up P1).
