@@ -3,5 +3,5 @@
 	"compilerOptions": {
 		"lib": ["ESNext"]
 	},
-	"include": ["src", "test/protected-autocomplete-compile.ts"]
+	"include": ["src"]
 }

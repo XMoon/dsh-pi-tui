@@ -39,7 +39,7 @@
 	"scripts": {
 		"build": "tsdown",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
-		"test": "node --test test/*.test.ts",
+		"test": "tsc --noEmit --target ES2024 --lib ESNext --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --strict --isolatedModules --verbatimModuleSyntax --skipLibCheck --types node test/protected-autocomplete-compile.ts && node --test test/*.test.ts",
 		"clean": "rm -rf dist"
 	},
 	"dependencies": {
