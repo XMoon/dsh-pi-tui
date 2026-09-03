@@ -75,6 +75,33 @@ test('the extreme no-match grant keeps the message over the header', () => {
   assert.ok(!joined.includes('tasks · subagents'), `the header must yield:\n${joined}`)
 })
 
+test('a 1-row search-mode grant paints only the search input and acks nothing', () => {
+  const exposed: string[] = []
+  const panel = new TaskBrowserPanel(
+    [runningJob({ attention: true })],
+    10,
+    {
+      header: 'tasks · subagents',
+      enableSearch: true,
+      onViewportExpose: (ids) => { exposed.push(...ids) },
+    },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.setMaxRows(1)
+  panel.render(100)
+  // The degraded layout drops the selected main row (only the search
+  // input fits): the exposure ack must NOT claim a row that was never
+  // painted — ack scope == paint scope.
+  assert.deepEqual(exposed, [], 'nothing may be acked when the selected row is not painted')
+  const lines = panel.render(100).map(strip)
+  const joined = lines.join('\n')
+  assert.ok(lines.length <= 1, `the render must fit the grant (${lines.length})`)
+  assert.ok(joined.includes('search…'), 'the search input is the one painted row')
+  assert.ok(!joined.includes('bash · pnpm build'), `the selected task must not be painted:\n${joined}`)
+})
+
 test('rows render a status dot, kind · label, and right-aligned status + elapsed', () => {
   const now = Date.now()
   const { panel, rendered } = makePanel([
