@@ -79,7 +79,9 @@ export class CompactTextPreview implements Component {
       ? this.indent
       : truncateToWidth(this.indent, indentWidth, '')
     const bodyWidth = Math.max(1, safeWidth - visibleWidth(prefix))
-    const wrapped = wrapTextWithAnsi(this.text, bodyWidth)
+    // Drop empty wrapped rows: a first grapheme wider than the body width
+    // would otherwise emit a leading blank row at tiny terminal widths.
+    const wrapped = wrapTextWithAnsi(this.text, bodyWidth).filter(row => row !== '')
     const truncated = wrapped.length > this.maxVisualRows
     const shown = wrapped.slice(0, this.maxVisualRows)
     if (truncated && shown.length > 0) {
