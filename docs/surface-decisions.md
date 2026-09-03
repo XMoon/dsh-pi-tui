@@ -466,3 +466,17 @@ fail-fast (re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
   the claim (same generation, same ownership — no trip); fullscreen
   main/alt-screen swaps stop/start the SCREENS (not the app) and never
   touch the slot at all.
+
+## Task Center uses one catalog with two presentation surfaces
+
+Quick Tasks is the footer-triggered, Active-scope view; `/tasks` opens the full
+Task Center in All scope. Both surfaces consume the same durable preorder and
+runtime projection. Scope, type, search, selection, and disclosure are
+presentation state, so promoting Quick to Full never reorders or deduplicates
+rows and Esc can restore the prior context. Active scope retains every ancestor
+needed to explain an active descendant but does not promote that descendant to a
+root. Terminal job failures are acknowledged only when a visible Task Center
+row is opened; until then the footer keeps a failure marker and the ↓ affordance.
+The stop action is a confirmed, capability-gated dispatch: continuable running
+children use their durable direct parent authority, while running jobs use the
+public job kill API. The browser never reads job output.

@@ -98,8 +98,16 @@ export interface ActivityStatus {
   readonly phase: RunPhase
   readonly busy: boolean
   readonly queuedCount: number
+  /** Running background jobs. */
   readonly taskCount: number
+  /** Running child agents. */
   readonly childAgentCount: number
+  /** Total job records currently available, including terminal records. */
+  readonly taskTotalCount?: number
+  /** Total durable child-agent records currently available. */
+  readonly childAgentTotalCount?: number
+  /** Unacknowledged failed/timed-out/lost job records. */
+  readonly failedTaskCount?: number
   readonly todoCount: number
 }
 

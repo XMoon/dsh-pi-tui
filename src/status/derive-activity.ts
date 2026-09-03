@@ -36,6 +36,9 @@ export function deriveActivityStatus(
     queuedCount: number
     taskCount: number
     childAgentCount: number
+    taskTotalCount?: number
+    childAgentTotalCount?: number
+    failedTaskCount?: number
     todoCount: number
   },
 ): ActivityStatus {
@@ -45,6 +48,9 @@ export function deriveActivityStatus(
     queuedCount: counts.queuedCount,
     taskCount: counts.taskCount,
     childAgentCount: counts.childAgentCount,
+    ...(counts.taskTotalCount === undefined ? {} : { taskTotalCount: counts.taskTotalCount }),
+    ...(counts.childAgentTotalCount === undefined ? {} : { childAgentTotalCount: counts.childAgentTotalCount }),
+    ...(counts.failedTaskCount === undefined ? {} : { failedTaskCount: counts.failedTaskCount }),
     todoCount: counts.todoCount,
   }
 }

@@ -343,8 +343,8 @@ export const selectListTheme: SelectListTheme = {
 
 /**
  * Status-dot colour for a background-job status (dsh-web StateDot parity:
- * running = ongoing/primary, stopping = warning, completed = done/dim,
- * failed/killed/timed-out/lost = error). Unknown statuses fall back to the
+ * running = ongoing/primary, stopping/killed = warning, completed = done/dim,
+ * failed/timed-out/lost = error). Unknown statuses fall back to the
  * muted token so a future wire status never crashes the renderer.
  */
 export function taskStatusColor(status: string): (text: string) => string {
@@ -353,7 +353,7 @@ export function taskStatusColor(status: string): (text: string) => string {
     case 'stopping': return color.warning
     case 'completed': return color.textDim
     case 'failed':
-    case 'killed':
+    case 'killed': return color.warning
     case 'timed_out':
     case 'lost':
       return color.error

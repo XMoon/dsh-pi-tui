@@ -99,6 +99,8 @@ export type TaskBrowserRow =
       readonly detail?: string
       readonly startedAt: number
       readonly finishedAt?: number
+      /** Runtime-owned unacknowledged failure attention marker. */
+      readonly attention?: boolean
     }
   | {
       readonly kind: 'subagent'

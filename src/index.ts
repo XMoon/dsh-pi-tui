@@ -122,10 +122,10 @@ import { Text } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import {
-  buildTaskRows, isSubagentRowInterruptible, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessOf, isViewerAccessInteractive,
+  buildTaskRows, isActiveJobStatus, isSubagentRowInterruptible, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessHint, viewerAccessOf, isViewerAccessInteractive,
   type TaskBrowserRow, type ViewerAccess,
 } from './tasks-browser.ts'
-import type { TaskPanelItem } from './task-panel.ts'
+import type { TaskBrowserViewState, TaskPanelItem } from './task-panel.ts'
 import { TaskBrowserRuntime } from './task-browser-runtime.ts'
 import type { TaskBrowserHandle } from './tui-app.ts'
 import { registerTuiCommands, type DefaultIntentRecord, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
@@ -1409,12 +1409,16 @@ function setTerminalTitle(title: string): void {
  * mapping). JOB rows keep their status/detail; SUBAGENT rows carry the
  * projected runtime activity as the status word, the durable mode as the
  * non-truncatable suffix, and the tree connector from the catalog depth.
- * The interrupt verb is advertised ONLY for a continuable child with a
+ * The Stop capability is advertised ONLY for a continuable child with a
  * LIVE running driver (`isSubagentRowInterruptible`) — an idle
  * continuable has no driver to stop. `has children` is deliberately NOT
  * a detail line: the tree connector already expresses parenthood.
  */
 function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
+  const labels = new Map<string, string>()
+  for (const row of target) {
+    if (row.kind === 'subagent') labels.set(row.childId, row.label)
+  }
   return target.map(row => row.kind === 'job'
     ? {
         value: row.value,
@@ -1426,7 +1430,13 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
         status: row.status,
         detail: row.detail,
         startedAt: row.startedAt,
+        finishedAt: row.finishedAt,
         group: rowGroup(row),
+        source: 'job' as const,
+        active: isActiveJobStatus(row.status),
+        attention: row.attention ?? (row.status === 'failed' || row.status === 'timed_out' || row.status === 'lost'),
+        canOpen: true,
+        canStop: isActiveJobStatus(row.status),
         // The Tab type filter: job rows filter by their job kind.
         type: row.jobKind,
       }
@@ -1439,9 +1449,19 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
         suffix: row.mode,
         status: row.activity,
         group: rowGroup(row),
+        source: 'subagent' as const,
         type: 'subagent',
+        active: row.activity === 'running',
+        canOpen: true,
+        canStop: isSubagentRowInterruptible(row),
+        parentId: row.parentId === '' ? undefined : `agent:${row.parentId}`,
+        parentLabel: row.parentId === '' ? undefined : labels.get(row.parentId),
+        depth: row.depth,
+        hasChildren: row.hasChildren,
+        mode: row.mode,
+        access: viewerAccessHint(row.mode, viewerAccessOf(row)),
         // Only a continuable row with a LIVE running driver is
-        // interruptible (one-shot ids are accepted no-ops for the
+        // Stop-capable (one-shot ids are accepted no-ops for the
         // interrupt transport; an idle continuable has no driver to
         // stop — the UI must not advertise a dead stop verb).
         interruptible: isSubagentRowInterruptible(row),
@@ -3523,6 +3543,8 @@ export function apply(ctx: Context, config: Config): void {
       activeTaskBrowser?.close()
       activeTaskBrowser = undefined
       taskRuntime?.reset()
+      app.setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
+      app.setTasks([])
       app.setAgents([])
       taskBrowserRows = []
       // A new session owns the surface: tear down the subagent viewer. The
@@ -5283,7 +5305,7 @@ export function apply(ctx: Context, config: Config): void {
         app.setDraft([recalledText, current].filter(part => part.trim() !== '').join('\n\n'))
         refreshQueue()
       },
-      // ↓ / Ctrl+J with an empty editor: the task browser over BOTH
+      // ↓ with an empty editor: the Quick Tasks browser over BOTH
       // background surfaces. Job rows (bash + background one-shot subagent
       // jobs) are status-only: the bash output read cursor belongs to the
       // model's job_output and a subagent job record carries no child
@@ -5301,9 +5323,9 @@ export function apply(ctx: Context, config: Config): void {
       //
       // The SAME browser is the `/tasks` surface (runner.openTasksBrowser):
       // the merged list + search is the single command-side entry, with
-      // row-level `i` = interrupt on subagent rows (kimi's stop-on-row
+      // row-level `S` = confirmed Stop on capable rows (kimi's stop-on-row
       // pattern; the old /subagents SettingsList-submenu panel is gone).
-      onOpenTasks: () => openTasksBrowser(),
+      onOpenTasks: () => openTasksBrowser('quick'),
       // Enter in an INTERACTIVE (continuable) subagent viewer: deliver the
       // human prompt through the OFFICIAL ctx.subagents.prompt control
       // API — the child inbox (a distinct FIFO turn: enqueue while
@@ -5589,9 +5611,9 @@ export function apply(ctx: Context, config: Config): void {
     //
     // The SAME browser is the `/tasks` surface (runner.openTasksBrowser):
     // the merged list + search is the single command-side entry, with
-    // row-level `i` = interrupt on subagent rows (kimi's stop-on-row
-    // pattern; the old /subagents SettingsList-submenu panel is gone).
-    const openTasksBrowser = (): void => {
+    // row-level `S` = confirmed Stop on capable rows (the old /subagents
+    // SettingsList submenu is gone).
+    const openTasksBrowser = (viewMode: 'quick' | 'full' = 'full', restoreState?: TaskBrowserViewState): void => {
       if (liveAgent === undefined) return
       let jobSnapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
       if (jobs !== undefined) {
@@ -5621,6 +5643,7 @@ export function apply(ctx: Context, config: Config): void {
       const runtime = taskRuntime
       if (runtime !== undefined) {
         runtime.refreshRuntime()
+        taskBrowserRows = [...runtime.rows()]
       } else {
         taskBrowserRows = buildTaskRows(jobSnapshots, [])
       }
@@ -5651,40 +5674,120 @@ export function apply(ctx: Context, config: Config): void {
         }
         openJobView(row.jobId)
       }
-      const actionRow = (value: string, action: 'interrupt'): void => {
+      const actionRow = (value: string, action: 'stop' | 'interrupt'): void => {
+        // `interrupt` is accepted only for pre-refactor embedders. The
+        // production panel emits `stop` after its confirmation dialog.
+        if (action !== 'stop' && action !== 'interrupt') return
+        const actionGeneration = sessionGeneration
+        const actionSession = liveAgent
         const row = taskBrowserRows.find(candidate => candidate.value === value)
-        // The EXECUTION gate is the SAME predicate as the panel's
-        // advertisement gate (`isSubagentRowInterruptible`): only a
-        // continuable child with a LIVE running driver may fire the stop
-        // verb — a one-shot id is an accepted no-op (a fake action) and an
-        // idle continuable has no driver to stop. One predicate for both
-        // layers, so a panel change can never release an idle interrupt.
-        if (row === undefined || row.kind !== 'subagent' || !isSubagentRowInterruptible(row)) return
-        const service = ctx.get('subagents')
-        if (service === undefined || liveAgent === undefined) {
-          app.notify('subagent service unavailable', 'error')
+        if (row === undefined) return
+        // The EXECUTION gate is deliberately repeated at dispatch time. A
+        // refresh can make a row inactive between render and confirmation;
+        // stale UI must never release a new/idle task.
+        if (actionSession === undefined || actionGeneration !== sessionGeneration || liveAgent !== actionSession) return
+        if (row.kind === 'subagent') {
+          if (!isSubagentRowInterruptible(row)) return
+          // Re-read the live driver at confirmation time; the panel row is
+          // only a snapshot and may have become idle since it was rendered.
+          if (agents?.get(row.childId as SessionId)?.status !== 'running') return
+          const service = ctx.get('subagents')
+          if (service === undefined) {
+            app.notify('subagent service unavailable', 'error')
+            return
+          }
+          // The interrupt authority names the child's DURABLE DIRECT parent;
+          // deep descendants must not be addressed through the main root.
+          const interruptParent = subagentInterruptParent(row, actionSession.session.id) as SessionId
+          try {
+            service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: interruptParent })
+            app.notify(`stopping ${row.label}`, 'info')
+          } catch (error) {
+            app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+          }
           return
         }
-        // The interrupt authority must name the child's DURABLE DIRECT
-        // parent (DSH contract: `{ kind: 'user', parentSessionId }` is the
-        // exact parent; a deep descendant passed with the main session id
-        // is rejected as unauthorized). The row's OWN parentId is the
-        // durable address the tree already carries — a direct child falls
-        // back to the browser root (the live main session).
-        const interruptParent = subagentInterruptParent(row, liveAgent.session.id) as SessionId
-        service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: interruptParent })
-        app.notify(`interrupting ${row.label}`, 'info')
+        // Job stop is capability-gated to an actually active current record.
+        // Pass the live caller to the public registry API; no output/read
+        // cursor is touched by the UI.
+        if (jobs === undefined || !isActiveJobStatus(row.status)) return
+        try {
+          const current = jobs.get(row.jobId as JobId, actionSession)
+          if (current === undefined || !isActiveJobStatus(current.status)) return
+          const result = jobs.kill(row.jobId as JobId, actionSession, 'stopped from Task Center')
+          app.notify(result === 'already-finished' ? `${row.label} already finished` : `stopping ${row.label}`, 'info')
+        } catch (error) {
+          app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+        }
       }
+      const initialScope = restoreState?.scope ?? (viewMode === 'quick' ? 'active' : 'all')
+      const initialQuery = restoreState?.searchQuery ?? ''
+      const initialSelected = restoreState?.selectedId === 'task:view-all' ? undefined : restoreState?.selectedId ?? undefined
+      const initialPreferred = initialSelected
+        ?? taskBrowserRows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
+        ?? taskBrowserRows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
       const handle = app.openTaskBrowser(
         taskPanelItems(taskBrowserRows),
-        // Selection and cancel both close the overlay (the app closes it
-        // before invoking the callback): drop the active-handle reference
-        // so a later runtime refresh cannot repaint a closed browser.
+        // Selection closes the overlay (the app closes it before invoking the
+        // callback): drop the active-handle reference so a later runtime
+        // refresh cannot repaint a closed browser.
         (value) => { activeTaskBrowser = undefined; selectRow(value) },
-        () => { activeTaskBrowser = undefined },
-        { header: 'tasks · subagents', enableSearch: true, onAction: actionRow },
+        () => {
+          const current = activeTaskBrowser?.getViewState?.()
+          activeTaskBrowser = undefined
+          if (viewMode === 'full' && restoreState !== undefined) {
+            // Esc from a promoted full view returns to Quick with the latest
+            // shared context, not the state from the promotion moment.
+            const state = current ?? quickTaskState ?? restoreState
+            openTasksBrowser('quick', state)
+          }
+        },
+        {
+          header: 'Tasks',
+          enableSearch: true,
+          mode: viewMode,
+          openedFrom: viewMode === 'full' && restoreState !== undefined ? 'quick' : 'command',
+          scope: initialScope,
+          typeFilter: restoreState?.typeFilter,
+          initialQuery,
+          initialSearchMode: restoreState?.searchMode,
+          expandedIds: [...(restoreState?.expandedIds ?? [])],
+          collapsedIds: [...(restoreState?.collapsedIds ?? [])],
+          selectedId: initialSelected,
+          preferredValue: initialPreferred,
+          maxVisible: viewMode === 'quick' ? 8 : 18,
+          loading: runtime !== undefined && taskBrowserRows.length === 0,
+          groupLabels: true,
+          onRefresh: () => {
+            if (runtime === undefined) {
+              refreshTasks()
+              return
+            }
+            activeTaskBrowser?.setRefreshState?.('loading')
+            runOwned('task browser descendants', () => runtime.refreshCatalog(), {
+              diag,
+              sessionId: () => liveAgent?.session.id,
+              onError: (error) => activeTaskBrowser?.setRefreshState?.('stale', `Refresh failed: ${safeErrorMessage(error)}`),
+            })
+          },
+          onViewFull: state => {
+            activeTaskBrowser = undefined
+            quickTaskState = state
+            openTasksBrowser('full', state)
+          },
+          onStop: value => actionRow(value, 'stop'),
+        },
       )
       activeTaskBrowser = handle
+      if (runtime !== undefined) {
+        // Opening either view acknowledges only failure rows that are
+        // actually visible. Quick's Active scope leaves terminal failures
+        // pending when live work is present, so its badge remains useful.
+        const visibleFailures = handle.visibleItems?.()
+          .filter(item => item.attention === true)
+          .map(item => item.value) ?? []
+        if (visibleFailures.length > 0) runtime.acknowledge(visibleFailures)
+      }
       // The open triggers a CATALOG refresh (membership may have drifted
       // since the last listing): the coordinator fences it against a
       // session switch and commits through the ACTIVE handle — a browser
@@ -5695,6 +5798,7 @@ export function apply(ctx: Context, config: Config): void {
         runOwned('task browser descendants', () => runtime.refreshCatalog(), {
           diag,
           sessionId: () => liveAgent?.session.id,
+          onError: (error) => activeTaskBrowser?.setRefreshState?.('stale', `Refresh failed: ${safeErrorMessage(error)}`),
         })
       }
     }
@@ -6195,14 +6299,24 @@ export function apply(ctx: Context, config: Config): void {
     let activeTaskBrowser: TaskBrowserHandle | undefined
     let taskBrowserRows: TaskBrowserRow[] = []
     let taskRuntime: TaskBrowserRuntime | undefined
+    /** Context retained only while the full center was promoted from Quick. */
+    let quickTaskState: TaskBrowserViewState | undefined
     const jobs = ctx.get('jobs')
     if (jobs !== undefined) {
       refreshTasks = (): void => {
-        let tasks: { id: string; label: string; status: string; kind?: string }[] = []
+        let tasks: { id: string; label: string; status: string; kind?: string; startedAt?: number; finishedAt?: number }[] = []
         try {
-          tasks = jobs.list(liveAgent)
-            .filter(job => job.status === 'running' || job.status === 'stopping')
-            .map(job => ({ id: job.id, label: job.label, status: job.status, kind: job.kind }))
+          // Keep terminal records in the catalog. Active/total separation is
+          // a presentation fact; dropping completed/failed jobs here made
+          // Full Task Center history and failure attention impossible.
+          tasks = jobs.list(liveAgent).map(job => ({
+            id: job.id,
+            label: job.label,
+            status: job.status,
+            kind: job.kind,
+            startedAt: job.startedAt,
+            finishedAt: job.finishedAt,
+          }))
         } catch {
           // The registry read is best-effort; the dock line just stays stale.
         }
@@ -6271,7 +6385,13 @@ export function apply(ctx: Context, config: Config): void {
           label: entry.label,
           activity: 'running',
         }))),
+        commitSummary: (summary) => app.setTaskSummary(summary),
+        commitRefreshState: (state, error) => activeTaskBrowser?.setRefreshState?.(state, error),
       })
+      // Seed the summary synchronously from jobs before the durable catalog
+      // listing lands; this prevents a terminal/jobs-only first frame from
+      // claiming every record is still running.
+      taskRuntime.refreshRuntime()
       refreshAgents = (): void => {
         if (liveAgent === undefined) {
           app.setAgents([])

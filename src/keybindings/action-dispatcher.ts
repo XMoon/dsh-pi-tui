@@ -139,6 +139,18 @@ export class AppActionDispatcher {
       case 'question.pageUp':
       case 'question.pageDown':
       case 'question.toggleExpand':
+      case 'tasks.open':
+      case 'tasks.search.enter':
+      case 'tasks.search.exit':
+      case 'tasks.scope.toggle':
+      case 'tasks.type.next':
+      case 'tasks.tree.expand':
+      case 'tasks.tree.collapse':
+      case 'tasks.running.next':
+      case 'tasks.running.previous':
+      case 'tasks.stop':
+      case 'tasks.view.full':
+      case 'tasks.refresh':
       case 'tasks.confirm':
       case 'tasks.cancel':
       case 'tasks.cursorUp':

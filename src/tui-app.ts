@@ -67,7 +67,8 @@ import {
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
 import { ENABLE_FOCUS_REPORTING, isFocusReport } from './notification/terminal-focus.ts'
-import { TaskBrowserPanel, type TaskPanelItem } from './task-panel.ts'
+import { TaskBrowserPanel, type TaskBrowserViewState, type TaskPanelItem } from './task-panel.ts'
+import type { TaskBrowserSummary } from './task-browser-runtime.ts'
 import type { StatusStore } from './status/store.ts'
 import type { AccessStatus, CompositionStatus, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
 import { deriveActivityStatus } from './status/derive-activity.ts'
@@ -1421,7 +1422,7 @@ export interface PickerOptions {
 
 /** Options for {@link TuiApp.openTaskBrowser}. */
 export interface TaskBrowserOptions {
-  /** Show a search input; typing filters rows by value/label/status/detail. */
+  /** Show explicit `/` search mode when true. */
   enableSearch?: boolean
   /** Title line above the rows (carries live counts). */
   header?: string
@@ -1429,16 +1430,39 @@ export interface TaskBrowserOptions {
   noMatchText?: string
   /** Pre-fill the search input. */
   initialQuery?: string
-  /** Overlay width in cells (default 72). */
-  width?: number
-  /** Overlay max height in rows (default 24). */
-  maxHeight?: number
+  /** Preserve explicit search-mode state during Quick/Full transitions. */
+  initialSearchMode?: boolean
+  /** Overlay width in cells, or a terminal-width percentage. */
+  width?: number | `${number}%`
+  /** Overlay max height in rows, or a terminal-height percentage. */
+  maxHeight?: number | `${number}%`
   /** Rows visible before the list scrolls (default 10). */
   maxVisible?: number
-  /** Row-level action (e.g. `i` = interrupt a subagent). Fires for the
-   * selected row while the search box is closed; the row value carries the
-   * picker identity (`agent:…` / `job:…`). */
+  /** Quick or full presentation mode. Omit for legacy picker behavior. */
+  mode?: 'quick' | 'full'
+  /** Whether Esc from full should return to a Quick Tasks parent. */
+  openedFrom?: 'quick' | 'command'
+  scope?: 'active' | 'all'
+  typeFilter?: string | null
+  expandedIds?: readonly string[]
+  collapsedIds?: readonly string[]
+  selectedId?: string
+  preferredValue?: string
+  /** Initial loading state while the runtime catalog is being fetched. */
+  loading?: boolean
+  /** Cached rows remain visible with this refresh failure. */
+  refreshError?: string
+  /** Use `Subagents / transcripts` and `Jobs / executions` group labels. */
+  groupLabels?: boolean
+  /** Re-list task data. */
+  onRefresh?: () => void
+  /** Quick Tasks → full Task Center transition. */
+  onViewFull?: (state: TaskBrowserViewState) => void
+  /** Legacy row-level action (`i` interrupt) for mode-less direct callers;
+   * the signature is unchanged so typed old embedders keep compiling. */
   onAction?: (value: string, action: 'interrupt') => void
+  /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
+  onStop?: (value: string) => void
 }
 
 /** Live control of an open picker. */
@@ -1480,6 +1504,12 @@ export interface TaskBrowserHandle {
    * else the first active job; the tree itself never re-sorts for the
    * cursor). */
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void
+  /** Update loading/ready/stale state without replacing cached rows. */
+  setRefreshState?(state: 'loading' | 'ready' | 'stale', error?: string): void
+  /** Read the presentation state for a Quick → Full transition. */
+  getViewState?(): TaskBrowserViewState
+  /** Read projected rows for failure acknowledgement and tests. */
+  visibleItems?(): readonly TaskPanelItem[]
 }
 
 /** Footer status data supplied by the runner. */
@@ -1931,7 +1961,7 @@ export class TuiApp {
    * rendered only while a goal is set (display-only).
    */
   private readonly goalLine: Text
-  /** Active background tasks for the footer badge (label + status). */
+  /** Job records retained for the footer/runtime compatibility mirror. */
   private dockTasks: readonly { id: string; label: string; status: string; kind?: string }[] = []
   /** Live child subagents (continuable or running one-shot) for the footer badge (never jobs records). */
   private dockAgents: readonly { id: string; label: string; activity: string }[] = []
@@ -1946,6 +1976,17 @@ export class TuiApp {
 
   /** Whether any background task is running/stopping. */
   private tasksActive = false
+  /** Independent Task Center counts; footer consumes this through status. */
+  private taskSummary: TaskBrowserSummary = {
+    runningAgents: 0,
+    totalAgents: 0,
+    runningJobs: 0,
+    totalJobs: 0,
+    failedAttention: 0,
+    failedTotal: 0,
+  }
+  /** Legacy direct setters have no terminal totals; production runtime sets this. */
+  private taskSummaryRich = false
 
   /**
    * The seat currently owning keyboard focus, derived from the ACTUAL
@@ -7660,7 +7701,7 @@ export class TuiApp {
   /**
    * The task-browser trigger semantic — ONE definition shared by the ↓
    * routing gate, the viewer's parent-lock, and the footer's `↓ view`
-   * hint: active background tasks, no overlay entries, an EMPTY VISIBLE
+   * hint: active background tasks or failure attention, no overlay entries, an EMPTY VISIBLE
    * seat editor in PROMPT mode. The visible seat decides (a shell-mode
    * empty body is composing a command; a plugin replacement editor
    * contributes its own text/mode) — the hidden host editor's draft is
@@ -9475,8 +9516,13 @@ export class TuiApp {
         this.busy,
         {
           queuedCount: this.queueItems.length,
-          taskCount: this.dockTasks.length,
-          childAgentCount: this.dockAgents.length,
+          taskCount: this.taskSummaryRich ? this.taskSummary.runningJobs : this.dockTasks.length,
+          childAgentCount: this.taskSummaryRich ? this.taskSummary.runningAgents : this.dockAgents.length,
+          ...(this.taskSummaryRich ? {
+            taskTotalCount: this.taskSummary.totalJobs,
+            childAgentTotalCount: this.taskSummary.totalAgents,
+            failedTaskCount: this.taskSummary.failedAttention,
+          } : {}),
           todoCount: this.todoItems.length,
         },
       ),
@@ -9509,8 +9555,8 @@ export class TuiApp {
     host.updateActivity({
       working: this.working.isActive(),
       queuedCount: this.queueItems.length,
-      taskCount: this.dockTasks.length,
-      childAgentCount: this.dockAgents.length,
+      taskCount: this.taskSummaryRich ? this.taskSummary.runningJobs : this.dockTasks.length,
+      childAgentCount: this.taskSummaryRich ? this.taskSummary.runningAgents : this.dockAgents.length,
       todoCount: this.todoItems.length,
       // The rendered todo summary (P1-5: the first-party builtin dock item
       // renders it through the public slot API; the host provides the
@@ -9692,13 +9738,22 @@ export class TuiApp {
   }
 
   /**
-   * Replace the active background-task list for the footer badge. Non-empty
-   * sets arm the ↓/Ctrl+J task-browser trigger.
-   * @param tasks - active jobs (id + label + lifecycle status), empty to hide.
+   * Replace the background-job snapshot used by the footer badge. The
+   * runtime-backed caller supplies terminal records too; the rich summary
+   * separates active and total counts. Non-empty active/attention sets arm
+   * the footer ↓ Task Center trigger.
+   * @param tasks - job records (id + label + lifecycle status), empty to hide.
    */
   setTasks(tasks: readonly { id: string; label: string; status: string; kind?: string }[]): void {
     this.dockTasks = tasks
-    this.tasksActive = tasks.length > 0 || this.dockAgents.length > 0
+    // In RICH mode the running/total counts come ONLY from the runtime's
+    // commitSummary (setTaskSummary) — never derived from whatever list a
+    // caller happens to pass here: the badge callback may legitimately
+    // receive a subset (e.g. running-only) and length-based derivation
+    // would corrupt the totals. setTasks/setAgents stay pure UI mirrors.
+    this.tasksActive = this.taskSummaryRich
+      ? this.taskSummary.runningJobs > 0 || this.taskSummary.runningAgents > 0 || this.taskSummary.failedAttention > 0
+      : tasks.length > 0 || this.dockAgents.length > 0
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.syncExtensionState()
@@ -9707,18 +9762,30 @@ export class TuiApp {
   /**
    * Replace the live child-subagent list for the footer badge. Continuable
    * children and foreground one-shot children never register jobs records
-   * (AGENTS.md), so they arm the ↓/Ctrl+J trigger through this channel.
+   * (AGENTS.md), so they arm the footer ↓ trigger through this channel.
    * @param agents - live children (id + label + activity), empty to hide.
    */
   setAgents(agents: readonly { id: string; label: string; activity: string }[]): void {
     this.dockAgents = agents
-    this.tasksActive = this.dockTasks.length > 0 || agents.length > 0
+    // RICH mode: see the setTasks note — counts are commitSummary-owned.
+    this.tasksActive = this.taskSummaryRich
+      ? this.taskSummary.runningJobs > 0 || this.taskSummary.runningAgents > 0 || this.taskSummary.failedAttention > 0
+      : this.dockTasks.length > 0 || agents.length > 0
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.syncExtensionState()
   }
 
-  /** Whether background tasks are active (drives the ↓/Ctrl+J trigger). */
+  /** Commit the runtime-owned Task Center totals and failure attention. */
+  setTaskSummary(summary: TaskBrowserSummary): void {
+    this.taskSummary = { ...summary }
+    this.taskSummaryRich = true
+    this.tasksActive = summary.runningJobs > 0 || summary.runningAgents > 0 || summary.failedAttention > 0
+    this.projectActivity()
+    this.syncExtensionState()
+  }
+
+  /** Whether background tasks or unacknowledged failures are available. */
   isTasksActive(): boolean {
     return this.tasksActive
   }
@@ -9948,7 +10015,7 @@ export class TuiApp {
    * ─ line here visually collides with the editor's own full-width border
    * (user feedback); the summary reads as an info line, and only the
    * EXPANDED todo panel (Ctrl+T) carries a panel border. Background-task and
-   * subagent details live in the footer badge and the ↓/Ctrl+J browser ONLY
+   * subagent details live in the footer badge and the footer ↓ browser ONLY
    * — every fact has exactly one home.
    */
   private renderDock(): void {
@@ -10691,8 +10758,8 @@ export class TuiApp {
   }
 
   /**
-   * Open the task browser overlay (the ↓ / Ctrl+J trigger with an empty
-   * editor, and /tasks). Unlike the generic {@link openPicker}, rows carry a
+   * Open the task browser overlay (the footer ↓ Quick Tasks trigger or
+   * `/tasks` Full Task Center). Unlike the generic {@link openPicker}, rows carry a
    * status word + start timestamp so the panel can render status dots,
    * right-aligned status/elapsed columns, live counts, and a 1s elapsed
    * tick. Selection calls `onSelect` with the row value and closes; Esc
@@ -10714,7 +10781,17 @@ export class TuiApp {
     // tick: the inert overlay handle would never dispose the panel, so
     // the unref'd interval would keep firing into the dead panel.
     if (this.disposed) {
-      return { close: () => {}, setItems: () => {} }
+      return { close: () => {}, setItems: () => {}, setRefreshState: () => {}, getViewState: () => ({
+        mode: options.mode ?? 'full',
+        openedFrom: options.openedFrom ?? 'command',
+        scope: options.scope ?? (options.mode === 'quick' ? 'active' : 'all'),
+        typeFilter: options.typeFilter ?? null,
+        searchMode: options.initialSearchMode ?? false,
+        searchQuery: options.initialQuery ?? '',
+        selectedId: options.selectedId ?? options.preferredValue ?? null,
+        expandedIds: new Set(options.expandedIds ?? []),
+        collapsedIds: new Set(options.collapsedIds ?? []),
+      }), visibleItems: () => [] }
     }
     const panel = new TaskBrowserPanel(
       items.map(item => ({ ...item })),
@@ -10724,7 +10801,25 @@ export class TuiApp {
         noMatchText: options.noMatchText,
         enableSearch: options.enableSearch,
         initialQuery: options.initialQuery,
+        initialSearchMode: options.initialSearchMode,
         onAction: options.onAction,
+        onStop: options.onStop,
+        onRefresh: options.onRefresh,
+        onViewFull: state => {
+          close()
+          options.onViewFull?.(state)
+        },
+        mode: options.mode,
+        openedFrom: options.openedFrom,
+        initialScope: options.scope,
+        initialTypeFilter: options.typeFilter,
+        initialExpandedIds: options.expandedIds,
+        initialCollapsedIds: options.collapsedIds,
+        initialSelectedId: options.selectedId,
+        initialPreferredValue: options.preferredValue,
+        loading: options.loading,
+        refreshError: options.refreshError,
+        groupLabels: options.groupLabels,
       },
       (value) => {
         close()
@@ -10736,7 +10831,11 @@ export class TuiApp {
       },
       () => this.requestRender(),
     )
-    const handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), { width: options.width ?? 72, maxHeight: options.maxHeight ?? 24 })
+    const handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
+      width: options.width ?? (options.mode === 'full' ? '100%' : 72),
+      maxHeight: options.maxHeight ?? (options.mode === 'full' ? '100%' : 16),
+      margin: options.mode === 'full' ? 1 : undefined,
+    })
     // One close path: hide the overlay AND stop the panel's 1s elapsed tick
     // (an unref'd interval must still be cleared — the panel is gone).
     // `close` is a `let` declared before the panel callbacks above reference
@@ -10754,6 +10853,12 @@ export class TuiApp {
         panel.setItems(next.map(item => ({ ...item })), preferredValue)
         this.requestRender()
       },
+      setRefreshState: (state, error) => {
+        panel.setRefreshState(state, error)
+        this.requestRender()
+      },
+      getViewState: () => panel.getViewState(),
+      visibleItems: () => panel.visibleItems(),
     }
   }
 

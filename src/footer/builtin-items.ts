@@ -120,13 +120,15 @@ const modelItem: FooterItemDefinition = {
   },
 }
 
-/** The combined task/agent badge (legacy form): `[N tasks running · M
- * agents · ↓ view]` — the ↓ hint advertises the task browser on an empty
- * editor (the host-owned surface context, never business state). */
+/**
+ * The Task Center badge. Legacy snapshots (which predate totals) retain the
+ * old wording for embedders; the runtime-backed snapshot uses independent
+ * running/total job and agent counts and a persistent failure marker.
+ */
 const tasksItem: FooterItemDefinition = {
   id: 'tasks',
   label: 'Tasks',
-  description: 'The combined background-task/subagent badge with the ↓ view hint.',
+  description: 'The Task Center running/total badge with failure attention and the ↓ view hint.',
   defaultZone: 'left',
   defaultImportance: 85,
   formats: ['badge'],
@@ -135,26 +137,50 @@ const tasksItem: FooterItemDefinition = {
     if (snapshot.view.subject.kind !== 'main') return null
     const tasks = snapshot.activity.taskCount
     const agents = snapshot.activity.childAgentCount
-    if (tasks <= 0 && agents <= 0) return null
-    // The ↓ hint mirrors the ROUTING GATE exactly (a P2 regression once
-    // shrunk it to "host editor empty" — a shell-mode empty body and a
-    // plugin replacement editor with a draft then advertised a ↓ that
-    // the gate refuses): the visible prompt-mode seat editor with no
-    // overlays can actually open the browser.
-    const hint = context.taskBrowserAvailable ? ' · ↓ view' : ''
-    if (density === 'compact') {
-      // The compact badge: `[1t·2a·↓]` — one-letter count codes, the ↓
-      // hint kept as a bare marker.
+    const failed = snapshot.activity.failedTaskCount ?? 0
+    const rich = snapshot.activity.taskTotalCount !== undefined
+      || snapshot.activity.childAgentTotalCount !== undefined
+      || snapshot.activity.failedTaskCount !== undefined
+    if (!rich) {
+      if (tasks <= 0 && agents <= 0) return null
+      // The old direct-setter contract remains available to non-runtime
+      // embedders. Production Task Center snapshots always take the branch
+      // below.
+      const hint = context.taskBrowserAvailable ? ' · ↓ view' : ''
+      if (density === 'compact') {
+        const parts: string[] = []
+        if (tasks > 0) parts.push(`${tasks}t`)
+        if (agents > 0) parts.push(`${agents}a`)
+        if (context.taskBrowserAvailable) parts.push('↓')
+        return { spans: [{ text: `[${parts.join('·')}]`, tone: 'primary' }] }
+      }
       const parts: string[] = []
-      if (tasks > 0) parts.push(`${tasks}t`)
-      if (agents > 0) parts.push(`${agents}a`)
+      if (tasks > 0) parts.push(`${tasks} task${tasks === 1 ? '' : 's'} running`)
+      if (agents > 0) parts.push(`${agents} agent${agents === 1 ? '' : 's'}`)
+      return { spans: [{ text: `[${parts.join(' · ')}${hint}]`, tone: 'primary' }] }
+    }
+    const totalJobs = snapshot.activity.taskTotalCount ?? tasks
+    const totalAgents = snapshot.activity.childAgentTotalCount ?? agents
+    if (tasks <= 0 && agents <= 0 && failed <= 0) return null
+    const hint = context.taskBrowserAvailable ? ' · ↓ view' : ''
+    const tone = failed > 0 ? 'warning' : 'primary'
+    if (density === 'compact') {
+      const parts: string[] = []
+      if (failed > 0) parts.push(`!${failed}`)
+      if (tasks > 0 || agents > 0) {
+        parts.push(`●${agents}/${totalAgents}a`)
+        parts.push(`${tasks}/${totalJobs}j`)
+      }
       if (context.taskBrowserAvailable) parts.push('↓')
-      return { spans: [{ text: `[${parts.join('·')}]`, tone: 'primary' }] }
+      return { spans: [{ text: `[${parts.join('·')}]`, tone }] }
     }
     const parts: string[] = []
-    if (tasks > 0) parts.push(`${tasks} task${tasks === 1 ? '' : 's'} running`)
-    if (agents > 0) parts.push(`${agents} agent${agents === 1 ? '' : 's'}`)
-    return { spans: [{ text: `[${parts.join(' · ')}${hint}]`, tone: 'primary' }] }
+    if (failed > 0) parts.push(`! ${failed} failed`)
+    if (tasks > 0 || agents > 0) {
+      parts.push(`● ${agents}/${totalAgents} agents`)
+      parts.push(`${tasks}/${totalJobs} jobs`)
+    }
+    return { spans: [{ text: `[${parts.join(' · ')}${hint}]`, tone }] }
   },
 }
 
