@@ -11105,8 +11105,16 @@ export class TuiApp {
     // dimension, then everything clamps to the margin-inset available
     // area (full mode keeps the 1-cell margin).
     const fullMode = options.mode === 'full'
-    const overlayWidth: number | `${number}%` = options.width ?? (fullMode ? '100%' : 72)
-    const overlayMaxHeight: number | `${number}%` = options.maxHeight ?? (fullMode ? '100%' : 16)
+    // A non-finite numeric option (NaN) falls back to the mode default —
+    // the fork would otherwise resolve the geometry to NaN (review NIT).
+    const widthOption = typeof options.width === 'number' && !Number.isFinite(options.width)
+      ? undefined
+      : options.width
+    const maxHeightOption = typeof options.maxHeight === 'number' && !Number.isFinite(options.maxHeight)
+      ? undefined
+      : options.maxHeight
+    const overlayWidth: number | `${number}%` = widthOption ?? (fullMode ? '100%' : 72)
+    const overlayMaxHeight: number | `${number}%` = maxHeightOption ?? (fullMode ? '100%' : 16)
     const resolveSize = (value: number | `${number}%`, dimension: number, avail: number): number => {
       const pixels = typeof value === 'number' ? value : Math.floor((dimension * parseFloat(value)) / 100)
       return Math.max(1, Math.min(pixels, avail))
