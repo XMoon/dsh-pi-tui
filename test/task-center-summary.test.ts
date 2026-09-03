@@ -29,3 +29,38 @@ test('Task Center footer shows separate running/total counts and failure attenti
   assert.ok(compact)
   assert.equal(plain(renderSpans(compact.spans)), '[!1·●2/7a·1/3j·↓]')
 })
+
+test('Task Center footer renders only the ACTIVE kinds (PR review polish)', () => {
+  const item = registry.get('tasks')!
+  const render = (patch: (mut: Mutable<StatusSnapshot>) => void, density: 'preferred' | 'compact' = 'preferred'): string => {
+    const snap = emptyStatusSnapshot() as Mutable<StatusSnapshot>
+    patch(snap)
+    const segment = item.render(snap as StatusSnapshot, ref, density, context)
+    return segment === null ? '' : plain(renderSpans(segment.spans))
+  }
+  // Jobs only: no ●0/0 agents noise.
+  assert.equal(render(snap => {
+    snap.activity.taskCount = 1
+    snap.activity.taskTotalCount = 3
+  }), '[● 1/3 jobs · ↓ view]')
+  assert.equal(render(snap => {
+    snap.activity.taskCount = 1
+    snap.activity.taskTotalCount = 3
+  }, 'compact'), '[1/3j·↓]')
+  // Agents only: no 0/0 jobs noise.
+  assert.equal(render(snap => {
+    snap.activity.childAgentCount = 2
+    snap.activity.childAgentTotalCount = 7
+  }), '[● 2/7 agents · ↓ view]')
+  assert.equal(render(snap => {
+    snap.activity.childAgentCount = 2
+    snap.activity.childAgentTotalCount = 7
+  }, 'compact'), '[●2/7a·↓]')
+  // Failure-only stays the failure badge (no zero counts).
+  assert.equal(render(snap => {
+    snap.activity.failedTaskCount = 1
+  }), '[! 1 failed · ↓ view]')
+  assert.equal(render(snap => {
+    snap.activity.failedTaskCount = 1
+  }, 'compact'), '[!1·↓]')
+})

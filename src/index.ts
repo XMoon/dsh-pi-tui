@@ -5615,6 +5615,13 @@ export function apply(ctx: Context, config: Config): void {
     // SettingsList submenu is gone).
     const openTasksBrowser = (viewMode: 'quick' | 'full' = 'full', restoreState?: TaskBrowserViewState): void => {
       if (liveAgent === undefined) return
+      // The destructive-intent fence is captured at OPEN time: a Stop
+      // confirmed later belongs to THIS surface's session. Comparing the
+      // generation/session AT dispatch against values captured AT dispatch
+      // (as in an earlier revision) could never fail — the intent must be
+      // bound to the browser that hosted the confirmation (PR review P1).
+      const browserGeneration = sessionGeneration
+      const browserSession = liveAgent
       let jobSnapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
       if (jobs !== undefined) {
         try {
@@ -5678,14 +5685,15 @@ export function apply(ctx: Context, config: Config): void {
         // `interrupt` is accepted only for pre-refactor embedders. The
         // production panel emits `stop` after its confirmation dialog.
         if (action !== 'stop' && action !== 'interrupt') return
-        const actionGeneration = sessionGeneration
-        const actionSession = liveAgent
         const row = taskBrowserRows.find(candidate => candidate.value === value)
         if (row === undefined) return
-        // The EXECUTION gate is deliberately repeated at dispatch time. A
-        // refresh can make a row inactive between render and confirmation;
-        // stale UI must never release a new/idle task.
-        if (actionSession === undefined || actionGeneration !== sessionGeneration || liveAgent !== actionSession) return
+        // The SURFACE fence: the user's destructive intent is bound to the
+        // session that owned this browser when it opened. A session that
+        // switched after the browser opened (or while a confirmation was
+        // pending) must never be stopped by the stale confirmation — the
+        // captured browser values, not the dispatch-time values, are the
+        // comparison side that can actually fail.
+        if (sessionGeneration !== browserGeneration || liveAgent !== browserSession) return
         if (row.kind === 'subagent') {
           if (!isSubagentRowInterruptible(row)) return
           // Re-read the live driver at confirmation time; the panel row is
@@ -5698,7 +5706,7 @@ export function apply(ctx: Context, config: Config): void {
           }
           // The interrupt authority names the child's DURABLE DIRECT parent;
           // deep descendants must not be addressed through the main root.
-          const interruptParent = subagentInterruptParent(row, actionSession.session.id) as SessionId
+          const interruptParent = subagentInterruptParent(row, browserSession.session.id) as SessionId
           try {
             service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: interruptParent })
             app.notify(`stopping ${row.label}`, 'info')
@@ -5712,9 +5720,9 @@ export function apply(ctx: Context, config: Config): void {
         // cursor is touched by the UI.
         if (jobs === undefined || !isActiveJobStatus(row.status)) return
         try {
-          const current = jobs.get(row.jobId as JobId, actionSession)
+          const current = jobs.get(row.jobId as JobId, browserSession)
           if (current === undefined || !isActiveJobStatus(current.status)) return
-          const result = jobs.kill(row.jobId as JobId, actionSession, 'stopped from Task Center')
+          const result = jobs.kill(row.jobId as JobId, browserSession, 'stopped from Task Center')
           app.notify(result === 'already-finished' ? `${row.label} already finished` : `stopping ${row.label}`, 'info')
         } catch (error) {
           app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
@@ -5763,11 +5771,15 @@ export function apply(ctx: Context, config: Config): void {
               refreshTasks()
               return
             }
-            activeTaskBrowser?.setRefreshState?.('loading')
+            // Refresh state is SINGLE-OWNER: only the coordinator's
+            // commitRefreshState (fenced by session key + request epoch)
+            // may set loading/ready/stale on the presentation. The runner
+            // must never touch setRefreshState directly — an unfenced
+            // onError here could mark a NEW session's browser as failed
+            // when the OLD session's listing rejects (PR review P1).
             runOwned('task browser descendants', () => runtime.refreshCatalog(), {
               diag,
               sessionId: () => liveAgent?.session.id,
-              onError: (error) => activeTaskBrowser?.setRefreshState?.('stale', `Refresh failed: ${safeErrorMessage(error)}`),
             })
           },
           onViewFull: state => {
@@ -5780,10 +5792,13 @@ export function apply(ctx: Context, config: Config): void {
       )
       activeTaskBrowser = handle
       if (runtime !== undefined) {
-        // Opening either view acknowledges only failure rows that are
-        // actually visible. Quick's Active scope leaves terminal failures
-        // pending when live work is present, so its badge remains useful.
-        const visibleFailures = handle.visibleItems?.()
+        // Opening either view acknowledges only failure rows the user can
+        // ACTUALLY see: the open viewport (scroll window), never the whole
+        // projection. A failure below the fold is not "seen" and keeps its
+        // footer attention until the user scrolls it into view (PR review
+        // M1). Quick's Active scope leaves terminal failures pending while
+        // live work is present, so its badge remains useful.
+        const visibleFailures = handle.viewportItems?.()
           .filter(item => item.attention === true)
           .map(item => item.value) ?? []
         if (visibleFailures.length > 0) runtime.acknowledge(visibleFailures)
@@ -5793,12 +5808,15 @@ export function apply(ctx: Context, config: Config): void {
       // session switch and commits through the ACTIVE handle — a browser
       // closed while the listing is in flight is never repainted. The
       // body above is synchronous, so the `runtime` captured for the
-      // first-frame seed is still the current coordinator.
+      // first-frame seed is still the current coordinator. Refresh state
+      // is single-owner: the coordinator's fenced commitRefreshState is
+      // the ONLY path that sets loading/ready/stale (an unfenced onError
+      // here could mark a new session's browser failed when an old
+      // session's listing rejects — PR review P1).
       if (runtime !== undefined) {
         runOwned('task browser descendants', () => runtime.refreshCatalog(), {
           diag,
           sessionId: () => liveAgent?.session.id,
-          onError: (error) => activeTaskBrowser?.setRefreshState?.('stale', `Refresh failed: ${safeErrorMessage(error)}`),
         })
       }
     }

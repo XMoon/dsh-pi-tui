@@ -65,6 +65,7 @@ function makeHarness(): {
   commits(): readonly TaskBrowserRow[][]
   preferreds(): readonly (string | undefined)[]
   badges(): readonly ReadonlyArray<{ id: string; label: string }>[]
+  refreshStates(): readonly { state: 'loading' | 'ready' | 'stale'; error?: string }[]
   setKey(key: string | undefined): void
   setStatus(id: string, status: string | undefined): void
   setJobs(jobs: readonly TaskBrowserJobInput[]): void
@@ -82,6 +83,7 @@ function makeHarness(): {
   const commits: TaskBrowserRow[][] = []
   const preferreds: (string | undefined)[] = []
   const badges: ReadonlyArray<{ id: string; label: string }>[] = []
+  const refreshStates: { state: 'loading' | 'ready' | 'stale'; error?: string }[] = []
   const runtime = new TaskBrowserRuntime({
     currentKey: () => key,
     listDescendants: () => {
@@ -98,6 +100,7 @@ function makeHarness(): {
       preferreds.push(preferred)
     },
     commitBadge: (running) => badges.push([...running]),
+    commitRefreshState: (state, error) => refreshStates.push({ state, ...(error === undefined ? {} : { error }) }),
   })
   return {
     runtime,
@@ -105,6 +108,7 @@ function makeHarness(): {
     commits: () => commits,
     preferreds: () => preferreds,
     badges: () => badges,
+    refreshStates: () => refreshStates,
     setKey: (next) => { key = next },
     setStatus: (id, status) => { if (status === undefined) statuses.delete(id); else statuses.set(id, status) },
     setJobs: (next) => { jobs = [...next] },
@@ -459,20 +463,30 @@ test('openTasksBrowser seeds the FIRST FRAME from the cached runtime and gates i
     'the interrupt execution gate must not drift back to a mode-only check')
 })
 
-test('Task Center dispatch re-validates session, driver and job state at confirm time (review round)', () => {
+test('Task Center dispatch re-validates session, driver and job state at confirm time (PR review P1)', () => {
   const marker = 'const actionRow = (value: string, action: \'stop\' | \'interrupt\'): void => {'
   const start = indexSource.indexOf(marker)
   const handler = indexSource.slice(start, start + 4000)
-  // The stale-confirm fence: the generation captured at dispatch must equal
-  // the CURRENT generation and the live agent must be unchanged.
-  assert.ok(handler.includes("actionGeneration !== sessionGeneration || liveAgent !== actionSession"),
-    'the dispatch must refuse a stale session generation')
+  // The STALE-CONFIRM fence must compare against values captured when the
+  // browser OPENED, never against values captured at dispatch — a
+  // dispatch-time capture can never differ from the current state, so the
+  // real protection is binding the intent to the opening surface.
+  assert.ok(handler.includes("sessionGeneration !== browserGeneration || liveAgent !== browserSession"),
+    'the dispatch must compare the current generation/session against the OPEN-time capture')
+  const openMarker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const openHead = indexSource.slice(indexSource.indexOf(openMarker), indexSource.indexOf(openMarker) + 900)
+  assert.ok(openHead.includes('const browserGeneration = sessionGeneration'),
+    'the browser must capture the generation at open')
+  assert.ok(openHead.includes('const browserSession = liveAgent'),
+    'the browser must capture the live agent at open')
+  assert.ok(!handler.includes('actionGeneration'),
+    'the dispatch must not re-capture the generation at dispatch time')
   // A subagent stop re-reads the LIVE driver before firing the interrupt.
   assert.ok(handler.includes("agents?.get(row.childId as SessionId)?.status !== 'running'"),
     'the dispatch must re-check the live registry driver at confirm time')
   // A job stop re-reads the current record through the public registry API.
-  assert.ok(handler.includes('jobs.get(row.jobId as JobId, actionSession)'),
-    'the dispatch must re-read the live job record before killing')
+  assert.ok(handler.includes('jobs.get(row.jobId as JobId, browserSession)'),
+    'the dispatch must re-read the live job record before killing through the surface session')
   assert.ok(handler.includes('!isActiveJobStatus(current.status)'),
     'a settled job must not be killable at confirm time')
 })
@@ -496,4 +510,57 @@ test('the Task Center surface never calls the consuming jobs read API (review ro
     'the browser must never consume the model-owned job output cursor')
   assert.ok(open.includes('jobs.get('),
     'metadata reads through the public get API are the only job access the surface needs')
+})
+
+test('Case E: an old session listing rejecting never marks the NEW session browser stale (PR review P1)', async () => {
+  const h = makeHarness()
+  // Session A starts a catalog refresh (pending listing).
+  const aListing = h.runtime.refreshCatalog()
+  assert.ok(h.refreshStates().some(state => state.state === 'loading'),
+    'the request itself surfaces loading under session A')
+  // The session switches to B before A's listing settles.
+  h.setKey('g2:sess-b')
+  h.setStatus('child-a', 'running')
+  h.runtime.refreshRuntime() // B's browser seeds its first frame
+  // A's listing rejects AFTER B owns the surface.
+  const failure = new Error('session A listing boom')
+  h.rejectListing(0, failure)
+  await assert.rejects(aListing, failure)
+  // The fenced coordinator commits NO stale/ready state after the switch:
+  // loading was the only A-owned transition, and B's seed must NOT have
+  // been followed by a stale marker.
+  const afterSwitch = h.refreshStates()
+  assert.ok(!afterSwitch.some(state => state.state === 'stale'),
+    `the new session must never see the old listing's failure:\n${JSON.stringify(afterSwitch)}`)
+})
+
+test('Case E2: the SAME session listing failure still surfaces stale (the fenced path works)', async () => {
+  const h = makeHarness()
+  const listing = h.runtime.refreshCatalog()
+  h.rejectListing(0, new Error('same-session boom'))
+  await assert.rejects(listing, /same-session boom/)
+  assert.ok(h.refreshStates().some(state => state.state === 'stale' && state.error === 'same-session boom'),
+    'a same-session failure must surface the stale notice')
+})
+
+test('the runner never sets refresh state outside the runtime fence (PR review P1)', () => {
+  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
+  // The open-browser body is the ONLY owner of the panel: an unfenced
+  // onError calling activeTaskBrowser.setRefreshState would let a stale
+  // session's failure mark a NEW session's browser — the fence must be
+  // consulted for every loading/ready/stale commit.
+  assert.ok(!open.includes("onError: (error) => activeTaskBrowser?.setRefreshState?."),
+    'no unfenced setRefreshState may exist in the runner')
+  assert.ok(open.includes("commitRefreshState"),
+    'a fenced commitRefreshState binding must exist for the coordinator')
+})
+
+test('acknowledge on open uses the OPEN VIEWPORT only (PR review M1)', () => {
+  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
+  assert.ok(open.includes('handle.viewportItems?.()'),
+    'acknowledge must read the open viewport, never the whole projection')
+  assert.ok(!open.replace(/\/\/.*$/gm, '').includes('handle.visibleItems?.()\n          .filter(item => item.attention === true)'),
+    'the whole-projection acknowledge path must be gone')
 })
