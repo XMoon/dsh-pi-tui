@@ -194,7 +194,8 @@ test('CompactTextPreview is Unicode-safe, capped, and re-derived on resize', () 
   for (const line of wide) assert.ok(visibleWidth(line) <= 60, JSON.stringify(line))
   assert.deepEqual(preview.render(12), narrow, 'narrow cache must remain deterministic after a wide render')
   // Visually empty wrapped rows (blank lines, or rows carrying only style
-  // codes at tiny widths) never surface as blank preview rows.
+  // codes at tiny widths) never surface as blank preview rows in the
+  // COMPACT mode…
   const styled = new CompactTextPreview({
     text: 'line one\n\nline three',
     maxVisualRows: 3,
@@ -204,6 +205,17 @@ test('CompactTextPreview is Unicode-safe, capped, and re-derived on resize', () 
   assert.equal(rows.length, 2, `blank middle row must be dropped: ${rows.join('|')}`)
   assert.ok(rows[0]?.includes('line one'), rows.join('|'))
   assert.ok(rows[1]?.includes('line three'), rows.join('|'))
+  // …while EXPANDED bodies opt into preserveBlankLines: paragraph breaks
+  // in the original message must not be collapsed away.
+  const preserved = new CompactTextPreview({
+    text: 'line one\n\nline three',
+    maxVisualRows: 3,
+    indent: '  ',
+    preserveBlankLines: true,
+  })
+  const kept = preserved.render(60)
+  assert.equal(kept.length, 3, `blank paragraph row must survive: ${kept.join('|')}`)
+  assert.equal(stripTerminalSequences(kept[1] ?? ''), '  ', 'the paragraph row must render as the bare indent')
 })
 
 test('folded action cards show payloads and suppress successful receipts', async () => {
@@ -246,14 +258,19 @@ test('expanded action cards keep payloads, historical snapshots, and terminal ou
   startedApps.add(app)
   app.setToolOutputExpanded(true)
   app.setTranscript([
-    actionMessage('send_message', { agent_id: 'child-1', message: 'first line\nsecond line\nthird line' }, 'message delivered to agent child-1'),
+    actionMessage('send_message', { agent_id: 'child-1', message: 'First instruction.\n\nSecond instruction.' }, 'message delivered to agent child-1'),
     actionMessage('terminal_send', { sessionId: 'pty-3', text: 'export FOO=1\nmake test' }, 'viewport output\n[wait: stdin_read]'),
     actionMessage('list_agents', { scope: 'children' }, '1 [running] — a\n2 [ready] — b'),
   ])
   const view = await viewport(vt)
-  assert.ok(view.includes('first line'), view)
-  assert.ok(view.includes('second line'), view)
-  assert.ok(view.includes('third line'), view)
+  const clean = view.split('\n').map(stripTerminalSequences)
+  assert.ok(view.includes('First instruction.'), view)
+  assert.ok(view.includes('Second instruction.'), view)
+  // Expanded fidelity: the original blank paragraph line survives between
+  // the two payload rows (row indices differ by two).
+  const first = clean.findIndex(line => line.includes('First instruction.'))
+  const second = clean.findIndex(line => line.includes('Second instruction.'))
+  assert.ok(first >= 0 && second - first === 2, `blank paragraph row missing:\n${view}`)
   assert.ok(view.includes('export FOO=1'), view)
   assert.ok(view.includes('make test'), view)
   assert.ok(view.includes('viewport output'), view)

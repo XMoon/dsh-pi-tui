@@ -17,6 +17,12 @@ export interface CompactTextPreviewOptions {
   readonly maxVisualRows: number
   /** Prefix applied to every returned row, normally two spaces. */
   readonly indent?: string
+  /**
+   * Whether blank content lines survive the row filter. The folded preview
+   * compresses them away by default (compact semantics); expanded bodies
+   * must preserve the original paragraph breaks.
+   */
+  readonly preserveBlankLines?: boolean
 }
 
 /**
@@ -40,19 +46,22 @@ export class CompactTextPreview implements Component {
   private readonly text: string
   private readonly maxVisualRows: number
   private readonly indent: string
+  private readonly preserveBlankLines: boolean
   private readonly cached = new Map<number, string[]>()
 
   constructor(options: CompactTextPreviewOptions)
-  constructor(text: string, maxVisualRows: number, indent?: string)
-  constructor(optionsOrText: CompactTextPreviewOptions | string, maxVisualRows?: number, indent = '  ') {
+  constructor(text: string, maxVisualRows: number, indent?: string, preserveBlankLines?: boolean)
+  constructor(optionsOrText: CompactTextPreviewOptions | string, maxVisualRows?: number, indent = '  ', preserveBlankLines = false) {
     if (typeof optionsOrText === 'string') {
       this.text = optionsOrText
       this.maxVisualRows = maxVisualRows ?? 0
       this.indent = indent
+      this.preserveBlankLines = preserveBlankLines
     } else {
       this.text = optionsOrText.text
       this.maxVisualRows = optionsOrText.maxVisualRows
       this.indent = optionsOrText.indent ?? '  '
+      this.preserveBlankLines = optionsOrText.preserveBlankLines ?? false
     }
   }
 
@@ -64,7 +73,7 @@ export class CompactTextPreview implements Component {
     const safeWidth = Math.max(1, Math.floor(width))
     const existing = this.cached.get(safeWidth)
     if (existing !== undefined) return existing
-    if (this.text === '' || this.maxVisualRows <= 0) {
+    if (this.maxVisualRows <= 0) {
       const empty: string[] = []
       this.cached.set(safeWidth, empty)
       return empty
@@ -78,11 +87,23 @@ export class CompactTextPreview implements Component {
     const prefix = indentWidth === requestedIndentWidth
       ? this.indent
       : truncateToWidth(this.indent, indentWidth, '')
+    if (this.text === '') {
+      // A blank content line survives only under preserveBlankLines: it
+      // renders as the bare indent row (the paragraph break). The folded
+      // compact mode omits it entirely.
+      const blank: string[] = this.preserveBlankLines ? [prefix] : []
+      this.cached.set(safeWidth, blank)
+      return blank
+    }
     const bodyWidth = Math.max(1, safeWidth - visibleWidth(prefix))
     // Drop visually empty wrapped rows: a first grapheme wider than the body
     // width would otherwise emit a leading blank row at tiny terminal widths
-    // — as plain text or as a row carrying only style codes.
-    const wrapped = wrapTextWithAnsi(this.text, bodyWidth).filter(row => visibleWidth(row) > 0)
+    // — as plain text or as a row carrying only style codes. Expanded bodies
+    // opt into preserveBlankLines, keeping genuine paragraph breaks.
+    const wrapped = wrapTextWithAnsi(this.text, bodyWidth).filter(row => {
+      if (visibleWidth(row) > 0) return true
+      return this.preserveBlankLines && row === ''
+    })
     const truncated = wrapped.length > this.maxVisualRows
     const shown = wrapped.slice(0, this.maxVisualRows)
     if (truncated && shown.length > 0) {
