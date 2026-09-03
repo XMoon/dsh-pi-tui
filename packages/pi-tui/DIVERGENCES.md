@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `90e00164136532282ebe4f97c658bc84f7bc53a1`
+- Audited local source commit: `f455abd18dfeb5758d0d8b5cf77013562d1f89d6`
 - Branch audited: `feat/vendor-divergence-ledger-hardening`
 - Audit date: `2026-09-03`
 - Upstream reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
@@ -22,7 +22,7 @@
 
 - Compared every local packages/pi-tui/src file with the pinned upstream blob.
 - Audited vendor-internal, inheritance/structural, host, public/extension, behavioral, and test/runtime ownership evidence.
-- Checked current local Pi and Kimi source snapshots for semantic comparison; issue and PR references are background only.
+- Compared recorded Pi and Kimi reference snapshots for semantic comparison; issue and PR references are background only.
 - Ran focused deletion experiments for X019, X030, X037, X038, X043, and X044; existing checks caught the first five, while X044 required a compile-only subclass fixture.
 - Historical removed and absorbed records were retained as explicit records instead of disappearing from the manifest.
 
@@ -193,7 +193,7 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 - packages/tui/src/components/select-list.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: The pinned and current upstream SelectList do not provide the host's combined search, grouping, dynamic setItems, and row-budget contract; Kimi's SearchableList is a separate state-object design, not an upstream equivalent.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference SelectList do not provide the host's combined search, grouping, dynamic setItems, and row-budget contract; Kimi's SearchableList is a separate state-object design, not an upstream equivalent.
 
 #### Retirement conditions
 
@@ -272,7 +272,7 @@ Open host pickers receive asynchronously enriched rows and must refresh without 
 - packages/tui/src/components/select-list.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream 0.84.4 has no setItems operation with query and selection preservation; the current upstream list still does not provide this contract.
+- Remaining semantic delta: Upstream 0.84.4 has no setItems operation with query and selection preservation; the audited upstream reference list still does not provide this contract.
 
 #### Retirement conditions
 
@@ -355,7 +355,7 @@ The former patch wrote a grapheme count into a code-unit cursor field. That coul
 
 #### Retirement evidence
 
-- Pinned and current source snapshots retain the upstream code-unit assignment.
+- The pinned baseline and the audited reference snapshots retain the upstream code-unit assignment.
 - Deletion experiment was the 2026-09 re-vendor itself: the ZWJ regression passes with the patch absent.
 - Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record retired.
 
@@ -420,7 +420,7 @@ Large bracketed pastes must not retain an unbounded duplicate registry in memory
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: The pinned and current upstream Editor stores every accepted paste; neither provides the local admission cap and inline fallback.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference Editor stores every accepted paste; neither provides the local admission cap and inline fallback.
 
 #### Retirement conditions
 
@@ -572,7 +572,7 @@ A provider that ignores AbortSignal must not block a newer completion request be
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Current upstream has request identity checks but retains a serial autocomplete task chain; it has not been proven equivalent to the local never-settling latest-wins behavior or host repaint route.
+- Remaining semantic delta: The audited upstream reference has request identity checks but retains a serial autocomplete task chain; it has not been proven equivalent to the local never-settling latest-wins behavior or host repaint route.
 
 #### Retirement conditions
 
@@ -590,7 +590,7 @@ A provider that ignores AbortSignal must not block a newer completion request be
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Current upstream source was inspected rather than inferred from issue status. The remaining serial task chain keeps equivalence PARTIAL.
+- Notes: The audited upstream reference source was inspected rather than inferred from issue status. The remaining serial task chain keeps equivalence PARTIAL.
 
 ### X006 — Word-forward skips punctuation at segment start
 
@@ -646,7 +646,7 @@ Forward word navigation should cross leading punctuation at the next word-like s
 - packages/tui/src/word-navigation.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned and current upstream stop before a leading punctuation segment in the audited case; the local helper deliberately advances past it.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference stop before a leading punctuation segment in the audited case; the local helper deliberately advances past it.
 
 #### Retirement conditions
 
@@ -736,7 +736,7 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - packages/tui/src/components/stack.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned upstream has no fork-wide optional dispose ownership graph. Current Pi has isolated disposable components, but not the host's Container/Stack/overlay exactly-once contract.
+- Remaining semantic delta: The pinned baseline has no fork-wide optional dispose ownership graph. The audited upstream reference has isolated disposable components, but not the host's Container/Stack/overlay exactly-once contract.
 
 #### Retirement conditions
 
@@ -961,7 +961,7 @@ An unbounded or corrupt ESC prefix must not trigger repeated large reslices. The
 - packages/tui/src/stdin-buffer.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: The pinned and current upstream buffer do not contain the local hard cap for an unterminated ESC prefix.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference buffer do not contain the local hard cap for an unterminated ESC prefix.
 
 #### Retirement conditions
 
@@ -1313,7 +1313,7 @@ The former local cleanup targeted _lastEventType. The field is still written by 
 **Behavioral coupling**
 - key-release behavior remains unchanged
 - the retained parser write is dead for isKeyRelease, which scans raw input
-- Audit note: The old cleanup is absorbed because the pinned/current source representation is identical; it is not evidence that isKeyRelease consumes _lastEventType.
+- Audit note: The old cleanup is absorbed because the pinned baseline/reference source representation is identical; it is not evidence that isKeyRelease consumes _lastEventType.
 
 #### Guarding tests
 
@@ -1328,7 +1328,7 @@ The former local cleanup targeted _lastEventType. The field is still written by 
 - packages/tui/src/keys.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned and current upstream retain the field and its parser writes, but isKeyRelease currently uses raw-sequence checks rather than reading _lastEventType; the local source matches the upstream baseline.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference retain the field and its parser writes, but isKeyRelease currently uses raw-sequence checks rather than reading _lastEventType; the local source matches the upstream baseline.
 
 #### Retirement conditions
 
@@ -1341,7 +1341,7 @@ The former local cleanup targeted _lastEventType. The field is still written by 
 #### Retirement evidence
 
 - git blob comparison at the pinned commit shows no local source divergence for X015.
-- Current upstream source retains the parser write; current isKeyRelease source was checked and does not read _lastEventType directly.
+- The audited upstream reference source retains the parser write; local isKeyRelease source was checked and does not read _lastEventType directly.
 - Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record absorbed.
 
 #### Audit record
@@ -1483,7 +1483,7 @@ Mouse handling belongs to the alternate fullscreen screen; regular mode remains 
 - packages/tui/src/tui-alt-screen.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned and current upstream assign mouse behavior to the alternate screen and leave regular mode mouse-free; local source matches.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference assign mouse behavior to the alternate screen and leave regular mode mouse-free; local source matches.
 
 #### Retirement conditions
 
@@ -1649,7 +1649,7 @@ Text.dispose is currently a no-op solely so Loader's dispose override and super.
 #### Retirement evidence
 
 - Current source proves a live Loader -> Text.dispose -> super.dispose inheritance edge.
-- The proposed replacement is local and atomic; no deletion experiment was run in this ledger task.
+- Deletion experiment: temporarily removing Text.dispose made the package typecheck fail in loader.ts with TS4113/TS2339 because Loader's override and super.dispose call lost their base member; the existing lifecycle tests remained green.
 
 #### Audit record
 
@@ -2025,7 +2025,7 @@ Fullscreen transcript lines reserve leading columns for a bullet/emoji. Copying 
 - packages/tui/src/tui-alt-screen.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream copySelection receives only flattened text and retains all leading spaces; neither pinned nor current source exposes selection start metadata for this rule.
+- Remaining semantic delta: Upstream copySelection receives only flattened text and retains all leading spaces; neither the pinned baseline nor the audited upstream reference exposes selection start metadata for this rule.
 
 #### Retirement conditions
 
@@ -2197,7 +2197,7 @@ The former local clipboard seam is now provided by Earendil 0.84.4 through copyS
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Historical absorbed record rechecked against pinned and current Pi source. It remains a real host capability, but no longer a local divergence.
+- Notes: Historical absorbed record rechecked against the pinned baseline and recorded Pi source. It remains a real host capability, but no longer a local divergence.
 
 ### X027 — fd directory typing does not rely on trailing separator
 
@@ -2241,7 +2241,7 @@ fd output can identify a directory without a trailing slash, including through s
 - bare directory lines remain directories
 - symlinks are followed by stat
 - failed stat keeps a trailing separator as a fallback
-- Audit note: Current upstream also changed nested/fuzzy ordering, which is not part of X027.
+- Audit note: The audited upstream reference also changed nested/fuzzy ordering, which is not part of X027.
 
 #### Guarding tests
 
@@ -2257,7 +2257,7 @@ fd output can identify a directory without a trailing slash, including through s
 - packages/tui/src/autocomplete.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned and current upstream classify plain fd lines by trailing slash and slice directory names; the local path uses stat first and avoids dropping the final character.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference classify plain fd lines by trailing slash and slice directory names; the local path uses stat first and avoids dropping the final character.
 
 #### Retirement conditions
 
@@ -2493,7 +2493,7 @@ The host imports decodePrintableKey from the package root for editor mode parsin
 - packages/tui/src/keys.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned and current upstream define decodePrintableKey in keys.ts but do not export it from the package root; the root public entry remains a real host dependency.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference define decodePrintableKey in keys.ts but do not export it from the package root; the root public entry remains a real host dependency.
 
 #### Retirement conditions
 
@@ -2569,7 +2569,7 @@ Marked GFM autolinks can absorb CJK or full-width punctuation after a bare URL. 
 - packages/tui/src/components/markdown.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned and current upstream marked configuration does not contain the CJK boundary tokenizer; the old landed-upstream note was incorrect.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference marked configuration does not contain the CJK boundary tokenizer; the old landed-upstream note was incorrect.
 
 #### Retirement conditions
 
@@ -2587,7 +2587,7 @@ Marked GFM autolinks can absorb CJK or full-width punctuation after a bare URL. 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Current pinned and current upstream source were checked; no issue closure was treated as absorption.
+- Notes: Both the pinned baseline and the audited upstream reference source were checked; no issue closure was treated as absorption.
 
 ### X032 — Container.render width clamp
 
@@ -2878,7 +2878,7 @@ Steady transcript frames should process only changed rendered line values. The h
 - packages/tui/src/tui.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned and current upstream reprocess every line each frame. Its bounded writer prevents huge output formation but does not replace value-based per-frame line reuse or the host render-cost contract.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference reprocess every line each frame. Its bounded writer prevents huge output formation but does not replace value-based per-frame line reuse or the host render-cost contract.
 
 #### Retirement conditions
 
@@ -3114,7 +3114,7 @@ Terminals and tmux can lose bracketed-paste markers and deliver a paste as rapid
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned and current upstream have no PasteBurst fallback or disable option. The local editor-internal terminal behavior cannot be judged unused from host imports.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference have no PasteBurst fallback or disable option. The local editor-internal terminal behavior cannot be judged unused from host imports.
 
 #### Retirement conditions
 
@@ -3190,7 +3190,7 @@ CJK-heavy host transcripts and width/theme invalidation bursts are intended to b
 - packages/tui/src/utils.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned and current upstream use a 512-entry cache; local uses 4096 intending to reduce CJK burst thrashing, but an isolated 4096-versus-512 measurement remains pending.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference use a 512-entry cache; local uses 4096 intending to reduce CJK burst thrashing, but an isolated 4096-versus-512 measurement remains pending.
 
 #### Retirement conditions
 
@@ -3271,7 +3271,7 @@ Prefilled query and draft inputs should place the cursor at the end by default, 
 - packages/tui/src/components/select-list.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned and current upstream setValue preserves/clamps the existing cursor at zero for a fresh Input; they do not provide the local end-by-default plus explicit preserve option.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference setValue preserves/clamps the existing cursor at zero for a fresh Input; they do not provide the local end-by-default plus explicit preserve option.
 
 #### Retirement conditions
 
@@ -3590,7 +3590,7 @@ The host TuiEditor subclass needs to drive explicit/context-gated completion and
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned and current upstream keep both methods private; the host subclass cannot express its supported completion control without the visibility divergence.
+- Remaining semantic delta: Both the pinned baseline and the audited upstream reference keep both methods private; the host subclass cannot express its supported completion control without the visibility divergence.
 
 #### Retirement conditions
 
@@ -3608,7 +3608,7 @@ The host TuiEditor subclass needs to drive explicit/context-gated completion and
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed the subclass edge and kept the seam; current upstream private visibility is not semantically equivalent.
+- Notes: Confirmed the subclass edge and kept the seam; audited upstream reference private visibility is not semantically equivalent.
 
 ### X045 — Editor expanded-cursor mapping getExpandedCursor
 
