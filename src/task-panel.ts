@@ -58,6 +58,13 @@ export interface TaskPanelOptions {
   onAction?: (value: string, action: 'interrupt') => void
   /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
   onStop?: (value: string) => void
+  /**
+   * Called ONCE per attention row the first time it enters the open
+   * viewport (scroll window), with the fresh ids. The runner uses it to
+   * acknowledge failures the user has actually seen — including rows
+   * scrolled into view AFTER the panel opened (PR review P1/P2).
+   */
+  onViewportExpose?: (ids: readonly string[]) => void
   /** Re-list the runtime catalog. */
   onRefresh?: () => void
   /** Quick Tasks → full Task Center. */
@@ -143,6 +150,8 @@ export class TaskBrowserPanel implements Component, Focusable {
   private readonly onCancel: () => void
   private readonly onAction: ((value: string, action: 'interrupt') => void) | undefined
   private readonly onStop: ((value: string) => void) | undefined
+  private readonly onViewportExpose: ((ids: readonly string[]) => void) | undefined
+  private readonly exposedAttention = new Set<string>()
   private readonly onRefresh: (() => void) | undefined
   private readonly onViewFull: ((state: TaskBrowserViewState) => void) | undefined
   private now = Date.now()
@@ -171,6 +180,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.onCancel = onCancel
     this.onAction = options.onAction
     this.onStop = options.onStop
+    this.onViewportExpose = options.onViewportExpose
     this.onRefresh = options.onRefresh
     this.onViewFull = options.onViewFull
     this.requestRender = requestRender
@@ -251,6 +261,24 @@ export class TaskBrowserPanel implements Component, Focusable {
     return this.filtered.slice(this.scroll, this.scroll + this.maxVisible)
   }
 
+  /**
+   * Report attention rows that entered the open viewport for the first
+   * time (deduped per row identity). Runs on every render — scrolling,
+   * paging, running-jump and row replacements all re-render — so a
+   * failure "scrolled into view" after the panel opened is acknowledged
+   * exactly once (the runtime's acknowledge is idempotent anyway).
+   */
+  private exposeViewport(): void {
+    if (this.onViewportExpose === undefined) return
+    const fresh: string[] = []
+    for (const item of this.viewportItems()) {
+      if (item.attention !== true || this.exposedAttention.has(item.value)) continue
+      this.exposedAttention.add(item.value)
+      fresh.push(item.value)
+    }
+    if (fresh.length > 0) this.onViewportExpose(fresh)
+  }
+
   /** Current view state used by Quick → Full. */
   getViewState(): TaskBrowserViewState {
     return {
@@ -299,12 +327,21 @@ export class TaskBrowserPanel implements Component, Focusable {
     // is hidden while refining a search/type filter so it cannot be mistaken
     // for a task match.
     if (this.mode === 'quick' && query === '' && this.activeType === null) {
-      const realCount = this.items.filter(item => item.kind !== 'view-full').length
-      const failures = this.items.filter(item => item.kind !== 'view-full' && (item.attention === true || isTaskItemFailure(item.status))).length
+      // "Open Task Center", not "View all N tasks": the transition keeps
+      // the current scope (it is a context-preserving promotion, never a
+      // scope reset), and agents/jobs are counted SEPARATELY because a
+      // background one-shot legitimately occupies one row in each registry
+      // — a summed "task" count would double-count it (PR review).
+      const real = this.items.filter(item => item.kind !== 'view-full')
+      const agents = real.filter(item => item.source === 'subagent').length
+      const jobs = real.filter(item => item.source === 'job').length
+      const failures = real.filter(item => item.attention === true || isTaskItemFailure(item.status)).length
+      const stats = [`${agents} agent${agents === 1 ? '' : 's'}`, `${jobs} job${jobs === 1 ? '' : 's'}`]
+      if (failures > 0) stats.push(`${failures} failed`)
       this.filtered.push({
         value: PSEUDO_VIEW_ALL,
         kind: 'view-full',
-        label: `View all ${realCount} tasks${failures > 0 ? ` · ${failures} failed` : ''}…`,
+        label: `Open Task Center · ${stats.join(' · ')}…`,
         status: 'completed',
         canOpen: true,
       })
@@ -659,6 +696,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
 
     this.ensureVisible()
+    this.exposeViewport()
     const start = this.scroll
     const end = Math.min(rows.length, start + this.maxVisible)
     const visibleRows = rows.slice(start, end)

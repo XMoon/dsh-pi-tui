@@ -156,15 +156,29 @@ export function projectTaskItems(
     return (id: string) => (tree.get(id) ?? []).some(child => subtree.get(child.value) === true)
   }
   const hasActiveDescendantInAll = propagateSubtree(all, childrenMap, isTaskItemActive)
-  const isDescendantOf = (candidate: TaskPanelItem, root: string): boolean => {
-    let parent = parentById.get(candidate.value)
-    const seen = new Set<string>()
-    while (parent !== undefined && !seen.has(parent)) {
-      seen.add(parent)
-      if (parent === root) return true
-      parent = parentById.get(parent)
+  /**
+   * The query-matching inactive branches that still host active work, and
+   * EVERYTHING below them. Computed in one preorder pass (a parent is
+   * always visited before its children, so the marker propagates top-down
+   * without re-scanning subtrees): the Active+search branch membership
+   * test is then O(1) per row, and the whole projection stays linear even
+   * on the worst-case search keystroke (PR review M2 — the earlier nested
+   * candidate loop re-walked every branch per matching root).
+   */
+  const matchingInactiveRoots = new Set<string>()
+  const underMatchingInactive = new Set<string>()
+  if (options.scope === 'active') {
+    for (const item of all) {
+      if (!isTaskItemActive(item) && queryMatches(item) && item.hasChildren && hasActiveDescendantInAll(item.value)) {
+        matchingInactiveRoots.add(item.value)
+      }
     }
-    return false
+    for (const item of all) {
+      const parent = parentById.get(item.value)
+      if (matchingInactiveRoots.has(item.value) || (parent !== undefined && underMatchingInactive.has(parent))) {
+        underMatchingInactive.add(item.value)
+      }
+    }
   }
 
   const includedIds = new Set<string>()
@@ -191,14 +205,8 @@ export function projectTaskItems(
       if (isTaskItemActive(item) && queryMatches(item)) includeWithAncestors(item)
       else if (options.includeAttentionInActive === true && !isTaskItemActive(item)
         && (item.attention === true || isTaskItemFailure(item.status)) && queryMatches(item)) includeWithAncestors(item)
-      else if (!isTaskItemActive(item) && queryMatches(item) && item.hasChildren
-        && hasActiveDescendantInAll(item.value)) {
-        for (const candidate of all) {
-          if (candidate.value !== item.value && isTaskItemActive(candidate) && isDescendantOf(candidate, item.value)) {
-            includeWithAncestors(candidate)
-          }
-        }
-      }
+      else if (matchingInactiveRoots.has(item.value)) includeWithAncestors(item)
+      else if (isTaskItemActive(item) && underMatchingInactive.has(item.value)) includeWithAncestors(item)
     }
   } else {
     for (const item of all) {

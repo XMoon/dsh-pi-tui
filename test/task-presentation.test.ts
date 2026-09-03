@@ -98,3 +98,25 @@ test('a deep/long tree projects linearly (no per-node subtree re-scan)', () => {
   // Every ancestor of the running leaf must be a context row.
   assert.equal(projection.rows.filter(row => row.ancestorContext === true).length, depth - 1)
 })
+
+test('Active+search worst case stays fast: every branch matches the query (PR review M2)', () => {
+  // A query that matches EVERY inactive branch root exercises the
+  // branch-membership propagation (and the include-with-ancestors walk)
+  // on the full depth — the case the empty-query linear test misses.
+  const depth = 300
+  const chain: TaskPanelItem[] = []
+  for (let i = 1; i <= depth; i += 1) {
+    chain.push({
+      value: `agent:n${i}`, label: `match ${i}`, status: i === depth ? 'running' : 'inactive',
+      active: i === depth,
+      source: 'subagent', type: 'subagent',
+      parentId: i === 1 ? undefined : `agent:n${i - 1}`,
+      depth: i, hasChildren: i < depth,
+    })
+  }
+  const start = performance.now()
+  const projection = projectTaskItems(chain, options({ scope: 'active', query: 'match' }))
+  const elapsed = performance.now() - start
+  assert.equal(projection.rows.length, depth, 'the matching lineage stays complete')
+  assert.ok(elapsed < 500, `worst-case search expected linear-ish, took ${elapsed.toFixed(1)}ms`)
+})

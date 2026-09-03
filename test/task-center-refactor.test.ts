@@ -120,9 +120,10 @@ test('Quick view-all pseudo-row carries no status tail (review round: cosmetic)'
     mode: 'quick', enableSearch: true, header: 'Tasks',
   }, () => {}, () => {}, () => {})
   const plain = panel.render(80).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
-  const row = plain.split('\n').find(line => line.includes('View all 1 tasks'))!
-  assert.ok(row.includes('View all 1 tasks'), `pseudo-row present:\n${plain}`)
-  assert.ok(!/View all 1 tasks[^\n]*completed/.test(row), `no completed tail:\n${row}`)
+  const row = plain.split('\n').find(line => line.includes('Open Task Center'))!
+  assert.ok(row.includes('Open Task Center · 0 agents · 1 job…'),
+    `pseudo-row present with separate agent/job counts:\n${plain}`)
+  assert.ok(!/Open Task Center[^\n]*completed/.test(row), `no completed tail:\n${row}`)
   panel.dispose()
 })
 
@@ -154,5 +155,40 @@ test('acknowledge scope is the VIEWPORT, not the whole projection (PR review M1)
     Array.from({ length: 8 }, (_, i) => `job:f${i}`),
     'the viewport is the scroll window from the top (the pseudo-row is beyond the fold)')
   assert.ok(panel.viewportItems().every(item => item.attention === true), 'every visible row is an attention row')
+  panel.dispose()
+})
+
+test('scrolling new attention rows into view exposes them exactly once (PR review P1/P2)', () => {
+  // 20 failures in an 8-row viewport: the FIRST frame exposes the top 8,
+  // scrolling exposes the next rows — each row exactly once, and rows
+  // that scroll back out are never re-exposed.
+  const failures: TaskPanelItem[] = Array.from({ length: 20 }, (_, i) => ({
+    value: `job:f${i}`, label: `failure ${i}`, status: 'failed', active: false, attention: true,
+    source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs',
+  }))
+  const exposed: string[] = []
+  const panel = new TaskBrowserPanel(failures, 8, {
+    mode: 'full', enableSearch: true, header: 'Tasks',
+    onViewportExpose: ids => exposed.push(...ids),
+  }, () => {}, () => {}, () => {})
+  // First render: the top of the viewport is exposed.
+  panel.render(80)
+  assert.deepEqual(exposed, Array.from({ length: 8 }, (_, i) => `job:f${i}`))
+  // Scroll down row by row (the scroll window overlaps by maxVisible-1,
+  // so every cursor step admits exactly one NEW row into the viewport):
+  // each newly visible failure is exposed exactly once.
+  for (let step = 0; step < 12; step += 1) {
+    panel.handleInput('\x1b[B')
+    panel.render(80)
+  }
+  assert.deepEqual(exposed,
+    [...Array.from({ length: 8 }, (_, i) => `job:f${i}`), ...Array.from({ length: 5 }, (_, i) => `job:f${i + 8}`)],
+    'rows entering the viewport are exposed exactly once, in order')
+  // Scroll back to the top: previously-seen rows are never re-exposed.
+  for (let step = 0; step < 12; step += 1) {
+    panel.handleInput('\x1b[A')
+    panel.render(80)
+  }
+  assert.equal(exposed.length, 13, 'no re-exposure of already-seen rows')
   panel.dispose()
 })

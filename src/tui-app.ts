@@ -1463,6 +1463,8 @@ export interface TaskBrowserOptions {
   onAction?: (value: string, action: 'interrupt') => void
   /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
   onStop?: (value: string) => void
+  /** First-time viewport exposure of attention rows (the ack signal). */
+  onViewportExpose?: (ids: readonly string[]) => void
 }
 
 /** Live control of an open picker. */
@@ -10806,6 +10808,7 @@ export class TuiApp {
         initialSearchMode: options.initialSearchMode,
         onAction: options.onAction,
         onStop: options.onStop,
+        onViewportExpose: options.onViewportExpose,
         onRefresh: options.onRefresh,
         onViewFull: state => {
           close()
