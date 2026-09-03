@@ -42,10 +42,11 @@ supported while M2–M8 remain unfinished.
 
 ## 2. Update release metadata and documentation
 
-If a stable release is based on a mature `next` snapshot, complete the
-`next -> promotion -> main -> next` branch promotion described in
-[docs/local-development.md](local-development.md) first. This checklist starts
-from the resulting `main` state.
+If a stable release is based on a mature `next` snapshot, first promote that
+snapshot into `main` as described in
+[docs/local-development.md](local-development.md). Complete this release
+checklist on `main`, then merge the resulting released `main` state back into
+`next` as the final promotion step.
 
 Choose exactly one release channel before editing metadata:
 

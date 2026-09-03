@@ -399,9 +399,10 @@ DSH target for both npm and Source Mode. `main` and all tags, including
 long-lived forward-integration line and may switch to Source Mode for
 unpublished DSH work. When a mature `next` snapshot is promoted, branch from
 that exact `next` commit, qualify the published DSH release there, merge the
-promotion into `main` with a real merge commit (**never squash**), then merge
-`main` back into `next`. Never reset `next` after a promotion, and never move
-an unpublished `next` DSH target into `main`.
+promotion into `main` with a real merge commit (**never squash**), complete the
+stable-release work on `main`, then merge the resulting `main` state back into
+`next`. Never reset `next` after a promotion, and never move an unpublished
+`next` DSH target into `main`.
 
 The canonical branch roles, distribution-policy ownership and promotion flow
 live in [docs/local-development.md](docs/local-development.md).
