@@ -19,7 +19,7 @@
  * @module @xmoon76/dsh-pi-tui/model-menu
  */
 
-import { SettingsList, Text, matchesKey, type Component } from '@xmoon76/pi-tui'
+import { SettingsList, Text, matchesKey, type Component, type RowBudgetAware } from '@xmoon76/pi-tui'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { OwnedTaskOptions } from './detached.ts'
@@ -87,12 +87,23 @@ class EscDismiss implements Component {
  * parent close latches `disposed` and aborts the info load; a resolve or
  * reject that settles afterwards is ignored (debug diagnostics only).
  */
-class EffortSubmenu implements Component {
+class EffortSubmenu implements Component, RowBudgetAware {
   private inner: Component
   private readonly requestRender: () => void
   /** Latched by every close path; late async results must not act after. */
   private disposed = false
   private readonly abort = new AbortController()
+  /** The last host row grant, re-applied to each swapped-in inner list. */
+  private rowGrant = Number.POSITIVE_INFINITY
+
+  /** Host row-budget seam: keep the grant and forward it to the inner
+   * list, so a list swapped in asynchronously after a resize still
+   * reflows (the outer SettingsList forwards through this seam). */
+  setMaxRows(rows: number): void {
+    this.rowGrant = rows
+    const inner = this.inner as RowBudgetAware
+    inner.setMaxRows?.(rows)
+  }
 
   constructor(providerId: string, modelId: string, currentEffort: string | undefined, deps: SubmenuDeps) {
     // Every close path funnels through done(); wrapping it lets the submenu
@@ -153,6 +164,8 @@ class EffortSubmenu implements Component {
           () => close(),
           {},
         )
+        // The async list lands AFTER any resize: re-apply the last grant.
+        this.setMaxRows(this.rowGrant)
         this.requestRender()
       },
       onError: () => {
@@ -183,12 +196,23 @@ class EffortSubmenu implements Component {
  * cancellation discipline as {@link EffortSubmenu}: a late model list must
  * neither repaint a closed menu nor swap in stale content.
  */
-export class ModelSubmenu implements Component {
+export class ModelSubmenu implements Component, RowBudgetAware {
   private inner: Component
   private readonly requestRender: () => void
   /** Latched by every close path; late async results must not act after. */
   private disposed = false
   private readonly abort = new AbortController()
+  /** The last host row grant, re-applied to each swapped-in inner list. */
+  private rowGrant = Number.POSITIVE_INFINITY
+
+  /** Host row-budget seam: keep the grant and forward it to the inner
+   * list, so a list swapped in asynchronously after a resize still
+   * reflows (the outer SettingsList forwards through this seam). */
+  setMaxRows(rows: number): void {
+    this.rowGrant = rows
+    const inner = this.inner as RowBudgetAware
+    inner.setMaxRows?.(rows)
+  }
 
   constructor(providerId: string, currentModel: string, currentEffort: string | undefined, deps: SubmenuDeps) {
     const close = (selected?: string): void => {
@@ -232,6 +256,8 @@ export class ModelSubmenu implements Component {
           () => close(),
           { enableSearch: true },
         )
+        // The async list lands AFTER any resize: re-apply the last grant.
+        this.setMaxRows(this.rowGrant)
         this.requestRender()
       },
       onError: () => {

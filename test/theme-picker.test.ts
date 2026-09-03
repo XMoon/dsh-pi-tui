@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { afterEach } from 'node:test'
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -17,6 +17,8 @@ import { customThemesDir, darkColors, loadCustomTheme, settingsListTheme } from 
 import { ThemeRegistry } from '../src/theme-registry.ts'
 import { resolveThemeSelection, themePickerRows } from '../src/theme-source.ts'
 import { ThemeSubmenu, themeDisplayName } from '../src/theme-menu.ts'
+import { TuiApp } from '../src/tui-app.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** Register one plugin theme into a fresh registry. */
 function pluginTheme(registry: ThemeRegistry, id: string, name: string, owner = 'acme-plugin'): void {
@@ -521,4 +523,57 @@ test('INTEGRATION: a STALE pick (the contribution unloads between open and confi
   const reopened = list!.render(80).join('\n')
   const autoMarked = reopened.split('\n').filter(line => line.includes('auto') && line.includes('← current'))
   assert.equal(autoMarked.length, 1, `the auto row carries the marker after the rollback:\n${reopened}`)
+})
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started here is stopped
+ * after each test (the process's single-live-TUI slot is held only by
+ * live surfaces). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
+test('INTEGRATION: the Theme submenu inherits the live row budget and keeps the selected theme + hint after a shrink', async () => {
+  // Many rows so the inner list (maxVisible min(8, rows)) overflows a
+  // short grant: without the RowBudgetAware seam the compositor would
+  // clip the hint from the bottom.
+  const registry = new ThemeRegistry()
+  for (let index = 0; index < 14; index += 1) {
+    // Zero-padded so the lexicographic picker order matches the numeric
+    // order (Palette 10 sits after Palette 09, not after Palette 01).
+    const padded = String(index).padStart(2, '0')
+    pluginTheme(registry, `palette-${padded}`, `Palette ${padded}`)
+  }
+  const vt = new VirtualTerminal(80, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.openSettings(
+    [{
+      id: 'theme',
+      label: 'Theme',
+      currentValue: 'auto',
+      submenu: (_currentValue, done) => new ThemeSubmenu('auto', registry, done),
+    }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  vt.sendInput('\r') // Enter: open the Theme submenu
+  await vt.waitForRender()
+  for (let index = 0; index < 10; index += 1) vt.sendInput('\x1b[B') // 10 downs: past auto/dark/light, onto plugin 7 of 14
+  await vt.waitForRender()
+  vt.resize(80, 10) // shrink: the outer grant (10 − 2) must reach the submenu list
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  // 17 rows total (3 builtins first + 14 plugins), so row 11/17 is
+  // 'Palette 07' — the selected row and the hint must survive the shrink.
+  assert.ok(view.includes('Palette 07'), `selected theme must survive the shrink:\n${view}`)
+  assert.ok(view.includes('Esc to cancel'), `theme submenu hint must survive the shrink:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
 })

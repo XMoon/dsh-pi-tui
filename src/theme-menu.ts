@@ -28,7 +28,7 @@
  * @module @xmoon76/dsh-pi-tui/theme-menu
  */
 
-import { SettingsList } from '@xmoon76/pi-tui'
+import { SettingsList, type RowBudgetAware } from '@xmoon76/pi-tui'
 import { settingsListTheme } from './theme.ts'
 import type { ThemeRegistry } from './theme-registry.ts'
 import { themePickerRows, normalizePersistedTheme } from './theme-source.ts'
@@ -70,8 +70,15 @@ export function themeDisplayName(value: string | undefined, themes: ThemeRegistr
  * P3. The outer row's display string is presentational only and is never
  * consulted for identity.
  */
-export class ThemeSubmenu {
+export class ThemeSubmenu implements RowBudgetAware {
   private readonly inner: SettingsList
+
+  /** Host row-budget seam: forward the outer SettingsList's live grant so
+   * the theme list reflows on a short terminal instead of being clipped
+   * by the compositor (the outer forwards on open and on every change). */
+  setMaxRows(rows: number): void {
+    this.inner.setMaxRows(rows)
+  }
 
   constructor(
     currentSelection: string,

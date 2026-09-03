@@ -374,6 +374,24 @@ test('panel: the detail pane is suppressed (never truncated) when the budget can
   assert.ok(roomyLines.some(line => line.includes('Session:')), 'Session must render')
 })
 
+test('panel: setMaxRows reflows the live row budget without losing selection', async () => {
+  const source = new FakeSource()
+  source.rows = Array.from({ length: 20 }, (_, index) => row(`entry ${index}`, 20 - index))
+  const { panel } = makePanel(source, { maxRows: 16 })
+  panel.start()
+  await settle()
+  for (let step = 0; step < 12; step += 1) panel.handleInput('\x1b[B')
+  assert.equal(panel.selected()?.content, 'entry 12')
+  panel.setMaxRows(8)
+  const narrow = panel.render(80)
+  assert.ok(narrow.length <= 8, `setMaxRows must cap the render (got ${narrow.length})`)
+  assert.ok(narrow.some(line => line.includes('entry 12')), 'the selected row must survive a shrink')
+  panel.setMaxRows(16)
+  const wide = panel.render(80)
+  assert.ok(wide.length > narrow.length, 'growing the budget must reflow more rows')
+  assert.ok(wide.some(line => line.includes('entry 12')), 'the selected row must survive a grow')
+})
+
 test('panel: maxRows 1–2 never overflows (the chrome yields, not the budget)', () => {
   // Round-6 repro: render() always emitted title + search + one body row
   // (3 rows), overflowing maxRows 1 and 2.

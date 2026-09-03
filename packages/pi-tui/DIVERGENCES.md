@@ -62,8 +62,16 @@ Keep `vendor-divergences.json` in sync with this file on every re-vendor.
 - Reason: `SelectList` gains an optional 5th constructor argument
   `SelectListOptions` (`enableSearch`, `header`, `noMatchText`, `showHint`,
   `initialQuery`), `SelectItem.group` + `SelectListTheme.groupHeader`,
-  PageUp/PageDown page navigation, and substring search over
-  value+label+description. `setFilter` is redefined to the same
+  PageUp/PageDown page navigation, substring search over
+  value+label+description, and `setMaxRows()` for host-owned responsive
+  overlay budgets. Render also self-limits to the live row grant: group
+  headers (a window spanning k groups renders k header rows) and the
+  scroll indicator are folded into the same budget, shrinking the item
+  window until the list fits with the hint tail intact. The shrink is
+  RENDER-LOCAL (a `visibleCount` derived from `maxVisible`) — the
+  persistent `maxVisible` stays the budget-derived baseline so a
+  selection move or a PageUp/PageDown can use the full grant again.
+  `setFilter` is redefined to the same
   case-insensitive substring filter (upstream prefix-matched value only).
   The filter query's canonical single-source-of-truth (getFilter/setItems
   stay in sync with setFilter) is X041 — re-apply both together.
@@ -860,7 +868,15 @@ Keep `vendor-divergences.json` in sync with this file on every re-vendor.
   package README states the wrapper contract ("every wrapper owning an
   Input/Editor must implement Focusable") but the kimi list components
   themselves did not implement it either; the host compensates with its
-  FocusForwardingFrame for the Frame layer.
+  FocusForwardingFrame for the Frame layer. Both lists also expose
+  `setMaxRows()` so a responsive host can lower the item window while
+  preserving the live filter, selection and submenu state, and their
+  render caps the selected row's description block to the grant so the
+  hint always survives — on degenerate tiny grants the render keeps the
+  tail (hint + trailing rows) rather than the head. SettingsList also
+  exposes the `RowBudgetAware` seam: the current grant is forwarded to
+  an open submenu that implements it, so nested lists (the host's /model
+  pickers) reflow on resize without SettingsList knowing their type.
 - Consumer: host pickers/settings overlays (mounted behind frames).
 - Upstream status: absent.
 - Tests: fork lifecycle/X041 suites assert the focused flag shape; the

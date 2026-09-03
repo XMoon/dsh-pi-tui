@@ -54,6 +54,40 @@ export const HISTORY_PANEL_CHROME_ROWS = 4
 /** The footer hint (plan §59 — `Enter use`, not `Enter select`). */
 export const HISTORY_PANEL_FOOTER = 'type filter · ↑↓ select · Enter use · Tab scope · Esc cancel'
 
+/** The live geometry budget for the history overlay. */
+export interface HistoryOverlayGeometry {
+  width: number
+  maxHeight: number
+  panelRows: number
+}
+
+/**
+ * Derive the history overlay geometry from the CURRENT terminal dimensions.
+ * The outer Frame owns two rows, so `panelRows` is the budget passed to the
+ * stateful HistoryPanel. Every dimension is clamped so a very small terminal
+ * still receives a usable positive layout instead of a negative overlay size.
+ */
+export function historyOverlayGeometry(columns: number, rows: number): HistoryOverlayGeometry {
+  const safeColumns = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 1
+  const safeRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : 1
+  const availableWidth = Math.max(1, safeColumns - 2)
+  const width = Math.max(1, Math.min(
+    availableWidth,
+    Math.max(20, Math.min(100, safeColumns - 6)),
+  ))
+  const availableHeight = Math.max(1, safeRows - 2)
+  const maxHeight = Math.max(1, Math.min(
+    availableHeight,
+    Math.max(8, Math.min(30, safeRows - 4)),
+  ))
+  return { width, maxHeight, panelRows: Math.max(1, maxHeight - 2) }
+}
+
+/** Normalize a host-provided row budget without allowing a zero-row panel. */
+function normalizeMaxRows(rows: number): number {
+  return Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : 24
+}
+
 /** Panel constructor options. */
 export interface HistoryPanelOptions {
   /** The injected search source (the runner wires the file-backed one). */
@@ -148,8 +182,9 @@ export class HistoryPanel implements Component, Focusable {
   private readonly onClose: () => void
   private readonly onResultsChanged: (() => void) | undefined
   private readonly debounceMs: number
-  private readonly maxRows: number
+  private maxRows: number
   private _focused = false
+  private disposed = false
   private timer: ReturnType<typeof setTimeout> | undefined
   private controller: AbortController | undefined
 
@@ -165,7 +200,7 @@ export class HistoryPanel implements Component, Focusable {
     // overlay height (maxHeight minus the Frame border), so a tiny
     // terminal gets a tiny panel — a floor here would push the framed
     // output past the overlay and clip the footer.
-    this.maxRows = options.maxRows ?? 24
+    this.maxRows = normalizeMaxRows(options.maxRows ?? 24)
     this.input = new Input()
     // The default scope: `session` when a live session identity exists
     // (the agent-session model — the current session's inputs are the
@@ -181,6 +216,11 @@ export class HistoryPanel implements Component, Focusable {
     }
     this.state.query = options.initialQuery ?? ''
     this.input.setValue(this.state.query)
+  }
+
+  /** Update the host-granted row budget while preserving all search state. */
+  setMaxRows(rows: number): void {
+    this.maxRows = normalizeMaxRows(rows)
   }
 
   get focused(): boolean {
@@ -241,11 +281,14 @@ export class HistoryPanel implements Component, Focusable {
 
   /** Open-time init: run the initial (empty-query) search immediately. */
   start(): void {
+    if (this.disposed) return
     void this.refresh() // allowlist: refresh() never rejects (errors land in the panel state)
   }
 
   /** Cancel and forget (called by the host on close). */
   dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
     // Invalidate the generation: a source that ignores the abort and
     // settles LATE (resolve OR reject) must never commit into the closed
     // panel — the refresh's generation check is the fence for both paths.

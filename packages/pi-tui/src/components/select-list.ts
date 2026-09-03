@@ -93,7 +93,11 @@ export class SelectList implements Component, Focusable {
 	/** Lowercased value+label+description per item, rebuilt on setItems. */
 	private searchTexts = new Map<SelectItem, string>();
 	private selectedIndex: number = 0;
+	/** Caller-configured item cap; the host may lower it for a short frame. */
+	private configuredMaxVisible: number;
 	private maxVisible: number = 5;
+	/** Inner row budget supplied by a root-owned responsive overlay. */
+	private maxRows = Number.POSITIVE_INFINITY;
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
 	private options: SelectListOptions;
@@ -130,7 +134,8 @@ export class SelectList implements Component, Focusable {
 		this.items = items;
 		this.filteredItems = items;
 		this.searchTexts = this.buildSearchTexts(items);
-		this.maxVisible = maxVisible;
+		this.configuredMaxVisible = Math.max(1, Math.floor(maxVisible));
+		this.maxVisible = this.configuredMaxVisible;
 		this.theme = theme;
 		this.layout = layout;
 		this.options = options;
@@ -143,6 +148,24 @@ export class SelectList implements Component, Focusable {
 				this.applyFilter(initial);
 			}
 		}
+	}
+
+	/** Update the live inner row budget without resetting filter or selection. */
+	setMaxRows(rows: number): void {
+		this.maxRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : Number.POSITIVE_INFINITY;
+		this.recomputeVisibleBudget();
+	}
+
+	/** Reserve the list chrome before deriving the item count. */
+	private recomputeVisibleBudget(): void {
+		const prefix = (this.options.header === undefined ? 0 : 2) + (this.searchEnabled ? 2 : 0);
+		const hint = this.options.showHint === true || this.searchEnabled ? 2 : 0;
+		const indicator = this.filteredItems.length > 1 ? 1 : 0;
+		const group = this.filteredItems.some(item => item.group !== undefined) ? 1 : 0;
+		const budget = this.maxRows === Number.POSITIVE_INFINITY
+			? this.configuredMaxVisible
+			: this.maxRows - prefix - hint - indicator - group;
+		this.maxVisible = Math.max(1, Math.min(this.configuredMaxVisible, budget));
 	}
 
 	/**
@@ -205,17 +228,74 @@ export class SelectList implements Component, Focusable {
 		if (this.filteredItems.length === 0) {
 			lines.push(this.theme.noMatch(this.options.noMatchText ?? "  No matching commands"));
 			if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, width);
-			return lines;
+			return this.finalizeEmpty(lines);
 		}
 
 		const primaryColumnWidth = this.getPrimaryColumnWidth();
+		const showHint = this.options.showHint === true || this.searchEnabled;
+		const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY;
+		const hintRows = showHint ? 2 : 0;
+
+		let visibleCount = this.maxVisible;
+		let window = this.renderItemWindow(width, primaryColumnWidth, visibleCount);
+		// Group headers consume physical rows beyond the reserved one: a
+		// window spanning k groups renders k headers, so the assembled list
+		// can exceed the host-granted row budget. Shrink the WINDOW (still
+		// selection-centered) until the whole list fits; the hint is the
+		// non-negotiable tail (setMaxRows contract). Only the local
+		// `visibleCount` shrinks — `maxVisible` stays the budget-derived
+		// baseline, so a later selection move can use the full grant again
+		// (a render-time ratchet would permanently shrink PageUp/PageDown).
+		while (Number.isFinite(this.maxRows)
+			&& lines.length + window.length + hintRows > this.maxRows
+			&& visibleCount > 1) {
+			visibleCount -= 1;
+			window = this.renderItemWindow(width, primaryColumnWidth, visibleCount);
+		}
+		lines.push(...window);
+		if (showHint) this.addHintLine(lines, width);
+		if (Number.isFinite(this.maxRows) && lines.length > this.maxRows) {
+			// Degenerate tiny grants: keep the tail (the hint plus as many
+			// trailing rows as fit) instead of letting the compositor slice
+			// the hint away.
+			return lines.slice(lines.length - this.maxRows);
+		}
+		return lines;
+	}
+
+	/** Finalize the empty/no-match assembly against the live grant. The
+	 * setMaxRows contract covers every path: `render().length <= maxRows`
+	 * with the semantic priority search input > no-match message > hint >
+	 * header > blank spacers, so the hint survives whenever the grant
+	 * physically allows it. */
+	private finalizeEmpty(lines: string[]): string[] {
+		if (!Number.isFinite(this.maxRows)) return lines;
+		const limit = Math.max(1, Math.floor(this.maxRows));
+		if (lines.length <= limit) return lines;
+		// Blank spacers are the lowest-value rows: drop them first (the
+		// content stays together and keeps its visual order).
+		const compact = lines.filter(line => line !== "");
+		if (compact.length <= limit) return compact;
+		// The header is chrome: yield it before any content (priority:
+		// hint > header).
+		const withoutHeader = this.options.header === undefined ? compact : compact.slice(1);
+		if (withoutHeader.length <= limit) return withoutHeader;
+		// Extreme grant: keep the head — the search input, then the
+		// message — per priority.
+		return compact.slice(0, limit);
+	}
+
+	/** Render the item window (group headers + item rows + scroll indicator)
+	 * at `visibleCount`, centered on the selected row. */
+	private renderItemWindow(width: number, primaryColumnWidth: number, visibleCount: number): string[] {
+		const lines: string[] = [];
 
 		// Calculate visible range with scrolling
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
+			Math.min(this.selectedIndex - Math.floor(visibleCount / 2), this.filteredItems.length - visibleCount),
 		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
+		const endIndex = Math.min(startIndex + visibleCount, this.filteredItems.length);
 
 		// Group counts over the full (filtered) sequence, so a header inside
 		// the visible window can show how many items its group holds.
@@ -254,8 +334,6 @@ export class SelectList implements Component, Focusable {
 			// Truncate if too long for terminal
 			lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")));
 		}
-
-		if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, width);
 
 		return lines;
 	}
@@ -341,6 +419,7 @@ export class SelectList implements Component, Focusable {
 					: searchable.includes(needle);
 			});
 		}
+		this.recomputeVisibleBudget();
 		if (previousValue !== undefined) {
 			const index = this.filteredItems.findIndex(item => item.value === previousValue);
 			if (index !== -1) {

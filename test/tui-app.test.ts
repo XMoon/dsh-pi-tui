@@ -18,7 +18,9 @@ import { testLifecycle } from './support/temp-lifecycle.ts'
 import { toolPresenterFrom } from '../src/present.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { Text, visibleWidth } from '@xmoon76/pi-tui'
+import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
+import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
@@ -449,6 +451,237 @@ test('notice rows beyond the fold collapse into a +N more line; user rows never 
   view = vt.getViewport().join('\n')
   assert.ok(!view.includes('more notices pending'), `fold line must vanish after drain:\n${view}`)
   assert.ok(view.includes('❯ my first queued message'), `user row must survive the drain:\n${view}`)
+})
+
+test('queue pane reflows from raw items across a narrow-to-wide resize', async () => {
+  const { vt, app } = startApp()
+  const fullNotice = 'NOTICE-RESIZE ' + 'the original notice survives the narrow frame '.repeat(2)
+  app.setQueueItems([{ id: 'notice-1', text: fullNotice, mode: 'steer', notice: true }])
+  await vt.waitForRender()
+  vt.resize(40, 24)
+  await vt.waitForRender()
+  let lines = vt.getViewport()
+  const narrowNotice = lines.findIndex(line => line.includes('NOTICE-RESIZE'))
+  assert.ok(narrowNotice > 0, `notice must remain visible after narrowing:\n${lines.join('\n')}`)
+  let borderRows = 0
+  for (let index = narrowNotice - 1; index >= 0 && lines[index]!.includes('─'); index -= 1) borderRows += 1
+  assert.equal(borderRows, 1, `a narrow queue must have one border row, not stale wrapped rows:\n${lines.join('\n')}`)
+  assert.equal(visibleWidth(lines[narrowNotice - 1]!), 40)
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  lines = vt.getViewport()
+  assert.ok(lines.some(line => line.includes(fullNotice)), `the wide queue must recover the raw notice:\n${lines.join('\n')}`)
+})
+
+test('todo panel rebuilds its border from the live width', async () => {
+  const { vt, app } = startApp()
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  app.setTodoSummary(Array.from({ length: 8 }, (_, index) => ({
+    content: `todo ${index}`,
+    status: 'pending' as const,
+  })))
+  app.toggleTodoPanel()
+  await vt.waitForRender()
+  const borderRowsBefore = (width: number): number => {
+    const lines = vt.getViewport()
+    const title = lines.findIndex(line => line.includes('Todo'))
+    assert.ok(title > 0, `todo title missing at ${width} columns:\n${lines.join('\n')}`)
+    let count = 0
+    for (let index = title - 1; index >= 0 && lines[index]!.includes('─'); index -= 1) count += 1
+    assert.equal(visibleWidth(lines[title - 1]!), width)
+    return count
+  }
+  assert.equal(borderRowsBefore(120), 1)
+  vt.resize(40, 24)
+  await vt.waitForRender()
+  assert.equal(borderRowsBefore(40), 1, 'the narrow todo border must not retain stale wrapped rows')
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  assert.equal(borderRowsBefore(120), 1)
+})
+
+test('height-only resize refreshes the extension widget row budget', async () => {
+  const vt = new VirtualTerminal(80, 16)
+  const ledger = new ExtensionLedger()
+  let app!: TuiApp
+  const host = new SurfaceHost(ledger, () => app.requestRender())
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
+  startedApps.add(app)
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: host.surfaceId,
+    generation: 1,
+    width: 80,
+    height: 16,
+    fullscreen: false,
+    focusedSeat: 'editor',
+    themeId: 'dark',
+    themeRevision: 0,
+  })
+  ledger.register('input.widget.below', { id: 'resize-widget' }, {
+    view: { kind: 'rows', rows: [
+      { kind: 'text', spans: [{ text: 'row one' }] },
+      { kind: 'text', spans: [{ text: 'row two' }] },
+      { kind: 'text', spans: [{ text: 'row three' }] },
+    ] },
+  }, 'resize-test')
+  host.refreshOutlets()
+  app.start()
+  const widgetRows = (): number => host.widgetsBelowText().split('\n').filter(line => line !== '').length
+  await vt.waitForRender()
+  assert.equal(widgetRows(), 3)
+  vt.resize(80, 7)
+  await vt.waitForRender()
+  assert.equal(widgetRows(), 1, `height-only shrink must reduce the below-widget budget (surface=${JSON.stringify(host.state().surface)})`)
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  assert.equal(widgetRows(), 2)
+  vt.resize(80, 16)
+  await vt.waitForRender()
+  assert.equal(widgetRows(), 3)
+})
+
+test('history overlay reflows geometry without restarting its search state', async () => {
+  const rows = [
+    { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
+    { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
+  ]
+  const source: import('../src/history-search.ts').HistorySearchSource = {
+    search: async () => ({ results: rows, exhausted: true }),
+  }
+  const vt = new VirtualTerminal(50, 10)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  app.start()
+  startedApps.add(app)
+  app.openHistorySearch()
+  await vt.waitForRender()
+  vt.sendInput('x')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('x'), `history query missing before resize:\n${view}`)
+  assert.ok(view.includes('entry beta'), `history selection missing before resize:\n${view}`)
+  vt.resize(120, 40)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('entry beta'), `history selection lost after grow:\n${view}`)
+  // The overlay design width is capped at 100 and the Frame consumes 4 of
+  // its columns, so the panel inner width (≤ 96) never reaches the 100-wide
+  // split threshold — the grown layout stays stacked. Assert the frame
+  // actually reflowed to span the grown width instead of a split marker.
+  const stripAnsi = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const frameTop = vt.getViewport().map(stripAnsi).find(line => line.includes('╭'))
+  assert.ok(frameTop !== undefined && visibleWidth(frameTop.trimEnd()) >= 100,
+    `history frame must span the grown terminal:\n${view}`)
+  assert.ok(view.includes('Current directory'), `history tabs did not reflow after grow:\n${view}`)
+  vt.resize(50, 10)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('╭') && view.includes('╰'), `history frame must survive shrink:\n${view}`)
+  assert.ok(view.includes('type filter') && view.includes('╰'), `history footer must survive shrink:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('task browser no-match state fits a short terminal without clipping the hint', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 8)
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    [{ value: 'job:1', label: 'bash · build', status: 'running', group: 'jobs' }],
+    () => {},
+    () => {},
+    { header: 'Tasks', enableSearch: true, noMatchText: 'no matching tasks' },
+  )
+  await vt.waitForRender()
+  for (const key of 'zzzz') vt.sendInput(key) // no match
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('no matching tasks'), `no-match message must survive:\n${view}`)
+  assert.ok(view.includes('esc close'), `no-match hint must survive:\n${view}`)
+  assert.ok(view.includes('╰'), `frame bottom must not be clipped:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('task browser keeps the selected row and hint visible after a height shrink', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 30)
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    Array.from({ length: 24 }, (_, index) => ({
+      value: `task-${index}`,
+      label: `task ${index}`,
+      status: 'running',
+      group: 'jobs',
+      // Real task rows carry detail lines under the main row; a tiny-grant
+      // fallback must keep the SELECTED MAIN row, not its detail tail.
+      detail: `detail line ${index}`,
+    })),
+    () => {},
+    () => {},
+    { header: 'Tasks', maxVisible: 10, enableSearch: true },
+  )
+  await vt.waitForRender()
+  for (let index = 0; index < 17; index += 1) vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('task 17'), `selected task main row must remain visible after shrink:\n${view}`)
+  assert.ok(view.includes('esc close'), `task hint must remain visible after shrink:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('generic picker preserves its selected row and hint after a short resize', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 30)
+  await vt.waitForRender()
+  app.openPicker(
+    Array.from({ length: 24 }, (_, index) => ({ value: `choice-${index}`, label: `choice ${index}` })),
+    () => {},
+    () => {},
+    { header: 'Choices', showHint: true },
+  )
+  await vt.waitForRender()
+  for (let index = 0; index < 17; index += 1) vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('choice 17'), `selected picker row must remain visible:\n${view}`)
+  assert.ok(view.includes('esc close'), `picker hint must remain visible:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('settings list preserves its selected row and hint after a short resize', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 30)
+  await vt.waitForRender()
+  app.openSettings(
+    Array.from({ length: 24 }, (_, index) => ({
+      id: `setting-${index}`,
+      label: `setting ${index}`,
+      currentValue: 'on',
+      values: ['on', 'off'],
+    })),
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  for (let index = 0; index < 17; index += 1) vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('setting 17'), `selected settings row must remain visible:\n${view}`)
+  assert.ok(view.includes('Esc to cancel'), `settings hint must remain visible:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
 })
 
 test('down opens the task browser only with active tasks and an empty editor; ctrl+j is inert', async () => {
