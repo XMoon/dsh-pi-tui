@@ -297,6 +297,23 @@ describe("SelectList", () => {
 			assert.ok(rendered.some((line) => line.includes("No matching")), "message must survive");
 			assert.ok(rendered.some((line) => line.includes("esc close")), "hint must survive");
 		});
+
+		it("keeps the message over the header on an extreme no-match grant", () => {
+			const list = new SelectList(
+				[{ value: "a", label: "alpha" }],
+				10,
+				testTheme,
+				{},
+				{ header: "items", enableSearch: true },
+			);
+			list.setMaxRows(2); // compact rows: header/search/message/hint = 4 > 2
+			list.handleInput("zzz"); // no match
+			const rendered = list.render(80);
+			assert.ok(rendered.length <= 2, `extreme no-match must fit the grant (${rendered.length})`);
+			assert.ok(rendered.some((line) => line.includes("No matching")),
+				"the no-match message must beat the header");
+			assert.ok(!rendered.some((line) => line.includes("items")), "the header must yield");
+		});
 	});
 
 	describe("group headers (dsh-pi-tui extension)", () => {
