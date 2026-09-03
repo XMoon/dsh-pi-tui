@@ -26,7 +26,7 @@ When the target DSH version is not yet available from npm, validate against the 
 pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
 ```
 
-CI uses Source Mode for `next` and npm Mode for `main` and every tag. The source lane validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary; the published `pi2dsh` ecosystem check is explicitly marked skipped until a compatible published combination exists. See [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md) for the full workflow.
+CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Both `next` lanes use `test/compat/dsh-source.json` for the current validated DSH target; Source Mode validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary, while npm Mode runs the frozen registry lane. The published `pi2dsh` ecosystem check is explicitly marked skipped for an unpublished source family. See [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md) for the full workflow.
 
 ## Features
 
@@ -375,7 +375,7 @@ dsh --profile pi-tui --session <session-id>
 
 ### Source Mode (validation only)
 
-Source Mode is only for `next` CI and local compatibility validation. It reads the full commit pin in `test/compat/dsh-source.json`, builds the official DSH tarball family, installs it through temporary pnpm overrides, and removes the temporary state afterward. Do not write DSH source paths, `file:` dependencies, or workspace symlinks into a published package.
+Source Mode is the validation-only distribution selected by the tracked policy for `next` CI and available for local compatibility checks. It reads the full commit pin in `test/compat/dsh-source.json`, builds the official DSH tarball family, installs it through temporary pnpm overrides, and removes the temporary state afterward. Do not write DSH source paths, `file:` dependencies, or workspace symlinks into a published package.
 
 ```sh
 pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"

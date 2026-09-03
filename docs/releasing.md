@@ -42,6 +42,11 @@ supported while M2–M8 remain unfinished.
 
 ## 2. Update release metadata and documentation
 
+If a stable release is based on a mature `next` snapshot, complete the
+`next -> promotion -> main -> next` branch promotion described in
+[docs/local-development.md](local-development.md) first. This checklist starts
+from the resulting `main` state.
+
 Choose exactly one release channel before editing metadata:
 
 - **Stable:** branch `main`, tag `vX.Y.Z`, npm dist-tag `latest`, and a stable

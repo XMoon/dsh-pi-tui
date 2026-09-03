@@ -26,7 +26,7 @@ dsh --profile pi-tui
 pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
 ```
 
-CI 中 `next` 使用 Source Mode，`main` 和所有 tag 使用 npm Mode。源码 lane 会验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界；依赖已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md)。
+CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。`next` 的两种 lane 都从 `test/compat/dsh-source.json` 读取当前 validated DSH target；Source Mode 会验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界，npm Mode 则运行冻结的 registry lane。对于尚未发布的 source family，已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md)。
 
 ## 功能
 
@@ -361,7 +361,7 @@ dsh --profile pi-tui --session <session-id>
 
 ### Source Mode（仅验证）
 
-Source Mode 只用于 `next` 的 CI 和本地兼容性验证，不是发布或用户安装方式。它从 `test/compat/dsh-source.json` 的完整 commit SHA 构建官方 DSH tarball family，通过临时 pnpm overrides 安装，并在完成后清理临时状态。不要把 DSH 源码路径、`file:` 依赖或 workspace symlink 写入发布 package。
+Source Mode 是 `next` CI 按跟踪策略选用的、并可用于本地兼容性检查的验证专用 distribution。它从 `test/compat/dsh-source.json` 的完整 commit SHA 构建官方 DSH tarball family，通过临时 pnpm overrides 安装，并在完成后清理临时状态。不要把 DSH 源码路径、`file:` 依赖或 workspace symlink 写入发布 package。
 
 ```sh
 pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"

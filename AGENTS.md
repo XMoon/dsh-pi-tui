@@ -384,12 +384,27 @@ node --import tsx/esm demo.ts   # standalone demo in a real TTY
 
 The published package contract is the lower-bound-only DSH peer range
 `>=0.1.2-alpha.4`; do not add `file:`, `link:`, or `workspace:` DSH specs to
-`package.json` or the tracked lockfile. Source Mode is test-only and is used
-for `next` pushes and pull requests targeting `next` when the exact upstream
-DSH family is not yet published. It checks out the full SHA in
-`test/compat/dsh-source.json`, runs the official DSH build/pack commands, and
-installs the resulting tarballs through temporary pnpm overrides. `main` and
-all tags, including `next-v*`, use the frozen registry/npm lane.
+`package.json` or the tracked lockfile. Source Mode is test-only and is
+selected by `test/compat/dsh-mode.json` for `next` pushes and pull requests
+targeting `next` when the exact upstream DSH family is not yet published. It
+checks out the full SHA in `test/compat/dsh-source.json`, runs the official DSH
+build/pack commands, and installs the resulting tarballs through temporary pnpm
+overrides. The `expectedVersion` in `dsh-source.json` is the current validated
+DSH target for both npm and Source Mode. `main` and all tags, including
+`next-v*`, use the frozen registry/npm lane.
+
+### Main / next promotion (hard rules)
+
+`main` is the released npm-backed DSH compatibility line; `next` is the
+long-lived forward-integration line and may switch to Source Mode for
+unpublished DSH work. When a mature `next` snapshot is promoted, branch from
+that exact `next` commit, qualify the published DSH release there, merge the
+promotion into `main` with a real merge commit (**never squash**), then merge
+`main` back into `next`. Never reset `next` after a promotion, and never move
+an unpublished `next` DSH target into `main`.
+
+The canonical branch roles, distribution-policy ownership and promotion flow
+live in [docs/local-development.md](docs/local-development.md).
 
 Use the isolated local drivers instead of workspace symlinks:
 
@@ -574,14 +589,15 @@ The rules below must never be broken; the full contracts live in `docs/`.
 
 The repository uses two fixed local worktrees:
 
-- `~/project/dsh-pi-tui` — main, registry-backed DSH (npm mode).
-- `~/project/dsh-pi-tui-next` — next, the exact source distribution pinned by
-  `test/compat/dsh-source.json`.
+- `~/project/dsh-pi-tui` — main, the released DSH baseline in npm mode.
+- `~/project/dsh-pi-tui-next` — next, the forward DSH baseline in its tracked
+  npm or Source Mode.
 
-The main branch intentionally has no source-pin file, so its default remains
-registry/npm. The pin is maintained on the next branch; merging main into next
-must preserve next's existing `test/compat/dsh-source.json` rather than adding
-that policy to main.
+The promotion invariant is that both long-lived branches carry
+`test/compat/dsh-mode.json` and `test/compat/dsh-source.json`: `main` keeps the
+mode at npm, while `next` may switch modes as upstream development requires.
+A `main -> next` merge must preserve the newer next policy and target rather
+than replacing it with the released main target.
 
 When entering either worktree, run `pnpm dev:doctor`. If it reports
 `STALE`, `MISSING`, or `BROKEN`, run `pnpm dev:bootstrap`. The doctor is
@@ -620,14 +636,14 @@ source-build implementation.
 
 ### Source development environment vs full Source compatibility
 
-The `next` worktree has two distinct Source Mode concepts. Do not conflate
-them:
+The development environment has two distinct Source Mode concepts. Do not
+conflate them:
 
-- **Materialized Source development environment** — the default daily
-  environment, entered via `pnpm dev:doctor` / `pnpm dev:bootstrap` /
-  `pnpm dev:shell`. Once `dev:doctor` reports `READY`, the environment is
-  available; ordinary development must NOT re-run the full compatibility
-  verifier just because the mode is Source Mode.
+- **Materialized Source development environment** — the daily environment when
+  the tracked mode is Source, entered via `pnpm dev:doctor` /
+  `pnpm dev:bootstrap` / `pnpm dev:shell`. Once `dev:doctor` reports `READY`,
+  the environment is available; ordinary development must NOT re-run the full
+  compatibility verifier just because the mode is Source Mode.
 - **Full Source compatibility verification** — `pnpm compat:dsh:source`,
   the CI-equivalent proof: exact upstream DSH source → official build/pack →
   full DSH family → TUI build/type/test → candidate/fresh install →
@@ -637,8 +653,9 @@ them:
 
 Local Source Mode and Full Source Compatibility are different operations.
 
-The `next` worktree normally uses the materialized pinned-DSH Source
-development environment prepared by `dev:bootstrap`.
+When `next` is in Source Mode, it uses the materialized pinned-DSH
+development environment prepared by `dev:bootstrap`. In npm mode, it uses the
+tracked lockfile and registry DSH family.
 
 If `pnpm dev:doctor` reports READY, reuse that environment.
 
@@ -654,14 +671,15 @@ Full `compat:dsh:source` is a CI-equivalent compatibility proof and should
 only be run locally when the change materially affects the DSH source
 distribution boundary or when explicitly requested.
 
-Pull requests targeting `next` continue to run the full Source compatibility
-lane in GitHub CI; that CI is authoritative for routine PR compatibility.
+Pull requests targeting `next` run the compatibility lane selected by
+`dsh-mode.json`: Source Mode builds the pinned family, while npm mode uses the
+frozen registry lane. GitHub CI is authoritative for routine PR compatibility.
 
 ### When to run the full Source verifier
 
 Only consider `compat:dsh:source` locally when one of the following applies:
 
-1. The source pin changed (`ref` / `expectedVersion` / `repository` in
+1. The source target changed (`ref` / `expectedVersion` / `repository` in
    `test/compat/dsh-source.json`).
 2. DSH distribution infrastructure changed (`scripts/dsh-source-pack.mjs`,
    `scripts/dsh-source-verify.mjs`, `scripts/prepare-dsh-test-environment.mjs`,
