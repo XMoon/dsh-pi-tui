@@ -152,7 +152,11 @@ export class TaskBrowserPanel implements Component, Focusable {
    * onViewportExpose and the PageUp/PageDown step — never the budget
    * baseline, which detail rows / the sidebar can undershoot. */
   private lastRenderedStart = 0
-  private lastRenderedCount = 1
+  private lastRenderedCount = 0
+  /** Whether render() recorded a painted viewport yet. Until the first
+   * paint no row was ever seen, so the pre-paint default (0 rows) must
+   * not over-claim; setMaxRows still bounds it to the live grant. */
+  private hasRenderedViewport = false
   private readonly options: TaskPanelOptions
   private readonly searchInput = new Input()
   private searchEnabled: boolean
@@ -186,8 +190,10 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.items = [...items]
     this.configuredMaxVisible = Math.max(1, Math.floor(maxVisible))
     this.maxVisible = this.configuredMaxVisible
-    // Pre-render default: the budget window. The first render's fit loop
-    // overwrites it with the ACTUAL painted window.
+    // Pre-render default: the configured window (direct embedders have no
+    // frame to tighten it). A framed mount's setMaxRows bounds it to the
+    // live grant before the first paint; the first render overwrites it
+    // with the ACTUAL painted window.
     this.lastRenderedCount = this.maxVisible
     this.options = options
     this.onSelect = onSelect
@@ -241,6 +247,10 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.maxRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : Number.POSITIVE_INFINITY
     this.recomputeVisibleBudget()
     this.ensureVisible()
+    // Before the first paint the recorded viewport is the live grant (the
+    // configured cap may be larger than what the frame allows); after a
+    // render the PAINTED window is authoritative and untouched here.
+    if (!this.hasRenderedViewport) this.lastRenderedCount = this.maxVisible
   }
 
   /** Derive the item window from the current chrome and row budget. */
@@ -751,6 +761,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       lines.push(hintLine)
       this.lastRenderedStart = 0
       this.lastRenderedCount = 0
+      this.hasRenderedViewport = true
       return this.finalizeEmpty(lines)
     }
 
@@ -767,6 +778,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       lines.push(hintLine)
       this.lastRenderedStart = 0
       this.lastRenderedCount = 0
+      this.hasRenderedViewport = true
       return this.finalizeEmpty(lines)
     }
 
@@ -837,6 +849,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     // budget baseline can be larger than what details/sidebar allow.
     this.lastRenderedStart = start
     this.lastRenderedCount = itemCount
+    this.hasRenderedViewport = true
     this.exposeViewport()
     if (candidate.length <= limit) return candidate
 
@@ -850,6 +863,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     return this.degradedFallback(
       selectedEntry,
       searchRowText,
+      searchEmpty,
       headerText,
       rows.length > itemCount ? `  ${this.selected + 1}/${rows.length}` : undefined,
       limit,
@@ -866,6 +880,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   private degradedFallback(
     selectedEntry: { group: string | undefined; main: string; details: string[] } | undefined,
     searchRowText: string,
+    searchEmpty: boolean,
     headerText: string | undefined,
     indicatorText: string | undefined,
     limit: number,
@@ -876,10 +891,12 @@ export class TaskBrowserPanel implements Component, Focusable {
       ? color.textMuted(`── ${selectedEntry.group} ──`)
       : undefined
     const detailRows = selectedEntry?.details ?? []
+    // A typed query renders plain (the placeholder dims) — main-path parity.
+    const searchShown = searchRowText === '' ? '' : (searchEmpty ? color.textDim(searchRowText) : searchRowText)
     // Mandatory content (priority 1-2): search row, then the selected
     // main row; the hint text follows (priority 3).
     const content: string[] = []
-    if (searchRowText !== '') content.push(color.textDim(searchRowText))
+    if (searchShown !== '') content.push(searchShown)
     if (mainRow !== undefined) content.push(mainRow)
     if (content.length >= limit) return content.slice(0, limit)
     const hintIncluded = content.length + 1 <= limit
@@ -901,7 +918,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     const hintBlank = used + 1 <= limit
     const out: string[] = []
     if (headerShown) out.push(color.textStrong(headerText!))
-    if (searchRowText !== '') out.push(color.textDim(searchRowText))
+    if (searchShown !== '') out.push(searchShown)
     if (groupShown) out.push(groupRow!)
     if (mainRow !== undefined) out.push(mainRow)
     out.push(...detailsShown)
