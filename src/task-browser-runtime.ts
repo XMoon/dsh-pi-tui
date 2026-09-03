@@ -100,8 +100,16 @@ export class TaskBrowserRuntime {
   /** Monotonic catalog-request epoch: every refreshCatalog request takes
    * the next value. */
   private requestEpoch = 0
-  /** Keeps runtime-only status events from clearing a pending catalog load. */
-  private catalogInFlight = 0
+  /**
+   * The refresh-state request token: the LATEST-STARTED catalog request
+   * (key + epoch) owns the loading/ready/stale transitions. A superseded
+   * or cross-session request never commits refresh state, so an
+   * overlapping pair cannot strand the browser in loading (a global
+   * in-flight counter could: the superseded request's finally would
+   * decrement it and no one would ever send 'ready' — PR review P1).
+   */
+  private pendingKey: string | undefined = undefined
+  private pendingEpoch = 0
   /** The epoch of the LAST SUCCESSFULLY COMMITTED catalog. A response
    * may commit only when its own request epoch is NOT below this — i.e.
    * "latest successfully committed wins", never "latest requested wins":
@@ -145,27 +153,43 @@ export class TaskBrowserRuntime {
     const key = this.hooks.currentKey()
     if (key === undefined) return
     const epoch = ++this.requestEpoch
-    this.catalogInFlight += 1
+    // This request takes over the refresh-state token: any older in-flight
+    // request becomes state-silent (it may still commit rows if its epoch
+    // is not superseded, but only the token holder ends loading).
+    this.pendingKey = key
+    this.pendingEpoch = epoch
     this.hooks.commitRefreshState?.('loading')
     let entries: readonly SubagentDescendantListEntry[]
     try {
       entries = await this.hooks.listDescendants()
     } catch (error) {
-      // A stale session's failure must not overwrite the new session's state.
-      if (this.hooks.currentKey() === key && epoch >= this.committedEpoch) {
+      // A stale session's failure must not overwrite the new session's
+      // state, and a superseded failure must not clear a newer token.
+      if (this.hooks.currentKey() === key && this.pendingKey === key && this.pendingEpoch === epoch) {
         const message = error instanceof Error ? error.message : 'Task catalog refresh failed'
         this.hooks.commitRefreshState?.('stale', message)
+        this.pendingKey = undefined
+        this.pendingEpoch = 0
       }
       throw error
-    } finally {
-      this.catalogInFlight -= 1
     }
-    if (this.hooks.currentKey() !== key) return
-    if (epoch < this.committedEpoch) return
+    if (this.hooks.currentKey() !== key) {
+      // Cross-session: the new session's own requests own refresh state.
+      return
+    }
+    if (epoch < this.committedEpoch) {
+      // Superseded by a newer successful commit; that request owns the
+      // token and will end the loading state.
+      return
+    }
     this.committedEpoch = epoch
     this.catalog = [...entries]
     this.apply(entries)
-    if (this.catalogInFlight === 0) this.hooks.commitRefreshState?.('ready')
+    if (this.pendingKey === key && this.pendingEpoch === epoch) {
+      this.hooks.commitRefreshState?.('ready')
+      this.pendingKey = undefined
+      this.pendingEpoch = 0
+    }
   }
 
   /** A RUNTIME-only refresh: NO descendant listing — reuse the cached
@@ -193,6 +217,11 @@ export class TaskBrowserRuntime {
     this.lastRows = []
     this.acknowledgedFailures.clear()
     this.previousFailureIds = new Set()
+    // Invalidates any pending refresh-state token: the old session's
+    // in-flight promises are state-silent (their key check fails against
+    // the new session), and the new session's requests mint a fresh token.
+    this.pendingKey = undefined
+    this.pendingEpoch = 0
   }
 
   /** Acknowledge only failure rows the current surface actually showed. */

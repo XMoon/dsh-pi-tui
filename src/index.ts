@@ -5788,21 +5788,17 @@ export function apply(ctx: Context, config: Config): void {
             openTasksBrowser('full', state)
           },
           onStop: value => actionRow(value, 'stop'),
+          onViewportExpose: ids => runtime?.acknowledge(ids),
         },
       )
       activeTaskBrowser = handle
-      if (runtime !== undefined) {
-        // Opening either view acknowledges only failure rows the user can
-        // ACTUALLY see: the open viewport (scroll window), never the whole
-        // projection. A failure below the fold is not "seen" and keeps its
-        // footer attention until the user scrolls it into view (PR review
-        // M1). Quick's Active scope leaves terminal failures pending while
-        // live work is present, so its badge remains useful.
-        const visibleFailures = handle.viewportItems?.()
-          .filter(item => item.attention === true)
-          .map(item => item.value) ?? []
-        if (visibleFailures.length > 0) runtime.acknowledge(visibleFailures)
-      }
+      // Acknowledging failures is CONTINUOUS, not one-shot-at-open: the
+      // panel reports each attention row the first time it enters the
+      // open viewport (first frame AND every later scroll/page/jump), and
+      // the runtime acknowledges exactly those ids (PR review P1/P2). Only
+      // rows the user can actually see lose their footer attention;
+      // Quick's Active scope leaves terminal failures pending while live
+      // work is present, so its badge stays useful.
       // The open triggers a CATALOG refresh (membership may have drifted
       // since the last listing): the coordinator fences it against a
       // session switch and commits through the ACTIVE handle — a browser

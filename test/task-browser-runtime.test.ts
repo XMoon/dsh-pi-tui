@@ -303,6 +303,13 @@ test('Case D3: overlapping catalog refreshes commit in REQUEST order (epoch supe
   assert.equal(h.commits().length, 1, 'the superseded listing must not commit')
   assert.equal(h.runtime.has('child-new'), true, 'the cache must keep the newer membership')
   assert.equal(h.runtime.has('child-old'), false, 'the stale membership must never land')
+  // PR review P1 race: the superseded request must not strand the browser
+  // in loading — the LATEST-started request owns the token and must end it.
+  const states = h.refreshStates()
+  assert.equal(states[states.length - 1]!.state, 'ready',
+    'the final refresh state must be ready, never stuck in loading')
+  assert.ok(states.filter(state => state.state === 'ready').length >= 1,
+    'exactly the token-owning request sends ready')
 })
 
 test('Case D4: a FAILED newer request must not invalidate a valid older response', async () => {
@@ -556,11 +563,35 @@ test('the runner never sets refresh state outside the runtime fence (PR review P
     'a fenced commitRefreshState binding must exist for the coordinator')
 })
 
-test('acknowledge on open uses the OPEN VIEWPORT only (PR review M1)', () => {
+test('viewport exposure drives acknowledgement continuously, never whole-projection (PR review P1/P2)', () => {
   const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
   const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
-  assert.ok(open.includes('handle.viewportItems?.()'),
-    'acknowledge must read the open viewport, never the whole projection')
-  assert.ok(!open.replace(/\/\/.*$/gm, '').includes('handle.visibleItems?.()\n          .filter(item => item.attention === true)'),
-    'the whole-projection acknowledge path must be gone')
+  // The runner wires the panel's first-time-viewport callback into the
+  // coordinator's acknowledge — not a one-shot whole-projection read.
+  assert.ok(open.includes('onViewportExpose: ids => runtime?.acknowledge(ids)'),
+    'the panel viewport-expose signal must drive the coordinator acknowledge')
+  assert.ok(!open.replace(/\/\/.*$/gm, '').includes('handle.viewportItems?.()'),
+    'no one-shot viewport ack may remain (the callback covers the first frame too)')
+})
+
+test('Case F: a cross-session overlap cannot strand the NEW session in loading (PR review P1)', async () => {
+  const h = makeHarness()
+  // Session A starts a catalog refresh; it stays pending.
+  const aListing = h.runtime.refreshCatalog()
+  // Session B takes over and its OWN refresh succeeds fully.
+  h.setKey('g2:sess-b')
+  h.setStatus('child-b', 'running')
+  const bListing = h.runtime.refreshCatalog()
+  h.settleListing(1, [child({ id: 'child-b' as SessionId, activity: 'running', depth: 1 })])
+  await bListing
+  const states = h.refreshStates()
+  assert.equal(states[states.length - 1]!.state, 'ready',
+    'session B must reach ready — session A must not hold its loading hostage')
+  // A settles LATE: state-silent (cross-session), and B stays ready.
+  h.settleListing(0, [child({ id: 'child-old' as SessionId, activity: 'running', depth: 1 })])
+  await aListing
+  assert.equal(h.runtime.has('child-b'), true, 'B keeps its membership')
+  assert.equal(h.runtime.has('child-old'), false, 'A never lands on B')
+  assert.equal(h.refreshStates()[h.refreshStates().length - 1]!.state, 'ready',
+    'A settling late must not move B off ready (never a stuck loading)')
 })
