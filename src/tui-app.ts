@@ -8731,8 +8731,9 @@ export class TuiApp {
           ? color.error(line)
           : color.textDim(line)
         // Reuse the live width-aware wrapper for expanded payload lines too:
-        // long coordination text keeps its two-cell continuation indent.
-        card.addChild(new CompactTextPreview(styled, Number.MAX_SAFE_INTEGER, '  '))
+        // long coordination text keeps its two-cell continuation indent, and
+        // original blank lines (paragraph breaks) stay visible.
+        card.addChild(new CompactTextPreview(styled, Number.MAX_SAFE_INTEGER, '  ', true))
       }
       return
     }
@@ -8742,12 +8743,12 @@ export class TuiApp {
       // output/exit-code path merely to make the payload visible.
       if (action.payload !== undefined && action.payload !== '') {
         for (const line of action.payload.split(/\r\n|\r|\n/)) {
-          card.addChild(new CompactTextPreview(color.textDim(line), Number.MAX_SAFE_INTEGER, '  '))
+          card.addChild(new CompactTextPreview(color.textDim(line), Number.MAX_SAFE_INTEGER, '  ', true))
         }
       }
       if (message.status === 'running') return
       if (message.status === 'error') {
-        if (action.result !== undefined) card.addChild(new CompactTextPreview(color.error(action.result), Number.MAX_SAFE_INTEGER, '  '))
+        if (action.result !== undefined) card.addChild(new CompactTextPreview(color.error(action.result), Number.MAX_SAFE_INTEGER, '  ', true))
         return
       }
     }
