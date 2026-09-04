@@ -52,12 +52,7 @@
 | File | Coupling | Notes |
 |---|---|---|
 | `src/index.ts` | `agents`, `sessions`, `subagents`, `jobs`, `attachments`, `llm`, `commands`, `settings`, `sessionPersistence`, `agentPresets`, `tools`, `permissionPresets`, `tokenMeter`, `agentDefaultModel`, `shell`, `planMode`, `sandboxPolicy`; `import:dsh-agent`, `import:dsh-session` | The runner: agent create/resume, session ownership, event subscription, input dispatch, queue/steer, lifecycle. The primary migration coupling point (plan §4.1). M1.8/M1.9 relocated `credentials`, `authorization` and `userQuestions` into the config/interaction adapters; `llm`/`tools`/`permissionPresets`/`tokenMeter` remain here ONLY for the runner's own non-command paths (boot diagnostics, status footer, the pre-mount surface prefetch and the image-submission preparation — never for command handlers). `planMode`/`sandboxPolicy` are the M0 status-seam wiring (the derives consume them through structural interfaces). |
-| `src/session-lock.ts`, `src/session-lock-proc.ts` | owner.lock open/steal | Direct-mode session ownership; never removed as "cleanup" (AGENTS.md guardrail). |
-| `src/session-lease-manager.ts`, `src/session-lease-cooling.ts` | lease/cooling state machine | Same. |
-| `src/transition-gate.ts`, `src/transition.ts` | transition gate | Same. |
-| `src/session-operation-barrier.ts` | operation barrier | Same. |
-| `src/open-locks.ts` | lock bookkeeping | Same. |
-| `src/session-fork.ts` | `import:dsh-agent`, `import:dsh-session` | Fork/rewind mechanics; Direct-mode agent handles. |
+| `src/session-fork.ts` | `import:dsh-agent`, `import:dsh-session` | Fork/rewind mechanics; Direct-mode agent handles (the AgentHandle escape, M8). |
 | `src/rewind.ts` | `import:dsh-session` | Rewind mechanics. |
 
 ### MIGRATABLE
@@ -77,7 +72,7 @@
 | `src/runtime/host-file-port.ts` | (none) | The Host-file port interface (M1.10, contract review) — path-only candidates (`{path, kind}`, the official `FileReferenceCandidate` shape); the TUI's ranking/quoting/`@`-insertion value/label/description/directory-continuation are CLIENT policy in mentions.ts, never Host data. Zero Host coupling. |
 | `src/runtime/direct/host-file-direct.ts` | (fs only; no ctx services) | The Direct `HostFilePort` adapter (M1.10) — the ONLY module in the `@`-file path that touches the filesystem: fd discovery (fork delegation) or the bounded recursive fallback scan, stat existence probes, `~` expansion. Returns path-only DTOs; discovery bounds only, no presentation. No ctx-service coupling (baseline-free). |
 | `src/runtime/session-lifecycle-port.ts` | (none) | The session LIFECYCLE port interface (M1.5, contract-reviewed) — transport-neutral: serializable requests, `SessionHandle` (no Host types). Zero Host coupling. |
-| `src/runtime/direct/session-lifecycle-direct.ts` | `agents`, `import:dsh-agent`, `import:dsh-session` | The Direct `SessionLifecycle` adapter (M1.5, contract-reviewed) — the ONLY module converting the semantic request into the Direct shapes (preset composition → `setup` callback, `SessionId`, seed). The runner keeps the ownership machinery (lock/lease/PINNED/transition/barrier) around the port calls. Baseline entries updated by the M1.5 contract revision (the port itself dropped to zero coupling). |
+| `src/runtime/direct/session-lifecycle-direct.ts` | `agents`, `import:dsh-agent`, `import:dsh-session` | The Direct `SessionLifecycle` adapter (M1.5, contract-reviewed) — the ONLY module converting the semantic request into the Direct shapes (preset composition → `setup` callback, `SessionId`, seed). The runner keeps the process-local surface coordination (transition gate, operation barrier, generation/stale fences) around the port calls; DSH `SessionHandle` / `SessionWriteLease` is the cross-process writer authority. Baseline entries updated by the M1.5 contract revision (the port itself dropped to zero coupling). |
 | `src/runtime/interaction-port.ts` | (type-only peer imports) | The interaction port interface (M1.6) — uses the official dsh-user-approval / dsh-user-questions types (declared peers). |
 | `src/runtime/direct/interaction-direct.ts` | `approval`, `userQuestions` | The Direct `InteractionPort` adapter (M1.6) — owns the `userQuestions` / `approval` service access and the `approval/request` subscription; the listeners/providers stay runner-owned. Baseline entries added by the M1.6 relocation (commands.ts and index.ts drop `approval` / `userQuestions`). |
 | `src/runtime/direct/catalog-direct.ts` | `llm`, `agentDefaultModel`, `agentPresets`, `tools`; `import:dsh-agent` (type-only, dsh-agent-presets) | The Direct `Catalog` adapter (M1.8) — owns the model/provider directory, the preset roster (read side), and the skill sub-domain's service discovery (`skills`/`agentPresets` through the skill-catalog.ts seam plus the `tools` loader probe for the host-vs-fallback injection decision); consumers depend on the port DTOs. Baseline entries added by the M1.8 relocation (commands.ts drops `llm`/`agentDefaultModel`/`agentPresets`/`tools` access). |
@@ -95,10 +90,14 @@
 Terminal rendering, editor, keybindings, clipboard/OSC52, input history,
 search UI state, picker cursor, overlay state, fullscreen, theme, draft
 state, local shell card display, question/approval *presentation* (the
-authority stays Host-owned). Representative files: `src/tui-app.ts`,
-`src/tui-editor.ts`, `src/theme.ts`, `src/present.ts` (rendering half),
-`src/clipboard.ts`, `src/history.ts`, `src/search.ts`, `src/overlay-broker.ts`,
-`src/keybinding-registry.ts`, `src/editor-registry.ts`, `src/renderer-registry.ts`.
+authority stays Host-owned), and session transition coordination
+(`src/transition-gate.ts`, `src/transition.ts`,
+`src/session-operation-barrier.ts` — the process-local single-writer
+transition rules; zero Host coupling). Representative files:
+`src/tui-app.ts`, `src/tui-editor.ts`, `src/theme.ts`, `src/present.ts`
+(rendering half), `src/clipboard.ts`, `src/history.ts`, `src/search.ts`,
+`src/overlay-broker.ts`, `src/keybinding-registry.ts`,
+`src/editor-registry.ts`, `src/renderer-registry.ts`.
 
 ### TEMPORARY_EXCEPTION
 
