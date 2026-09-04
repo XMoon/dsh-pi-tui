@@ -9,28 +9,92 @@
 
 `dsh-pi-tui` 作为独立的 dsh bundle 安装到 profile 中，提供流式对话、工具调用、会话管理、Subagent、历史搜索、Shell、审批与设置等终端交互。模型、工具、Session、权限、Skills、Plan、Goal、Subagent 等运行时能力仍由 DeepSeek Harness 提供。
 
-## 快速开始
+![dsh-pi-tui](docs/dsh-pi-tui.png)
 
-稳定版适合普通用户，推荐使用 `@latest`：
+## 安装到 DSH Profile
+
+### Stable / latest
+
+稳定版是普通用户的推荐渠道。请先安装 DSH，再将 TUI 添加到 `pi-tui` profile：
 
 ```sh
+npm install -g @deepseek-ai/dsh@0.1.2-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
-![dsh-pi-tui](docs/dsh-pi-tui.png)
+### Preview / next
 
-## DSH 兼容性与源码验证
-
-发布包通过 `package.json` peer contract 使用 DSH `>=0.1.2-rc.1`；源码验证不会修改这个发布契约，也不会把 DSH vendor 进本仓库。
-
-当目标 DSH 版本尚未发布到 npm 时，可以用固定 commit 的官方源码包做本地验证：
+预览版包含未发布的变更，仅在需要体验或验证预发布版本时使用：
 
 ```sh
-pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
 ```
 
-CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。`next` 的两种 lane 都从 `test/compat/dsh-source.json` 读取当前 validated DSH target；Source Mode 会验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界，npm Mode 则运行冻结的 registry lane。对于尚未发布的 source family，已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md)。
+### 环境要求
+
+* DeepSeek Harness
+* Node.js `^22.19.0 || >=24`
+
+### DSH 与 TUI 版本对应（重要）
+
+| TUI 包版本 | 对应 DSH 版本 | 说明 |
+|---|---|---|
+| `0.4.0`（`@latest`） | `>=0.1.2-rc.1` | 当前稳定版；按 0.1.2-rc.1 family 验证 |
+| `0.4.x-alpha`（`@next`） | `>=0.1.2-rc.1` | 后续预发布线；按每个发布版本的具体 DSH family 验证 |
+| `0.4.0-alpha.2`（已发布） | `>=0.1.2-alpha.4` | 上一条 0.4 预发布线；其发布版本按 alpha.4/alpha.5 family 验证 |
+| `0.4.0-alpha.1`（已发布） | `>=0.1.2-alpha.2` | 更早的 0.4 预发布线；接受 alpha.2/alpha.3 运行时 |
+| `0.3.x`（`@0.3`） | `0.1.1-rc.2` | 旧运行时兼容线 |
+
+不要把两条线混装：DSH 0.1.1 不在 0.4 的 peer 支持范围内，运行时会在
+正常的不兼容边界以非零状态失败。启动行会在 Loader 并发挂载顺序允许时打印
+升级和回退提示，但该友好提示是 best-effort，不是启动顺序保证；保留 DSH
+0.1.1 时请使用 0.3，保留 alpha.2/alpha.3 时请使用
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.1`，保留 alpha.4/alpha.5 时请使用
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.2`。稳定版的安装方式已在上方“安装到 DSH
+Profile”中给出；如果需要保留旧 DSH，请使用下面的兼容恢复路径：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
+dsh --profile pi-tui
+```
+
+`0.4` 当前线的声明支持范围是 `>=0.1.2-rc.1`；每个发布版本都会验证
+具体的 DSH family。`npm install -g` 仅用于安装 DSH 本身；要将 dsh-pi-tui
+安装进 DSH profile，必须使用 `dsh plugin` 命令。
+
+新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
+`code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
+旧数据中省略请求的 `code` default/session 值只有在确认 roster 不含 `code` 后
+才会回退到 `ptc`。
+
+### Profile management
+
+更新已安装的 TUI：
+
+```sh
+dsh plugin --profile pi-tui -- update @xmoon76/dsh-pi-tui
+```
+
+查看已安装插件：
+
+```sh
+dsh plugin --profile pi-tui -- list
+```
+
+卸载：
+
+```sh
+dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
+```
+
+恢复已有 Session：
+
+```sh
+dsh --profile pi-tui --session <session-id>
+```
 
 ## 功能
 
@@ -301,108 +365,6 @@ dsh-pi-tui:
   移除某 action 的全部触发。
 
 
-## 安装
-
-### 环境要求
-
-* DeepSeek Harness
-* Node.js `^22.19.0 || >=24`
-
-### DSH 与 TUI 版本对应（重要）
-
-| TUI 包版本 | 对应 DSH 版本 | 说明 |
-|---|---|---|
-| `0.4.0`（`@latest`） | `>=0.1.2-rc.1` | 当前稳定版；按 0.1.2-rc.1 family 验证 |
-| `0.4.x-alpha`（`@next`） | `>=0.1.2-rc.1` | 后续预发布线；按每个发布版本的具体 DSH family 验证 |
-| `0.4.0-alpha.2`（已发布） | `>=0.1.2-alpha.4` | 上一条 0.4 预发布线；其发布版本按 alpha.4/alpha.5 family 验证 |
-| `0.4.0-alpha.1`（已发布） | `>=0.1.2-alpha.2` | 更早的 0.4 预发布线；接受 alpha.2/alpha.3 运行时 |
-| `0.3.x`（`@0.3`） | `0.1.1-rc.2` | 旧运行时兼容线 |
-
-不要把两条线混装：DSH 0.1.1 不在 0.4 的 peer 支持范围内，运行时会在
-正常的不兼容边界以非零状态失败。启动行会在 Loader 并发挂载顺序允许时打印
-升级和回退提示，但该友好提示是 best-effort，不是启动顺序保证；保留 DSH
-0.1.1 时请使用 0.3，保留 alpha.2/alpha.3 时请使用
-`@xmoon76/dsh-pi-tui@0.4.0-alpha.1`，保留 alpha.4/alpha.5 时请使用
-`@xmoon76/dsh-pi-tui@0.4.0-alpha.2`。当前稳定版（`@latest`）的推荐安装顺序如下
-（先装 DSH，再把 TUI 装入 profile）：
-
-```sh
-npm install -g @deepseek-ai/dsh@0.1.2-rc.1
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
-dsh --profile pi-tui
-```
-
-如果需要保留旧 DSH：
-
-```sh
-npm install -g @deepseek-ai/dsh@0.1.1-rc.2
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
-dsh --profile pi-tui
-```
-
-`0.4` 当前线的声明支持范围是 `>=0.1.2-rc.1`；每个发布版本都会验证
-具体的 DSH family。`npm install -g` 仅用于安装 DSH 本身；要将 dsh-pi-tui
-安装进 DSH profile，必须使用上面的 `dsh plugin` 命令。
-
-新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
-`code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
-旧数据中省略请求的 `code` default/session 值只有在确认 roster 不含 `code` 后
-才会回退到 `ptc`。
-
-### Stable / latest
-
-稳定版是普通用户的推荐渠道。建议使用单独的 `pi-tui` profile：
-
-```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
-dsh --profile pi-tui
-```
-
-恢复已有 Session：
-
-```sh
-dsh --profile pi-tui --session <session-id>
-```
-
-### Preview / next
-
-需要体验未发布的预览版本时，显式使用 `@next`。普通用户仍应使用上面的
-稳定版 `@latest` 渠道：
-
-```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
-dsh --profile pi-tui
-```
-
-### Source Mode（仅验证）
-
-Source Mode 是 `next` CI 按跟踪策略选用的、并可用于本地兼容性检查的验证专用 distribution。它从 `test/compat/dsh-source.json` 的完整 commit SHA 构建官方 DSH tarball family，通过临时 pnpm overrides 安装，并在完成后清理临时状态。不要把 DSH 源码路径、`file:` 依赖或 workspace symlink 写入发布 package。
-
-```sh
-pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
-pnpm compat:dsh:npm
-```
-
-安装包已经包含运行所需的 Pi TUI fork，不需要额外安装内部的 TUI package。
-
-### 更新
-
-```sh
-dsh plugin --profile pi-tui -- update @xmoon76/dsh-pi-tui
-```
-
-查看已安装插件：
-
-```sh
-dsh plugin --profile pi-tui -- list
-```
-
-卸载：
-
-```sh
-dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
-```
-
 ## 从源码运行
 
 ```sh
@@ -564,6 +526,25 @@ node --expose-gc scripts/bench.mts
 dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD
 dsh --profile pi-tui-dev
 ```
+
+## DSH 兼容性与验证
+
+以下内容仅介绍 Source Mode 和 CI 验证细节；普通用户无需使用 Source Mode 安装 TUI。
+
+### Source Mode（仅验证）
+
+Source Mode 是 `next` CI 按跟踪策略选用的、并可用于本地兼容性检查的验证专用 distribution。它从 `test/compat/dsh-source.json` 的完整 commit SHA 构建官方 DSH tarball family，通过临时 pnpm overrides 安装，并在完成后清理临时状态。不要把 DSH 源码路径、`file:` 依赖或 workspace symlink 写入发布 package。
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
+```
+
+安装包已经包含运行所需的 Pi TUI fork，不需要额外安装内部的 TUI package。
+
+### CI 验证策略
+
+CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。`next` 的两种 lane 都从 `test/compat/dsh-source.json` 读取当前 validated DSH target；Source Mode 会验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界，npm Mode 则运行冻结的 registry lane。对于尚未发布的 source family，已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md)。
 
 ## 项目结构
 

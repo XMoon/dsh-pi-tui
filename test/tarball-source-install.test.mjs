@@ -55,6 +55,7 @@ function candidateFiles() {
     'scripts/repair-session.mjs': '#!/usr/bin/env node\nconsole.log(\'usage: repair-session\')\n',
     'scripts/repair-core.mjs': 'export const repair = true\n',
     'README.md': '# source probe\n',
+    'README.en.md': '# source probe\n',
   }
 }
 

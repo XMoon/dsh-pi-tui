@@ -7,7 +7,7 @@ boundary.
 
 | dsh-pi-tui line | DeepSeek Harness line | Policy |
 |---|---|---|
-| `0.3.x` | `0.1.1` | Supported legacy runtime line |
+| `0.3.x` | `0.1.1-rc.2` | Supported legacy runtime line |
 | `0.4.0` | `>=0.1.2-rc.1` | Current stable; validated against the rc.1 DSH family |
 | `0.4.x-alpha` | `>=0.1.2-rc.1` | Following prerelease line; each release validates the concrete DSH family |
 | `0.4.0-alpha.2` | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; validated the alpha.4/alpha.5 DSH family |
@@ -20,33 +20,42 @@ Loader mount gets to run first, but that friendly notice is best-effort. The
 published peer contract intentionally uses a lower bound only: later DSH
 versions remain eligible until a concrete compatibility failure is found.
 
+For the current stable 0.4 line, install the validated Harness family and the
+stable TUI:
+
 ```sh
-# 推荐：安装本 TUI 当前验证过的 exact DSH（0.1.2-rc.1 属于 npm next
-# channel，不是 latest；exact 版本让恢复目标确定，不随 channel tag 漂移）
 npm install -g @deepseek-ai/dsh@0.1.2-rc.1
-
-# 或跟随 DSH next channel
-npm install -g @deepseek-ai/dsh@next
-
-npm install -g @xmoon76/dsh-pi-tui@0.3
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 ```
 
-The first command upgrades the Harness for 0.4 (the concrete family validated
-by the current stable baseline is `0.1.2-rc.1`; the peer contract stays
-lower-bound-only at `>=0.1.2-rc.1`). The second pins the compatible
-TUI line when the installed Harness must remain on 0.1.1; a Harness on the
-alpha.2/alpha.3 baseline instead stays on `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`,
-and a Harness on the alpha.4/alpha.5 baseline stays on
-`@xmoon76/dsh-pi-tui@0.4.0-alpha.2` — the last lines that accept them. Later DSH
-versions are eligible under the lower-bound-only peer contract; each release
-still runs its concrete runtime and preset gates. The startup notice only
-reports versions below `0.1.2-rc.1`; an incompatible future runtime fails
-through the normal package contract rather than an early TUI-specific API
-branch. Peer prerelease tuples are validated separately before each release.
+To try the preview channel, use the DSH `next` line with the TUI `@next` channel:
 
-Note that `npm install -g @deepseek-ai/dsh` without an explicit version
-follows npm's `latest` dist-tag, which is the older 0.1.1 line — always name
-the exact version or the `next` channel explicitly.
+```sh
+npm install -g @deepseek-ai/dsh@next
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+```
+
+If the legacy DSH runtime must be kept, use the compatible 0.3 TUI line:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
+```
+
+The stable pair uses the concrete `0.1.2-rc.1` family; the peer contract stays
+lower-bound-only at `>=0.1.2-rc.1`. A Harness on the alpha.2/alpha.3 baseline
+uses `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, and a Harness on the alpha.4/alpha.5
+baseline uses `@xmoon76/dsh-pi-tui@0.4.0-alpha.2` — the last lines that accept
+them. Later DSH versions remain eligible under the lower-bound-only peer
+contract; each release still runs its concrete runtime and preset gates. The
+startup notice reports versions below `0.1.2-rc.1`; an incompatible future
+runtime fails through the normal package contract rather than an early
+TUI-specific API branch. Peer prerelease tuples are validated separately before
+each release.
+
+Note that `npm install -g @deepseek-ai/dsh` without an explicit version follows
+npm's `latest` dist-tag, which is the older 0.1.1 line — always name the exact
+version or the `next` channel explicitly.
 
 ## Data compatibility
 

@@ -149,15 +149,19 @@ function containsExactGuidance(content, command) {
 const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3' : '0.1.2-alpha.5'
 const dshStablePin = version === '0.4.0' ? '0.1.2-rc.1' : '0.1.2'
 if (version.startsWith('0.4.')) {
+  // Release bodies must remain reproducible after a later stable/preview
+  // publish moves the npm dist-tags. README keeps the moving channel tags for
+  // ordinary installs; changelog/release-note guidance pins this release.
+  const tuiPin = `@xmoon76/dsh-pi-tui@${version}`
   const requiredGuidance = channel === 'next'
     ? [
         `@deepseek-ai/dsh@${dshAlphaPin}`,
-        '@xmoon76/dsh-pi-tui@next',
+        tuiPin,
         '@xmoon76/dsh-pi-tui@0.3',
       ]
     : [
         `@deepseek-ai/dsh@${dshStablePin}`,
-        '@xmoon76/dsh-pi-tui@latest',
+        tuiPin,
         '@xmoon76/dsh-pi-tui@0.3',
       ]
   for (const command of requiredGuidance) {

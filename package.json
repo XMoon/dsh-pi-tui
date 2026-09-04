@@ -208,6 +208,7 @@
     "compat:dsh:npm": "node scripts/dsh-npm-verify.mjs",
     "prepare:dsh:test": "node scripts/prepare-dsh-test-environment.mjs",
     "gate:source-leak": "node scripts/dsh-source-leak-gate.mjs",
+    "gate:installation-doc": "node scripts/installation-doc-gate.mjs",
     "gate:temp-hygiene": "node scripts/temp-hygiene-gate.mjs",
     "generate:pi-divergences": "node scripts/generate-pi-divergences.mjs",
     "gate:pi-divergence-ledger": "node scripts/pi-divergence-ledger-gate.mjs",
@@ -224,12 +225,12 @@
     "dev:doctor": "node scripts/dev-doctor.mjs",
     "dev:bootstrap": "node scripts/dev-bootstrap.mjs",
     "dev:shell": "node scripts/dev-shell.mjs",
-    "verify:prepush": "pnpm typecheck:fork && pnpm test:fork && pnpm test:docs && pnpm test:tooling && pnpm gate:pi-divergence-ledger && pnpm gate:pi-vendor-diff --strict && node scripts/naming-gate.mjs && pnpm gate:temp-hygiene && node scripts/check-no-session-events.mjs && pnpm gate:boundary && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release",
-    "verify:prepush:nofork": "pnpm test:docs && pnpm test:tooling && pnpm gate:pi-divergence-ledger && pnpm gate:pi-vendor-diff --strict && node scripts/naming-gate.mjs && pnpm gate:temp-hygiene && node scripts/check-no-session-events.mjs && pnpm gate:boundary && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release",
+    "verify:prepush": "pnpm typecheck:fork && pnpm test:fork && pnpm test:docs && pnpm test:tooling && pnpm gate:installation-doc && pnpm gate:pi-divergence-ledger && pnpm gate:pi-vendor-diff --strict && node scripts/naming-gate.mjs && pnpm gate:temp-hygiene && node scripts/check-no-session-events.mjs && pnpm gate:boundary && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release",
+    "verify:prepush:nofork": "pnpm test:docs && pnpm test:tooling && pnpm gate:installation-doc && pnpm gate:pi-divergence-ledger && pnpm gate:pi-vendor-diff --strict && node scripts/naming-gate.mjs && pnpm gate:temp-hygiene && node scripts/check-no-session-events.mjs && pnpm gate:boundary && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release",
     "prepare": "husky",
     "gate:boundary": "node scripts/client-boundary-gate.mjs",
     "gate:keybindings": "node --import tsx/esm scripts/check-host-keybindings.mts",
-    "test:tooling": "node scripts/run-with-temp-root.mjs node --test test/dev-environment.test.mjs test/dev-bootstrap-ephemeral.test.mjs test/pre-push-hook.test.mjs test/pre-push-stages.test.mjs test/dsh-ci-context.test.mjs test/dsh-distribution.test.mjs test/dsh-npm-verify.test.mjs test/dsh-peer-window.test.mjs test/dsh-process.test.mjs test/dsh-runtime-boundary.test.mjs test/dsh-source-identity.test.mjs test/dsh-source-leak.test.mjs test/release-context.test.mjs test/release-notes.test.mjs test/source-mode-rules.test.mjs test/client-boundary-gate.test.mjs test/tarball-source-install.test.mjs test/pi2dsh-compat-smoke.test.mjs test/temp-hygiene-gate.test.mjs test/pi-vendor-diff-gate.test.mjs test/pi-divergence-ledger-gate.test.mjs test/run-with-temp-root.test.mjs",
+    "test:tooling": "pnpm gate:installation-doc && node scripts/run-with-temp-root.mjs node --test test/dev-environment.test.mjs test/dev-bootstrap-ephemeral.test.mjs test/pre-push-hook.test.mjs test/pre-push-stages.test.mjs test/dsh-ci-context.test.mjs test/dsh-distribution.test.mjs test/dsh-npm-verify.test.mjs test/dsh-peer-window.test.mjs test/dsh-process.test.mjs test/dsh-runtime-boundary.test.mjs test/dsh-source-identity.test.mjs test/dsh-source-leak.test.mjs test/release-context.test.mjs test/release-notes.test.mjs test/source-mode-rules.test.mjs test/client-boundary-gate.test.mjs test/tarball-source-install.test.mjs test/pi2dsh-compat-smoke.test.mjs test/temp-hygiene-gate.test.mjs test/pi-vendor-diff-gate.test.mjs test/pi-divergence-ledger-gate.test.mjs test/run-with-temp-root.test.mjs",
     "test:product": "node scripts/run-with-temp-root.mjs node --test test/*.test.ts test/repair.test.mjs test/tarball-smoke.test.mjs"
   }
 }

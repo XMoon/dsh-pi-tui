@@ -257,6 +257,9 @@ jobs:
       - name: Test documentation
         run: pnpm test:docs
 
+      - name: Validate installation documentation
+        run: pnpm gate:installation-doc
+
       # Development-tooling suite: dev-environment fixtures, pre-push policy,
       # DSH distribution gates. Kept OUT of prepack so the artifact lifecycle
       # never depends on the developer git/CI environment.

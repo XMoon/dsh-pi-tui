@@ -189,7 +189,7 @@ export function incompatibleHarnessMessage(installed: string, entry: HarnessComp
   if (entry.fallbackTui !== undefined) {
     recovery.push(
       'Or keep your current Harness and use the compatible TUI line:',
-      `  npm install -g @xmoon76/dsh-pi-tui@${entry.fallbackTui}`,
+      `  dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@${entry.fallbackTui}`,
     )
   }
   if (entry.guidance !== undefined) recovery.push(entry.guidance)

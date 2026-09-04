@@ -164,7 +164,7 @@ function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION) {
       `running dsh ${oldVersion}`,
       `DeepSeek Harness ${notice.requires} or later`,
       `npm install -g @deepseek-ai/dsh@${notice.upgrade}`,
-      `npm install -g @xmoon76/dsh-pi-tui@${notice.fallbackTui}`,
+      `dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@${notice.fallbackTui}`,
       'dsh --profile pi-tui',
     ]
     for (const text of required) {
