@@ -19,16 +19,17 @@ const BINDINGS: readonly LeaderBinding[] = [
 function createMachine(
   config: LeaderConfig = CONFIG,
   bindings: readonly LeaderBinding[] = BINDINGS,
-): { machine: LeaderStateMachine; activated: string[]; stateChanges: () => number } {
+): { machine: LeaderStateMachine; activated: string[]; activatedKeys: string[]; stateChanges: () => number } {
   const activated: string[] = []
+  const activatedKeys: string[] = []
   let stateChanges = 0
   const machine = new LeaderStateMachine(config, bindings, {
-    onActivate: (action) => { activated.push(action); return true },
+    onActivate: (action, key) => { activated.push(action); activatedKeys.push(key); return true },
     onStateChange: () => { stateChanges += 1 },
   })
   // The counter is exposed as a GETTER — a by-value copy would freeze at 0
   // (the AGENTS.md mutable-counter trap).
-  return { machine, activated, stateChanges: () => stateChanges }
+  return { machine, activated, activatedKeys, stateChanges: () => stateChanges }
 }
 
 test('idle: the leader key arms the pending state', () => {
@@ -40,6 +41,14 @@ test('idle: the leader key arms the pending state', () => {
   assert.ok(stateChanges() >= 1)
 })
 
+test('idle: Kitty repeat/release artifacts are consumed without arming', () => {
+  const { machine, stateChanges } = createMachine()
+  assert.deepEqual(machine.feed('\x1b[120;5:2u'), { kind: 'consumed' })
+  assert.deepEqual(machine.feed('\x1b[120;5:3u'), { kind: 'consumed' })
+  assert.equal(machine.pending, false)
+  assert.equal(stateChanges(), 0, 'protocol artifacts must not repaint which-key state')
+})
+
 test('idle: other keys pass through', () => {
   const { machine } = createMachine()
   assert.deepEqual(machine.feed('a'), { kind: 'passed' })
@@ -47,11 +56,12 @@ test('idle: other keys pass through', () => {
 })
 
 test('a completing key activates the bound action', () => {
-  const { machine, activated } = createMachine()
+  const { machine, activated, activatedKeys } = createMachine()
   machine.feed('\x18') // leader
   const result = machine.feed('t')
   assert.deepEqual(result, { kind: 'activated', action: 'app.tasks.open', consumed: true })
   assert.deepEqual(activated, ['app.tasks.open'])
+  assert.deepEqual(activatedKeys, ['t'])
   assert.equal(machine.pending, false)
 })
 

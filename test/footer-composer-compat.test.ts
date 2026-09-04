@@ -177,21 +177,21 @@ test('compact preset output is byte-equivalent to the reference compact footer',
   assert.equal(actual, expected)
 })
 
-test('the Ctrl+C instruction appends as an INDEPENDENT line (the stats row survives)', () => {
+test('the dynamic exit instruction appends as an INDEPENDENT line (the stats row survives)', () => {
   // plan 2026-08-31 §7: the instruction is no longer a Row-2 REPLACER —
   // it reserves its own line from the global budget; the user layout rows
   // render beside it, position-independent.
   const snap = mainSnapshot()
   const expected = [
     referenceFooter(legacyLine1(snap, true, ''), defaultStatsRow(snap), 100),
-    color.textDim('Press Ctrl+C again to exit'),
+    color.textDim('Press Ctrl+Shift+X again to exit'),
   ].join('\n')
   const actual = composer.render({
     snapshot: snap,
     layout: DEFAULT_FOOTER_LAYOUT,
     width: 100,
     context: CONTEXT,
-    instruction: { id: 'ctrl-c-exit', text: [{ text: 'Press Ctrl+C again to exit' }], priority: 100 },
+    instruction: { id: 'exit-confirm', text: [{ text: 'Press Ctrl+Shift+X again to exit' }], priority: 100 },
   })
   assert.equal(actual, expected)
 })
@@ -272,27 +272,27 @@ test('mergeCommandSurface keeps its contract under the new capacity (smoke)', ()
   // still merges onto the last row slot of the COMMAND surface (its own
   // contract, distinct from the native row allocator), tail-capped at
   // narrow widths.
-  const instruction = { id: 'ctrl-c-exit', text: [{ text: 'Press Ctrl+C again to exit' }], priority: 100 }
+  const instruction = { id: 'exit-confirm', text: [{ text: 'Press Ctrl+Shift+X again to exit' }], priority: 100 }
   assert.equal(mergeCommandSurface(['cmd row one', 'cmd row two'], instruction, 20)
     .replace(/\x1b\[[0-9;]*m/g, ''),
-    'cmd row one\nPress Ctrl+C again…')
+    'cmd row one\nPress Ctrl+Shift+X…')
   assert.equal(mergeCommandSurface(['cmd row one'], instruction, 100)
     .replace(/\x1b\[[0-9;]*m/g, ''),
-    'cmd row one\nPress Ctrl+C again to exit')
+    'cmd row one\nPress Ctrl+Shift+X again to exit')
   assert.equal(mergeCommandSurface(['only'], undefined, 100), 'only')
   // Budget normalization mirrors the native composer: exactly 0 grants
   // nothing; negative totals are invalid input and floor at 1 (the hint
   // can never be silently hidden by an underflow); absurd values clamp to
   // the hard capacity; degenerate widths still bound every row.
-  const instr = { id: 'ctrl-c-exit', text: [{ text: 'Press Ctrl+C again to exit' }], priority: 100 }
+  const instr = { id: 'exit-confirm', text: [{ text: 'Press Ctrl+Shift+X again to exit' }], priority: 100 }
   assert.equal(mergeCommandSurface(['cmd'], instr, 20, { total: 0 }), '')
   assert.equal(
     mergeCommandSurface(['cmd'], instr, 20, { total: -1 }).replace(/\x1b\[[0-9;]*m/g, ''),
-    'Press Ctrl+C again…',
+    'Press Ctrl+Shift+X…',
   )
   assert.equal(
     mergeCommandSurface(['cmd'], instr, 20, { total: 999 }).replace(/\x1b\[[0-9;]*m/g, ''),
-    'cmd\nPress Ctrl+C again…',
+    'cmd\nPress Ctrl+Shift+X…',
   )
   // A degenerate width normalizes to the width-1 surface: every row
   // collapses to its 1-cell ellipsis form.
@@ -304,7 +304,7 @@ test('mergeCommandSurface keeps its contract under the new capacity (smoke)', ()
   // width passes through un-normalized (edge widths included).
   for (const edgeWidth of [Number.NaN, 0, -5, 7.5]) {
     const actual = mergeCommandSurface(['cmd row one', 'cmd row two'], instr, edgeWidth as number)
-    const legacyWrapped = wrapTextWithAnsi('Press Ctrl+C again to exit', edgeWidth as number)
+    const legacyWrapped = wrapTextWithAnsi('Press Ctrl+Shift+X again to exit', edgeWidth as number)
     const legacyRow = legacyWrapped.length > 1
       ? `${truncateToWidth(legacyWrapped[0]!, Math.max(1, (edgeWidth as number) - 1), '')}…`
       : legacyWrapped[0]!
@@ -325,7 +325,7 @@ test('mergeCommandSurface keeps its contract under the new capacity (smoke)', ()
     const lines = mergeCommandSurface(['cmd', 'cmd two'], instr, 20, { total: nonFinite })
       .replace(/\x1b\[[0-9;]*m/g, '').split('\n')
     assert.ok(lines.length <= 4, `non-finite total ${nonFinite} must stay inside the capacity:\n${lines}`)
-    assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again'), `the hint must survive a non-finite total ${nonFinite}:\n${lines}`)
+    assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+Shift+X'), `the hint must survive a non-finite total ${nonFinite}:\n${lines}`)
   }
 })
 
@@ -405,7 +405,7 @@ test('a row that becomes the ONLY logical line follows the SAME 1..2-line contra
 })
 
 test('the instruction as the ONLY logical line caps to one physical row', () => {
-  // A 1-row layout whose status row renders empty + the Ctrl+C
+  // A 1-row layout whose status row renders empty + the dynamic exit
   // instruction: the instruction's own INDEPENDENT surface contract caps
   // it to one physical row (plan 2026-08-31 §7).
   const snap = emptyStatusSnapshot()
@@ -414,12 +414,12 @@ test('the instruction as the ONLY logical line caps to one physical row', () => 
     layout: { schemaVersion: 1, rows: [{ left: [{ id: 'ext:gone/unknown' }], right: [] }] },
     width: 30,
     context: CONTEXT,
-    instruction: { id: 'ctrl-c-exit', text: [{ text: 'Press Ctrl+C again to exit — this hint is deliberately long' }], priority: 100 },
+    instruction: { id: 'exit-confirm', text: [{ text: 'Press Ctrl+Shift+X again to exit — this hint is deliberately long' }], priority: 100 },
   })
   const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
   const lines = plain.split('\n')
   assert.equal(lines.length, 1, `the instruction must cap to one physical row:\n${plain}`)
-  assert.ok(plain.includes('Press Ctrl+C'), `the hint must survive:\n${plain}`)
+  assert.ok(plain.includes('Press Ctrl+Shift+X'), `the hint must survive:\n${plain}`)
 })
 
 test('an EMPTY stats row does not cap the status row as if it were the stats tail', () => {

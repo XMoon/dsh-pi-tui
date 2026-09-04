@@ -15,7 +15,7 @@
  * src/keybindings/definitions.ts; the effective map (user overrides
  * applied) is inspectable at runtime with `/keybindings`. Comments in this
  * file name keys only when the SEMANTICS are key-specific (e.g. the
- * Ctrl+C clear-then-exit chord); every other mention is a shorthand for
+ * Ctrl+C clear-draft behavior); every other mention is a shorthand for
  * the action and must never be relied on as the live binding.
  * @module @xmoon76/dsh-pi-tui/tui-app
  */
@@ -141,7 +141,7 @@ import { InputRouter } from './input-router.ts'
 import { AppActionDispatcher, type AppActionHost } from './keybindings/action-dispatcher.ts'
 import { deriveKeybindingContext } from './keybindings/context.ts'
 import { APP_KEYBINDINGS, VIEWER_BLOCKED_PARENT_ACTIONS } from './keybindings/definitions.ts'
-import { formatKeyId } from './keybindings/hints.ts'
+import { formatKeyId, formatLeaderSequence } from './keybindings/hints.ts'
 import type { LeaderStateMachine } from './keybindings/leader.ts'
 import { HostKeybindingManager } from './keybindings/manager.ts'
 import type { AppKeybindingId, KeybindingContext, UserKeybindingsConfig } from './keybindings/types.ts'
@@ -1204,8 +1204,8 @@ export interface TuiAppEventsBase {
    * absent means the draft text is the only emptiness authority.
    */
   isImageDraft?: () => boolean
-  /** The user asked to quit (the exit action; Ctrl+C keeps its
-   * clear-then-exit chord in the TUI's own raw mode). */
+  /** The user asked to quit after the TUI's same-key keyboard exit
+   * confirmation; Ctrl+C additionally clears the draft on its first press. */
   onExit: () => void
   /** Stop the current activity (the interrupt action, default: Esc — a
    * SINGLE press fires this directly while busy; idle, a double press
@@ -1782,11 +1782,11 @@ export interface TuiAppOptions {
    */
   readClipboardText?: () => Promise<string | undefined>
   /**
-   * The empty-editor double-Ctrl+C exit window in ms (issue #8);
+   * The keyboard exit-confirmation window in ms (issue #8);
    * injectable so headless tests never wait the real 1.5s. The footer
    * hint's lifetime is EXACTLY this window — the two share one timer.
    */
-  ctrlCExitWindowMs?: number
+  exitConfirmWindowMs?: number
   /**
    * Phase 2: the ADVANCED normalized input capture route (wired by the
    * runner from the service's advanced registry). Consulted by the host
@@ -1962,6 +1962,19 @@ interface MessageComponentEntry {
   rendererId?: string
   /** M7: the renderer registry revision at build time. */
   rendererRevision?: number
+}
+
+interface ExitConfirmationTrigger {
+  /** Canonical identity, including the leader prefix when applicable. */
+  readonly identity: string
+  /** The direct or completing effective key. */
+  readonly key: KeyId
+  /** The user-facing effective trigger label. */
+  readonly label: string
+  /** Set for a leader sequence so its prefix can span confirmation presses. */
+  readonly leaderKey?: KeyId
+  /** A Ctrl+C completion keeps the clear-draft behavior on first press. */
+  readonly clearsDraft: boolean
 }
 
 export class TuiApp {
@@ -2289,21 +2302,22 @@ export class TuiApp {
   private submitPendingDetail: SubmitPendingDetail | undefined
   /** Phase 4: the plugin working-message override (advanced host state). */
   private workingMessageOverride: string | undefined
-  /** Timestamp of the last Ctrl+C press, for the empty-editor exit chord. */
-  private lastCtrlCAt: number | undefined
-  /** The empty-editor double-Ctrl+C exit window in ms. A 500ms window
-   * silently misses a human-paced double press (0.6–1s apart), which
-   * read as "the chord doesn't work"; 1.5s covers a natural double
-   * press, and the armed state is announced by the hint. */
-  private static readonly CTRL_C_EXIT_WINDOW_MS = 1500
+  /** The effective key whose keyboard exit confirmation is armed. */
+  private exitConfirmTrigger: ExitConfirmationTrigger | undefined
+  /** Timestamp at which the current keyboard exit confirmation was armed. */
+  private exitConfirmAt: number | undefined
+  /** The keyboard exit-confirmation window in ms. A too-short window silently
+   * misses a human-paced double press (0.6–1s apart), which reads as "the
+   * confirmation doesn't work"; 1.5s covers a natural double press, and the
+   * armed state is announced by the footer. */
+  private static readonly EXIT_CONFIRM_WINDOW_MS = 1500
   /** Issue #8: the effective exit window (injectable for tests). */
-  private readonly ctrlCExitWindowMs: number
-  /** Issue #8: whether the exit chord is armed — the footer's second line
-   * shows `Press Ctrl+C again to exit` while armed, and the hint's
+  private readonly exitConfirmWindowMs: number
+  /** Issue #8: the footer instruction reflects the armed effective trigger
+   * label while armed, and the instruction's
    * lifetime is EXACTLY the exit window (one shared timer, never a
    * lingering notify). */
-  private ctrlCExitArmed = false
-  private ctrlCExitTimer: NodeJS.Timeout | undefined
+  private exitConfirmTimer: NodeJS.Timeout | undefined
   /** Session workspace root for path relativization (Web relativizeToCwd). */
   private readonly workspaceRoot: string | undefined
   /** The tool presentation bridge, wired by the runner to the live registry. */
@@ -2582,7 +2596,7 @@ export class TuiApp {
     // re-merges its chrome rows so the new content reaches the screen.
     this.extensionHost?.setChromeRefresher(() => this.refreshChrome())
     this.notifyDurationMs = options.notifyDurationMs ?? TuiApp.NOTIFY_DURATION_MS
-    this.ctrlCExitWindowMs = options.ctrlCExitWindowMs ?? TuiApp.CTRL_C_EXIT_WINDOW_MS
+    this.exitConfirmWindowMs = options.exitConfirmWindowMs ?? TuiApp.EXIT_CONFIRM_WINDOW_MS
     this.workspaceRoot = options.workspaceRoot
     this.present = options.present
     this.pluginActionFor = options.pluginActionFor
@@ -2607,6 +2621,9 @@ export class TuiApp {
       // finding). Guarded: the initial manager build runs before
       // messagesView exists.
       onInvalidate: () => {
+        // A keymap rebuild changes the effective trigger identity; never
+        // allow a confirmation armed under the old map to carry over.
+        this.clearExitConfirmation()
         if (this.messagesView !== undefined) {
           this.refreshTranscriptWindowHint()
           this.rebuildMessages()
@@ -2614,7 +2631,7 @@ export class TuiApp {
         this.requestRender()
       },
       onLeaderStateChange: () => this.renderFooter(),
-      onLeaderActivate: (action) => {
+      onLeaderActivate: (action, key) => {
         // M6: a leader sequence must never bypass the viewer's
         // parent-action guard — a `<leader>X` binding of a parent action
         // (e.g. app.input.steer) is inert inside the continuable viewer,
@@ -2639,7 +2656,17 @@ export class TuiApp {
         // that DECLINES (pasteMedia without a handler, unbound history
         // search) must fall through like a direct key — the completing
         // key is NOT consumed by the sequence (review finding).
-        return this.dispatchResolvedAction(action as AppKeybindingId, '')
+        const leaderKey = this.keybindings.leaderMachine()?.leaderKey
+        const trigger = action === 'app.exit.request' && leaderKey !== undefined
+          ? {
+              identity: `leader:${leaderKey}:${key}`,
+              key,
+              label: formatLeaderSequence(key),
+              leaderKey,
+              clearsDraft: key === 'ctrl+c',
+            }
+          : undefined
+        return this.dispatchResolvedAction(action as AppKeybindingId, '', key, trigger)
       },
       // A user remap/disable of app.input.submit must REALLY move/remove
       // the editor's submission: the fork editor routes the submit key
@@ -2689,6 +2716,8 @@ export class TuiApp {
     })
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
+      // Enter is a fresh submit attempt, including an empty no-op attempt.
+      this.clearExitConfirmation()
       // The shell-editor-mode boundary: the editor buffer holds the bare
       // command body, so the wire form is re-serialized here — the shell
       // dispatch (shellModeOf) must keep receiving the exact same text as
@@ -2740,9 +2769,6 @@ export class TuiApp {
       // Fresh user input supersedes any transient notice (a stale error
       // from the previous submission must not outlive the next one).
       this.clearNotify()
-      // Issue #8: a successful submit is a fresh explicit action — the
-      // armed exit chord (and its footer hint) must not survive.
-      this.clearCtrlCExit()
       // The mode resets BEFORE the dispatch: a SYNCHRONOUS rejection
       // (e.g. the transition fence) restores the serialized text through
       // setEditorText, which decodes the mode back — an async rejection
@@ -2752,6 +2778,10 @@ export class TuiApp {
       this.events.onSubmit(serialized)
     }
     this.editor.onChange = () => {
+      // Ordinary editor input is an intervening action, so it disarms a
+      // pending exit confirmation. Ctrl+C clear-draft arms again after its
+      // own setText mutation completes.
+      this.clearExitConfirmation()
       // The footer's task badge advertises the ↓ browser ONLY while the
       // editor is empty; the editor mutates without going through
       // setStatus, so keep the badge truthful while tasks are active.
@@ -3061,7 +3091,7 @@ export class TuiApp {
    */
   private suspendForExternalEditor(): void {
     this.keybindings.cancelLeader()
-    this.clearCtrlCExit()
+    this.clearExitConfirmation()
     this.lastEscapeAt = undefined
     if (this.fullscreen !== undefined) {
       this.fullscreen.stop({ preserveScreen: true })
@@ -3096,9 +3126,9 @@ export class TuiApp {
    * process-tui-slot.ts). */
   stop(): void {
     this.clearNotify()
-    // Issue #8: the exit-chord timer dies with the surface — a stopped
+    // Issue #8: the exit-confirmation timer dies with the surface — a stopped
     // TUI must never fire a stale disarm into a dead footer.
-    this.clearCtrlCExit()
+    this.clearExitConfirmation()
     // A stop/start cycle is a fresh surface lifecycle: a PENDING leader
     // sequence must be cancelled (its timeout must never fire into the
     // stopped surface) and the interrupt double-action window must not
@@ -3324,6 +3354,10 @@ export class TuiApp {
     if (replacement === undefined) return undefined
     const event = this.editorInputEventOf(data)
     if (event === undefined) return undefined
+    // A replacement editor owns this fresh key/text event. It cannot be the
+    // second half of the Host's exit confirmation because app.exit.request
+    // was resolved before this stage.
+    this.clearExitConfirmation()
     if (replacement(event)) return { consume: true }
     if (forceEscapeRoute) return undefined
     // Declined regular editor input: retry against plugin bindings only
@@ -3400,12 +3434,14 @@ export class TuiApp {
     if (isFocusReport(data)) {
       return this.handleInputCore(data)
     }
-    // Any REAL (non-focus-report) input proves the user is operating the
-    // terminal: restore the focus tracker to 'focused' BEFORE the raw
+    // Any REAL (non-focus/non-protocol) input proves the user is operating
+    // the terminal: restore the focus tracker to 'focused' BEFORE the raw
     // stage and plugin routing — even a chunk a capture later consumes
     // still proves user activity (a missed FOCUS_IN must not leave the
-    // tracker believing the terminal is unfocused).
-    this.events.onUserInput?.()
+    // tracker believing the terminal is unfocused). Kitty repeat/release
+    // sequences are protocol artifacts, not user activity.
+    const protocolArtifact = isKeyRelease(data) || isKeyRepeat(data)
+    if (!protocolArtifact) this.events.onUserInput?.()
     // Phase 3: the UNSTABLE raw interception stage — BEFORE Host
     // semantic routing (plan §4), after the terminal pipeline has
     // reassembled and normalized the input (see UnstableRawInputEvent).
@@ -3430,10 +3466,16 @@ export class TuiApp {
           // escape the input path.
         }
         this.notify('unstable captures released (emergency fail-safe)', 'info')
+        if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true }
+        this.clearExitConfirmation()
         return { consume: true }
       }
       const outcome = this.unstableInputRoute(data, this.extensionHost?.surfaceId ?? 'tui')
-      if (outcome.action === 'consume') return { consume: true }
+      if (outcome.action === 'consume') {
+        if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true }
+        this.clearExitConfirmation()
+        return { consume: true }
+      }
       if (outcome.action === 'rewrite') {
         // A rewrite INTO a focus-control sequence is refused: focus
         // reports are HOST-reserved, and the tracker must never be
@@ -3446,7 +3488,14 @@ export class TuiApp {
         // `data` field). Each terminal chunk passes the interception chain
         // at most once: the rewrite goes straight to the host decoder and
         // never re-enters the raw stage (handleInputCore has no raw
-        // stage).
+        // stage). A protocol artifact deliberately rewritten into real input
+        // becomes user activity at this boundary.
+        if (protocolArtifact
+          && !isFocusReport(outcome.data)
+          && !isKeyRelease(outcome.data)
+          && !isKeyRepeat(outcome.data)) {
+          this.events.onUserInput?.()
+        }
         const result = this.handleInputCore(outcome.data)
         if (result === undefined) return { data: outcome.data }
         return result
@@ -3467,6 +3516,7 @@ export class TuiApp {
     // did when it was registered first. (Unstable raw captures already ran
     // BEFORE this point and still see every chunk.)
     if (MOUSE_SEQUENCE.test(data) || (data.length === 6 && data.startsWith('\x1b[M'))) {
+      this.clearExitConfirmation()
       return undefined
     }
     // FOCUS reports (CSI ? 1004 — ESC[I/ESC[O) are handled HOST-SIDE,
@@ -3491,9 +3541,13 @@ export class TuiApp {
     // separate sequences; the app must act on the PRESS only. A release of
     // Ctrl+O would otherwise double-toggle the fold (press expands, release
     // collapses — a single press would appear to do nothing), and a release
-    // of Esc would trip the double-Esc cancel. The framework already filters
-    // releases for the focused component; listeners are on their own.
-    if (isKeyRelease(data) || isKeyRepeat(data)) return undefined
+    // of Esc would trip the double-Esc cancel. App listeners are independent
+    // of the focused-component filter, so consume these artifacts here too;
+    // the focused component must never see them.
+    // Consume protocol artifacts here so the focused component cannot
+    // reinterpret a release/repeat as editor input or trigger onChange. They
+    // are neither user actions nor confirmation presses.
+    if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true }
     const physicalEscape = matchesKey(data, 'escape')
     // The double-action window is a CONSECUTIVE-press chord of the
     // EFFECTIVE interrupt trigger: any OTHER key between the two presses
@@ -3509,9 +3563,11 @@ export class TuiApp {
       this.lastEscapeAt = undefined
     }
     if (this.activeQuestions !== undefined) {
+      this.clearExitConfirmation()
       return this.handleQuestionKey(data)
     }
     if (this.activeApproval !== undefined) {
+      this.clearExitConfirmation()
       return this.handleApprovalKey(data)
     }
     // The subagent viewer input policy is MODE-AWARE:
@@ -3524,6 +3580,10 @@ export class TuiApp {
     //   ladder, so the viewer can never steer/queue/dequeue the parent
     //   session or exit the TUI from inside the child view.
     if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries) {
+      // A viewer owns this input stage; no parent keyboard exit request can
+      // be confirmed from inside it. Treat the viewer event as fresh input
+      // and discard any stale parent confirmation.
+      this.clearExitConfirmation()
       const viewer = this.viewerMode
       if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
         const consumed = this.dispatchResolvedAction('app.transcript.jumpLatest', data)
@@ -3585,6 +3645,9 @@ export class TuiApp {
     // a remap of the toggle must work while the overlay is open too —
     // matching the EFFECTIVE keys (review finding).
     if (this.searchOverlay !== undefined) {
+      // The search overlay owns this input; it is a fresh interaction, never
+      // the second half of a parent keyboard exit confirmation.
+      this.clearExitConfirmation()
       if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
         const consumed = this.dispatchResolvedAction('app.transcript.jumpLatest', data)
         if (consumed) return { consume: true }
@@ -3613,13 +3676,18 @@ export class TuiApp {
     // cycle to the next category. Checked BEFORE the overlay guard — Tab
     // must not fall through to the focused picker component.
     if (matchesKey(data, 'tab') && this.activeCategorizedPicker !== undefined) {
+      this.clearExitConfirmation()
       this.activeCategorizedPicker.cycle()
       return { consume: true }
     }
     // A managed non-search overlay owns the focused component. App-level
     // lifecycle handlers must not consume its keys before pi-tui dispatches
-    // them to that component.
-    if (this.activeScreen.hasOverlayEntries) return undefined
+    // them to that component. Discard any stale exit confirmation before
+    // letting the focused component process this fresh interaction.
+    if (this.activeScreen.hasOverlayEntries) {
+      this.clearExitConfirmation()
+      return undefined
+    }
     // P1-10: a PLUGIN editor occupying the seat receives editor-routed input
     // before plugin keybindings. Enter remains host-owned: forward it through
     // the hidden host editor so active autocomplete gets its normal confirm /
@@ -3632,10 +3700,11 @@ export class TuiApp {
     if (this.seatEditor().handleInput !== undefined
       && !matchesKey(data, 'escape')
       && this.isSubmitKey(data)) {
+      this.clearExitConfirmation()
       this.editorSeatHolder.handleHostFallbackInput(data)
       return { consume: true }
     }
-// M6: the leader sequence machine (armed only when a leader key is
+    // M6: the leader sequence machine (armed only when a leader key is
     // configured). Fed AFTER the capturing flows and overlays, BEFORE the
     // host action ladder — a completing key is consumed by the sequence,
     // and a paste burst / non-matching key cancels the pending state and
@@ -3649,6 +3718,13 @@ export class TuiApp {
     if (leader !== undefined && !(physicalEscape && !leader.pending)) {
       const outcome = leader.feed(data)
       if (outcome.kind === 'consumed' || outcome.kind === 'cancelled-consume') {
+        // A second leader prefix begins the next full sequence. Preserve an
+        // armed leader trigger across that prefix so `<leader>X` can confirm;
+        // a direct trigger is still disarmed by the intervening prefix.
+        const sameLeader = outcome.kind === 'consumed'
+          && leader.pending
+          && this.exitConfirmTrigger?.leaderKey === leader.leaderKey
+        if (!sameLeader) this.clearExitConfirmation()
         return { consume: true }
       }
       if (outcome.kind === 'activated') {
@@ -3656,9 +3732,11 @@ export class TuiApp {
         // declined action falls through to the editor/plugin stages
         // (review finding).
         if (outcome.consumed) return { consume: true }
+        this.clearExitConfirmation()
       }
-      // cancelled-pass: the pending state was cancelled; the key is
-      // processed normally below.
+      // cancelled-pass: the pending state was cancelled; this is still a
+      // fresh interaction. The key is processed normally below.
+      if (outcome.kind === 'cancelled-pass') this.clearExitConfirmation()
     }
 
     // Physical Escape is a reserved lifecycle path, not a normal user action:
@@ -3724,7 +3802,10 @@ export class TuiApp {
     // A generic managed overlay owns the focused component. Do not probe the
     // seat editor or plugin bindings here; returning undefined lets pi-tui
     // dispatch the raw key to the overlay component (including reserved keys).
-    if (context.hasOverlay) return undefined
+    if (context.hasOverlay) {
+      this.clearExitConfirmation()
+      return undefined
+    }
     // Phase 2: the ADVANCED normalized captures (plan §5/§11). Consulted
     // AFTER the host's own capturing flows (questions, approvals, overlays)
     // and reserved lifecycle keys, BEFORE the editor and the Stable
@@ -3734,6 +3815,7 @@ export class TuiApp {
     // the input sequence itself (the shared Host decoder); a consuming
     // capture stops the event here.
     if (this.advancedInputRoute !== undefined && this.advancedInputRoute(data) === 'consumed') {
+      this.clearExitConfirmation()
       return { consume: true }
     }
     const route = this.inputRouter.route(data, context, (key) => this.pluginActionForFor(key))
@@ -3742,17 +3824,22 @@ export class TuiApp {
       // A generic overlay is the focused owner. The app listener must not
       // consume its key before pi-tui dispatches to that component; this also
       // lets reserved overlay keys (Esc, Ctrl+Enter, etc.) reach the overlay.
-      if (context.hasOverlay) return undefined
+      if (context.hasOverlay) {
+        this.clearExitConfirmation()
+        return undefined
+      }
       // With the host editor in the seat, a reserved key that was not
       // handled by the app ladder must still reach the fork Editor (notably
       // Enter, whose onSubmit lives on the focused component). A replacement
       // editor has no host onSubmit, so its reserved fallback remains inert.
+      this.clearExitConfirmation()
       return replacement === undefined ? undefined : { consume: true }
     }
     if (replacement !== undefined && (route.kind === 'editor' || route.kind === 'viewer-editor')) {
       return this.handleReplacementEditorInput(data, context, false)
     }
     if ((route.kind === 'editor' || route.kind === 'viewer-editor') && replacement === undefined) {
+      this.clearExitConfirmation()
       // P2-R5: only the HOST seat may forward to the hidden host editor. A
       // display-only replacement editor (no handleInput hook) owns the seat
       // too: the public contract (public-types.ts) says ordinary typing is
@@ -3769,6 +3856,7 @@ export class TuiApp {
       return undefined
     }
     if (route.kind === 'plugin-action') {
+      this.clearExitConfirmation()
       try {
         this.events.onExtensionAction?.(route.action)
           this.recoverKeybinding(route.key)
@@ -3792,8 +3880,16 @@ export class TuiApp {
    * a user remap of app.agent.interrupt adds a semantic interrupt trigger
    * whose remapped key bypasses physical-editor Escape seams. Returns whether
    * the key was consumed. */
-  private dispatchResolvedAction(action: AppKeybindingId, data: string, key?: KeyId): boolean {
+  private dispatchResolvedAction(
+    action: AppKeybindingId,
+    data: string,
+    key?: KeyId,
+    trigger?: ExitConfirmationTrigger,
+  ): boolean {
     if (action === 'app.agent.interrupt') {
+      // Interrupt is a separate lifecycle action and must disarm any pending
+      // exit confirmation, including remapped interrupt keys.
+      this.clearExitConfirmation()
       // Convergence §5: the PHYSICAL Escape key runs the full
       // handleEscapeKey (editor Escape seams + semantic core); a REMAPPED
       // interrupt key (e.g. Ctrl+X) goes STRAIGHT to the semantic core —
@@ -3806,9 +3902,22 @@ export class TuiApp {
       return this.handleInterruptAction(data) !== undefined
     }
     if (action === 'app.exit.request') {
-      this.handleExitKey(data)
+      // The resolver's effective KeyId is the confirmation identity. A
+      // missing key can only come from an internal legacy caller; fail closed
+      // instead of treating an unknown trigger as an immediate exit.
+      if (key === undefined) return true
+      this.handleExitRequest(trigger ?? {
+        identity: `direct:${key}`,
+        key,
+        label: formatKeyId(key),
+        clearsDraft: key === 'ctrl+c',
+      })
       return true
     }
+    // Every other semantic host action is an intervening user action. Clear
+    // the exit confirmation before dispatch so a stale first press can never
+    // combine with a later exit key after the user did something else.
+    this.clearExitConfirmation()
     if (action === 'app.input.submit' && data !== '') {
       // The fork editor OWNS the direct submit keys (backslash-newline
       // semantics live in its tui.editor.submit — X037; the
@@ -3846,6 +3955,7 @@ export class TuiApp {
   }
 
   private handleInterruptAction(data: string): TuiInputListenerResult | undefined {
+    this.clearExitConfirmation()
     // The host may consume the first Esc (runner-owned modes like the
     // subagent viewer); otherwise it arms the double-Esc cancel. A
     // CONSUMED Esc is a fresh action: it disarms any pending window (a
@@ -3893,6 +4003,9 @@ export class TuiApp {
    * preserving the remapped trigger's consecutive-press contract. Returns
    * undefined when the key must fall through. */
   private handleEscapeKey(data: string, includeInterrupt = true): TuiInputListenerResult | undefined {
+    // Escape is a separate lifecycle action; it can never complete a
+    // keyboard exit confirmation.
+    this.clearExitConfirmation()
     // While Escape is the effective interrupt trigger, BUSY cancel keeps its
     // Host-owned priority over EVERY physical Escape seam (shell-mode exit,
     // replacement-editor Esc). A remapped interrupt intentionally bypasses
@@ -3946,57 +4059,44 @@ export class TuiApp {
     return this.handleInterruptAction(data)
   }
 
-  /** The exit path (app.exit.request): Ctrl+C keeps the clear-then-exit
-   * chord (a first press clears a non-empty draft and arms the window; a
-   * second press within it exits); every other key bound to the action
-   * (Ctrl+D or a user remap) exits immediately. */
-  private handleExitKey(data: string): TuiInputListenerResult {
-    if (matchesKey(data, 'ctrl+c')) {
-      // pi parity (handleCtrlC): a first press CLEARS a non-empty editor
-      // (recording the time); a second press within the window on the now
-      // EMPTY editor exits. Issue #8: every arm shows the footer hint for
-      // EXACTLY the exit window (armCtrlCExit), and the exit path disarms
-      // it — the hint never outlives the window.
+  /** The keyboard exit path (app.exit.request). Every effective exit key
+   * needs a second press of the SAME key within the confirmation window.
+   * Ctrl+C additionally keeps its pi-parity clear-then-confirm behavior;
+   * other exit keys preserve the draft on their first press. */
+  private handleExitRequest(trigger: ExitConfirmationTrigger): void {
+    const isCtrlC = trigger.clearsDraft
+    // Ctrl+C is the only exit key with clear-draft semantics. Check the
+    // draft before same-key confirmation so a programmatic draft mutation
+    // can never make a pending Ctrl+C unexpectedly exit while text remains.
+    if (isCtrlC) {
       const text = this.seatEditor().getText()
-      // A shell-mode draft is non-empty in its SERIALIZED form: the
-      // first press clears BOTH the body and the mode — an empty `! ` /
-      // `!!` editor would otherwise show a cleared body under a stale
-      // shell prompt, and the next Ctrl+C would exit instead of
-      // completing the pre-mode clear contract.
+      // A shell-mode draft is non-empty in its SERIALIZED form: the first
+      // press clears BOTH the body and the mode — an empty `!` / `!!` editor
+      // would otherwise show a stale shell prompt and skip the clear step.
       if (text !== '' || this.seatInputMode() !== 'prompt') {
         this.seatEditor().setText('')
         this.resetEditorMode()
         this.editorSeatHolder.notifyChanged()
-        this.armCtrlCExit()
+        this.armExitConfirmation(trigger)
         // The key is CONSUMED at the app level, so the fork's input path
-        // never reaches the focused editor and never requests its own
-        // frame — without an explicit render the cleared draft stays on
-        // screen until the next keypress (the stale-clear trap, seen in
-        // tmux: the editor reads empty but the old text is still
-        // visible). Same pattern as setDraft/submitDraft.
+        // never reaches the focused editor and never requests its own frame.
+        // Repaint explicitly or the cleared draft would stay on screen until
+        // the next keypress (the stale-clear trap).
         this.requestRender()
-        return { consume: true }
+        return
       }
-      const now = Date.now()
-      if (this.lastCtrlCAt !== undefined && now - this.lastCtrlCAt < this.ctrlCExitWindowMs) {
-        this.clearCtrlCExit()
-        this.events.onExit()
-      } else {
-        // First press on an EMPTY editor changes nothing visible, and the
-        // exit window is easy to miss — announce the armed state so a
-        // slow second press is not a silent no-op (the next Enter would
-        // otherwise send an empty draft). The second press within the
-        // window exits.
-        this.armCtrlCExit()
-      }
-      return { consume: true }
     }
-    // Ctrl+D (or a user-bound exit key) quits like /exit. The editor's
-    // delete-char-forward remains on the Delete key. Issue #8: an armed
-    // exit chord must not leave its hint behind on a non-chord exit.
-    this.clearCtrlCExit()
-    this.events.onExit()
-    return { consume: true }
+
+    const now = Date.now()
+    if (this.exitConfirmationMatches(trigger, now)) {
+      this.clearExitConfirmation()
+      this.events.onExit()
+      return
+    }
+    // First press, an expired press, or a different exit key replaces the
+    // armed identity. The next confirmation must use this exact effective
+    // trigger identity; Ctrl+C → Ctrl+D can never confirm each other.
+    this.armExitConfirmation(trigger)
   }
 
   /** The semantic action → host method surface (plan §9). The dispatcher
@@ -4297,6 +4397,9 @@ export class TuiApp {
     if (this.disposed) {
       return { hide: () => {}, setHidden: () => {}, isHidden: () => true, focus: () => {}, unfocus: () => {}, isFocused: () => false }
     }
+    // Mounting an overlay is a focus transition; an armed keyboard exit
+    // confirmation must not survive while the overlay is active.
+    this.clearExitConfirmation()
     // M6: an overlay owns the focused component now — any pending leader
     // sequence is cancelled (focus-transition cancellation).
     this.keybindings.cancelLeader()
@@ -4575,6 +4678,9 @@ export class TuiApp {
    */
   setFullscreen(enabled: boolean): void {
     if (this.disposed) return
+    // Fullscreen transitions change the focused screen and disarm transient
+    // keyboard confirmation state.
+    this.clearExitConfirmation()
     // M6: the screen swap is a focus transition — any pending leader
     // sequence is cancelled.
     this.keybindings.cancelLeader()
@@ -6390,42 +6496,51 @@ export class TuiApp {
   }
 
   /**
-   * Issue #8: arm the empty-editor double-Ctrl+C exit window. The footer's
-   * second line switches to `Press Ctrl+C again to exit` for EXACTLY
-   * {@link ctrlCExitWindowMs} — the hint and the exit window share ONE
-   * timer, so a stale hint can never outlive a dead window (the old
-   * notify-based hint lingered ~8s while the window was already gone).
+   * Issue #8: arm the keyboard exit-confirmation window for one effective
+   * trigger. The footer hint and the exit window share ONE timer, so a stale hint
+   * can never outlive a dead confirmation. A timer identity check also makes
+   * an already-queued callback from an older arm harmless after replacement.
    */
-  private armCtrlCExit(): void {
-    this.clearCtrlCExit()
-    this.lastCtrlCAt = Date.now()
-    this.ctrlCExitArmed = true
+  private armExitConfirmation(trigger: ExitConfirmationTrigger): void {
+    this.clearExitConfirmation()
+    const armedAt = Date.now()
+    this.exitConfirmTrigger = trigger
+    this.exitConfirmAt = armedAt
     this.renderFooter()
-    this.ctrlCExitTimer = setTimeout(() => {
-      this.ctrlCExitTimer = undefined
-      this.lastCtrlCAt = undefined
-      this.ctrlCExitArmed = false
+    const timer = setTimeout(() => {
+      if (this.exitConfirmTimer !== timer || this.exitConfirmAt !== armedAt) return
+      this.exitConfirmTimer = undefined
+      this.exitConfirmTrigger = undefined
+      this.exitConfirmAt = undefined
       this.renderFooter()
       this.requestRender()
-    }, this.ctrlCExitWindowMs)
-    this.ctrlCExitTimer.unref?.()
+    }, this.exitConfirmWindowMs)
+    this.exitConfirmTimer = timer
+    this.exitConfirmTimer.unref?.()
+  }
+
+  /** Whether the current press is the armed trigger inside the live window. */
+  private exitConfirmationMatches(trigger: ExitConfirmationTrigger, now: number): boolean {
+    return this.exitConfirmTrigger?.identity === trigger.identity
+      && this.exitConfirmAt !== undefined
+      && now >= this.exitConfirmAt
+      && now - this.exitConfirmAt < this.exitConfirmWindowMs
   }
 
   /**
-   * Issue #8: disarm the exit chord and restore the footer. Public so the
-   * runner clears it on session switches (a stale armed window must not
-   * exit the NEW session). Idempotent; safe after dispose (renderFooter
-   * requests are benign no-ops then).
+   * Issue #8: disarm the keyboard exit confirmation and restore the footer.
+   * Public so the runner clears it on session switches (a stale armed window
+   * must not exit the NEW session). Idempotent; safe after dispose.
    */
-  clearCtrlCExit(): void {
-    if (this.ctrlCExitTimer !== undefined) {
-      clearTimeout(this.ctrlCExitTimer)
-      this.ctrlCExitTimer = undefined
+  clearExitConfirmation(): void {
+    if (this.exitConfirmTimer !== undefined) {
+      clearTimeout(this.exitConfirmTimer)
+      this.exitConfirmTimer = undefined
     }
-    if (this.ctrlCExitArmed || this.lastCtrlCAt !== undefined) {
-      this.ctrlCExitArmed = false
-      this.lastCtrlCAt = undefined
-      this.renderFooter()
+    if (this.exitConfirmTrigger !== undefined || this.exitConfirmAt !== undefined) {
+      this.exitConfirmTrigger = undefined
+      this.exitConfirmAt = undefined
+      if (this.footer !== undefined) this.renderFooter()
     }
   }
 
@@ -6443,6 +6558,7 @@ export class TuiApp {
    * exit).
    */
   setEditorText(text: string): void {
+    this.clearExitConfirmation()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
@@ -6471,6 +6587,7 @@ export class TuiApp {
    * in the viewer is a later milestone — text-only follow-ups for now).
    */
   insertIntoEditor(text: string): void {
+    this.clearExitConfirmation()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       const editor = this.seatEditor()
@@ -6511,6 +6628,9 @@ export class TuiApp {
    * @param mode - the viewer target; `undefined` leaves the viewer.
    */
   setViewerMode(mode: SubagentViewerTarget | undefined): void {
+    // Viewer entry, exit, and child switches are focus/session transitions;
+    // an armed parent exit confirmation must not survive them.
+    this.clearExitConfirmation()
     // M6: the viewer owns the input policy now — any pending leader
     // sequence is cancelled (focus-transition cancellation).
     this.keybindings.cancelLeader()
@@ -6747,10 +6867,6 @@ export class TuiApp {
     // reach the child like the literal prefix did before the mode feature.
     if (serialized.trim() === '') return
     this.clearNotify()
-    // Issue #8: a successful submit is a fresh explicit action — the armed
-    // exit chord (and its footer hint) must not survive into the next
-    // interaction.
-    this.clearCtrlCExit()
     // Snapshot + clear the visible child draft. The per-child SLOT is
     // cleared EXPLICITLY — not via the onChange mirror — because a
     // replacement editor in the seat does not guarantee onChange: an
@@ -10123,6 +10239,7 @@ export class TuiApp {
    * exit).
    */
   setDraft(text: string): void {
+    this.clearExitConfirmation()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
@@ -10174,6 +10291,9 @@ export class TuiApp {
    *   the busyEnter preference.
    */
   submitDraft(forceQueue = false): void {
+    // Submission is an explicit intervening action even when the draft is
+    // empty or a viewer guard rejects it.
+    this.clearExitConfirmation()
     // P1-12: a finally-disposed surface never submits — a late plugin
     // callback (or a stale host dispatch) must not produce a real
     // session-side effect after teardown.
@@ -10191,10 +10311,6 @@ export class TuiApp {
     // submission (plan §11.1).
     if (serialized.trim() === '' && this.events.isImageDraft?.() !== true) return
     this.clearNotify()
-    // Issue #8: a successful submit is a fresh explicit action — the armed
-    // exit chord (and its footer hint) must not survive into the next
-    // interaction.
-    this.clearCtrlCExit()
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       // A plugin action inside an interactive viewer submits to the
       // SUBAGENT (the semantic target of the visible editor), never the
@@ -10440,7 +10556,7 @@ export class TuiApp {
 
   /** Rebuild the footer from the unified status snapshot (M1): the
    * composer renders the active layout (default/compact) against the
-   * snapshot, and the Host instruction surface owns the Ctrl+C exit hint.
+   * snapshot, and the Host instruction surface owns the keyboard exit hint.
    * The TuiApp no longer derives permission/plan/viewer/usage — the items
    * do, from the snapshot. An empty surface (every item unavailable, e.g.
    * an unloaded extension item) renders zero rows: the fork's Text emits
@@ -10450,14 +10566,14 @@ export class TuiApp {
   private renderFooter(): void {
     const width = Math.max(1, this.terminal.columns)
     // M6 keybindings: a pending leader sequence shows the which-key hint as
-    // a Host-owned instruction beside the Ctrl+C exit hint (exit outranks
+    // a Host-owned instruction beside the keyboard exit hint (exit outranks
     // the leader; resolveFooterInstruction picks ONE). The instruction is
     // an INDEPENDENT surface (plan 2026-08-31 §7): it appends its own
     // reserved physical line after the layout rows — never a "line-2 slot"
     // replacement of the stats row.
     const leader = this.keybindings.leaderMachine()
     const instruction = resolveFooterInstruction({
-      ctrlCExitArmed: this.ctrlCExitArmed,
+      exitConfirmKeyLabel: this.exitConfirmTrigger?.label,
       viewing: this.viewerFooter !== undefined,
       leaderHint: leader !== undefined && leader.pending ? this.leaderHint(leader) : undefined,
     })

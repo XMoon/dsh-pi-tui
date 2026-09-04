@@ -276,12 +276,12 @@ test('advanced input route: reserved host lifecycle keys never reach a capture',
     mode: 'observe',
     handle: (event) => { seen.push(event.kind === 'key' ? event.key.key : event.kind) },
   }, 'owner')
-  // Ctrl+C is the host exit shortcut (the pi chord: a first press on
-  // the empty editor arms it, the second within 500ms exits) — the
+  // Ctrl+C is the host exit shortcut (the first press arms the same-key
+  // confirmation, the second within the configured window exits) — the
   // capture must never see it.
   vt.sendInput('\x03')
   await vt.waitForRender()
-  assert.equal(exited, 0, 'a single Ctrl+C only arms the exit chord')
+  assert.equal(exited, 0, 'a single Ctrl+C only arms exit confirmation')
   vt.sendInput('\x03')
   await vt.waitForRender()
   assert.equal(exited, 1, 'the second Ctrl+C exits')

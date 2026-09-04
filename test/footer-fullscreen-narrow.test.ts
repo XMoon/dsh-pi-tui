@@ -170,24 +170,24 @@ test('the footer never clips out of a narrow fullscreen viewport', async () => {
   }
 })
 
-test('the armed Ctrl+C instruction never pushes the footer out of a narrow fullscreen viewport', async () => {
-  // Ctrl+C (arm) shows the Host instruction: 3 physical lines were then
+test('the armed Ctrl+D instruction never pushes the footer out of a narrow fullscreen viewport', async () => {
+  // Ctrl+D (arm) shows the Host instruction: 3 physical lines were then
   // spent on the status row + the exit hint and the stats row clipped.
   // The instruction is an INDEPENDENT surface with a 1-line contract
   // (plan §7): 1 status line + 1 stats line + 1 instruction line must fit
   // — inside the same 3-line budget, read from the footer component.
   const { vt, app } = await startFullscreenApp(40, 10)
   try {
-    vt.sendInput('\x03') // arm the exit window: the hint owns its own line
+    vt.sendInput('\x04') // arm the exit window: the hint owns its own line
     await vt.waitForRender()
     const lines = vt.getViewport()
     const view = lines.join('\n')
-    assert.ok(view.includes('Press Ctrl+C again to exit'), `the exit hint must stay visible:\n${view}`)
+    assert.ok(view.includes('Press Ctrl+D again to exit'), `the exit hint must stay visible:\n${view}`)
     assert.ok(view.includes('workspace-write') || view.includes('ww'), `the status row must survive beside the hint:\n${view}`)
     assert.ok(view.includes('TTFB 12.3s'), `the stats row must survive beside the hint:\n${view}`)
     const footerLines = [...app.footerRenderRowsForTest()]
     assert.equal(footerLines.length, 3, `the footer with its instruction must stay inside the effective budget:\n${view}`)
-    assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+C again'), `the hint must be the footer's last line:\n${view}`)
+    assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+D again'), `the hint must be the footer's last line:\n${view}`)
     const plainViewportLines = lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
     for (const row of footerLines) {
       const text = row.replace(/\x1b\[[0-9;]*m/g, '').trimEnd()
@@ -203,7 +203,7 @@ test('the armed Ctrl+C instruction never pushes the footer out of a narrow fulls
   }
 })
 
-test('the armed Ctrl+C instruction on a chrome-heavy 20x10 viewport is NEVER clipped', async () => {
+test('the armed Ctrl+D instruction on a chrome-heavy 20x10 viewport is NEVER clipped', async () => {
   // THE P2 regression (PR #57 review task, sections 2 and 7.1): at 20x10 the pinned chrome
   // (header + wrapped todo + working + editor) leaves only TWO footer
   // slots. Without the surface budget the composer still emitted
@@ -214,14 +214,14 @@ test('the armed Ctrl+C instruction on a chrome-heavy 20x10 viewport is NEVER cli
   // VIEWPORT at the cost of the lower-importance stats row.
   const { vt, app } = await startFullscreenApp(20, 10)
   try {
-    vt.sendInput('\x03') // arm the exit window
+    vt.sendInput('\x04') // arm the exit window
     await vt.waitForRender()
     const lines = vt.getViewport()
     const view = lines.join('\n')
     // The hint's viewport-visible form at 20 columns: the full text is
     // 26 cells and the line is 20 — the ANSI-safe cap carries the prefix.
     assert.ok(
-      lines.some(line => line.includes('Press Ctrl+C again')),
+      lines.some(line => line.includes('Press Ctrl+D again')),
       `the exit hint must be visible in the VIEWPORT (not only in the component):\n${view}`,
     )
     // One high-importance status fact survives beside it (importance
@@ -238,7 +238,7 @@ test('the armed Ctrl+C instruction on a chrome-heavy 20x10 viewport is NEVER cli
     // last, and both rows painted.
     const footerLines = [...app.footerRenderRowsForTest()]
     assert.equal(footerLines.length, 2, `the surface budget must flow into the composer:\n${view}`)
-    assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+C again'), `the hint must be last:\n${view}`)
+    assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+D again'), `the hint must be last:\n${view}`)
     const plainViewportLines = lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
     for (const row of footerLines) {
       const text = row.replace(/\x1b\[[0-9;]*m/g, '').trimEnd()
@@ -334,7 +334,7 @@ test('a surface with ZERO available footer slots renders nothing at all', async 
   await vt.waitForRender()
   app.setFullscreen(true)
   await vt.waitForRender()
-  vt.sendInput('\x03')
+  vt.sendInput('\x04')
   await vt.waitForRender()
   try {
     const footerLines = [...app.footerRenderRowsForTest()]
@@ -353,7 +353,7 @@ test('a terminal HEIGHT resize recomposes the footer at the fresh surface budget
   // growing it back must restore the fuller footer.
   const { vt, app } = await startFullscreenApp(40, 24)
   try {
-    vt.sendInput('\x03') // arm the exit hint: it must survive every resize
+    vt.sendInput('\x04') // arm the exit hint: it must survive every resize
     await vt.waitForRender()
     const before = [...app.footerRenderRowsForTest()]
     assert.ok(before.length >= 3, `roomy viewport renders the fuller footer, saw ${before.length}`)
@@ -364,12 +364,12 @@ test('a terminal HEIGHT resize recomposes the footer at the fresh surface budget
     const shrunk = [...app.footerRenderRowsForTest()]
     assert.ok(shrunk.length <= 2, `the shrunken viewport must cap the footer at its 2 available slots, saw ${shrunk.length}\n${shrunk.join('\n')}`)
     assert.ok(
-      shrunk[shrunk.length - 1]!.includes('Press Ctrl+C again'),
+      shrunk[shrunk.length - 1]!.includes('Press Ctrl+D again'),
       `the hint must survive the height shrink:\n${shrunk.join('\n')}`,
     )
     let view = vt.getViewport().join('\n')
     assert.ok(
-      view.split('\n').some(line => line.includes('Press Ctrl+C again')),
+      view.split('\n').some(line => line.includes('Press Ctrl+D again')),
       `the hint must be visible in the VIEWPORT after the shrink:\n${view}`,
     )
 
@@ -380,7 +380,7 @@ test('a terminal HEIGHT resize recomposes the footer at the fresh surface budget
     assert.ok(grown.length >= shrunk.length, `growing must not keep the shrunken footer:\n${grown.join('\n')}`)
     view = vt.getViewport().join('\n')
     assert.ok(
-      view.split('\n').some(line => line.includes('Press Ctrl+C again to exit')),
+      view.split('\n').some(line => line.includes('Press Ctrl+D again to exit')),
       `the hint must be uncapped again after the growth:\n${view}`,
     )
   } finally {
@@ -399,19 +399,19 @@ test('the command footer consumes the surface budget: the hint is never clipped 
   try {
     app.setFooterCommandRows(['cmd-status'])
     await vt.waitForRender()
-    vt.sendInput('\x03') // arm the exit hint
+    vt.sendInput('\x04') // arm the exit hint
     await vt.waitForRender()
     const lines = vt.getViewport()
     const view = lines.join('\n')
     // effective total at 20x10 = 2: 1 command row + 1 hint.
     assert.ok(
-      lines.some(line => line.includes('Press Ctrl+C again')),
+      lines.some(line => line.includes('Press Ctrl+D again')),
       `the exit hint must be visible in the VIEWPORT:\n${view}`,
     )
     assert.ok(view.includes('cmd-status'), `the command row must keep the remaining slot:\n${view}`)
     const footerLines = [...app.footerRenderRowsForTest()]
     assert.equal(footerLines.length, 2, `1 command row + hint inside the effective budget:\n${view}`)
-    assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+C again'), `the hint must be last:\n${view}`)
+    assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+D again'), `the hint must be last:\n${view}`)
     const plainViewportLines = lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
     for (const row of footerLines) {
       const text = row.replace(/\x1b\[[0-9;]*m/g, '').trimEnd()
@@ -431,17 +431,17 @@ test('a ONE-slot command surface spends the slot on the instruction', async () =
   try {
     app.setFooterCommandRows(['cmd-status'])
     await vt.waitForRender()
-    vt.sendInput('\x03')
+    vt.sendInput('\x04')
     await vt.waitForRender()
     const lines = vt.getViewport()
     const view = lines.join('\n')
     assert.ok(
-      lines.some(line => line.includes('Press Ctrl+C again')),
+      lines.some(line => line.includes('Press Ctrl+D again')),
       `the exit hint must own the only slot:\n${view}`,
     )
     const footerLines = [...app.footerRenderRowsForTest()]
     assert.equal(footerLines.length, 1, `exactly the granted slot:\n${view}`)
-    assert.ok(footerLines[0]!.includes('Press Ctrl+C again'), `the slot must be the hint:\n${view}`)
+    assert.ok(footerLines[0]!.includes('Press Ctrl+D again'), `the slot must be the hint:\n${view}`)
     assert.ok(!view.includes('cmd-status'), `the command row must drop under height pressure:\n${view}`)
   } finally {
     app.stop()

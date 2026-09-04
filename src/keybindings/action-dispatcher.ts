@@ -29,7 +29,7 @@ export interface AppActionHost {
   dequeueDraft(): boolean
   /** Interrupt the current activity (the Esc path). */
   interruptActivity(): boolean
-  /** Request TUI exit (the Ctrl+C chord / Ctrl+D path). */
+  /** Request TUI exit for the resolved effective key. */
   requestExit(key: KeyId): boolean
   /** Open the transcript search overlay. */
   openTranscriptSearch(): boolean
@@ -73,9 +73,8 @@ export class AppActionDispatcher {
 
   /** Dispatch one resolved action. Returns whether the key was consumed.
    * @param action - the resolved semantic action.
-   * @param key - the physical key that resolved (the exit path needs it:
-   *   Ctrl+C uses the clear-then-exit chord, every other key exits
-   *   immediately). */
+   * @param key - the effective key that resolved. Exit confirmation owns
+   *   same-key semantics at the TuiApp ingress; an absent key is invalid. */
   dispatch(action: AppKeybindingId, key?: KeyId): boolean {
     switch (action) {
       case 'app.input.submit':
@@ -89,7 +88,10 @@ export class AppActionDispatcher {
       case 'app.agent.interrupt':
         return this.host.interruptActivity()
       case 'app.exit.request':
-        return this.host.requestExit(key ?? 'enter')
+        // Never fabricate a key for a key-sensitive exit request. The host
+        // ingress treats an absent identity as consumed but non-exiting.
+        if (key === undefined) return true
+        return this.host.requestExit(key)
       case 'app.transcript.search':
         return this.host.openTranscriptSearch()
       case 'app.transcript.jumpLatest':
