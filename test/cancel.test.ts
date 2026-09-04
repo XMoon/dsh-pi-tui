@@ -369,6 +369,22 @@ test('a custom exit key uses dynamic same-key confirmation', async () => {
   assert.equal(surface.exits, 1)
 })
 
+test('an explicit Ctrl+D exit remap stays Host-owned with a non-empty draft', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
+  surface.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.exit.request': 'ctrl+d' }))
+  await surface.vt.waitForRender()
+  surface.app.setDraft('draft')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.app.seatTextForTest(), 'draft', 'a custom Ctrl+D must preserve the draft')
+  assert.equal(surface.exits, 0)
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+D again to exit'))
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the custom Ctrl+D must confirm through the Host path')
+})
+
 test('Ctrl+D confirmation expires and must be re-armed', async () => {
   const surface = startAppWithExits({ exitConfirmWindowMs: 50 })
   await surface.vt.waitForRender()
