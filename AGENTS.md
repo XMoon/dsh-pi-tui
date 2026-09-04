@@ -100,11 +100,13 @@ extension-facing contract.
 
 ## Correctness invariants
 
-- **One Direct surface per session.** Until Host-owned writes and cross-client
-  concurrency are proven, Direct permits one process-owned surface per session;
-  `owner.lock`, lease/cooling, PINNED, the transition gate, and
-  `SessionOperationBarrier` remain authoritative. Do not weaken them or
-  reintroduce per-submit persistence reads on the hot path. See
+- **One Direct surface per session.** DSH `SessionHandle` / `SessionWriteLease`
+  is the sole cross-process Session writer ownership authority on the master
+  baseline; one process-owned surface per session is guaranteed by DSH
+  authority. Do not add a second persistence/artifact-level owner lock in the
+  TUI. The TUI still owns process-local surface correctness:
+  `SessionTransitionGate`, `SessionOperationBarrier`, and stale/generation
+  fences. Keep the submit hot path free of persistence reads. See
   `docs/concurrency.md`.
 - **No bare fire-and-forget promises.** Use the repository's `runDetached` /
   `runOwned` ownership model and preserve its failure semantics. See
