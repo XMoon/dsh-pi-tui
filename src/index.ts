@@ -172,7 +172,7 @@ import {
 } from './subagent-viewer-submit.ts'
 import { createDirectBackend } from './runtime/backend.ts'
 import { DirectSubagentPort } from './runtime/direct/subagent-direct.ts'
-import { DirectSessionReader } from './runtime/direct/session-direct.ts'
+import { DirectSessionReader, type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import { DirectSessionWriter } from './runtime/direct/session-writer-direct.ts'
 import { DirectSessionLifecycle } from './runtime/direct/session-lifecycle-direct.ts'
 import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
@@ -180,6 +180,8 @@ import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from './runtime/direct/config-direct.ts'
 import { serializeTuiSettingsMutation } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
+import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-direct.ts'
+import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 import { directAgentOf, ownerHandleOf, type CreateSessionRequest, type ResumeSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
@@ -197,12 +199,6 @@ import {
   type SkillCatalogContext,
 } from './skill-catalog.ts'
 
-import {
-  acquireSessionLock,
-  type SessionLockInfo,
-  type SessionLockPersistence,
-} from './session-lock.ts'
-import { createProcProbe, parseProcStat } from './session-lock-proc.ts'
 import { collectRewindCandidates, rewindPickerItem } from './rewind.ts'
 import {
   commitRewind,
@@ -214,9 +210,6 @@ import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckSt
 import { SubmitLatencyTracker } from './submit-latency.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
 import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
-import { OpenLockHolder } from './open-locks.ts'
-import { acquireProcessLeaseManager } from './session-lease-manager.ts'
-import { SessionLeaseCoolingCoordinator, snapshotSession, type CoolingPersistenceLike } from './session-lease-cooling.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
 
@@ -902,40 +895,14 @@ function bundleVersion(): string {
   }
 }
 
-/** Translate official DSH events into the local preview operations. */
+/** Translate official DSH events into the local preview operations. The
+ * STREAMED tool-call deltas arrive through the live assistant stream seam
+ * (`applyStreamingToolPreviewInput`); this durable-event path only CLEARS
+ * previews (settled calls, retries, step/turn boundaries). */
 function applyStreamingToolPreviewEvent(
   previews: Map<string, StreamingToolPreview>,
   event: SessionEvent,
 ): void {
-  if (event.type === 'assistant/chunk' && event.data.chunk.type === 'tool-call-delta') {
-    const chunk = event.data.chunk
-    upsertStreamingToolPreview(previews, {
-      callId: chunk.id,
-      turn: event.data.turn,
-      step: event.data.step,
-      index: chunk.index,
-      name: chunk.name,
-    })
-    return
-  }
-  if (
-    event.type === 'assistant/chunk'
-    && event.data.chunk.type === 'block-end'
-    && event.data.chunk.block.type === 'tool-call'
-  ) {
-    const chunk = event.data.chunk
-    // ContentBlock is merge-extensible, so retain the runtime tag guard above
-    // and narrow the known tool-call fields structurally here.
-    const block = chunk.block as { type: 'tool-call'; id: ToolCallId; name: string }
-    upsertStreamingToolPreview(previews, {
-      callId: block.id,
-      turn: event.data.turn,
-      step: event.data.step,
-      index: chunk.index,
-      name: block.name,
-    })
-    return
-  }
   if (event.type === 'tool/call') {
     removeStreamingToolPreview(previews, event.data.callId, event.data.turn, event.data.step)
     return
@@ -950,6 +917,38 @@ function applyStreamingToolPreviewEvent(
   }
   if (event.type === 'turn/end') {
     clearStreamingToolPreviewsForTurn(previews, event.data.turn)
+  }
+}
+
+/** Translate one live assistant stream input (Session v2 transient plane)
+ * into the streaming tool preview operations. The CLEAR paths stay on the
+ * durable session-event plane (`tool/call`, `llm/retry`, `step/end`,
+ * `turn/end`); only the streamed tool-call deltas and block-ends arrive
+ * here. */
+function applyStreamingToolPreviewInput(
+  previews: Map<string, StreamingToolPreview>,
+  input: AssistantLiveInput,
+): void {
+  if (input.kind !== 'chunk') return
+  const chunk = input.chunk
+  if (chunk.type === 'tool-call-delta') {
+    upsertStreamingToolPreview(previews, {
+      callId: chunk.id,
+      turn: input.turn,
+      step: input.step,
+      index: chunk.index,
+      name: chunk.name,
+    })
+    return
+  }
+  if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+    upsertStreamingToolPreview(previews, {
+      callId: chunk.block.id ?? '',
+      turn: input.turn,
+      step: input.step,
+      index: chunk.index,
+      name: chunk.block.name,
+    })
   }
 }
 
@@ -1064,60 +1063,6 @@ export function resumeCommand(profile: string, sessionId: string): string | unde
   const id = sessionId.trim()
   if (id === '') return undefined
   return `dsh --profile ${profile} --session ${id}`
-}
-
-/** The lock identity of THIS process: pid + boot-relative starttime. */
-// The lock identity of THIS process, computed once: pid + starttime are
-// boot-constants, so re-reading /proc/self/stat per acquire is pure waste.
-let cachedSelfLockInfo: SessionLockInfo | undefined
-function selfLockInfo(): SessionLockInfo {
-  if (cachedSelfLockInfo !== undefined) return cachedSelfLockInfo
-  const info: SessionLockInfo = {
-    pid: process.pid,
-    starttime: 0,
-    startedAt: Date.now(),
-    profile: runningProfile(),
-  }
-  try {
-    info.starttime = parseProcStat(readFileSync(`/proc/self/stat`, 'utf8'))?.starttime ?? 0
-  } catch {
-    // No /proc (non-Linux): starttime 0 is still a valid unique marker for
-    // this process's own lock record (the same-process shortcut compares
-    // pid AND starttime, so 0 is fine for self-consistency).
-  }
-  cachedSelfLockInfo = info
-  return info
-}
-/** Human-readable lock owner description for the refusal notice. */
-function lockOwnerText(owner: SessionLockInfo): string {
-  const parts = [`pid ${owner.pid}`]
-  if (owner.profile !== undefined) parts.push(`profile ${owner.profile}`)
-  if (owner.startedAt > 0) {
-    const started = new Date(owner.startedAt)
-    parts.push(`started ${started.toLocaleTimeString()}`)
-  }
-  if (owner.tty !== undefined) parts.push(`tty ${owner.tty}`)
-  return parts.join(', ')
-}
-
-/** The refusal notice for a session held by another live dsh process. */
-function lockHeldNotice(sessionId: string, owner: SessionLockInfo): string {
-  return `Session ${sessionId} is open in another dsh process (${lockOwnerText(owner)}); opening it here could corrupt the log. Close it there first, or restart that process.`
-}
-
-/**
- * A launch-time open-lock refusal: the requested session is held by another
- * live dsh process (or its lock cannot be verified). Unlike a stale/missing
- * session id, this is NOT recoverable by falling back to a fresh session —
- * the user asked for a specific session and must resolve the holder first.
- * Thrown from the resume path and re-thrown past the resume catch so the
- * runner exits with the refusal as the error message.
- */
-export class SessionLockRefusedError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'SessionLockRefusedError'
-  }
 }
 
 /**
@@ -1916,128 +1861,14 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-    // Open-time session lock: the ONE session this process currently holds
-    // (acquired at resume/switch; a switch-away lock is released only by
-    // the verified cooling release, and a clean exit leaves touched locks
-    // as stale records for the next opener's takeover).
-    // `undefined` means either no session yet (deferred start) or no lock
-    // (deployment cannot lock — the fail-closed resume/refuse rules cover
-    // it for existing sessions).
-    // The multi-slot open-lock registry: a transition may hold the OLD and
-    // the TARGET lock at once (the old lock is never released before the
-    // target is acquired — releasing first opened a vacuum window where
-    // another process could grab the old session while a switch was still
-    // failing, and the current session would stay live WITHOUT its lock).
-    const openLocks = new OpenLockHolder()
-    // The /proc probe for stale-lock takeover, created once per mount.
-    const lockProc = createProcProbe()
-    /** One open-lock acquisition's settled result. `unavailable` and
-     * `refused` are DISTINCT: an existing session may proceed sessionless
-     * itself (nothing is written without a session), but a FRESH session's
-     * target-lock-before-create transaction must see `acquired` — anything
-     * else means the child would be published without its lock (review
-     * round 7: the old `string | undefined` return conflated "locked" with
-     * "cannot lock", so a fresh pre-acquire silently degenerated to
-     * publish-before-lock via no-lock-dir). */
-    type OpenLockResult =
-      | { kind: 'acquired' }
-      | { kind: 'unavailable'; reason: string }
-      | { kind: 'refused'; message: string }
-    /** The PHYSICAL open-time lock take (the lease manager's low-level
-     * surface). Never throws. A FRESH session's artifact directory is
-     * pre-created by the lock layer when needed, so the lock can
-     * physically exist BEFORE the session log does. */
-    const physicalAcquire = (target: { id: string; header?: { cwd?: string } }): {
-      result: OpenLockResult
-      release: () => void
-    } => {
-      const { id: sessionId, header } = target
-      if (openLocks.has(sessionId)) return { result: { kind: 'acquired' }, release: () => openLocks.release(sessionId) }
-      const persistence = ctx.get('sessionPersistence') as SessionLockPersistence | undefined
-      const outcome = acquireSessionLock(
-        {
-          persistence,
-          fs: {
-            readFileSync: (path) => readFileSync(path, 'utf8'),
-            writeFileSync: (path, content, options) => writeFileSync(path, content, options),
-            unlinkSync,
-            mkdirSync: (dir, options) => mkdirSync(dir, options),
-            rmdirSync: (dir) => rmdirSync(dir),
-          },
-          proc: lockProc,
-        },
-        { id: sessionId, header },
-        selfLockInfo(),
-      )
-      switch (outcome.kind) {
-        case 'acquired':
-        case 'taken-over-stale':
-          openLocks.add(sessionId, outcome.release)
-          if (outcome.kind === 'taken-over-stale') {
-            diag.warn('session lock stale taken over', { session: sessionId })
-          }
-          return { result: { kind: 'acquired' }, release: () => openLocks.release(sessionId) }
-        case 'held':
-          diag.warn('session lock held', { session: sessionId, pid: outcome.owner.pid })
-          return { result: { kind: 'refused', message: lockHeldNotice(sessionId, outcome.owner) }, release: () => {} }
-        case 'unverifiable':
-          diag.warn('session lock unverifiable', { session: sessionId, pid: outcome.owner?.pid })
-          return {
-            result: {
-              kind: 'refused',
-              message: outcome.owner === undefined
-                ? `Session ${sessionId} has an unreadable or malformed lock file; refusing to open it here. If no other dsh process is using it, delete the owner.lock file next to the session log and retry.`
-                : `Session ${sessionId} has a lock file whose owner (pid ${outcome.owner.pid}) cannot be verified; refusing to open it here. If that process is gone, delete the owner.lock file next to the session log and retry.`,
-            },
-            release: () => {},
-          }
-        case 'unavailable':
-          // No persistence/artifact/dir/write access: proceed without a
-          // lock for EXISTING sessions (fail-closed at the transition);
-          // a fresh target's transition treats this as a failure too.
-          return { result: { kind: 'unavailable', reason: outcome.reason }, release: () => {} }
-      }
-    }
-    /** The process-global lease manager: ownership policy over the physical
-     * locks. A remount (HMR) reuses the SAME manager so this process never
-     * forgets the locks it physically holds. */
-    const leaseWorld = acquireProcessLeaseManager({
-      acquire: physicalAcquire,
-    })
-    const leaseManager = leaseWorld.manager
-    // The retired-session cooling verifier: after a switch, the OLD
-    // session's lease is verified (quiet window + durable parity) before
-    // its physical lock may be released cross-process (convergence plan
-    // phase 6).
-    const coolingCoordinator = new SessionLeaseCoolingCoordinator({
-      leaseManager,
-      persistence: () => ctx.get('sessionPersistence') as CoolingPersistenceLike | undefined,
-      diag,
-      signal: lifecycleController.signal,
-    })
-    // HMR/plugin remount: the lease manager is process-global, so a new
-    // runner instance must take over the pending COOLING verifications
-    // (the old instance's verifier died with its lifecycle signal).
-    coolingCoordinator.resumePending()
-    /** Try to reserve the lease for a session about to be ACTIVATED
-     * (physical acquire when this process does not hold it; idempotent
-     * for held leases). Uses the LIFECYCLE-layer reservation: a held
-     * COOLING/ACTIVE/TOUCHED/RESERVED lease is reactivated — the
-     * previous lifecycle epoch is invalidated synchronously BEFORE any
-     * DSH resume, so an older cooling verifier can never affect the new
-     * lifecycle (the reactivation rule). A held PINNED lease is a STICKY
-     * QUARANTINE and is REFUSED (never demoted to a new lifecycle). */
-    const acquireOpenLock = (sessionId: string, header?: { cwd?: string }): OpenLockResult =>
-      leaseManager.reserveForActivation({ id: sessionId, header })
-    /** A rejected create/resume is NEVER retried and NEVER falls back (the
-     * first DSH call may have left a hidden lifecycle — see the
-     * sticky-quarantine rule). */
-    // A failed --session resume pins the session and the surface starts
-    // sessionless (the next input creates a new session); the failure is
-    // surfaced as a notify line.
+    // A failed --session resume leaves the surface sessionless (the next
+    // input creates a new session); the failure is surfaced as a notify
+    // line. The DSH SessionWriteLease (kernel flock) is the ONLY
+    // cross-process writer authority — the TUI's physical owner.lock /
+    // lease / cooling stack is removed legacy.
     let resumeFailure: string | undefined
     // Pre-mount startup status (explicit resume only): the resume
-    // transaction (preflight, lock, DSH resume) and the whenIdle/catalog
+    // transaction (preflight, DSH resume) and the whenIdle/catalog
     // barrier run BEFORE the TUI mounts — a single-line TTY hint keeps
     // the blank terminal from reading as a hang. Pure presentation: it
     // never owns lifecycle state, and every teardown path (success,
@@ -2055,57 +1886,16 @@ export function apply(ctx: Context, config: Config): void {
       // explaining: deferred / sessionless starts have nothing to resume.
       startupStatus.show('Resuming session…')
       try {
-        // The lock file lives next to the session log, whose path needs the
-        // session's stored cwd: resolve the header first (best-effort — an
-        // unresolvable header still proceeds to the normal resume path).
-        let lockHeader: { cwd?: string } | undefined
-        try {
-          const persistence = ctx.get('sessionPersistence')
-          lockHeader = (await persistence?.list())?.find(candidate => candidate.id === sessionId)
-        } catch {
-          // Header lookup is best-effort; the resume path reports failures.
-        }
         // The stored session's recorded preset wins (resolved from the log,
         // not the header): a session that switched while blank ran every turn
         // under the newer composition, and rebuilding it differently would
-        // replay tool calls the model can no longer make. ALL fallible
-        // preflight runs BEFORE the physical lock is taken (review
-        // round 36): a preflight failure leaves no lock to release or pin.
+        // replay tool calls the model can no longer make.
         const recorded = await recordedPreset(ctx, sessionId)
-        // Preflight: the preset composition is resolved BEFORE the physical
-        // lock (a roster failure must never pin a session that did not enter
-        // the DSH boundary). The RESOLVED composition (with its concrete
+        // Preflight: the preset composition is resolved BEFORE the DSH
+        // boundary. The RESOLVED composition (with its concrete
         // agentPreset) is what the adapter re-mounts — never a second
         // compose(undefined) that could resolve a different default preset.
         const launchComposition = await compose(recorded)
-        // Refuse to resume a session another live dsh process holds: the
-        // second open makes persistence synthesize interrupted-turn closers
-        // into the shared log while the first process keeps appending from
-        // its own in-memory seq — the classic seq-collision corruption (the
-        // second opener's memory matches the file, so no post-open check
-        // would see it). Refusing here avoids the collision entirely.
-        const lock = acquireOpenLock(sessionId, lockHeader)
-        if (lock.kind === 'refused') {
-          throw new SessionLockRefusedError(lock.message)
-        }
-        // Fail-closed (convergence plan phase 2): a writable existing
-        // session REQUIRES its physical owner lock — an unavailable lock
-        // means this deployment cannot guarantee single-owner writes, so
-        // the resume is refused instead of proceeding unowned.
-        if (lock.kind === 'unavailable') {
-          throw new SessionLockRefusedError(`cannot lock session ${sessionId} (${lock.reason}); refusing to resume without an owner lock`)
-        }
-        // The DSH boundary: the resume target is touched IMMEDIATELY
-        // before the DSH call (ALL fallible preflight above already ran —
-        // a preflight failure must not pin a session that never entered
-        // the DSH boundary; review rounds 32/36). From here on a failure
-        // pins it (no release, no automatic fallback).
-        leaseManager.markTouched(sessionId)
-        // A rejection is NEVER retried (no same-ID recovery): the first
-        // DSH call may have left a hidden lifecycle, so a retry cannot
-        // clear the uncertainty — the session is PINNED immediately
-        // (fail-closed; no publication-phase inference, no second fresh
-        // fallback).
         // Agent options are only the creation/resume fallback. The setup
         // installs an Agent-local selection and reconstructs the target
         // Session's durable model choice after resume.
@@ -2155,25 +1945,17 @@ export function apply(ctx: Context, config: Config): void {
         // warning would interleave with the status and the later
         // mount-time clear would erase the wrong line.
         startupStatus.clear()
-        // A lock refusal is NOT recoverable: the user asked for a specific
-        // held session. Re-throw so the runner exits with the refusal as
-        // the message.
-        if (error instanceof SessionLockRefusedError) {
-          throw error
-        }
-        // The failed target is PINNED ONLY if it crossed the DSH boundary
-        // (touched) — a PREFLIGHT failure leaves no lock and nothing to
-        // pin (review round 36). There is NO second fresh fallback
-        // (convergence plan phase 4): the surface starts sessionless and
-        // the next user input creates a new session.
+        // A rejected resume (e.g. the DSH SessionWriteLease's
+        // SessionAlreadyOwnedError) leaves the session untouched: no pin,
+        // no fallback — the surface starts sessionless and the next user
+        // input creates a new session; the failure is surfaced as a
+        // notify line.
         const message = safeErrorMessage(error)
-        if (leaseManager.state(sessionId)?.touchedByDsh === true) {
-          leaseManager.pin(sessionId, `resume failed: ${message}`)
-          diag.warn('session lease pinned', { session: sessionId, reason: `resume failed: ${message}` })
-        }
         ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${message}`)
         diag.error('resume failed', { session: sessionId, error: message })
-        resumeFailure = `session ${sessionId} could not be resumed; it stays locked by this TUI`
+        resumeFailure = /already owned/i.test(message)
+          ? `session ${sessionId} is already owned by another DSH writer/process`
+          : `session ${sessionId} could not be resumed: ${message}`
       }
     } else {
       // Deferred session creation: without --session the TUI opens with NO
@@ -2186,9 +1968,6 @@ export function apply(ctx: Context, config: Config): void {
     // a resumed idle session must never notify (no observed running).
     completionController.setLiveAgent(liveAgent?.id)
     if (liveAgent !== undefined) {
-      // The committed live session's lease becomes ACTIVE (a successful
-      // launch resume must not stay TOUCHED — review round 32).
-      leaseManager.markActive(liveAgent.session.id)
       // The resume transaction succeeded; the remaining pre-mount wait is
       // the conversation preparation (whenIdle + the catalog ready
       // barrier) — the second status stage replaces the first in place
@@ -2324,16 +2103,14 @@ export function apply(ctx: Context, config: Config): void {
      *
      * The ordering is the whole point (review rounds 2–3):
      *
-     *   1. QUIESCE OLD — `whenIdle()` then the FINAL flush, with the old
-     *      session's open lock still held. `dispose()` is an async
-     *      quiescence and a cancelled RUNNING turn appends its closure
-     *      events (interrupted assistant/message, step/end, turn/end) in
-     *      finally blocks — releasing the old lock before the old agent is
-     *      idle would let another dsh process resume the session while
-     *      those closures are still appended (two-writers/seq-collision).
+     *   1. QUIESCE OLD — `whenIdle()` then the FINAL flush. `dispose()` is
+     *      an async quiescence and a cancelled RUNNING turn appends its
+     *      closure events (interrupted assistant/message, step/end,
+     *      turn/end) in finally blocks — the old agent must be idle before
+     *      the flush so those closures are never split across the switch.
      *      Old-idle-then-flush closes that window; may fail → abort with
      *      ZERO child side effects.
-     *   2. caller `prepare` (rewind's stale gate, switch lock pre-checks)
+     *   2. caller `prepare` (rewind's stale gate, switch pre-checks)
      *      — may fail → abort;
      *   3. create/resume the CHILD — may fail → abort; once it SUCCEEDS the
      *      child is published (session/created → persistence may already
@@ -2342,10 +2119,7 @@ export function apply(ctx: Context, config: Config): void {
      *      an agent but never deletes a persisted session; dsh has no
      *      durable rollback);
      *   4. COMMIT — a synchronous critical section (generation bump, live
-     *      handle/agent replacement — the target
-     *      lock was acquired in phase 2 and stays held; NO lock changes
-     *      happen here, review round 10) with no awaits between its
-     *      steps;
+     *      handle/agent replacement) with no awaits between its steps;
      *   5. RETIRE — old-handle dispose (now idle: no abort closures), child
      *      whenIdle, surface rebuild, catalog refresh — failures WARN ONLY,
      *      the committed child always stands.
@@ -2366,24 +2140,18 @@ export function apply(ctx: Context, config: Config): void {
       const oldHandle = liveHandle
       return runTransitionTo<T>({
         quiesceOld: async () => {
-          if (liveAgent === undefined) return undefined
+          if (liveAgent === undefined) return
           // QUIESCE first: after whenIdle the old agent can no longer
-          // produce turn events, so the final flush below is truly final —
-          // releasing its open lock afterwards cannot race our own
-          // teardown appends. (A /new or /fork while the agent is busy now
-          // WAITS for the current activity instead of aborting it — the
-          // deliberate product semantics, see docs/concurrency.md.)
+          // produce turn events, so the final flush below is truly final.
+          // (A /new or /fork while the agent is busy now WAITS for the
+          // current activity instead of aborting it — the deliberate
+          // product semantics, see docs/concurrency.md.)
           await liveAgent.whenIdle()
-          // Final flush, with the old session's lock still held; the
-          // FINAL snapshot (event count, tail fingerprint) is captured
-          // here — the cooling verifier compares the durable state
-          // against it (convergence plan phase 5/6).
+          // Final flush before the switch. The DSH SessionWriteLease
+          // (kernel flock) is the only cross-process writer authority, so
+          // no TUI-side lock bookkeeping is needed around the flush.
           await sessions.flush(liveAgent.session)
-          return snapshotSession(liveAgent.session)
         },
-        acquireTargetLease: (target) => leaseManager.reserveForActivation(target),
-        releaseUntouchedTarget: (sessionId) => leaseManager.releaseUntouched(sessionId),
-        markTargetTouched: (sessionId) => leaseManager.markTouched(sessionId),
         commit: (next) => {
           // A new session owns the surface: the OLD session's pending
           // submit ack must never leak into it, and its latency timeline
@@ -2401,7 +2169,6 @@ export function apply(ctx: Context, config: Config): void {
           // out and the new agent must be observed running before it can
           // ever notify.
           completionController.setLiveAgent(liveAgent.id)
-          leaseManager.markActive((directAgentOf(next) as Agent).session.id)
           // A fresh target inherits the surface's explicit choice (/new):
           // the create options carried it, but the installed ref would
           // otherwise fall back to the global default while the default
@@ -2421,75 +2188,21 @@ export function apply(ctx: Context, config: Config): void {
             }
           }
         },
-        pinTarget: (sessionId, reason) => {
-          leaseManager.pin(sessionId, reason)
-          diag.warn('session lease pinned', { session: sessionId, reason })
-        },
-        retireOld: async (next, oldSnapshot) => {
+        retireOld: async (next) => {
           const retired: string[] = []
           // 1. Dispose the OLD handle FIRST: whenIdle only idles the agent
           // machine — session-scoped async writers (e.g. the title
           // generator awaiting a provider) are aborted only by
-          // session/disposed, which the dispose fires. The old session's
-          // lock is still held throughout.
-          let disposeSucceeded = true
+          // session/disposed, which the dispose fires.
           if (oldHandle !== undefined) {
             try {
               await oldHandle.dispose()
             } catch (error) {
               // A failed dispose means the old session may still have
-              // writers: PIN it (never release), the child stays current,
-              // and COOLING MUST NOT START (a pinned lease never
-              // downgrades — review round 37).
-              disposeSucceeded = false
-              if (from !== undefined) {
-                leaseManager.pin(from, `old handle dispose failed: ${safeErrorMessage(error)}`)
-                diag.warn('session lease pinned', { session: from, reason: 'old handle dispose failed' })
-              }
+              // writers; the child stays current and the failure is
+              // recorded (the DSH SessionWriteLease still guards the
+              // session cross-process).
               retired.push(`old handle dispose: ${safeErrorMessage(error)}`)
-            }
-          }
-          // 2. The OLD session enters COOLING — ONLY after a successful
-          // dispose (review round 37): the lease manager / cooling
-          // coordinator decides when its physical lock may be released
-          // (quiet window + durable parity + stable signals; any
-          // uncertainty pins it). The old lock is deliberately NOT
-          // released here (convergence plan phase 5).
-          if (from !== undefined && disposeSucceeded) {
-            if (oldSnapshot === undefined) {
-              leaseManager.pin(from, 'no final snapshot captured before the switch')
-              diag.warn('session lease pinned', { session: from, reason: 'no final snapshot' })
-            } else {
-              // Local detach gate (convergence plan appendix): the dispose
-              // must have REMOVED the old agent/session from the live
-              // registries — release eligibility requires the old session
-              // to be truly closed locally before any cross-process
-              // handover can be considered.
-              const agents = ctx.get('agents') as { get?: (id: string) => unknown } | undefined
-              const sessions = ctx.get('sessions') as { get?: (id: string) => unknown } | undefined
-              let detached = true
-              try {
-                if (agents?.get?.(from) !== undefined || sessions?.get?.(from) !== undefined) {
-                  detached = false
-                }
-              } catch {
-                detached = false
-              }
-              if (!detached) {
-                leaseManager.pin(from, 'old agent/session remained registered after dispose')
-                diag.warn('session lease pinned', { session: from, reason: 'old agent/session remained registered after dispose' })
-              } else {
-                // The old session enters COOLING with a NEW lifecycle
-                // epoch; the cooling coordinator verifies under exactly
-                // that epoch (the reactivation rule: a same-process
-                // re-open invalidates it, and the old verifier then can
-                // never release/pin the new lifecycle).
-                const epoch = leaseManager.beginCooling(from, oldSnapshot)
-                if (epoch !== undefined) {
-                  diag.info('session lease cooling started', { session: from, events: oldSnapshot.eventCount, epoch })
-                  coolingCoordinator.start(from, oldSnapshot, epoch)
-                }
-              }
             }
           }
           try {
@@ -2527,18 +2240,14 @@ export function apply(ctx: Context, config: Config): void {
     /** Hand the TUI over to another persisted session. Never throws: every
      * failure (unknown session, broken log, preset mount) returns an error
      * string so callers' `.then(error => ...)` need no rejection path. The
-     * whole switch (lock pre-checks → compose → resume → commit) runs inside the
+     * whole switch (compose → resume → commit) runs inside the
      * session-transition gate, so it can never interleave with /new, /fork
      * or a rewind commit (the single-writer rule). */
     const switchSession = (sessionId: string): Promise<string | undefined> =>
       transitionGate.run(() => operationBarrier.runTransition(() => switchSessionLocked(sessionId)))
 
     const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
-      // A switch INTO the session we are already on is a no-op — refusing
-      // it up front also keeps the failure branches from ever releasing the
-      // CURRENT session's lock through a same-session target id (review
-      // round 7: the idempotent acquire would not record a new lock, but an
-      // unconditional releaseOpenLock(target) would drop the live one).
+      // A switch INTO the session we are already on is a no-op.
       if (liveAgent !== undefined && liveAgent.session.id === sessionId) {
         return 'already on this session'
       }
@@ -2548,26 +2257,15 @@ export function apply(ctx: Context, config: Config): void {
       // orphan the editor's placeholders on every failed switch (review
       // finding 2).
       try {
-        // The unified transaction: the OLD session is flushed FIRST (with
-        // its lock still held — the flush-before-release rule), then the
-        // TARGET's lock is acquired WHILE STILL HOLDING the current one
-        // (the multi-slot holder; a non-blocking refusal, never a wait),
-        // then the resume publishes the child. A failure anywhere before
-        // the create leaves the current session live WITH its lock — there
-        // is no vacuum window and nothing to re-acquire.
-        // The target's lock path needs its stored cwd: resolve the header
-        // first (best-effort — an unresolvable header still proceeds).
-        let lockHeader: { cwd?: string } | undefined
-        try {
-          const persistence = ctx.get('sessionPersistence')
-          lockHeader = (await persistence?.list())?.find(candidate => candidate.id === sessionId)
-        } catch {
-          // Best-effort; the resume path reports failures.
-        }
+        // The unified transaction: the OLD session is flushed FIRST, then
+        // the resume publishes the child. A failure anywhere before the
+        // create leaves the current session live — there is nothing to
+        // re-acquire (the DSH SessionWriteLease is the only writer
+        // authority).
         // The recorded preset drives the resume; the composition is
         // resolved by the Direct adapter from that id (preflight here only
-        // for lock ordering — a roster failure must not pin a session that
-        // never entered the DSH boundary).
+        // for the composition — a roster failure must not enter the DSH
+        // boundary).
         const recorded = await recordedPreset(ctx, sessionId)
         // Preflight with the resolved composition (see the launch resume
         // note): the adapter re-mounts the EXACT resolved preset id.
@@ -2583,21 +2281,18 @@ export function apply(ctx: Context, config: Config): void {
           agentPreset: switchComposition.agentPreset,
         }
         const result = await transitionTo({
-          target: { id: sessionId, header: lockHeader },
-          // A rejected resume is NEVER retried: the first DSH call may
-          // have left a hidden lifecycle, so the target is PINNED
-          // immediately (fail-closed; the session stays locked for this
-          // process's lifetime).
+          target: { id: sessionId },
+          // A rejected resume (e.g. SessionAlreadyOwnedError) leaves the
+          // target untouched: no pin, no retry — the CURRENT session stays
+          // live and the user can retry the switch.
           create: () => backend.sessionLifecycle.resume(resumeOptions),
         })
         if (!result.ok) {
-          // The resume failed: the target is pinned (or refused before
-          // the DSH call). The CURRENT session is still live AND still
-          // holds its own lock.
+          // The resume failed: the CURRENT session is still live.
           return result.message
         }
         // The switch COMMITTED: staged drafts are per-session UI state —
-        // drop the UNPINNED ones now (never durable attachments, plan
+        // drop the unpinned ones now (never durable attachments, plan
         // §14). In-flight submissions keep their pinned drafts so a stale
         // submission can still restore its text with a live backing draft
         // (review finding: clear() would orphan the restored placeholders).
@@ -2607,8 +2302,7 @@ export function apply(ctx: Context, config: Config): void {
         const message = safeErrorMessage(error)
         ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
         diag.error('switch failed', { session: sessionId, error: message })
-        // The CURRENT session is still live and still holds its own lock;
-        // a target that crossed the DSH boundary stays pinned.
+        // The CURRENT session is still live.
         return `switch failed: ${message}`
       }
     }
@@ -3050,18 +2744,12 @@ export function apply(ctx: Context, config: Config): void {
       } catch {
         // The stream may already be gone during teardown; best effort.
       }
-      // The touched-session physical locks are DELIBERATELY NOT released
-      // here (convergence plan phase 7): a clean TUI exit is not a proof
-      // that the DSH persistence tree is quiet, so releasing an active /
-      // cooling / pinned session's owner.lock would hand another process a
-      // session this process may still be flushing. The locks stay on disk
-      // as stale records; the next opener's stale-takeover mechanism
-      // handles them (the system must support kill -9 stale locks anyway).
+      // The DSH SessionWriteLease (kernel flock) is the only cross-process
+      // writer authority: a clean TUI exit needs no TUI-side lock
+      // bookkeeping — the lease is released by the DSH session teardown
+      // (the TUI's physical owner.lock / lease / cooling stack is removed
+      // legacy).
       lifecycleController.abort()
-      // The process-global lease registry's ref count: this mount is done
-      // with the manager (bookkeeping only — the physical locks stay;
-      // review: a missing release leaked refCount across HMR remounts).
-      leaseWorld.release()
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.
       catalogCoordinator?.dispose()
@@ -3215,7 +2903,7 @@ export function apply(ctx: Context, config: Config): void {
           staleNotice: () => 'the session changed while the submission was being checked — the output was not submitted',
           // The session-transition write fence (review round 4): while a
           // transition is in flight the followup would target a session
-          // whose lock is about to be released.
+          // that is about to be retired.
           fence: () => transitionGate.busy,
           barrier: operationBarrier,
           fenceNotice: () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles',
@@ -3541,10 +3229,6 @@ export function apply(ctx: Context, config: Config): void {
       ownerFolder: TranscriptFolder,
       event: SessionEvent,
     ): void => {
-      // TranscriptFolder already rejects assistant chunks after a completed
-      // turn. Keep this presentation-only projection aligned without adding a
-      // second completed-turn tombstone or retaining stale event state.
-      if (event.type === 'assistant/chunk' && ownerFolder.turnActivity(event.data.turn)?.completed === true) return
       applyStreamingToolPreviewEvent(previews, event)
     }
     const paintNow = (): void => {
@@ -3790,13 +3474,20 @@ export function apply(ctx: Context, config: Config): void {
           ? (child as { header: { cwd: string } }).header.cwd
           : ''
       } else {
-        // An inactive child is no longer in the live store; load its log.
-        const persistence = ctx.get('sessionPersistence')
-        if (persistence !== undefined) {
+        // An inactive child is no longer in the live store; load its log
+        // through the semantic session-query seam (the raw persistence
+        // fallback is removed legacy on the master baseline).
+        const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
+        if (query !== undefined) {
           try {
-            const own = childOwnEvents((await persistence.inspect(childId)).events)
-            childFolder.hydrate(own)
-            childStats.hydrate(own)
+            const observation = await query.observeSession(SessionId(childId), { projectionMode: 'none' })
+            try {
+              const own = childOwnEvents(observation.events)
+              childFolder.hydrate(own)
+              childStats.hydrate(own)
+            } finally {
+              observation[Symbol.dispose]()
+            }
           } catch {
             // No persisted log either: the view stays empty.
           }
@@ -4126,7 +3817,7 @@ export function apply(ctx: Context, config: Config): void {
           // The session-transition write fence: the identity check above
           // can yield across a concurrent /new, /fork, rewind or
           // switch — once a transition is in flight, executing the command
-          // would write an agent whose lock is about to be released (review
+          // would write an agent that is about to be retired (review
           // round 27). Refuse and restore the draft instead.
           if (transitionGate.busy) {
             fallbackPin()
@@ -4529,8 +4220,8 @@ export function apply(ctx: Context, config: Config): void {
           },
           // The session-transition write fence: while a transition is in
           // flight (quiesce → commit) the old agent may be woken again —
-          // a steer in that window would target a session whose lock is
-          // about to be released (the two-writers race, review round 4).
+          // a steer in that window would target a session that is about
+          // to be retired (the two-writers race, review round 4).
           fence: () => transitionGate.busy,
           barrier: operationBarrier,
           fenceNotice: () => 'a session transition is in progress — try again in a moment',
@@ -6759,72 +6450,54 @@ export function apply(ctx: Context, config: Config): void {
       creating = transitionGate.run(() => operationBarrier.runTransition(async () => {
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
-        // The first-session creation follows the SAME target-before-DSH
-        // rule as every other transition: the id is pre-generated and its
-        // lease is acquired BEFORE the create publishes the session — a
-        // refusal aborts with zero side effects, and a create failure
-        // PINNS the target (never a release, never a second fresh
-        // fallback).
-        const createWithLock = async (composition: { agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }): Promise<SessionHandle> => {
+        // The first-session creation follows the same transaction shape as
+        // every other transition: the id is pre-generated and the DSH
+        // create publishes the session; a create failure leaves the
+        // surface sessionless — the next user input starts a NEW attempt
+        // (no pin, no second fresh fallback).
+        const createFirstSession = async (composition: { agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }): Promise<SessionHandle> => {
           const sessionId = SessionId(`session-${randomUUID()}`)
-          const lock = acquireOpenLock(String(sessionId), { cwd: process.cwd() })
-          if (lock.kind === 'refused') throw new Error(lock.message)
-          if (lock.kind === 'unavailable') throw new Error(`cannot lock the fresh session before creating it (${lock.reason})`)
-          // The DSH boundary: from here on this lease is touched — a
-          // failure PINNS it (never released, never retried, never a
-          // second fresh fallback; the first DSH call may have left a
-          // hidden lifecycle, so a same-ID retry cannot clear the
-          // uncertainty).
-          leaseManager.markTouched(String(sessionId))
-          try {
-            // Read the sessionless facade at the actual create boundary so a
-            // `/model` choice made while composition was loading is used by
-            // the first deferred Session. The intent and its generation are
-            // captured HERE: the save may settle while the create awaits,
-            // and the seed decision below must know whether the choice was
-            // still pending or failed at this boundary.
-            const creationSelection = selected.current ?? defaultModel.currentSelection()
-            const creationIntent = activeDefaultIntent?.selection
-            return await backend.sessionLifecycle.create({
-              sessionId: String(sessionId),
-              meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
-              provider: creationSelection?.provider,
-              model: creationSelection?.model,
-              agentPreset: composition.agentPreset,
-            }).then(created => {
-              // A sessionless /model choice must seed the first Session's own
-              // selection: the create options carry it, but the installed ref
-              // would otherwise fall back to the global default while the
-              // default save is still in flight (or after it failed). Seed
-              // the NEWEST still-pending intent (a newer /model during the
-              // create wait wins), or the captured choice when its save
-              // FAILED — a successfully settled save leaves the blank Session
-              // observing the persisted default dynamically.
-              const newestPending = activeDefaultIntent?.selection
-              if (newestPending !== undefined) {
-                modelSelections.selectForNextRequest(created.direct!.agent as Agent, newestPending)
-              } else if (creationIntent !== undefined && defaultIntentOutcome === 'failed') {
-                modelSelections.selectForNextRequest(created.direct!.agent as Agent, creationIntent)
-              }
-              return created
-            })
-          } catch (error) {
-            leaseManager.pin(String(sessionId), `first-session creation failed: ${safeErrorMessage(error)}`)
-            diag.warn('session lease pinned', { session: String(sessionId), reason: 'first-session creation failed' })
-            throw error
-          }
+          // Read the sessionless facade at the actual create boundary so a
+          // `/model` choice made while composition was loading is used by
+          // the first deferred Session. The intent and its generation are
+          // captured HERE: the save may settle while the create awaits,
+          // and the seed decision below must know whether the choice was
+          // still pending or failed at this boundary.
+          const creationSelection = selected.current ?? defaultModel.currentSelection()
+          const creationIntent = activeDefaultIntent?.selection
+          return backend.sessionLifecycle.create({
+            sessionId: String(sessionId),
+            meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
+            provider: creationSelection?.provider,
+            model: creationSelection?.model,
+            agentPreset: composition.agentPreset,
+          }).then(created => {
+            // A sessionless /model choice must seed the first Session's own
+            // selection: the create options carry it, but the installed ref
+            // would otherwise fall back to the global default while the
+            // default save is still in flight (or after it failed). Seed
+            // the NEWEST still-pending intent (a newer /model during the
+            // create wait wins), or the captured choice when its save
+            // FAILED — a successfully settled save leaves the blank Session
+            // observing the persisted default dynamically.
+            const newestPending = activeDefaultIntent?.selection
+            if (newestPending !== undefined) {
+              modelSelections.selectForNextRequest(created.direct!.agent as Agent, newestPending)
+            } else if (creationIntent !== undefined && defaultIntentOutcome === 'failed') {
+              modelSelections.selectForNextRequest(created.direct!.agent as Agent, creationIntent)
+            }
+            return created
+          })
         }
         let created: SessionHandle
         try {
-          created = await createWithLock(launched.composition)
+          created = await createFirstSession(launched.composition)
         } catch (error) {
-          // Once the DSH boundary was crossed, NO second fresh fallback may
-          // run (convergence plan phase 4): the failed session is pinned
-          // (inside createWithLock) and the surface stays sessionless — the
-          // next user input starts a NEW attempt. Preset mount failures are
-          // no longer auto-replaced; the resolve-level fallback (requested →
-          // default) already happened inside launchComposition, BEFORE any
-          // DSH call.
+          // A failed create leaves the surface sessionless — the next user
+          // input starts a NEW attempt (no pin, no second fresh fallback).
+          // Preset mount failures are no longer auto-replaced; the
+          // resolve-level fallback (requested → default) already happened
+          // inside launchComposition, BEFORE any DSH call.
           const message = safeErrorMessage(error)
           ctx.logger.warn(`tui-runner: failed to create the first session: ${message}`)
           diag.warn('first session creation failed', { error: message })
@@ -6840,16 +6513,8 @@ export function apply(ctx: Context, config: Config): void {
         // the new live identity (a fresh agent must be observed running
         // before it can ever notify).
         completionController.setLiveAgent(createdAgent.id)
-        leaseManager.markActive(createdAgent.session.id)
-        // The open-time lock was acquired BEFORE the create (above — the
-        // createWithLock helper REQUIRED an acquired result, so this record
-        // is an idempotent no-op). This is a plain PHYSICAL re-record of
-        // the already-ACTIVE lease — NOT an activation, so reserveFor
-        // Activation must not be used (it would invalidate the brand-new
-        // lifecycle's epoch).
-        leaseManager.reserve({ id: liveAgent.session.id, header: liveAgent.session.header })
-        // Post-create initialization is best-effort: the child is committed
-        // and locked, so failures are recorded, never a fallback (the same
+        // Post-create initialization is best-effort: the child is committed,
+        // so failures are recorded, never a fallback (the same
         // retire-warn-only semantics as every other transition).
         try {
           await liveAgent.whenIdle()
@@ -7055,7 +6720,7 @@ export function apply(ctx: Context, config: Config): void {
                 return
               }
               // The swap COMMITTED: staged drafts are per-session UI state —
-              // drop the UNPINNED ones now, exactly like /new and /fork (a
+              // drop the unpinned ones now, exactly like /new and /fork (a
               // historic attachment is never silently re-staged).
               draftImages.clearUnpinned()
               if (outcome.hasNonTextContent) {
@@ -7214,7 +6879,7 @@ export function apply(ctx: Context, config: Config): void {
       // The transition write fence: agent-write entry points (plain
       // submits, steers, skill invocations, shell submits) refuse while a
       // transition is in flight (quiesce → commit) — the old agent may be
-      // woken again between whenIdle and the lock handover.
+      // woken again between whenIdle and the retire.
       sessionTransitionPending: () => transitionGate.busy,
       // The single-writer session-transition gate: /new, /fork and the
       // command-side switches run their create AND commit inside one
@@ -7448,9 +7113,6 @@ export function apply(ctx: Context, config: Config): void {
         settleLocalSubmitAck('user message')
         submitLatencyTracker.mark(liveAgent.session.id, 'user.message')
       }
-      if (event.type === 'assistant/chunk') {
-        submitLatencyTracker.mark(liveAgent.session.id, 'assistant.first')
-      }
       // Compaction lifecycle (dsh-compaction is not a peer — the event
       // data is read structurally): the working row advertises the
       // compaction phase (summarizing → applying), the busy flag covers
@@ -7532,6 +7194,50 @@ export function apply(ctx: Context, config: Config): void {
         })
       }
     })
+    // Session v2 live assistant streams: the TRANSIENT plane
+    // (`agent/assistant-stream` frames mapped through the neutral port).
+    // Live model output never rides the durable log; the runner routes the
+    // neutral input by session id — the main folder/stats/previews for the
+    // live agent, the viewer's own folder/stats/previews for a viewed
+    // child — and stamps the first-token latency. The identity fence
+    // re-reads the live surface so a stale stream from a retired agent
+    // never reaches the presentation.
+    const disposeAssistantStream = installAssistantStreamDirect({
+      ctx,
+      isCurrentAgent: (agent) => {
+        const candidate = agent as { session?: { id?: unknown } } | undefined
+        const id = candidate?.session?.id
+        if (typeof id !== 'string') return false
+        if (liveAgent !== undefined && id === liveAgent.session.id) return true
+        return viewing !== undefined && id === viewing.id
+      },
+      onInput: (input) => {
+        // The preview projection keeps the durable completed-turn guard
+        // (the old `assistant/chunk` path): a late live chunk for a
+        // completed turn is a replay artifact and must not resurrect a
+        // preview. The folder/stats folds carry their own gates.
+        const previewsLive = (owner: TranscriptFolder, previews: Map<string, StreamingToolPreview>): void => {
+          if (input.kind === 'chunk' && owner.turnActivity(input.turn)?.completed === true) return
+          applyStreamingToolPreviewInput(previews, input)
+        }
+        if (viewing !== undefined && input.sessionId === viewing.id) {
+          previewsLive(viewing.folder, viewing.previews)
+          viewing.folder.applyLiveInput(input)
+          viewing.stats.applyLiveInput(input)
+          schedulePaint()
+          return
+        }
+        if (liveAgent === undefined || input.sessionId !== liveAgent.session.id) return
+        previewsLive(folder, mainStreamingToolPreviews)
+        folder.applyLiveInput(input)
+        statsFolder.applyLiveInput(input)
+        if (input.kind === 'chunk') {
+          submitLatencyTracker.mark(liveAgent.session.id, 'assistant.first')
+        }
+        schedulePaint()
+      },
+    })
+    lifecycleController.signal.addEventListener('abort', disposeAssistantStream, { once: true })
     // Subagent lifecycle events drive the continuable-children half of the
     // dock badge (they never register jobs). The events are scoped by the
     // delegating parent, but an UNTAGGED listener (this runner) receives

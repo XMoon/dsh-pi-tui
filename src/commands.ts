@@ -417,16 +417,8 @@ export interface TuiCommandRunner {
    * this transaction and must run it inside {@link withSessionTransition}.
    */
   transitionTo<T>(steps: {
-    /** The child's PRE-GENERATED session identity (MANDATORY): the
-     * transaction reserves its lease BEFORE the DSH call (while the old
-     * lock is still held), so a refusal aborts with zero child side
-     * effects; a create/resume rejection is NEVER retried (no same-ID
-     * recovery) — once the DSH boundary is crossed, the target is PINNED
-     * immediately and stays locked for this process's lifetime. */
+    /** The child's PRE-GENERATED session identity (MANDATORY). */
     target: { id: string; header?: { cwd?: string } }
-    /** Whether the target is a FRESH session: the target lock must settle
-     * as acquired, or the transaction aborts before the create. */
-    fresh?: boolean
     /** An explicit model choice the fresh target must inherit: recorded
      * durably on the created Agent so its first request never falls back
      * to a stale global default (the /new seeding path). */
@@ -2566,7 +2558,7 @@ export function registerTuiCommands(
     // through the shared prepared-input pipeline so an image-bearing
     // `/skill [image #1 ...]` line is a real multimodal prompt, exactly
     // like a plain prompt (review finding 4). The referenced drafts are
-    // PINNED across the WHOLE invocation — the async prepare, the steer
+    // pinned across the WHOLE invocation — the async prepare, the steer
     // and the draft consumption — so a concurrent /image prune can never
     // delete images this invocation is still admitting (review finding 1).
     const releasePin = runner.imageStore.pinReferenced(line)
@@ -3063,17 +3055,15 @@ export function registerTuiCommands(
     description: 'Start a fresh session in this workspace',
     handler: () => runner.withSessionTransition(async () => {
       // The unified transaction: the old session is flushed BEFORE the
-      // fresh session is created, the child's lock is acquired BEFORE the
-      // create publishes it (pre-generated id — review round 6), the commit
-      // is synchronous, and a failure anywhere before the create leaves
-      // the current session untouched (no published child to roll back).
+      // fresh session is created, the commit is synchronous, and a failure
+      // anywhere before the create leaves the current session untouched
+      // (no published child to roll back).
       const sessionId = SessionId(`session-${randomUUID()}`)
       // The concrete preset id is resolved ONCE and rides the create (a
-      // rejected create is NEVER retried — the first DSH call may have left
-      // a hidden lifecycle, so the target is PINNED immediately). The preset
-      // COMPOSITION (setup callback) is resolved inside the Direct session
-      // lifecycle from this id — the command surface only ever sees the
-      // identity (migration M1.11).
+      // rejected create is NEVER retried — the old session stays current).
+      // The preset COMPOSITION (setup callback) is resolved inside the
+      // Direct session lifecycle from this id — the command surface only
+      // ever sees the identity (migration M1.11).
       const resolved = await runner.catalog.presets.resolve(runner.effectivePresetId)
       // Read the DEFAULT selection intent at transition time: a fresh
       // Session observes the global default (official blank-session
@@ -3086,7 +3076,6 @@ export function registerTuiCommands(
       }
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd } },
-        fresh: true,
         // Seed only an explicit default intent: without one the fresh
         // Session observes the persisted default dynamically instead of
         // freezing it into a durable choice.
@@ -3102,7 +3091,7 @@ export function registerTuiCommands(
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
-      // drop the UNPINNED ones now, never before (a failed create keeps
+      // drop the unpinned ones now, never before (a failed create keeps
       // the current session and its drafts intact; in-flight submissions
       // keep their pinned drafts — review finding 2).
       runner.imageStore.clearUnpinned()
@@ -3585,27 +3574,25 @@ export function registerTuiCommands(
       // Shared child creation with rewind (plan §6.2): preset inheritance,
       // live session cwd, provider/model inheritance, parentSession +
       // isSeeded/inheritedEventCount metadata — one chain, no drift between the two surfaces.
-      // The child's id is PRE-GENERATED so the transaction acquires its
-      // open lock BEFORE the create publishes it (review round 6); the
-      // create runs inside the unified transaction, and a failure before
-      // the create leaves nothing behind (no published child, no ghost,
-      // no rollback attempt).
+      // The child's id is PRE-GENERATED so the create publishes it under a
+      // known identity (review round 6); the create runs inside the unified
+      // transaction, and a failure before the create leaves nothing behind
+      // (no published child, no ghost, no rollback attempt).
       const sessionId = SessionId(`session-${randomUUID()}`)
       const childCwd = source.session.header.cwd || runner.sessionCwd()
       // The current preset is read once from the DSH projection and rides the
-      // create (a rejected create is NEVER retried — the first DSH call may
-      // have left a hidden lifecycle, so the target is PINNED immediately).
-      // The composition setup stays inside the Direct session lifecycle — the
-      // command surface only ever sees the identity (migration M1.11).
+      // create (a rejected create is NEVER retried — the old session stays
+      // current). The composition setup stays inside the Direct session
+      // lifecycle — the command surface only ever sees the identity
+      // (migration M1.11).
       const sourcePreset = runner.currentPreset()
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd: childCwd } },
-        fresh: true,
         create: () => createForkedAgent(runner, source, seed, sessionId, sourcePreset),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
-      // drop the UNPINNED ones now (durable attachments are untouched, plan
+      // drop the unpinned ones now (durable attachments are untouched, plan
       // §14; in-flight submissions keep their pinned drafts — review
       // finding 2).
       runner.imageStore.clearUnpinned()
