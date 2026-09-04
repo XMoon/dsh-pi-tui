@@ -4,8 +4,8 @@
  * `@xmoon76/dsh-pi-tui` tarball end to end, so a fresh checkout can never
  * publish a broken or leaky artifact:
  *
- *   1. structure — every `exports` file exists, cordis.patch.yml + repair
- *      scripts are included, no duplicated official preset root is shipped, and
+ *   1. structure — every `exports` file exists, cordis.patch.yml is
+ *      included, no duplicated official preset root is shipped, and
  *      nothing else leaks in (no test fixtures,
  *      no backups, no nested tarballs, no absolute paths);
  *   2. content — no workspace absolute paths anywhere, and the bundle does
@@ -14,9 +14,7 @@
  *      the TypeScript compiler when available;
  *   4. install — the tarball installs standalone (`npm install --omit=dev`
  *      in a fresh temp project), both `exports` entries import, and
- *      `@xmoon76/pi-tui` is NOT resolvable from the installed package;
- *   5. repair CLI — `--help` works and a read-only `--scan` over fixture
- *      sessions reports the damaged one and touches nothing.
+ *      `@xmoon76/pi-tui` is NOT resolvable from the installed package.
  *
  * Usage: node scripts/tarball-smoke.mjs [path-to-tgz]
  *   [--dsh-distribution path]
@@ -45,7 +43,6 @@ import {
   realpathSync,
   rmSync,
   statSync,
-  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -53,7 +50,6 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { parseArgs } from 'node:util'
-import { zstdCompressSync } from 'node:zlib'
 
 import {
   assertSourceResolution,
@@ -275,8 +271,6 @@ function main() {
     check('types dist/builtins.d.mts', has('dist/builtins.d.mts'))
     check('cordis.patch.yml included', has('cordis.patch.yml'))
     check('no duplicated official preset root', !files.some(name => name.startsWith('config/agent-presets/')))
-    check('repair-session.mjs included', has('scripts/repair-session.mjs'))
-    check('repair-core.mjs included', has('scripts/repair-core.mjs'))
     check('README included', has('README.md'))
     check('English README included', has('README.en.md'))
     const leaks = files.filter(name => name.includes('test/')
@@ -446,56 +440,6 @@ function main() {
         ], { cwd: probeDir })
         check('@xmoon76/pi-tui is not resolvable from the installed package (self-contained)',
           forkRun.status === 3, `status=${forkRun.status}`)
-      }
-
-      // --- repair CLI from the installed package ---
-      const cli = join(probeDir, 'node_modules', '@xmoon76', 'dsh-pi-tui', 'scripts', 'repair-session.mjs')
-      if (existsSync(cli)) {
-        const help = run(process.execPath, [cli, '--help'])
-        check('installed repair CLI shows help', help.status === 0 && help.stdout.includes('usage:'),
-          help.status === 0 ? '' : help.stderr.slice(0, 200))
-        // A read-only scan over fixtures: healthy + torn sessions. The CLI
-        // needs a dsh stub whose node_modules resolves @deepseek-ai/dsh-session
-        // (npm installed the peer deps into the probe).
-        const dshSession = join(probeDir, 'node_modules', '@deepseek-ai', 'dsh-session')
-        if (existsSync(dshSession)) {
-          const home = join(workDir, 'home')
-          const stub = join(workDir, 'dsh-stub')
-          const torn = join(home, 'sessions', 'proj', 'torn-session')
-          const healthy = join(home, 'sessions', 'proj', 'ok-session')
-          mkdirSync(join(stub, 'node_modules', '@deepseek-ai'), { recursive: true })
-          writeFileSync(join(stub, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.0.0' }))
-          symlinkSync(dshSession, join(stub, 'node_modules', '@deepseek-ai', 'dsh-session'), 'dir')
-          mkdirSync(torn, { recursive: true })
-          mkdirSync(healthy, { recursive: true })
-          const HEADER = JSON.stringify({
-            type: 'session', version: 0, id: 'torn-session', createdAt: 1,
-            cwd: '/work', delegationDepth: 0, agentPreset: 'standard',
-          })
-          const text = [HEADER,
-            JSON.stringify({ type: 'permission/preset', seq: 0, time: 1, data: { preset: 'workspace-write' } }),
-            JSON.stringify({ type: 'user/message', seq: 1, time: 2, data: { content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } } }),
-          ].join('\n')
-          writeFileSync(join(healthy, 'session.jsonl'), `${text}\n`)
-          // A torn zstd artifact: complete frames + a truncated frame tail.
-          const full = Buffer.concat([
-            zstdCompressSync(Buffer.from(`${HEADER}\n`, 'utf8')),
-            zstdCompressSync(Buffer.from(`${text.slice(HEADER.length + 1)}\n`, 'utf8')),
-            zstdCompressSync(Buffer.from('{"type":"user/message","seq":2,"time":3,"data":{"content":[{"type":"text","text":"lost"}],"source":{"kind":"user"}}}\n', 'utf8')),
-          ])
-          writeFileSync(join(torn, 'session.jsonl.zstd'), full.subarray(0, full.length - 9))
-          const scan = run(process.execPath, [cli, '--scan', '--dsh-dir', stub, '--dsh-home', home])
-          check('installed repair CLI --scan reports the torn session and ignores the healthy one',
-            scan.status === 1 && scan.stdout.includes('torn-session') && !scan.stdout.includes('ok-session'),
-            `status=${scan.status} stdout=${scan.stdout.trim().slice(0, 200)}`)
-          const before = readFileSync(join(torn, 'session.jsonl.zstd'))
-          const dry = run(process.execPath, [cli, 'torn-session', '--dsh-dir', stub, '--dsh-home', home])
-          const after = readFileSync(join(torn, 'session.jsonl.zstd'))
-          check('installed repair CLI dry run is read-only', dry.status === 1 && before.equals(after),
-            `status=${dry.status} ${dry.stdout.trim().slice(0, 120)}`)
-        } else {
-          checks.push('skip repair CLI scan — peer deps not installed in probe')
-        }
       }
     }
   } finally {

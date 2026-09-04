@@ -52,8 +52,6 @@ function candidateFiles() {
     'dist/extension/advanced.d.mts': 'export declare const ADVANCED_API_LEVEL: 1\n',
     'dist/extension/unstable.d.mts': 'export declare const UNSTABLE_API_LEVEL: 1\n',
     'cordis.patch.yml': 'patch: []\n',
-    'scripts/repair-session.mjs': '#!/usr/bin/env node\nconsole.log(\'usage: repair-session\')\n',
-    'scripts/repair-core.mjs': 'export const repair = true\n',
     'README.md': '# source probe\n',
     'README.en.md': '# source probe\n',
   }
