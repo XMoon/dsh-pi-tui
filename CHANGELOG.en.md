@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-04
+
+### Installation and version pairing
+
+For this stable release, install the matching DSH first and then add the TUI
+bundle into a profile:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.1
+dsh --profile pi-tui
+```
+
+Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`. The
+complete version matrix and update/remove commands are in the README's “Install
+into a DSH profile” section.
+
+### Added
+
+- **Streaming tool preparation cards.** Tool calls now show live cards during
+  preparation; Focus also shows a compact summary of preparing tools and keeps a
+  stable position when a tool name arrives late.
+
+### Improved
+
+- **Focus preparing projection.** Preparing-tool state keeps the correct order
+  across the regular view, the expanded Focus view, and viewer changes; when a
+  block ends it is migrated to the formal tool card or safely cleared.
+- **Unified keyboard exit confirmation.** Built-in exit entries such as Ctrl+C
+  and Ctrl+D require a same-key second press, so different keys cannot confirm
+  one another. Ctrl+D remains editor-owned forward-delete for a non-empty draft,
+  and custom exit-key mappings remain intact.
+
+### Fixed
+
+- Fixed preparing-tool identity migration across block completion and viewer
+  changes, avoiding duplicate, misplaced, or incorrectly cleared cards from late
+  events.
+- Fixed exit-confirmation hints and editor/command-surface routing so narrow
+  terminals retain the necessary prompt.
+
+### Compatibility
+
+- **Continue using DSH `0.1.2-rc.1`.** Version 0.4.1 retains the
+  `>=0.1.2-rc.1` support range; users who must keep DSH `0.1.1-rc.2` should use
+  `@xmoon76/dsh-pi-tui@0.3`.
+- Version 0.4.1 retains the 0.4 line's Session and legacy-data compatibility.
+
+> **Known limitation:** The production default backend remains Direct; remote
+> attach is not supported.
+
 ## [0.4.0] - 2026-09-03
 
 ### Installation and version pairing
@@ -693,7 +744,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...v0.4.0
 [0.4.0-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...next-v0.4.0-alpha.2
 [0.4.0-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...next-v0.4.0-alpha.1

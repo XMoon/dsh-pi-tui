@@ -7,6 +7,50 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-04
+
+### 安装与版本对应
+
+当前稳定版建议按以下顺序安装，先安装匹配的 DSH，再将 TUI bundle 加入
+profile：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.2-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.1
+dsh --profile pi-tui
+```
+
+需要保留 DSH `0.1.1-rc.2` 的用户应改用 `@xmoon76/dsh-pi-tui@0.3`。完整版本
+矩阵和更新/卸载命令见 README 的「安装到 DSH Profile」。
+
+### 新增
+
+- **流式工具准备卡片。** 工具调用在准备阶段即可显示实时卡片；Focus 视图
+  同步显示准备中的工具摘要，并在工具名称延迟到达时保持稳定位置。
+
+### 改进
+
+- **Focus 准备状态投影。** 普通视图、Focus 展开视图和不同 viewer 之间切换时，
+  准备中的工具状态保持正确顺序；block 结束后会迁移到正式工具卡片或安全清理。
+- **统一键盘退出确认。** Ctrl+C/Ctrl+D 等内置退出入口使用同一按键二次确认，
+  避免不同按键交叉确认；非空编辑器中的 Ctrl+D 仍保持 forward-delete，自定义退出
+  键映射不受影响。
+
+### 修复
+
+- 修正流式工具准备标识在 block 结束和 viewer 切换期间的迁移，避免卡片重复、
+  错位或被迟到事件错误清理。
+- 修正退出确认提示与编辑器/命令 surface 的按键路由，窄终端下仍保留必要提示。
+
+### 兼容性
+
+- **继续使用 DSH `0.1.2-rc.1`。** 0.4.1 仍声明支持范围
+  `>=0.1.2-rc.1`；需要保留 DSH `0.1.1-rc.2` 的用户应使用
+  `@xmoon76/dsh-pi-tui@0.3`。
+- 0.4.1 沿用 0.4 线的 Session 与旧数据兼容策略。
+
+> **已知限制：** 当前生产默认后端仍为 Direct；remote attach 暂不支持。
+
 ## [0.4.0] - 2026-09-03
 
 ### 安装与版本对应
@@ -583,7 +627,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...v0.4.0
 [0.4.0-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...next-v0.4.0-alpha.2
 [0.4.0-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...next-v0.4.0-alpha.1

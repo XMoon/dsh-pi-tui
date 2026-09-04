@@ -43,7 +43,7 @@ dsh --profile pi-tui
 
 | TUI package line | Matching DSH line | Notes |
 |---|---|---|
-| `0.4.0` (`@latest`) | `>=0.1.2-rc.1` | Current stable; validated against the rc.1 family |
+| `0.4.1` (`@latest`) | `>=0.1.2-rc.1` | Current stable; validated against the rc.1 family |
 | `0.4.x-alpha` (`@next`) | `>=0.1.2-rc.1` | Subsequent prerelease; each release validates its concrete DSH family |
 | `0.4.0-alpha.2` (published) | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; its releases validated the alpha.4/alpha.5 family |
 | `0.4.0-alpha.1` (published) | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 runtime |

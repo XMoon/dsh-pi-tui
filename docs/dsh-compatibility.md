@@ -8,7 +8,7 @@ boundary.
 | dsh-pi-tui line | DeepSeek Harness line | Policy |
 |---|---|---|
 | `0.3.x` | `0.1.1-rc.2` | Supported legacy runtime line |
-| `0.4.0` | `>=0.1.2-rc.1` | Current stable; validated against the rc.1 DSH family |
+| `0.4.1` | `>=0.1.2-rc.1` | Current stable; validated against the rc.1 DSH family |
 | `0.4.x-alpha` | `>=0.1.2-rc.1` | Following prerelease line; each release validates the concrete DSH family |
 | `0.4.0-alpha.2` | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; validated the alpha.4/alpha.5 DSH family |
 | `0.4.0-alpha.1` | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 DSH family |
