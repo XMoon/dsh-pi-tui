@@ -1,8 +1,9 @@
 /**
  * The Host Instruction Surface (plan §2.4/§19): Host-owned temporary
  * prompts that the user can NEVER hide through footer configuration —
- * the Ctrl+C exit hint first, more later. Since the 2026-08-31 footer
- * rework the instruction is an INDEPENDENT surface: it reserves its own
+ * the keyboard exit-confirmation hint first, more later. Since the
+ * 2026-08-31 footer rework the instruction is an INDEPENDENT surface: it
+ * reserves its own
  * physical line from the footer's global budget and appends AFTER the
  * layout rows — it never replaces (or shares a "line-2 slot" with) a
  * user row, and it always survives the height budget.
@@ -20,10 +21,10 @@ export interface FooterInstruction {
 
 /** The host state the resolver reads (structural — the TuiApp's fields). */
 export interface FooterInstructionHostState {
-  /** Whether the Ctrl+C exit chord is armed. */
-  readonly ctrlCExitArmed: boolean
+  /** The formatted effective key whose exit confirmation is armed. */
+  readonly exitConfirmKeyLabel?: string
   /** Whether the subagent viewer is open (the exit hint is meaningless
-   * there — Ctrl+C is inert inside the viewer). */
+   * there — parent exit requests are inert inside the viewer). */
   readonly viewing: boolean
   /** The M6 which-key hint for a PENDING leader sequence, already
    * formatted by the caller. It resolves BESIDE the exit hint (an
@@ -39,10 +40,10 @@ export interface FooterInstructionHostState {
 export function resolveFooterInstruction(
   state: FooterInstructionHostState,
 ): FooterInstruction | undefined {
-  if (state.ctrlCExitArmed && !state.viewing) {
+  if (state.exitConfirmKeyLabel !== undefined && !state.viewing) {
     return {
-      id: 'ctrl-c-exit',
-      text: [{ text: 'Press Ctrl+C again to exit' }],
+      id: 'exit-confirm',
+      text: [{ text: `Press ${state.exitConfirmKeyLabel} again to exit` }],
       priority: 100,
     }
   }

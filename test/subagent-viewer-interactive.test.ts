@@ -157,7 +157,7 @@ test('the main session chords are inert inside the interactive viewer', async ()
   await vt.waitForRender()
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
   await vt.waitForRender()
-  // Alt+↑ (dequeue), Shift+Tab (permission) and Ctrl+C (exit chord) too.
+  // Alt+↑ (dequeue), Shift+Tab (permission) and keyboard exit too.
   vt.sendInput('\x1b[1;3A') // alt+up
   await vt.waitForRender()
   vt.sendInput('\x1b[Z') // shift+tab
@@ -591,10 +591,10 @@ test('the one-shot viewer footer carries the one-shot badge and no stats line un
   app.stop()
 })
 
-test('the viewer footer never shows the parent\u2019s Ctrl+C exit hint (round-1 finding)', async () => {
+test('the viewer footer never shows the parent keyboard exit hint (round-1 finding)', async () => {
   // The parent arms the exit window (Ctrl+C on a non-empty draft), then
-  // the user opens a viewer before the timer expires: Ctrl+C is inert
-  // inside the viewer, so "Press Ctrl+C again to exit" must never render
+  // the user opens a viewer before the timer expires: parent exit requests
+  // are inert inside the viewer, so the confirmation hint must never render
   // there — the child's stats line shows instead.
   const { vt, app } = await startApp()
   app.setDraft('unsent text')
@@ -620,7 +620,7 @@ test('the viewer footer never shows the parent\u2019s Ctrl+C exit hint (round-1 
   })
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('Press Ctrl+C again'), `the parent exit hint must never leak into the viewer footer:\n${view}`)
+  assert.ok(!view.includes('again to exit'), `the parent exit hint must never leak into the viewer footer:\n${view}`)
   assert.ok(view.includes('TTFB 12.3s'), `the child stats line must show instead:\n${view}`)
   app.setViewerFooter(undefined)
   app.setViewerMode(undefined)

@@ -57,8 +57,9 @@ export interface HostKeybindingManagerOptions {
   readonly onInvalidate?: () => void
   /** Called when the leader pending state changes (which-key hint). */
   readonly onLeaderStateChange?: () => void
-  /** Called when a leader sequence completes (the app dispatches). */
-  readonly onLeaderActivate?: (action: string) => boolean
+  /** Called when a leader sequence completes (the app dispatches). The
+   * completing key is passed so key-sensitive actions retain its identity. */
+  readonly onLeaderActivate?: (action: string, key: KeyId) => boolean
   /** The leader timeout in ms (defaults to the config default). */
   readonly leaderTimeoutMs?: number
   /**
@@ -76,7 +77,7 @@ export interface HostKeybindingManagerOptions {
 export class HostKeybindingManager {
   private readonly onInvalidate: () => void
   private readonly onLeaderStateChange: () => void
-  private readonly onLeaderActivate: (action: string) => boolean
+  private readonly onLeaderActivate: (action: string, key: KeyId) => boolean
   private readonly onEditorSubmitSync: (keys: readonly KeyId[]) => void
   private readonly leaderTimeoutMs: number
 
@@ -287,7 +288,7 @@ export class HostKeybindingManager {
           ? { ...effectiveLeaderConfig, timeoutMs: this.leaderTimeoutMs }
           : effectiveLeaderConfig
         this.leader = new LeaderStateMachine(machineConfig, leaderBindings, {
-          onActivate: (action) => this.onLeaderActivate(action),
+          onActivate: (action, key) => this.onLeaderActivate(action, key),
           onStateChange: () => this.onLeaderStateChange(),
         })
       }

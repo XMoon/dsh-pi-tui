@@ -112,27 +112,30 @@ test('ctrl+c twice within the window exits (pi parity)', async () => {
   surface.vt.sendInput('\x03') // empty editor: first press only arms the chord
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 0, 'a single Ctrl+C must not exit')
-  surface.vt.sendInput('\x03') // within 500ms: exit
+  surface.vt.sendInput('\x03') // within the confirmation window: exit
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 1)
 })
 
-test('ctrl+d triggers the exit event (like /exit)', async () => {
+test('ctrl+d requires same-key confirmation and ignores kitty repeat/release', async () => {
   const surface = startApp()
   await surface.vt.waitForRender()
-  surface.vt.sendInput('\x04')
-  await surface.vt.waitForRender()
-  assert.equal(surface.exits, 1)
-  // A kitty-protocol Ctrl+D press exits exactly once; the release does not.
+
   const { setKittyProtocolActive } = await import('@xmoon76/pi-tui')
   setKittyProtocolActive(true)
   try {
-    surface.vt.sendInput('\x1b[100;5:1u') // ctrl+d press
+    surface.vt.sendInput('\x1b[100;5:1u') // ctrl+d press: arm
     await surface.vt.waitForRender()
-    assert.equal(surface.exits, 2)
+    assert.equal(surface.exits, 0, 'the first Ctrl+D only arms confirmation')
+    surface.vt.sendInput('\x1b[100;5:2u') // ctrl+d repeat
+    await surface.vt.waitForRender()
+    assert.equal(surface.exits, 0, 'repeat must not confirm or disarm')
     surface.vt.sendInput('\x1b[100;5:3u') // ctrl+d release
     await surface.vt.waitForRender()
-    assert.equal(surface.exits, 2, 'release must not exit again')
+    assert.equal(surface.exits, 0, 'release must not confirm or disarm')
+    surface.vt.sendInput('\x1b[100;5:1u') // ctrl+d press
+    await surface.vt.waitForRender()
+    assert.equal(surface.exits, 1, 'a same-key press confirms')
   } finally {
     setKittyProtocolActive(false)
   }

@@ -72,7 +72,8 @@ ui.input.capture({
   typing, arrows, Enter with the host editor, and the Stable keybindings.
 - **What a capture can NEVER preempt:** Host questions/approvals, Host
   overlays, and the reserved Host lifecycle keys (Esc double-cancel,
-  Ctrl+C/Ctrl+D exit, Ctrl+S steer, Ctrl+G external editor, ...).
+  keyboard exit confirmation (Ctrl+C/Ctrl+D by default), Ctrl+S steer,
+  Ctrl+G external editor, ...).
   Session safety stays Host-owned.
 
 ## 2. Focused interactive surface (`ui.ui.showInteractiveOverlay`)

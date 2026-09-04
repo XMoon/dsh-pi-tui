@@ -298,8 +298,8 @@ For the full `/footer` workflow, Custom Text / Command items, YAML reference, se
 | `Shift+Enter` | Insert newline                                      |
 | `Esc`         | Cancel current interaction / interrupt running work |
 | `Esc Esc`     | Open Rewind while idle                              |
-| `Ctrl+C`      | Interrupt / clear current input                     |
-| `Ctrl+D`      | Quit the TUI (like `/exit`)                         |
+| `Ctrl+C`      | Keyboard exit confirmation; clears the draft first |
+| `Ctrl+D`      | Keyboard exit confirmation; press it again to quit  |
 | `Ctrl+S`      | Steer queued messages and the draft into the running turn |
 | `Ctrl+T`      | Toggle the todo panel                               |
 | `Ctrl+R`      | Search input history                                |

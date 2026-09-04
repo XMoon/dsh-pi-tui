@@ -44,7 +44,7 @@ function busySnapshot(): StatusSnapshot {
   return snap as StatusSnapshot
 }
 
-const INSTRUCTION = { id: 'ctrl-c-exit', text: [{ text: 'Press Ctrl+C again to exit' }], priority: 100 } as const
+const INSTRUCTION = { id: 'exit-confirm', text: [{ text: 'Press Ctrl+D again to exit' }], priority: 100 } as const
 
 function plainPhysical(
   snap: StatusSnapshot,
@@ -148,7 +148,7 @@ test('the Host instruction never deletes a user row when the budget fits', () =>
   assert.equal(lines.length, 4, `the instruction must APPEND, not replace:\n${JSON.stringify(lines)}`)
   // At 20 columns the hint itself is tail-capped ('…') — its own 1-line
   // contract.
-  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again'), `the instruction must be last:\n${JSON.stringify(lines)}`)
+  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+D again'), `the instruction must be last:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('[yolo]')), `row 1 must survive:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('deepseek')), `row 2 must survive:\n${JSON.stringify(lines)}`)
 })
@@ -162,7 +162,7 @@ test('the Host instruction reserves its line; capacity 4 gives status 2 + stats 
   const snap = busySnapshot()
   const lines = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, 40, { instruction: INSTRUCTION })
   assert.equal(lines.length, 4, `2 + 1 + hint inside the capacity of 4:\n${JSON.stringify(lines)}`)
-  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again to exit'), `the hint must be its own line:\n${JSON.stringify(lines)}`)
+  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+D again to exit'), `the hint must be its own line:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('yolo')), `the status row must survive:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('tok/s')), `the stats row must survive (not be replaced):\n${JSON.stringify(lines)}`)
 })
@@ -175,7 +175,7 @@ test('a 3-row layout under the DEFAULT budget fits beside the instruction', () =
   const snap = busySnapshot()
   const lines = plainPhysical(snap, THREE_ROW_LAYOUT, 20, { instruction: INSTRUCTION })
   assert.equal(lines.length, 4, `3 rows + hint inside the capacity of 4:\n${JSON.stringify(lines)}`)
-  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again'), `the hint must be last:\n${JSON.stringify(lines)}`)
+  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+D again'), `the hint must be last:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('[yolo]')), `row 1 must survive:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('deepseek')), `row 2 must survive:\n${JSON.stringify(lines)}`)
   // Width 20 truncates the row to 'feat/footer-customi…' — its PREFIX
@@ -195,7 +195,7 @@ test('a DYNAMIC total of 2 still keeps the instruction and drops the stats tail'
   const budget: FooterPhysicalLineBudget = { perRow: 2, total: 2 }
   const lines = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, 40, { budget, instruction: INSTRUCTION })
   assert.equal(lines.length, 2, `exactly the surface budget, hint included:\n${JSON.stringify(lines)}`)
-  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again to exit'), `the hint must be last:\n${JSON.stringify(lines)}`)
+  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+D again to exit'), `the hint must be last:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('yolo')), `the highest-importance row must survive:\n${JSON.stringify(lines)}`)
   assert.ok(!lines.some(line => line.includes('tok/s')), `the stats tail must drop under height pressure:\n${JSON.stringify(lines)}`)
 })
@@ -233,7 +233,7 @@ test('a capacity of 4 with an active hint splits it as 2 + 1 + hint', () => {
   }
   const lines = plainPhysical(snap, layout, 40, { instruction: INSTRUCTION })
   assert.equal(lines.length, 4, `2 + 1 + hint inside the capacity, saw:\n${JSON.stringify(lines)}`)
-  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+C again to exit'), `the hint must be last:\n${JSON.stringify(lines)}`)
+  assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+D again to exit'), `the hint must be last:\n${JSON.stringify(lines)}`)
   assert.ok(lines[0]!.includes('deepseek'), `the first row must keep its second line:\n${JSON.stringify(lines)}`)
 })
 
@@ -326,7 +326,7 @@ test('a surface that grants ZERO lines (exactly 0) renders nothing at all', () =
     instruction: INSTRUCTION,
     physicalLineBudget: { perRow: 2, total: -1 },
   }).replace(/\x1b\[[0-9;]*m/g, '')
-  assert.ok(negative.includes('Press Ctrl+C again'), `a negative total must NOT hide the instruction:\n${negative}`)
+  assert.ok(negative.includes('Press Ctrl+D again'), `a negative total must NOT hide the instruction:\n${negative}`)
 })
 
 test('an instruction that renders NOTHING reserves no line and paints nothing', () => {

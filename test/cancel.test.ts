@@ -16,6 +16,7 @@ import type { SettingItem } from '@xmoon76/pi-tui'
 import { interruptAgent } from '../src/index.ts'
 import type { SessionWriter } from '../src/runtime/session-writer-port.ts'
 import { rewindPickerItem } from '../src/rewind.ts'
+import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -126,7 +127,7 @@ test('a slow second Esc does not cancel', async () => {
 
 // ── requirement 7: Ctrl+C pi parity + busy single-Esc ─────────────────────
 
-function startAppWithExits(options: { ctrlCExitWindowMs?: number } = {}): { vt: VirtualTerminal; app: TuiApp; cancels: number; exits: number } {
+function startAppWithExits(options: { exitConfirmWindowMs?: number } = {}): { vt: VirtualTerminal; app: TuiApp; cancels: number; exits: number } {
   const vt = new VirtualTerminal(100, 24)
   let cancels = 0
   let exits = 0
@@ -179,7 +180,7 @@ test('a second Ctrl+C within the window on the EMPTY editor exits', async () => 
   surface.vt.sendInput('\x03') // empty editor: record the time
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 0, 'the first empty-editor Ctrl+C only arms the chord')
-  surface.vt.sendInput('\x03') // within 500ms: exit
+  surface.vt.sendInput('\x03') // within the confirmation window: exit
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 1)
   // A third press starts a fresh window: no immediate exit.
@@ -188,7 +189,7 @@ test('a second Ctrl+C within the window on the EMPTY editor exits', async () => 
   assert.equal(surface.exits, 1, 'after exiting the window resets')
 })
 
-test('the first empty-editor Ctrl+C shows the exit-chord hint', async () => {
+test('the first empty-editor Ctrl+C shows the exit-confirmation hint', async () => {
   const surface = startAppWithExits()
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03') // empty editor: arms the window
@@ -202,7 +203,7 @@ test('the first empty-editor Ctrl+C shows the exit-chord hint', async () => {
 // ── issue #8: the exit hint lives in the footer for EXACTLY the window ───
 
 test('the exit hint renders in the FOOTER, never the transcript notify', async () => {
-  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
@@ -218,7 +219,7 @@ test('the exit hint renders in the FOOTER, never the transcript notify', async (
 })
 
 test('the exit hint disappears when the window expires (one shared timer)', async () => {
-  const surface = startAppWithExits({ ctrlCExitWindowMs: 80 })
+  const surface = startAppWithExits({ exitConfirmWindowMs: 80 })
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
@@ -229,7 +230,7 @@ test('the exit hint disappears when the window expires (one shared timer)', asyn
 })
 
 test('a second Ctrl+C after the window expired only re-arms, never exits', async () => {
-  const surface = startAppWithExits({ ctrlCExitWindowMs: 80 })
+  const surface = startAppWithExits({ exitConfirmWindowMs: 80 })
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
@@ -247,7 +248,7 @@ test('a second Ctrl+C after the window expired only re-arms, never exits', async
 })
 
 test('a successful exit clears the hint', async () => {
-  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03')
   surface.vt.sendInput('\x03')
@@ -257,21 +258,23 @@ test('a successful exit clears the hint', async () => {
     `the hint must clear on exit:\n${surface.vt.getViewport().join('\n')}`)
 })
 
-test('Ctrl+D while armed clears the hint too (round-1 finding)', async () => {
-  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
+test('a different exit key replaces the armed key (C → D)', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
   await surface.vt.waitForRender()
-  surface.vt.sendInput('\x03') // arm
+  surface.vt.sendInput('\x03') // arm Ctrl+C
   await surface.vt.waitForRender()
   assert.ok(footerLine(surface.vt).includes('Press Ctrl+C again to exit'), 'armed before Ctrl+D')
-  surface.vt.sendInput('\x04') // ctrl+d
+  surface.vt.sendInput('\x04') // first Ctrl+D replaces the armed key
   await surface.vt.waitForRender()
-  assert.equal(surface.exits, 1, 'Ctrl+D exits')
-  assert.ok(!footerLine(surface.vt).includes('Press Ctrl+C again to exit'),
-    `the armed hint must not survive a Ctrl+D exit:\n${surface.vt.getViewport().join('\n')}`)
+  assert.equal(surface.exits, 0, 'a cross-key press must not exit')
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+D again to exit'), 'Ctrl+D must be armed')
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the same Ctrl+D confirms the exit')
 })
 
 test('Ctrl+C with text clears the editor AND shows the exit hint', async () => {
-  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
   await surface.vt.waitForRender()
   surface.vt.sendInput('abc')
   await surface.vt.waitForRender()
@@ -283,8 +286,100 @@ test('Ctrl+C with text clears the editor AND shows the exit hint', async () => {
     `clear-then-arm must show the hint:\n${surface.vt.getViewport().join('\n')}`)
 })
 
-test('a submit clears the armed exit chord', async () => {
-  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
+test('Ctrl+D requires a same-key second press', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'the first Ctrl+D must only arm')
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+D again to exit'))
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1)
+})
+
+test('Ctrl+D preserves a non-empty draft while arming', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('hello')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.app.seatTextForTest(), 'hello')
+  assert.equal(surface.exits, 0)
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+D again to exit'))
+})
+
+test('Ctrl+D → Ctrl+C replaces the armed key without exiting', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0)
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+C again to exit'))
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1)
+})
+
+test('an ordinary editor key disarms the keyboard exit confirmation', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('a')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'typing between exit presses must disarm')
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+D again to exit'))
+})
+
+test('a host action disarms the keyboard exit confirmation', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x0f') // Ctrl+O: transcript expansion action
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'a host action between presses must disarm')
+})
+
+test('a custom exit key uses dynamic same-key confirmation', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
+  surface.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.exit.request': 'ctrl+x' }))
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('draft')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x18')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0)
+  assert.equal(surface.app.seatTextForTest(), 'draft', 'custom exit keys preserve the draft')
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+X again to exit'))
+  surface.vt.sendInput('\x18')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1)
+})
+
+test('Ctrl+D confirmation expires and must be re-armed', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 50 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+D again to exit'))
+  await waitFor(() => !footerLine(surface.vt).includes('Press Ctrl+D again to exit'), surface.vt)
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0)
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+D again to exit'))
+})
+
+test('a submit clears the armed exit confirmation', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03') // arm
   await surface.vt.waitForRender()
@@ -297,7 +392,7 @@ test('a submit clears the armed exit chord', async () => {
 })
 
 test('dispose clears the exit timer (no stale timer fires into a dead surface)', async () => {
-  const surface = startAppWithExits({ ctrlCExitWindowMs: 50 })
+  const surface = startAppWithExits({ exitConfirmWindowMs: 50 })
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03') // arm
   await surface.vt.waitForRender()
@@ -315,8 +410,41 @@ test('dispose clears the exit timer (no stale timer fires into a dead surface)',
   assert.equal(surface.exits, 0)
 })
 
+test('stop/start cannot carry an armed exit confirmation forward', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.ok(footerLine(surface.vt).includes('Press Ctrl+D again to exit'))
+
+  surface.app.stop()
+  surface.app.start()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'the first press after restart must re-arm')
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'only the post-restart second press may exit')
+})
+
+test('a session transition clears the armed exit confirmation', async () => {
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  surface.app.clearExitConfirmation()
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'a stale first press must not exit the new session')
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1)
+})
+
 test('the compact footer preset still shows the armed hint', async () => {
-  const surface = startAppWithExits({ ctrlCExitWindowMs: 200 })
+  const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
   await surface.vt.waitForRender()
   surface.app.setFooterPreset('compact')
   await surface.vt.waitForRender()
@@ -327,7 +455,7 @@ test('the compact footer preset still shows the armed hint', async () => {
 })
 
 test('Ctrl+C presses spaced beyond the window do not exit', async () => {
-  const surface = startAppWithExits({ ctrlCExitWindowMs: 80 })
+  const surface = startAppWithExits({ exitConfirmWindowMs: 80 })
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
@@ -348,7 +476,7 @@ test('Ctrl+C clears text first, THEN a fast second press exits', async () => {
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03') // empty + within the window: exit
   await surface.vt.waitForRender()
-  assert.equal(surface.exits, 1, 'clear-then-exit is the pi chord')
+  assert.equal(surface.exits, 1, 'same-key confirmation preserves the pi chord')
 })
 
 test('Ctrl+C clearing the editor REPAINTS the frame (stale-clear trap)', async () => {

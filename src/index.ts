@@ -237,7 +237,8 @@ export const Config: z<Config> = z.object({
   sessionId: z.string(),
 })
 
-/** The launcher's bounded exit request; the TUI asks for it on Ctrl+C. */
+/** The launcher's bounded exit request; the TUI invokes it after keyboard
+ * confirmation. */
 interface AppExit {
   (code: number): void
 }
@@ -4881,7 +4882,7 @@ export function apply(ctx: Context, config: Config): void {
         runOwned(label, task, { ...options, diag, sessionId: () => liveAgent?.session.id })
       },
       onExit: () => {
-        // Ctrl+C / Ctrl+D route through the SAME exit orchestration as
+        // Keyboard exit requests route through the SAME exit orchestration as
         // /exit and /quit (createExitController above): flush with a hard
         // timeout, idempotent cleanup, warning, resume hint, process exit.
         requestExit()
@@ -6559,6 +6560,9 @@ export function apply(ctx: Context, config: Config): void {
      * plus every switch await the coordinator refresh themselves.
      */
     const initLiveSession = async (agent: Agent): Promise<void> => {
+      // Session transitions invalidate transient keyboard confirmation before
+      // any asynchronous hydration or bootstrap work begins.
+      app.clearExitConfirmation()
       // Setup installs this before publication; the idempotent call also
       // covers test/direct adapters that hand an already-live Agent back to
       // the runner. Its fold is the resume source of truth.
@@ -6615,8 +6619,9 @@ export function apply(ctx: Context, config: Config): void {
       }
       app.clearLocalMessages()
       app.clearNotify() // a notice from the previous session is stale here
-      // Issue #8: a stale armed exit chord must not exit the NEW session.
-      app.clearCtrlCExit()
+      // Issue #8: a stale keyboard exit confirmation must not exit the NEW
+      // session.
+      app.clearExitConfirmation()
       // The subagent-notice notify guard is per-session: a new session's
       // settlements must notify again.
       notifiedSubagentNotices.clear()

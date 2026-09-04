@@ -571,23 +571,56 @@ test('pasteMedia remapped: the OLD key is not swallowed by a stale reservation (
   app.stop()
 })
 
-test('exit multi-key binding: the footer hint advertises the Ctrl+C chord specifically (PR review)', async () => {
+test('exit multi-key binding confirms the effective key dynamically', async () => {
   const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  let exits = 0
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => { exits += 1 } })
   app.start()
   startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.exit.request': ['ctrl+x', 'ctrl+c'] }))
   await vt.waitForRender()
-  // Arm the Ctrl+C exit chord: the footer must advertise Ctrl+C (the
-  // chord's own key), never the generic primary (Ctrl+X).
+  // Ctrl+C keeps its clear-draft behavior and names itself, not the first
+  // configured key. Ctrl+X then replaces the armed identity rather than
+  // confirming across keys.
   app.setDraft('draft')
   await vt.waitForRender()
-  vt.sendInput('\x03') // ctrl+c — first press clears the draft + arms
+  vt.sendInput('\x03')
   await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Ctrl+C'), `the armed exit hint must name Ctrl+C:\n${view}`)
-  assert.ok(!view.includes('Press Ctrl+X'), `the hint must not name the generic primary:\n${view}`)
-  app.stop()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Press Ctrl+C again to exit'), `the C hint must be dynamic:\n${view}`)
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  assert.equal(exits, 0, 'a different exit key must not confirm')
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Press Ctrl+X again to exit'), `the X hint must replace C:\n${view}`)
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  assert.equal(exits, 1, 'the same custom key confirms')
+})
+
+test('leader-bound exit confirmation uses the full trigger identity', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let exits = 0
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => { exits += 1 } })
+  app.start()
+  startedApps.add(app)
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+z',
+    bindings: { 'app.exit.request': '<leader>x' },
+  }))
+  await vt.waitForRender()
+  vt.sendInput('\x1a') // leader prefix
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.equal(exits, 0)
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Press Leader X again to exit'), `leader hint must name the full trigger:\n${view}`)
+  // The second full sequence confirms. A direct x could never confirm this
+  // armed leader sequence because its identity includes the prefix.
+  vt.sendInput('\x1a')
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.equal(exits, 1)
 })
 
 test('a remapped submit key keeps the editor backslash-newline semantics (PR review P1)', async () => {
