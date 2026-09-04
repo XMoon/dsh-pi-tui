@@ -8,6 +8,7 @@
  */
 
 import { existsSync, globSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -57,8 +58,9 @@ async function ensureFsExtBinding(target) {
   if (existsSync(binding)) return
   // node-gyp ships inside the npm installation; resolve it the same way the
   // repo's E2E harnesses do (npm root -g), falling back to a PATH binary.
-  const npmRoot = await runBounded('npm', ['root', '-g'], { timeoutMs: 30_000, label: 'npm root -g' })
-  const bundled = npmRoot.status === 0 ? join(npmRoot.stdout.trim(), 'npm', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js') : ''
+  // runBounded streams stdio (no capture), so the probe uses spawnSync.
+  const probe = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', timeout: 30_000 })
+  const bundled = probe.status === 0 ? join(probe.stdout.trim(), 'npm', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js') : ''
   const gyp = bundled !== '' && existsSync(bundled) ? bundled : 'node-gyp'
   const result = gyp === 'node-gyp'
     ? await runBounded(gyp, ['configure', 'build'], { cwd: fsExtDir, env: { ...process.env, npm_config_ignore_scripts: 'false' }, timeoutMs: 5 * 60_000, label: 'fs-ext native binding build' })
