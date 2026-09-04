@@ -10,6 +10,15 @@ inventory, and `DIVERGENCES.md` is the generated human report.
 
 ## Hard rules
 
+- **Read-only by default.** Ordinary dsh-pi-tui feature/bug work must not
+  modify this vendored fork unless the requested behavior cannot be
+  implemented correctly through the root/public surface.
+
+- **No convenience divergences.** A fork edit must be required by the current
+  task, checked against the existing X### ledger first, and have explicit
+  divergence ownership plus a guarding regression test. Cleaner, smaller,
+  more direct, or easier to test is not sufficient justification.
+
 - **Never overwrite this directory wholesale when syncing from upstream.**
   Each local divergence must be re-verified after a sync; its test and evidence
   record is listed in the generated `DIVERGENCES.md`.
