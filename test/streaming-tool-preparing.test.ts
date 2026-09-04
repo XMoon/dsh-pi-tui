@@ -14,7 +14,7 @@ import {
 } from '../src/streaming-tool-preparing.ts'
 import { toolIconSemantic, toolTitle } from '../src/present.ts'
 import { TuiApp, type StreamingToolPreview } from '../src/tui-app.ts'
-import type { TurnActivity } from '../src/transcript.ts'
+import type { TranscriptMessage, TurnActivity } from '../src/transcript.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 function event<K extends SessionEvent['type']>(
@@ -285,15 +285,16 @@ test('preparing rows are inert in the fullscreen hit map', async () => {
     name: 'edit',
   }])
   app.setFullscreen(true)
+  app.expandFocusTurn(1)
   await vt.waitForRender()
 
   const before = vt.getViewport().join('\n')
   const previewRow = vt.getViewport().findIndex(line => line.includes('Preparing Edit...'))
   assert.ok(previewRow >= 0, `preview row missing:\n${before}`)
-  assert.deepEqual(app.focusExpandedTurnsForTest(), new Set())
+  assert.deepEqual(app.focusExpandedTurnsForTest(), new Set([1]))
   click(vt, 10, previewRow + 1)
   await vt.waitForRender()
-  assert.deepEqual(app.focusExpandedTurnsForTest(), new Set(), 'preview click must not toggle a Thought')
+  assert.deepEqual(app.focusExpandedTurnsForTest(), new Set([1]), 'preview click must not toggle a Thought')
   assert.ok(vt.getViewport().join('\n').includes('Preparing Edit...'), 'preview click must be inert')
 })
 
@@ -336,11 +337,23 @@ test('renders preparing rows with the selected icon style and no spinner state',
   assert.ok(!view.includes('~  Preparing Edit...'), `minimal preview kept a symbol prefix:\n${view}`)
 
   app.setFocusMode(true)
-  app.setTranscript([], new Map(), undefined, [preview])
+  const focusActivity: TurnActivity = {
+    turn: 1,
+    completed: false,
+    think: { text: 'still thinking' },
+    assistantMessages: 0,
+    toolCalls: 0,
+    tools: new Map(),
+    revision: 1,
+  }
+  const focusMessages: TranscriptMessage[] = [{ kind: 'assistant', turn: 1, text: 'answer' }]
+  app.setTranscript(focusMessages, new Map([[1, focusActivity]]), undefined, [preview])
   await vt.waitForRender()
-  assert.ok(vt.getViewport().join('\n').includes('Preparing Edit...'), 'Focus must keep the ephemeral row visible')
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Tool:    Preparing Edit…'), `Focus collapsed Tool slot missing:\n${view}`)
+  assert.ok(!view.includes('Preparing Edit...'), `Focus collapsed must not render a standalone row:\n${view}`)
 
-  app.setTranscript([])
+  app.setTranscript(focusMessages, new Map([[1, focusActivity]]))
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().join('\n').includes('Preparing Edit...'), 'omitting the preview snapshot must clear old rows')
+  assert.ok(!vt.getViewport().join('\n').includes('Preparing'), 'omitting the preview snapshot must clear old rows')
 })

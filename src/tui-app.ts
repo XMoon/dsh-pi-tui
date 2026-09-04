@@ -130,7 +130,7 @@ import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
 import { recentTurnThreshold, textWithImageMarkers, type TranscriptMessage, type TurnActivity } from './transcript.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
-import { FocusActivityComponent, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
+import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
 import { WorkingIndicator, workingFramesFor } from './working.ts'
 import { iconFor, iconLead, iconPrefix, type IconStyle } from './icons.ts'
 import { indeterminateProgressFrames } from './progress.ts'
@@ -1904,12 +1904,15 @@ function deepFreeze(value: unknown): unknown {
  * one bulk owner: Ctrl+O never touches Thinking. */
 type ExpandHint = 'click' | 'fold' | 'thinking' | undefined
 
-/** One live-only transcript block containing all preparing tool rows. It is
+/** One live-only transcript block containing preparing tool rows. It is
  * kept outside FocusProjectedBlock so no ephemeral row can enter the Focus
- * activity projection or durable transcript model. */
+ * activity projection or durable transcript model. Focus-expanded blocks carry
+ * their owner turn only for visual placement and blank-row hit testing. */
 type TranscriptRenderBlock = FocusProjectedBlock | {
   kind: 'streaming-tool-previews'
   previews: readonly StreamingToolPreview[]
+  turn?: number
+  collapseFocusOwnerOnClick?: number
 }
 
 /** One cached component for a transcript message (stage J render cache). */
@@ -2439,6 +2442,7 @@ export class TuiApp {
     themeRev: number
     iconStyle: IconStyle
     toolDisplay?: string
+    preparingSummary?: string
   }>()
   /** The parent session's expansion set while the subagent viewer covers
    * the surface (turn numbers are per-session — plan §26). */
@@ -5577,16 +5581,89 @@ export class TuiApp {
     return projectFocus(this.messages, this.turnActivities, projectionExpanded, this.focusModeEnabled)
   }
 
-  /** Build the rendered transcript blocks in visual order. Preparing rows are
-   * one live-only block between the durable projection and local cards, so
-   * multiple calls stay contiguous and never enter Focus aggregation. */
+  /** The live Preparing snapshot for one Focus turn, kept in model order. */
+  private streamingToolPreviewsForTurn(turn: number): StreamingToolPreview[] {
+    return this.streamingToolPreviews
+      .filter(preview => preview.turn === turn)
+      .sort((left, right) => left.index - right.index || left.step - right.step || left.callId.localeCompare(right.callId))
+  }
+
+  /** Find the presentation insertion point for one expanded Thought. The
+   * process rows carry the existing owner marker; the final assistant is held
+   * back by projectFocus, so a preview block lands after process content and
+   * before that final answer. A turn without a projected activity is ignored
+   * rather than attaching a preview to an unrelated Thought. */
+  private focusPreparingInsertionIndex(
+    blocks: readonly TranscriptRenderBlock[],
+    turn: number,
+  ): number | undefined {
+    let activityIndex = -1
+    let lastTurnIndex = -1
+    let lastProcessIndex = -1
+    let finalAssistantIndex = -1
+    for (let index = 0; index < blocks.length; index += 1) {
+      const block = blocks[index]!
+      if (block.kind === 'activity') {
+        if (block.activity.turn === turn) {
+          activityIndex = index
+          lastTurnIndex = index
+        }
+        continue
+      }
+      if (block.kind === 'streaming-tool-previews') continue
+      if (!('turn' in block.message) || block.message.turn !== turn) continue
+      lastTurnIndex = index
+      if (block.collapseFocusOwnerOnClick === turn) lastProcessIndex = index
+      if (block.message.kind === 'assistant' && block.collapseFocusOwnerOnClick === undefined) {
+        finalAssistantIndex = index
+      }
+    }
+    if (activityIndex === -1) return undefined
+    if (lastProcessIndex !== -1) return lastProcessIndex + 1
+    if (finalAssistantIndex !== -1) return finalAssistantIndex
+    return lastTurnIndex + 1
+  }
+
+  /** Build the rendered transcript blocks in visual order. Focus keeps the
+   * ephemeral Preparing state outside the durable projection: collapsed rows
+   * are summarized by their Thought header, while expanded rows are inserted
+   * into the owning turn's process tail. Focus OFF retains the original
+   * standalone block between the durable projection and local cards. */
   private transcriptBlocks(projectionExpanded: ReadonlySet<number>): TranscriptRenderBlock[] {
     const blocks: TranscriptRenderBlock[] = [...this.projectedBlocks(projectionExpanded)]
-    if (this.streamingToolPreviews.length > 0) {
-      blocks.push({ kind: 'streaming-tool-previews', previews: this.streamingToolPreviews })
+    if (!this.focusModeEnabled) {
+      if (this.streamingToolPreviews.length > 0) {
+        blocks.push({ kind: 'streaming-tool-previews', previews: this.streamingToolPreviews })
+      }
+    } else if (this.streamingToolPreviews.length > 0) {
+      const previewTurns = new Set(this.streamingToolPreviews.map(preview => preview.turn))
+      for (const turn of previewTurns) {
+        if (!projectionExpanded.has(turn)) continue
+        const previews = this.streamingToolPreviewsForTurn(turn)
+        if (previews.length === 0) continue
+        const insertion = this.focusPreparingInsertionIndex(blocks, turn)
+        if (insertion === undefined) continue
+        blocks.splice(insertion, 0, {
+          kind: 'streaming-tool-previews',
+          turn,
+          previews,
+          // This marker belongs to the preceding spacer's owner only; the
+          // preview block itself has no activity/message and remains inert.
+          collapseFocusOwnerOnClick: turn,
+        })
+      }
     }
     blocks.push(...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock))
     return blocks
+  }
+
+  /** The expanded Focus owner used only for the spacer immediately before a
+   * live Preparing block. The block itself still has no message/activity, so
+   * its content remains inert in the fullscreen hit map. */
+  private focusOwnerForRenderBlock(block: TranscriptRenderBlock): number | undefined {
+    return block.kind === 'message' || block.kind === 'streaming-tool-previews'
+      ? block.collapseFocusOwnerOnClick
+      : undefined
   }
 
   /** Render the live preparing rows with the current semantic tool icon and
@@ -5614,19 +5691,31 @@ export class TuiApp {
    * when the activity OBJECT changed (session/viewer switches mint fresh
    * folder objects, so the same turn number from another session can
    * never reuse this one's component), the activity revision moved, the
-   * disclosure flipped, the theme switched, or the precomputed Tool
-   * display changed (plan §39). render() re-reads Date.now() every frame,
-   * so the running duration is always live. */
-  private focusActivityComponentFor(activity: TurnActivity, expanded: boolean, toolDisplay: string | undefined): FocusActivityComponent {
+   * disclosure flipped, the theme switched, the precomputed Tool display
+   * changed, or the live Preparing summary changed (plan §39). render()
+   * re-reads Date.now() every frame, so the running duration is always live. */
+  private focusActivityComponentFor(
+    activity: TurnActivity,
+    expanded: boolean,
+    toolDisplay: string | undefined,
+    preparingSummary: string | undefined,
+  ): FocusActivityComponent {
     const entry = this.focusActivityComponents.get(activity.turn)
     if (entry !== undefined && entry.activity === activity
       && entry.revision === activity.revision
       && entry.expanded === expanded && entry.themeRev === this.themeRevision
       && entry.iconStyle === this.iconStyle
-      && entry.toolDisplay === toolDisplay) {
+      && entry.toolDisplay === toolDisplay
+      && entry.preparingSummary === preparingSummary) {
       return entry.component
     }
-    const component = new FocusActivityComponent({ activity, expanded, toolDisplay, iconStyle: this.iconStyle })
+    const component = new FocusActivityComponent({
+      activity,
+      expanded,
+      toolDisplay,
+      iconStyle: this.iconStyle,
+      preparingSummary,
+    })
     this.focusActivityComponents.set(activity.turn, {
       activity,
       component,
@@ -5635,6 +5724,7 @@ export class TuiApp {
       themeRev: this.themeRevision,
       iconStyle: this.iconStyle,
       toolDisplay,
+      preparingSummary,
     })
     return component
   }
@@ -5681,6 +5771,7 @@ export class TuiApp {
       let rendered: string[]
       let truncatedMarker = false
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
+      const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
       if (block.kind === 'activity') {
         // The live Thought disclosure; the hidden process rows (if any)
         // render as ordinary message blocks below it (plan §15).
@@ -5688,6 +5779,9 @@ export class TuiApp {
           block.activity,
           projectionExpanded.has(block.activity.turn),
           this.focusToolDisplayFor(block.activity),
+          this.focusModeEnabled && !projectionExpanded.has(block.activity.turn)
+            ? focusPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
+            : undefined,
         )
         rendered = component.render(width)
       } else if (block.kind === 'streaming-tool-previews') {
@@ -5717,8 +5811,8 @@ export class TuiApp {
           ...(block.kind === 'message'
             ? { message: block.message }
             : block.kind === 'activity' ? { activity: block.activity } : {}),
-          ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
-            ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+          ...(collapseFocusOwnerOnClick !== undefined
+            ? { collapseFocusOwnerOnClick }
             : {}),
           height: 0,
           attachments: [],
@@ -5746,8 +5840,8 @@ export class TuiApp {
         ...(block.kind === 'message'
           ? { message: block.message }
           : block.kind === 'activity' ? { activity: block.activity } : {}),
-        ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
-          ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+        ...(collapseFocusOwnerOnClick !== undefined
+          ? { collapseFocusOwnerOnClick }
           : {}),
         height,
         attachments,
@@ -5880,11 +5974,15 @@ export class TuiApp {
       let rendered: string[]
       let truncatedMarker = false
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
+      const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
       if (block.kind === 'activity') {
         component = this.focusActivityComponentFor(
           block.activity,
           projectionExpanded.has(block.activity.turn),
           this.focusToolDisplayFor(block.activity),
+          this.focusModeEnabled && !projectionExpanded.has(block.activity.turn)
+            ? focusPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
+            : undefined,
         )
         rendered = component.render(width)
       } else if (block.kind === 'streaming-tool-previews') {
@@ -5903,8 +6001,8 @@ export class TuiApp {
           ...(block.kind === 'message'
             ? { message: block.message }
             : block.kind === 'activity' ? { activity: block.activity } : {}),
-          ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
-            ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+          ...(collapseFocusOwnerOnClick !== undefined
+            ? { collapseFocusOwnerOnClick }
             : {}),
           height: 0,
           attachments: [],
@@ -5917,8 +6015,8 @@ export class TuiApp {
         ...(block.kind === 'message'
           ? { message: block.message }
           : block.kind === 'activity' ? { activity: block.activity } : {}),
-        ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
-          ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
+        ...(collapseFocusOwnerOnClick !== undefined
+          ? { collapseFocusOwnerOnClick }
           : {}),
         height,
         attachments,

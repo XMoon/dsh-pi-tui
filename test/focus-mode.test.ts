@@ -26,6 +26,7 @@ import {
   focusDisclosureIcon,
   focusDisclosureSemantic,
   focusDurationText,
+  focusPreparingSummary,
   focusStatusLabel,
   focusToolStatParts,
   formatFocusDuration,
@@ -1321,6 +1322,37 @@ test('the header never wraps: every candidate fits its width', () => {
   }
 })
 
+test('Focus collapsed Preparing temporarily overrides the formal Tool slot', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/foo.ts' }) }, 1002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'message' } }, 1003, 3),
+  ])
+  const activity = folder.turnActivity(0)!
+  const formal = focusCollapsedBody(activity, 80, '✓ Read src/foo.ts')
+  const preparing = focusCollapsedBody(activity, 80, '✓ Read src/foo.ts', 'Preparing Edit +1')
+  assert.ok(formal.some(line => line.includes('✓ Read src/foo.ts')), formal.join('\n'))
+  assert.ok(preparing.some(line => line.includes('Tool:    Preparing Edit +1')), preparing.join('\n'))
+  assert.ok(!preparing.some(line => line.includes('Read src/foo.ts')), preparing.join('\n'))
+})
+
+test('focusPreparingSummary is deterministic and keeps unknown names generic', () => {
+  const previews = [
+    { index: 2, name: 'read' },
+    { index: 0, name: 'edit' },
+    { index: 1, name: 'unregistered_tool' },
+  ] as const
+  assert.equal(focusPreparingSummary([]), undefined)
+  assert.equal(focusPreparingSummary([{ index: 0, name: 'edit' }]), 'Preparing Edit…')
+  assert.equal(focusPreparingSummary([{ index: 0 }]), 'Preparing tool…')
+  assert.equal(focusPreparingSummary([{ index: 0 }, { index: 1 }, { index: 2 }]), 'Preparing 3 tools…')
+  assert.equal(focusPreparingSummary(previews), 'Preparing Edit +2')
+  assert.deepEqual(previews.map(preview => preview.index), [2, 0, 1])
+})
+
+// The collapsed body preserves its fixed Think → Tool → Message slot order.
 test('the collapsed body renders the three slots in fixed order — Think, Tool, Message (plan §24/§25/§47)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
