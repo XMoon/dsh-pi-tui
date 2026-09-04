@@ -8,9 +8,9 @@ import { computeStats } from '../src/stats.ts'
 import { hydrateSessionUi } from '../src/session-ui-hydrate.ts'
 import { foldTranscript } from '../src/transcript.ts'
 
-function event<K extends SessionEvent['type']>(
+function event<K extends string>(
   type: K,
-  data: SessionEvent<K>['data'],
+  data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
 ): SessionEvent {
   return { type, seq, time: 1_700_000_000_000 + seq * 1000, data } as SessionEvent
@@ -36,6 +36,7 @@ test('hydrates transcript and stats projections from the same event log', () => 
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 10, outputTokens: 2 },
+      stream: [],
     }, 3),
     event('step/end', { turn: 0, step: 0 }, 4),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),

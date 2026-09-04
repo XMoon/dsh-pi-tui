@@ -23,6 +23,7 @@ import { contextIconSemantic, contextProvenance, contextSummary } from './contex
 import type { IconSemantic } from './icons.ts'
 import { firstLine, latestLine, type JsonValue } from './present.ts'
 import { StepUsageAccumulator, totalTokens, type TokenUsageTotals } from './token-usage.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 // Load the official command event declarations.
 import type {} from '@deepseek-ai/dsh-commands'
 // Load the official subagent event declarations.
@@ -1258,6 +1259,122 @@ export class TranscriptFolder {
   }
 
   /**
+   * Apply one live assistant stream input (Session v2 TRANSIENT plane —
+   * `agent/assistant-stream` mapped through the neutral port). Live model
+   * output NEVER rides the durable log anymore: text/reasoning/usage
+   * deltas accumulate here, and the authoritative settlement arrives
+   * through the durable `assistant/message` / `assistant/attempt` events
+   * on the `session/event` plane. The `end` frame is a notification only:
+   * a committed attempt's durable event already settled the entries, and
+   * an abandoned attempt (no durable settlement) closes the open thinking
+   * entries so no live candidate stays "running" forever.
+   */
+  applyLiveInput(input: AssistantLiveInput): void {
+    switch (input.kind) {
+      case 'start':
+        // The attempt opened: entries are created on their first delta;
+        // the Focus preparing state is runner-owned.
+        break
+      case 'chunk':
+        this.applyAssistantChunk(input.turn, input.step, input.chunk)
+        break
+      case 'end':
+        if (input.status === 'abandoned') {
+          // No durable settlement exists (the append failed upstream):
+          // close the attempt's open thinking entries so the partial
+          // reasoning stops animating — the partial text stays visible.
+          const open = this.openThinkingByTurn.get(input.turn)
+          if (open !== undefined) {
+            for (const entry of open) entry.running = false
+            this.openThinkingByTurn.delete(input.turn)
+          }
+        }
+        break
+    }
+  }
+
+  /** Fold one live assistant chunk (Session v2 transient plane) into the
+   * streaming entries and Focus aggregation. */
+  private applyAssistantChunk(turn: number, step: number, chunk: AssistantLiveChunk): void {
+    // After turn/end a late assistant event is a replay artifact: it
+    // must not mutate the transcript entries — the final-answer
+    // selection reads the exact last assistant (review finding).
+    const activity = this.activityFor(turn)
+    if (activity.completed) return
+    // Streaming text accumulates in place on the entry itself; there is
+    // no separate accumulator map, so a long session's text is stored
+    // once, not twice.
+    if (chunk.type === 'text-delta') {
+      this.assistantEntry(turn, step).text += chunk.text
+      // Search projection: O(1) dirty mark — the entry is re-normalized
+      // as a WHOLE string at the next search (Unicode lowercasing is
+      // not chunk-splittable — Greek sigma — but the live streaming
+      // path must never pay per-chunk lowercase).
+      this.markStreamingEntryDirty(`assistant:${stepKey(turn, step)}`)
+      // Focus aggregation: the streaming assistant text feeds the
+      // Message candidate IMMEDIATELY (no assistant/message wait —
+      // plan §5.2), so the running card previews the intermediate
+      // message in real time.
+      this.foldMessageCandidate(this.activityFor(turn), step, chunk.text)
+    } else if (chunk.type === 'reasoning-delta') {
+      this.thinkingEntry(turn, step).text += chunk.text
+      // Search projection: O(1) dirty mark (see the text-delta path).
+      this.markStreamingEntryDirty(`thinking:${stepKey(turn, step)}`)
+      // Focus aggregation: keep a compact reasoning preview (the
+      // rolling tail — never the full stream, plan §10.6/§42).
+      this.foldThinking(this.activityFor(turn), chunk.text)
+    } else if (chunk.type === 'usage') {
+      // Focus aggregation: per-turn token facts (the shared
+      // accumulator — the footer and Focus can never drift).
+      this.usage.onUsageChunk(turn, step, chunk.usage)
+      this.syncUsage(activity)
+    }
+  }
+
+  /** Restore a SETTLED thinking entry from a durable embedded stream
+   * (Session v2 cold replay — `assistant/message.stream` /
+   * `assistant/attempt.stream`). The live plane never delivered these
+   * reasoning deltas, so the compacted `reasoning-chunks` records (and
+   * raw `chunk` records carrying `reasoning-delta`) rebuild the entry;
+   * it is created closed (running=false) — the attempt already settled. */
+  private restoreThinkingFromStream(turn: number, step: number, stream: readonly unknown[]): void {
+    let text = ''
+    for (const record of stream) {
+      if (typeof record !== 'object' || record === null) continue
+      const value = record as { type?: unknown; texts?: unknown; chunk?: unknown }
+      if (value.type === 'reasoning-chunks' && Array.isArray(value.texts)) {
+        for (const member of value.texts) {
+          if (typeof member === 'string') text += member
+        }
+      } else if (value.type === 'chunk') {
+        const chunk = value.chunk as { type?: unknown; text?: unknown } | undefined
+        if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string') text += chunk.text
+      }
+    }
+    if (text === '') return
+    const entry = this.thinkingEntry(turn, step)
+    entry.text = text
+    this.closeThinking(entry)
+  }
+
+  /** Restore a SETTLED thinking entry from the reasoning blocks of a
+   * durable assistant message (Session v2 cold replay — the assembled
+   * `message.content` carries `reasoning` blocks the live plane streamed
+   * as deltas). No-op when the entry already exists (live path). */
+  private restoreThinkingFromMessage(turn: number, step: number, blocks: readonly ContentBlock[]): void {
+    const key = stepKey(turn, step)
+    if (this.thinkingEntries.has(key)) return
+    let text = ''
+    for (const block of blocks) {
+      if (block.type === 'reasoning') text += block.text
+    }
+    if (text === '') return
+    const entry = this.thinkingEntry(turn, step)
+    entry.text = text
+    this.closeThinking(entry)
+  }
+
+  /**
    * Hydrate a cold session log in one batch. Folding remains event-ordered,
    * but expensive read-run reflow is deferred until every event has settled;
    * live suffixes must continue to use {@link apply} for immediate grouping.
@@ -1703,6 +1820,31 @@ export class TranscriptFolder {
       this.applyCompactionEvent(event as { type: string; data: Record<string, unknown> }, kind)
       return
     }
+    // `assistant/attempt` is a Session v2 durable settlement (master
+    // vocabulary — the installed dsh-session may lag, so it is typed
+    // STRUCTURALLY like the compaction events). One model attempt that
+    // committed NO surface message (failed, retried, cancelled-before-
+    // content, or stream-error settlement). The live reasoning was already
+    // streamed into the thinking entry; the attempt settles it closed (it
+    // never became a message). On a COLD replay the embedded stream
+    // restores the reasoning evidence the live plane never delivered
+    // (plan §A2.1).
+    if (kind === 'assistant/attempt') {
+      const data = event.data as { turn: number; step: number; stream?: readonly unknown[] }
+      const activity = this.activityFor(data.turn)
+      const key = stepKey(data.turn, data.step)
+      const thinking = this.thinkingEntries.get(key)
+      if (thinking !== undefined) {
+        this.closeThinking(thinking)
+      } else {
+        this.restoreThinkingFromStream(data.turn, data.step, data.stream ?? [])
+      }
+      // Focus aggregation: a failed/retried attempt is orchestration —
+      // it never touches the Message slot (the llm/retry event carries
+      // the retry evidence).
+      activity.revision += 1
+      return
+    }
     switch (event.type) {
       case 'step/start': {
         // Focus aggregation: a new step opens usage accounting, and a
@@ -1792,44 +1934,6 @@ export class TranscriptFolder {
         }
         break
       }
-      case 'assistant/chunk': {
-        const { chunk } = event.data
-        const step = event.data.step
-        // After turn/end a late assistant event is a replay artifact: it
-        // must not mutate the transcript entries — the final-answer
-        // selection reads the exact last assistant (review finding).
-        const activity = this.activityFor(event.data.turn)
-        if (activity.completed) break
-        // Streaming text accumulates in place on the entry itself; there is
-        // no separate accumulator map, so a long session's text is stored
-        // once, not twice.
-        if (chunk.type === 'text-delta') {
-          this.assistantEntry(event.data.turn, step).text += chunk.text
-          // Search projection: O(1) dirty mark — the entry is re-normalized
-          // as a WHOLE string at the next search (Unicode lowercasing is
-          // not chunk-splittable — Greek sigma — but the live streaming
-          // path must never pay per-chunk lowercase).
-          this.markStreamingEntryDirty(`assistant:${stepKey(event.data.turn, step)}`)
-          // Focus aggregation: the streaming assistant text feeds the
-          // Message candidate IMMEDIATELY (no assistant/message wait —
-          // plan §5.2), so the running card previews the intermediate
-          // message in real time.
-          this.foldMessageCandidate(this.activityFor(event.data.turn), step, chunk.text)
-        } else if (chunk.type === 'reasoning-delta') {
-          this.thinkingEntry(event.data.turn, step).text += chunk.text
-          // Search projection: O(1) dirty mark (see the text-delta path).
-          this.markStreamingEntryDirty(`thinking:${stepKey(event.data.turn, step)}`)
-          // Focus aggregation: keep a compact reasoning preview (the
-          // rolling tail — never the full stream, plan §10.6/§42).
-          this.foldThinking(this.activityFor(event.data.turn), chunk.text)
-        } else if (chunk.type === 'usage') {
-          // Focus aggregation: per-turn token facts (the shared
-          // accumulator — the footer and Focus can never drift).
-          this.usage.onUsageChunk(event.data.turn, step, chunk.usage)
-          this.syncUsage(activity)
-        }
-        break
-      }
       case 'assistant/message': {
         // After turn/end a late message is a replay artifact: reject it
         // BEFORE mutating the transcript entries — the final-answer
@@ -1866,8 +1970,15 @@ export class TranscriptFolder {
         }
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.
+        // On a COLD replay no live reasoning deltas ever arrived — the
+        // assembled `reasoning` blocks in the durable message restore the
+        // settled thinking entry (Session v2 embedded-stream parity).
         const thinking = this.thinkingEntries.get(key)
-        if (thinking !== undefined) this.closeThinking(thinking)
+        if (thinking !== undefined) {
+          this.closeThinking(thinking)
+        } else {
+          this.restoreThinkingFromMessage(event.data.turn, event.data.step, messageBlocks)
+        }
         // Focus aggregation: the settled assistant text OVERWRITES the
         // candidate's text (authoritative — plan §5.4) but does NOT decide
         // whether it is the final answer; the candidate keeps its step
@@ -2228,10 +2339,10 @@ export class TranscriptFolder {
 
 /**
  * Fold a session event log into the transcript messages, in log order.
- * `assistant/chunk` text deltas accumulate into the assistant message of
- * their own (turn, step); `reasoning-delta` chunks accumulate into a
- * thinking entry. A tool call and its result merge into one card; an
- * unanswered call stays `running`.
+ * Live text deltas accumulate into the assistant message of their own
+ * (turn, step); `reasoning-delta` chunks accumulate into a thinking entry.
+ * A tool call and its result merge into one card; an unanswered call stays
+ * `running`.
  * @param events - the session log.
  * @param options - optional display window (older turns collapse).
  * @returns ordered renderable messages.

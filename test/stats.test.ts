@@ -8,27 +8,79 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { computeStats, formatStats, StatsFolder } from '../src/stats.ts'
+import { computeStats, formatStats, StatsFolder, type SessionStats } from '../src/stats.ts'
 import { StepUsageAccumulator } from '../src/token-usage.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 
-/** Build a minimal event envelope for tests. */
-function event<K extends SessionEvent['type']>(
+/** Build a minimal event envelope for tests. The type parameter is widened
+ * to any string so legacy v1 `assistant/chunk` events (absent from master's
+ * SessionEventMap) can be constructed and fed through the live-seam bridge;
+ * known types keep their typed data surface, widened with
+ * `Record<string, unknown>` so Session v2 fields the installed dsh-session
+ * may lag (e.g. `assistant/message.stream`) can be supplied. */
+function event<K extends string>(
   type: K,
-  data: SessionEvent<K>['data'],
+  data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
   time = 1_700_000_000_000 + seq * 1000,
 ): SessionEvent {
   return { type, seq, time, data } as SessionEvent
 }
 
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(
+  turn: number,
+  step: number,
+  chunk: AssistantLiveChunk,
+  time: number,
+): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+/** A folder that can fold both the durable event plane and the Session v2
+ * live input seam (StatsFolder and TranscriptFolder share this surface). */
+interface LiveFoldable {
+  apply(events: readonly SessionEvent[]): void
+  applyLiveInput(input: AssistantLiveInput): void
+}
+
+/** Apply a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function applyMixed(folder: LiveFoldable, events: readonly SessionEvent[]): void {
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
+}
+
+/** One-shot fold of a mixed event list through the live input seam (the
+ * `computeStats` equivalent for logs that still carry legacy
+ * `assistant/chunk` events). */
+function foldStats(events: readonly SessionEvent[]): SessionStats {
+  const folder = new StatsFolder()
+  applyMixed(folder, events)
+  return folder.snapshot()
+}
+
 test('computes turns, steps, LLM time, and first-token latency', () => {
   const t = 1_700_000_000_000
-  const stats = computeStats([
+  const folder = new StatsFolder()
+  folder.apply([
     event('turn/start', { turn: 0 }, 0, t),
     event('step/start', { turn: 0, step: 0 }, 1, t),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'hi' } }, 2, t + 1_100),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: ' there' } }, 3, t + 2_000),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hi' }, t + 1_100))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: ' there' }, t + 2_000))
+  folder.apply([
     event('assistant/message', {
       turn: 0, step: 0,
       message: {
@@ -37,10 +89,12 @@ test('computes turns, steps, LLM time, and first-token latency', () => {
         content: [{ type: 'text', text: 'hi there' }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
+      stream: [],
     }, 4, t + 8_000),
     event('step/end', { turn: 0, step: 0 }, 5, t + 8_100),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6, t + 8_200),
   ])
+  const stats = folder.snapshot()
   assert.equal(stats.turns, 1)
   assert.equal(stats.steps, 1)
   // LLM wall time ends at assistant/message, never at step/end (Web parity).
@@ -61,6 +115,7 @@ test('replacement surface messages do not mutate either stats fold', () => {
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 25 },
+      stream: [],
     }, 1, t + 100),
     surfaceOp: { op: 'replace', start: 0, end: 0 },
   } as SessionEvent
@@ -82,12 +137,16 @@ test('replacement surface messages do not mutate either stats fold', () => {
 
 test('a step without an assistant message contributes no timing (Web parity)', () => {
   const t = 1_700_000_000_000
-  const stats = computeStats([
+  const folder = new StatsFolder()
+  folder.apply([
     event('step/start', { turn: 0, step: 0 }, 0, t),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'hi' } }, 1, t + 1_000),
-    // Cancelled/failed: step/end arrives, the message never does.
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hi' }, t + 1_000))
+  // Cancelled/failed: step/end arrives, the message never does.
+  folder.apply([
     event('step/end', { turn: 0, step: 0 }, 2, t + 5_000),
   ])
+  const stats = folder.snapshot()
   assert.equal(stats.steps, 1, 'steps count at step/end')
   assert.equal(stats.turns, 1, 'turns count at step/end (unique)')
   assert.equal(stats.llmMs, 0, 'no message means no wall time')
@@ -114,6 +173,7 @@ test('first-token semantics match the Web isTokenDelta: reasoning deltas start t
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 10, outputTokens: 450, cacheReadTokens: 0 },
+      stream: [],
     }, 3, t + 5_000),
     event('step/end', { turn: 0, step: 0 }, 4, t + 6_000),
     // Step 1: tool-call delta only, then usage — also a token delta start.
@@ -128,10 +188,11 @@ test('first-token semantics match the Web isTokenDelta: reasoning deltas start t
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 10, outputTokens: 50, cacheReadTokens: 0 },
+      stream: [],
     }, 7, t + 7_600),
     event('step/end', { turn: 1, step: 0 }, 8, t + 8_000),
   ]
-  const stats = computeStats(log)
+  const stats = foldStats(log)
   // Step 0: 450 tokens / 5000 ms full wall = 90 tok/s. Step 1: 50 / 600 ms.
   // The effective throughput pools BOTH steps: 500 tokens / 5600 ms.
   assert.equal(stats.tokensPerSec, Math.round((500 * 1000) / 5_600), `effective throughput uses the full LLM wall:\n${JSON.stringify(stats)}`)
@@ -153,6 +214,7 @@ test('accumulates usage and computes cache hit rate', () => {
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 9_000, outputTokens: 832, cacheReadTokens: 1_000 },
+      stream: [],
     }, 0),
   ])
   assert.equal(stats.inputTokens, 9_000)
@@ -179,13 +241,13 @@ test('StatsFolder matches computeStats and folds incrementally', () => {
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6, t + 8_200),
   ]
   // One-shot fold: the reference result.
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   // Incremental fold: every suffix boundary must agree with the one-shot
   // result for the events applied so far.
   const folder = new StatsFolder()
   for (let index = 0; index < log.length; index += 1) {
-    folder.apply([log[index]!])
-    const partial = computeStats(log.slice(0, index + 1))
+    applyMixed(folder, [log[index]!])
+    const partial = foldStats(log.slice(0, index + 1))
     const snapshot = folder.snapshot()
     assert.deepEqual(
       { ...snapshot, firstTokenMsAvg: Math.round(snapshot.firstTokenMsAvg * 1000) / 1000 },
@@ -224,6 +286,7 @@ test('StatsFolder bounds completed-turn lifecycle state with a monotonic fence',
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     usage: { inputTokens: 10, outputTokens: 5 },
+    stream: [],
   }, 2_000)])
   assert.equal(folder.snapshot().outputTokens, 0)
 })
@@ -240,11 +303,11 @@ test('higher turn/end advances the shared usage fence before older turn/end', ()
     event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 2, t + 200),
   ]
   const folder = new StatsFolder()
-  folder.apply(prefix)
+  applyMixed(folder, prefix)
   assert.equal(folder.snapshot().outputTokens, 20, 'higher turn/end must finalize the older open usage')
   folder.apply([event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3, t + 300)])
   assert.equal(folder.snapshot().outputTokens, 20, 'the late older boundary must not commit it twice')
-  assert.equal(computeStats(prefix).outputTokens, 20)
+  assert.equal(foldStats(prefix).outputTokens, 20)
 })
 
 test('StatsFolder keeps the recent throughput window bounded', () => {
@@ -254,11 +317,9 @@ test('StatsFolder keeps the recent throughput window bounded', () => {
   for (let step = 0; step < 12; step += 1) {
     folder.apply([
       event('step/start', { turn: 0, step }, step * 10, t + step * 1_000),
-      event('assistant/chunk', {
-        turn: 0,
-        step,
-        chunk: { type: 'text-delta', index: 0, text: 'answer' },
-      }, step * 10 + 1, t + step * 1_000 + 100),
+    ])
+    folder.applyLiveInput(liveChunk(0, step, { type: 'text-delta', index: 0, text: 'answer' }, t + step * 1_000 + 100))
+    folder.apply([
       event('assistant/message', {
         turn: 0,
         step,
@@ -269,6 +330,7 @@ test('StatsFolder keeps the recent throughput window bounded', () => {
           source: { kind: 'model', provider: 'p', model: 'm' },
         },
         usage: { inputTokens: 10, outputTokens: 100 },
+        stream: [],
       }, step * 10 + 2, t + step * 1_000 + 500),
       event('step/end', { turn: 0, step }, step * 10 + 3, t + step * 1_000 + 600),
     ])
@@ -292,6 +354,7 @@ test('duplicate assistant messages settle timing only once', () => {
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     usage: { inputTokens: 10, outputTokens },
+    stream: [],
   }, seq, time)
   const log = [
     event('step/start', { turn: 0, step: 0 }, 0, t),
@@ -306,9 +369,9 @@ test('duplicate assistant messages settle timing only once', () => {
     message(3, t + 2_000, 200),
     event('step/end', { turn: 0, step: 0 }, 4, t + 2_100),
   ]
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   assert.equal(oneShot.llmMs, 1_000)
   assert.equal(oneShot.firstTokenMsAvg, 100)
   // The duplicate replaced the sample in place: 200 tokens over the SAME
@@ -339,14 +402,15 @@ test('one turn with many steps keeps late-message retention on a cheap turn fenc
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 1, outputTokens: 1 },
+      stream: [],
     }, seq++, t + seq))
     events.push(event('step/end', { turn: 0, step }, seq++, t + seq))
   }
   events.push(event('turn/end', { turn: 0, reason: { kind: 'completed' } }, seq, t + seq))
 
-  const oneShot = computeStats(events)
+  const oneShot = foldStats(events)
   const folder = new StatsFolder()
-  folder.apply(events)
+  applyMixed(folder, events)
   assert.deepEqual(folder.snapshot(), oneShot)
   assert.equal(oneShot.steps, 1_000)
   assert.equal(oneShot.outputTokens, 1_000)
@@ -366,6 +430,7 @@ test('settled timing ignores a late token delta before a duplicate message', () 
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     usage: { inputTokens: 10, outputTokens },
+    stream: [],
   }, seq, time)
   const log = [
     event('step/start', { turn: 0, step: 0 }, 0, t),
@@ -380,9 +445,9 @@ test('settled timing ignores a late token delta before a duplicate message', () 
     message(3, t + 300, 200),
     event('step/end', { turn: 0, step: 0 }, 4, t + 400),
   ]
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   assert.equal(oneShot.llmMs, 100)
   assert.equal(oneShot.firstTokenMsAvg, 0)
   // The burst-delivered step (no token delta before settle) samples on its
@@ -405,6 +470,7 @@ test('older duplicate messages cannot mutate timing after a higher turn starts',
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     usage: { inputTokens: 10, outputTokens },
+    stream: [],
   }, seq, time)
   const log = [
     event('turn/start', { turn: 0 }, 0, t),
@@ -420,9 +486,9 @@ test('older duplicate messages cannot mutate timing after a higher turn starts',
     event('turn/start', { turn: 1 }, 4, t + 300),
     message(5, t + 400, 200),
   ]
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   // The late duplicate is stale for both folds: the original sample and
   // output-token total remain authoritative.
   assert.equal(oneShot.llmMs, 200)
@@ -454,11 +520,12 @@ test('older token deltas cannot reopen timing after a higher turn starts', () =>
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 10, outputTokens: 100 },
+      stream: [],
     }, 4, t + 300),
   ]
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   assert.equal(oneShot.llmMs, 0)
   assert.equal(oneShot.firstTokenMsAvg, 0)
   assert.equal(oneShot.tokensPerSec, 0)
@@ -478,6 +545,7 @@ test('duplicate step/start preserves settled timing and a duplicate end is idemp
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     usage: { inputTokens: 10, outputTokens },
+    stream: [],
   }, seq, time)
   const log = [
     event('turn/start', { turn: 0 }, 0, t),
@@ -499,9 +567,9 @@ test('duplicate step/start preserves settled timing and a duplicate end is idemp
     event('step/end', { turn: 0, step: 0 }, 9, t + 310),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 10, t + 320),
   ]
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   assert.equal(oneShot.turns, 1)
   assert.equal(oneShot.steps, 1)
   assert.equal(oneShot.llmMs, 100)
@@ -544,6 +612,7 @@ test('late assistant usage after step/end replaces the sampled throughput token 
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     usage: { inputTokens: 10, outputTokens },
+    stream: [],
   }, seq, time)
   const prefix = [
     event('step/start', { turn: 0, step: 0 }, 0, t),
@@ -557,9 +626,9 @@ test('late assistant usage after step/end replaces the sampled throughput token 
   ]
   const late = assistantMessage(4, t + 2_000, 200)
   const suffix = [late, event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5, t + 2_100)]
-  const oneShot = computeStats([...prefix, ...suffix])
+  const oneShot = foldStats([...prefix, ...suffix])
   const folder = new StatsFolder()
-  folder.apply(prefix)
+  applyMixed(folder, prefix)
   assert.equal(folder.snapshot().tokensPerSec, 100)
   assert.equal((folder as unknown as { perStep: Map<unknown, unknown> }).perStep.size, 0)
   folder.apply(suffix)
@@ -607,9 +676,12 @@ test('formats the lifetime LLM wall as a readable duration at scale', () => {
 
 test('usage is counted once per step despite chunk and message both carrying it', () => {
   const t = 1_700_000_000_000
-  const stats = computeStats([
+  const folder = new StatsFolder()
+  folder.apply([
     event('step/start', { turn: 0, step: 0 }, 0, t),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 9_000, outputTokens: 832, cacheReadTokens: 1_000 } } }, 1, t + 1_000),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'usage', usage: { inputTokens: 9_000, outputTokens: 832, cacheReadTokens: 1_000 } }, t + 1_000))
+  folder.apply([
     event('assistant/message', {
       turn: 0,
       step: 0,
@@ -620,9 +692,11 @@ test('usage is counted once per step despite chunk and message both carrying it'
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 9_000, outputTokens: 832, cacheReadTokens: 1_000 },
+      stream: [],
     }, 2, t + 2_000),
     event('step/end', { turn: 0, step: 0 }, 3, t + 3_000),
   ])
+  const stats = folder.snapshot()
   // The same assembler usage rides both events; adding both would double it.
   assert.equal(stats.inputTokens, 9_000)
   assert.equal(stats.outputTokens, 832)
@@ -650,6 +724,7 @@ test('tok/s samples every completed step with valid usage on its FULL LLM wall',
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 10, outputTokens: 400, cacheReadTokens: 0 },
+      stream: [],
     }, 3, t + 10_001),
     event('step/end', { turn: 0, step: 0 }, 4, t + 11_000),
     event('step/start', { turn: 0, step: 1 }, 5, t + 12_000),
@@ -664,13 +739,14 @@ test('tok/s samples every completed step with valid usage on its FULL LLM wall',
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 10, outputTokens: 500, cacheReadTokens: 0 },
+      stream: [],
     }, 8, t + 13_000),
     event('step/end', { turn: 0, step: 1 }, 9, t + 14_000),
     event('step/start', { turn: 0, step: 2 }, 10, t + 15_000),
     event('assistant/chunk', { turn: 0, step: 2, chunk: { type: 'text-delta', index: 0, text: 'x' } }, 11, t + 15_100),
     event('step/end', { turn: 0, step: 2 }, 12, t + 16_000),
   ]
-  const stats = computeStats(log)
+  const stats = foldStats(log)
   // Pooled recent window: (400 + 500) tokens / (10.001 s + 1 s) full wall
   // — the burst step contributes ~40 tok/s, not 400 000.
   assert.equal(stats.tokensPerSec, Math.round((900 * 1000) / 11_001))
@@ -689,9 +765,9 @@ test('turn/start advances the accumulator: a delayed prior-turn usage fact is st
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 200, outputTokens: 0 } } }, 4, t + 4),
     event('step/end', { turn: 0, step: 0 }, 5, t + 5),
   ]
-  const stats = computeStats(events)
+  const stats = foldStats(events)
   const folder = new TranscriptFolder()
-  folder.apply(events)
+  applyMixed(folder, events)
   assert.equal(stats.inputTokens, 100, 'the delayed prior-turn fact must be stale')
   assert.equal(folder.turnActivity(0)!.totalTokens, 100, 'the Focus per-turn total must agree with the footer')
 })
@@ -701,8 +777,10 @@ test('turn/end drops the open timing entries of the ended turn', () => {
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
     event('step/start', { turn: 0, step: 0 }, 1),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'hi' } }, 2),
-    // turn/end arrives while the step is still open (interrupted).
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hi' }, 1_700_000_000_002))
+  // turn/end arrives while the step is still open (interrupted).
+  folder.apply([
     event('turn/end', { turn: 0, reason: { kind: 'interrupted' } }, 3),
   ])
   const perStep = (folder as unknown as { perStep: Map<string, unknown> }).perStep
@@ -720,9 +798,9 @@ test('turn/end with an open step finalizes its usage in BOTH folds', () => {
     // A late step/end (replay artifact) must not change anything.
     event('step/end', { turn: 0, step: 0 }, 4, t + 4),
   ]
-  const stats = computeStats(events)
+  const stats = foldStats(events)
   const folder = new TranscriptFolder()
-  folder.apply(events)
+  applyMixed(folder, events)
   assert.equal(stats.inputTokens, 100, 'the footer must finalize the open step at turn/end')
   assert.equal(folder.turnActivity(0)!.totalTokens, 100, 'the Focus per-turn total must agree with the footer')
 })
@@ -735,13 +813,17 @@ test('late usage after turn/end is ignored by BOTH the stats fold and the Focus 
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 2, t + 2),
     event('step/end', { turn: 0, step: 0 }, 3, t + 3),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4, t + 4),
-    // A late usage chunk (replay artifact): both folds must ignore it.
+    // A late usage fact (replay artifact): both folds must ignore it. The
+    // Session v2 transient expression of a late usage fact is a live chunk
+    // (routed through the live seam by applyMixed); both folds reject it
+    // via their completed-turn gates (StatsFolder: completedTurnFence,
+    // TranscriptFolder: activity.completed).
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 200, outputTokens: 0 } } }, 5, t + 5),
   ]
-  const stats = computeStats(events)
+  const stats = foldStats(events)
   const folder = new TranscriptFolder()
-  folder.apply(events)
-  assert.equal(stats.inputTokens, 100, 'the footer must ignore the late usage chunk')
+  applyMixed(folder, events)
+  assert.equal(stats.inputTokens, 100, 'the footer must ignore the late usage fact')
   assert.equal(folder.turnActivity(0)!.totalTokens, 100, 'the Focus per-turn total must agree with the footer')
 })
 
@@ -799,7 +881,9 @@ test('StatsFolder drops the step timing entry at step/end (no unbounded growth)'
   const folder = new StatsFolder()
   folder.apply([
     event('step/start', { turn: 0, step: 0 }, 0),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'hi' } }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hi' }, 1_700_000_000_001))
+  folder.apply([
     event('assistant/message', {
       turn: 0, step: 0,
       message: {
@@ -808,6 +892,7 @@ test('StatsFolder drops the step timing entry at step/end (no unbounded growth)'
         content: [{ type: 'text', text: 'hi' }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
+      stream: [],
     }, 2),
     event('step/end', { turn: 0, step: 0 }, 3),
   ])
@@ -829,6 +914,7 @@ test('llmMs spans step/start to assistant/message, not to step/end', () => {
         content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
+      stream: [],
     }, 1, t + 2_000),
     // A long tool run after the message must not extend the LLM wall time.
     event('step/end', { turn: 0, step: 0 }, 2, t + 9_000),
@@ -877,6 +963,7 @@ function completedStep(
       source: { kind: 'model', provider: options.provider ?? 'p', model: options.model ?? 'm' },
     },
     usage: { inputTokens: 10, outputTokens: options.outputTokens ?? 100 },
+    stream: [],
   }, seq, startTime + wallMs))
   seq += 1
   events.push(event('step/end', { turn, step }, seq, startTime + wallMs + 100))
@@ -894,17 +981,17 @@ test('recent-5 throughput pools the latest five steps and evicts the first (Σou
     log.push(...events)
     seq += events.length
   }
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   // Five steps × 1000 tokens over five 1s walls = 1000 tok/s.
   assert.equal(oneShot.tokensPerSec, 1_000)
   assert.deepEqual(folder.snapshot(), oneShot)
   // Hard gate: cold and incremental folds agree at EVERY suffix boundary.
   const probe = new StatsFolder()
   for (let index = 0; index < log.length; index += 1) {
-    probe.apply([log[index]!])
-    assert.deepEqual(probe.snapshot(), computeStats(log.slice(0, index + 1)), `parity after event ${index}`)
+    applyMixed(probe, [log[index]!])
+    assert.deepEqual(probe.snapshot(), foldStats(log.slice(0, index + 1)), `parity after event ${index}`)
   }
 })
 
@@ -933,15 +1020,16 @@ test('an early burst never ratchets the session TPS (recent window, not lifetime
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 10, outputTokens: 400 },
+      stream: [],
     }, seq++, startTime + 2_000),
     event('step/end', { turn: 0, step }, seq++, startTime + 2_100),
   ]
   for (let step = 0; step < 20; step += 1) log.push(...burst(step, t + step * 5_000))
-  const afterBurst = computeStats(log)
+  const afterBurst = foldStats(log)
   assert.equal(afterBurst.tokensPerSec, 200, 'burst steps sample on their full request wall (400/2s)')
   const longStep = completedStep(0, 20, seq, t + 100_000, { outputTokens: 500, wallMs: 25_000, firstDeltaMs: 1_000 })
   log.push(...longStep)
-  const afterLong = computeStats(log)
+  const afterLong = foldStats(log)
   // The long step is 1 of 5 window samples: 4×400 tokens/2s + 500/25s →
   // pooled (2100 tokens / 33 s) — no lifetime ratchet, no crash back.
   assert.equal(afterLong.tokensPerSec, Math.round((2_100 * 1000) / 33_000))
@@ -960,9 +1048,9 @@ test('recent TTFB averages the latest five first-token steps', () => {
     log.push(...events)
     seq += events.length
   }
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   // Latest five first-token deltas: 200..600 ms → mean 400 ms.
   assert.equal(oneShot.firstTokenMsAvg, 400)
   assert.deepEqual(folder.snapshot(), oneShot)
@@ -983,12 +1071,12 @@ test('a model/provider route change resets the recent performance window', () =>
     provider: 'b', model: 'fast', outputTokens: 100, wallMs: 1_000, firstDeltaMs: 100,
   })
   log.push(...switchEvents)
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log.slice(0, log.length - switchEvents.length))
+  applyMixed(folder, log.slice(0, log.length - switchEvents.length))
   assert.equal(folder.snapshot().tokensPerSec, 200, 'before the switch the window is route A')
   assert.equal(folder.snapshot().firstTokenMsAvg, 4_000)
-  folder.apply(switchEvents)
+  applyMixed(folder, switchEvents)
   // After B's first completed response the window holds ONLY B's sample.
   assert.deepEqual(folder.snapshot(), oneShot)
   assert.equal(folder.snapshot().tokensPerSec, 100)
@@ -1007,9 +1095,9 @@ test('route keys are delimiter-safe (provider/model containing "/" never collide
   const stepA = completedStep(0, 0, 0, t, { provider: 'a/b', model: 'c', outputTokens: 1_000, wallMs: 5_000, firstDeltaMs: 4_000 })
   const stepB = completedStep(0, 1, stepA.length, t + 10_000, { provider: 'a', model: 'b/c', outputTokens: 100, wallMs: 1_000, firstDeltaMs: 100 })
   const log = [...stepA, ...stepB]
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   assert.equal(folder.snapshot().tokensPerSec, 100, 'the delimiter-ambiguous switch must still reset the window')
   assert.equal(folder.snapshot().firstTokenMsAvg, 100)
   assert.deepEqual(folder.snapshot(), oneShot)
@@ -1037,11 +1125,12 @@ test('a late usage replacement cannot resurrect a sample after a route reset', (
       source: { kind: 'model', provider: 'a', model: 'm' },
     },
     usage: { inputTokens: 10, outputTokens: 9_999 },
+    stream: [],
   }, seq++, t + 20_000)
   log.push(late)
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   assert.equal(oneShot.tokensPerSec, 100, 'only route B\'s sample remains')
   assert.equal(oneShot.outputTokens, 10_099, 'the token ACCOUNTING still applies the authoritative replacement')
   assert.deepEqual(folder.snapshot(), oneShot)
@@ -1064,6 +1153,7 @@ test('a usage-less step that becomes valid via a late authoritative message join
           content: [{ type: 'text', text: 'answer' }],
           source: { kind: 'model', provider: 'p', model: 'm' },
         },
+        stream: [],
       }, seq++, t + step * 10_000 + 1_000),
       event('step/end', { turn: 0, step }, seq++, t + step * 10_000 + 1_100),
     ]
@@ -1085,11 +1175,12 @@ test('a usage-less step that becomes valid via a late authoritative message join
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     usage: { inputTokens: 10, outputTokens: 900 },
+    stream: [],
   }, seq++, t + 30_000)
   log.push(late)
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log.slice(0, -1))
+  applyMixed(folder, log.slice(0, -1))
   // Before the late message: one sample (step 2: 300 tokens / 1 s).
   assert.equal(folder.snapshot().tokensPerSec, 300)
   folder.apply([late])
@@ -1108,9 +1199,9 @@ test('a burst route keeps token totals identical to the pre-recent accounting', 
     log.push(...events)
     seq += events.length
   }
-  const stats = computeStats(log)
+  const stats = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   // Effective throughput may exceed 1 tok/ms on burst routes — that is the
   // honest full-wall rate; nothing clamps it (plan §2.2: no TPS clamps).
   assert.equal(stats.tokensPerSec, 4_000)
@@ -1140,9 +1231,9 @@ test('cancelled and failed steps contribute no recent performance samples', () =
     event('step/end', { turn: 0, step: 3 }, seq++, t + 35_000),
   ]
   const log = [...prefix, ...cancelled]
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   assert.equal(oneShot.tokensPerSec, 100)
   assert.equal(oneShot.firstTokenMsAvg, 0)
   assert.deepEqual(folder.snapshot(), oneShot)
@@ -1160,6 +1251,7 @@ test('an authoritative duplicate that invalidates the sample REMOVES it (no stal
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     ...(outputTokens === undefined ? {} : { usage: { inputTokens: 10, outputTokens } }),
+    stream: [],
   }, seq, time)
   const prefix = [
     event('step/start', { turn: 0, step: 0 }, 0, t),
@@ -1175,9 +1267,9 @@ test('an authoritative duplicate that invalidates the sample REMOVES it (no stal
   // sample is no longer valid and must not keep feeding the recent rate.
   const invalidating = message(4, t + 2_000, 0)
   const log = [...prefix, invalidating]
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(prefix)
+  applyMixed(folder, prefix)
   assert.equal(folder.snapshot().tokensPerSec, 100, 'the valid sample rides the window first')
   folder.apply([invalidating])
   assert.deepEqual(folder.snapshot(), oneShot)
@@ -1195,10 +1287,10 @@ test('an authoritative duplicate that invalidates the sample REMOVES it (no stal
   // 2 s = 200) both miss; the correct removal yields 300 tok/s.
   const stepB = completedStep(0, 1, 5, t + 10_000, { outputTokens: 300, wallMs: 1_000 })
   const withB = [...prefix, invalidating, ...stepB]
-  const oneShotWithB = computeStats(withB)
+  const oneShotWithB = foldStats(withB)
   const folderB = new StatsFolder()
-  folderB.apply(prefix)
-  folderB.apply([invalidating, ...stepB])
+  applyMixed(folderB, prefix)
+  applyMixed(folderB, [invalidating, ...stepB])
   assert.equal(folderB.snapshot().tokensPerSec, 300, `the invalidated wall must not ride the window:\n${JSON.stringify(folderB.snapshot())}`)
   assert.deepEqual(folderB.snapshot(), oneShotWithB)
 
@@ -1206,7 +1298,7 @@ test('an authoritative duplicate that invalidates the sample REMOVES it (no stal
   // at the ORIGINAL completion ordinal (0 → 500: pooled with B = 400).
   const revalid = message(9, t + 20_000, 500)
   folderB.apply([revalid])
-  assert.deepEqual(folderB.snapshot(), computeStats([...withB, revalid]))
+  assert.deepEqual(folderB.snapshot(), foldStats([...withB, revalid]))
   assert.equal(folderB.snapshot().tokensPerSec, 400, 'the re-validated step rejoins the pooled window')
 })
 
@@ -1237,11 +1329,12 @@ test('a route STRING match is not enough: A → B → A cannot resurrect the fir
       source: { kind: 'model', provider: 'p', model: 'a' },
     },
     usage: { inputTokens: 10, outputTokens: 9_999 },
+    stream: [],
   }, seq, t + 30_000)
   log.push(late)
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   // Only the SECOND A lifecycle's sample rides the window: 200 tok/s.
   assert.equal(oneShot.tokensPerSec, 200, `the epoch gate must hold:\n${JSON.stringify(oneShot)}`)
   assert.deepEqual(folder.snapshot(), oneShot)
@@ -1263,7 +1356,7 @@ test('invalidating one of the latest five BACKFILLS the next-older candidate', (
     push(completedStep(0, step, seq, t + step * 10_000, { outputTokens: 100, wallMs: 1_000 }))
   }
   const folder = new StatsFolder()
-  folder.apply(log)
+  applyMixed(folder, log)
   assert.equal(folder.snapshot().tokensPerSec, 100, 'the sixth completion evicts sample 0 from the derived window')
   // An authoritative duplicate invalidates the NEWEST sample (ordinal 5):
   // the window's contract is "latest 5 VALID samples", so ordinal 0 —
@@ -1278,9 +1371,10 @@ test('invalidating one of the latest five BACKFILLS the next-older candidate', (
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     usage: { inputTokens: 10, outputTokens: 0 },
+    stream: [],
   }, seq++, t + 100_000)
   log.push(invalidating)
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   folder.apply([invalidating])
   assert.equal(folder.snapshot().tokensPerSec, 280, `the evicted candidate must backfill:\n${JSON.stringify(folder.snapshot())}`)
   assert.deepEqual(folder.snapshot(), oneShot)

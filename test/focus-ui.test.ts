@@ -17,6 +17,7 @@ import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TranscriptFolder, windowMessages } from '../src/transcript.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth, type StreamingToolPreview } from '../src/tui-app.ts'
 import type { ToolPresenter } from '../src/present.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -50,6 +51,35 @@ const T0 = Date.now() - 60_000
 /** Build an event with a controlled time. */
 function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
   return { type, seq, time, data } as SessionEvent
+}
+
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(turn: number, step: number, chunk: AssistantLiveChunk, time: number): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+/** A folder that can fold both the durable event plane and the Session v2
+ * live input seam (TranscriptFolder shares this surface with StatsFolder). */
+interface LiveFoldable {
+  apply(events: readonly SessionEvent[]): void
+  applyLiveInput(input: AssistantLiveInput): void
+}
+
+/** Apply a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function applyMixed(folder: LiveFoldable, events: readonly SessionEvent[]): void {
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
 }
 
 /** A running turn with user + thinking + a running tool. */
@@ -120,7 +150,7 @@ function show(app: TuiApp, folder: TranscriptFolder, previews?: readonly Streami
 test('Focus ON running: the Thought card is collapsed with previews, the process is hidden, the WorkingIndicator stays', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   app.setWorking(true)
   show(app, folder)
@@ -144,7 +174,7 @@ test('Focus ON running: the Thought card is collapsed with previews, the process
 test('Focus collapsed Preparing uses the Tool slot and temporarily overrides the formal tool', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder, [
     { callId: 'p-edit', turn: 1, step: 0, index: 0, name: 'edit' },
@@ -177,7 +207,7 @@ test('Focus collapsed Preparing uses the Tool slot and temporarily overrides the
 test('Focus expanded places Preparing rows after the process tail and before the final assistant', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply([...runningTurn(0), ...settleEvents(0)])
+  applyMixed(folder, [...runningTurn(0), ...settleEvents(0)])
   app.setFocusMode(true)
   show(app, folder, [
     { callId: 'p-bash', turn: 1, step: 0, index: 1, name: 'bash' },
@@ -207,7 +237,7 @@ test('Focus expanded places Preparing rows after the process tail and before the
 test('clicking the Thought header expands a RUNNING turn: process visible, Thinking compact by default', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   app.setWorking(true)
   show(app, folder)
@@ -236,7 +266,7 @@ test('clicking the Thought header expands a RUNNING turn: process visible, Think
 test('new events stream into the RUNNING expansion', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -253,7 +283,7 @@ test('new events stream into the RUNNING expansion', async () => {
   click(vt, 10, ty + 1)
   await vt.waitForRender()
   // The turn keeps running: a second tool call + reasoning land live.
-  folder.apply([
+  applyMixed(folder, [
     eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'checking turn boundaries…' } }, T0 + 4000, 10),
     eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 4100, 11),
   ])
@@ -269,7 +299,7 @@ test('new events stream into the RUNNING expansion', async () => {
 test('turn/end preserves a running expansion (▾) and settles the final below it', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -282,7 +312,7 @@ test('turn/end preserves a running expansion (▾) and settles the final below i
   // turn/end: the expansion choice SURVIVES (plan §16.2); the symbol flips
   // ◐→▾ (already expanded) and the final assistant appears after the
   // process — exactly once.
-  folder.apply(settleEvents(0))
+  applyMixed(folder, settleEvents(0))
   show(app, folder)
   await vt.waitForRender()
   const joined = vt.getViewport().join('\n')
@@ -297,13 +327,13 @@ test('turn/end preserves a running expansion (▾) and settles the final below i
 test('a collapsed running turn stays collapsed after turn/end (◐ → ▸) and shows only the final', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
   assert.ok(vt.getViewport().join('\n').includes('🐋 Thought'), 'starts collapsed')
-  folder.apply(settleEvents(0))
+  applyMixed(folder, settleEvents(0))
   show(app, folder)
   await vt.waitForRender()
   const view = vt.getViewport()
@@ -319,7 +349,7 @@ test('a collapsed running turn stays collapsed after turn/end (◐ → ▸) and 
 test('clicking the expanded header collapses the turn again while it runs', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -342,7 +372,7 @@ test('clicking the expanded header collapses the turn again while it runs', asyn
 test('Ctrl+O cannot leak a collapsed Focus turn (outer gate)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   app.setToolOutputExpanded(true) // Ctrl+O master switch ON
   show(app, folder)
@@ -364,7 +394,7 @@ test('Ctrl+O cannot leak a collapsed Focus turn (outer gate)', async () => {
 test('session switch clears the Focus disclosures (transient state)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -387,7 +417,7 @@ test('session switch clears the Focus disclosures (transient state)', async () =
 test('the subagent-viewer scope preserves and restores the parent disclosures', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -414,7 +444,7 @@ test('the subagent-viewer scope preserves and restores the parent disclosures', 
 test('discardFocusViewerScope never restores the parked disclosures (Esc exits restore; swaps discard)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -440,7 +470,7 @@ test('discardFocusViewerScope never restores the parked disclosures (Esc exits r
 test('a session switch while viewing DISCARDS the parent Focus disclosures (never restores them)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -473,7 +503,7 @@ test('a session switch with the SAME turn number and revision renders the NEW ac
   const { vt, app } = startApp()
   // Session A: turn 1 with one read call (revision 2 after 2 events).
   const folderA = new TranscriptFolder()
-  folderA.apply([
+  applyMixed(folderA, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('ca'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, T0 + 1, 1),
   ])
@@ -486,7 +516,7 @@ test('a session switch with the SAME turn number and revision renders the NEW ac
   // DIFFERENT activity (bash). The activity-object identity in the cache
   // key must force a rebuild — never a stale parent component (review fix).
   const folderB = new TranscriptFolder()
-  folderB.apply([
+  applyMixed(folderB, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cb'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 1, 1),
   ])
@@ -510,7 +540,7 @@ test('boot restore: a persisted Focus ON applies to the app BEFORE the first fra
   // split across restarts (review blocker).
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true) // boot restore — no /focus involved
   show(app, folder)      // the first snapshot lands AFTER the restore
   app.setFullscreen(true)
@@ -525,7 +555,7 @@ test('boot restore: a persisted Focus ON applies to the app BEFORE the first fra
 test('Alt+T is the ONE Thinking detail toggle, shared by Focus ON/OFF (unified disclosure contract)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -562,7 +592,7 @@ test('Alt+T is the ONE Thinking detail toggle, shared by Focus ON/OFF (unified d
 test('Focus OFF renders the ordinary transcript (strong regression)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -576,7 +606,7 @@ test('Focus OFF renders the ordinary transcript (strong regression)', async () =
 test('a failed turn collapses to ⚠ with the error line and no final', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...runningTurn(0),
     eventAt('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'E_BOOM', message: 'tool failed' } } }, T0 + 8000, 20),
   ])
@@ -595,7 +625,7 @@ test('a failed turn collapses to ⚠ with the error line and no final', async ()
 test('max-tokens keeps the settled output with the truncated marker', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...runningTurn(0),
     eventAt('assistant/message', {
       turn: 1, step: 1,
@@ -624,7 +654,7 @@ test('max-tokens keeps the settled output with the truncated marker', async () =
 test('a RUNNING turn supports live secondary disclosures (plan §41)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   app.setWorking(true)
   show(app, folder)
@@ -643,7 +673,7 @@ test('a RUNNING turn supports live secondary disclosures (plan §41)', async () 
   click(vt, 10, ty + 1)
   await vt.waitForRender()
   // Append a new reasoning delta: it streams into the OPEN secondary.
-  folder.apply([
+  applyMixed(folder, [
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'checking turn boundaries…' } }, T0 + 4000, 10),
   ])
   show(app, folder)
@@ -670,7 +700,7 @@ test('a RUNNING turn supports live secondary disclosures (plan §41)', async () 
 test('turn/end keeps the root and the secondary open; the final appears outside (plan §42)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -685,7 +715,7 @@ test('turn/end keeps the root and the secondary open; the final appears outside 
   click(vt, 10, ty + 1)
   await vt.waitForRender()
   // turn/end: the root AND the secondary stay open; the final appears.
-  folder.apply(settleEvents(0))
+  applyMixed(folder, settleEvents(0))
   show(app, folder)
   await vt.waitForRender()
   view = vt.getViewport()
@@ -700,7 +730,7 @@ test('turn/end keeps the root and the secondary open; the final appears outside 
 test('Ctrl+O cannot force the secondaries full inside an expanded Thought (plan §44)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   app.setToolOutputExpanded(true) // Ctrl+O master switch ON
   show(app, folder)
@@ -733,7 +763,7 @@ test('Ctrl+O cannot force the secondaries full inside an expanded Thought (plan 
 test('fullscreen Thinking: compact default, click-full, Alt+T toggles the bulk level (plan §45 → unified)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -776,7 +806,7 @@ test('fullscreen Thinking: compact default, click-full, Alt+T toggles the bulk l
 test('a session switch clears the secondary expansions with the other overrides (plan §30)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -815,7 +845,7 @@ test('a session switch clears the secondary expansions with the other overrides 
 test('revealSearchMatch opens the owner Thought and full-reveals the matched secondary (plan §28)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -848,7 +878,7 @@ test('a plugin tool renderer sees the EFFECTIVE expansion inside an expanded Tho
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -874,7 +904,7 @@ test('a plugin tool renderer sees the EFFECTIVE expansion inside an expanded Tho
 test('regular mode: Ctrl+O is the Focus detail master (review contract)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   await vt.waitForRender()
@@ -918,7 +948,7 @@ test('regular mode: Ctrl+O is the Focus detail master (review contract)', async 
 test('switching to fullscreen drops the Ctrl+O-derived reveal; back to regular it returns (plan §16)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   app.setToolOutputExpanded(true) // regular Ctrl+O master ON
   show(app, folder)
@@ -943,7 +973,7 @@ test('switching to fullscreen drops the Ctrl+O-derived reveal; back to regular i
 test('regular mode: a manually revealed turn full-reveals its process (no dead compact cards)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   await vt.waitForRender()
@@ -975,7 +1005,7 @@ test('regular Ctrl+O derives ONLY the recent Focus turns; older roots stay colla
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  for (let turn = 1; turn <= 4; turn += 1) folder.apply(miniTurn(turn, turn * 100))
+  for (let turn = 1; turn <= 4; turn += 1) applyMixed(folder, miniTurn(turn, turn * 100))
   app.setFocusMode(true)
   show(app, folder)
   await vt.waitForRender()
@@ -1002,7 +1032,7 @@ test('regular search reveal of a NON-recent root full-reveals its process (no de
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  for (let turn = 1; turn <= 4; turn += 1) folder.apply(miniTurn(turn, turn * 100))
+  for (let turn = 1; turn <= 4; turn += 1) applyMixed(folder, miniTurn(turn, turn * 100))
   app.setFocusMode(true)
   app.setToolOutputExpanded(true) // Ctrl+O ON: turns 2-4 derive
   show(app, folder)
@@ -1037,7 +1067,7 @@ test('regular Focus expanded roots render large diffs in FULL (no mouse, no cap)
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('tool/call', {
       turn: 1, step: 0, callId: ToolCallId('cdiff'),
@@ -1080,7 +1110,7 @@ test('cache identity: Ctrl+O ON caps a large diff, then /focus on FULL-REVEALS t
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
     eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
@@ -1119,7 +1149,7 @@ test('cache identity: /focus off restores the ordinary CAPPED diff presentation 
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
     eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
@@ -1239,7 +1269,7 @@ test('fullscreen Focus: a multiline Bash heredoc stays ONE row and never ghosts 
   // established cleanly (a first frame with the multiline row would be a
   // full redraw that self-heals — the ghost only escapes when the row is
   // written by a DIFF frame whose following rows are unchanged).
-  folder.apply(noToolTurn(0))
+  applyMixed(folder, noToolTurn(0))
   app.setFocusMode(true)
   app.setWorking(true)
   show(app, folder)
@@ -1254,13 +1284,13 @@ test('fullscreen Focus: a multiline Bash heredoc stays ONE row and never ghosts 
   }
   // The multiline tool call arrives in a DIFF frame: pre-fix its embedded
   // newlines escape onto the unchanged rows below the Tool slot.
-  folder.apply(multilineBashTurn(0).slice(2))
+  applyMixed(folder, multilineBashTurn(0).slice(2))
   show(app, folder)
   await vt.waitForRender()
   assertNoGhost('tool call frame')
   // The turn settles: the Tool row is rewritten (✓ prefix) — pre-fix that
   // rewrite re-ghosts; the final assistant row lands below it.
-  folder.apply(settleMultilineBashTurn(0))
+  applyMixed(folder, settleMultilineBashTurn(0))
   show(app, folder)
   await vt.waitForRender()
   assertNoGhost('settle frame')
@@ -1284,12 +1314,12 @@ test('fullscreen Focus expand/collapse: the expanded Bash card keeps the multili
   // Same diff-frame sequence: clean baseline, then ONLY the appended
   // suffix (tool/call + settle) lands in one later frame — a real
   // append-only event stream, never a duplicated user/message.
-  folder.apply(noToolTurn(0))
+  applyMixed(folder, noToolTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  folder.apply([...multilineBashTurn(0).slice(2), ...settleMultilineBashTurn(0)])
+  applyMixed(folder, [...multilineBashTurn(0).slice(2), ...settleMultilineBashTurn(0)])
   show(app, folder)
   await vt.waitForRender()
   // Collapsed: the Tool slot is ONE row with the command identity only.
@@ -1417,7 +1447,7 @@ test('fullscreen Focus Ctrl+O expands ONLY the recent roots; secondaries stay co
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
+  for (let turn = 1; turn <= 5; turn += 1) applyMixed(folder, settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1454,7 +1484,7 @@ test('fullscreen Ctrl+O Expand Recent follows a pre-set global Thinking preferen
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  for (let turn = 1; turn <= 3; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
+  for (let turn = 1; turn <= 3; turn += 1) applyMixed(folder, settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1480,7 +1510,7 @@ test('fullscreen Ctrl+O collapses ALL roots once any is expanded (plan §22.2)',
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
+  for (let turn = 1; turn <= 5; turn += 1) applyMixed(folder, settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1505,7 +1535,7 @@ test('fullscreen Ctrl+O roundtrip is deterministic: recent-3 → all → recent-
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
+  for (let turn = 1; turn <= 5; turn += 1) applyMixed(folder, settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1526,7 +1556,7 @@ test('fullscreen Ctrl+O Collapse All clears every secondary override; the global
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(settledThoughtTurn(1, 0))
+  applyMixed(folder, settledThoughtTurn(1, 0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1585,7 +1615,7 @@ test('fullscreen Ctrl+O Collapse All clears every secondary override; the global
 test('regular Ctrl+O never writes the fullscreen Focus root set (plan §22.5/§22.6)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   // Regular + Focus ON: Ctrl+O toggles the DERIVED reveal — the manual
@@ -1611,7 +1641,7 @@ test('regular Ctrl+O never writes the fullscreen Focus root set (plan §22.5/§2
 test('fullscreen + Focus OFF: Ctrl+O keeps the historical tool master — never the root bulk (plan §22.7)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  for (let turn = 1; turn <= 3; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
+  for (let turn = 1; turn <= 3; turn += 1) applyMixed(folder, settledThoughtTurn(turn, turn * 100))
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -1629,7 +1659,7 @@ test('blank-row collapse works when the Thought header scrolled OUT of view (pla
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(offscreenThoughtTurn(0))
+  applyMixed(folder, offscreenThoughtTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1679,7 +1709,7 @@ test('a secondary content row toggles only the secondary; the adjacent blank row
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(settledThoughtTurn(1, 0))
+  applyMixed(folder, settledThoughtTurn(1, 0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1724,7 +1754,7 @@ test('clicking the Thinking row toggles the secondary, never the root (plan §23
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(settledThoughtTurn(1, 0))
+  applyMixed(folder, settledThoughtTurn(1, 0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1751,8 +1781,8 @@ test('a blank-row click collapses ONLY the owning Thought (plan §23.4)', async 
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(settledThoughtTurn(1, 0))
-  folder.apply(settledThoughtTurn(2, 100))
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  applyMixed(folder, settledThoughtTurn(2, 100))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1793,7 +1823,7 @@ test('clicking a blank row that belongs to NO Thought is a no-op (plan §23.5)',
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(settledThoughtTurn(1, 0))
+  applyMixed(folder, settledThoughtTurn(1, 0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1823,7 +1853,7 @@ test('clicks on the editor seat and the footer never collapse a Thought (plan §
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(settledThoughtTurn(1, 0))
+  applyMixed(folder, settledThoughtTurn(1, 0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1851,7 +1881,7 @@ test('the blank-row fallback never pierces an open overlay (plan §23.7)', async
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(settledThoughtTurn(1, 0))
+  applyMixed(folder, settledThoughtTurn(1, 0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1894,7 +1924,7 @@ test('resize keeps the blank-row click map aligned (plan §23.8)', async () => {
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(offscreenThoughtTurn(0))
+  applyMixed(folder, offscreenThoughtTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1938,7 +1968,7 @@ test('a blank-row click BEFORE the first paint after a resize is dropped — reb
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(offscreenThoughtTurn(0))
+  applyMixed(folder, offscreenThoughtTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -1988,8 +2018,8 @@ test('Collapse All clears a secondary override parked on a WINDOWED-AWAY message
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(settledThoughtTurn(1, 0))
-  folder.apply(settledThoughtTurn(2, 100))
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  applyMixed(folder, settledThoughtTurn(2, 100))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -2094,7 +2124,7 @@ test('a zero-height trailing process row must not turn the boundary spacer into 
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(reasoningTailTurn(0))
+  applyMixed(folder, reasoningTailTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -2124,7 +2154,7 @@ test('a Thought with NO process cards: the header trailing spacer stays a no-op'
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }, T0 + 1, 1),
     eventAt('assistant/message', { turn: 1, step: 0, message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'hi back' }], source: { kind: 'model', provider: 'p', model: 'm' } } }, T0 + 2, 2),
@@ -2155,8 +2185,8 @@ test('the boundary spacer between two adjacent Thoughts is a no-op', async () =>
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(settledThoughtTurn(1, 0))
-  folder.apply(settledThoughtTurn(2, 100))
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  applyMixed(folder, settledThoughtTurn(2, 100))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -2189,7 +2219,7 @@ test('the collapsed header block trailing spacer stays a no-op — never expands
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(settledThoughtTurn(1, 0))
+  applyMixed(folder, settledThoughtTurn(1, 0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -2216,7 +2246,7 @@ test('Ctrl+O with a PARKED expansion on a windowed-away root still expands the v
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  for (let turn = 1; turn <= 5; turn += 1) folder.apply(settledThoughtTurn(turn, turn * 100))
+  for (let turn = 1; turn <= 5; turn += 1) applyMixed(folder, settledThoughtTurn(turn, turn * 100))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -2286,7 +2316,7 @@ test('gutter blocker: the fullscreen Focus hit-map stays aligned across the disc
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('user/message', {
       id: MessageId('u1'), role: 'user',
@@ -2378,7 +2408,7 @@ test('the truncated marker stays ONE row inside the gutter: a click below it sti
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     // Turn 1: a max-tokens turn whose final carries the truncated marker.
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('user/message', {
@@ -2455,7 +2485,7 @@ test('editor/footer clicks are clipped OUT of the transcript hit-test when scrol
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(offscreenThoughtTurn(0))
+  applyMixed(folder, offscreenThoughtTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -2507,7 +2537,7 @@ test('Collapse All keeps a local shell card mouse-expanded (its override is not 
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(settledThoughtTurn(1, 0))
+  applyMixed(folder, settledThoughtTurn(1, 0))
   const long = Array.from({ length: 30 }, (_, i) => `shell line ${i}`).join('\n')
   app.pushLocalMessage({
     kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',

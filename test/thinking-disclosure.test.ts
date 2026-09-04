@@ -24,6 +24,7 @@ import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from
 import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
@@ -58,6 +59,35 @@ const T0 = Date.now() - 60_000
 
 function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
   return { type, seq, time, data } as SessionEvent
+}
+
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(turn: number, step: number, chunk: AssistantLiveChunk, time: number): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+/** A folder that can fold both the durable event plane and the Session v2
+ * live input seam (TranscriptFolder shares this surface with StatsFolder). */
+interface LiveFoldable {
+  apply(events: readonly SessionEvent[]): void
+  applyLiveInput(input: AssistantLiveInput): void
+}
+
+/** Apply a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function applyMixed(folder: LiveFoldable, events: readonly SessionEvent[]): void {
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
 }
 
 /** A running turn with user + thinking + a running tool. */
@@ -155,7 +185,7 @@ function hintCount(view: string, verb: string): number {
 test('A1: Focus OFF regular — Thinking exists compact with a preview and the Alt+T hint', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(twoThinkingTurn(0))
+  applyMixed(folder, twoThinkingTurn(0))
   show(app, folder)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
@@ -169,7 +199,7 @@ test('A1: Focus OFF regular — Thinking exists compact with a preview and the A
 test('A2/A3: Alt+T expands ALL Thinking full, then back to compact — never removed', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(twoThinkingTurn(0))
+  applyMixed(folder, twoThinkingTurn(0))
   show(app, folder)
   await vt.waitForRender()
   vt.sendInput('\x1bt') // Alt+T: bulk full
@@ -192,7 +222,7 @@ test('A2/A3: Alt+T expands ALL Thinking full, then back to compact — never rem
 test('A4: Ctrl+O expands recent tool/system output but NEVER Thinking detail', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   show(app, folder)
   await vt.waitForRender()
   vt.sendInput('\x0f') // Ctrl+O ON
@@ -218,7 +248,7 @@ test('A4: Ctrl+O expands recent tool/system output but NEVER Thinking detail', a
 test('B1: fullscreen — clicking ONE Thinking card expands only that card', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(twoThinkingTurn(0))
+  applyMixed(folder, twoThinkingTurn(0))
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -238,7 +268,7 @@ test('B1: fullscreen — clicking ONE Thinking card expands only that card', asy
 test('B2/B3: Alt+T after a local override resets every override and bulk-toggles ALL', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(twoThinkingTurn(0))
+  applyMixed(folder, twoThinkingTurn(0))
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -268,7 +298,7 @@ test('B2/B3: Alt+T after a local override resets every override and bulk-toggles
 test('C1/C2: Focus collapsed — the Think: preview stays; Alt+T changes only the bulk preference', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -292,7 +322,7 @@ test('C1/C2: Focus collapsed — the Think: preview stays; Alt+T changes only th
 test('D1: regular Focus expanded root — Thinking compact (never absent), Tool full', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   await vt.waitForRender()
@@ -309,7 +339,7 @@ test('D1: regular Focus expanded root — Thinking compact (never absent), Tool 
 test('D2/D3: Alt+T expands Thinking full; Ctrl+O never changes it — Tool unchanged throughout', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   app.setToolOutputExpanded(true) // Ctrl+O master ON (tools full)
   show(app, folder)
@@ -336,7 +366,7 @@ test('D2/D3: Alt+T expands Thinking full; Ctrl+O never changes it — Tool uncha
 test('E1: Focus ON fullscreen expanded root — Thinking compact, Tool compact', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -356,7 +386,7 @@ test('E1: Focus ON fullscreen expanded root — Thinking compact, Tool compact',
 test('E2–E5: per-card clicks layer over the bulk preference; Alt+T resets them', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(twoThinkingTurn(0))
+  applyMixed(folder, twoThinkingTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -405,7 +435,7 @@ test('E2–E5: per-card clicks layer over the bulk preference; Alt+T resets them
 test('F1/F2: the Thinking preference survives Focus ON/OFF switches', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   // F1: Focus OFF + expanded → Focus ON → still expanded.
   show(app, folder)
   app.toggleThinkingExpanded()
@@ -429,7 +459,7 @@ test('F1/F2: the Thinking preference survives Focus ON/OFF switches', async () =
 test('G2: a fullscreen click override never leaks into regular — regular follows the bulk only', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(twoThinkingTurn(0))
+  applyMixed(folder, twoThinkingTurn(0))
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -455,7 +485,7 @@ test('G2: a fullscreen click override never leaks into regular — regular follo
 test('H1: a search hit full-reveals ONLY the matched Thinking; the bulk preference stays compact', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(twoThinkingTurn(0))
+  applyMixed(folder, twoThinkingTurn(0))
   show(app, folder)
   await vt.waitForRender()
   const messages = folder.messages()
@@ -474,7 +504,7 @@ test('H1: a search hit full-reveals ONLY the matched Thinking; the bulk preferen
 test('H2: Focus collapsed search hit opens the owner Thought with the matched Thinking full', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(twoThinkingTurn(0))
+  applyMixed(folder, twoThinkingTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -667,7 +697,7 @@ test('I1–I6: the /settings Thinking row is the SAME state as Alt+T (detail sem
 test('I7: the /settings declarative setter clears per-card overrides like Alt+T (bulk statement)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(twoThinkingTurn(0))
+  applyMixed(folder, twoThinkingTurn(0))
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -707,7 +737,7 @@ test('I7: the /settings declarative setter clears per-card overrides like Alt+T 
 test('J1: a turn without reasoning-delta never manufactures a Thinking block', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(noReasoningTurn(0))
+  applyMixed(folder, noReasoningTurn(0))
   show(app, folder)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
@@ -757,14 +787,14 @@ test('P1: an override on a Thinking card OUTSIDE the visible window is still cle
 test('K2: FULL running reasoning live-appends new deltas into the open body', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(runningTurn(0))
+  applyMixed(folder, runningTurn(0))
   show(app, folder)
   app.setThinkingExpanded(true) // full from the start
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('locating the transcript path'), 'the full body renders')
   // A new reasoning delta streams in: it live-appends into the full card.
-  folder.apply([
+  applyMixed(folder, [
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: '\nchecking turn boundaries…' } }, T0 + 4000, 10),
   ])
   show(app, folder)
