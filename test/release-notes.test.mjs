@@ -104,6 +104,14 @@ test('0.4 release guidance pins the exact release TUI version', (t) => {
   assert.equal(stableResult.status, 0, stableResult.stderr)
 })
 
+test('0.4.1 stable guidance pins the published rc.1 DSH family', (t) => {
+  const life = testLifecycle(t)
+  const guidance = '\n- @deepseek-ai/dsh@0.1.2-rc.1\n- @xmoon76/dsh-pi-tui@0.4.1\n- @xmoon76/dsh-pi-tui@0.3'
+  const stable = createFixture(life, { version: '0.4.1', guidance })
+  const result = run(stable, 'v0.4.1')
+  assert.equal(result.status, 0, result.stderr)
+})
+
 test('release-notes guidance matching rejects near-miss package versions', (t) => {
   const life = testLifecycle(t)
   const fixture = createFixture(life, {
