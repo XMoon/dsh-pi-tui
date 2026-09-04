@@ -3907,7 +3907,7 @@ export class TuiApp {
       // visible editor has content. Only an EMPTY editor may promote that
       // builtin physical key to a Host exit request; explicit user remaps and
       // leader completions stay Host-owned.
-      if (key === 'ctrl+d' && trigger === undefined && source !== 'user' && this.seatEditor().getText() !== '') {
+      if (key === 'ctrl+d' && trigger === undefined && source === 'builtin' && this.seatEditor().getText() !== '') {
         this.clearExitConfirmation()
         return false
       }
