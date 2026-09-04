@@ -116,8 +116,10 @@ The script compares the parsed tag version (without the `next-` channel
 marker) with `package.json` and verifies both dated bilingual sections. Review
 the generated file if the release body matters. For the 0.4 migration line,
 the dated sections must also include the DSH/TUI pairing and copy-paste
-installation commands: that extracted file is the GitHub Release body, not an
-optional summary. A failure here means the release channel, section, date,
+installation commands: the TUI command is pinned to the parsed release version
+rather than `@latest` or `@next`. README channel guidance may keep those moving
+tags for ordinary installs. The extracted file is the GitHub Release body, not
+an optional summary. A failure here means the release channel, section, date,
 package version, or installation guidance is incomplete; do not bypass it.
 
 ## 4. Run the appropriate verification gate

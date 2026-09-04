@@ -9,28 +9,96 @@ A Pi-style terminal frontend for [DeepSeek Harness](https://github.com/deepseek-
 
 `dsh-pi-tui` is installed as an independent dsh bundle inside a profile. It provides terminal interaction for streaming conversations, tool calls, session management, subagents, history search, shell commands, approvals, and settings. Models, tools, Sessions, permissions, Skills, Plan, Goal, and Subagent runtime behavior are still provided by DeepSeek Harness.
 
-## Quick start
+![dsh-pi-tui](docs/dsh-pi-tui.png)
 
-Stable releases are recommended for ordinary users; use `@latest`:
+## Install into a DSH profile
+
+### Stable / latest
+
+Stable releases are recommended for ordinary users. Install DSH first, then add
+the TUI to the `pi-tui` profile:
 
 ```sh
+npm install -g @deepseek-ai/dsh@0.1.2-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
-![dsh-pi-tui](docs/dsh-pi-tui.png)
+### Preview / next
 
-## DSH compatibility and source validation
-
-The published package declares the lower-bound-only DSH peer contract `>=0.1.2-rc.1`. Source validation does not change that contract or vendor DSH into this repository.
-
-When the target DSH version is not yet available from npm, validate against the official checkout pinned by commit SHA:
+Preview releases contain unreleased changes. Use this channel only when you need
+to try or validate a prerelease:
 
 ```sh
-pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
 ```
 
-CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Both `next` lanes use `test/compat/dsh-source.json` for the current validated DSH target; Source Mode validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary, while npm Mode runs the frozen registry lane. The published `pi2dsh` ecosystem check is explicitly marked skipped for an unpublished source family. See [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md) for the full workflow.
+### Requirements
+
+* DeepSeek Harness
+* Node.js `^22.19.0 || >=24`
+
+### DSH/TUI version pairing (important)
+
+| TUI package line | Matching DSH line | Notes |
+|---|---|---|
+| `0.4.0` (`@latest`) | `>=0.1.2-rc.1` | Current stable; validated against the rc.1 family |
+| `0.4.x-alpha` (`@next`) | `>=0.1.2-rc.1` | Subsequent prerelease; each release validates its concrete DSH family |
+| `0.4.0-alpha.2` (published) | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; its releases validated the alpha.4/alpha.5 family |
+| `0.4.0-alpha.1` (published) | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 runtime |
+| `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
+
+Do not mix the lines: DSH 0.1.1 is outside the 0.4 peer window and the
+normal incompatible-runtime boundary will fail. The startup row prints upgrade
+and rollback guidance when concurrent Loader ordering allows it, but that
+friendly notice is best-effort rather than a startup-order guarantee. If you
+keep DSH 0.1.1, use the 0.3 TUI line; if you keep the alpha.2/alpha.3
+baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`; if you keep the
+alpha.4/alpha.5 baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`. The stable
+installation path is documented above under “Install into a DSH profile”; if
+you need to keep the legacy DSH runtime, use this compatibility recovery path:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
+dsh --profile pi-tui
+```
+
+The current 0.4 line declares `>=0.1.2-rc.1`; each release validates
+its concrete DSH family. `npm install -g` is only for installing DSH itself; to
+install dsh-pi-tui into a DSH profile, you must use the `dsh plugin` command.
+
+New agent sessions use the official roster's selected preset id. A custom DSH
+preset literally named `code` is valid and remains `code` when it exists in the
+current roster. Old persisted `code` defaults/session values fall back to `ptc`
+only after the roster proves that no custom `code` preset exists.
+
+### Profile management
+
+Update the installed TUI:
+
+```sh
+dsh plugin --profile pi-tui -- update @xmoon76/dsh-pi-tui
+```
+
+List installed plugins:
+
+```sh
+dsh plugin --profile pi-tui -- list
+```
+
+Remove the plugin:
+
+```sh
+dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
+```
+
+Resume an existing Session:
+
+```sh
+dsh --profile pi-tui --session <session-id>
+```
 
 ## Features
 
@@ -98,7 +166,8 @@ Regular `↑` / `↓` history recall is still available for recent input.
 
 ### Subagents and background tasks
 
-`/tasks` opens the task browser for the current Session.
+`/tasks` opens the full Task Center for all background work in the current
+Session; the Footer's `↓` opens the lightweight Quick Tasks view for running work.
 
 Subagents are shown using their complete lineage, including nested descendants:
 
@@ -116,6 +185,12 @@ The browser distinguishes:
 * running / inactive
 * nested descendants
 * background Jobs
+
+The two views share the same runtime state: `A` toggles Active / All scope,
+`Tab` changes type filters, `/` enters search, `S` stops the selected task after
+confirmation, and `N` / `Shift+N` moves between running tasks. In Quick Tasks,
+`T` or the bottom “View all” row opens the full Task Center, and `Esc` returns
+one layer at a time.
 
 Completed one-shot Subagents remain available for persisted Transcript inspection.
 
@@ -312,111 +387,6 @@ dsh-pi-tui:
   works; only `false` removes every trigger of an action.
 
 
-## Installation
-
-### Requirements
-
-* DeepSeek Harness
-* Node.js `^22.19.0 || >=24`
-
-### DSH/TUI version pairing (important)
-
-| TUI package line | Matching DSH line | Notes |
-|---|---|---|
-| `0.4.0` (`@latest`) | `>=0.1.2-rc.1` | Current stable; validated against the rc.1 family |
-| `0.4.x-alpha` (`@next`) | `>=0.1.2-rc.1` | Subsequent prerelease; each release validates its concrete DSH family |
-| `0.4.0-alpha.2` (published) | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; its releases validated the alpha.4/alpha.5 family |
-| `0.4.0-alpha.1` (published) | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 runtime |
-| `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
-
-Do not mix the lines: DSH 0.1.1 is outside the 0.4 peer window and the
-normal incompatible-runtime boundary will fail. The startup row prints upgrade
-and rollback guidance when concurrent Loader ordering allows it, but that
-friendly notice is best-effort rather than a startup-order guarantee. If you
-keep DSH 0.1.1, use the 0.3 TUI line; if you keep the alpha.2/alpha.3
-baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`; if you keep the
-alpha.4/alpha.5 baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`. For the
-current stable release (`@latest`), install the matching DSH first and then add
-the TUI to a profile:
-
-```sh
-npm install -g @deepseek-ai/dsh@0.1.2-rc.1
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
-dsh --profile pi-tui
-```
-
-If you need to keep the legacy DSH runtime:
-
-```sh
-npm install -g @deepseek-ai/dsh@0.1.1-rc.2
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
-dsh --profile pi-tui
-```
-
-The current 0.4 line declares `>=0.1.2-rc.1`; each release validates
-its concrete DSH family. `npm install -g` is only for installing DSH itself; to
-install dsh-pi-tui into a DSH profile, you must use the `dsh plugin` command above.
-
-New agent sessions use the official roster's selected preset id. A custom DSH
-preset literally named `code` is valid and remains `code` when it exists in the
-current roster. Old persisted `code` defaults/session values fall back to `ptc`
-only after the roster proves that no custom `code` preset exists.
-
-### Stable / latest
-
-Stable releases are recommended for ordinary users. Use a dedicated `pi-tui`
-profile:
-
-```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
-dsh --profile pi-tui
-```
-
-Resume an existing Session:
-
-```sh
-dsh --profile pi-tui --session <session-id>
-```
-
-### Preview / next
-
-To try unreleased preview changes, explicitly use `@next`. Ordinary users should
-continue to use the stable `@latest` channel above:
-
-```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
-dsh --profile pi-tui
-```
-
-### Source Mode (validation only)
-
-Source Mode is the validation-only distribution selected by the tracked policy for `next` CI and available for local compatibility checks. It reads the full commit pin in `test/compat/dsh-source.json`, builds the official DSH tarball family, installs it through temporary pnpm overrides, and removes the temporary state afterward. Do not write DSH source paths, `file:` dependencies, or workspace symlinks into a published package.
-
-```sh
-pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
-pnpm compat:dsh:npm
-```
-
-The published package already contains the Pi TUI fork required at runtime. No separate internal TUI package needs to be installed.
-
-### Update
-
-```sh
-dsh plugin --profile pi-tui -- update @xmoon76/dsh-pi-tui
-```
-
-List installed plugins:
-
-```sh
-dsh plugin --profile pi-tui -- list
-```
-
-Remove:
-
-```sh
-dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
-```
-
 ## Running from source
 
 ```sh
@@ -578,6 +548,25 @@ The project is also developed against a dedicated `pi-tui-dev` profile:
 dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD
 dsh --profile pi-tui-dev
 ```
+
+## DSH compatibility and validation
+
+This section contains Source Mode and CI validation details only; ordinary users do not need Source Mode to install the TUI.
+
+### Source Mode (validation only)
+
+Source Mode is the validation-only distribution selected by the tracked policy for `next` CI and available for local compatibility checks. It reads the full commit pin in `test/compat/dsh-source.json`, builds the official DSH tarball family, installs it through temporary pnpm overrides, and removes the temporary state afterward. Do not write DSH source paths, `file:` dependencies, or workspace symlinks into a published package.
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
+```
+
+The published package already contains the Pi TUI fork required at runtime. No separate internal TUI package needs to be installed.
+
+### CI validation policy
+
+CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Both `next` lanes use `test/compat/dsh-source.json` for the current validated DSH target; Source Mode validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary, while npm Mode runs the frozen registry lane. The published `pi2dsh` ecosystem check is explicitly marked skipped for an unpublished source family. See [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md) for the full workflow.
 
 ## Repository layout
 

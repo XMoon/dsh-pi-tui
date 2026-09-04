@@ -32,6 +32,7 @@ function leakTarball(life, leakText) {
   }))
   writeFileSync(join(pkgDir, 'dist', 'index.mjs'), `// leak: ${leakText}\nexport const x = 1\n`)
   writeFileSync(join(pkgDir, 'README.md'), 'readme\n')
+  writeFileSync(join(pkgDir, 'README.en.md'), 'readme\n')
   const tarball = join(dir, 'leak.tgz')
   const tar = spawnSync('tar', ['-czf', tarball, '-C', dir, 'package'])
   assert.equal(tar.status, 0, tar.stderr)
