@@ -137,6 +137,7 @@ interface RunnerHarness {
   readonly createOptions: { provider?: string; model?: string }[]
   readonly createdSessions: FakeSession[]
   readonly commands: unknown
+  readonly subagents?: unknown
 }
 
 function fakeAgent(session: FakeSession): Agent {
@@ -165,6 +166,7 @@ function makeHarness(
   initialDefault: { provider: string; model: string; reasoningEffort?: string } = { provider: 'p', model: 'm' },
   saveDefault?: (next: { provider: string; model: string; reasoningEffort?: string }) => Promise<unknown>,
   createGate?: () => Promise<unknown>,
+  subagents?: unknown,
 ): RunnerHarness {
   const persisted = new Map<string, FakeSession>()
   const live = new Map<string, Agent>()
@@ -254,7 +256,7 @@ function makeHarness(
     execute: async () => ({ result: { kind: 'success' } }),
     handler: (name: string) => definitions.get(name)?.handler,
   }
-  return { persistence, agents, sessions, defaultModel, llm, createOptions, createdSessions, commands }
+  return { persistence, agents, sessions, defaultModel, llm, createOptions, createdSessions, commands, subagents }
 }
 
 async function settle(): Promise<void> {
@@ -413,6 +415,7 @@ async function mountRunner(
   ctx.provide('agentDefaultModel', harness.defaultModel as never)
   ctx.provide('llm', harness.llm as never)
   ctx.provide('commands', harness.commands as never)
+  if (harness.subagents !== undefined) ctx.provide('subagents', harness.subagents as never)
   ctx.provide('loader', { await: async () => {} } as never)
   const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, config))
   await fiber
@@ -1056,6 +1059,139 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
   assert.equal(readScroll().isFollowingEnd, true, 'a viewport following the end must remain attached to live output')
   const following = readScroll()
   assert.equal(following.scrollTop, following.maxScrollTop, JSON.stringify(following))
+})
+
+test('the parent Preparing projection keeps updating behind a child viewer', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-parent-preparing-viewer-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'parent-preparing-viewer-session',
+    header: { id: 'parent-preparing-viewer-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child: FakeSession = fakeSession({
+    id: 'child-preparing-viewer-session',
+    header: { id: 'child-preparing-viewer-session', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('child answer'),
+  })
+  const subagents = {
+    listDescendants: async () => [{
+      kind: 'child',
+      id: child.id,
+      label: 'child viewer',
+      mode: 'continuable',
+      activity: 'running',
+      hasChildren: false,
+      parentId: parent.id,
+      depth: 1,
+    }],
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+
+  // The main session owns the first preview before the viewer opens.
+  context.emit('session/event', parent as never, event('turn/start', { turn: 1 }, 10))
+  context.emit('session/event', parent as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'parent-call-a' as ToolCallId, name: 'edit', argumentsDelta: '{' },
+  }, 11))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => preview.callId), ['parent-call-a'])
+
+  // /tasks opens the real runner browser, and Enter mounts the child viewer.
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must be mounted')
+
+  // Parent events continue through the runner while the child owns the
+  // visible transcript. Updating A and adding B must both survive the visit.
+  context.emit('session/event', parent as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'parent-call-a' as ToolCallId, name: 'write', argumentsDelta: '}' },
+  }, 12))
+  context.emit('session/event', parent as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 1, id: 'parent-call-b' as ToolCallId, name: 'read', argumentsDelta: '{' },
+  }, 13))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+
+  // Esc returns to the parent surface; its hidden map, not a reset map, is
+  // projected and therefore contains the latest A plus the new B.
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => [preview.callId, preview.name]), [
+    ['parent-call-a', 'write'],
+    ['parent-call-b', 'read'],
+  ])
+
+  // A parent call that materializes while the child remains visible must be
+  // removed from the hidden main map, not recreated when the viewer closes.
+  context.emit('session/event', parent as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 14))
+  await vt.waitForRender()
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.getViewerGeneration(), 3, 'the child viewer must reopen')
+  context.emit('session/event', parent as never, event('turn/start', { turn: 2 }, 15))
+  context.emit('session/event', parent as never, event('assistant/chunk', {
+    turn: 2,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'parent-call-c' as ToolCallId, name: 'edit', argumentsDelta: '{' },
+  }, 16))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  context.emit('session/event', parent as never, event('tool/call', {
+    turn: 2,
+    step: 0,
+    callId: 'parent-call-c' as ToolCallId,
+    name: 'edit',
+    arguments: '{}',
+  }, 17))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews, [],
+    'a parent preview materialized behind the viewer must not return on exit')
 })
 
 test('explicit cold resume shows the pre-mount status and clears it before mount; fresh start stays silent', async (t) => {

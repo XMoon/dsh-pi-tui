@@ -70,6 +70,8 @@ import type {} from '@deepseek-ai/dsh-settings'
 // P5d service/event merges: goal badge, background jobs, permission
 // presets, session titles, and the workflow/retry folds (transcript.ts).
 import type {} from '@deepseek-ai/dsh-goal'
+// The retry event merge for the live request retry boundary.
+import type {} from '@deepseek-ai/dsh-llm-retry'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type { JobId } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-permission-presets'
@@ -115,7 +117,13 @@ import { FooterCommandRunner } from './footer/command-runner.ts'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
 import { startProcessTui, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TuiApp } from './tui-app.ts'
-import { applyStreamingToolPreviewEvent, streamingToolPreviewSnapshot } from './streaming-tool-preparing.ts'
+import {
+  clearStreamingToolPreviewsForStep,
+  clearStreamingToolPreviewsForTurn,
+  removeStreamingToolPreview,
+  streamingToolPreviewSnapshot,
+  upsertStreamingToolPreview,
+} from './streaming-tool-preparing.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
 
 import { normalizedKeyToKeyId } from './keybindings/manager.ts'
@@ -891,6 +899,39 @@ function bundleVersion(): string {
     return pkg.version ?? '0.0.0'
   } catch {
     return '0.0.0'
+  }
+}
+
+/** Translate official DSH events into the local preview operations. */
+function applyStreamingToolPreviewEvent(
+  previews: Map<string, StreamingToolPreview>,
+  event: SessionEvent,
+): void {
+  if (event.type === 'assistant/chunk' && event.data.chunk.type === 'tool-call-delta') {
+    const chunk = event.data.chunk
+    upsertStreamingToolPreview(previews, {
+      callId: chunk.id,
+      turn: event.data.turn,
+      step: event.data.step,
+      index: chunk.index,
+      name: chunk.name,
+    })
+    return
+  }
+  if (event.type === 'tool/call') {
+    removeStreamingToolPreview(previews, event.data.callId, event.data.turn, event.data.step)
+    return
+  }
+  if (event.type === 'llm/retry' || event.type === 'llm/retry-started') {
+    clearStreamingToolPreviewsForStep(previews, event.data.turn, event.data.step)
+    return
+  }
+  if (event.type === 'step/end') {
+    clearStreamingToolPreviewsForStep(previews, event.data.turn, event.data.step)
+    return
+  }
+  if (event.type === 'turn/end') {
+    clearStreamingToolPreviewsForTurn(previews, event.data.turn)
   }
 }
 
@@ -3436,7 +3477,7 @@ export function apply(ctx: Context, config: Config): void {
     let repaintTimer: NodeJS.Timeout | undefined
     // Ephemeral previews are isolated per presentation owner: the main live
     // session and a mounted child viewer never share call ids or rows.
-    const mainStreamingToolPreviews = new Map<ToolCallId, StreamingToolPreview>()
+    const mainStreamingToolPreviews = new Map<string, StreamingToolPreview>()
     // P7d: subagent viewer — while set, the transcript shows another live
     // session's log and Esc returns to the parent session. The target is
     // MODE-AWARE: a continuable child's viewer is INTERACTIVE (the editor
@@ -3462,7 +3503,7 @@ export function apply(ctx: Context, config: Config): void {
       /** The child session's workspace ('' when unknown, e.g. a cold child). */
       cwd: string
       /** Live-only preparing rows for this child presentation owner. */
-      previews: Map<ToolCallId, StreamingToolPreview>
+      previews: Map<string, StreamingToolPreview>
     } | undefined
     // Unsettled subagent delegations in the live session, in tool/call order.
     // The viewer matches one of these by description when the user opens a
@@ -3478,7 +3519,7 @@ export function apply(ctx: Context, config: Config): void {
       return streamingToolPreviewSnapshot(viewing?.previews ?? mainStreamingToolPreviews)
     }
     const applyOwnerStreamingToolPreviewEvent = (
-      previews: Map<ToolCallId, StreamingToolPreview>,
+      previews: Map<string, StreamingToolPreview>,
       ownerFolder: TranscriptFolder,
       event: SessionEvent,
     ): void => {
@@ -3757,9 +3798,8 @@ export function apply(ctx: Context, config: Config): void {
       // commit its child over the current surface (no viewing write, no
       // repaint, no viewer mount, no auto-pop match).
       if (!viewerOpen.isCurrent(request)) return
-      // The viewer replaces the main transcript presentation owner; discard
-      // any main-session preparing rows rather than replaying them on exit.
-      mainStreamingToolPreviews.clear()
+      // The viewer replaces the main transcript presentation owner, but the
+      // main session's live preview state continues updating off-screen.
       const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
       if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
       viewerSessionAbort = new AbortController()
@@ -7276,8 +7316,7 @@ export function apply(ctx: Context, config: Config): void {
         // main folder below — the viewer never starves the main transcript.
       }
       if (session.id !== liveAgent.session.id) return
-      if (viewing === undefined) applyOwnerStreamingToolPreviewEvent(mainStreamingToolPreviews, folder, event)
-      else mainStreamingToolPreviews.clear()
+      applyOwnerStreamingToolPreviewEvent(mainStreamingToolPreviews, folder, event)
       // Keep the Direct owner in sync with durable model intent and consume a
       // pending choice only when the exact raw request header was recorded.
       // The structural check keeps this next-version event compatible with
