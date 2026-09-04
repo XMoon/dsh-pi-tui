@@ -261,7 +261,7 @@ test('source verification delegates packing to the dedicated pack script', () =>
 })
 
 test('official preset npm target uses the current validated DSH version', () => {
-  assert.equal(currentValidatedDshVersion(), '0.1.2-rc.1')
+  assert.equal(currentValidatedDshVersion(), '0.1.3-alpha.1')
 })
 
 test('official preset source args retain effective source overrides', () => {
