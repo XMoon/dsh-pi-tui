@@ -144,7 +144,7 @@ import { APP_KEYBINDINGS, VIEWER_BLOCKED_PARENT_ACTIONS } from './keybindings/de
 import { formatKeyId, formatLeaderSequence } from './keybindings/hints.ts'
 import type { LeaderStateMachine } from './keybindings/leader.ts'
 import { HostKeybindingManager } from './keybindings/manager.ts'
-import type { AppKeybindingId, KeybindingContext, UserKeybindingsConfig } from './keybindings/types.ts'
+import type { AppKeybindingId, KeybindingContext, KeybindingSource, UserKeybindingsConfig } from './keybindings/types.ts'
 import {
   isLocalShellCard,
   localShellHiddenMarker,
@@ -3783,7 +3783,7 @@ export class TuiApp {
       //   Host-private semantic action (round-12 finding — capability
       //   boundary).
       if (resolution.owner === 'host') {
-        const consumed = this.dispatchResolvedAction(resolution.action as AppKeybindingId, data, resolution.key)
+        const consumed = this.dispatchResolvedAction(resolution.action as AppKeybindingId, data, resolution.key, undefined, resolution.source)
         if (consumed) return { consume: true }
         // The HOST dispatcher declined (e.g. pasteMedia without a
         // handler): the key must reach the editor/plugin remainder — never
@@ -3885,6 +3885,7 @@ export class TuiApp {
     data: string,
     key?: KeyId,
     trigger?: ExitConfirmationTrigger,
+    source?: KeybindingSource,
   ): boolean {
     if (action === 'app.agent.interrupt') {
       // Interrupt is a separate lifecycle action and must disarm any pending
@@ -3902,11 +3903,11 @@ export class TuiApp {
       return this.handleInterruptAction(data) !== undefined
     }
     if (action === 'app.exit.request') {
-      // The default Ctrl+D remains an editor-owned forward-delete while the
+      // The builtin Ctrl+D remains an editor-owned forward-delete while the
       // visible editor has content. Only an EMPTY editor may promote that
-      // physical key to a Host exit request; explicit custom exit keys and
+      // builtin physical key to a Host exit request; explicit user remaps and
       // leader completions stay Host-owned.
-      if (key === 'ctrl+d' && trigger === undefined && this.seatEditor().getText() !== '') {
+      if (key === 'ctrl+d' && trigger === undefined && source !== 'user' && this.seatEditor().getText() !== '') {
         this.clearExitConfirmation()
         return false
       }
