@@ -9,7 +9,6 @@
  * Allowlist (focused-component / protocol seams — the plan's sanctioned
  * exceptions):
  * - the read-only subagent viewer guard (Esc + Ctrl+O pass through);
- * - the Ctrl+C exit-chord discriminator (the chord is Ctrl+C-specific);
  * - the approval dialog's own keys (a capturing overlay component);
  * - the replacement-editor Enter seams (a plugin editor owns Shift+Enter);
  * - `Ctrl+Home/End` in the Home/End settings row (fork editor-level keys,
@@ -37,6 +36,7 @@ const SCANNED_STRING_FILES = [
   'src/commands.ts',
   'src/tui-app.ts',
   'src/local-shell-card.ts',
+  'src/footer/instruction.ts',
   // The action TABLE's descriptions are USER-FACING (they render in
   // /keybindings and /help) — a hard-coded chord label there lies after a
   // remap, exactly like any other user-facing string (review finding).
@@ -61,8 +61,6 @@ const STRING_CHORD_PATTERN = /(?:'[^'\\]*|"[^"\\]*|`[^`\\]*)(?:(?:Ctrl|Alt|Shift
 const ALLOWLIST = [
   // The read-only viewer guard: only Esc (exit) and Ctrl+O (fold) pass.
   "if (!matchesKey(data, 'escape') && !matchesKey(data, 'ctrl+o')) {",
-  // The exit-chord discriminator: Ctrl+C keeps the clear-then-exit chord.
-  "if (matchesKey(data, 'ctrl+c')) {",
   // The replacement-editor Enter seam (P1-10): a plugin editor receives
   // editor-routed input; Enter is forwarded to the hidden host editor and
   // Shift+Enter stays with the plugin (its own multiline editing).
@@ -91,11 +89,11 @@ const STRING_ALLOWLIST = [
   // that owns y/n/Esc/Ctrl+C while it is up — never resolved by the
   // keymap).
   '[esc/ctrl+c] cancel',
-  // The armed Ctrl+C exit-chord hint: the clear-then-exit chord is
-  // Ctrl+C-SPECIFIC (a second Ctrl+C exits; another exit key exits
-  // immediately), so the copy names Ctrl+C literally — the semantics are
-  // key-specific, the sanctioned convention (PR review finding).
-  'Press Ctrl+C again to exit',
+  // The exit path's key-id comparison is semantic behavior, not UI copy.
+  "clearsDraft: key === 'ctrl+c'",
+  // The default Ctrl+D editor-ownership branch is semantic routing, not UI copy.
+  "key === 'ctrl+d'",
+  // Dynamic exit-confirmation labels are intentionally not allowlisted.
 ]
 
 let failures = 0

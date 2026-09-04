@@ -16,7 +16,7 @@ bundle into a profile:
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.2-rc.1
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.0
 dsh --profile pi-tui
 ```
 
@@ -24,7 +24,7 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`;
 users on the DSH `0.1.2-alpha.2`/`alpha.3` baseline should pin
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, and users on the alpha.4/alpha.5 baseline
 should pin `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`. The complete matrix and
-update/remove commands are in the README's Installation section.
+update/remove commands are in the README's “Install into a DSH profile” section.
 
 ### Added
 
@@ -148,14 +148,14 @@ into a profile:
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.2-alpha.5
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.0-alpha.2
 dsh --profile pi-tui
 ```
 
 Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`;
 users on the DSH `0.1.2-alpha.2`/`alpha.3` baseline should pin
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`. The complete matrix and update/remove
-commands are in the README's Installation section.
+commands are in the README's “Install into a DSH profile” section.
 
 ### Added
 
@@ -237,7 +237,7 @@ commands are in the README's Installation section.
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.2-alpha.3
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.0-alpha.1
 dsh --profile pi-tui
 ```
 

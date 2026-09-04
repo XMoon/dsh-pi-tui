@@ -546,13 +546,12 @@ test('the app renders the command surface; the Host instruction still merges on 
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('red line'), `the command surface must render:\n${view}`)
-  // The Ctrl+C exit hint (Host-owned) still merges on top of the command
-  // surface — the command can never hide it.
-  app.setDraft('unsent')
-  vt.sendInput('\x03')
+  // With an EMPTY editor, the Ctrl+D exit hint (Host-owned) still merges on
+  // top of the command surface — the command can never hide it.
+  vt.sendInput('\x04')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Press Ctrl+C again'), `the Host instruction must survive the command surface:\n${view}`)
+  assert.ok(view.includes('Press Ctrl+D again'), `the Host instruction must survive the command surface:\n${view}`)
   // Clearing the command surface restores the native composer.
   app.setFooterCommandRows(undefined)
   await vt.waitForRender()

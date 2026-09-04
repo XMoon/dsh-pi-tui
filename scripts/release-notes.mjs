@@ -142,22 +142,28 @@ function containsExactGuidance(content, command) {
 
 // The DSH install pin each 0.4 release documents: 0.4.0-alpha.1 shipped on
 // the alpha.3 family, the alpha train documented its latest validated alpha
-// family while the peer floor stayed at the previous alpha, and the 0.4.0
-// stable cutover pairs with the published rc.1 line (0.1.2 stable is not out
-// yet). Released changelog sections are immutable, so the requirement follows
-// the version being released.
+// family while the peer floor stayed at the previous alpha. The 0.4.0 and
+// 0.4.1 stable releases continue to use the published rc.1 family because the
+// 0.1.2 stable family is not published yet. Released changelog sections are
+// immutable, so the requirement follows the version being released.
 const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3' : '0.1.2-alpha.5'
-const dshStablePin = version === '0.4.0' ? '0.1.2-rc.1' : '0.1.2'
+const dshStablePin = version === '0.4.0' || version === '0.4.1'
+  ? '0.1.2-rc.1'
+  : '0.1.2'
 if (version.startsWith('0.4.')) {
+  // Release bodies must remain reproducible after a later stable/preview
+  // publish moves the npm dist-tags. README keeps the moving channel tags for
+  // ordinary installs; changelog/release-note guidance pins this release.
+  const tuiPin = `@xmoon76/dsh-pi-tui@${version}`
   const requiredGuidance = channel === 'next'
     ? [
         `@deepseek-ai/dsh@${dshAlphaPin}`,
-        '@xmoon76/dsh-pi-tui@next',
+        tuiPin,
         '@xmoon76/dsh-pi-tui@0.3',
       ]
     : [
         `@deepseek-ai/dsh@${dshStablePin}`,
-        '@xmoon76/dsh-pi-tui@latest',
+        tuiPin,
         '@xmoon76/dsh-pi-tui@0.3',
       ]
   for (const command of requiredGuidance) {

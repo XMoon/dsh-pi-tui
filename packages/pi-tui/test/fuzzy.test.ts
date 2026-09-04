@@ -90,6 +90,11 @@ describe("fuzzyFilter", () => {
 		assert.deepStrictEqual(result, ["cl", "clone"]);
 	});
 
+	it("preserves input order for equal fuzzy scores", () => {
+		const items = ["ba", "ca", "da", "ea"];
+		assert.deepStrictEqual(fuzzyFilter(items, "a", (x: string) => x), items);
+	});
+
 	it("works with custom getText function", () => {
 		const items = [
 			{ name: "foo", id: 1 },

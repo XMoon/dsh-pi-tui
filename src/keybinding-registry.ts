@@ -94,7 +94,8 @@ interface BindingRecord {
  * binds it), and the user-orchestrable keymap (src/keybindings/
  * definitions.ts) owns the effective keys. This list exists ONLY to
  * reject plugin registrations on the host's DEFAULT lifecycle keys
- * (Ctrl+C/D exit, Ctrl+S steer-all, Ctrl+F search, Ctrl+O expand, Ctrl+T
+ * (default keyboard exit confirmation, Ctrl+S steer-all, Ctrl+F search,
+ * Ctrl+O expand, Ctrl+T
  * todo, Ctrl+G external editor, Ctrl+R history search, Ctrl+V clipboard,
  * Ctrl+Enter queue, Enter submit, Esc cancel, Shift+Tab permission,
  * Alt+Up dequeue, Alt+T thinking, Alt+K dismiss, Ctrl+End jump latest).

@@ -17,7 +17,7 @@ import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TranscriptFolder, windowMessages } from '../src/transcript.ts'
-import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
+import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth, type StreamingToolPreview } from '../src/tui-app.ts'
 import type { ToolPresenter } from '../src/present.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -113,8 +113,8 @@ function click(vt: VirtualTerminal, x: number, y: number): void {
 }
 
 /** Push a folder snapshot into the app (the runner's repaint contract). */
-function show(app: TuiApp, folder: TranscriptFolder): void {
-  app.setTranscript(folder.messages(), folder.turnActivities())
+function show(app: TuiApp, folder: TranscriptFolder, previews?: readonly StreamingToolPreview[]): void {
+  app.setTranscript(folder.messages(), folder.turnActivities(), undefined, previews)
 }
 
 test('Focus ON running: the Thought card is collapsed with previews, the process is hidden, the WorkingIndicator stays', async () => {
@@ -137,6 +137,69 @@ test('Focus ON running: the Thought card is collapsed with previews, the process
   assert.ok(!joined.includes('📖'), `collapsed must hide the tool card:\n${joined}`)
   // The WorkingIndicator (the whale row above the editor) stays — plan §59.
   assert.ok(joined.includes('Working...'), `WorkingIndicator must remain visible:\n${joined}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('Focus collapsed Preparing uses the Tool slot and temporarily overrides the formal tool', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply(runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder, [
+    { callId: 'p-edit', turn: 1, step: 0, index: 0, name: 'edit' },
+    { callId: 'p-bash', turn: 1, step: 0, index: 1, name: 'bash' },
+  ])
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  let joined = view.join('\n')
+  assert.ok(joined.includes('Tool:    Preparing Edit +1'), `Preparing must own the compact Tool slot:\n${joined}`)
+  assert.ok(!joined.includes('Tool:    Read src/transcript.ts'), `the formal Tool slot must be overridden:\n${joined}`)
+  assert.ok(!joined.includes('Preparing Edit...'), `collapsed Focus must not append a standalone preview row:\n${joined}`)
+
+  show(app, folder, [{ callId: 'p-read', turn: 1, step: 0, index: 0, name: 'read' }])
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('Tool:    Preparing Read…'), `the live Tool-slot summary must refresh:\n${joined}`)
+  assert.ok(!joined.includes('Preparing Edit +1'), `the cached previous summary must be replaced:\n${joined}`)
+
+  show(app, folder)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.ok(joined.includes('Tool:    Read src/transcript.ts'), `clearing Preparing must restore the formal Tool slot:\n${joined}`)
+  assert.ok(!joined.includes('Preparing'), `clearing Preparing must remove its presentation:\n${joined}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('Focus expanded places Preparing rows after the process tail and before the final assistant', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply([...runningTurn(0), ...settleEvents(0)])
+  app.setFocusMode(true)
+  show(app, folder, [
+    { callId: 'p-bash', turn: 1, step: 0, index: 1, name: 'bash' },
+    { callId: 'p-edit', turn: 1, step: 0, index: 0, name: 'edit' },
+  ])
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const headerRow = findRow(vt.getViewport(), '🐋 Thought')
+  assert.ok(headerRow >= 0, `collapsed Thought missing:\n${vt.getViewport().join('\n')}`)
+  click(vt, 3, headerRow + 1)
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const joined = view.join('\n')
+  const processRow = findRow(view, 'Read src/transcript.ts')
+  const editRow = findRow(view, 'Preparing Edit...')
+  const bashRow = findRow(view, 'Preparing Bash...')
+  const finalRow = findRow(view, 'The transcript folds events incrementally.')
+  assert.ok(joined.includes('🐳 Thought'), `expanded Thought missing:\n${joined}`)
+  assert.ok(processRow >= 0 && editRow >= 0 && bashRow >= 0 && finalRow >= 0, `expanded ordering rows missing:\n${joined}`)
+  assert.ok(processRow < editRow && editRow < bashRow && bashRow < finalRow, `Preparing rows must be index ordered at the process tail:\n${joined}`)
+  assert.equal((joined.match(/Preparing (?:Edit|Bash)\.\.\./g) ?? []).length, 2, `each preview should render once:\n${joined}`)
+  assert.ok(!joined.includes('Tool:    Preparing'), `expanded Focus must not use the compact Preparing Tool slot:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })

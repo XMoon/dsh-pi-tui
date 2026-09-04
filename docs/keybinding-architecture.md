@@ -167,9 +167,9 @@ configurable action first (plan §3.3).
     strings across ALL quote styles (single/double/backtick, either
     casing) and new `matchesKey(data, 'ctrl+…'/'alt+…'/'shift+…')`
     chords in `src/tui-app.ts`, with a documented allowlist for the
-    sanctioned seams (read-only viewer guard, Ctrl+C exit-chord
-    discriminator, approval dialog keys, replacement-editor Enter seams,
-    the effective-submit Shift+Enter exclusion).
+    sanctioned seams (read-only viewer guard, the Ctrl+C clear-draft
+    semantic discriminator, approval dialog keys, replacement-editor Enter
+    seams, the effective-submit Shift+Enter exclusion).
 
 ## User configuration
 
@@ -292,12 +292,18 @@ the user's live bindings:
 - **The single source of truth for DEFAULT keys is `definitions.ts`**
   (plus the `RESERVED_HOST_KEYS` inventory in keybinding-registry.ts).
   `src/tui-app.ts` and `src/index.ts` carry a header note pointing here.
+- **Keyboard exit requests use same-key confirmation.** Every effective exit
+  request that reaches the Host — including full `<leader>X` sequences — arms
+  its own 1.5-second window and must be repeated with the same trigger; a
+  different exit key replaces the armed trigger. The default Ctrl+D remains
+  editor-owned while the visible editor has content. The footer renders the
+  effective trigger label dynamically.
 - **User-facing strings derive key labels from the keymap**
   (`keyHint()` / `keysFor()` — e.g. the guard notices and the `/settings`
   row descriptions). A remap updates the copy automatically; a disabled
   action shows a neutral fallback.
 - **Comments** may name a key only when the SEMANTICS are key-specific
-  (the Ctrl+C clear-then-exit chord, the double-Esc window, the
+  (Ctrl+C's clear-draft behavior, the double-Esc window, the
   read-only viewer's fixed Esc/Ctrl+O policy, the search overlay's fixed
   keys). Every other mention is shorthand for the default binding and
   must not be relied on as the live binding.
@@ -316,7 +322,7 @@ revision, leader fall-through, search-toggle effective keys, the
 (editor sync + cross-instance isolation + safe mode + leader-only/
 conflict fail-soft), action-driven host reservation, leader-prefix
 collision, host/plugin rule layering, the fixed viewer Esc close, the
-armed exit-chord copy, and the effective read-model (no fabricated
+armed same-key exit-confirmation copy, and the effective read-model (no fabricated
 fallback, no dead leader advertisement). The final round was accepted.
 This doc records the CONTRACT, not the review log. The convergence pass
 then re-derived the architecture from first principles and is what the

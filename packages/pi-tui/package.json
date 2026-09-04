@@ -10,7 +10,7 @@
 		"type": "git",
 		"url": "git+https://github.com/XMoon/dsh-pi-tui.git",
 		"directory": "packages/pi-tui",
-		"note": "vendored snapshot of @earendil-works/pi-tui at v0.84.4 (commit b79e4cc834970cca69daebffab7df1da7d1e52c4, see UPSTREAM.json); carries the local divergences listed in packages/pi-tui/DIVERGENCES.md (re-verify all on every re-vendor)"
+		"note": "vendored snapshot of @earendil-works/pi-tui at v0.84.4 (see UPSTREAM.json); carries the structured local divergence ledger in packages/pi-tui/vendor-divergences.json and its generated DIVERGENCES.md report (re-verify all on every re-vendor)"
 	},
 	"keywords": [
 		"tui",
@@ -39,7 +39,7 @@
 	"scripts": {
 		"build": "tsdown",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
-		"test": "node --test test/*.test.ts",
+		"test": "tsc --noEmit --target ES2024 --lib ESNext --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --strict --isolatedModules --verbatimModuleSyntax --skipLibCheck --types node test/protected-autocomplete-compile.ts && node --test test/*.test.ts",
 		"clean": "rm -rf dist"
 	},
 	"dependencies": {

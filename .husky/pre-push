@@ -1,7 +1,7 @@
 # Pre-push gate:
 #   - branch pushes: skipped; CI is authoritative.
 #   - release tags (refs/tags/v* and refs/tags/next-v*): run the FULL
-#     CI-equivalent verification (source checks + audit + pack with every
+#     CI-equivalent verification (divergence ledger/vendor audit + pack with every
 #     postpack smoke). A failed CI round-trip costs ~5 minutes, and some
 #     failures are only visible in the PACKED artifact (the declaration-leak
 #     gate, tarball smokes) — the settleCompactionSurface leak was exactly

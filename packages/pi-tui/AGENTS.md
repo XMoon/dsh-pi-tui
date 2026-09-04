@@ -2,24 +2,53 @@
 
 `packages/pi-tui` is a vendored copy of pi-tui from the upstream pi-mono
 project, pinned to Earendil `v0.84.4` (see `UPSTREAM.json` — the single
-source of truth for the baseline; do not copy the version/commit into other
-docs). It is no longer patched via pnpm patches — all local fixes are applied
-directly to the source. The differential-rendering behavior in `src/tui.ts`
-matches upstream; the only remaining divergences are listed in
-`DIVERGENCES.md`.
+source of truth for the baseline; generated reports may repeat the pin but
+must not become a second hand-maintained source). It is no longer patched via
+pnpm patches — all local fixes are applied directly to the source. The differential-rendering behavior in `src/tui.ts`
+matches upstream; the schema-v2 `vendor-divergences.json` is the authoritative
+inventory, and `DIVERGENCES.md` is the generated human report.
 
 ## Hard rules
 
+- **Read-only by default.** Ordinary dsh-pi-tui feature/bug work must not
+  modify this vendored fork unless the requested behavior cannot be
+  implemented correctly through the root/public surface.
+
+- **No convenience divergences.** A fork edit must be required by the current
+  task, checked against the existing X### ledger first, and have explicit
+  divergence ownership plus a guarding regression test. Cleaner, smaller,
+  more direct, or easier to test is not sufficient justification.
+
 - **Never overwrite this directory wholesale when syncing from upstream.**
-  Each local divergence must be re-verified after a sync; all of them are
-  guarded by tests (see `DIVERGENCES.md`).
-- **Read `DIVERGENCES.md` before editing any file under `src/`.** Every
-  divergence has an ID, category, consumer, upstream status and guarding
+  Each local divergence must be re-verified after a sync; its test and evidence
+  record is listed in the generated `DIVERGENCES.md`.
+- **Read the structured ledger before editing any file under `src/`.**
+  `vendor-divergences.json` is the source of truth and `DIVERGENCES.md` is
+  generated from it. Every record has an ID, status, category, risk, consumer
+  evidence, semantic upstream comparison, retirement conditions, and guarding
   tests. Do not re-add removed kimi-only code; do not delete a hard seam
   without a host-side replacement.
-- **Source ownership:** `src/`, `test/`, `README.md` are upstream-owned
-  (Earendil baseline + re-applied divergences). `package.json`,
-  `tsconfig.json`, `tsdown.config.ts`, `UPSTREAM.json`, `DIVERGENCES.md`,
+- **Run the ledger gates for every re-vendor.** Use
+  `pnpm gate:pi-divergence-ledger`, `pnpm generate:pi-divergences`, and
+  `pnpm gate:pi-vendor-diff --strict`. Never mark a record unused from host
+  grep alone: vendor-internal, inheritance/structural, host,
+  public/extension, behavioral, and test/runtime ownership must all be
+  explicitly audited. `ABSORBED_UPSTREAM` requires semantic `YES`; an
+  `UNKNOWN` comparison cannot retire; `REMOVED_UNUSED` requires empty audited
+  dependency classes plus deletion evidence; and `REDUNDANT_SHIM` requires an
+  atomic replacement mapping and evidence.
+- **Audit snapshots:** `UPSTREAM.json` remains the sole vendored baseline
+  source. `verification.referenceSnapshots` records the immutable sources used
+  during an explicit audit; it does not track repository HEAD. Refresh those
+  snapshots only for re-vendor, divergence re-audit, retirement evaluation, or
+  deliberate upstream-equivalence review. Neither field is a repository-HEAD
+  freshness target; `auditedSourceCommit` identifies the local source snapshot
+  audited in that review.
+- **Source ownership:** `src/` and `test/` are upstream-owned (Earendil
+  baseline + re-applied divergences). `README.md` keeps the upstream content
+  plus the local fork/ledger header, which must be preserved or re-applied
+  after a sync. `package.json`, `tsconfig.json`, `tsdown.config.ts`,
+  `UPSTREAM.json`, `vendor-divergences.json`, `DIVERGENCES.md`, and
   `AGENTS.md` are XMoon-owned package shell — never overwrite them from
   upstream.
 - **Package shell contract:** name stays `@xmoon76/pi-tui`, `private: true`,
@@ -42,6 +71,9 @@ pnpm --dir packages/pi-tui typecheck   # fork typecheck
 pnpm --dir packages/pi-tui test        # fork suite (node --test)
 pnpm --dir packages/pi-tui build       # fork build (dist/index.mjs + dist/index.d.mts)
 pnpm gate:pi-surface-compat            # bundle: component lifecycle compat gate
+pnpm gate:pi-divergence-ledger          # schema, retirement, and generated-report gate
+pnpm generate:pi-divergences             # regenerate DIVERGENCES.md from the JSON ledger
+pnpm gate:pi-vendor-diff --strict       # pinned source coverage, including stale-entry checks
 ```
 
 `gate:pi-surface-compat` is a re-vendor hard gate, not an optional smoke.
@@ -50,14 +82,18 @@ pnpm gate:pi-surface-compat            # bundle: component lifecycle compat gate
 
 1. Read `UPSTREAM.json` for the pinned baseline (repository, package, tag,
    commit).
-2. Fetch the pinned upstream package; copy upstream-owned files
-   (`src/`, `test/`, `README.md`) over the local ones.
-3. Re-apply every `HARD_HOST_API` / `BUGFIX_MISSING_UPSTREAM` divergence
-   from `DIVERGENCES.md` (never wholesale-copy an old local file back).
-4. Re-verify each guarding test; update `DIVERGENCES.md` (a divergence that
-   upstream absorbed becomes `ABSORBED_UPSTREAM`; a dead entry becomes
-   `STALE_LEDGER` and is fixed in place).
-5. Run the hard gates above, then the bundle gates
+2. Fetch the pinned upstream package; copy `src/` and `test/` from the
+   pinned baseline. Merge upstream README content while preserving the local
+   fork/ledger header.
+3. Re-apply each source-active record in
+   `vendor-divergences.json` (never wholesale-copy an old local file back).
+   Historical `ABSORBED_UPSTREAM` and `REMOVED_UNUSED` records stay explicit
+   with evidence but are not re-applied.
+4. Re-verify every dependency class and guarding test. Update the JSON record
+   when upstream absorbs a behavior or a retirement audit changes; then run
+   `pnpm generate:pi-divergences` to refresh the report. Do not hand-edit
+   `DIVERGENCES.md`.
+5. Run the ledger and source hard gates above, then the bundle gates
    (`pnpm build`, `pnpm typecheck`, `pnpm test:bundle`).
 
 ## Testing

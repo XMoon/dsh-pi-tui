@@ -2,11 +2,13 @@
 /**
  * pi-vendor-diff gate: verify the vendored fork's src/ against the PINNED
  * upstream baseline (packages/pi-tui/UPSTREAM.json) and the machine-readable
- * divergence manifest (packages/pi-tui/vendor-divergences.json).
+ * structured divergence ledger (packages/pi-tui/vendor-divergences.json).
  *
  * The gate exists because "docs says only a few divergences" is not the same
  * as "actual source diff": every re-vendor must prove that every local change
- * is accounted for in the ledger, and that the ledger is not stale.
+ * is accounted for in the ledger, and that the source-active ledger is not
+ * stale. Schema-v2 historical records remain in the ledger for audit evidence
+ * but do not count as source coverage unless their status is source-active.
  *
  * Rules:
  *   1. FAIL — a local src file whose blob differs from the pinned upstream
@@ -16,8 +18,12 @@
  *   2. WARN — a manifest entry whose src files ALL match upstream. The
  *      divergence may have been absorbed upstream or accidentally reverted;
  *      the ledger entry is stale. (--strict promotes this to a failure.)
- *   3. WARN — a manifest entry listing a src file that no longer exists
- *      locally. (--strict promotes this to a failure.)
+ *   3. WARN — a source-active manifest entry listing a src file that no
+ *      longer exists locally. (--strict promotes this to a failure.)
+ *   4. Historical records are retained for audit evidence but are excluded
+ *      from file-level source coverage; several share files with active
+ *      divergences, so file-level comparison cannot prove their old hunk is
+ *      present or absent. The structured ledger gate owns their status rules.
  *
  * Upstream resolution (first hit wins):
  *   - $PI_UPSTREAM_REPO — a checkout of the upstream repository
@@ -37,9 +43,47 @@ import { fileURLToPath } from 'node:url'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const FORK_SRC = path.join(ROOT, 'packages', 'pi-tui', 'src')
 const UPSTREAM_JSON_PATH = path.join(ROOT, 'packages', 'pi-tui', 'UPSTREAM.json')
-const MANIFEST_PATH = path.join(ROOT, 'packages', 'pi-tui', 'vendor-divergences.json')
+const MANIFEST_PATH = process.env.PI_VENDOR_MANIFEST
+  ? path.resolve(process.env.PI_VENDOR_MANIFEST)
+  : path.join(ROOT, 'packages', 'pi-tui', 'vendor-divergences.json')
 
 const STRICT = process.argv.includes('--strict')
+const SOURCE_ACTIVE_STATUSES = new Set(['ACTIVE', 'RETIREMENT_CANDIDATE', 'REDUNDANT_SHIM'])
+const SCHEMA_V2_STATUSES = new Set([
+  ...SOURCE_ACTIVE_STATUSES,
+  'ABSORBED_UPSTREAM',
+  'MOVED_TO_HOST',
+  'SUPERSEDED',
+  'REMOVED_UNUSED',
+])
+
+/** Read both the schema-v2 ledger and the legacy flat shape while a checkout
+ * is being migrated. The committed manifest is schema v2; accepting the old
+ * shape here keeps the diff gate useful for a partial local re-vendor and
+ * gives a clearer failure from the dedicated ledger gate. */
+function manifestEntries(manifest) {
+  if (manifest?.schemaVersion === 2) {
+    if (manifest.divergences === null || typeof manifest.divergences !== 'object' || Array.isArray(manifest.divergences)) {
+      throw new Error(`manifest ${path.relative(ROOT, MANIFEST_PATH)} has no schema-v2 divergences object`)
+    }
+    return Object.entries(manifest.divergences).map(([id, entry]) => {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry) || !Array.isArray(entry.files) || entry.files.length === 0 || !entry.files.every((file) => typeof file === 'string' && file.trim().length > 0)) {
+        throw new Error(`manifest entry ${id} must contain a non-empty files array`)
+      }
+      if (typeof entry.status !== 'string' || !SCHEMA_V2_STATUSES.has(entry.status)) {
+        throw new Error(`manifest entry ${id} must contain a supported schema-v2 status`)
+      }
+      return [id, entry.files, entry.status]
+    })
+  }
+  return Object.entries(manifest ?? {})
+    .filter(([id]) => !id.startsWith('_'))
+    .map(([id, files]) => [id, files, 'ACTIVE'])
+}
+
+function sourceActive(status) {
+  return SOURCE_ACTIVE_STATUSES.has(status)
+}
 
 /** Recursively list *.ts files under a directory, relative to it. */
 function listTsFiles(dir) {
@@ -80,8 +124,8 @@ function upstreamBlob(repo, packageDir, commit, file, isGit) {
 function resolveUpstream() {
   const upstream = JSON.parse(readFileSync(UPSTREAM_JSON_PATH, 'utf8'))
   const { repository, package: packageDir, commit } = upstream
-  if (typeof repository !== 'string' || typeof packageDir !== 'string' || typeof commit !== 'string') {
-    throw new Error(`malformed ${path.relative(ROOT, UPSTREAM_JSON_PATH)}: need repository/package/commit`)
+  if (typeof repository !== 'string' || typeof packageDir !== 'string' || !/^[0-9a-f]{40}$/u.test(commit ?? '')) {
+    throw new Error(`malformed ${path.relative(ROOT, UPSTREAM_JSON_PATH)}: need repository/package and a full 40-character commit SHA`)
   }
   const candidates = []
   if (process.env.PI_UPSTREAM_REPO) candidates.push(process.env.PI_UPSTREAM_REPO)
@@ -147,15 +191,16 @@ function main() {
   const upstream = resolveUpstream()
   try {
     const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8'))
-    const entries = Object.entries(manifest).filter(([id]) => !id.startsWith('_'))
+    const entries = manifestEntries(manifest)
     if (entries.length === 0) throw new Error(`manifest ${path.relative(ROOT, MANIFEST_PATH)} has no entries`)
+    const sourceEntries = entries.filter(([, , status]) => sourceActive(status))
 
-    // Reverse index: src file -> divergence ids that cover it. Manifest
-    // paths carry the `src/` prefix (matching DIVERGENCES.md); the local
-    // walk yields paths relative to the fork's src/ root, so normalize.
+    // Reverse index: src file -> source-active divergence ids that cover it.
+    // Manifest paths carry the `src/` prefix (matching DIVERGENCES.md); the
+    // local walk yields paths relative to the fork's src/ root, so normalize.
     const normalize = (file) => (file.startsWith('src/') ? file.slice(4) : file)
     const coveredBy = new Map()
-    for (const [id, files] of entries) {
+    for (const [id, files] of sourceEntries) {
       for (const file of files) {
         if (!file.startsWith('src/')) continue // non-src paths are not gated
         const list = coveredBy.get(normalize(file)) ?? []
@@ -181,7 +226,7 @@ function main() {
       failures.push(`UNACCOUNTED divergence: ${file} differs from upstream ${upstream.commit} but no manifest entry covers it`)
     }
 
-    for (const [id, files] of entries) {
+    for (const [id, files] of sourceEntries) {
       const srcFiles = files.filter((file) => file.startsWith('src/')).map(normalize)
       if (srcFiles.length === 0) continue
       const allMatch = srcFiles.every((file) => !changed.includes(file))

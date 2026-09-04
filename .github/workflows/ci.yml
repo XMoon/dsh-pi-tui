@@ -257,6 +257,9 @@ jobs:
       - name: Test documentation
         run: pnpm test:docs
 
+      - name: Validate installation documentation
+        run: pnpm gate:installation-doc
+
       # Development-tooling suite: dev-environment fixtures, pre-push policy,
       # DSH distribution gates. Kept OUT of prepack so the artifact lifecycle
       # never depends on the developer git/CI environment.
@@ -269,11 +272,22 @@ jobs:
       - name: Pi component compatibility contract
         run: pnpm gate:pi-surface-compat
 
+      # The JSON ledger is authoritative; this step proves the checked-in
+      # human report is deterministic and has not been hand-edited.
+      - name: Generate vendored divergence report
+        run: |
+          pnpm generate:pi-divergences
+          git diff --exit-code -- packages/pi-tui/DIVERGENCES.md
+          git diff --check -- packages/pi-tui/DIVERGENCES.md
+
+      - name: Validate vendored divergence ledger
+        run: pnpm gate:pi-divergence-ledger
+
       # Vendored-fork divergence gate: every local src change must be
       # covered by vendor-divergences.json against the pinned upstream
       # blobs (resolved via the codeload tarball fallback on CI).
       - name: Vendored fork divergence gate
-        run: pnpm gate:pi-vendor-diff
+        run: pnpm gate:pi-vendor-diff --strict
 
       - name: Verify naming and packaging contracts
         run: node scripts/naming-gate.mjs

@@ -16,14 +16,14 @@ profile：
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.2-rc.1
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.0
 dsh --profile pi-tui
 ```
 
 需要保留 DSH `0.1.1-rc.2` 的用户应改用 `@xmoon76/dsh-pi-tui@0.3`；DSH
 `0.1.2-alpha.2`/`alpha.3` 用户应固定 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`，
 alpha.4/alpha.5 用户应固定 `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`。完整版本
-矩阵和更新/卸载命令见 README 的「安装」。
+矩阵和更新/卸载命令见 README 的「安装到 DSH Profile」。
 
 ### 新增
 
@@ -117,13 +117,13 @@ alpha.4/alpha.5 用户应固定 `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`。完整版�
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.2-alpha.5
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.0-alpha.2
 dsh --profile pi-tui
 ```
 
 需要保留 DSH `0.1.1-rc.2` 的用户应改用 `@xmoon76/dsh-pi-tui@0.3`；DSH
 `0.1.2-alpha.2`/`alpha.3` 用户应固定 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`。
-完整版本矩阵和更新/卸载命令见 README 的「安装」。
+完整版本矩阵和更新/卸载命令见 README 的「安装到 DSH Profile」。
 
 ### 新增
 
@@ -186,7 +186,7 @@ dsh --profile pi-tui
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.2-alpha.3
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.0-alpha.1
 dsh --profile pi-tui
 ```
 

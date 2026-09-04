@@ -278,6 +278,7 @@ function main() {
     check('repair-session.mjs included', has('scripts/repair-session.mjs'))
     check('repair-core.mjs included', has('scripts/repair-core.mjs'))
     check('README included', has('README.md'))
+    check('English README included', has('README.en.md'))
     const leaks = files.filter(name => name.includes('test/')
       || name.endsWith('.bak')
       || name.endsWith('.tgz')

@@ -46,8 +46,11 @@ export type LeaderFeedResult =
 export interface LeaderMachineCallbacks {
   /** A leader sequence completed (the app dispatches the action).
    * Returns whether the dispatch consumed the key (false → the key must
-   * fall through, mirroring the direct-key resolver contract). */
-  readonly onActivate: (action: string) => boolean
+   * fall through, mirroring the direct-key resolver contract). The
+   * completing key is passed separately so actions whose semantics depend on
+   * the effective key (such as exit confirmation) keep the same identity as
+   * a direct binding. */
+  readonly onActivate: (action: string, key: import('./types.ts').LeaderBinding['key']) => boolean
   /** The pending state changed (the app repaints the which-key hint). */
   readonly onStateChange: () => void
 }
@@ -87,6 +90,10 @@ export class LeaderStateMachine {
     if (this.disposed) return { kind: 'passed' }
     const leaderKey = this.config.key
     if (leaderKey === undefined) return { kind: 'passed' }
+    // Protocol artifacts are inert in both idle and pending states. In idle,
+    // this guard must precede leader matching: Kitty release/repeat data can
+    // otherwise look like a fresh press of the configured leader key.
+    if (isKeyRelease(data) || isKeyRepeat(data)) return { kind: 'consumed' }
     if (this.state === 'idle') {
       if (matchesKey(data, leaderKey)) {
         this.enterPending()
@@ -94,9 +101,6 @@ export class LeaderStateMachine {
       }
       return { kind: 'passed' }
     }
-    // Pending: protocol artifacts are ignored (a release of the leader key
-    // must not cancel the sequence it just armed).
-    if (isKeyRelease(data) || isKeyRepeat(data)) return { kind: 'consumed' }
     // Paste/typing isolation: a multi-char chunk is not a single key —
     // cancel the pending state and pass the text through untouched.
     if (parseKey(data) === undefined) {
@@ -112,7 +116,7 @@ export class LeaderStateMachine {
     for (const binding of this.bindings) {
       if (matchesKey(data, binding.key)) {
         this.cancel()
-        const consumed = this.callbacks.onActivate(binding.action)
+        const consumed = this.callbacks.onActivate(binding.action, binding.key)
         return { kind: 'activated', action: binding.action, consumed }
       }
     }

@@ -21,7 +21,7 @@ test('runtime boundary accepts the friendly advisory notice', () => {
     'dsh-pi-tui v0.4.0 requires DeepSeek Harness 0.1.2-alpha.2 or later,',
     'but this installation is running dsh 0.1.1-rc.2.',
     'npm install -g @deepseek-ai/dsh@0.1.2-rc.1',
-    'npm install -g @xmoon76/dsh-pi-tui@0.3',
+    'dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3',
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
   assert.doesNotThrow(() => assertBoundary(output, 1, '0.1.1-rc.2'))
@@ -32,7 +32,7 @@ test('runtime boundary rejects the previous alpha.1 floor with the same advisory
     'dsh-pi-tui v0.4.0 requires DeepSeek Harness 0.1.2-alpha.2 or later,',
     'but this installation is running dsh 0.1.2-alpha.1.',
     'npm install -g @deepseek-ai/dsh@0.1.2-rc.1',
-    'npm install -g @xmoon76/dsh-pi-tui@0.3',
+    'dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3',
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
   assert.doesNotThrow(() => assertBoundary(output, 1, '0.1.2-alpha.1'))
@@ -43,7 +43,7 @@ test('runtime boundary rejects the alpha.2/alpha.3 baseline with the 0.4-alpha f
     'dsh-pi-tui v0.4.0 requires DeepSeek Harness 0.1.2-alpha.4 or later,',
     'but this installation is running dsh 0.1.2-alpha.3.',
     'npm install -g @deepseek-ai/dsh@0.1.2-rc.1',
-    'npm install -g @xmoon76/dsh-pi-tui@0.4.0-alpha.1',
+    'dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.0-alpha.1',
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
   assert.doesNotThrow(() => assertBoundary(output, 1, '0.1.2-alpha.3'))
@@ -54,7 +54,7 @@ test('runtime boundary rejects the alpha.4/alpha.5 baseline with the previous 0.
     'dsh-pi-tui v0.4.0 requires DeepSeek Harness 0.1.2-rc.1 or later,',
     'but this installation is running dsh 0.1.2-alpha.5.',
     'npm install -g @deepseek-ai/dsh@0.1.2-rc.1',
-    'npm install -g @xmoon76/dsh-pi-tui@0.4.0-alpha.2',
+    'dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.0-alpha.2',
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
   assert.doesNotThrow(() => assertBoundary(output, 1, '0.1.2-alpha.5'))

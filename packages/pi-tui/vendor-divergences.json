@@ -1,45 +1,1697 @@
 {
-  "_doc": "Machine-readable mirror of DIVERGENCES.md (Earendil v0.84.4 baseline). Each entry maps a divergence id to the local src/ files it changes. The vendor-diff gate (pnpm gate:pi-vendor-diff) fails when a local src file differs from the pinned upstream blob without being covered here, and warns when an entry's files all match upstream (stale ledger). Only src/ paths are gated; non-src paths (e.g. tsdown.config.ts) are recorded for the ledger but not compared. Entries whose divergence was REMOVED/ABSORBED (X003, X013, X015, X017, X026) are intentionally absent — their files must match upstream. Keep this file in sync with DIVERGENCES.md on every re-vendor.",
-  "X001": ["src/components/select-list.ts"],
-  "X002": ["src/components/select-list.ts"],
-  "X004A": ["src/components/editor.ts"],
-  "X004B": ["src/components/editor.ts", "src/undo-stack.ts"],
-  "X005": ["src/components/editor.ts"],
-  "X006": ["src/word-navigation.ts"],
-  "X007": ["src/tui.ts", "src/components/scroll-view.ts", "src/components/text.ts", "src/components/loader.ts", "src/components/box.ts", "src/components/settings-list.ts", "src/components/stack.ts"],
-  "X008": ["src/tui.ts"],
-  "X009": ["src/tui-main-screen.ts"],
-  "X010": ["src/stdin-buffer.ts"],
-  "X011": ["src/components/input.ts"],
-  "X012": ["src/fuzzy.ts"],
-  "X014": ["src/layout.ts"],
-  "X016": ["src/terminal.ts"],
-  "X018": ["src/tui-alt-screen.ts"],
-  "X019": ["src/components/text.ts"],
-  "X020": ["src/components/editor.ts"],
-  "X021": ["src/utils.ts"],
-  "X022": ["src/components/editor.ts"],
-  "X023": ["src/components/editor.ts"],
-  "X024": ["src/tui-alt-screen.ts"],
-  "X025": ["tsdown.config.ts", "src/native-module-path.ts"],
-  "X027": ["src/autocomplete.ts"],
-  "X028": ["src/tui-alt-screen.ts", "src/components/scroll-view.ts"],
-  "X029": ["src/components/editor.ts"],
-  "X030": ["src/index.ts"],
-  "X031": ["src/components/markdown.ts"],
-  "X032": ["src/tui.ts"],
-  "X033": ["src/tui-main-screen.ts"],
-  "X034": ["src/components/editor.ts"],
-  "X035": ["src/tui-main-screen.ts", "src/utils.ts", "src/tui.ts"],
-  "X036": ["src/tui-alt-screen.ts"],
-  "X037": ["src/keybindings.ts", "src/components/editor.ts"],
-  "X038": ["src/paste-burst.ts", "src/components/editor.ts"],
-  "X039": ["src/utils.ts"],
-  "X040": ["src/components/input.ts"],
-  "X041": ["src/components/select-list.ts"],
-  "X042": ["src/components/select-list.ts", "src/components/settings-list.ts"],
-  "X043": ["src/tui-alt-screen.ts"],
-  "X044": ["src/components/editor.ts"],
-  "X045": ["src/components/editor.ts"],
-  "X046": ["src/tui.ts"]
+  "schemaVersion": 2,
+  "baseline": {
+    "repository": "earendil-works/pi",
+    "package": "packages/tui",
+    "tag": "v0.84.4",
+    "commit": "b79e4cc834970cca69daebffab7df1da7d1e52c4"
+  },
+  "verification": {
+    "auditedAt": "2026-09-03",
+    "branch": "feat/vendor-divergence-ledger-hardening",
+    "auditedSourceCommit": "f455abd18dfeb5758d0d8b5cf77013562d1f89d6",
+    "referenceSnapshots": {
+      "upstream": {
+        "repository": "earendil-works/pi",
+        "commit": "b8b873b9872db04a938fb4357b5e8e824ddc051c"
+      },
+      "kimi": {
+        "repository": "MoonshotAI/kimi-code",
+        "commit": "9e881528a89945a373002b0b229f91735e8f2c4f"
+      }
+    },
+    "method": [
+      "Compared every local packages/pi-tui/src file with the pinned upstream blob.",
+      "Audited vendor-internal, inheritance/structural, host, public/extension, behavioral, and test/runtime ownership evidence.",
+      "Compared recorded Pi and Kimi reference snapshots for semantic comparison; issue and PR references are background only.",
+      "Ran focused deletion experiments for X019, X030, X037, X038, X043, and X044; existing checks caught the first five, while X044 required a compile-only subclass fixture.",
+      "Historical removed and absorbed records were retained as explicit records instead of disappearing from the manifest."
+    ]
+  },
+  "categoryDefinitions": {
+    "HARD_HOST_API": "A vendor API required by host routing, lifecycle, terminal, or process ownership.",
+    "PUBLIC_COMPONENT_CONTRACT": "A component method or shape observable by package consumers or host adapters.",
+    "LOCAL_UX": "A product interaction behavior retained for DSH UX rather than generic upstream parity.",
+    "BUGFIX_MISSING_UPSTREAM": "A correctness or robustness fix absent from the pinned upstream behavior.",
+    "PERF_HOST_DEPENDENT": "A measured render, layout, allocation, or workload performance contract.",
+    "PACKAGING": "A package shell, build, export, native-module, or artifact-resolution contract."
+  },
+  "gatePolicy": {
+    "sourceCoverage": "Every changed packages/pi-tui/src TypeScript file must be covered by a source-active ledger record.",
+    "referenceSnapshotPolicy": "Reference snapshots and auditedSourceCommit are audit evidence, not continuous views of repository HEAD. Refresh them only during an explicit re-vendor, divergence re-audit, retirement evaluation, or upstream-equivalence review.",
+    "staleActive": "Source-active records whose listed source files all match the pinned baseline warn by default and fail in strict mode.",
+    "historicalRecords": "ABSORBED_UPSTREAM, MOVED_TO_HOST, SUPERSEDED, and REMOVED_UNUSED records remain auditable but do not provide source coverage; REDUNDANT_SHIM remains source-active until its atomic replacement is proven.",
+    "packagingPaths": "Non-src paths such as X025 remain registered in the ledger and are ignored by the src-only diff walk.",
+    "upstreamResolution": ["PI_UPSTREAM_REPO checkout containing the pinned commit", "known local ~/project/pi checkout", "codeload tarball fallback via PI_UPSTREAM_TARBALL or PI_UPSTREAM_CURL"]
+  },
+  "relocationAudit": [
+    {"decision": "DROPPED", "records": ["X013"], "reason": "No known in-repo vendor, host, public, or behavioral consumer remains; external use of this private package behavior is unverified. The host busy indicator is WorkingIndicator."},
+    {"decision": "DELIBERATELY_KEPT", "records": ["X030"], "reason": "A host copy of decodePrintableKey would duplicate the implementation; the package exports map exposes only the root entry."},
+    {"decision": "DEFERRED_HOST_MIGRATION", "records": ["X001", "X002", "X041", "X042"], "reason": "A host SearchablePicker could replace the extended list, but only after mapping search, grouping, dynamic rows, query state, focus, and row-budget semantics."},
+    {"decision": "NOT_MOVABLE", "records": ["X004A", "X004B", "X005", "X006", "X007", "X008", "X009", "X010", "X011", "X012", "X014", "X016", "X018", "X019", "X020", "X021", "X022", "X023", "X024", "X025", "X027", "X028", "X029", "X031", "X032", "X033", "X034", "X035", "X036", "X037", "X038", "X039", "X040", "X043", "X044", "X045", "X046", "X047"], "reason": "The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary."},
+    {"decision": "UPSTREAM_LEVER", "records": ["X005", "X006", "X007", "X008", "X012", "X014", "X016", "X021", "X033", "X035"], "reason": "Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence."}
+  ],
+  "removedLegacy": [
+    {"surface": "inlineSlashTrigger and inline-slash helpers", "decision": "PRODUCT_DECISION", "reason": "The host uses explicit, context-gated Tab completion; the old opt-in inline dropdown is not part of DSH UX."},
+    {"surface": "setHistoryFilter", "decision": "PRODUCT_DECISION", "reason": "DSH recall is mode-agnostic by design; shell-mode history filtering is a separate parity feature."},
+    {"surface": "setText preservePasteRegistry option", "decision": "SUPERSEDED", "reason": "X023 canonical staging prunes surviving markers and releases vanished entries without a manual opt-in flag."},
+    {"surface": "AutocompleteProvider additionalBasePaths", "decision": "NO_HOST_CONSUMER", "reason": "MentionProvider owns multi-root fan-out through HostFilePort rather than the old provider option."},
+    {"surface": "inlineSkill Enter carve-out", "decision": "PRODUCT_DECISION", "reason": "DSH has no mid-prompt inline-skill token; slash commands submit on Enter."},
+    {"surface": "getLayoutRoot", "decision": "NO_CONSUMER", "reason": "No vendor or host call path was found."},
+    {"surface": "WIDTH_CACHE_SIZE 512", "decision": "RESTORED_AS_X039", "reason": "Retained as active X039 pending an isolated reproducible 4096-versus-512 CJK burst benchmark; the current X035 benchmark's incidental CJK lines do not establish a benefit."}
+  ],
+  "divergences": {
+    "X001": {
+      "title": "SelectList searchable/grouped picker",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API", "PUBLIC_COMPONENT_CONTRACT"],
+      "risk": "HIGH",
+      "files": ["src/components/select-list.ts"],
+      "why": "The host needs searchable, grouped, pageable, and responsively bounded pickers while a picker is live. Upstream 0.84.4 only provides the basic value list and cannot preserve this host state.",
+      "changedSurface": ["SelectListOptions search/header/no-match settings", "SelectItem groups and group-header rendering", "substring filtering, PageUp/PageDown, setMaxRows, and zero-match navigation"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["SelectList filtering, selection movement, group headers, and render budget share the active query and visible-window state."], "notes": "The search Input and list navigation are coupled inside the component."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No subclass or super edge for the searchable semantics was found; Focusable forwarding is recorded separately under X042."},
+        "host": {"audited": true, "items": ["src/tui-app.ts openPicker and categorized picker rebuild", "src/commands.ts session picker plus login/rewind SelectList callsites", "advanced ui.select picker adapter"], "notes": "Collectively, the actual SelectList callers exercise query, grouping, dynamic rows, and row budgets: openPicker/session paths supply the extended dynamic behavior, while advanced ui.select supplies the public picker adapter without a mutable query/setItems handle. The model picker in src/model-menu.ts and footer/configurator.ts are host-owned SettingsList/Input flows, not X001 consumers. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics."},
+        "publicExtension": {"audited": true, "items": ["Advanced ui.select and picker adapter contracts expose the searchable picker behavior to host-owned integrations."], "notes": "The package root exports SelectList as a public component."},
+        "behavioral": {"audited": true, "items": ["query preservation across setItems and category changes", "group headers and descriptions consume the same row budget", "zero-result navigation is a no-op while search input remains usable", "vendor Editor autocomplete uses only the upstream-compatible basic SelectList shape and does not prove dependency on search/group/setItems/filter semantics"], "notes": "A type-compatible upstream list would still change host picker navigation and query behavior, even though the vendor Editor's basic autocomplete path would remain type-compatible."}
+      },
+      "tests": ["packages/pi-tui/test/select-list.test.ts: search, groups, paging, setFilter, and zero-match navigation", "test/session-picker-loading.test.ts and picker integration coverage", "test/session-categories.test.ts: categorized SelectList query carry", "test/sessions.test.ts: PickerHandle.setItems and initialQuery", "test/advanced-broker.test.ts and test/advanced-cordis-lifecycle.test.ts: ui.select picker lifecycle"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/select-list.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference SelectList do not provide the host's combined search, grouping, dynamic setItems, and row-budget contract; Kimi's SearchableList is a separate state-object design, not an upstream equivalent."
+      },
+      "retirement": {
+        "conditions": ["Provide a semantically equivalent upstream searchable/grouped list, or complete a host-owned picker migration covering query, grouping, dynamic rows, selection identity, paging, and advanced ui.select behavior.", "Run host picker, extension surface, narrow-budget, and zero-result interaction tests after the migration."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed in the audited checkout that the heavy consumers are host picker stacks rather than the vendor Editor's upstream-compatible autocomplete SelectList construction. No deletion experiment was run."
+      }
+    },
+    "X002": {
+      "title": "SelectList setItems selection/search preservation",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "HIGH",
+      "files": ["src/components/select-list.ts"],
+      "why": "Open host pickers receive asynchronously enriched rows and must refresh without losing the active query or a surviving selected value.",
+      "changedSurface": ["setItems(items) replaces rows while preserving a surviving selection by value", "setItems reapplies the canonical active filter and recalculates the visible window"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["setItems calls the same filter and selection-window logic used by keyboard navigation."], "notes": "The replacement operation is not an isolated setter."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No inheritance edge was found for setItems."},
+        "host": {"audited": true, "items": ["src/tui-app.ts session and categorized SelectList refreshes", "src/commands.ts asynchronous session-title enrichment"], "notes": "Host updates session/category rows while overlays remain mounted; the model picker is SettingsList-owned and is not counted as an X002 SelectList consumer."},
+        "publicExtension": {"audited": true, "items": ["SelectList.setItems is a public component method exported by @xmoon76/pi-tui."], "notes": "The host PickerHandle dynamic-row API lives in src/tui-app.ts, not the extension AdvancedSelectOptions contract; the public package method remains observable independently."},
+        "behavioral": {"audited": true, "items": ["selection-by-value survives row enrichment", "active query survives replacement", "zero-match and group-header layout remain bounded"], "notes": "Restoring upstream loses state during a live refresh even when types still pass."}
+      },
+      "tests": ["packages/pi-tui/test/select-list.test.ts: setItems and selected-by-value/search preservation", "test/session-picker-loading.test.ts: asynchronous title refresh/query preservation", "test/sessions.test.ts: setItems with default selection", "Missing host moved-selection refresh regression; current host tests do not exercise a non-default selected row during enrichment"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/select-list.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream 0.84.4 has no setItems operation with query and selection preservation; the audited upstream reference list still does not provide this contract."
+      },
+      "retirement": {
+        "conditions": ["Retire only together with X001/X041 after a replacement preserves query, selection identity, row enrichment, grouping, and all picker interaction tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed that host refreshes call setItems while the picker is mounted. Kept separate from X001 in the ledger because dynamic replacement is an independently breakable behavior."
+      }
+    },
+    "X003": {
+      "title": "Editor multi-line insert cursor",
+      "status": "REMOVED_UNUSED",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/components/editor.ts"],
+      "why": "The former patch wrote a grapheme count into a code-unit cursor field. That could split supplementary-plane graphemes on the next edit, so the pinned upstream code-unit end is the correct behavior.",
+      "changedSurface": ["Former multi-line insert cursor assignment; no local patch remains"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": [], "notes": "The former assignment is absent; editor cursor state uses the upstream code-unit representation."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No structural consumer of the removed assignment exists."},
+        "host": {"audited": true, "items": [], "notes": "Host uses the surviving Editor cursor contract, not the removed behavior."},
+        "publicExtension": {"audited": true, "items": [], "notes": "No public or extension contract requires the defective cursor count."},
+        "behavioral": {"audited": true, "items": [], "notes": "The old behavior was document-corrupting rather than a supported behavior."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts: supplementary-plane and ZWJ cursor preservation after multi-line insert"],
+      "upstream": {
+        "equivalence": "YES",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "The upstream code-unit cursor assignment is the safe behavior; reapplying the old grapheme-count patch is not semantically equivalent to the editor's cursor representation."
+      },
+      "retirement": {
+        "conditions": ["Keep the upstream implementation and retain the supplementary-plane regression test; never reintroduce the old patch during a re-vendor."],
+        "replacementMapping": [],
+        "evidence": ["The pinned baseline and the audited reference snapshots retain the upstream code-unit assignment.", "Deletion experiment was the 2026-09 re-vendor itself: the ZWJ regression passes with the patch absent.", "Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record retired."]
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Historical removed record rechecked. The absence is intentional and protects the editor's code-unit cursor invariant."
+      }
+    },
+    "X004A": {
+      "title": "Editor bounded paste registry",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/components/editor.ts"],
+      "why": "Large bracketed pastes must not retain an unbounded duplicate registry in memory. Pastes beyond 256 KiB are inserted inline instead of adding another expandable marker.",
+      "changedSurface": ["MAX_PASTE_STORED_CHARS bounded paste-marker admission", "oversize paste fallback inserts ordinary multiline text"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Editor insertion, marker expansion, deletion, clear, and registry pruning share paste-entry ownership."], "notes": "The registry is editor-internal state with multiple mutation paths."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No subclass or override edge was found for registry admission."},
+        "host": {"audited": true, "items": ["Host editor receives terminal paste data through the Editor paste path."], "notes": "No host wrapper can enforce the marker memory bound after the fork accepts the paste."},
+        "publicExtension": {"audited": true, "items": ["Public Editor paste behavior and expanded-text access depend on bounded marker semantics."], "notes": "The registry is not directly exposed, but its expansion behavior is."},
+        "behavioral": {"audited": true, "items": ["oversize (>256 KiB) marker-registry storage and admission remain bounded", "oversize content is inserted inline and remains editable as text", "undo and marker expansion stay coherent"], "notes": "The direct cap fixture uses 300 KiB; removing the bound creates a memory-risk regression without a type error."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts: oversize 300 KiB paste inline expansion and undo behavior", "test/editor-registry.test.ts: host replacement and marker ownership"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference Editor stores every accepted paste; neither provides the local admission cap and inline fallback."
+      },
+      "retirement": {
+        "conditions": ["Retire only when upstream or the editor owner provides an equivalent bounded paste policy with the same marker, undo, and large-input behavior.", "Run memory-sensitive registry and host replacement tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed the registry is consumed by editor internals and by the expanded-draft handoff. No host-only relocation is available."
+      }
+    },
+    "X004B": {
+      "title": "Editor shallow undo snapshots",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/components/editor.ts", "src/undo-stack.ts"],
+      "why": "Editor snapshots already detach their mutable containers. UndoStack must retain that detached snapshot rather than structured-cloning the entire document again on every edit.",
+      "changedSurface": ["pushUndoSnapshot shallow-copies lines and paste entries", "UndoStack.push stores the already-detached snapshot without a second whole-document clone"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Editor pushUndoSnapshot and UndoStack.push jointly define snapshot ownership."], "notes": "The performance fix spans both the producer and the stack."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "UndoStack has no subclass contract in the vendor or host."},
+        "host": {"audited": true, "items": ["Host editor undo/redo path handles large pasted documents."], "notes": "The host cannot prevent a deep clone performed inside the fork."},
+        "publicExtension": {"audited": true, "items": ["Editor undo and paste expansion remain public observable behavior."], "notes": "Snapshot representation itself is private."},
+        "behavioral": {"audited": true, "items": ["detached snapshots remain isolated from later edits", "large-paste undo avoids a second whole-document allocation"], "notes": "The optimization must not be replaced with shared mutable line arrays."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts: undo isolation and large-paste snapshot behavior", "packages/pi-tui/src/undo-stack.ts: source-level ownership audited; no standalone undo-stack test file"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts", "packages/tui/src/undo-stack.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream UndoStack.push performs structuredClone on the snapshot; it does not share the local detached-snapshot ownership contract."
+      },
+      "retirement": {
+        "conditions": ["Retire only after upstream adopts detached snapshot ownership or a benchmarked replacement proves no large-document clone regression while preserving undo isolation."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Corrected the old ledger claim: the local shallow producer alone was insufficient; UndoStack.push is part of the same patch and was audited as one ownership boundary."
+      }
+    },
+    "X005": {
+      "title": "Editor autocomplete latest-wins",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/components/editor.ts"],
+      "why": "A provider that ignores AbortSignal must not block a newer completion request behind a never-settling older request. Request identity and text/cursor snapshots make completion commits latest-wins.",
+      "changedSurface": ["requestId and text/cursor snapshot validation", "latest request can commit without awaiting a prior provider's settlement"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Editor completion request, abort controller, dropdown state, and cursor mutation share request identity."], "notes": "Stale completion callbacks can otherwise overwrite current text."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiEditor subclasses the vendor Editor and uses the protected autocomplete seam recorded in X044."], "notes": "The request state is private but its lifecycle is observed by the host subclass."},
+        "host": {"audited": true, "items": ["src/tui-editor.ts explicit and context-gated completion providers", "host active-screen repaint route for asynchronous completion commits"], "notes": "The host supplies providers that may ignore abort."},
+        "publicExtension": {"audited": true, "items": ["Editor autocomplete provider callbacks are a public component integration surface."], "notes": "Provider timing is an extension-facing behavioral contract."},
+        "behavioral": {"audited": true, "items": ["never-settling old provider cannot stall a newer request", "stale text/cursor results are rejected", "async commit repaints the current screen"], "notes": "A serial promise chain is not semantically equivalent under hostile providers."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts: never-settling provider latest-wins regression", "test/autocomplete-active-screen-repaint.test.ts: current-screen repaint"],
+      "upstream": {
+        "equivalence": "PARTIAL",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "The audited upstream reference has request identity checks but retains a serial autocomplete task chain; it has not been proven equivalent to the local never-settling latest-wins behavior or host repaint route."
+      },
+      "retirement": {
+        "conditions": ["Upstream must make completion commits latest-wins even when an aborted provider never settles, with the same stale text/cursor fencing.", "Run provider, subclass, and active-screen repaint tests before removing the local path."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "The audited upstream reference source was inspected rather than inferred from issue status. The remaining serial task chain keeps equivalence PARTIAL."
+      }
+    },
+    "X006": {
+      "title": "Word-forward skips punctuation at segment start",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "MEDIUM",
+      "files": ["src/word-navigation.ts"],
+      "why": "Forward word navigation should cross leading punctuation at the next word-like segment instead of stopping without moving, including CJK-aware segmentation.",
+      "changedSurface": ["wordForward segment-start punctuation branch"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Editor Ctrl/Alt word-forward movement calls wordForward."], "notes": "The helper is used inside the exported editor behavior."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No inheritance or structural consumer found."},
+        "host": {"audited": true, "items": ["Host editor keybindings use the vendor word navigation helper."], "notes": "The host does not reimplement cursor segmentation."},
+        "publicExtension": {"audited": true, "items": ["Editor word navigation is observable through the public component input contract."], "notes": "No direct helper export is required for the behavior to be public."},
+        "behavioral": {"audited": true, "items": ["leading punctuation is crossed rather than producing a no-op", "custom and Intl segmenter word-like classifications remain respected"], "notes": "A similarly named upstream helper can differ at the cursor boundary."}
+      },
+      "tests": ["packages/pi-tui/test/word-navigation.test.ts: leading punctuation with a custom segmenter", "packages/pi-tui/test/editor.test.ts: word movement integration"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/word-navigation.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference stop before a leading punctuation segment in the audited case; the local helper deliberately advances past it."
+      },
+      "retirement": {
+        "conditions": ["Retire only when upstream's wordForward has the same segment-start punctuation semantics and the cursor-boundary regression remains green."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Checked the helper and its editor call path; did not classify this as absorbed merely because upstream has a similarly named function."
+      }
+    },
+    "X007": {
+      "title": "Component dispose lifecycle",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API", "PUBLIC_COMPONENT_CONTRACT"],
+      "risk": "CRITICAL",
+      "files": ["src/tui.ts", "src/components/scroll-view.ts", "src/components/text.ts", "src/components/loader.ts", "src/components/box.ts", "src/components/settings-list.ts", "src/components/stack.ts"],
+      "why": "The host owns timers, callbacks, child components, submenu slots, and overlay leases. A single optional Component.dispose contract releases each resource exactly once across removal, hide, replacement, and final surface teardown.",
+      "changedSurface": ["optional Component.dispose and idempotent Container disposal", "Container/Box/Stack child ownership and removal", "ScrollView timer/callback cleanup", "Loader, SettingsList submenu, and opt-in overlay disposal"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Container, Box, Stack, ScrollView, SettingsList, Text, and Loader each participate in the release graph."], "notes": "The patch is an ownership graph, not one helper."},
+        "inheritanceStructural": {"audited": true, "items": ["Loader extends Text and historically used Text.dispose as an inheritance shim (X019).", "ScrollView and Stack override container lifecycle methods."], "notes": "Override and super edges were checked before any retirement classification."},
+        "host": {"audited": true, "items": ["src/tui-app.ts OverlayBroker.disposeAll and overlay leases", "editor seat, panels, timers, and fullscreen surface teardown", "test/pi-component-compat.test.ts public component compatibility"], "notes": "Host final teardown relies on exactly-once release."},
+        "publicExtension": {"audited": true, "items": ["Stable/Advanced/Unstable extension mounts and public component leases", "component compatibility surface accepts optional dispose"], "notes": "Extension-owned remountable leases intentionally opt out of overlay disposeOnHide."},
+        "behavioral": {"audited": true, "items": ["removed children are detached before disposal", "repeated dispose is a no-op", "disposeOnHide is opt-in so remountable overlays survive hide", "Stack clears its second layout representation"], "notes": "Type-compatible removal can leak timers or resurrect disposed children."}
+      },
+      "tests": ["test/pi-component-compat.test.ts: close idempotency, exactly-once disposal, lease invalidation, fullscreen migration", "packages/pi-tui/test/dispose-lifecycle.test.ts: Container and ScrollView ownership", "packages/pi-tui/test/layout.test.ts: Stack entries and disposed layout behavior", "packages/pi-tui/test/overlay-options.test.ts: disposeOnHide ownership"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui.ts", "packages/tui/src/components/scroll-view.ts", "packages/tui/src/components/text.ts", "packages/tui/src/components/loader.ts", "packages/tui/src/components/box.ts", "packages/tui/src/components/settings-list.ts", "packages/tui/src/components/stack.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "The pinned baseline has no fork-wide optional dispose ownership graph. The audited upstream reference has isolated disposable components, but not the host's Container/Stack/overlay exactly-once contract."
+      },
+      "retirement": {
+        "conditions": ["Do not retire in a ledger cleanup. A dedicated lifecycle architecture change must replace every ownership edge and preserve exactly-once teardown, remount behavior, extension lifetime, and final OverlayBroker cleanup.", "Run the full component compatibility, layout, overlay, timer, and extension lifecycle suites."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Known ownership graph was re-read in the audited checkout. X007 remains KEEP HARD; no source deletion or upstream absorption experiment was attempted."
+      }
+    },
+    "X008": {
+      "title": "Timed-out OSC 11 queries drop from the queue",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/tui.ts"],
+      "why": "A timed-out background-color query must leave the pending queue, preventing queue/counter drift when no newer query is pending; concurrent late replies remain ambiguous because OSC 11 has no request ID.",
+      "changedSurface": ["OSC 11 timeout removes the pending query", "late OSC 11 replies are swallowed before generic counter handling when no pending query remains"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["TuiBase query queue, timeout callback, response classifier, and reply counter are one protocol state machine."], "notes": "Queue and counter order cannot be changed independently."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiBase is shared by regular and alternate screens."], "notes": "Both screens inherit the protocol handling path."},
+        "host": {"audited": true, "items": ["src/tui-app.ts TuiApp.runAutoDetect issues OSC 11 background queries", "src/theme.ts provides palette/detection helpers but does not own the query"], "notes": "The query is issued by the host app and routed through the active screen; theme.ts is recorded only as a helper boundary."},
+        "publicExtension": {"audited": true, "items": [], "notes": "No extension directly owns terminal protocol replies."},
+        "behavioral": {"audited": true, "items": ["a sole late timed-out reply does not increment or shift the generic response counter", "background autodetect remains ordered across retries", "a late A reply while B is pending remains protocol-ambiguous because OSC 11 has no request ID"], "notes": "The local patch fixes queue/counter drift but cannot distinguish late A from pending B; that limitation is recorded rather than overstated as complete ordering safety."}
+      },
+      "tests": ["packages/pi-tui/test/osc11-query.test.ts: timed-out query queue/counter alignment", "packages/pi-tui/test/terminal-colors.test.ts: active-screen query routing", "Missing A-timeout/B-pending/late-A ambiguity regression; add before retirement"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream keeps timed-out queries in the pending queue and uses a different counter check; it is not equivalent under a late reply."
+      },
+      "retirement": {
+        "conditions": ["Retire only after upstream proves the same timeout, late-reply, retry, and active-screen ordering semantics with protocol tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Protocol queue ownership and the reply-swallowing order were checked; no host grep-only conclusion was used."
+      }
+    },
+    "X009": {
+      "title": "No stray spacer blank on the final row when exiting",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "MEDIUM",
+      "files": ["src/tui-main-screen.ts"],
+      "why": "Exit cleanup must not write a spacer when the cursor is already on the terminal's final row, otherwise a blank remains visible after the TUI stops.",
+      "changedSurface": ["beforeTerminalStop conditional final-row spacer write"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["TuiMainScreen exit cursor position and terminal stop writer share the final-row calculation."], "notes": "The behavior sits in the render/exit boundary."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiMainScreen extends the main screen implementation used by the host."], "notes": "No override consumer of the spacer branch was found."},
+        "host": {"audited": true, "items": ["TuiApp normal exit and terminal restart paths."], "notes": "The host relies on clean terminal restoration."},
+        "publicExtension": {"audited": true, "items": [], "notes": "Exit cleanup is not extension-controlled."},
+        "behavioral": {"audited": true, "items": ["final-row exit leaves no painted spacer", "non-final-row cursor cleanup remains intact"], "notes": "The visible terminal state is the contract."}
+      },
+      "tests": ["packages/pi-tui/test/tui-render.test.ts: direct final-row stop cleanup fixture", "Missing integration test through the full terminal exit path; retain the focused fixture until that coverage exists"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui-main-screen.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream writes the spacer unconditionally; the local branch avoids a visible final-row artifact."
+      },
+      "retirement": {
+        "conditions": ["Add a dedicated final-row exit regression and retire only if upstream adopts the same conditional write."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Kept active. The audit found no direct extension consumer but the host-visible exit terminal state is a behavioral contract."
+      }
+    },
+    "X010": {
+      "title": "Capped ESC-prefix scans",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "MEDIUM",
+      "files": ["src/stdin-buffer.ts"],
+      "why": "An unbounded or corrupt ESC prefix must not trigger repeated large reslices. The 1024-byte cap degrades an unterminated prefix to ordinary input with bounded work.",
+      "changedSurface": ["MAX_ESCAPE_SEQUENCE_LENGTH scan cap", "oversized ESC-prefix fallback"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["StdinBuffer scan cursor, prefix parser, and fallback consume the same buffered input."], "notes": "The cap protects the parser's complexity boundary."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No subclass or structural consumer found."},
+        "host": {"audited": true, "items": ["ProcessTerminal stdin path and host input router consume decoded chunks."], "notes": "The host cannot bound a prefix after the buffer has accepted it."},
+        "publicExtension": {"audited": true, "items": [], "notes": "Raw stdin buffering is below the extension API."},
+        "behavioral": {"audited": true, "items": ["the 1024-byte cap bounds an incomplete ESC prefix", "valid CSI and modifier sequences remain decodable", "the existing long-prefix fixture is only 100 characters and does not reach the cap"], "notes": "This is a robustness boundary; the direct regression feeds an 1100-character incomplete prefix and verifies the buffer degrades and drains it."}
+      },
+      "tests": ["packages/pi-tui/test/stdin-buffer.test.ts: valid ESC sequence, long-prefix, and >1024-byte incomplete-prefix degradation cases"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/stdin-buffer.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference buffer do not contain the local hard cap for an unterminated ESC prefix."
+      },
+      "retirement": {
+        "conditions": ["Retire only after upstream provides an equivalent bounded parser and valid-sequence compatibility tests cover oversized and corrupt input."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "The audit treats input complexity as a runtime safety property, not an import-consumer question."
+      }
+    },
+    "X011": {
+      "title": "Input prompt clips on extremely narrow widths",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "MEDIUM",
+      "files": ["src/components/input.ts"],
+      "why": "Input must render a clipped prompt at tiny widths instead of emitting an overwide raw line that corrupts the terminal layout.",
+      "changedSurface": ["prompt clipping before render padding and cursor placement"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Input prompt width, value rendering, and cursor geometry share the available width."], "notes": "The guard runs at the component boundary."},
+        "inheritanceStructural": {"audited": true, "items": ["SelectList and SettingsList own Input instances and forward focus (X042)."], "notes": "Wrapper components inherit the narrow-width behavior through their child."},
+        "host": {"audited": true, "items": ["Question free-text, search boxes, picker filters, and task/history inputs."], "notes": "Multiple host surfaces can be mounted in narrow terminals."},
+        "publicExtension": {"audited": true, "items": ["Public Input component render behavior."], "notes": "No private host implementation replaces Input rendering."},
+        "behavioral": {"audited": true, "items": ["zero and one-column grants never emit negative or overwide padding", "prompt remains visible enough for editing"], "notes": "Narrow rendering is a visible contract even without a unique host symbol."}
+      },
+      "tests": ["No dedicated X011-only test existed; narrow-width editor, settings, and component render suites exercise the behavior. Add a direct Input test before retirement."],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/input.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream returns the raw prompt when the width is too small; the local component clips it before composing the line."
+      },
+      "retirement": {
+        "conditions": ["Add direct tiny-width Input regressions and retire only when upstream has equivalent clipping and all wrapper surfaces remain aligned."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Kept active. This is a component/layout contract and is not disproved by the lack of one dedicated test."
+      }
+    },
+    "X012": {
+      "title": "Deterministic fuzzy tie sort",
+      "status": "RETIREMENT_CANDIDATE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "LOW",
+      "files": ["src/fuzzy.ts"],
+      "why": "The local comparator explicitly preserves input order for equal fuzzy scores. Supported Node engines guarantee stable Array.prototype.sort, so the explicit tie term may be redundant but must be checked as a semantic runtime assumption.",
+      "changedSurface": ["fuzzyFilter result index tie-breaker"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["fuzzyFilter constructs result order and passes it directly to sort."], "notes": "No secondary randomization or map is involved."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "The helper has no inheritance or structural implementation edge."},
+        "host": {"audited": true, "items": ["Host transcript, picker, and command search paths use fuzzyFilter results."], "notes": "Ordering is user-visible in search results."},
+        "publicExtension": {"audited": true, "items": ["Fuzzy helper is used by fork-exported providers and picker behavior."], "notes": "The result array order is observable."},
+        "behavioral": {"audited": true, "items": ["equal scores preserve original input order", "supported engine range is Node >=22.19 or >=24"], "notes": "The candidate depends on the ECMAScript stable-sort guarantee, not merely on a matching function name."}
+      },
+      "tests": ["packages/pi-tui/test/fuzzy.test.ts: equal-score ordering and fuzzy result behavior"],
+      "upstream": {
+        "equivalence": "YES",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/fuzzy.ts", "packages/tui/package.json"],
+        "relevantIssues": [],
+        "semanticDelta": "With the package's supported Node engine, upstream score-only sort is stable and preserves the same input-order ties. The explicit index comparator is therefore runtime-equivalent, subject to the engine and input-order assumptions recorded here."
+      },
+      "retirement": {
+        "conditions": ["Confirm the project engine floor, comparator input order, and equal-score regression on every supported Node boundary.", "Run the deletion experiment: restore upstream fuzzy.ts, run vendor fuzzy tests, bundle tests, typecheck, and both vendor gates; keep the explicit comparator if any result changes."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Candidate only. Current package.json declares the stable-sort-capable Node floor; source comparison confirmed upstream still uses score-only sort. The equal-score fixture now guards input-order preservation; behavior was not changed in this ledger task."
+      }
+    },
+    "X013": {
+      "title": "setIndicator never revives a stopped loader",
+      "status": "REMOVED_UNUSED",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "MEDIUM",
+      "files": ["src/components/loader.ts"],
+      "why": "The former patch changed setIndicator after stop, but the host uses its own WorkingIndicator and no vendor Loader path consumes that behavior.",
+      "changedSurface": ["Former setIndicator stopped-loader branch; no local patch remains"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": [], "notes": "No vendor component constructs or calls Loader/setIndicator in the audited source."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No override or super consumer of the removed branch was found."},
+        "host": {"audited": true, "items": [], "notes": "Host busy feedback is WorkingIndicator in src/, not Loader."},
+        "publicExtension": {"audited": true, "items": [], "notes": "Loader remains root-exported, but no known in-repo extension or public contract requires the removed stopped-loader setIndicator behavior; external consumers cannot be enumerated from this checkout."},
+        "behavioral": {"audited": true, "items": [], "notes": "The old semantic change has no supported consumer; upstream restart behavior is retained."}
+      },
+      "tests": ["No dedicated setIndicator regression exists; loader lifecycle/timer ownership was audited separately and no focused package test guards the removed behavior"],
+      "upstream": {
+        "equivalence": "YES",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/loader.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "The upstream setIndicator behavior is retained and no vendor or host consumer requires the former stopped-loader behavior."
+      },
+      "retirement": {
+        "conditions": ["Keep the upstream loader implementation and recheck Loader construction/searches whenever the host adds a loader consumer."],
+        "replacementMapping": [],
+        "evidence": ["Deletion evidence: current audited host search found WorkingIndicator as the busy indicator and no Loader/setIndicator call path.", "Pinned source and local source match for the retired branch; strict vendor diff reports no stale active entry for this record.", "Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record retired."]
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Historical removal rechecked with vendor-internal and host searches. The previous host busy-indicator claim remains rejected."
+      }
+    },
+    "X014": {
+      "title": "Measured line widths cached",
+      "status": "ACTIVE",
+      "category": ["PERF_HOST_DEPENDENT"],
+      "risk": "MEDIUM",
+      "files": ["src/layout.ts"],
+      "why": "Repeated measureWidth calls should reuse the maximum visible line width for a component and width within a frame instead of rescanning styled lines at every call site.",
+      "changedSurface": ["layout context maxWidthCache keyed by component and width", "measureWidth cache lookup and population"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Layout context creation, measureWidth callers, and per-frame invalidation share the cache lifetime."], "notes": "The cache is scoped to layout work, not a global stale width store."},
+        "inheritanceStructural": {"audited": true, "items": ["Container and layout-node implementations call the shared measureWidth helper."], "notes": "No subclass overrides the cache contract."},
+        "host": {"audited": true, "items": ["Host transcript and fullscreen render trees exercise package layout measurement repeatedly within a frame."], "notes": "The performance consumer is indirect call frequency through package layout components, not a named host import."},
+        "publicExtension": {"audited": true, "items": ["Extension-rendered components participate in the same layout measurement pass."], "notes": "No extension API exposes the cache directly."},
+        "behavioral": {"audited": true, "items": ["same-frame repeated measurement returns the same width", "cache does not survive a new layout context or width change"], "notes": "Dropping the cache is a measurable frame-cost regression, not a type failure; current tests and render-churn benchmark provide indirect evidence rather than isolated cache-hit instrumentation."}
+      },
+      "tests": ["packages/pi-tui/test/layout.test.ts: indirect measure and scrollbar layout correctness", "packages/pi-tui/test/render-churn-bench.ts: total layout/render churn with representative workload", "Missing direct measure-count/cache-hit, invalidation, and cache-versus-no-cache performance assertion"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/layout.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream remeasures visible lines on every measureWidth call; its scrollbar clamp is already baseline and is not part of this divergence."
+      },
+      "retirement": {
+        "conditions": ["Run a reproducible host transcript/fullscreen benchmark at representative line counts and widths.", "Retire only if upstream or a replacement has equal or better measured steady-frame cost without stale-width behavior."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed the cache is used through layout call frequency; no import-only unused conclusion was made. The upstream thumb clamp was excluded from ownership."
+      }
+    },
+    "X015": {
+      "title": "Dead _lastEventType state",
+      "status": "ABSORBED_UPSTREAM",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "LOW",
+      "files": ["src/keys.ts"],
+      "why": "The former local cleanup targeted _lastEventType. The field is still written by Kitty parsing in the upstream baseline, but the current isKeyRelease implementation checks the raw input directly; the source representation is retained because the former local removal is no longer a local diff.",
+      "changedSurface": ["Former _lastEventType removal; no local patch remains"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Kitty parser writes _lastEventType; the current isKeyRelease helper does not read it directly."], "notes": "The write is retained in the pinned baseline, while the old ledger claim that isKeyRelease consumes it was not confirmed."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No subclass edge beyond the key parser implementation."},
+        "host": {"audited": true, "items": ["Host keybinding and modifier decoding consume key release state indirectly."], "notes": "The removed cleanup is not a host-owned replacement."},
+        "publicExtension": {"audited": true, "items": [], "notes": "No extension directly accesses the private field."},
+        "behavioral": {"audited": true, "items": ["key-release behavior remains unchanged", "the retained parser write is dead for isKeyRelease, which scans raw input"], "notes": "The old cleanup is absorbed because the pinned baseline/reference source representation is identical; it is not evidence that isKeyRelease consumes _lastEventType."}
+      },
+      "tests": ["packages/pi-tui/test/keys.test.ts: key release and printable decoding behavior"],
+      "upstream": {
+        "equivalence": "YES",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/keys.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference retain the field and its parser writes, but isKeyRelease currently uses raw-sequence checks rather than reading _lastEventType; the local source matches the upstream baseline."
+      },
+      "retirement": {
+        "conditions": ["Keep the upstream key parser state and do not resurrect the former dead-field cleanup."],
+        "replacementMapping": [],
+        "evidence": ["git blob comparison at the pinned commit shows no local source divergence for X015.", "The audited upstream reference source retains the parser write; local isKeyRelease source was checked and does not read _lastEventType directly.", "Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record absorbed."]
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Historical absorbed record rechecked; its old title is retained for provenance, not as an instruction to edit keys.ts."
+      }
+    },
+    "X016": {
+      "title": "start does not stack terminal listeners",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "CRITICAL",
+      "files": ["src/terminal.ts"],
+      "why": "Restarting ProcessTerminal during fullscreen transitions must replace every owned listener and buffer exactly once, preserve the original raw mode, and keep Kitty keyboard negotiation balanced.",
+      "changedSurface": ["remove-before-assign resize and stdin data listeners", "destroy previous StdinBuffer and clear negotiation state", "capture raw state only on first start", "push Kitty protocol once per start/stop cycle"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["ProcessTerminal start/stop, StdinBuffer callback, resize listener, raw mode, and Kitty push/pop state form one lifecycle."], "notes": "Fixing only resize leaves duplicate stdin delivery or raw-mode leaks."},
+        "inheritanceStructural": {"audited": true, "items": ["ProcessTerminal implements the Terminal interface consumed by TuiBase and screens."], "notes": "No alternate implementation can repair a duplicated ProcessTerminal listener."},
+        "host": {"audited": true, "items": ["TuiApp fullscreen toggle restarts the terminal and reuses the input handler."], "notes": "A repeated start is a real host path."},
+        "publicExtension": {"audited": true, "items": ["Extension surfaces observe terminal input through the canonical host router."], "notes": "The raw terminal lifecycle itself is not exposed to Stable plugins."},
+        "behavioral": {"audited": true, "items": ["one stdin chunk reaches the handler once", "stop restores the original cooked/raw state", "Kitty push/pop remains balanced", "resize ownership does not accumulate"], "notes": "The type shape remains unchanged while runtime delivery duplicates."}
+      },
+      "tests": ["packages/pi-tui/test/terminal.test.ts: repeated resize listener, stdin listener, raw state, and Kitty protocol tests", "test/process-tui-slot.test.ts and fullscreen restart coverage"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/terminal.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream stacks listeners and re-captures state on repeated start; it does not provide the local all-resource swap and negotiation balance."
+      },
+      "retirement": {
+        "conditions": ["Retire only after upstream exposes equivalent repeated-start ownership across resize, stdin, buffers, raw state, timers, and Kitty protocol negotiation.", "Run the complete repeated-start/stop and fullscreen restart tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Rechecked the full resource graph, not only the original resize-listener symptom. KEEP HARD."
+      }
+    },
+    "X017": {
+      "title": "Regular mode owns no mouse",
+      "status": "ABSORBED_UPSTREAM",
+      "category": ["LOCAL_UX"],
+      "risk": "LOW",
+      "files": ["src/tui-main-screen.ts", "src/tui-alt-screen.ts"],
+      "why": "Mouse handling belongs to the alternate fullscreen screen; regular mode remains mouse-free in the pinned upstream baseline.",
+      "changedSurface": ["Former regular-screen mouse ownership change; no local patch remains"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Main and alternate screen constructors keep separate mouse/input ownership."], "notes": "The source comparison shows the local split matches upstream."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiMainScreen and TuiAltScreen share TuiBase but install different screen input behavior."], "notes": "The distinction is structural screen ownership."},
+        "host": {"audited": true, "items": ["Host fullscreen interactions are installed on TuiAltScreen; regular transcript uses app routing."], "notes": "No host replacement is needed for the absorbed difference."},
+        "publicExtension": {"audited": true, "items": [], "notes": "Screen mouse ownership is below the stable extension surface."},
+        "behavioral": {"audited": true, "items": ["regular mode does not claim mouse chunks", "fullscreen mode retains mouse selection/click handling"], "notes": "The ownership split remains observable."}
+      },
+      "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: alternate-screen mouse behavior", "bundle fullscreen input tests"],
+      "upstream": {
+        "equivalence": "YES",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui-main-screen.ts", "packages/tui/src/tui-alt-screen.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference assign mouse behavior to the alternate screen and leave regular mode mouse-free; local source matches."
+      },
+      "retirement": {
+        "conditions": ["Keep the upstream screen ownership split and recheck it on every re-vendor."],
+        "replacementMapping": [],
+        "evidence": ["Pinned source blob comparison found no local patch for X017.", "Current source and fullscreen tests preserve alternate-only mouse ownership.", "Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record absorbed."]
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Historical absorbed record retained to prevent the old divergence from silently returning to the active manifest."
+      }
+    },
+    "X018": {
+      "title": "Click granularity guard and onCellClick",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "HIGH",
+      "files": ["src/tui-alt-screen.ts"],
+      "why": "The host needs single-cell fullscreen clicks for click-to-expand. Double-click selection must remain native word selection, and single-click handling must not duplicate clipboard feedback.",
+      "changedSurface": ["onCellClick callback for character-granularity clicks", "single/double click branch ownership"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Alt-screen mouse selection state, click granularity, and clipboard callback share the selection lifecycle."], "notes": "The callback cannot be extracted without preserving native selection behavior."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiAltScreen extends TuiBase and owns the fullscreen viewport listener."], "notes": "No subclass replaces click classification."},
+        "host": {"audited": true, "items": ["src/tui-app.ts handleFullscreenClick expands the question/transcript surface."], "notes": "The callback is a direct host seam."},
+        "publicExtension": {"audited": true, "items": ["TuiAltScreen options expose the click callback through the public component constructor."], "notes": "The shape is also consumed by compatibility tests."},
+        "behavioral": {"audited": true, "items": ["single click invokes host callback", "double click selects a word and preserves copy-on-select semantics", "selection feedback is not duplicated"], "notes": "A callback with the wrong granularity is not equivalent."}
+      },
+      "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: onCellClick and double-click selection", "test/tui-app.test.ts, test/rendering.test.ts, and test/thinking-disclosure.test.ts: fullscreen click-to-expand host behavior"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui-alt-screen.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream has no onCellClick callback and therefore cannot express host fullscreen click ownership."
+      },
+      "retirement": {
+        "conditions": ["Retire only when upstream supplies a callback with the same single-cell/double-click and clipboard ordering semantics, then run fullscreen and selection compatibility tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed the host callback is a structural and behavioral seam, not a convenience import."
+      }
+    },
+    "X019": {
+      "title": "Text no-op dispose inheritance shim",
+      "status": "REDUNDANT_SHIM",
+      "category": ["HARD_HOST_API", "PUBLIC_COMPONENT_CONTRACT"],
+      "risk": "HIGH",
+      "files": ["src/components/text.ts"],
+      "why": "Text.dispose is currently a no-op solely so Loader's dispose override and super.dispose call typecheck. The inheritance edge is real, but the base no-op can be removed by an atomic Loader cleanup.",
+      "changedSurface": ["Text.dispose(): void no-op", "Loader.dispose override calls stop and super.dispose"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Loader extends Text and calls super.dispose in its current local implementation."], "notes": "This is an existing inheritance consumer, not unused code."},
+        "inheritanceStructural": {"audited": true, "items": ["Loader -> Text.dispose -> super.dispose"], "notes": "The required structural audit sample is present."},
+        "host": {"audited": true, "items": ["X007 lifecycle consumers can dispose Loader through the Component contract."], "notes": "No direct host call to Text.dispose exists, but X007 owns the lifecycle edge."},
+        "publicExtension": {"audited": true, "items": ["Component.dispose is optional and public component consumers may dispose a Loader instance."], "notes": "Removing the shim must not remove Loader timer cleanup."},
+        "behavioral": {"audited": true, "items": ["Loader.stop timer cleanup must remain exactly once", "Text remains disposable only if a distinct owner requires it"], "notes": "The safe change is an atomic inheritance cleanup, not a REMOVED_UNUSED classification."}
+      },
+      "tests": ["packages/pi-tui/test/dispose-lifecycle.test.ts: Loader cleanup and idempotency", "packages/pi-tui/test/layout.test.ts and test/pi-component-compat.test.ts: component lifecycle contract"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/text.ts", "packages/tui/src/components/loader.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream has neither the local Component disposal contract nor the current Text/Loader shim. Restoring upstream wholesale would remove the broader X007 lifecycle behavior."
+      },
+      "retirement": {
+        "conditions": ["Apply one atomic change: remove Text.dispose and remove Loader's super.dispose call while retaining Loader.dispose and timer cleanup.", "Run lifecycle, Loader timer, layout, surface compatibility, and typecheck gates before changing status."],
+        "replacementMapping": ["Atomic replacement: Text.dispose no-op -> no base method; Loader.dispose remains the owning cleanup and calls stop directly without super.dispose."],
+        "evidence": ["Current source proves a live Loader -> Text.dispose -> super.dispose inheritance edge.", "Deletion experiment: temporarily removing Text.dispose made the package typecheck fail in loader.ts with TS4113/TS2339 because Loader's override and super.dispose call lost their base member; the existing lifecycle tests remained green."]
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Classified as REDUNDANT_SHIM rather than unused. It remains active until the dedicated atomic cleanup is implemented and verified."
+      }
+    },
+    "X020": {
+      "title": "Editor clearHistory",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "HIGH",
+      "files": ["src/components/editor.ts"],
+      "why": "When a session or workspace changes, the host must replace the prompt-history context and browsing state without reconstructing the editor.",
+      "changedSurface": ["Editor.clearHistory clears entries and browsing state"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Editor history entries, current browsing index, and draft callbacks are reset together."], "notes": "Clearing only the array leaves stale browsing state."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiEditor owns an Editor instance and calls clearHistory during seat/session changes."], "notes": "No subclass override of clearHistory was found."},
+        "host": {"audited": true, "items": ["src/editor-seat-holder.ts session/workspace switch", "src/tui-editor.ts host editor adapter"], "notes": "This is a direct replacement-editor/session seam."},
+        "publicExtension": {"audited": true, "items": ["Editor public method used by host adapter; history callbacks remain part of X029."], "notes": "The method is not an internal-only optimization."},
+        "behavioral": {"audited": true, "items": ["old prompts cannot reappear after a session switch", "history browsing exits cleanly", "mode-aware draft state is not resurrected"], "notes": "A host-side rebuild is not equivalent because it changes editor seat identity and focus."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts:375-393 clearHistory entries and browsing-state reset", "packages/pi-tui/test/editor-history-keybindings.test.ts: history keybinding behavior", "test/editor-seat-non-owning.test.ts and session/editor switch coverage"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream has no clearHistory method or equivalent host seat reset operation."
+      },
+      "retirement": {
+        "conditions": ["Provide an upstream or host-owned operation that clears history and browsing state without replacing the editor seat, then run session-switch and mode-history tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed direct host seat-holder use; KEEP HARD."
+      }
+    },
+    "X021": {
+      "title": "Wrapped lines are foreground-balanced",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/utils.ts"],
+      "why": "Every wrapped physical line must close non-background ANSI attributes so styles do not leak into padding, table borders, or following rows while preserving the background across the wrapped segment.",
+      "changedSurface": ["AnsiCodeTracker.getLineEndReset closes foreground and non-background attributes", "wrapSingleLine appends a final segment reset"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["wrapSingleLine, ANSI tracking, markdown rendering, and line padding share reset semantics."], "notes": "The helper is used by multiple text and markdown paths."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No inheritance edge; the coupling is shared utility behavior."},
+        "host": {"audited": true, "items": ["TranscriptFolder output feeds styled Markdown and host renderers", "table and panel borders follow wrapped content"], "notes": "transcript.ts owns fold/data/state; wrapping is performed by the shared utility and package/host renderers. The consumer is rendered output, not a direct method call."},
+        "publicExtension": {"audited": true, "items": ["Extension renderers can return ANSI-styled lines consumed by the shared wrapper."], "notes": "The utility's output reaches public component rendering."},
+        "behavioral": {"audited": true, "items": ["foreground/bold/dim/etc. close at each physical line", "background remains open for cell padding", "OSC 8 and table borders do not leak"], "notes": "Upstream's partial markdown table reset is not equivalent to general wrap balancing."}
+      },
+      "tests": ["packages/pi-tui/test/wrap-ansi.test.ts: foreground and background reset behavior", "packages/pi-tui/test/markdown.test.ts: inline-code style does not leak into table borders"],
+      "upstream": {
+        "equivalence": "PARTIAL",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/utils.ts", "packages/tui/src/components/markdown.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream has table-cell style resets but does not balance all non-background attributes at every wrapped line boundary."
+      },
+      "retirement": {
+        "conditions": ["Upstream must provide general wrap balancing for all tracked non-background attributes, not only markdown table cells.", "Run ANSI, markdown, OSC 8, and background-preservation tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Compared semantic reset behavior and recorded PARTIAL rather than ABSORBED_UPSTREAM."
+      }
+    },
+    "X022": {
+      "title": "Editor public cursor synchronization setCursor",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "HIGH",
+      "files": ["src/components/editor.ts"],
+      "why": "The host's replacement editor needs to restore a clamped line/column cursor without firing onChange, mutating history, or changing document text.",
+      "changedSurface": ["Editor.setCursor line/column API", "grapheme-boundary clamping and repaint without onChange"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["setCursor uses editor line state, cursor clamping, and render invalidation without normal insertion side effects."], "notes": "It is deliberately separate from setTextAndCursor (X023)."},
+        "inheritanceStructural": {"audited": true, "items": ["Host TuiEditor and SeatEditor adapters access the public method without a cast."], "notes": "No override edge found."},
+        "host": {"audited": true, "items": ["src/editor-seat-holder.ts replacement-editor fallback and cursor restore"], "notes": "The host cannot restore the cursor through a public upstream equivalent."},
+        "publicExtension": {"audited": true, "items": ["Editor component public method and HostEditorAdapter optional capability."], "notes": "The cursor API is part of a compatibility boundary."},
+        "behavioral": {"audited": true, "items": ["requested position clamps to existing line and grapheme boundary", "onChange and undo/history remain untouched", "repaint is requested"], "notes": "A setter that fires normal edit callbacks is not equivalent."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts: setCursor clamping and no onChange", "test/editor-seat-non-owning.test.ts: replacement cursor handoff"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream exposes no public cursor synchronization method with the local side-effect-free contract."
+      },
+      "retirement": {
+        "conditions": ["Provide an upstream public cursor setter with the same clamping, no-change, no-undo, and repaint semantics, then run seat handoff and cursor tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed the replacement-editor host consumer and kept the seam active."
+      }
+    },
+    "X023": {
+      "title": "Editor side-effect-free text/cursor staging",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API", "PUBLIC_COMPONENT_CONTRACT"],
+      "risk": "CRITICAL",
+      "files": ["src/components/editor.ts"],
+      "why": "Declined editor replacement and seat handoffs need to install normalized text and a cursor without onChange, undo, history, or stale paste-marker side effects; staging must leave autocomplete state for the host to cancel conditionally after handoff.",
+      "changedSurface": ["Editor.setTextAndCursor normalization and atomic staging", "paste registry pruning to markers surviving in staged text", "staging leaves autocomplete untouched while the host conditionally cancels stale completion after handoff"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Editor document, cursor, history, undo stack, and paste registry are updated in one staging operation", "Autocomplete state is deliberately left untouched by setTextAndCursor"], "notes": "The pruning rule is part of marker ownership; stale-autocomplete cancellation belongs to the host handoff after staging."},
+        "inheritanceStructural": {"audited": true, "items": ["Host TuiEditor/SeatEditor use the method through the editor adapter; no subclass override was found."], "notes": "The public method avoids private casts."},
+        "host": {"audited": true, "items": ["src/editor-seat-holder.ts declined-key replacement fallback and wire handoff", "host.cancelAutocomplete is conditionally called after staging when the dropdown/request is stale"], "notes": "The host transfers drafts between editor seats; Editor.setTextAndCursor itself does not cancel autocomplete."},
+        "publicExtension": {"audited": true, "items": ["HostEditorAdapter optional staging capability", "Editor public text/cursor contract"], "notes": "Callers depend on absence of edit callbacks during staging."},
+        "behavioral": {"audited": true, "items": ["line endings and tabs normalize", "no onChange/no undo/history push", "staging does not cancel autocomplete", "the host conditionally cancels stale dropdown/request after staging", "surviving paste markers still expand and orphaned entries are released"], "notes": "A plain setText plus cursor setter would not preserve normalization, marker pruning, and callback/undo side effects; autocomplete cancellation is an explicit host decision after staging."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts: public staging and normalization", "test/editor-registry.test.ts: declined fallback preserves autocomplete state and paste-registry pruning", "test/editor-seat-non-owning.test.ts: seat handoff and host stale-autocomplete cancellation"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream has no atomic side-effect-free text/cursor staging operation and no equivalent paste-registry pruning contract."
+      },
+      "retirement": {
+        "conditions": ["Provide a public upstream staging operation with all normalization, transient-state, undo/history, and marker-pruning semantics.", "Run editor registry, seat handoff, public API, and lifecycle tests before replacing the method."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed the old preservePasteRegistry option is superseded by this stronger canonical staging contract."
+      }
+    },
+    "X024": {
+      "title": "Line-head selections copy without emoji-column indent",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/tui-alt-screen.ts"],
+      "why": "Fullscreen transcript lines reserve leading columns for a bullet/emoji. Copying a selection that begins at physical column zero should remove only that synthetic padding, while mid-line spaces and residual real indentation survive the bounded strip.",
+      "changedSurface": ["copySelectionToClipboard receives selection start metadata", "line-head-only removal of one to three synthetic spaces"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Alt-screen selection coordinates and flattened copied text are combined before invoking the clipboard callback."], "notes": "The column check must happen before metadata is discarded."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiAltScreen owns the native selection and copy path inherited from TuiBase."], "notes": "No host subclass can recover startColumn from final text."},
+        "host": {"audited": true, "items": ["src/clipboard.ts callback and fullscreen drag-copy UX"], "notes": "The host callback shape receives only final text."},
+        "publicExtension": {"audited": true, "items": ["TuiAltScreen copySelection option is a public component contract."], "notes": "The host cannot move this behavior to a string-only wrapper."},
+        "behavioral": {"audited": true, "items": ["a single-row selection beginning at column zero strips synthetic padding", "a selection beginning mid-line keeps its first-row leading spaces", "four or more real indentation spaces are not all stripped; residual indentation survives"], "notes": "The implementation applies the column-zero strip per copied row; its bounded 1-to-3-space removal leaves residual indentation on four-plus-space lines. Multi-row selections beginning mid-line, ANSI, wide-grapheme, and scroll cases still need explicit coverage. A text-only host callback loses the selection metadata required for equivalence."}
+      },
+      "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: line-head and mid-line selection copy cases", "test/clipboard.test.ts and fullscreen clipboard integration", "Missing dedicated multi-row mid-line/ANSI/wide-grapheme regression; add before retirement"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui-alt-screen.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream copySelection receives only flattened text and retains all leading spaces; neither the pinned baseline nor the audited upstream reference exposes selection start metadata for this rule."
+      },
+      "retirement": {
+        "conditions": ["Expose selection metadata upstream or remove synthetic padding from selectable text, then map line-head, mid-line, and real-indentation behavior one-for-one.", "Run the selection and clipboard compatibility tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Reconfirmed the planned high-risk contradiction: a host text callback alone cannot replace X024."
+      }
+    },
+    "X025": {
+      "title": "Explicit tsdown build config and package rename",
+      "status": "ACTIVE",
+      "category": ["PACKAGING"],
+      "risk": "HIGH",
+      "files": ["tsdown.config.ts", "src/native-module-path.ts"],
+      "why": "The vendored package has an XMoon package shell and must build from its own CWD without the root tsdown config shadowing it. Native self-reference must follow the package rename.",
+      "changedSurface": ["package-local tsdown entry/output/declaration configuration", "TUI_PACKAGE_NAME native-module self-reference uses @xmoon76/pi-tui"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["native-module-path resolves package metadata and optional native assets through the renamed package."], "notes": "The package shell and source helper are coupled."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No class inheritance dependency; build and package resolution are structural tooling contracts."},
+        "host": {"audited": true, "items": ["Root pnpm build invokes packages/pi-tui build before bundling the root package."], "notes": "The published root artifact consumes the fork's generated dist."},
+        "publicExtension": {"audited": true, "items": ["Root bundle and package exports resolve dist/index.mjs and declarations from the renamed private fork."], "notes": "Package metadata is part of the install/build boundary."},
+        "behavioral": {"audited": true, "items": ["building from packages/pi-tui is deterministic", "root tsdown does not shadow the fork config", "optional native lookup fails gracefully under the renamed scope"], "notes": "A source diff gate must not ignore this non-src divergence."}
+      },
+      "tests": ["packages/pi-tui/test/native-module-path.test.ts: renamed package lookup and graceful fallback", "pnpm --dir packages/pi-tui build and root bundle build", "scripts/tarball-smoke.mjs package/export checks"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/native-module-path.ts", "packages/tui/package.json"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream package metadata and build contract use the Earendil scope/tooling. Copying them would break the private @xmoon76 package shell and root bundle build."
+      },
+      "retirement": {
+        "conditions": ["Retire only if the package shell, package-local build configuration, output exports, and renamed native lookup are deliberately redesigned together.", "Run fork build, root build, declaration, tarball, and optional-native fallback checks."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Non-src packaging divergence was explicitly included in the structured ledger; the source diff gate will continue to ignore it while the ledger gate validates it."
+      }
+    },
+    "X026": {
+      "title": "Injectable selection clipboard handler",
+      "status": "ABSORBED_UPSTREAM",
+      "category": ["HARD_HOST_API"],
+      "risk": "MEDIUM",
+      "files": ["src/tui-alt-screen.ts"],
+      "why": "The former local clipboard seam is now provided by Earendil 0.84.4 through copySelection, copyOnSelect, and active-selection methods.",
+      "changedSurface": ["Former local clipboard injection patch; current local source uses the upstream callback contract"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["TuiAltScreen selection and copy methods call the injected copySelection callback."], "notes": "The behavior is now owned by the upstream implementation."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiAltScreen constructor options carry copySelection through the screen lifecycle."], "notes": "No local replacement branch remains."},
+        "host": {"audited": true, "items": ["src/clipboard.ts callback supplies host clipboard policy and Copied!/Copy failed feedback."], "notes": "The host remains a consumer of the upstream seam, not of a local divergence."},
+        "publicExtension": {"audited": true, "items": ["TuiAltScreen copySelection/copyOnSelect public options."], "notes": "The absorbed API must remain covered by surface compatibility tests."},
+        "behavioral": {"audited": true, "items": ["single and double selection copy behavior remains native", "host callback result controls feedback"], "notes": "Absorption is semantic because the current API and callback ordering match."}
+      },
+      "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: selection/copy behavior", "test/clipboard.test.ts: host callback feedback", "test/pi-component-compat.test.ts: public surface"],
+      "upstream": {
+        "equivalence": "YES",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui-alt-screen.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Pinned upstream natively supplies the callback and selection controls required by the host; the local source matches that API and no extra patch is re-applied."
+      },
+      "retirement": {
+        "conditions": ["Keep the upstream copy-selection API and verify the host callback path on each re-vendor."],
+        "replacementMapping": ["Former local clipboard patch -> upstream copySelection/copyOnSelect/active-selection API; host policy remains src/clipboard.ts."],
+        "evidence": ["Pinned source exposes all required callback and selection methods.", "Bundle clipboard tests pass through the upstream callback path without a local X026 patch.", "Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record absorbed."]
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Historical absorbed record rechecked against the pinned baseline and recorded Pi source. It remains a real host capability, but no longer a local divergence."
+      }
+    },
+    "X027": {
+      "title": "fd directory typing does not rely on trailing separator",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "MEDIUM",
+      "files": ["src/autocomplete.ts"],
+      "why": "fd output can identify a directory without a trailing slash, including through symlinks. statSync classification preserves the directory path and uses the separator only as a fallback.",
+      "changedSurface": ["typeDirectoryOutputLines stat-based directory classification", "trailing separator fallback only when stat fails"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["CombinedAutocompleteProvider and directory-output typing share path normalization and completion item construction."], "notes": "The provider owns the behavior below host wrappers."},
+        "inheritanceStructural": {"audited": true, "items": ["MentionProvider wraps the fork's CombinedAutocompleteProvider for shell-mode/path positions; the wrapper does not replace the fork classifier."], "notes": "The current host passes fdPath=null to this inner provider for deterministic fallback, so no claim is made that the host's @-mention HostFilePort path exercises fd output."},
+        "host": {"audited": true, "items": ["src/mentions.ts delegates shell-mode command/path positions and slash-command-name completion to CombinedAutocompleteProvider", "public AutocompleteProvider consumers may provide an fd-backed provider"], "notes": "The current @ flow uses HostFilePort/discoverMention and the /image path uses completeImageArgument/LocalFileSource; neither is counted as a direct fd consumer of X027."},
+        "publicExtension": {"audited": true, "items": ["AutocompleteProvider output is public through editor completion integration", "CombinedAutocompleteProvider accepts an fd-backed path for callers that opt into it"], "notes": "Directory item type and insertion behavior are observable when the fd-backed provider path is used."},
+        "behavioral": {"audited": true, "items": ["bare directory lines remain directories", "symlinks are followed by stat", "failed stat keeps a trailing separator as a fallback"], "notes": "The audited upstream reference also changed nested/fuzzy ordering, which is not part of X027."}
+      },
+      "tests": ["packages/pi-tui/test/autocomplete.test.ts: typeDirectoryOutputLines and fd-backed provider cases", "test/file-completion-convergence.test.ts: host file completion is explicitly separate and does not prove fd-path usage"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/autocomplete.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference classify plain fd lines by trailing slash and slice directory names; the local path uses stat first and avoids dropping the final character."
+      },
+      "retirement": {
+        "conditions": ["Retire only when upstream directory completion classifies bare and symlinked directories with the same insertion text and fallback behavior.", "Run fd, symlink, trailing-slash, and host @ completion tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Separated X027 from upstream's unrelated nested/fuzzy autocomplete changes. The current host's @ and /image paths are separate from fd output; the public fd-backed provider path remains a supported vendor capability, so this is not classified as unused."
+      }
+    },
+    "X028": {
+      "title": "Fullscreen viewport boundary, pre-input, and search-reset seams",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "CRITICAL",
+      "files": ["src/tui-alt-screen.ts", "src/components/scroll-view.ts"],
+      "why": "The host virtual transcript owns paging and search while the fork owns viewport mechanics. Boundary callbacks, pre-input interception, canScroll, and clearSearch let both owners cooperate without duplicating the scroll implementation.",
+      "changedSurface": ["onScrollBoundary for final unconsumed edge attempts", "onBeforeViewportInput before built-in Home/End/Page handling", "ScrollView.canScroll and host prompt-navigation fallthrough", "clearSearch and previous/next prompt routing"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["TuiAltScreen viewport listener, ScrollView scroll state, built-in search, and scrollbar edge detection share input ordering."], "notes": "The seams are coupled to the primary scroll view, not arbitrary callbacks."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiAltScreen owns a ScrollView and routes its viewport input before component dispatch."], "notes": "No host wrapper can reproduce the built-in scrollbar/viewport state safely."},
+        "host": {"audited": true, "items": ["src/tui-app.ts wires onBeforeViewportInput and onScrollBoundary, owns virtual transcript paging/Home/End, and calls clearSearch for jumpLatest and prompt navigation"], "notes": "Host wires the callbacks and clearSearch; ScrollView.canScroll is consumed internally by TuiAltScreen as fallback state, not called by the host."},
+        "publicExtension": {"audited": true, "items": ["TuiAltScreenOptions viewport callbacks and ScrollView.canScroll public component shape."], "notes": "The seams are part of compatibility tests."},
+        "behavioral": {"audited": true, "items": ["only a primary viewport edge emits a boundary", "host pre-input can claim semantic keys before built-ins", "short transcripts let keys fall through to focused components", "jump-latest resets built-in search"], "notes": "Restoring upstream can silently consume navigation keys or bypass virtual transcript ownership."}
+      },
+      "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: boundary, overscroll, page, scrollbar, and search reset", "packages/pi-tui/test/tui-shrink.test.ts and ScrollView canScroll coverage", "test/home-end-keys.test.ts: bundle Home/End ownership"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui-alt-screen.ts", "packages/tui/src/components/scroll-view.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream lacks the host callbacks and canScroll seam; its built-in viewport behavior cannot express virtual transcript paging or host pre-input ownership."
+      },
+      "retirement": {
+        "conditions": ["Provide an upstream listener/viewport contract that maps edge, pre-input, search reset, canScroll, and prompt navigation semantics one-for-one.", "Run fullscreen interaction and host virtual transcript tests before any replacement."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Rechecked all four seams and the short-transcript fallthrough; KEEP HARD."
+      }
+    },
+    "X029": {
+      "title": "Editor history callbacks",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "HIGH",
+      "files": ["src/components/editor.ts"],
+      "why": "The host must preserve !/!! input mode across prompt recall and history-draft browsing. Recall, save, and restore callbacks provide the mode-aware history contract.",
+      "changedSurface": ["onRecall callback", "onHistoryDraftSave callback", "onHistoryDraftRestore callback"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Editor history navigation invokes callbacks at recall and draft transitions in a defined order."], "notes": "The callbacks are attached to internal history branches."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiEditor assigns the callback properties on its Editor instance."], "notes": "No private cast is used for these callbacks."},
+        "host": {"audited": true, "items": ["src/tui-editor.ts mode-aware history adapter", "src/editor-seat-holder.ts draft handoff"], "notes": "The host stores and restores mode metadata outside the vendor document."},
+        "publicExtension": {"audited": true, "items": ["Editor public callback properties are consumed by the host adapter."], "notes": "Third-party editor subclasses could observe the same public shape."},
+        "behavioral": {"audited": true, "items": ["recall round-trips mode", "history draft save/restore does not turn mode prefixes into document text", "up/down browsing remains compatible"], "notes": "A generic history API without mode callbacks is only partial."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts: editor history callbacks and keybindings", "test/editor-input-mode.test.ts: !/!! mode round-trip"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream has no mode-aware history callback properties; Kimi's similar callbacks are design evidence, not upstream equivalence."
+      },
+      "retirement": {
+        "conditions": ["Provide a public history event/callback contract that preserves mode metadata and draft transitions, then run editor and host mode round-trip tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed callbacks are direct host API consumers and not removed kimi-only residue."
+      }
+    },
+    "X030": {
+      "title": "decodePrintableKey root re-export",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "HIGH",
+      "files": ["src/index.ts"],
+      "why": "The host imports decodePrintableKey from the package root for editor mode parsing, footer configuration, and keybinding UI. The implementation remains in keys.ts; this divergence is the public re-export.",
+      "changedSurface": ["index.ts root export of decodePrintableKey"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Vendor Editor imports decodePrintableKey relatively from keys.ts; it does not depend on the root re-export."], "notes": "Internal and root consumers were distinguished."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No inheritance edge; the contract is package entry export shape."},
+        "host": {"audited": true, "items": ["src/tui-editor.ts !/!! printable parsing", "src/footer/configurator.ts", "src/keybinding-ui/list.ts"], "notes": "The TuiEditor consumer was explicitly included in this audit."},
+        "publicExtension": {"audited": true, "items": ["Package root export map exposes the decoder to host and public integrations."], "notes": "The host cannot deep-import the private keys.ts path through the exports map."},
+        "behavioral": {"audited": true, "items": ["root import resolves the same decoder as the relative internal path", "printable key parsing stays consistent across editor and configuration UI"], "notes": "Moving or copying the function could create two decoder implementations."}
+      },
+      "tests": ["packages/pi-tui/test/keys.test.ts: direct src/index root export smoke and decoder behavior", "test/editor-input-mode.test.ts: !/!! mode codec behavior", "test/keybinding-integration.test.ts and footer configurator tests"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/index.ts", "packages/tui/src/keys.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference define decodePrintableKey in keys.ts but do not export it from the package root; the root public entry remains a real host dependency."
+      },
+      "retirement": {
+        "conditions": ["Upstream must export the same decoder from its package root with compatible declarations, or a deliberate package API migration must update every root consumer and compatibility fixture.", "Do not replace this with a host copy while the package exports map remains root-only."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Corrected the incomplete old consumer inventory: TuiEditor, footer configurator, and keybinding UI all use the root export."
+      }
+    },
+    "X031": {
+      "title": "CJK URL boundary tokenizer",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "MEDIUM",
+      "files": ["src/components/markdown.ts"],
+      "why": "Marked GFM autolinks can absorb CJK or full-width punctuation after a bare URL. The tokenizer cuts at the first boundary while keeping balanced full-width parentheses in the URL.",
+      "changedSurface": ["CjkBoundaryUrlTokenizer URL token boundary logic", "Markdown parser extension registration"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Markdown parser tokenizers and rendered link nodes share the boundary result."], "notes": "The change is inside the fork Markdown component."},
+        "inheritanceStructural": {"audited": true, "items": ["Markdown component wraps marked output without a host subclass override."], "notes": "No structural consumer found beyond the component path."},
+        "host": {"audited": true, "items": ["TranscriptFolder output and message renderers display Markdown containing CJK URLs."], "notes": "transcript.ts emits message/fold data; package Markdown and host renderers perform wrapping and display. Host transcript content supplies the real punctuation cases."},
+        "publicExtension": {"audited": true, "items": ["Public Markdown component/render path consumes marked tokens."], "notes": "Rendered href/text are observable."},
+        "behavioral": {"audited": true, "items": ["CJK punctuation is not included in bare URL href/text", "balanced full-width parentheses remain eligible", "ordinary Latin URLs retain marked behavior"], "notes": "A generic URL tokenizer with a similar name is not enough without boundary semantics."}
+      },
+      "tests": ["packages/pi-tui/test/markdown.test.ts: CJK and full-width punctuation after bare URLs", "test/rendering.test.ts: transcript Markdown rendering"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/markdown.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference marked configuration does not contain the CJK boundary tokenizer; the old landed-upstream note was incorrect."
+      },
+      "retirement": {
+        "conditions": ["Retire only when upstream or the Markdown owner provides equivalent CJK/full-width URL boundary and balanced-parenthesis behavior.", "Run Markdown link and transcript rendering tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Both the pinned baseline and the audited upstream reference source were checked; no issue closure was treated as absorption."
+      }
+    },
+    "X032": {
+      "title": "Container.render width clamp",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/tui.ts"],
+      "why": "A non-positive width must be clamped before it reaches component repeat/padding logic so narrow or transient geometry cannot crash the whole render tree.",
+      "changedSurface": ["Container.render clamps width to at least one column"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Container width is passed to every child component render and layout helper."], "notes": "The entry-point clamp protects the whole component tree."},
+        "inheritanceStructural": {"audited": true, "items": ["Container is the base for Box/Stack and host component containers."], "notes": "Inherited render paths receive the clamped width."},
+        "host": {"audited": true, "items": ["Host narrow terminal and responsive overlay layouts can transiently produce zero or negative grants."], "notes": "The host supports narrow terminals and resize rebuilds."},
+        "publicExtension": {"audited": true, "items": ["Extension components are rendered under Container-owned widths."], "notes": "The defensive boundary protects third-party components too."},
+        "behavioral": {"audited": true, "items": ["width 0 and negative widths become one", "positive widths are unchanged", "child rendering does not receive invalid repeat counts"], "notes": "This is defense-in-depth even where the normal host minimum is larger."}
+      },
+      "tests": ["packages/pi-tui/test/tui-render.test.ts: width 0, -3, and 5 clamp behavior", "test/frame-tiny.test.ts and narrow host render suites"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream passes non-positive Container widths to child rendering; it does not provide the local entry-point clamp."
+      },
+      "retirement": {
+        "conditions": ["Retire only if every supported geometry path guarantees a positive width before Container.render and direct negative-width regressions remain covered."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Kept as a cheap whole-tree defensive boundary; no behavior cleanup was attempted."
+      }
+    },
+    "X033": {
+      "title": "Overwide rendered lines are truncated, not fatal",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/tui-main-screen.ts"],
+      "why": "Host components can produce a line one or more columns wider than a transient terminal width. The main screen must truncate it instead of throwing and taking down the TUI.",
+      "changedSurface": ["overwide non-image line truncation to terminal width", "truncate-before-segment-reset ordering"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["TuiMainScreen line processing, ANSI segment reset, kitty image scan, and differential render cache share processed-line output."], "notes": "X033 and X035 are separate ownership records over the same processing pass."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiMainScreen extends the screen base and processes all rendered component lines."], "notes": "No host subclass can catch a throw after the screen processing path."},
+        "host": {"audited": true, "items": ["Host narrow-terminal layouts, transcript cards, and wide graphemes."], "notes": "The host deliberately supports responsive and 40-column surfaces."},
+        "publicExtension": {"audited": true, "items": ["Extension renderer output is passed into the same main-screen line processor."], "notes": "A plugin can produce an overwide grapheme or styled line."},
+        "behavioral": {"audited": true, "items": ["overwide ordinary lines are clipped rather than fatal", "reset is appended after the truncation slice", "image line behavior remains separate"], "notes": "Changing only the throw to a slice before reset can leak styles."}
+      },
+      "tests": ["packages/pi-tui/test/tui-render.test.ts: overwide, styled, CJK, and reset ordering", "test/frame-tiny.test.ts and narrow host render coverage"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui-main-screen.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream throws on overwide rendered lines; local processing truncates before appending the complete segment reset."
+      },
+      "retirement": {
+        "conditions": ["Retire only if upstream accepts overwide lines without fatal termination and preserves truncation/reset/image ordering.", "Run narrow-width and styled-line regressions across the cold and cached processing paths."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed the reset ordering and its cross-dependency with X035; kept active."
+      }
+    },
+    "X034": {
+      "title": "wordWrapLine single-grapheme overwide guard",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/components/editor.ts"],
+      "why": "An atomic grapheme wider than the available width cannot be split. The guard prevents recursive rewrapping from overflowing the call stack; X033 clips the eventual screen line.",
+      "changedSurface": ["wordWrapLine sub-grapheme width check before recursive wrapping"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Editor draft wrapping, cursor row mapping, and main-screen truncation depend on the overwide grapheme result."], "notes": "The guard is inside Editor's recursive wrapping helper."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiEditor uses the vendor Editor wrapping implementation through composition/subclassing."], "notes": "No independent host wrapper can prevent recursion once the helper is called."},
+        "host": {"audited": true, "items": ["Host editor at widths 1-8 and responsive draft/editor seats."], "notes": "CJK and ZWJ drafts exercise the boundary."},
+        "publicExtension": {"audited": true, "items": ["Editor render behavior is visible to host and editor integrations."], "notes": "The helper itself is private but its rendering contract is public."},
+        "behavioral": {"audited": true, "items": ["wide CJK/ZWJ grapheme produces one chunk", "no RangeError from recursive wrapping", "cursor and line rendering remain usable at narrow widths"], "notes": "The one-column overflow is intentionally handled by X033."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts: wordWrapLine and narrow Editor rendering at widths 1-8", "packages/pi-tui/test/tui-render.test.ts: narrow screen clipping"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream recursively rewraps a single overwide grapheme and can overflow the stack; it does not provide the local base case."
+      },
+      "retirement": {
+        "conditions": ["Retire only with an upstream grapheme-aware base case that preserves narrow Editor rendering and cursor mapping, then run CJK/ZWJ width tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Kept active because the failure is an editor-internal recursion hazard, not an absence of host imports."
+      }
+    },
+    "X035": {
+      "title": "Per-frame processed-line reuse",
+      "status": "ACTIVE",
+      "category": ["PERF_HOST_DEPENDENT"],
+      "risk": "HIGH",
+      "files": ["src/tui-main-screen.ts", "src/utils.ts", "src/tui.ts"],
+      "why": "Steady transcript frames should process only changed rendered line values. The host keeps component render arrays stable as a useful render optimization, while the main-screen cache itself compares primitive string values and can reuse equal fresh strings too.",
+      "changedSurface": ["previousRawLines and previousLineImageIds caches", "value-equality processing fast path", "asciiVisibleWidth and exported SEGMENT_RESET support", "cache invalidation on width/state restore"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["TuiMainScreen differential processing, image-id scanning, truncation/reset, and TuiBase render state restoration share cache validity."], "notes": "The cache is invalidated on width changes and state resets."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiMainScreen compares each rendered line value with the previous line value; component-array identity is not required for the string cache hit."], "notes": "The contract is value-based for strings, not reference-based."},
+        "host": {"audited": true, "items": ["src/tui-app.ts BulletedComponent and ThinkingCompactComponent return stable arrays as an upstream render optimization", "long transcript and streaming spinner frames"], "notes": "Host stability helps avoid upstream render work, but is not the proof of the main-screen line-cache hit."},
+        "publicExtension": {"audited": true, "items": ["Extension renderer components enter the same line-processing pipeline."], "notes": "The cache behavior is observable through rendered output and performance, not a public cache method."},
+        "behavioral": {"audited": true, "items": ["steady equal line values write no changes", "fresh arrays with equal primitive strings also hit the cache", "width changes invalidate reuse", "cached and cold paths both truncate/normalize/reset equivalently", "kitty image IDs remain aligned"], "notes": "Upstream BoundedTerminalWriter solves output-string size, not this per-frame reuse contract."}
+      },
+      "tests": ["packages/pi-tui/test/tui-render.test.ts: equal primitive-line frame and steady-frame performance regression", "packages/pi-tui/test/render-preprocess-bench.ts: 1k-10k line benchmark", "test/rendering.test.ts: indirect host component-array stability only; it does not prove main-screen cache identity", "Missing direct cache invalidation, cold/cached equivalence, image-ID alignment, and instrumentation assertions"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui-main-screen.ts", "packages/tui/src/utils.ts", "packages/tui/src/tui.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference reprocess every line each frame. Its bounded writer prevents huge output formation but does not replace value-based per-frame line reuse or the host render-cost contract."
+      },
+      "retirement": {
+        "conditions": ["Provide a benchmarked replacement with equal steady-frame CPU and allocation cost at representative transcript sizes.", "Run cold/cached render, image-id, width-invalidation, and host reference-stability tests before removal."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "KEEP PERF CONTRACT. The audit corrected the old reference-identity wording: the implementation compares primitive string values, so fresh equal strings also reuse processed output. Performance behavior still requires benchmark evidence rather than host imports alone."
+      }
+    },
+    "X036": {
+      "title": "FOCUS_IN and FOCUS_OUT reach app listeners",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "HIGH",
+      "files": ["src/tui-alt-screen.ts"],
+      "why": "Fullscreen focus reports must clean up native selection on FOCUS_OUT while still reaching app-level listeners for notification suppression and clipboard/image tracking.",
+      "changedSurface": ["viewport focus handler performs cleanup then returns undefined for FOCUS_IN/FOCUS_OUT"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Alt-screen viewport focus cleanup and TuiBase/app input listener fan-out share the listener result."], "notes": "Cleanup and passthrough must happen in that order."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiAltScreen inherits TuiBase listener dispatch and installs the viewport listener."], "notes": "No host workaround can observe a consumed report."},
+        "host": {"audited": true, "items": ["TuiApp.routeInput/handleInput focus tracking", "notification and clipboard-image focus policy"], "notes": "The app listener is registered above the viewport path."},
+        "publicExtension": {"audited": true, "items": ["App input listener registration is a host/extension-adjacent input contract."], "notes": "Raw focus reports remain internal to the screen but fan-out is observable."},
+        "behavioral": {"audited": true, "items": ["FOCUS_OUT clears alternate-screen selection", "FOCUS_IN and FOCUS_OUT are still observed by app listeners", "the app listener passthrough is ordered after alternate-screen cleanup"], "notes": "The divergence is an alternate-screen cleanup/passthrough contract; no main-screen FOCUS handler parity claim is made."}
+      },
+      "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: app listener observes both focus reports and selection cleanup remains", "test/focus-ui.test.ts and notification focus behavior"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui-alt-screen.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream consumes both focus reports inside the alt-screen viewport handler; local behavior cleans up FOCUS_OUT and passes both reports through."
+      },
+      "retirement": {
+        "conditions": ["Retire only when upstream provides equivalent cleanup plus app-listener fan-out on the alternate screen, then run focus and notification tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed the passthrough is required after cleanup and is not safely movable to a host text/search layer."
+      }
+    },
+    "X037": {
+      "title": "Editor-owned submit binding tui.editor.submit",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API", "PUBLIC_COMPONENT_CONTRACT"],
+      "risk": "CRITICAL",
+      "files": ["src/keybindings.ts", "src/components/editor.ts"],
+      "why": "Editor submission must be remappable without changing plain Input submission. The editor binding is also shared by physical-submit detection, PasteBurst, and backslash-Enter fallback.",
+      "changedSurface": ["process-global tui.editor.submit binding definition", "Editor submit and backslash-enter checks use the editor binding", "X038 physical Enter detection reads the same effective binding"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Editor submit branch, PasteBurst physical-submit check, backslash-enter fallback, and keybinding registry share tui.editor.submit."], "notes": "All three Editor paths must move together."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiEditor is a host subclass/composition boundary over the vendor Editor; keybinding names are structural process-global state."], "notes": "A host interception cannot reproduce all internal branches safely."},
+        "host": {"audited": true, "items": ["src/keybindings/manager.ts onEditorSubmitSync", "src/tui-app.ts editorAccepts inventory and dispose-time default restore", "src/keybindings/definitions.ts"], "notes": "The host remaps editor submission while keeping tui.input.submit at enter."},
+        "publicExtension": {"audited": true, "items": ["Editor public submit behavior and keybinding contract", "Stable/Advanced editor integrations observe submit semantics"], "notes": "The dedicated binding prevents configuration leakage into plain Inputs."},
+        "behavioral": {"audited": true, "items": ["submit: ctrl+x affects Editor but not question/search Input", "physical Enter under a remapped binding is distinguished from the remapped chord", "backslash-enter uses the effective editor submit keys"], "notes": "A host-only interception would bypass or duplicate X038 and Editor internal semantics."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts: editor submit binding split", "test/keybinding-integration.test.ts: anti-pollution and default restore", "packages/pi-tui/test/keybindings.test.ts: binding registry"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/keybindings.ts", "packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream has only tui.input.submit; it cannot express the editor-only binding or its shared physical-submit semantics."
+      },
+      "retirement": {
+        "conditions": ["Upstream must provide a per-editor binding/action consumed by submit, PasteBurst physical-submit detection, and backslash-enter fallback.", "Run anti-pollution, remap, PasteBurst, history, and editor input tests before changing either half."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "KEEP HARD. Cross-audited with X038; both the binding definition and editor call sites are required."
+      }
+    },
+    "X038": {
+      "title": "PasteBurst non-bracketed paste fallback",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/paste-burst.ts", "src/components/editor.ts"],
+      "why": "Terminals and tmux can lose bracketed-paste markers and deliver a paste as rapid plain characters. The trailing physical Enter must insert a newline rather than submit a partial draft.",
+      "changedSurface": ["PasteBurst single-character timing detector", "Editor disablePasteBurst option/setter and integration", "physical-submit Enter suppression with X037 remap distinction"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["PasteBurst state, Editor input loop, bracketed-paste path, insert-point feeds, and submit binding are one input-ordering contract."], "notes": "The multi-character chunk reset is intentional for typed-ahead/test input."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiEditor exposes the disablePasteBurst setter through its Editor integration."], "notes": "No host copy can observe each physical character after the fork parser consumes it."},
+        "host": {"audited": true, "items": ["Host editor paste path across SSH, tmux, iTerm2, and remapped submit configurations."], "notes": "The bugfix is editor-internal and deliberately has no single host import consumer."},
+        "publicExtension": {"audited": true, "items": ["Editor constructor option and setDisablePasteBurst integration surface."], "notes": "Integrations can opt out while the default remains enabled."},
+        "behavioral": {"audited": true, "items": ["eight or more single chars within the burst window mark a paste", "physical Enter is suppressed to newline", "remapped submit chord still submits mid-burst", "physical Enter under a remap breaks the burst"], "notes": "The X037 cross-semantics are part of this record."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts: PasteBurst fallback and X037 cross tests", "docs/tmux-testing.md: two-step terminal driving guidance", "test/editor-input-mode.test.ts: submit behavior"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference have no PasteBurst fallback or disable option. The local editor-internal terminal behavior cannot be judged unused from host imports."
+      },
+      "retirement": {
+        "conditions": ["Retire only if supported terminal environments provide reliable bracketed paste markers or upstream implements an equivalent fallback and opt-out contract.", "Run terminal/tmux timing, remapped submit, and editor input tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Restored and re-audited after the earlier incorrect no-host-consumer removal."
+      }
+    },
+    "X039": {
+      "title": "WIDTH_CACHE_SIZE 4096",
+      "status": "ACTIVE",
+      "category": ["PERF_HOST_DEPENDENT"],
+      "risk": "MEDIUM",
+      "files": ["src/utils.ts"],
+      "why": "CJK-heavy host transcripts and width/theme invalidation bursts are intended to benefit from a 4096-entry non-ASCII width cache; the upstream 512-entry FIFO may thrash in those bursts, pending an isolated benchmark.",
+      "changedSurface": ["WIDTH_CACHE_SIZE constant 4096 instead of 512"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["visibleWidth, wrapping, layout measurement, and render preprocessing share the non-ASCII width cache."], "notes": "The cache is global utility state with bounded eviction."},
+        "inheritanceStructural": {"audited": true, "items": [], "notes": "No inheritance edge; all width callers use the utility."},
+        "host": {"audited": true, "items": ["CJK-heavy transcript, Markdown, fullscreen, and theme invalidation paths."], "notes": "The consumer is measured burst workload."},
+        "publicExtension": {"audited": true, "items": ["Extension-rendered text uses visibleWidth indirectly."], "notes": "No public cache API is exposed."},
+        "behavioral": {"audited": true, "items": ["cache remains bounded", "a larger working set is intended to reduce repeated CJK measurement", "width results remain identical"], "notes": "The current render-preprocess benchmark targets X035 and contains incidental CJK lines; it does not establish a 4096-versus-512 result for X039. Removal must be decided by an isolated benchmark, not import search."}
+      },
+      "tests": ["packages/pi-tui/test/layout.test.ts and wrap-ansi.test.ts: width correctness", "packages/pi-tui/test/render-preprocess-bench.ts: X035 render benchmark with incidental CJK workload", "Missing isolated 4096-vs-512 cache-size assertion and reproducible CJK burst benchmark"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/utils.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference use a 512-entry cache; local uses 4096 intending to reduce CJK burst thrashing, but an isolated 4096-versus-512 measurement remains pending."
+      },
+      "retirement": {
+        "conditions": ["Run a repeatable CJK burst benchmark across cold, theme-change, and width-change paths.", "Retire only if 512 or an upstream replacement is no worse within the agreed performance budget."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "KEEP unless benchmark disproves the workload benefit; no behavior change was made."
+      }
+    },
+    "X040": {
+      "title": "Input.setValue cursor placement",
+      "status": "ACTIVE",
+      "category": ["PUBLIC_COMPONENT_CONTRACT"],
+      "risk": "HIGH",
+      "files": ["src/components/input.ts"],
+      "why": "Prefilled query and draft inputs should place the cursor at the end by default, while callers doing mid-edit replacement can request a clamped preserved cursor explicitly.",
+      "changedSurface": ["Input.setValue(value, { cursor }) option", "default end placement and preserve mode"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Input value, cursor clamp, search filter, and render cursor marker share setValue semantics."], "notes": "X041 calls this through SelectList filter synchronization."},
+        "inheritanceStructural": {"audited": true, "items": ["SelectList and SettingsList own Input children and forward focus."], "notes": "Wrapper behavior depends on the child's cursor placement."},
+        "host": {"audited": true, "items": ["SelectList initialQuery/setFilter", "src/history-panel.ts history query", "src/task-panel.ts task query", "src/question.ts question draft/prefill paths"], "notes": "These callers append or continue typing after prefill; the cited host paths are concrete setValue consumers rather than a generic editor-adjacent bucket."},
+        "publicExtension": {"audited": true, "items": ["Input public setValue API and picker/filter adapters."], "notes": "The option is part of the component contract."},
+        "behavioral": {"audited": true, "items": ["setValue('foo') then typing appends by default", "preserve explicitly retains a clamped mid-edit cursor", "filter query synchronization keeps the cursor at the end"], "notes": "Upstream/kimi clamp-at-zero behavior is not equivalent for prefills."}
+      },
+      "tests": ["packages/pi-tui/test/input.test.ts: X040 cursor semantics", "packages/pi-tui/test/select-list.test.ts: initial query/filter continuation", "Host setValue callsites in history-panel.ts, task-panel.ts, and question.ts were audited; no direct host cursor assertion exists"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/input.ts", "packages/tui/src/components/select-list.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference setValue preserves/clamps the existing cursor at zero for a fresh Input; they do not provide the local end-by-default plus explicit preserve option."
+      },
+      "retirement": {
+        "conditions": ["Provide an upstream setValue cursor contract with end-by-default prefills and explicit preserve semantics, then run Input, SelectList, question, and history tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Kept with X041 because canonical filter synchronization relies on the end-placement behavior."
+      }
+    },
+    "X041": {
+      "title": "SelectList canonical filter query",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API", "PUBLIC_COMPONENT_CONTRACT"],
+      "risk": "HIGH",
+      "files": ["src/components/select-list.ts"],
+      "why": "filterQuery is the single source of truth for the rendered search box, getFilter, setFilter, setItems, and category switches. This prevents programmatic filters from disappearing on the next keypress.",
+      "changedSurface": ["filterQuery canonical state", "setFilter synchronizes the search Input and applies the filter", "getFilter and setItems read the same canonical query"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["SelectList search Input, filter application, item replacement, selection, and category rebuild share filterQuery."], "notes": "The source-of-truth rule prevents mirrored search state."},
+        "inheritanceStructural": {"audited": true, "items": ["MarqueeFilterAdapter wraps SelectList and reads getFilter through the public shape; it does not call setFilter."], "notes": "The host PickerHandle getFilter/setFilter closures are separate structural adapters; no subclass override was found."},
+        "host": {"audited": true, "items": ["src/tui-app.ts categorized picker query handoff and category cycle", "src/commands.ts session prefill and row enrichment", "src/tui-app.ts PickerHandle getFilter/setFilter closures and MarqueeFilterAdapter getFilter read"], "notes": "Host calls both programmatic and typed filter paths through distinct adapters; category navigation re-injects initialQuery after query clear and Tab."},
+        "publicExtension": {"audited": true, "items": ["SelectList.getFilter/setFilter are public component methods exported by @xmoon76/pi-tui."], "notes": "AdvancedSelectOptions does not expose these methods; the host PickerHandle adapter lives in src/tui-app.ts, so its public-host status is kept distinct from the package component contract."},
+        "behavioral": {"audited": true, "items": ["programmatic filter is visible in the search box", "next key refines rather than resets the programmatic query", "setItems preserves the live query", "categorized picker rebuild can re-inject the original initialQuery after the user clears it and presses Tab", "getFilter is truthful with search disabled"], "notes": "X040 cursor placement is part of the visible continuation behavior. The clear-then-Tab initialQuery edge is recorded as a host follow-up rather than overstated as unconditional query preservation."}
+      },
+      "tests": ["packages/pi-tui/test/select-list.test.ts: canonical filter state", "test/session-picker-loading.test.ts and picker category/filter integration", "Missing categorized-picker clear-then-Tab initialQuery regression; decide whether re-injection is intended before retirement"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/select-list.ts", "packages/tui/src/components/input.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream has no searchable SelectList or canonical filter state. The local query behavior is not present to absorb."
+      },
+      "retirement": {
+        "conditions": ["Retire only together with X001/X002 after a replacement has one query source of truth across typed, programmatic, setItems, category, and advanced ui.select paths."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "KEEP NOW. This record prevents a future SearchableList migration from losing the query-state contract."
+      }
+    },
+    "X042": {
+      "title": "Focusable propagation on Input-owning lists",
+      "status": "ACTIVE",
+      "category": ["PUBLIC_COMPONENT_CONTRACT"],
+      "risk": "HIGH",
+      "files": ["src/components/select-list.ts", "src/components/settings-list.ts"],
+      "why": "List wrappers own the Input or submenu the user actually types into. Focus state must propagate so the cursor marker and IME candidate positioning follow the focused child.",
+      "changedSurface": ["SelectList Focusable getter/setter forwards to search Input", "SettingsList Focusable propagation reaches search Input and conditionally forwards to an open submenu", "row-budget forwarding for nested submenu lists"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["SelectList search Input and SettingsList submenu/search lifecycle share focus and row-budget state."], "notes": "Propagation must be updated when submenu ownership changes."},
+        "inheritanceStructural": {"audited": true, "items": ["SelectList and SettingsList implement Focusable; SettingsList forwards only when a submenu structurally exposes focused."], "notes": "The conditional optional-method edge is real; host ThemeSubmenu, Model/EffortSubmenu, and SubagentModelAllowlistSubmenu currently do not all implement Focusable."},
+        "host": {"audited": true, "items": ["src/tui-app.ts FocusForwardingFrame and picker/settings overlays", "src/theme-menu.ts, src/model-menu.ts, and src/subagent-model-menu.ts submenu wrappers"], "notes": "Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. The audit found a remaining IME/cursor gap for non-Focusable submenu wrappers."},
+        "publicExtension": {"audited": true, "items": ["Focusable component interface and row-budget-aware submenu public shape."], "notes": "The public wrapper contract is used by host and extensions, but optional structural focus must be made explicit by each submenu owner."},
+        "behavioral": {"audited": true, "items": ["focused top-level list emits cursor marker through its actual Input", "IME candidate window follows top-level search focus", "submenu receives focus only when it implements Focusable", "selection/description tail remains within budget"], "notes": "Current host submenu wrappers without focused do not receive the inner search focus; this is an identified follow-up gap, not proof that the vendor seam is unused."}
+      },
+      "tests": ["packages/pi-tui/test/select-list.test.ts and settings-list.test.ts: focus/row-budget behavior", "test/extension-focus-seat.test.ts: SurfaceSnapshot.focusedSeat state only (not SelectList/SettingsList or IME)", "Missing dedicated host submenu focus/IME integration regression for non-Focusable wrappers; add before retirement"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/select-list.ts", "packages/tui/src/components/settings-list.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream lists do not implement the local focus propagation and nested row-budget forwarding contract."
+      },
+      "retirement": {
+        "conditions": ["Provide equivalent upstream Focusable propagation and nested row-budget semantics, then run IME, cursor marker, submenu, and extension focus lifecycle tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed list wrappers are actual Input-owning components. The vendor seam is active, while the current host's non-Focusable submenu wrappers leave a follow-up IME/cursor coverage gap; this record does not claim that gap is solved."
+      }
+    },
+    "X043": {
+      "title": "Deferred viewport input listener registration",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "CRITICAL",
+      "files": ["src/tui-alt-screen.ts"],
+      "why": "Fullscreen host routing must register before the viewport listener so raw captures and host policy see every chunk before built-in scrolling consumes it.",
+      "changedSurface": ["deferViewportListener constructor option", "idempotent installViewportListener method", "host router-first registration order"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["TuiAltScreen constructor, viewport listener, input dispatch order, and host listener installation share registration timing."], "notes": "Listener order is a lifecycle/resource contract."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiAltScreen inherits TuiBase listener dispatch where registration order determines consumption."], "notes": "No post-construction wrapper can reorder an already-registered listener."},
+        "host": {"audited": true, "items": ["src/tui-app.ts fullscreen setFullscreen installs routeInput then viewport listener", "unstable raw capture stage and host pre-input policy"], "notes": "The host explicitly opts into deferred registration."},
+        "publicExtension": {"audited": true, "items": ["Unstable raw capture contract observes arbitrary fullscreen chunks before viewport consumption."], "notes": "The low-level tier still depends on the screen routing seam."},
+        "behavioral": {"audited": true, "items": ["router/preHost sees wheel, mouse, and semantic scroll before viewport", "default constructor path preserves upstream order", "install is idempotent", "X028 pre-input still runs inside the viewport"], "notes": "Constructor-first registration changes who consumes input without changing types."}
+      },
+      "tests": ["packages/pi-tui/test/tui-alt-screen.test.ts: default/deferred listener registration and idempotent install", "test/unstable-interactive.test.ts and test/unstable-input.test.ts: host raw capture behavior", "test/input-router.test.ts and test/home-end-keys.test.ts: host routing", "Missing exhaustive raw rewrite, wheel/mouse, and semantic-scroll ordering matrix"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui-alt-screen.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream always registers the viewport listener in the constructor, making it run before later host/raw listeners; no listener phase/priority contract replaces the local option."
+      },
+      "retirement": {
+        "conditions": ["Upstream must expose listener phase/priority ordering that guarantees protocol -> host/raw -> viewport -> component semantics.", "Run registration-order, raw-capture, wheel/mouse, and fullscreen routing tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "KEEP HARD. Registration order itself is the input-routing contract; no cleanup was attempted."
+      }
+    },
+    "X044": {
+      "title": "Protected autocomplete seam",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "HIGH",
+      "files": ["src/components/editor.ts"],
+      "why": "The host TuiEditor subclass needs to drive explicit/context-gated completion and stale-dropdown cancellation through a supported protected seam rather than unsafe casts to private methods.",
+      "changedSurface": ["requestAutocomplete visibility private -> protected", "cancelAutocomplete visibility private -> protected"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Editor completion state, request/cancel methods, provider callbacks, and dropdown lifecycle are coupled."], "notes": "Visibility is the only local code change; behavior remains vendor-owned."},
+        "inheritanceStructural": {"audited": true, "items": ["src/tui-editor.ts subclass calls requestAutocomplete/cancelAutocomplete through protected access."], "notes": "This is the explicit structural audit target."},
+        "host": {"audited": true, "items": ["src/tui-editor.ts eight former cast sites for completion gating and cancellation"], "notes": "The host no longer depends on a private implementation cast."},
+        "publicExtension": {"audited": true, "items": ["Host editor adapter and subclass compatibility surface."], "notes": "Protected is intentionally not a root public method for unrelated consumers."},
+        "behavioral": {"audited": true, "items": ["explicit completion uses the same request state", "stale dropdown cancellation stays synchronized with Editor input", "upstream signature changes fail at typecheck instead of silently at runtime"], "notes": "A public wrapper or cast would change the supported structural contract."}
+      },
+      "tests": ["packages/pi-tui/test/protected-autocomplete-compile.ts: compile-only host subclass contract", "packages/pi-tui/test/editor.test.ts: no-provider protected seam", "test/advanced-editor.test.ts and editor autocomplete integration"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Both the pinned baseline and the audited upstream reference keep both methods private; the host subclass cannot express its supported completion control without the visibility divergence."
+      },
+      "retirement": {
+        "conditions": ["Upstream must expose a protected or equivalent subclass-safe completion seam with compatible request/cancel lifecycle.", "Run subclass typecheck and stale-dropdown/autocomplete tests before changing visibility."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Confirmed the subclass edge and kept the seam; audited upstream reference private visibility is not semantically equivalent."
+      }
+    },
+    "X045": {
+      "title": "Editor expanded-cursor mapping getExpandedCursor",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "CRITICAL",
+      "files": ["src/components/editor.ts"],
+      "why": "Expanded draft handoffs need the cursor in getExpandedText coordinates. Every paste marker before the raw cursor expands the offset, and a cursor inside an atomic marker snaps to the expanded content end.",
+      "changedSurface": ["getExpandedCursor public method", "single-pass marker tokenizer shared with getExpandedText", "raw-coordinate cursor mapping and inside-marker snap"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["Editor paste registry, marker tokenizer, expanded text, and cursor state share raw marker coordinates."], "notes": "Text and cursor must use one tokenizer to avoid expansion drift."},
+        "inheritanceStructural": {"audited": true, "items": ["HostEditorAdapter/SeatEditor optional getExpandedCursor capability reads the public method."], "notes": "No private cast path is used."},
+        "host": {"audited": true, "items": ["src/editor-seat-holder.ts wireCursorOf and editor seat handoffs", "steer/submit/viewer expanded draft paths"], "notes": "Host transfers text and cursor together across seats."},
+        "publicExtension": {"audited": true, "items": ["Host editor adapter optional expanded-cursor capability."], "notes": "The capability is public at the host adapter boundary."},
+        "behavioral": {"audited": true, "items": ["markers before the cursor add only their content expansion delta", "between-marker positions do not over-count later markers", "inside-marker positions snap to expanded content end", "literal marker text inside pasted content is not rescanned"], "notes": "Type-compatible text-only expansion is not enough for cursor handoff."}
+      },
+      "tests": ["packages/pi-tui/test/editor.test.ts: every raw cursor position, marker collision, and bounded snap", "test/editor-seat-non-owning.test.ts: expanded draft/cursor handoff"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/components/editor.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream has getExpandedText but no cursor-pair mapping; its multi-round marker replacement would also rescan marker-like content."
+      },
+      "retirement": {
+        "conditions": ["Provide an upstream text/cursor pair API with one-pass marker expansion and the same raw-coordinate/snap rules.", "Run marker collision, every-position mapping, and all host seat handoff tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "Rechecked the round-2 robustness fixes; kept active and separate from X023 text staging."
+      }
+    },
+    "X046": {
+      "title": "Cell-size replies consumed before input listeners",
+      "status": "ACTIVE",
+      "category": ["HARD_HOST_API"],
+      "risk": "CRITICAL",
+      "files": ["src/tui.ts"],
+      "why": "Terminal cell-size replies must update image geometry even when a modal or raw capture consumes every ordinary input chunk. Protocol replies are filtered before host listeners.",
+      "changedSurface": ["CSI 6;H;W t cell-size response classification before listener dispatch"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["TuiBase terminal response classifiers and input listener loop share protocol precedence."], "notes": "Cell-size, OSC 11, and color-scheme replies have an ordering contract."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiMainScreen and TuiAltScreen inherit TuiBase protocol handling."], "notes": "Both regular and fullscreen surfaces need the same reply precedence."},
+        "host": {"audited": true, "items": ["src/terminal-image.ts and fullscreen image rendering consume cell dimensions", "questions, approvals, and unstable raw captures can consume ordinary chunks"], "notes": "The host modal/capture layers make listener ordering observable."},
+        "publicExtension": {"audited": true, "items": ["Unstable raw input capture contract must not swallow terminal negotiation replies."], "notes": "The low-level surface still cannot own protocol replies."},
+        "behavioral": {"audited": true, "items": ["cell dimensions update despite consume-everything listener", "protocol reply never reaches ordinary host handlers", "image coordinate math stays current under modal/raw capture"], "notes": "Moving the classifier after listeners creates a silent stale-geometry failure."}
+      },
+      "tests": ["packages/pi-tui/test/tui-cell-size-input.test.ts: reply before consume-everything listener", "test/unstable-input.test.ts and test/unstable-interactive.test.ts: host raw-capture integration", "Missing dedicated modal-plus-raw-capture cell-size regression; fullscreen image rendering is covered separately but does not assert protocol ordering"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/tui.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "Upstream consumes the cell-size response after input listeners; a listener that consumes every chunk can swallow it."
+      },
+      "retirement": {
+        "conditions": ["Upstream must guarantee all terminal-owned protocol replies precede host/raw listener consumption, or expose an equivalent protocol-priority stage.", "Run cell-size, modal, raw-capture, and fullscreen image tests."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "KEEP HARD. Reply ordering is terminal protocol ownership, not a host import detail."
+      }
+    },
+    "X047": {
+      "title": "Anchored Kitty repeat/release classification",
+      "status": "ACTIVE",
+      "category": ["BUGFIX_MISSING_UPSTREAM"],
+      "risk": "HIGH",
+      "files": ["src/keys.ts"],
+      "why": "Generic Terminal.start input callbacks may deliver arbitrary multi-character chunks. Repeat/release filtering must recognize only complete Kitty protocol sequences so ordinary batched text containing suffixes such as :2u or :3~ is not swallowed before it reaches the focused component.",
+      "changedSurface": ["anchored complete-sequence Kitty event classifier", "isKeyRepeat exact repeat detection", "isKeyRelease exact release detection"],
+      "dependencies": {
+        "vendorInternal": {"audited": true, "items": ["keys.ts protocol parsing and TuiBase input filtering call the exported repeat/release helpers before focused-component dispatch."], "notes": "The helper is a package-owned protocol boundary shared by both direct consumers and inherited TUI surfaces."},
+        "inheritanceStructural": {"audited": true, "items": ["TuiBase, TuiMainScreen, and TuiAltScreen use the same pre-listener filtering path."], "notes": "A root-only replay cannot safely replace the inherited filter without duplicating or reordering input ownership."},
+        "host": {"audited": true, "items": ["src/input-router.ts and src/tui-app.ts depend on repeat/release artifacts being inert", "VirtualTerminal and generic Terminal injections can forward arbitrary data chunks"], "notes": "Production StdinBuffer splits ordinary stdin text, but the public Terminal callback contract and injected terminals do not promise one logical event per callback."},
+        "publicExtension": {"audited": true, "items": ["Terminal.start(onInput) accepts arbitrary string chunks", "exported isKeyRepeat/isKeyRelease helpers are consumed at the package boundary"], "notes": "The fix protects custom terminal integrations and test/injected transports, not just the production stdin adapter."},
+        "behavioral": {"audited": true, "items": ["complete Kitty repeat/release sequences remain inert", "ordinary text containing :2u, :3u, :2A, or :3~ remains editable", "bracketed paste payloads and incomplete sequences are not protocol artifacts"], "notes": "Substring matching creates data loss for valid batched input; anchoring preserves protocol filtering without a root-side replay path."}
+      },
+      "tests": ["packages/pi-tui/test/keys.test.ts: complete Kitty forms, lookalike text, bracketed paste, and partial sequences", "test/terminal-focus.test.ts: injected batched text with Kitty-like suffixes reaches the editor and user-activity seam"],
+      "upstream": {
+        "equivalence": "NO",
+        "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
+        "relevantFiles": ["packages/tui/src/keys.ts", "packages/tui/src/tui.ts", "packages/tui/src/terminal.ts"],
+        "relevantIssues": [],
+        "semanticDelta": "The pinned upstream helpers use broad substring checks, while the local classifier requires a complete Kitty CSI sequence. The generic Terminal callback contract permits batching, and TuiBase independently filters after root listeners, so a consumer-side replay is not equivalent."
+      },
+      "retirement": {
+        "conditions": ["Upstream must provide exact complete-sequence repeat/release classification or a protocol-priority input stage that covers arbitrary Terminal callback chunks and inherited TuiBase consumers.", "Run the lookalike-text, bracketed-paste, partial-sequence, and root injected-terminal regressions before removing the fork fix."],
+        "replacementMapping": [],
+        "evidence": []
+      },
+      "audit": {
+        "lastAuditedAt": "2026-09-03",
+        "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
+        "notes": "KEEP HARD. The supported generic Terminal boundary accepts arbitrary chunks; root replay would duplicate inherited input ownership."
+      }
+    }
+  }
 }

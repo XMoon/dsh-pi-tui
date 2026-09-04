@@ -5,14 +5,14 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { ProcessTerminal } from '@xmoon76/pi-tui'
-import { MessageId } from '@deepseek-ai/dsh-llm'
+import { MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, type Config } from '../src/index.ts'
 import { StatsFolder } from '../src/stats.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
-import { TuiApp } from '../src/tui-app.ts'
+import { TuiApp, type StreamingToolPreview } from '../src/tui-app.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -137,6 +137,7 @@ interface RunnerHarness {
   readonly createOptions: { provider?: string; model?: string }[]
   readonly createdSessions: FakeSession[]
   readonly commands: unknown
+  readonly subagents?: unknown
 }
 
 function fakeAgent(session: FakeSession): Agent {
@@ -165,6 +166,7 @@ function makeHarness(
   initialDefault: { provider: string; model: string; reasoningEffort?: string } = { provider: 'p', model: 'm' },
   saveDefault?: (next: { provider: string; model: string; reasoningEffort?: string }) => Promise<unknown>,
   createGate?: () => Promise<unknown>,
+  subagents?: unknown,
 ): RunnerHarness {
   const persisted = new Map<string, FakeSession>()
   const live = new Map<string, Agent>()
@@ -254,7 +256,7 @@ function makeHarness(
     execute: async () => ({ result: { kind: 'success' } }),
     handler: (name: string) => definitions.get(name)?.handler,
   }
-  return { persistence, agents, sessions, defaultModel, llm, createOptions, createdSessions, commands }
+  return { persistence, agents, sessions, defaultModel, llm, createOptions, createdSessions, commands, subagents }
 }
 
 async function settle(): Promise<void> {
@@ -315,6 +317,7 @@ interface RunnerProbe {
   transcriptHydrateCount: number
   statsHydrateCount: number
   capturedMessages: readonly { kind: string; text?: string }[] | undefined
+  capturedStreamingToolPreviews: readonly StreamingToolPreview[] | undefined
   scrollToBottomCount: number
   capturedModels: string[]
   capturedWelcomeModels: string[]
@@ -330,6 +333,7 @@ function installProbe(): RunnerProbe {
     transcriptHydrateCount: 0,
     statsHydrateCount: 0,
     capturedMessages: undefined,
+    capturedStreamingToolPreviews: undefined,
     scrollToBottomCount: 0,
     capturedModels: [],
     capturedWelcomeModels: [],
@@ -361,9 +365,10 @@ function installProbe(): RunnerProbe {
     probe.statsHydrateCount += 1
     return originalStatsHydrate.call(this, events)
   }
-  TuiApp.prototype.setTranscript = function (messages, activities) {
+  TuiApp.prototype.setTranscript = function (messages, activities, window, streamingToolPreviews) {
     probe.capturedMessages = messages
-    return originalSetTranscript.call(this, messages, activities)
+    probe.capturedStreamingToolPreviews = streamingToolPreviews
+    return originalSetTranscript.call(this, messages, activities, window, streamingToolPreviews)
   }
   TuiApp.prototype.setStatus = function (status) {
     if (typeof status.model === 'string') probe.capturedModels.push(status.model)
@@ -410,6 +415,7 @@ async function mountRunner(
   ctx.provide('agentDefaultModel', harness.defaultModel as never)
   ctx.provide('llm', harness.llm as never)
   ctx.provide('commands', harness.commands as never)
+  if (harness.subagents !== undefined) ctx.provide('subagents', harness.subagents as never)
   ctx.provide('loader', { await: async () => {} } as never)
   const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, config))
   await fiber
@@ -456,7 +462,15 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
   const resumed: FakeSession = fakeSession({
     id: 'runner-session-a',
     header: { id: 'runner-session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
-    events: [...sessionEvents('resumed answer'), ...modelHistory('provider-a', 'model-a', 'high')],
+    events: [
+      ...sessionEvents('resumed answer'),
+      ...modelHistory('provider-a', 'model-a', 'high'),
+      event('assistant/chunk', {
+        turn: 0,
+        step: 0,
+        chunk: { type: 'tool-call-delta', index: 0, id: 'historical-preview' as ToolCallId, name: 'edit', argumentsDelta: '{"path"' },
+      }, 8),
+    ],
   })
   const resumeHarness = makeHarness(home, resumed, { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' })
   resumeContext = new Context()
@@ -466,6 +480,7 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
   assert.equal(probe.transcriptHydrateCount, 1)
   assert.equal(probe.statsHydrateCount, 1)
   assert.ok(probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'resumed answer'))
+  assert.deepEqual(probe.capturedStreamingToolPreviews, [], 'cold hydration must not recreate Preparing rows')
   assert.ok(probe.capturedModels.includes('provider-a/model-a @high'),
     `resume must restore the Session-local model, not the global fallback: ${probe.capturedModels.join(', ')}`)
 
@@ -995,8 +1010,35 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
     step: 0,
     chunk: { type: 'text-delta', index: 0, text: 'streaming while scrolled up' },
   }, 11))
-  context.emit('session/event', resumed as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 12))
+  context.emit('session/event', resumed as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'preview-call' as ToolCallId, name: 'edit', argumentsDelta: '{"path"' },
+  }, 12))
+  await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => preview.name), ['edit'])
+  context.emit('session/event', resumed as never, event('tool/call', {
+    turn: 1,
+    step: 0,
+    callId: 'preview-call' as ToolCallId,
+    name: 'edit',
+    arguments: '{"path":"x"}',
+  }, 13))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews, [])
+
+  context.emit('session/event', resumed as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 14))
+  await vt.waitForRender()
+  context.emit('session/event', resumed as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'late-preview' as ToolCallId, name: 'write', argumentsDelta: '{' },
+  }, 15))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews, [], 'late chunks after turn/end must not resurrect a preview')
   assert.equal(probe.scrollToBottomCount, 0, 'live repaint must not force the latest window to its bottom')
   assert.equal(readScroll().isFollowingEnd, false, 'live repaint must preserve the manually disabled follow-end state')
   assert.ok(readScroll().scrollTop < readScroll().maxScrollTop, 'live repaint must leave the viewport away from the bottom')
@@ -1005,18 +1047,160 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
   await vt.waitForRender()
   assert.equal(readScroll().isFollowingEnd, true, 'an explicit bottom jump must re-enable follow-end')
   probe.scrollToBottomCount = 0
-  context.emit('session/event', resumed as never, event('turn/start', { turn: 2 }, 13))
+  context.emit('session/event', resumed as never, event('turn/start', { turn: 2 }, 16))
   context.emit('session/event', resumed as never, event('assistant/chunk', {
     turn: 2,
     step: 0,
     chunk: { type: 'text-delta', index: 0, text: 'streaming while following' },
-  }, 14))
-  context.emit('session/event', resumed as never, event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 15))
+  }, 17))
+  context.emit('session/event', resumed as never, event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 18))
   await vt.waitForRender()
   assert.equal(probe.scrollToBottomCount, 0, 'ScrollView follow-end must handle live output without an imperative jump')
   assert.equal(readScroll().isFollowingEnd, true, 'a viewport following the end must remain attached to live output')
   const following = readScroll()
   assert.equal(following.scrollTop, following.maxScrollTop, JSON.stringify(following))
+})
+
+test('the parent Preparing projection keeps updating behind a child viewer', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-parent-preparing-viewer-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'parent-preparing-viewer-session',
+    header: { id: 'parent-preparing-viewer-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child: FakeSession = fakeSession({
+    id: 'child-preparing-viewer-session',
+    header: { id: 'child-preparing-viewer-session', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('child answer'),
+  })
+  const subagents = {
+    listDescendants: async () => [{
+      kind: 'child',
+      id: child.id,
+      label: 'child viewer',
+      mode: 'continuable',
+      activity: 'running',
+      hasChildren: false,
+      parentId: parent.id,
+      depth: 1,
+    }],
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+
+  // The main session owns the first preview before the viewer opens.
+  context.emit('session/event', parent as never, event('turn/start', { turn: 1 }, 10))
+  context.emit('session/event', parent as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: '' as ToolCallId, name: 'edit', argumentsDelta: '{' },
+  }, 11))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => preview.callId), [''])
+
+  // /tasks opens the real runner browser, and Enter mounts the child viewer.
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must be mounted')
+
+  // Parent events continue through the runner while the child owns the
+  // visible transcript. Updating A and adding B must both survive the visit.
+  context.emit('session/event', parent as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: '' as ToolCallId, name: 'write', argumentsDelta: '}' },
+  }, 12))
+  context.emit('session/event', parent as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 1, id: 'parent-call-b' as ToolCallId, name: 'read', argumentsDelta: '{' },
+  }, 13))
+  context.emit('session/event', parent as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: {
+      type: 'block-end',
+      index: 0,
+      block: { type: 'tool-call', id: 'parent-call-a' as ToolCallId, name: 'write', arguments: '{}' },
+    },
+  }, 14))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+
+  // Esc returns to the parent surface; its hidden map, not a reset map, is
+  // projected and therefore contains the latest A plus the new B.
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => [preview.callId, preview.name]), [
+    ['parent-call-a', 'write'],
+    ['parent-call-b', 'read'],
+  ])
+
+  // A parent call that materializes while the child remains visible must be
+  // removed from the hidden main map, not recreated when the viewer closes.
+  context.emit('session/event', parent as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 15))
+  await vt.waitForRender()
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.getViewerGeneration(), 3, 'the child viewer must reopen')
+  context.emit('session/event', parent as never, event('turn/start', { turn: 2 }, 16))
+  context.emit('session/event', parent as never, event('assistant/chunk', {
+    turn: 2,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'parent-call-c' as ToolCallId, name: 'edit', argumentsDelta: '{' },
+  }, 17))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  context.emit('session/event', parent as never, event('tool/call', {
+    turn: 2,
+    step: 0,
+    callId: 'parent-call-c' as ToolCallId,
+    name: 'edit',
+    arguments: '{}',
+  }, 18))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews, [],
+    'a parent preview materialized behind the viewer must not return on exit')
 })
 
 test('explicit cold resume shows the pre-mount status and clears it before mount; fresh start stays silent', async (t) => {

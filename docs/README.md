@@ -44,14 +44,19 @@ Other documentation, and why it is not here:
 - Root `CHANGELOG.md` — the 简体中文 release history, maintained on every
   release per the hard rule in `AGENTS.md` (Keep a Changelog 1.1.0 format),
   with `CHANGELOG.en.md` kept in sync as the English version.
-- Root `AGENTS.md` — the contributor operating manual: naming, layout, key
-  decisions, development loop, traps, and pointers into this directory.
-- `packages/pi-tui/AGENTS.md` — the vendored fork's divergence ledger: every
-  local fix with its guarding tests. It is the source of record for re-vendor
-  verification and intentionally lives with the fork.
+- Root `AGENTS.md` — the repository constitution: execution discipline,
+  ownership and correctness boundaries, development/release pointers, and
+  links into this directory.
+- `packages/pi-tui/vendor-divergences.json` — the authoritative schema-v2
+  ledger: every local fix, dependency audit, upstream comparison, and
+  retirement condition. Run `pnpm generate:pi-divergences` to produce the
+  generated `packages/pi-tui/DIVERGENCES.md` report.
+- `packages/pi-tui/AGENTS.md` — the vendored fork's contributor/re-vendor guide;
+  it points to the structured ledger and records the hard gates.
 - `packages/pi-tui/UPSTREAM.json` — the single source of truth for the
-  vendored upstream version/commit (deliberately not copied into any other
-  doc; the fork's `package.json` `repository.note` defers to it).
+  vendored upstream version/commit. The generated divergence report repeats
+  the pin for audit readability; the fork's `package.json` `repository.note`
+  defers to this file.
 - `README.md` — the repository root is the published package, so the root
   README is the npm page (user-facing install instructions).
 - `.agents/AGENTS.md` — private, gitignored environment handbook for this

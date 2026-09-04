@@ -70,6 +70,8 @@ import type {} from '@deepseek-ai/dsh-settings'
 // P5d service/event merges: goal badge, background jobs, permission
 // presets, session titles, and the workflow/retry folds (transcript.ts).
 import type {} from '@deepseek-ai/dsh-goal'
+// The retry event merge for the live request retry boundary.
+import type {} from '@deepseek-ai/dsh-llm-retry'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type { JobId } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-permission-presets'
@@ -114,7 +116,14 @@ import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type Foot
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
-import { startProcessTui, type CompactionPhase, type QueueItem, type TuiApp } from './tui-app.ts'
+import { startProcessTui, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TuiApp } from './tui-app.ts'
+import {
+  clearStreamingToolPreviewsForStep,
+  clearStreamingToolPreviewsForTurn,
+  removeStreamingToolPreview,
+  streamingToolPreviewSnapshot,
+  upsertStreamingToolPreview,
+} from './streaming-tool-preparing.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
 
 import { normalizedKeyToKeyId } from './keybindings/manager.ts'
@@ -237,7 +246,8 @@ export const Config: z<Config> = z.object({
   sessionId: z.string(),
 })
 
-/** The launcher's bounded exit request; the TUI asks for it on Ctrl+C. */
+/** The launcher's bounded exit request; the TUI invokes it after keyboard
+ * confirmation. */
 interface AppExit {
   (code: number): void
 }
@@ -892,15 +902,68 @@ function bundleVersion(): string {
   }
 }
 
+/** Translate official DSH events into the local preview operations. */
+function applyStreamingToolPreviewEvent(
+  previews: Map<string, StreamingToolPreview>,
+  event: SessionEvent,
+): void {
+  if (event.type === 'assistant/chunk' && event.data.chunk.type === 'tool-call-delta') {
+    const chunk = event.data.chunk
+    upsertStreamingToolPreview(previews, {
+      callId: chunk.id,
+      turn: event.data.turn,
+      step: event.data.step,
+      index: chunk.index,
+      name: chunk.name,
+    })
+    return
+  }
+  if (
+    event.type === 'assistant/chunk'
+    && event.data.chunk.type === 'block-end'
+    && event.data.chunk.block.type === 'tool-call'
+  ) {
+    const chunk = event.data.chunk
+    // ContentBlock is merge-extensible, so retain the runtime tag guard above
+    // and narrow the known tool-call fields structurally here.
+    const block = chunk.block as { type: 'tool-call'; id: ToolCallId; name: string }
+    upsertStreamingToolPreview(previews, {
+      callId: block.id,
+      turn: event.data.turn,
+      step: event.data.step,
+      index: chunk.index,
+      name: block.name,
+    })
+    return
+  }
+  if (event.type === 'tool/call') {
+    removeStreamingToolPreview(previews, event.data.callId, event.data.turn, event.data.step)
+    return
+  }
+  if (event.type === 'llm/retry' || event.type === 'llm/retry-started') {
+    clearStreamingToolPreviewsForStep(previews, event.data.turn, event.data.step)
+    return
+  }
+  if (event.type === 'step/end') {
+    clearStreamingToolPreviewsForStep(previews, event.data.turn, event.data.step)
+    return
+  }
+  if (event.type === 'turn/end') {
+    clearStreamingToolPreviewsForTurn(previews, event.data.turn)
+  }
+}
+
 /**
  * Repaint the transcript from the active folder's bounded window. Messages,
- * navigation facts, and turn activities come from one fold snapshot so a
- * repaint can never show a stale Thought header against fresh rows.
+ * navigation facts, turn activities and live preparing rows come from one
+ * presentation snapshot so a repaint can never show a stale Thought header
+ * against fresh rows.
  */
 function repaint(
   app: TuiApp,
   folder: TranscriptFolder,
   windowController: TranscriptWindowController,
+  streamingToolPreviews: readonly StreamingToolPreview[],
 ): TranscriptWindow {
   windowController.setTurns(folder.groupedTurns())
   const endTurn = windowController.endTurn()
@@ -910,10 +973,10 @@ function repaint(
   })
   app.setTranscript(projection.messages, folder.turnActivities(), {
     ...windowController.state(),
-     firstTurn: projection.firstTurn,
-     lastTurn: projection.lastTurn,
+    firstTurn: projection.firstTurn,
+    lastTurn: projection.lastTurn,
     hasNewer: projection.hasNewer,
-  })
+  }, streamingToolPreviews)
   return projection
 }
 
@@ -3430,6 +3493,9 @@ export function apply(ctx: Context, config: Config): void {
     // (cheap) but the view rebuild flushes at most every REPAINT_FLUSH_MS,
     // and immediately on turn/end.
     let repaintTimer: NodeJS.Timeout | undefined
+    // Ephemeral previews are isolated per presentation owner: the main live
+    // session and a mounted child viewer never share call ids or rows.
+    const mainStreamingToolPreviews = new Map<string, StreamingToolPreview>()
     // P7d: subagent viewer — while set, the transcript shows another live
     // session's log and Esc returns to the parent session. The target is
     // MODE-AWARE: a continuable child's viewer is INTERACTIVE (the editor
@@ -3454,6 +3520,8 @@ export function apply(ctx: Context, config: Config): void {
       access: ViewerAccess
       /** The child session's workspace ('' when unknown, e.g. a cold child). */
       cwd: string
+      /** Live-only preparing rows for this child presentation owner. */
+      previews: Map<string, StreamingToolPreview>
     } | undefined
     // Unsettled subagent delegations in the live session, in tool/call order.
     // The viewer matches one of these by description when the user opens a
@@ -3463,19 +3531,34 @@ export function apply(ctx: Context, config: Config): void {
     // transcript (see enterView). Consumed on the matching tool/result.
     const viewCallToChild = new Map<string, SessionId>()
     const activeFolder = (): TranscriptFolder => viewing?.folder ?? folder
-     const activeWindow = (): TranscriptWindowController => viewing?.window ?? windowController
+    const activeWindow = (): TranscriptWindowController => viewing?.window ?? windowController
+    const activeStreamingToolPreviews = (): readonly StreamingToolPreview[] => {
+      if (!activeWindow().isLatest()) return []
+      return streamingToolPreviewSnapshot(viewing?.previews ?? mainStreamingToolPreviews)
+    }
+    const applyOwnerStreamingToolPreviewEvent = (
+      previews: Map<string, StreamingToolPreview>,
+      ownerFolder: TranscriptFolder,
+      event: SessionEvent,
+    ): void => {
+      // TranscriptFolder already rejects assistant chunks after a completed
+      // turn. Keep this presentation-only projection aligned without adding a
+      // second completed-turn tombstone or retaining stale event state.
+      if (event.type === 'assistant/chunk' && ownerFolder.turnActivity(event.data.turn)?.completed === true) return
+      applyStreamingToolPreviewEvent(previews, event)
+    }
     const paintNow = (): void => {
       if (repaintTimer !== undefined) {
         clearTimeout(repaintTimer)
         repaintTimer = undefined
       }
-      repaint(app, activeFolder(), activeWindow())
+      repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews())
     }
     const schedulePaint = (): void => {
       if (repaintTimer !== undefined) return
       repaintTimer = setTimeout(() => {
         repaintTimer = undefined
-        repaint(app, activeFolder(), activeWindow())
+        repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews())
       }, REPAINT_FLUSH_MS)
     }
     // Tool-call arguments by callId, for the approval-preview dialog.
@@ -3519,6 +3602,7 @@ export function apply(ctx: Context, config: Config): void {
     const bumpSessionGeneration = (): number => {
       sessionGeneration += 1
       callArgs.clear()
+      mainStreamingToolPreviews.clear()
       // The new session's subagent delegations are a fresh namespace: stale
       // pending calls from the old session would consume viewer match slots,
       // and dead callId→child maps would silently disable the auto-pop.
@@ -3572,7 +3656,7 @@ export function apply(ctx: Context, config: Config): void {
         // keeps the teardown's intent explicit and ordering-safe). The
         // Esc path uses exitFocusViewerScope instead (restore).
         app.discardFocusViewerScope()
-        repaint(app, folder, windowController)
+        repaint(app, folder, windowController, activeStreamingToolPreviews())
         windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
         // The new session's own measurement comes from its initLiveSession
         // deferred path — the teardown refresh is UI-only.
@@ -3609,7 +3693,7 @@ export function apply(ctx: Context, config: Config): void {
       const folder = activeFolder()
       const controller = activeWindow()
       controller.anchorAt(match.turn)
-      repaint(app, folder, controller)
+      repaint(app, folder, controller, activeStreamingToolPreviews())
       app.scrollToBottom({ disableFollow: !controller.isLatest() })
 
       // Focus Mode: the search hits the FULL transcript (hidden process
@@ -3732,13 +3816,15 @@ export function apply(ctx: Context, config: Config): void {
       // commit its child over the current surface (no viewing write, no
       // repaint, no viewer mount, no auto-pop match).
       if (!viewerOpen.isCurrent(request)) return
+      // The viewer replaces the main transcript presentation owner, but the
+      // main session's live preview state continues updating off-screen.
       const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
       if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
       viewerSessionAbort = new AbortController()
       viewing = {
         id: childId,
         folder: childFolder,
-         window: childWindow,
+        window: childWindow,
         stats: childStats,
         parentSessionId,
         label: label ?? childId,
@@ -3746,11 +3832,12 @@ export function apply(ctx: Context, config: Config): void {
         activity,
         access,
         cwd: childCwd,
+        previews: new Map(),
       }
       // The child's turn numbers are its OWN namespace: the parent's Focus
       // disclosures must not leak into the child transcript (plan §26).
       app.enterFocusViewerScope()
-      repaint(app, childFolder, childWindow)
+      repaint(app, childFolder, childWindow, activeStreamingToolPreviews())
       // The viewer bar covers the editor (a read-only placeholder for
       // one-shot, the child's own draft for continuable) and the header
       // badges the mode — the transient notify is no longer the only "you
@@ -3767,6 +3854,8 @@ export function apply(ctx: Context, config: Config): void {
     const exitView = (): boolean => {
       viewerOpen.invalidate()
       if (viewing === undefined) return false
+      const previousViewing = viewing
+      previousViewing.previews.clear()
       viewing = undefined
       viewerSessionAbort?.abort() // cancel an in-flight, not-yet-accepted follow-up
       viewerSessionAbort = undefined
@@ -3780,7 +3869,7 @@ export function apply(ctx: Context, config: Config): void {
       // Restore the parent's Focus disclosures BEFORE the repaint so the
       // projection uses them (plan §26).
       app.exitFocusViewerScope()
-      repaint(app, folder, windowController)
+      repaint(app, folder, windowController, activeStreamingToolPreviews())
       // The main transcript may have grown while the viewer covered it (the
       // child's result, the parent's streaming): restore the parent's semantic latest/history position
       // so the pop never loses an intentional history anchor.
@@ -4881,7 +4970,7 @@ export function apply(ctx: Context, config: Config): void {
         runOwned(label, task, { ...options, diag, sessionId: () => liveAgent?.session.id })
       },
       onExit: () => {
-        // Ctrl+C / Ctrl+D route through the SAME exit orchestration as
+        // Keyboard exit requests route through the SAME exit orchestration as
         // /exit and /quit (createExitController above): flush with a hard
         // timeout, idempotent cleanup, warning, resume hint, process exit.
         requestExit()
@@ -5082,7 +5171,7 @@ export function apply(ctx: Context, config: Config): void {
         const anchor = app.captureTranscriptViewportAnchor()
         const controller = activeWindow()
         if (!controller.moveOlder()) return false
-        repaint(app, activeFolder(), controller)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
         // Preserve the old top edge at the same rendered row in the overlap.
         if (anchor === undefined) app.scrollToBottom({ disableFollow: true })
         else app.restoreTranscriptViewportAnchor(anchor, 'top')
@@ -5095,7 +5184,7 @@ export function apply(ctx: Context, config: Config): void {
         if (!app.isFullscreen()) return false
         const controller = activeWindow()
         if (!controller.turnOlder()) return false
-        repaint(app, activeFolder(), controller)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
         app.scrollToBottom({ disableFollow: true })
         return true
       },
@@ -5103,7 +5192,7 @@ export function apply(ctx: Context, config: Config): void {
         if (!app.isFullscreen()) return false
         const controller = activeWindow()
         if (!controller.turnNewer()) return false
-        repaint(app, activeFolder(), controller)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
         app.scrollToBottom({ disableFollow: true })
         return true
       },
@@ -5111,7 +5200,7 @@ export function apply(ctx: Context, config: Config): void {
         const anchor = app.captureTranscriptViewportAnchor()
         const controller = activeWindow()
         if (!controller.moveNewer()) return false
-        repaint(app, activeFolder(), controller)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
         if (controller.isLatest()) app.scrollToBottom()
         else if (anchor === undefined) app.scrollToTop({ disableFollow: true })
         else app.restoreTranscriptViewportAnchor(anchor, 'bottom')
@@ -5130,7 +5219,7 @@ export function apply(ctx: Context, config: Config): void {
         const controller = activeWindow()
         const changed = controller.latest()
         if (!changed && !closedSearch && !app.isFullscreen()) return false
-        repaint(app, activeFolder(), controller)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
         app.scrollToBottom()
         app.setSearchResult(0, 0)
         return true
@@ -5217,7 +5306,7 @@ export function apply(ctx: Context, config: Config): void {
         } else {
           controller.latest()
         }
-        repaint(app, activeFolder(), controller)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
         if (controller.isLatest()) app.scrollToBottom()
         else app.scrollToTop({ disableFollow: true })
       },
@@ -6559,6 +6648,9 @@ export function apply(ctx: Context, config: Config): void {
      * plus every switch await the coordinator refresh themselves.
      */
     const initLiveSession = async (agent: Agent): Promise<void> => {
+      // Session transitions invalidate transient keyboard confirmation before
+      // any asynchronous hydration or bootstrap work begins.
+      app.clearExitConfirmation()
       // Setup installs this before publication; the idempotent call also
       // covers test/direct adapters that hand an already-live Agent back to
       // the runner. Its fold is the resume source of truth.
@@ -6615,12 +6707,13 @@ export function apply(ctx: Context, config: Config): void {
       }
       app.clearLocalMessages()
       app.clearNotify() // a notice from the previous session is stale here
-      // Issue #8: a stale armed exit chord must not exit the NEW session.
-      app.clearCtrlCExit()
+      // Issue #8: a stale keyboard exit confirmation must not exit the NEW
+      // session.
+      app.clearExitConfirmation()
       // The subagent-notice notify guard is per-session: a new session's
       // settlements must notify again.
       notifiedSubagentNotices.clear()
-      repaint(app, folder, windowController)
+      repaint(app, folder, windowController, activeStreamingToolPreviews())
       // PR D2: the first usable frame paints with the cached measurement
       // (or none); the context measure is deferred one event-loop turn so
       // cold resume never blocks first paint on a long-session scan.
@@ -7218,6 +7311,7 @@ export function apply(ctx: Context, config: Config): void {
       if (liveAgent === undefined) return
       if (viewing !== undefined) {
         if (session.id === viewing.id) {
+          applyOwnerStreamingToolPreviewEvent(viewing.previews, viewing.folder, event)
           viewing.folder.apply([event])
           viewing.stats.apply([event])
           // The store-activity snapshot moves with the child's own
@@ -7240,6 +7334,7 @@ export function apply(ctx: Context, config: Config): void {
         // main folder below — the viewer never starves the main transcript.
       }
       if (session.id !== liveAgent.session.id) return
+      applyOwnerStreamingToolPreviewEvent(mainStreamingToolPreviews, folder, event)
       // Keep the Direct owner in sync with durable model intent and consume a
       // pending choice only when the exact raw request header was recorded.
       // The structural check keeps this next-version event compatible with

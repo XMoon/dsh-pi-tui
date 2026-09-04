@@ -25,6 +25,7 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui
 import { color } from './theme.ts'
 import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
+import { toolTitle } from './present.ts'
 import type { TurnActivity } from './transcript.ts'
 import type { TranscriptMessage } from './transcript.ts'
 
@@ -104,6 +105,34 @@ export function focusDurationText(activity: TurnActivity, now: () => number): st
   if (activity.startedAt === undefined) return undefined
   const end = activity.completed ? (activity.endedAt ?? now()) : now()
   return formatFocusDuration(Math.max(0, end - activity.startedAt))
+}
+
+/** The presentation-only shape needed to summarize one live Preparing row.
+ * It deliberately excludes the call id, turn and arguments: Focus owns no
+ * lifecycle state and only needs the stable visual order plus an optional
+ * display name. */
+export interface FocusPreparingPreview {
+  readonly index: number
+  readonly name?: string
+}
+
+/** The compact Focus-collapsed Tool-slot text for live Preparing rows.
+ * Names that do not map to a known tool title remain generic, so model-facing
+ * names never make the compact Thought card noisy. The input is copied and
+ * sorted so the summary is deterministic even when a caller supplies a fresh
+ * order. */
+export function focusPreparingSummary(
+  previews: readonly FocusPreparingPreview[],
+): string | undefined {
+  if (previews.length === 0) return undefined
+  const ordered = [...previews].sort((left, right) => left.index - right.index)
+  const known = ordered
+    .map(preview => preview.name === undefined || preview.name === '' ? undefined : toolTitle(preview.name))
+    .find(title => title !== undefined && title !== 'Tool' && title !== 'tool')
+  if (known === undefined) {
+    return ordered.length === 1 ? 'Preparing tool…' : `Preparing ${ordered.length} tools…`
+  }
+  return ordered.length === 1 ? `Preparing ${known}…` : `Preparing ${known} +${ordered.length - 1}`
 }
 
 /** Assemble the one-line header, dropping the stat tail progressively so
@@ -210,19 +239,23 @@ function previewTailLines(label: string, text: string, width: number, maxRows: n
  * Think, Tool, Message — then the error reason (plan §24). Think and
  * Tool are at most ONE visual row; Message is the third process slot and
  * shows the latest up to {@link FOCUS_MESSAGE_MAX_ROWS} visual rows of
- * its bounded tail. Only existing slots render. The Tool line's status
- * prefix follows plan §10: none while running, ✓ settled ok, ✗ settled
- * error. */
+ * its bounded tail. Only existing slots render. A live Preparing display,
+ * when supplied, temporarily owns the Tool slot over the formal Tool display.
+ * The formal Tool line's status prefix follows plan §10: none while running,
+ * ✓ settled ok, ✗ settled error. */
 export function focusCollapsedBody(
   activity: TurnActivity,
   width: number,
   toolDisplay?: string,
+  preparingDisplay?: string,
 ): string[] {
   const lines: string[] = []
   if (activity.think !== undefined) {
     lines.push(previewLine('Think:', activity.think.text, width))
   }
-  if (activity.tool !== undefined && toolDisplay !== undefined) {
+  if (preparingDisplay !== undefined) {
+    lines.push(previewLine('Tool:', preparingDisplay, width))
+  } else if (activity.tool !== undefined && toolDisplay !== undefined) {
     const prefix = activity.tool.status === 'ok' ? '✓ ' : activity.tool.status === 'error' ? '✗ ' : ''
     lines.push(previewLine('Tool:', `${prefix}${toolDisplay}`, width))
   }
@@ -244,7 +277,9 @@ export function focusCollapsedBody(
  * icon style) keeps that cheap. The component never mutates Focus state —
  * clicks route through the app's hit map to toggleFocusTurn (plan §17).
  * The Tool line's display text is PRECOMPUTED by the app (presenter-first,
- * plan §38) — the component stays a pure renderer.
+ * plan §38) — the component stays a pure renderer. A collapsed Preparing
+ * summary is presentation input only; expanded rows are composed by TuiApp
+ * after the projected process tail.
  */
 export class FocusActivityComponent {
   private readonly activity: TurnActivity
@@ -252,6 +287,7 @@ export class FocusActivityComponent {
   private readonly now: () => number
   private readonly toolDisplay: string | undefined
   private readonly iconStyle: IconStyle
+  private readonly preparingSummary: string | undefined
 
   constructor(options: {
     activity: TurnActivity
@@ -259,12 +295,14 @@ export class FocusActivityComponent {
     now?: () => number
     toolDisplay?: string
     iconStyle?: IconStyle
+    preparingSummary?: string
   }) {
     this.activity = options.activity
     this.expanded = options.expanded
     this.now = options.now ?? (() => Date.now())
     this.toolDisplay = options.toolDisplay
     this.iconStyle = options.iconStyle ?? 'emoji'
+    this.preparingSummary = options.preparingSummary
   }
 
   /** The Component interface requires invalidate(); the component keeps no
@@ -281,9 +319,15 @@ export class FocusActivityComponent {
     // The header formatter budgets the CONTENT width (the indent is added
     // after), so a header that fits never wraps past the terminal — the
     // fullscreen row hit-map depends on that (review fix).
-    lines.push(`${indent}${color.textDim(formatFocusHeaderLine(this.activity, this.expanded, this.now, contentWidth, this.iconStyle))}`)
+    lines.push(`${indent}${color.textDim(formatFocusHeaderLine(
+      this.activity,
+      this.expanded,
+      this.now,
+      contentWidth,
+      this.iconStyle,
+    ))}`)
     if (!this.expanded) {
-      for (const line of focusCollapsedBody(this.activity, contentWidth, this.toolDisplay)) {
+      for (const line of focusCollapsedBody(this.activity, contentWidth, this.toolDisplay, this.preparingSummary)) {
         lines.push(`${indent}${color.textDim(line)}`)
       }
     }
