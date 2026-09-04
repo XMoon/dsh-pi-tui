@@ -34,7 +34,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-projection-direct
  */
 
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import { safeErrorMessage } from '../../error-boundary.ts'
@@ -56,10 +56,15 @@ export interface SessionProjectionReaderLike {
 /** The zero-I/O projection-cache hint (structural subset of
  * `sessionProjectionCache`). A row is possibly stale but never wrong; the
  * caller's `list()` header is the identity witness, so no log read and no
- * second corpus listing is needed. */
+ * second corpus listing is needed. The master contract completes the
+ * checkpoint identity with the EXACT inherited prefix length
+ * (`inheritedEventCount`) — a seeded session without an exact cut must
+ * never guess one (a wrong cut would seed values folded from an unrelated
+ * log prefix). */
 export interface SessionProjectionCacheLike {
   cachedSnapshot(
     meta: SessionHeader,
+    inheritedEventCount: ReturnType<typeof SessionLogOffset>,
     keys?: readonly ProjectionKey[],
   ): { readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } } | undefined
 }
@@ -129,19 +134,35 @@ function errorCodeOf(error: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined
 }
 
+/** The exact inherited prefix length completing a header's checkpoint
+ * identity, or undefined when the header carries no exact cut (a seeded
+ * session whose lightweight list metadata lacks `inheritedEventCount`).
+ * An unseeded session's cut is exactly 0 — never guessed, never derived
+ * from the event count. The header field is read STRUCTURALLY: the
+ * installed dsh-session may lag master's `SessionHeader.inheritedEventCount`. */
+function inheritedCutOf(header: SessionHeader): ReturnType<typeof SessionLogOffset> | undefined {
+  if (header.isSeeded === false) return SessionLogOffset(0)
+  const cut = (header as { inheritedEventCount?: unknown }).inheritedEventCount
+  return typeof cut === 'number' ? SessionLogOffset(cut) : undefined
+}
+
 /**
  * Read the projection-cache hint for one header WITHOUT letting a throwing
- * cache read escalate: the cache is derived data (DSH's own consumers do the
- * same), so damage falls through to the authoritative observation instead of
- * failing the row.
+ * cache read escalate: the cache is derived data (DSH's own consumers do
+ * the same), so damage falls through to the authoritative observation
+ * instead of failing the row. A seeded header WITHOUT an exact inherited
+ * cut skips the cache entirely — a guessed cut could seed values folded
+ * from an unrelated log prefix (master contract §3.5).
  */
 function safeCachedSnapshot(
   cache: SessionProjectionCacheLike | undefined,
   header: SessionHeader,
 ): { readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } } | undefined {
   if (cache === undefined) return undefined
+  const cut = inheritedCutOf(header)
+  if (cut === undefined) return undefined
   try {
-    return cache.cachedSnapshot(header, ['title', 'agentPreset'])
+    return cache.cachedSnapshot(header, cut, ['title', 'agentPreset'])
   } catch {
     return undefined
   }

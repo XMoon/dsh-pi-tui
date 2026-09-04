@@ -17,8 +17,7 @@
  */
 
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
-import { isUnsupportedSessionFormatError } from '../../sessions.ts'
+import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { projectionBatch, type SessionQueryObservationLike, type SessionReaderDiagLike } from './session-projection-direct.ts'
 import { sessionPresetOf } from './session-preset-direct.ts'
@@ -34,6 +33,16 @@ import type { ExportReadResult, SessionProjectionSummary, SessionSearchHit, Sess
  */
 export interface SessionQueryLike {
   listSessions(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; live: boolean }>>
+  /** One exact live or prepared logical Session observation (the export
+   * read plane): header + complete validated event log, caller-owned. */
+  observeSession(
+    sessionId: SessionId,
+    options?: { readonly signal?: AbortSignal; readonly projectionMode?: 'all' | 'none' },
+  ): Promise<{
+    readonly header: SessionHeader
+    readonly events: readonly SessionEvent[]
+    [Symbol.dispose](): void
+  }>
   /**
    * Provider-independent semantic text filtering. The method is optional so
    * older test doubles and intentionally rosterless deployments can still use
@@ -67,12 +76,6 @@ export interface HostContextLike {
   get(name: string): unknown
 }
 
-/** The structural `sessionPersistence` surface the reader needs. */
-export interface SessionPersistenceLike {
-  list(signal?: AbortSignal): Promise<Array<{ id: string; createdAt: number; version: number; cwd?: string; agentPreset?: string; parentSession?: string; origin?: 'subagent' }>>
-  readRaw(id: string): Promise<{ content: string; filename?: string } | undefined>
-}
-
 /** The structural `tokenMeter` surface the reader needs. */
 export interface TokenMeterLike {
   measure(session: unknown): { totalTokens: number }
@@ -103,6 +106,28 @@ function errorCodeOf(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined
   const code = (error as { code?: unknown }).code
   return typeof code === 'string' ? code : undefined
+}
+
+/** Serialize one session's logical log as canonical JSONL text (the
+ * upstream `session-log-export` contract): the header line, then one line
+ * per event, with a trailing newline. The TUI never touches physical
+ * artifacts or compression suffixes — the logical events come from the
+ * semantic observation, so the export is provider-independent. */
+function serializeLogicalSessionLog(header: SessionHeader, events: readonly SessionEvent[]): string {
+  const lines = [JSON.stringify({
+    type: 'session',
+    version: header.version,
+    id: header.id,
+    createdAt: header.createdAt,
+    ...header.cwd === undefined ? {} : { cwd: header.cwd },
+    ...header.parentSession === undefined ? {} : { parentSession: header.parentSession },
+    isSeeded: header.isSeeded,
+    ...header.origin === undefined ? {} : { origin: header.origin },
+    delegationDepth: header.delegationDepth ?? 0,
+    ...header.agentPreset === undefined ? {} : { agentPreset: header.agentPreset },
+  })]
+  for (const event of events) lines.push(JSON.stringify(event))
+  return `${lines.join('\n')}\n`
 }
 
 /** The Direct backend's session reader: `ctx` services behind the semantic
@@ -174,39 +199,26 @@ export class DirectSessionReader implements SessionReader {
   }
 
   async list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined> {
-    const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
     const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
     signal?.throwIfAborted()
-    let rows: SessionSummary[]
-    if (query !== undefined) {
-      // Listing is deliberately header/live-only. Cold projection replay is a
-      // separate projectionBatch() operation so /sessions can open its first
-      // picker frame without waiting on every historical session log.
-      const records = await query.listSessions(signal)
-      signal?.throwIfAborted()
-      this.headerSnapshot = new Map(records.map(record => [String(record.header.id), record.header]))
-      rows = records.map(record => ({
-        id: record.header.id,
-        createdAt: record.header.createdAt,
-        cwd: record.header.cwd,
-        parentSession: record.header.parentSession,
-        origin: record.header.origin,
-        live: record.live,
-      }))
-    } else {
-      if (persistence === undefined) return undefined
-      const headers = await persistence.list(signal)
-      signal?.throwIfAborted()
-      this.headerSnapshot = new Map(headers.map(header => [String(header.id), header as SessionHeader]))
-      rows = headers.map(header => ({
-        id: header.id,
-        createdAt: header.createdAt,
-        cwd: header.cwd,
-        parentSession: header.parentSession,
-        origin: header.origin,
-        live: header.id === currentSessionId,
-      }))
-    }
+    // The semantic corpus is the ONLY listing plane (master contract): the
+    // reader never falls back to raw persistence artifacts. An unmounted
+    // session-query service is an explicit unavailable, not a JSONL scan.
+    if (query === undefined) return undefined
+    // Listing is deliberately header/live-only. Cold projection replay is a
+    // separate projectionBatch() operation so /sessions can open its first
+    // picker frame without waiting on every historical session log.
+    const records = await query.listSessions(signal)
+    signal?.throwIfAborted()
+    this.headerSnapshot = new Map(records.map(record => [String(record.header.id), record.header]))
+    const rows = records.map(record => ({
+      id: record.header.id,
+      createdAt: record.header.createdAt,
+      cwd: record.header.cwd,
+      parentSession: record.header.parentSession,
+      origin: record.header.origin,
+      live: record.live,
+    }))
     signal?.throwIfAborted()
     rows.sort((a, b) => b.createdAt - a.createdAt)
     return rows
@@ -241,69 +253,36 @@ export class DirectSessionReader implements SessionReader {
     if (searchText === '') return []
 
     const sessionQuery = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
-    if (sessionQuery?.filterEvents !== undefined) {
-      // `searchSessions` is intentionally disabled by the shipped SQLite FTS
-      // session-query provider (`openAt: never`). `filterEvents` remains the
-      // public, backend-independent semantic text seam, so use it over the
-      // query engine's live-preferred corpus rather than scanning raw JSONL.
-      const records = [...await sessionQuery.listSessions()]
-        .sort((a, b) => b.header.createdAt - a.header.createdAt)
-        .slice(0, 100)
-      const hits: SessionSearchHit[] = []
-      for (const record of records) {
-        let documents: readonly SessionEventSearchDocumentLike[]
-        try {
-          documents = await sessionQuery.filterEvents(SessionId(record.header.id), [{ kind: 'text', text: searchText }])
-        } catch (error) {
-          // An explicitly disabled query capability is the one case where the
-          // old persistence path remains a deliberate deployment fallback.
-          // It is not a DSH runtime compatibility branch.
-          if (errorCodeOf(error) === 'SESSION_QUERY_SEARCH_DISABLED') return this.searchRaw(searchText)
-          throw error
-        }
-        const document = documents[0]
-        if (document === undefined) continue
-        hits.push({
-          id: String(record.header.id),
-          createdAt: record.header.createdAt,
-          snippet: semanticSnippet(document, searchText),
-        })
-        if (hits.length >= 20) break
-      }
-      return hits
-    }
-
-    // Test doubles and deployments without a query engine retain the old
-    // capability fallback. The supported DSH runtime itself mounts the query
-    // service; this branch is not API or runtime-version detection.
-    return this.searchRaw(searchText)
-  }
-
-  private async searchRaw(query: string): Promise<SessionSearchHit[] | undefined> {
-    const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
-    if (persistence === undefined) return undefined
-    const needle = query.toLowerCase()
-    // Copy before sorting: the persistence service's list() result is a
-    // shared array — an in-place sort would reorder it for every other
-    // consumer (review finding).
-    const headers = [...(await persistence.list())]
-      .sort((a, b) => b.createdAt - a.createdAt)
+    // `filterEvents` is the public, backend-independent semantic text seam
+    // (master contract): the reader NEVER scans raw persistence artifacts.
+    // An unmounted or explicitly disabled capability is an explicit
+    // unavailable, not a JSONL fallback.
+    if (sessionQuery?.filterEvents === undefined) return undefined
+    // `searchSessions` is intentionally disabled by the shipped SQLite FTS
+    // session-query provider (`openAt: never`). `filterEvents` remains the
+    // public semantic seam, so use it over the query engine's live-preferred
+    // corpus.
+    const records = [...await sessionQuery.listSessions()]
+      .sort((a, b) => b.header.createdAt - a.header.createdAt)
       .slice(0, 100)
     const hits: SessionSearchHit[] = []
-    for (const header of headers) {
-      let raw: { content: string } | undefined
+    for (const record of records) {
+      let documents: readonly SessionEventSearchDocumentLike[]
       try {
-        raw = await persistence.readRaw(header.id)
+        documents = await sessionQuery.filterEvents(SessionId(record.header.id), [{ kind: 'text', text: searchText }])
       } catch (error) {
-        if (isUnsupportedSessionFormatError(error)) throw error
-        continue
+        // An explicitly disabled query capability is an explicit
+        // unavailable — never a raw-artifact scan.
+        if (errorCodeOf(error) === 'SESSION_QUERY_SEARCH_DISABLED') return undefined
+        throw error
       }
-      if (raw === undefined) continue
-      const index = raw.content.toLowerCase().indexOf(needle)
-      if (index === -1) continue
-      const start = Math.max(0, index - 40)
-      const snippet = raw.content.slice(start, index + query.length + 40).replace(/\s+/g, ' ').trim()
-      hits.push({ id: header.id, createdAt: header.createdAt, snippet })
+      const document = documents[0]
+      if (document === undefined) continue
+      hits.push({
+        id: String(record.header.id),
+        createdAt: record.header.createdAt,
+        snippet: semanticSnippet(document, searchText),
+      })
       if (hits.length >= 20) break
     }
     return hits
@@ -323,16 +302,27 @@ export class DirectSessionReader implements SessionReader {
   }
 
   async readExportData(sessionId: string): Promise<ExportReadResult> {
-    const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
-    if (persistence === undefined) return { kind: 'unavailable' }
+    const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
+    // The semantic observation is the ONLY export plane (master contract):
+    // the reader never touches raw persistence artifacts. An unmounted
+    // session-query service is an explicit unavailable, not a JSONL scan.
+    if (query === undefined) return { kind: 'unavailable' }
+    let observation: { readonly header: SessionHeader; readonly events: readonly SessionEvent[]; [Symbol.dispose](): void } | undefined
     try {
-      const raw = await persistence.readRaw(sessionId)
-      if (raw === undefined) return { kind: 'none' }
-      return { kind: 'found', data: { filename: raw.filename ?? sessionId, content: raw.content } }
+      observation = await query.observeSession(SessionId(sessionId), { projectionMode: 'none' })
+      return {
+        kind: 'found',
+        data: {
+          filename: `${sessionId}.jsonl`,
+          content: serializeLogicalSessionLog(observation.header, observation.events),
+        },
+      }
     } catch (error) {
       // A REJECTED read (corrupt log, validation, I/O) is a real failure
       // with a diagnostic — never misclassified as 'no materialized log'.
       return { kind: 'error', message: safeErrorMessage(error) }
+    } finally {
+      observation?.[Symbol.dispose]()
     }
   }
 }

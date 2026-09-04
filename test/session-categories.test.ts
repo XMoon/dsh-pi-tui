@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   buildSessionTree,
@@ -340,8 +340,8 @@ test('the search query is carried across category switches', async () => {
 
 test('headerToPickerRow + sessionPickerItem feed the Main category without subagent rows', () => {
   const headers: SessionHeader[] = [
-    { version: 0, isSeeded: false, id: SessionId('session-root-1'), createdAt: 5, cwd: '/w' },
-    { version: 0, isSeeded: false, id: SessionId('session-child-1'), createdAt: 4, cwd: '/w', origin: 'subagent', parentSession: SessionId('session-root-1') },
+    { version: SESSION_FORMAT_VERSION, isSeeded: false, id: SessionId('session-root-1'), createdAt: 5, cwd: '/w' },
+    { version: SESSION_FORMAT_VERSION, isSeeded: false, id: SessionId('session-child-1'), createdAt: 4, cwd: '/w', origin: 'subagent', parentSession: SessionId('session-root-1') },
   ]
   const rows = headers.map(header => headerToPickerRow(header, false))
   const main = rows.filter(row => row.origin !== 'subagent')
