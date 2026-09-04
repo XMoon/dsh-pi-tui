@@ -18,7 +18,7 @@ import {
 } from '../src/runtime/session-preset.ts'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 
 /** Minimal roster double recording every mount. */
@@ -53,7 +53,7 @@ function ctxWith(get: (name: string) => unknown): Context {
 
 function sessionHeader(id: string, agentPreset?: string): SessionHeader {
   return {
-    version: 0,
+    version: SESSION_FORMAT_VERSION,
     id: SessionId(id),
     createdAt: 1,
     cwd: '/tmp',
