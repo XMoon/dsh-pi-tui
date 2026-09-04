@@ -60,7 +60,7 @@
 - `DROPPED`: `X013` — No known in-repo vendor, host, public, or behavioral consumer remains; external use of this private package behavior is unverified. The host busy indicator is WorkingIndicator.
 - `DELIBERATELY_KEPT`: `X030` — A host copy of decodePrintableKey would duplicate the implementation; the package exports map exposes only the root entry.
 - `DEFERRED_HOST_MIGRATION`: `X001`, `X002`, `X041`, `X042` — A host SearchablePicker could replace the extended list, but only after mapping search, grouping, dynamic rows, query state, focus, and row-budget semantics.
-- `NOT_MOVABLE`: `X004A`, `X004B`, `X005`, `X006`, `X007`, `X008`, `X009`, `X010`, `X011`, `X012`, `X014`, `X016`, `X018`, `X019`, `X020`, `X021`, `X022`, `X023`, `X024`, `X025`, `X027`, `X028`, `X029`, `X031`, `X032`, `X033`, `X034`, `X035`, `X036`, `X037`, `X038`, `X039`, `X040`, `X043`, `X044`, `X045`, `X046` — The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary.
+- `NOT_MOVABLE`: `X004A`, `X004B`, `X005`, `X006`, `X007`, `X008`, `X009`, `X010`, `X011`, `X012`, `X014`, `X016`, `X018`, `X019`, `X020`, `X021`, `X022`, `X023`, `X024`, `X025`, `X027`, `X028`, `X029`, `X031`, `X032`, `X033`, `X034`, `X035`, `X036`, `X037`, `X038`, `X039`, `X040`, `X043`, `X044`, `X045`, `X046`, `X047` — The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary.
 - `UPSTREAM_LEVER`: `X005`, `X006`, `X007`, `X008`, `X012`, `X014`, `X016`, `X021`, `X033`, `X035` — Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence.
 
 ## Removed or superseded legacy surfaces
@@ -75,8 +75,8 @@
 
 ## Summary
 
-- Records: 47
-- Statuses: `ABSORBED_UPSTREAM`: 3, `ACTIVE`: 40, `REDUNDANT_SHIM`: 1, `REMOVED_UNUSED`: 2, `RETIREMENT_CANDIDATE`: 1
+- Records: 48
+- Statuses: `ABSORBED_UPSTREAM`: 3, `ACTIVE`: 41, `REDUNDANT_SHIM`: 1, `REMOVED_UNUSED`: 2, `RETIREMENT_CANDIDATE`: 1
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -127,6 +127,7 @@
 | X044 | ACTIVE | HIGH | HARD_HOST_API | NO |
 | X045 | ACTIVE | CRITICAL | HARD_HOST_API | NO |
 | X046 | ACTIVE | CRITICAL | HARD_HOST_API | NO |
+| X047 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 
 ## Divergences
 
@@ -3765,3 +3766,84 @@ Terminal cell-size replies must update image geometry even when a modal or raw c
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: KEEP HARD. Reply ordering is terminal protocol ownership, not a host import detail.
+
+### X047 — Anchored Kitty repeat/release classification
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `HIGH`
+- Files: `src/keys.ts`
+- Last audited: `2026-09-03`
+- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+
+#### Why it exists
+
+Generic Terminal.start input callbacks may deliver arbitrary multi-character chunks. Repeat/release filtering must recognize only complete Kitty protocol sequences so ordinary batched text containing suffixes such as :2u or :3~ is not swallowed before it reaches the focused component.
+
+#### Changed surface
+
+- anchored complete-sequence Kitty event classifier
+- isKeyRepeat exact repeat detection
+- isKeyRelease exact release detection
+
+#### Dependency map
+
+**Vendor internal**
+- keys.ts protocol parsing and TuiBase input filtering call the exported repeat/release helpers before focused-component dispatch.
+- Audit note: The helper is a package-owned protocol boundary shared by both direct consumers and inherited TUI surfaces.
+
+**Inheritance / structural**
+- TuiBase, TuiMainScreen, and TuiAltScreen use the same pre-listener filtering path.
+- Audit note: A root-only replay cannot safely replace the inherited filter without duplicating or reordering input ownership.
+
+**Host**
+- src/input-router.ts and src/tui-app.ts depend on repeat/release artifacts being inert
+- VirtualTerminal and generic Terminal injections can forward arbitrary data chunks
+- Audit note: Production StdinBuffer splits ordinary stdin text, but the public Terminal callback contract and injected terminals do not promise one logical event per callback.
+
+**Public / extension**
+- Terminal.start(onInput) accepts arbitrary string chunks
+- exported isKeyRepeat/isKeyRelease helpers are consumed at the package boundary
+- Audit note: The fix protects custom terminal integrations and test/injected transports, not just the production stdin adapter.
+
+**Behavioral coupling**
+- complete Kitty repeat/release sequences remain inert
+- ordinary text containing :2u, :3u, :2A, or :3~ remains editable
+- bracketed paste payloads and incomplete sequences are not protocol artifacts
+- Audit note: Substring matching creates data loss for valid batched input; anchoring preserves protocol filtering without a root-side replay path.
+
+#### Guarding tests
+
+- packages/pi-tui/test/keys.test.ts: complete Kitty forms, lookalike text, bracketed paste, and partial sequences
+- test/terminal-focus.test.ts: injected batched text with Kitty-like suffixes reaches the editor and user-activity seam
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Relevant upstream files:
+- packages/tui/src/keys.ts
+- packages/tui/src/tui.ts
+- packages/tui/src/terminal.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: The pinned upstream helpers use broad substring checks, while the local classifier requires a complete Kitty CSI sequence. The generic Terminal callback contract permits batching, and TuiBase independently filters after root listeners, so a consumer-side replay is not equivalent.
+
+#### Retirement conditions
+
+- Upstream must provide exact complete-sequence repeat/release classification or a protocol-priority input stage that covers arbitrary Terminal callback chunks and inherited TuiBase consumers.
+- Run the lookalike-text, bracketed-paste, partial-sequence, and root injected-terminal regressions before removing the fork fix.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: KEEP HARD. The supported generic Terminal boundary accepts arbitrary chunks; root replay would duplicate inherited input ownership.
