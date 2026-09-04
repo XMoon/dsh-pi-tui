@@ -47,10 +47,20 @@ function occurrence(text, marker) {
   return text.split(marker).length - 1
 }
 
-function section(text, startMarker, endMarker) {
-  const start = text.indexOf(startMarker)
-  const end = text.indexOf(endMarker, start + startMarker.length)
-  return start >= 0 && end >= 0 ? text.slice(start, end) : ''
+function markdownSubsection(text, startHeading) {
+  const lines = text.split(/\r?\n/)
+  const start = lines.findIndex((line) => line.trim() === startHeading)
+  if (start === -1) return ''
+
+  const level = startHeading.match(/^#+/u)?.[0].length
+  if (level === undefined) return ''
+
+  const end = lines.findIndex((line, index) => {
+    if (index <= start) return false
+    const heading = line.match(/^(#{1,6})\s+/u)
+    return heading !== null && heading[1].length <= level
+  })
+  return lines.slice(start, end === -1 ? lines.length : end).join('\n')
 }
 
 function check(condition, message) {
@@ -64,8 +74,8 @@ for (const definition of README_FILES) {
   const stableAt = text.indexOf(definition.stable)
   const previewAt = text.indexOf(definition.preview)
   const featuresAt = text.indexOf(definition.features)
-  const stableSection = section(text, definition.stable, definition.preview)
-  const previewSection = section(text, definition.preview, definition.features)
+  const stableSection = markdownSubsection(text, definition.stable)
+  const previewSection = markdownSubsection(text, definition.preview)
 
   check(!text.includes(forbiddenGlobalTuiInstall), `${definition.name}: forbidden global TUI install command`)
   check(occurrence(text, definition.install) === 1, `${definition.name}: installation heading must occur exactly once`)
