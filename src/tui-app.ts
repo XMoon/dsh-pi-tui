@@ -118,6 +118,7 @@ import {
   systemContextBody,
   toolCardHeader,
   toolIconSemantic,
+  toolTitle,
   webCardLines,
   type ToolPresenter,
 } from './present.ts'
@@ -237,6 +238,17 @@ function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
  * being committed). Derived by the runner from compaction/start →
  * compaction/summary → compaction/end (foldCompactionEvent). */
 export type CompactionPhase = 'idle' | 'summarizing' | 'applying'
+
+/** One live, ephemeral preview of a tool call whose arguments are still
+ * streaming. This presentation state is deliberately separate from the
+ * durable TranscriptMessage/TurnActivity model. */
+export interface StreamingToolPreview {
+  readonly callId: string
+  readonly turn: number
+  readonly step: number
+  readonly index: number
+  readonly name?: string
+}
 
 /** The indeterminate progress-bar frames shown while a compaction runs:
  * width 12 / block 3, the same visual weight as the footer context bar. */
@@ -1892,6 +1904,14 @@ function deepFreeze(value: unknown): unknown {
  * one bulk owner: Ctrl+O never touches Thinking. */
 type ExpandHint = 'click' | 'fold' | 'thinking' | undefined
 
+/** One live-only transcript block containing all preparing tool rows. It is
+ * kept outside FocusProjectedBlock so no ephemeral row can enter the Focus
+ * activity projection or durable transcript model. */
+type TranscriptRenderBlock = FocusProjectedBlock | {
+  kind: 'streaming-tool-previews'
+  previews: readonly StreamingToolPreview[]
+}
+
 /** One cached component for a transcript message (stage J render cache). */
 interface MessageComponentEntry {
   component: Component
@@ -2055,6 +2075,10 @@ export class TuiApp {
   private readonly questionQueue: QuestionState[] = []
   /** The folded transcript; re-rendered into the messages view on change. */
   private messages: readonly TranscriptMessage[] = []
+  /** Live-only tool-call previews; never part of the folded transcript or
+   * Focus activity state. The runner replaces this snapshot on each coalesced
+   * transcript repaint. */
+  private streamingToolPreviews: readonly StreamingToolPreview[] = []
   /** Local (non-session) cards — e.g. `!` shell runs — rendered after the transcript. */
   private readonly localMessages: TranscriptMessage[] = []
   /** Submitted input history (newest first), mirrored for persistence. */
@@ -5038,14 +5062,18 @@ export class TuiApp {
    * @param activities - the same fold state's per-turn Focus activities
    *   (plan §19: messages and activities must come from ONE fold snapshot,
    *   so a repaint never shows a stale header against fresh rows).
+   * @param streamingToolPreviews - live-only preparing rows for the current
+   *   presentation owner; omitted by legacy callers and never persisted.
    */
   setTranscript(
-     messages: readonly TranscriptMessage[],
-     activities?: ReadonlyMap<number, TurnActivity>,
-     window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
-   ): void {
+    messages: readonly TranscriptMessage[],
+    activities?: ReadonlyMap<number, TurnActivity>,
+    window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
+    streamingToolPreviews?: readonly StreamingToolPreview[],
+  ): void {
     this.messages = messages
     if (activities !== undefined) this.turnActivities = activities
+    this.streamingToolPreviews = [...(streamingToolPreviews ?? [])]
     this.transcriptWindow = window
     this.refreshTranscriptWindowHint()
     // Repaints do NOT clear the transient notify line: an active session
@@ -5549,6 +5577,30 @@ export class TuiApp {
     return projectFocus(this.messages, this.turnActivities, projectionExpanded, this.focusModeEnabled)
   }
 
+  /** Build the rendered transcript blocks in visual order. Preparing rows are
+   * one live-only block between the durable projection and local cards, so
+   * multiple calls stay contiguous and never enter Focus aggregation. */
+  private transcriptBlocks(projectionExpanded: ReadonlySet<number>): TranscriptRenderBlock[] {
+    const blocks: TranscriptRenderBlock[] = [...this.projectedBlocks(projectionExpanded)]
+    if (this.streamingToolPreviews.length > 0) {
+      blocks.push({ kind: 'streaming-tool-previews', previews: this.streamingToolPreviews })
+    }
+    blocks.push(...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock))
+    return blocks
+  }
+
+  /** Render the live preparing rows with the current semantic tool icon and
+   * title mappings. The arguments stream is intentionally not retained or
+   * parsed; only the tool identity is shown. */
+  private streamingToolPreviewComponent(previews: readonly StreamingToolPreview[]): Component {
+    const lines = previews.map(preview => {
+      const name = preview.name ?? ''
+      const prefix = iconPrefix(toolIconSemantic(name), this.iconStyle)
+      return color.textDim(`${prefix}Preparing ${toolTitle(name)}...`)
+    })
+    return new Text(lines.join('\n'), 0, 0)
+  }
+
   /** The precomputed Focus Tool-line display for one activity: presenter-
    * first, static fallback second (plan §38/§9.4). The FocusActivityComponent
    * stays a pure renderer — the presentation bridge lives here. */
@@ -5623,10 +5675,7 @@ export class TuiApp {
     // a session never reads as one undifferentiated wall of text. The spacer
     // row is charged to the preceding block's height, keeping the fullscreen
     // click hit-testing aligned with the rendered layout.
-    const blocks: FocusProjectedBlock[] = [
-      ...this.projectedBlocks(projectionExpanded),
-      ...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock),
-    ]
+    const blocks = this.transcriptBlocks(projectionExpanded)
     blocks.forEach((block, index) => {
       let component: Component
       let rendered: string[]
@@ -5640,6 +5689,10 @@ export class TuiApp {
           projectionExpanded.has(block.activity.turn),
           this.focusToolDisplayFor(block.activity),
         )
+        rendered = component.render(width)
+      } else if (block.kind === 'streaming-tool-previews') {
+        // Live-only preview block
+        component = this.streamingToolPreviewComponent(block.previews)
         rendered = component.render(width)
       } else {
         // Persistent per-message components (stage J): unchanged messages
@@ -5661,7 +5714,9 @@ export class TuiApp {
         // and the row height — the click map stays aligned (height 0
         // never hits, see handleFullscreenClick).
         rows.push({
-          ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+          ...(block.kind === 'message'
+            ? { message: block.message }
+            : block.kind === 'activity' ? { activity: block.activity } : {}),
           ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
             ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
             : {}),
@@ -5688,7 +5743,9 @@ export class TuiApp {
       }
       const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
       rows.push({
-        ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+        ...(block.kind === 'message'
+          ? { message: block.message }
+          : block.kind === 'activity' ? { activity: block.activity } : {}),
         ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
           ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
           : {}),
@@ -5809,10 +5866,7 @@ export class TuiApp {
     // The derived projection set is computed ONCE per refresh (never per
     // activity block — review finding).
     const projectionExpanded = this.focusProjectionExpandedTurns()
-    const blocks: FocusProjectedBlock[] = [
-      ...this.projectedBlocks(projectionExpanded),
-      ...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock),
-    ]
+    const blocks = this.transcriptBlocks(projectionExpanded)
     const rows: Array<{
       message?: TranscriptMessage
       activity?: TurnActivity
@@ -5833,6 +5887,9 @@ export class TuiApp {
           this.focusToolDisplayFor(block.activity),
         )
         rendered = component.render(width)
+      } else if (block.kind === 'streaming-tool-previews') {
+        component = this.streamingToolPreviewComponent(block.previews)
+        rendered = component.render(width)
       } else {
         component = this.componentForMessage(block.message, boundary, width)
         rendered = component.render(width)
@@ -5843,7 +5900,9 @@ export class TuiApp {
         // Same zero-row rule as rebuildMessages: no spacer row, no height —
         // the click map must mirror the rendered layout exactly.
         rows.push({
-          ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+          ...(block.kind === 'message'
+            ? { message: block.message }
+            : block.kind === 'activity' ? { activity: block.activity } : {}),
           ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
             ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
             : {}),
@@ -5855,7 +5914,9 @@ export class TuiApp {
       }
       const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
       rows.push({
-        ...(block.kind === 'message' ? { message: block.message } : { activity: block.activity }),
+        ...(block.kind === 'message'
+          ? { message: block.message }
+          : block.kind === 'activity' ? { activity: block.activity } : {}),
         ...(block.kind === 'message' && block.collapseFocusOwnerOnClick !== undefined
           ? { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }
           : {}),
