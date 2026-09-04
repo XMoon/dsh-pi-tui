@@ -6,8 +6,11 @@ import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
-  applyStreamingToolPreviewEvent,
+  clearStreamingToolPreviewsForStep,
+  clearStreamingToolPreviewsForTurn,
+  removeStreamingToolPreview,
   streamingToolPreviewSnapshot,
+  upsertStreamingToolPreview,
 } from '../src/streaming-tool-preparing.ts'
 import { toolIconSemantic, toolTitle } from '../src/present.ts'
 import { TuiApp, type StreamingToolPreview } from '../src/tui-app.ts'
@@ -43,6 +46,29 @@ function delta(
   }, turn * 100 + step * 10 + index) as SessionEvent
 }
 
+function applyPreviewEvent(previews: Map<string, StreamingToolPreview>, event: SessionEvent): void {
+  if (event.type === 'assistant/chunk' && event.data.chunk.type === 'tool-call-delta') {
+    const chunk = event.data.chunk
+    upsertStreamingToolPreview(previews, {
+      callId: chunk.id,
+      turn: event.data.turn,
+      step: event.data.step,
+      index: chunk.index,
+      name: chunk.name,
+    })
+    return
+  }
+  if (event.type === 'tool/call') {
+    removeStreamingToolPreview(previews, event.data.callId, event.data.turn, event.data.step)
+    return
+  }
+  if (event.type === 'llm/retry' || event.type === 'llm/retry-started' || event.type === 'step/end') {
+    clearStreamingToolPreviewsForStep(previews, event.data.turn, event.data.step)
+    return
+  }
+  if (event.type === 'turn/end') clearStreamingToolPreviewsForTurn(previews, event.data.turn)
+}
+
 function click(vt: VirtualTerminal, x: number, y: number): void {
   vt.sendInput(`\x1b[<0;${x};${y}M`)
   vt.sendInput(`\x1b[<0;${x};${y}m`)
@@ -57,10 +83,10 @@ afterEach(() => {
 })
 
 test('tracks one preview per call, preserves delayed names, and sorts by index', () => {
-  const previews = new Map<ToolCallId, StreamingToolPreview>()
-  applyStreamingToolPreviewEvent(previews, delta(1, 0, 1, 'call-b', '{"path"', 'write'))
-  applyStreamingToolPreviewEvent(previews, delta(1, 0, 0, 'call-a', '{"path"'))
-  applyStreamingToolPreviewEvent(previews, delta(1, 0, 1, 'call-b', ':"x"}'))
+  const previews = new Map<string, StreamingToolPreview>()
+  applyPreviewEvent(previews, delta(1, 0, 1, 'call-b', '{"path"', 'write'))
+  applyPreviewEvent(previews, delta(1, 0, 0, 'call-a', '{"path"'))
+  applyPreviewEvent(previews, delta(1, 0, 1, 'call-b', ':"x"}'))
 
   assert.deepEqual(streamingToolPreviewSnapshot(previews).map(preview => ({
     callId: preview.callId,
@@ -78,9 +104,9 @@ test('tracks one preview per call, preserves delayed names, and sorts by index',
 })
 
 test('empty ids use the stable chunk position and migrate to a later call id', () => {
-  const previews = new Map<ToolCallId, StreamingToolPreview>()
-  applyStreamingToolPreviewEvent(previews, delta(2, 0, 1, '', '{}', 'write'))
-  applyStreamingToolPreviewEvent(previews, delta(2, 0, 0, '', '{}', 'edit'))
+  const previews = new Map<string, StreamingToolPreview>()
+  applyPreviewEvent(previews, delta(2, 0, 1, '', '{}', 'write'))
+  applyPreviewEvent(previews, delta(2, 0, 0, '', '{}', 'edit'))
 
   assert.deepEqual(streamingToolPreviewSnapshot(previews).map(preview => ({
     callId: preview.callId,
@@ -91,8 +117,8 @@ test('empty ids use the stable chunk position and migrate to a later call id', (
     { callId: '', index: 1, name: 'write' },
   ])
 
-  applyStreamingToolPreviewEvent(previews, delta(2, 0, 0, 'real-edit', '{}'))
-  applyStreamingToolPreviewEvent(previews, event('tool/call', {
+  applyPreviewEvent(previews, delta(2, 0, 0, 'real-edit', '{}'))
+  applyPreviewEvent(previews, event('tool/call', {
     turn: 2,
     step: 0,
     callId: 'real-edit' as ToolCallId,
@@ -101,7 +127,7 @@ test('empty ids use the stable chunk position and migrate to a later call id', (
   }, 20))
   assert.deepEqual(streamingToolPreviewSnapshot(previews).map(preview => preview.callId), [''])
 
-  applyStreamingToolPreviewEvent(previews, event('tool/call', {
+  applyPreviewEvent(previews, event('tool/call', {
     turn: 2,
     step: 0,
     callId: '' as ToolCallId,
@@ -112,9 +138,9 @@ test('empty ids use the stable chunk position and migrate to a later call id', (
 })
 
 test('retry boundaries clear partial previews before the next request attempt', () => {
-  const previews = new Map<ToolCallId, StreamingToolPreview>()
-  applyStreamingToolPreviewEvent(previews, delta(4, 1, 0, 'failed-call', '{', 'edit'))
-  applyStreamingToolPreviewEvent(previews, event('llm/retry', {
+  const previews = new Map<string, StreamingToolPreview>()
+  applyPreviewEvent(previews, delta(4, 1, 0, 'failed-call', '{', 'edit'))
+  applyPreviewEvent(previews, event('llm/retry', {
     retryId: 'retry-1' as RetryId,
     turn: 4,
     step: 1,
@@ -128,8 +154,8 @@ test('retry boundaries clear partial previews before the next request attempt', 
   }, 41))
   assert.deepEqual(streamingToolPreviewSnapshot(previews), [])
 
-  applyStreamingToolPreviewEvent(previews, delta(4, 1, 0, 'retry-call', '{', 'write'))
-  applyStreamingToolPreviewEvent(previews, event('llm/retry-started', {
+  applyPreviewEvent(previews, delta(4, 1, 0, 'retry-call', '{', 'write'))
+  applyPreviewEvent(previews, event('llm/retry-started', {
     retryId: 'retry-1' as RetryId,
     turn: 4,
     step: 1,
@@ -139,12 +165,12 @@ test('retry boundaries clear partial previews before the next request attempt', 
 })
 
 test('formal materialization and lifecycle boundaries remove only matching previews', () => {
-  const previews = new Map<ToolCallId, StreamingToolPreview>()
-  applyStreamingToolPreviewEvent(previews, delta(2, 0, 0, 'call-a', '{}', 'edit'))
-  applyStreamingToolPreviewEvent(previews, delta(2, 1, 0, 'call-b', '{}', 'bash'))
-  applyStreamingToolPreviewEvent(previews, delta(3, 0, 0, 'call-c', '{}', 'read'))
+  const previews = new Map<string, StreamingToolPreview>()
+  applyPreviewEvent(previews, delta(2, 0, 0, 'call-a', '{}', 'edit'))
+  applyPreviewEvent(previews, delta(2, 1, 0, 'call-b', '{}', 'bash'))
+  applyPreviewEvent(previews, delta(3, 0, 0, 'call-c', '{}', 'read'))
 
-  applyStreamingToolPreviewEvent(previews, event('tool/call', {
+  applyPreviewEvent(previews, event('tool/call', {
     turn: 2,
     step: 0,
     callId: 'call-a' as ToolCallId,
@@ -153,10 +179,10 @@ test('formal materialization and lifecycle boundaries remove only matching previ
   }, 20))
   assert.deepEqual(streamingToolPreviewSnapshot(previews).map(preview => preview.callId), ['call-b', 'call-c'])
 
-  applyStreamingToolPreviewEvent(previews, event('step/end', { turn: 2, step: 1 }, 21))
+  applyPreviewEvent(previews, event('step/end', { turn: 2, step: 1 }, 21))
   assert.deepEqual(streamingToolPreviewSnapshot(previews).map(preview => preview.callId), ['call-c'])
 
-  applyStreamingToolPreviewEvent(previews, event('turn/end', { turn: 3, reason: { kind: 'completed' } }, 22))
+  applyPreviewEvent(previews, event('turn/end', { turn: 3, reason: { kind: 'completed' } }, 22))
   assert.deepEqual(streamingToolPreviewSnapshot(previews), [])
 })
 
