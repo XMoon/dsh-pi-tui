@@ -702,7 +702,7 @@ function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
 
 /** Classify a tool name into its row variant; unknown names are `others`. */
 export function classifyTool(name: string): ToolVariant {
-  return TOOL_VARIANTS[name] ?? 'others'
+  return Object.prototype.hasOwnProperty.call(TOOL_VARIANTS, name) ? TOOL_VARIANTS[name]! : 'others'
 }
 
 /** The structural icon semantic per exact tool name, for synthetic cards
@@ -738,10 +738,25 @@ const VARIANT_SEMANTICS: Record<ToolVariant, IconSemantic> = {
  * @param name - the tool name.
  */
 export function toolIconSemantic(name: string): IconSemantic {
-  const exact = TOOL_SEMANTICS[name]
+  const exact = Object.prototype.hasOwnProperty.call(TOOL_SEMANTICS, name) ? TOOL_SEMANTICS[name] : undefined
   if (exact !== undefined) return exact
   if (name.startsWith('/')) return 'slash-command'
   return VARIANT_SEMANTICS[classifyTool(name)]
+}
+
+/**
+ * The short title used by live tool-call presentations. Known names reuse the
+ * same exact-title and variant tables as formal tool cards; an unknown tool is
+ * intentionally generic rather than exposing its raw model-facing name.
+ */
+export function toolTitle(name: string): string {
+  if (name === '') return 'tool'
+  const exact = Object.prototype.hasOwnProperty.call(TOOL_TITLES, name)
+    ? TOOL_TITLES[name]
+    : Object.prototype.hasOwnProperty.call(TUI_TOOL_TITLES, name) ? TUI_TOOL_TITLES[name] : undefined
+  if (exact !== undefined) return exact
+  const variant = classifyTool(name)
+  return variant === 'others' ? 'Tool' : VARIANT_TITLES[variant]
 }
 
 /** The rendered card header: design title plus the relativized args summary. */

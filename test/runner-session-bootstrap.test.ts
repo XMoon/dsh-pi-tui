@@ -5,14 +5,14 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { ProcessTerminal } from '@xmoon76/pi-tui'
-import { MessageId } from '@deepseek-ai/dsh-llm'
+import { MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, type Config } from '../src/index.ts'
 import { StatsFolder } from '../src/stats.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
-import { TuiApp } from '../src/tui-app.ts'
+import { TuiApp, type StreamingToolPreview } from '../src/tui-app.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -315,6 +315,7 @@ interface RunnerProbe {
   transcriptHydrateCount: number
   statsHydrateCount: number
   capturedMessages: readonly { kind: string; text?: string }[] | undefined
+  capturedStreamingToolPreviews: readonly StreamingToolPreview[] | undefined
   scrollToBottomCount: number
   capturedModels: string[]
   capturedWelcomeModels: string[]
@@ -330,6 +331,7 @@ function installProbe(): RunnerProbe {
     transcriptHydrateCount: 0,
     statsHydrateCount: 0,
     capturedMessages: undefined,
+    capturedStreamingToolPreviews: undefined,
     scrollToBottomCount: 0,
     capturedModels: [],
     capturedWelcomeModels: [],
@@ -361,9 +363,10 @@ function installProbe(): RunnerProbe {
     probe.statsHydrateCount += 1
     return originalStatsHydrate.call(this, events)
   }
-  TuiApp.prototype.setTranscript = function (messages, activities) {
+  TuiApp.prototype.setTranscript = function (messages, activities, window, streamingToolPreviews) {
     probe.capturedMessages = messages
-    return originalSetTranscript.call(this, messages, activities)
+    probe.capturedStreamingToolPreviews = streamingToolPreviews
+    return originalSetTranscript.call(this, messages, activities, window, streamingToolPreviews)
   }
   TuiApp.prototype.setStatus = function (status) {
     if (typeof status.model === 'string') probe.capturedModels.push(status.model)
@@ -456,7 +459,15 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
   const resumed: FakeSession = fakeSession({
     id: 'runner-session-a',
     header: { id: 'runner-session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
-    events: [...sessionEvents('resumed answer'), ...modelHistory('provider-a', 'model-a', 'high')],
+    events: [
+      ...sessionEvents('resumed answer'),
+      ...modelHistory('provider-a', 'model-a', 'high'),
+      event('assistant/chunk', {
+        turn: 0,
+        step: 0,
+        chunk: { type: 'tool-call-delta', index: 0, id: 'historical-preview' as ToolCallId, name: 'edit', argumentsDelta: '{"path"' },
+      }, 8),
+    ],
   })
   const resumeHarness = makeHarness(home, resumed, { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' })
   resumeContext = new Context()
@@ -466,6 +477,7 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
   assert.equal(probe.transcriptHydrateCount, 1)
   assert.equal(probe.statsHydrateCount, 1)
   assert.ok(probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'resumed answer'))
+  assert.deepEqual(probe.capturedStreamingToolPreviews, [], 'cold hydration must not recreate Preparing rows')
   assert.ok(probe.capturedModels.includes('provider-a/model-a @high'),
     `resume must restore the Session-local model, not the global fallback: ${probe.capturedModels.join(', ')}`)
 
@@ -995,8 +1007,35 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
     step: 0,
     chunk: { type: 'text-delta', index: 0, text: 'streaming while scrolled up' },
   }, 11))
-  context.emit('session/event', resumed as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 12))
+  context.emit('session/event', resumed as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'preview-call' as ToolCallId, name: 'edit', argumentsDelta: '{"path"' },
+  }, 12))
+  await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => preview.name), ['edit'])
+  context.emit('session/event', resumed as never, event('tool/call', {
+    turn: 1,
+    step: 0,
+    callId: 'preview-call' as ToolCallId,
+    name: 'edit',
+    arguments: '{"path":"x"}',
+  }, 13))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews, [])
+
+  context.emit('session/event', resumed as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 14))
+  await vt.waitForRender()
+  context.emit('session/event', resumed as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'late-preview' as ToolCallId, name: 'write', argumentsDelta: '{' },
+  }, 15))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews, [], 'late chunks after turn/end must not resurrect a preview')
   assert.equal(probe.scrollToBottomCount, 0, 'live repaint must not force the latest window to its bottom')
   assert.equal(readScroll().isFollowingEnd, false, 'live repaint must preserve the manually disabled follow-end state')
   assert.ok(readScroll().scrollTop < readScroll().maxScrollTop, 'live repaint must leave the viewport away from the bottom')
@@ -1005,13 +1044,13 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
   await vt.waitForRender()
   assert.equal(readScroll().isFollowingEnd, true, 'an explicit bottom jump must re-enable follow-end')
   probe.scrollToBottomCount = 0
-  context.emit('session/event', resumed as never, event('turn/start', { turn: 2 }, 13))
+  context.emit('session/event', resumed as never, event('turn/start', { turn: 2 }, 16))
   context.emit('session/event', resumed as never, event('assistant/chunk', {
     turn: 2,
     step: 0,
     chunk: { type: 'text-delta', index: 0, text: 'streaming while following' },
-  }, 14))
-  context.emit('session/event', resumed as never, event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 15))
+  }, 17))
+  context.emit('session/event', resumed as never, event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 18))
   await vt.waitForRender()
   assert.equal(probe.scrollToBottomCount, 0, 'ScrollView follow-end must handle live output without an imperative jump')
   assert.equal(readScroll().isFollowingEnd, true, 'a viewport following the end must remain attached to live output')
