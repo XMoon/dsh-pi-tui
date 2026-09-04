@@ -5,9 +5,12 @@
  * touches `ctx` and the preset composition; the semantic request (preset
  * id, provider/model) is converted HERE into the Direct shapes (`setup`
  * callback, `SessionId`, seed), and a Remote adapter will implement the
- * same interface over the wire. The runner keeps the Direct-mode
- * ownership machinery (owner.lock, lease/cooling, PINNED, transition
- * gate, operation barrier) around the port calls.
+ * same interface over the wire. The DSH AgentHandle / SessionHandle owns
+ * the persistence writer lifetime (its `dispose()` is the structured
+ * teardown; the kernel-flock SessionWriteLease is the only cross-process
+ * writer authority). The TUI runner owns only surface transition
+ * coordination (the transition gate, the operation barrier,
+ * generation/stale fences) around the port calls.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-lifecycle-direct
@@ -84,8 +87,8 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     // The ownership escape preserves BOTH the live agent and the real
     // AgentHandle: `dispose()` is the ownership capability the runner
     // needs at retirement (a lost handle previously pinned old leases —
-    // the P1 regression class). The semantic `session` identity stays
-    // transport-neutral.
+    // removed legacy, the P1 regression class). The semantic `session`
+    // identity stays transport-neutral.
     return { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } }
   }
 

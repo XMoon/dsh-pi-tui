@@ -2,8 +2,8 @@
  * Runner-level regression gates for the submit ownership model (plan
  * B/C/D): after the divergence-guard removal the Enter/Ctrl+S write path
  * must reach `followup` WITHOUT touching `sessionPersistence` at all —
- * the single-writer safety net is the owner.lock + process lease +
- * cooling verifier, acquired at open/transition, never a per-submit
+ * the single-writer safety net is the DSH SessionWriteLease (kernel
+ * flock), acquired by the Host at open/transition, never a per-submit
  * consistency probe. The submit work must be INDEPENDENT of the session
  * history length, and the local submit acknowledgement row must appear
  * with the submit gesture and settle on the first authoritative event.
@@ -28,15 +28,15 @@ process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 process.env.CI = ''
 
-function event<K extends SessionEvent['type']>(
+function event<K extends string>(
   type: K,
-  data: SessionEvent<K>['data'],
+  data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
 ): SessionEvent {
   // DSH 0.1.2+ requires the top-level `surfaceOp` marker on surface-eligible
   // (message-producing) events — exactly user/message, assistant/message and
   // tool/result — and REJECTS the marker on log-only events
-  // (packages/core/session/src/surface.ts). assistant/chunk is log-only.
+  // (packages/core/session/src/surface.ts). request/context is log-only.
   const surfaceOp = type === 'user/message' || type === 'assistant/message' || type === 'tool/result'
     ? { surfaceOp: 'append' as const }
     : {}
@@ -64,6 +64,7 @@ function turnEvents(turn: number, text: string, fromSeq: number): SessionEvent[]
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
       usage: { inputTokens: 10, outputTokens: 2 },
+      stream: [],
     }, fromSeq + 3),
     event('step/end', { turn, step: 0 }, fromSeq + 4),
     event('turn/end', { turn, reason: { kind: 'completed' } }, fromSeq + 5),
@@ -384,7 +385,7 @@ const SURFACE_ELIGIBLE_TYPES = ['user/message', 'assistant/message', 'tool/resul
 test('event fixtures carry surfaceOp exactly on the surface-eligible types (review round 1)', () => {
   // A seeded event the real Session.fromRestore validates must match DSH's
   // surface rules: the marker is REQUIRED on surface-eligible types and
-  // FORBIDDEN on log-only ones (assistant/chunk included).
+  // FORBIDDEN on log-only ones (request/context included).
   const surfaceType = event('user/message', {
     id: MessageId('probe'),
     role: 'user',
@@ -392,13 +393,13 @@ test('event fixtures carry surfaceOp exactly on the surface-eligible types (revi
     source: { kind: 'user' },
   }, 0)
   assert.equal((surfaceType as SessionEvent & { surfaceOp?: unknown }).surfaceOp, 'append')
-  const logOnlyType = event('assistant/chunk', {} as never, 1)
+  const logOnlyType = event('request/context', {} as never, 1)
   assert.equal((logOnlyType as SessionEvent & { surfaceOp?: unknown }).surfaceOp, undefined)
   for (const type of SURFACE_ELIGIBLE_TYPES) {
     const marked = event(type, {} as never, 2) as SessionEvent & { surfaceOp?: unknown }
     assert.equal(marked.surfaceOp, 'append', `${type} must carry the marker`)
   }
-  for (const type of ['turn/start', 'step/start', 'step/end', 'turn/end', 'assistant/chunk'] as const) {
+  for (const type of ['turn/start', 'step/start', 'step/end', 'turn/end', 'request/context'] as const) {
     const unmarked = event(type, {} as never, 3) as SessionEvent & { surfaceOp?: unknown }
     assert.equal(unmarked.surfaceOp, undefined, `${type} must NOT carry the marker`)
   }

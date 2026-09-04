@@ -5,7 +5,8 @@
  * a transition began. It cannot stop a writer that started BEFORE the
  * transition and is still awaiting a provider/IO when the transition
  * quiesces and switches — that late completion would append to a session
- * whose lock is being handed over.
+ * the transition is retiring (the old agent is being disposed and the
+ * surface has moved).
  *
  * This barrier gives every TUI-owned session writer a `runWriter` section
  * and every transition a `runTransition` section:
