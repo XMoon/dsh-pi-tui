@@ -9,8 +9,12 @@ A Pi-style terminal frontend for [DeepSeek Harness](https://github.com/deepseek-
 
 `dsh-pi-tui` is installed as an independent dsh bundle inside a profile. It provides terminal interaction for streaming conversations, tool calls, session management, subagents, history search, shell commands, approvals, and settings. Models, tools, Sessions, permissions, Skills, Plan, Goal, and Subagent runtime behavior are still provided by DeepSeek Harness.
 
+## Quick start
+
+Stable releases are recommended for ordinary users; use `@latest`:
+
 ```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
@@ -332,8 +336,8 @@ friendly notice is best-effort rather than a startup-order guarantee. If you
 keep DSH 0.1.1, use the 0.3 TUI line; if you keep the alpha.2/alpha.3
 baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`; if you keep the
 alpha.4/alpha.5 baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`. For the
-current 0.4 stable release, install the matching DSH first and then add the
-TUI to a profile:
+current stable release (`@latest`), install the matching DSH first and then add
+the TUI to a profile:
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.2-rc.1
@@ -350,19 +354,18 @@ dsh --profile pi-tui
 ```
 
 The current 0.4 line declares `>=0.1.2-rc.1`; each release validates
-its concrete DSH family. Running only `npm install -g @xmoon76/dsh-pi-tui` does
-not install the plugin into a DSH profile; the `dsh plugin` command is still
-required.
+its concrete DSH family. `npm install -g` is only for installing DSH itself; to
+install dsh-pi-tui into a DSH profile, you must use the `dsh plugin` command above.
 
 New agent sessions use the official roster's selected preset id. A custom DSH
 preset literally named `code` is valid and remains `code` when it exists in the
 current roster. Old persisted `code` defaults/session values fall back to `ptc`
 only after the roster proves that no custom `code` preset exists.
 
-### npm
+### Stable / latest
 
-Using a dedicated `pi-tui` profile is recommended. Use the TUI channel that
-matches your DSH line: `@latest` for stable releases, `@next` for prereleases:
+Stable releases are recommended for ordinary users. Use a dedicated `pi-tui`
+profile:
 
 ```sh
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
@@ -373,6 +376,16 @@ Resume an existing Session:
 
 ```sh
 dsh --profile pi-tui --session <session-id>
+```
+
+### Preview / next
+
+To try unreleased preview changes, explicitly use `@next`. Ordinary users should
+continue to use the stable `@latest` channel above:
+
+```sh
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
 ```
 
 ### Source Mode (validation only)

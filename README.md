@@ -9,8 +9,12 @@
 
 `dsh-pi-tui` 作为独立的 dsh bundle 安装到 profile 中，提供流式对话、工具调用、会话管理、Subagent、历史搜索、Shell、审批与设置等终端交互。模型、工具、Session、权限、Skills、Plan、Goal、Subagent 等运行时能力仍由 DeepSeek Harness 提供。
 
+## 快速开始
+
+稳定版适合普通用户，推荐使用 `@latest`：
+
 ```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
@@ -319,7 +323,7 @@ dsh-pi-tui:
 升级和回退提示，但该友好提示是 best-effort，不是启动顺序保证；保留 DSH
 0.1.1 时请使用 0.3，保留 alpha.2/alpha.3 时请使用
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`，保留 alpha.4/alpha.5 时请使用
-`@xmoon76/dsh-pi-tui@0.4.0-alpha.2`。当前 0.4 稳定版的推荐安装顺序如下
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.2`。当前稳定版（`@latest`）的推荐安装顺序如下
 （先装 DSH，再把 TUI 装入 profile）：
 
 ```sh
@@ -337,18 +341,17 @@ dsh --profile pi-tui
 ```
 
 `0.4` 当前线的声明支持范围是 `>=0.1.2-rc.1`；每个发布版本都会验证
-具体的 DSH family。仅执行 `npm install -g @xmoon76/dsh-pi-tui` 不会把插件安装进
-DSH profile，实际使用仍应执行上面的 `dsh plugin` 命令。
+具体的 DSH family。`npm install -g` 仅用于安装 DSH 本身；要将 dsh-pi-tui
+安装进 DSH profile，必须使用上面的 `dsh plugin` 命令。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
 旧数据中省略请求的 `code` default/session 值只有在确认 roster 不含 `code` 后
 才会回退到 `ptc`。
 
-### npm
+### Stable / latest
 
-推荐使用单独的 `pi-tui` profile。使用与 DSH 版本匹配的
-TUI channel（稳定版用 `@latest`，预发布版用 `@next`）：
+稳定版是普通用户的推荐渠道。建议使用单独的 `pi-tui` profile：
 
 ```sh
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
@@ -359,6 +362,16 @@ dsh --profile pi-tui
 
 ```sh
 dsh --profile pi-tui --session <session-id>
+```
+
+### Preview / next
+
+需要体验未发布的预览版本时，显式使用 `@next`。普通用户仍应使用上面的
+稳定版 `@latest` 渠道：
+
+```sh
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
 ```
 
 ### Source Mode（仅验证）
