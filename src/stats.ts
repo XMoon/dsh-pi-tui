@@ -34,6 +34,7 @@
 
 import { isReplacementSurfaceEvent, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { formatTokens, StepUsageAccumulator, type UsageLike } from './token-usage.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 
 /** Aggregated session statistics. */
 export interface SessionStats {
@@ -392,32 +393,6 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
         if (currentTimingTurn) perStep.delete(key)
         break
       }
-      case 'assistant/chunk': {
-        enterSettledTurn(event.data.turn)
-        const { chunk } = event.data
-        if (chunk.type === 'usage') {
-          // Streaming usage is provisional: assistant/message carries the same
-          // value and replaces it at settle, so it is counted exactly once.
-          usage.onUsageChunk(event.data.turn, event.data.step, chunk.usage)
-          const key = stepKey(event.data.turn, event.data.step)
-          const timing = settledTurn === event.data.turn ? perStep.get(key) : undefined
-          if (timing !== undefined) {
-            // The LATEST chunk wins (the assembler value is cumulative) —
-            // the same replace rule as the shared accumulator.
-            timing.usage = chunk.usage
-          }
-        } else if (isTokenDelta(chunk)) {
-          // The FIRST token delta of the step stamps the TTFT start
-          // (Web firstTokenTime). Reasoning and tool-call deltas count too.
-          const timing = settledTurn === event.data.turn
-            ? perStep.get(stepKey(event.data.turn, event.data.step))
-            : undefined
-          if (timing !== undefined && timing.settled !== true && timing.firstDelta === undefined) {
-            timing.firstDelta = event.time
-          }
-        }
-        break
-      }
       case 'assistant/message': {
         enterSettledTurn(event.data.turn)
         const key = stepKey(event.data.turn, event.data.step)
@@ -592,6 +567,48 @@ export class StatsFolder {
     this.apply(events)
   }
 
+  /**
+   * Apply one live assistant stream input (Session v2 TRANSIENT plane).
+   * Live performance metrics (TTFT, recent throughput samples) come from
+   * the transient stream's timestamps/content; the durable plane carries
+   * no per-chunk accounting anymore. `start`/`end` frames carry no
+   * performance content — the timing settles at the durable
+   * `assistant/message` on the `session/event` plane.
+   */
+  applyLiveInput(input: AssistantLiveInput): void {
+    if (input.kind !== 'chunk') return
+    this.applyAssistantChunk(input.turn, input.step, input.time, input.chunk)
+  }
+
+  /** Fold one live assistant chunk (Session v2 transient plane) into the
+   * per-step timing: streaming usage (provisional — the durable
+   * `assistant/message` replaces it at settle) and the first-token TTFT
+   * stamp. */
+  private applyAssistantChunk(turn: number, step: number, time: number, chunk: AssistantLiveChunk): void {
+    // After turn/end a late live chunk is a replay artifact: it must not
+    // mutate the per-step timing/usage — the same completed-turn gate as
+    // the durable fold (mirrors TranscriptFolder's activity.completed).
+    if (this.completedTurnFence !== undefined && turn <= this.completedTurnFence) return
+    this.enterSettledTurn(turn)
+    if (chunk.type === 'usage') {
+      this.usage.onUsageChunk(turn, step, chunk.usage)
+      const key = stepKey(turn, step)
+      const timing = this.settledTurn === turn ? this.perStep.get(key) : undefined
+      if (timing !== undefined) {
+        // The LATEST chunk wins (the assembler value is cumulative) —
+        // the same replace rule as the shared accumulator.
+        timing.usage = chunk.usage
+      }
+    } else if (isTokenDelta(chunk)) {
+      const timing = this.settledTurn === turn
+        ? this.perStep.get(stepKey(turn, step))
+        : undefined
+      if (timing !== undefined && timing.settled !== true && timing.firstDelta === undefined) {
+        timing.firstDelta = time
+      }
+    }
+  }
+
   /** The derived stats as of the last applied event. */
   snapshot(): SessionStats {
     const derived: SessionStats = { ...this.stats }
@@ -675,28 +692,6 @@ export class StatsFolder {
         const timing = currentTimingTurn ? this.perStep.get(key) : undefined
         if (timing?.settled === true) this.settledPerStep.set(key, timing)
         if (currentTimingTurn) this.perStep.delete(key)
-        break
-      }
-      case 'assistant/chunk': {
-        this.enterSettledTurn(event.data.turn)
-        const { chunk } = event.data
-        if (chunk.type === 'usage') {
-          this.usage.onUsageChunk(event.data.turn, event.data.step, chunk.usage)
-          const key = stepKey(event.data.turn, event.data.step)
-          const timing = this.settledTurn === event.data.turn ? this.perStep.get(key) : undefined
-          if (timing !== undefined) {
-            // The LATEST chunk wins (the assembler value is cumulative) —
-            // the same replace rule as the shared accumulator.
-            timing.usage = chunk.usage
-          }
-        } else if (isTokenDelta(chunk)) {
-          const timing = this.settledTurn === event.data.turn
-            ? this.perStep.get(stepKey(event.data.turn, event.data.step))
-            : undefined
-          if (timing !== undefined && timing.settled !== true && timing.firstDelta === undefined) {
-            timing.firstDelta = event.time
-          }
-        }
         break
       }
       case 'assistant/message': {

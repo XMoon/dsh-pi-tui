@@ -12,6 +12,7 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import {
   FOCUS_MODE_PROMPT,
   FOCUS_SECTION_NAME,
@@ -45,6 +46,35 @@ function eventAt(type: string, data: Record<string, unknown>, time: number, seq:
 /** Build an event with the default time = 1.7e12 + seq. */
 function event(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
   return eventAt(type, data, 1_700_000_000_000 + seq, seq)
+}
+
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(turn: number, step: number, chunk: AssistantLiveChunk, time: number): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+/** A folder that can fold both the durable event plane and the Session v2
+ * live input seam (TranscriptFolder shares this surface with StatsFolder). */
+interface LiveFoldable {
+  apply(events: readonly SessionEvent[]): void
+  applyLiveInput(input: AssistantLiveInput): void
+}
+
+/** Apply a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function applyMixed(folder: LiveFoldable, events: readonly SessionEvent[]): void {
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
 }
 
 /** One full completed turn: user → thinking → tool call/result → assistant → end. */
@@ -145,7 +175,7 @@ test('focusModeOf normalizes persisted values defensively', () => {
 
 test('aggregates turn timing, tool stats and the Think slot from events', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(1, 0, 1000))
+  applyMixed(folder, completedTurn(1, 0, 1000))
   const activity = folder.turnActivity(1)
   assert.ok(activity !== undefined)
   assert.equal(activity.startedAt, 1000)
@@ -189,7 +219,7 @@ test('tool/result never double-counts a call; same-name calls accumulate', () =>
     }, 1004, 4),
     eventAt('tool/call', { turn: 3, step: 0, callId: ToolCallId('c3'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm lint' }) }, 1005, 5),
   ]
-  folder.apply(events)
+  applyMixed(folder, events)
   const activity = folder.turnActivity(3)!
   assert.equal(activity.toolCalls, 3, 'tool/result must not double-count')
   assert.equal(activity.tools.get('bash'), 3)
@@ -203,7 +233,7 @@ test('tool/result never double-counts a call; same-name calls accumulate', () =>
 
 test('running text-delta feeds the Message slot immediately (no assistant/message wait)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '我先检查 provider registry。' } }, 1001, 1),
   ])
@@ -214,7 +244,7 @@ test('running text-delta feeds the Message slot immediately (no assistant/messag
 
 test('an intermediate message is confirmed by a later tool/call and survives settle', () => {
   const folder = new TranscriptFolder()
-  folder.apply(intermediateTurn(0, 0, 1000))
+  applyMixed(folder, intermediateTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
   // The final answer is NOT duplicated into the Message slot: the
   // confirmed intermediate message wins (plan §5.6).
@@ -224,7 +254,7 @@ test('an intermediate message is confirmed by a later tool/call and survives set
 
 test('only-final turns show NO Message slot (the final stays outside)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '答案是…' } }, 1001, 1),
     eventAt('assistant/message', {
@@ -239,7 +269,7 @@ test('only-final turns show NO Message slot (the final stays outside)', () => {
 
 test('an interrupted streaming candidate survives turn/end (process information)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '正在分析配置…' } }, 1001, 1),
     eventAt('turn/end', { turn: 0, reason: { kind: 'interrupted' } }, 2000, 2),
@@ -250,7 +280,7 @@ test('an interrupted streaming candidate survives turn/end (process information)
 
 test('a later step start confirms the earlier candidate (plan §5.3 B)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步说明' } }, 1001, 1),
     eventAt('step/start', { turn: 0, step: 1 }, 1002, 2),
@@ -269,7 +299,7 @@ test('a later step start confirms the earlier candidate (plan §5.3 B)', () => {
 
 test('assistant/message settles the candidate text authoritatively (plan §5.4)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'partial stream' } }, 1001, 1),
     eventAt('assistant/message', {
@@ -287,7 +317,7 @@ test('assistant/message settles the candidate text authoritatively (plan §5.4)'
 
 test('ANY tool/call is a Tool — skill included (event-first classification)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'skill', arguments: JSON.stringify({ name: 'session-review' }) }, 1001, 1),
   ])
@@ -303,7 +333,7 @@ test('ANY tool/call is a Tool — skill included (event-first classification)', 
 
 test('an unknown custom tool is still a Tool (never a Message/System/nothing)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'vendor_probe', arguments: JSON.stringify({ host: 'cache-01' }) }, 1001, 1),
   ])
@@ -316,7 +346,7 @@ test('an unknown custom tool is still a Tool (never a Message/System/nothing)', 
 
 test('user-explicit /skill invocation and skill-catalog injection are NOT Tools', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('user/message', {
       id: MessageId('s1'), role: 'user',
@@ -340,7 +370,7 @@ test('user-explicit /skill invocation and skill-catalog injection are NOT Tools'
 
 test('parallel tool results never yank the Tool slot back to an older call (plan §10/§44)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('A'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('B'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1002, 2),
@@ -357,7 +387,7 @@ test('parallel tool results never yank the Tool slot back to an older call (plan
   assert.equal(activity.tool?.name, 'bash', 'the LATEST call owns the slot')
   assert.equal(activity.tool?.status, 'running', 'an older result must not settle the latest slot')
   // The matching result settles it.
-  folder.apply([eventAt('tool/result', {
+  applyMixed(folder, [eventAt('tool/result', {
     turn: 0, step: 0,
     message: {
       id: MessageId('rB'), role: 'user',
@@ -370,7 +400,7 @@ test('parallel tool results never yank the Tool slot back to an older call (plan
 
 test('an empty assistant/message without a prior chunk still owns the final slot (no earlier fallback)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1), // step 1: 'final answer text'
     // The exact last assistant/message is EMPTY and has no preceding chunk.
     eventAt('assistant/message', {
@@ -390,7 +420,7 @@ test('an empty assistant/message without a prior chunk still owns the final slot
 
 test('later provisional usage chunks REPLACE the earlier one (latest wins, plan §13.2)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
@@ -404,7 +434,7 @@ test('later provisional usage chunks REPLACE the earlier one (latest wins, plan 
 
 test('an orphan tool/result never settles a running card of ANOTHER turn', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, 1000, 0),
     eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1001, 1),
     // An orphan result (unknown callId) for turn 2 with the same name.
@@ -425,7 +455,7 @@ test('an orphan tool/result never settles a running card of ANOTHER turn', () =>
 
 test('an orphan tool/result attributes to its OWN turn, never the stale current turn', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, 1000, 0),
     eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1001, 1),
     // A result for an UNKNOWN call, from turn 2 (replay fragment): the
@@ -447,7 +477,7 @@ test('an orphan tool/result attributes to its OWN turn, never the stale current 
 
 test('step/end commits the open step usage and clears the pending state', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
@@ -464,7 +494,7 @@ test('step/end commits the open step usage and clears the pending state', () => 
 
 test('an authoritative message BEFORE step/start keeps its provenance (a late chunk never replaces it)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     // The authoritative message arrives BEFORE the step/start (replay).
     eventAt('assistant/message', {
@@ -506,7 +536,7 @@ test('usage ordering matrix: every chunk/message/start/end permutation counts th
   ]
   for (const events of permutations) {
     const folder = new TranscriptFolder()
-    folder.apply([eventAt('turn/start', { turn: 0 }, 1000, 0), ...events])
+    applyMixed(folder, [eventAt('turn/start', { turn: 0 }, 1000, 0), ...events])
     const activity = folder.turnActivity(0)!
     // The authoritative 110 wins whenever a message exists; a lone
     // provisional chunk commits its own value; a stale chunk after an
@@ -520,7 +550,7 @@ test('usage ordering matrix: every chunk/message/start/end permutation counts th
 
 test('a late authoritative message after step/end replaces the committed provisional value (no double count)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
@@ -539,7 +569,7 @@ test('a late authoritative message after step/end replaces the committed provisi
 
 test('a turn-start-less tool/call attributes to its OWN turn (replay fragment)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('tool/call', { turn: 7, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1000, 0),
   ])
   const activity = folder.turnActivity(7)!
@@ -550,7 +580,7 @@ test('a turn-start-less tool/call attributes to its OWN turn (replay fragment)',
 
 test('an empty authoritative message for the latest confirmed step clears the confirmed text', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'partial' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
@@ -572,7 +602,7 @@ test('an empty authoritative message for the latest confirmed step clears the co
 
 test('a late text-delta for an already-confirmed step never resurrects a candidate', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
@@ -591,7 +621,7 @@ test('a late text-delta for an already-confirmed step never resurrects a candida
 
 test('an empty candidate confirmed after a prior intermediate clears the slot', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1002, 2),
@@ -615,7 +645,7 @@ test('an empty candidate confirmed after a prior intermediate clears the slot', 
 
 test('a late message for an older step never regresses the final-answer dedup', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1002, 2),
@@ -640,7 +670,7 @@ test('a late message for an older step never regresses the final-answer dedup', 
 
 test('a late assistant event after turn/end never changes the exact final answer', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1001, 1),
     eventAt('assistant/message', {
@@ -666,7 +696,7 @@ test('a late assistant event after turn/end never changes the exact final answer
 
 test('an empty authoritative message settles its step (a late delta cannot resurrect a preview)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     // The step's output is an EMPTY authoritative message (image-only
     // step, no prior deltas).
@@ -689,7 +719,7 @@ test('an empty authoritative message settles its step (a late delta cannot resur
 
 test('a text-delta after the step\'s authoritative message is ignored', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '流式' } }, 1001, 1),
     eventAt('assistant/message', {
@@ -712,7 +742,7 @@ test('a text-delta after the step\'s authoritative message is ignored', () => {
 
 test('a late step/start after turn/end never reopens accumulator state', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
@@ -728,7 +758,7 @@ test('a late step/start after turn/end never reopens accumulator state', () => {
 
 test('a replayed OLDER turn/start never regresses the current turn', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, 1000, 0),
     // A replayed turn/start for an older turn (replay artifact).
     eventAt('turn/start', { turn: 0 }, 1001, 1),
@@ -746,7 +776,7 @@ test('a replayed OLDER turn/start never regresses the current turn', () => {
 
 test('a replayed turn/start never resurrects a finalized turn', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '最终' } }, 1001, 1),
     eventAt('assistant/message', {
@@ -769,7 +799,7 @@ test('a replayed turn/start never resurrects a finalized turn', () => {
 
 test('a late usage chunk after turn/end never adds a token segment retroactively', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
@@ -784,7 +814,7 @@ test('a late usage chunk after turn/end never adds a token segment retroactively
 
 test('a late assistant/message after turn/end never mutates the settled Thought card', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
@@ -807,7 +837,7 @@ test('a late assistant/message after turn/end never mutates the settled Thought 
 
 test('late reasoning and tool events after turn/end never mutate the Focus state', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: '思考' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1002, 2),
@@ -845,7 +875,7 @@ test('late reasoning and tool events after turn/end never mutate the Focus state
 
 test('a late delta for an older unseen step never confirms the streaming candidate', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1001, 1),
     // A late delta for an OLDER step that was never seen (replay).
@@ -862,7 +892,7 @@ test('a late delta for an older unseen step never confirms the streaming candida
 
 test('a late text-delta after turn/end never resurrects the Message candidate', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1001, 1),
     eventAt('assistant/message', {
@@ -879,7 +909,7 @@ test('a late text-delta after turn/end never resurrects the Message candidate', 
 
 test('a late message after turn/end never resurrects the final candidate', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '最终答案' } }, 1001, 1),
     eventAt('assistant/message', {
@@ -899,7 +929,7 @@ test('a late message after turn/end never resurrects the final candidate', () =>
 
 test('a late authoritative message for an already-confirmed candidate updates the confirmed text in place', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'partial stream' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1002, 2),
@@ -922,7 +952,7 @@ test('a late authoritative message for an already-confirmed candidate updates th
 
 test('a late message for an OLDER confirmed step never regresses the slot', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' }, 1002, 2),
@@ -947,7 +977,7 @@ test('a late message for an OLDER confirmed step never regresses the slot', () =
 
 test('a later assistant/message confirms the earlier candidate and becomes the new candidate (plan §5.3 C)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '第一步说明' } }, 1001, 1),
     // Step 1's message arrives WITHOUT a step-1 text delta (replay edge).
@@ -971,7 +1001,7 @@ test('a later assistant/message confirms the earlier candidate and becomes the n
 test('a long confirmed intermediate message previews its TAIL, never the stale head', () => {
   const folder = new TranscriptFolder()
   const long = 'line one\n' + 'x'.repeat(600) + '\nTHE END MARKER'
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: long } }, 1001, 1),
     eventAt('assistant/message', {
@@ -998,7 +1028,7 @@ test('a long confirmed intermediate message previews its TAIL, never the stale h
 
 test('a settled message without any prior candidate is still the final when the turn ends (no phantom slot)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/message', {
       turn: 0, step: 0,
@@ -1012,7 +1042,7 @@ test('a settled message without any prior candidate is still the final when the 
 
 test('workflow/subagent lifecycle events never touch the Tool slot or the count (plan §17)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool-workflow/run-start', { runId: 'r1', name: 'audit' }, 1001, 1),
     eventAt('subagent/descriptor', { label: 'reviewer', mode: 'subagent' }, 1002, 2),
@@ -1041,7 +1071,7 @@ function usageStep(turn: number, step: number, usage: Record<string, number>, ba
 
 test('per-turn token totals include cache read/write and output (plan §12.2)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     ...usageStep(0, 0, { inputTokens: 100, outputTokens: 40, cacheReadTokens: 50, cacheWriteTokens: 10 }, 1, 1001),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2000, 10),
@@ -1056,7 +1086,7 @@ test('per-turn token totals include cache read/write and output (plan §12.2)', 
 
 test('multi-step turns sum their committed steps', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     ...usageStep(0, 0, { inputTokens: 200, outputTokens: 0 }, 1, 1001),
     ...usageStep(0, 1, { inputTokens: 300, outputTokens: 0 }, 10, 2001),
@@ -1069,7 +1099,7 @@ test('multi-step turns sum their committed steps', () => {
 
 test('provisional usage is replaced, never added (plan §13.2/§45)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
     // Streaming provisional: 100.
@@ -1089,7 +1119,7 @@ test('provisional usage is replaced, never added (plan §13.2/§45)', () => {
 
 test('a usage chunk without assistant/message still counts (plan §45)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 80, outputTokens: 20 } } }, 1002, 2),
@@ -1102,7 +1132,7 @@ test('a usage chunk without assistant/message still counts (plan §45)', () => {
 
 test('an orphan fact is reconciled when its step opens late (no double count)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     // The usage chunk arrives BEFORE the step/start (out-of-order replay).
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1001, 1),
@@ -1121,7 +1151,7 @@ test('an orphan fact is reconciled when its step opens late (no double count)', 
 
 test('orphan usage: the authoritative message REPLACES the provisional chunk (never adds)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     // No step/start: both facts are orphan replay edges.
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1001, 1),
@@ -1138,7 +1168,7 @@ test('orphan usage: the authoritative message REPLACES the provisional chunk (ne
 
 test('a turn-start-less turn/end attributes its synthetic cards to the EVENT turn', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, 1000, 0),
     // Turn 2's end arrives without a turn/start (replay fragment).
     eventAt('turn/end', { turn: 2, reason: { kind: 'error', error: { code: 'E', message: 'boom' } } }, 2000, 1),
@@ -1152,7 +1182,7 @@ test('a turn-start-less turn/end attributes its synthetic cards to the EVENT tur
 
 test('usage without a step boundary still attributes to the turn (replay edge)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     // No step/start: the usage fact is a settled replay edge.
     eventAt('assistant/message', {
@@ -1168,7 +1198,7 @@ test('usage without a step boundary still attributes to the turn (replay edge)',
 
 test('no usage fact → no token segment (never a fake 0 tok)', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000))
+  applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
   assert.equal(activity.usage, undefined)
   assert.equal(activity.totalTokens, undefined)
@@ -1192,7 +1222,7 @@ test('replay determinism: per-turn tokens match a fresh fold of the same events'
 
 test('the running display includes the open step provisional usage', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } } }, 1002, 2),
@@ -1205,7 +1235,7 @@ test('the running display includes the open step provisional usage', () => {
 
 function activityOf(turn: number, events: SessionEvent[]): ReturnType<TranscriptFolder['turnActivity']> {
   const folder = new TranscriptFolder()
-  folder.apply(events)
+  applyMixed(folder, events)
   return folder.turnActivity(turn)
 }
 
@@ -1324,7 +1354,7 @@ test('the header never wraps: every candidate fits its width', () => {
 
 test('Focus collapsed Preparing temporarily overrides the formal Tool slot', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/foo.ts' }) }, 1002, 2),
@@ -1355,7 +1385,7 @@ test('focusPreparingSummary is deterministic and keeps unknown names generic', (
 // The collapsed body preserves its fixed Think → Tool → Message slot order.
 test('the collapsed body renders the three slots in fixed order — Think, Tool, Message (plan §24/§25/§47)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: '这应该是 presenter fallback。' } }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '我已经找到 skill 的特殊处理。' } }, 1002, 2),
@@ -1391,7 +1421,7 @@ function messageActivity(text: string): ReturnType<TranscriptFolder['turnActivit
 
 test('the Message slot is the THIRD process slot: Think, Tool, Message', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'message body' } }, 1002, 2),
@@ -1493,13 +1523,13 @@ test('resize re-wraps: the same text yields different row counts at different wi
 
 test('streaming appends roll the Message tail forward (no scroll index)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'first\nsecond\nthird\nfourth' } }, 1001, 1),
   ])
   const before = focusCollapsedBody(folder.turnActivity(0)!, 60)
   assert.ok(before[2]!.includes('fourth'), `before append: ${before.join('|')}`)
-  folder.apply([
+  applyMixed(folder, [
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '\nfifth' } }, 1002, 2),
   ])
   const after = focusCollapsedBody(folder.turnActivity(0)!, 60)
@@ -1558,7 +1588,7 @@ test('the error line follows the three slots (plan §24)', () => {
 
 test('the component renders an indented muted card and refreshes duration live', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000))
+  applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
   const component = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
   const lines = component.render(80)
@@ -1575,7 +1605,7 @@ test('the component renders an indented muted card and refreshes duration live',
 
 test('the symbols/minimal disclosure keeps every narrow width inside the terminal', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000))
+  applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
   for (const iconStyle of ['symbols', 'minimal'] as const) {
     for (const width of [1, 2, 3, 4, 8]) {
@@ -1729,7 +1759,7 @@ test('Focus OFF returns the current normal ordering (identity projection)', () =
 
 test('Focus ON collapsed: user → FocusActivity → final, process hidden', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000))
+  applyMixed(folder, completedTurn(0, 0, 1000))
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
   assert.deepEqual(blockKinds(blocks), ['user', 'activity', 'assistant'])
   const final = blocks[2]
@@ -1743,7 +1773,7 @@ test('Focus ON collapsed: user → FocusActivity → final, process hidden', () 
 
 test('intermediate assistant messages are hidden when collapsed', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1), // drop the turn/end
     eventAt('assistant/message', {
       turn: 0, step: 2,
@@ -1769,14 +1799,14 @@ test('intermediate assistant messages are hidden when collapsed', () => {
 
 test('no final assistant before turn/end (running collapsed)', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000).slice(0, -1)) // drop turn/end
+  applyMixed(folder, completedTurn(0, 0, 1000).slice(0, -1)) // drop turn/end
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
   assert.deepEqual(blockKinds(blocks), ['user', 'activity'])
 })
 
 test('FocusActivity always precedes the final assistant', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000))
+  applyMixed(folder, completedTurn(0, 0, 1000))
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
   const activityIndex = blocks.findIndex(b => b.kind === 'activity')
   const finalIndex = blocks.findIndex(b => b.kind === 'message' && b.message.kind === 'assistant')
@@ -1785,7 +1815,7 @@ test('FocusActivity always precedes the final assistant', () => {
 
 test('expanded turns show the full process in order and never duplicate the final', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000))
+  applyMixed(folder, completedTurn(0, 0, 1000))
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
   const kinds = blockKinds(blocks)
   assert.deepEqual(kinds, ['user', 'activity', 'thinking', 'tool', 'assistant'])
@@ -1796,7 +1826,7 @@ test('expanded turns show the full process in order and never duplicate the fina
 test('aborted/interrupted/error turns show no final assistant collapsed', () => {
   for (const reason of ['aborted', 'interrupted', 'error', 'blocked']) {
     const folder = new TranscriptFolder()
-    folder.apply([
+    applyMixed(folder, [
       ...completedTurn(0, 0, 1000).slice(0, -1),
       eventAt('turn/end', { turn: 0, reason: reason === 'error'
         ? { kind: 'error', error: { code: 'X', message: 'boom' } }
@@ -1811,7 +1841,7 @@ test('aborted/interrupted/error turns show no final assistant collapsed', () => 
 
 test('max-tokens keeps the useful settled assistant with the truncated marker', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1),
     eventAt('turn/end', { turn: 0, reason: { kind: 'max-tokens' } }, 7000, 99),
   ])
@@ -1827,7 +1857,7 @@ test('max-tokens keeps the useful settled assistant with the truncated marker', 
 
 test('an EXPANDED max-tokens turn keeps the truncated marker on its last assistant', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1),
     eventAt('turn/end', { turn: 0, reason: { kind: 'max-tokens' } }, 7000, 99),
   ])
@@ -1847,8 +1877,8 @@ test('an EXPANDED max-tokens turn keeps the truncated marker on its last assista
 
 test('turnActivities returns the SAME objects by reference (no per-repaint copy)', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000))
-  folder.apply(completedTurn(1, 10, 20_000))
+  applyMixed(folder, completedTurn(0, 0, 1000))
+  applyMixed(folder, completedTurn(1, 10, 20_000))
   const first = folder.turnActivities()
   const second = folder.turnActivities()
   assert.equal(first, second, 'the map itself must not be rebuilt per repaint')
@@ -1860,7 +1890,7 @@ test('turnActivities returns the SAME objects by reference (no per-repaint copy)
 
 test('the final is the EXACT last assistant: an empty last step yields NO final (no earlier fallback)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1), // step 1 settles 'final answer text'
     // step 2 streams then settles to EMPTY text (the folder keeps the
     // entry, text becomes '').
@@ -1881,7 +1911,7 @@ test('the final is the EXACT last assistant: an empty last step yields NO final 
 
 test('an image-only final assistant is the EXACT final (never falls back to the earlier text step)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1), // step 1: 'final answer text'
     eventAt('assistant/message', {
       turn: 0, step: 2,
@@ -1911,7 +1941,7 @@ test('an image-only final assistant is the EXACT final (never falls back to the 
 
 test('a reasoning-only exact last assistant is NOT renderable — no final', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1), // earlier text assistant
     eventAt('assistant/message', {
       turn: 0, step: 2,
@@ -1936,7 +1966,7 @@ test('a reasoning-only exact last assistant is NOT renderable — no final', () 
 
 test('a tool-call-only exact last assistant is NOT renderable — no final', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1), // earlier text assistant
     eventAt('assistant/message', {
       turn: 0, step: 2,
@@ -1955,7 +1985,7 @@ test('a tool-call-only exact last assistant is NOT renderable — no final', () 
 
 test('max-tokens also never falls back to an earlier assistant', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1),
     eventAt('assistant/chunk', { turn: 0, step: 3, chunk: { type: 'text-delta', index: 0, text: 'partial' } }, 1000 + 11, 21),
     eventAt('assistant/message', {
@@ -1971,7 +2001,7 @@ test('max-tokens also never falls back to an earlier assistant', () => {
 
 test('the EXPANDED final is always the LAST block (a max-tokens system row cannot precede it)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1), // assistant step 1 settles
     eventAt('turn/end', { turn: 0, reason: { kind: 'max-tokens' } }, 1000 + 13, 23),
   ])
@@ -1989,7 +2019,7 @@ test('the EXPANDED final is always the LAST block (a max-tokens system row canno
 
 test('the Thought component never exceeds the terminal at widths 1-3', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000))
+  applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
   const component = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
   for (const width of [1, 2, 3]) {
@@ -2001,7 +2031,7 @@ test('the Thought component never exceeds the terminal at widths 1-3', () => {
 
 test('the Thought component never renders a line wider than the terminal', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000))
+  applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
   const running = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
   const open = new FocusActivityComponent({ activity, expanded: true, now: () => 35000 })
@@ -2023,7 +2053,7 @@ function projectTools(
 
 test('collapsed turns never render process rows at all (no Ctrl+O leak)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1), // still running
     eventAt('user/message', { id: MessageId('m2'), role: 'user', content: [{ type: 'text', text: 'more' }], source: { kind: 'user' } }, 2000, 50),
   ])
@@ -2037,7 +2067,7 @@ test('collapsed turns never render process rows at all (no Ctrl+O leak)', () => 
 
 test('compaction cards keep their existing lifecycle under Focus', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...completedTurn(0, 0, 1000).slice(0, -1),
     eventAt('compaction/start', { compactionId: 'c1' }, 7000, 99),
     eventAt('compaction/end', { compactionId: 'c1' }, 8000, 100),
@@ -2049,7 +2079,7 @@ test('compaction cards keep their existing lifecycle under Focus', () => {
 
 test('window summaries (turn-less entries) pass through the projection', () => {
   const folder = new TranscriptFolder()
-  folder.apply(completedTurn(0, 0, 1000))
+  applyMixed(folder, completedTurn(0, 0, 1000))
   const windowed = [{ kind: 'summary', text: '… 3 earlier turns' }, ...folder.messages()] as TranscriptMessage[]
   const blocks = projectFocus(windowed, folder.turnActivities(), new Set(), true)
   assert.equal(blocks[0]?.kind === 'message' ? blocks[0].message.kind : '', 'summary')
@@ -2096,7 +2126,7 @@ function steeredTurn(turn: number, baseSeq: number, startTime: number): SessionE
 
 test('expanded: the initial user stays before the Thought; a mid-turn steer returns to its chronological position', () => {
   const folder = new TranscriptFolder()
-  folder.apply(steeredTurn(0, 0, 1000))
+  applyMixed(folder, steeredTurn(0, 0, 1000))
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
   const kinds = blockKinds(blocks)
   // user(initial) → activity → thinking → tool → user(steer) → assistant(final)
@@ -2109,7 +2139,7 @@ test('expanded: the initial user stays before the Thought; a mid-turn steer retu
 
 test('expanded: injected/system context before the initial user stays above the Thought (core regression)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     // Injected context folds into a system row BEFORE the initial prompt.
     eventAt('user/message', {
@@ -2152,7 +2182,7 @@ test('expanded: injected/system context before the initial user stays above the 
 
 test('expanded: a second CONSECUTIVE user is a steer, never part of the initial prompt', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('user/message', {
       id: MessageId('u1'), role: 'user',
@@ -2182,7 +2212,7 @@ test('expanded: a second CONSECUTIVE user is a steer, never part of the initial 
 
 test('expanded: a turn with NO user row keeps the Thought and never crashes (no synthetic user)', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1001, 1),
     eventAt('assistant/message', {
@@ -2199,7 +2229,7 @@ test('expanded: a turn with NO user row keeps the Thought and never crashes (no 
 
 test('expanded: multiple steers keep their relative chronology', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     ...steeredTurn(0, 0, 1000).slice(0, -1),
     eventAt('user/message', {
       id: MessageId('msg-s2'), role: 'user',
@@ -2226,7 +2256,7 @@ test('expanded: multiple steers keep their relative chronology', () => {
 
 test('expanded: user rows never carry the owner collapse mark; process rows always do', () => {
   const folder = new TranscriptFolder()
-  folder.apply(steeredTurn(0, 0, 1000))
+  applyMixed(folder, steeredTurn(0, 0, 1000))
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
   for (const block of blocks) {
     if (block.kind !== 'message') continue
@@ -2244,7 +2274,7 @@ test('expanded: user rows never carry the owner collapse mark; process rows alwa
 
 test('expanded: rows before the first user stay in place; a late steer stays chronological', () => {
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1001, 1),
     eventAt('user/message', {
@@ -2268,7 +2298,7 @@ test('expanded: rows before the first user stay in place; a late steer stays chr
 
 test('fold → expand → fold projection is reversible (same collapsed output)', () => {
   const folder = new TranscriptFolder()
-  folder.apply(steeredTurn(0, 0, 1000))
+  applyMixed(folder, steeredTurn(0, 0, 1000))
   const collapsed = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
   const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
   const refolded = projectFocus(

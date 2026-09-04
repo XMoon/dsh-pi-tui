@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { toolPresenterFrom } from '../src/present.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { Text, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
@@ -56,6 +57,28 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; ge
  * deliberate second todo click must be a NEW gesture, never coalesced. */
 function sleepBeyondTodoCoalesce(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 550))
+}
+
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(turn: number, step: number, chunk: AssistantLiveChunk, time: number): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+/** Apply a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function applyMixed(folder: TranscriptFolder, events: readonly SessionEvent[]): void {
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
 }
 
 test('renders the header and the editor frame', async () => {
@@ -2147,12 +2170,13 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
 
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
-    // Thinking streams, then the step settles with a reasoning-only message
-    // (NO text block): the image pipeline's non-text-block retention keeps
-    // the empty assistant entry — it must not occupy a spacer row, or the
-    // thinking card and the next card read two blank rows apart.
+    // Thinking streams (Session v2: THROUGH THE LIVE SEAM), then the step
+    // settles with a reasoning-only message (NO text block): the image
+    // pipeline's non-text-block retention keeps the empty assistant entry —
+    // it must not occupy a spacer row, or the thinking card and the next
+    // card read two blank rows apart.
     { type: 'assistant/chunk', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', text: 'think one\nthink two\n' } } } as SessionEvent,
     { type: 'assistant/message', seq: 2, time: 1_700_000_000_002, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'reasoning', text: 'think one\nthink two' }] } } } as SessionEvent,
     { type: 'tool/call', seq: 3, time: 1_700_000_000_003, data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } } as SessionEvent,

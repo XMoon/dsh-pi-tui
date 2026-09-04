@@ -29,6 +29,7 @@ import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
@@ -57,6 +58,35 @@ const T0 = Date.now() - 60_000
 
 function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
   return { type, seq, time, data } as SessionEvent
+}
+
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(turn: number, step: number, chunk: AssistantLiveChunk, time: number): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+/** A folder that can fold both the durable event plane and the Session v2
+ * live input seam (TranscriptFolder shares this surface with StatsFolder). */
+interface LiveFoldable {
+  apply(events: readonly SessionEvent[]): void
+  applyLiveInput(input: AssistantLiveInput): void
+}
+
+/** Apply a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function applyMixed(folder: LiveFoldable, events: readonly SessionEvent[]): void {
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
 }
 
 function show(app: TuiApp, folder: TranscriptFolder): void {
@@ -137,7 +167,7 @@ async function fullscreenFocusApp(
 ): Promise<{ vt: VirtualTerminal; app: TuiApp }> {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  for (const turn of turns) folder.apply(turn.events)
+  for (const turn of turns) applyMixed(folder, turn.events)
   app.setFocusMode(true)
   if (turns.some(turn => turn.running)) app.setWorking(true)
   show(app, folder)
@@ -248,9 +278,9 @@ test('running Thought + user following the end keeps following (plan §21.3)', a
     assert.ok(vt.getViewport().join('\n').includes('🐳 Thought'), 'the running root must expand')
     // A new event streams in: the viewport must keep chasing the tail.
     const folder = new TranscriptFolder()
-    for (let turn = 1; turn <= 3; turn += 1) folder.apply(settledTurn(turn, turn * 100))
-    folder.apply(runningTurnStart(4, 400))
-    folder.apply([
+    for (let turn = 1; turn <= 3; turn += 1) applyMixed(folder, settledTurn(turn, turn * 100))
+    applyMixed(folder, runningTurnStart(4, 400))
+    applyMixed(folder, [
       eventAt('tool/result', {
         turn: 4, step: 0,
         message: {
