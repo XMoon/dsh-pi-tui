@@ -7,7 +7,7 @@
  * @module prepare-dsh-test-environment
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, globSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -39,6 +39,33 @@ function readTargetVersion() {
   const manifest = JSON.parse(readFileSync(path, 'utf8'))
   if (typeof manifest.dshVersion !== 'string' || manifest.dshVersion === '') fail(`${path} has no exact dshVersion`)
   return manifest.dshVersion
+}
+
+/** Build the fs-ext native binding in the target workspace when the
+ * source-mode install skipped it. Master's pnpm-workspace allowBuilds does
+ * not include fs-ext, so a fresh install has no flock addon and the JSONL
+ * backend cannot boot (the official preset matrix and the ownership E2E
+ * both need the real kernel-flock path). Idempotent: a present binding is
+ * left alone. pnpm keeps fs-ext inside its isolated store
+ * under node_modules/.pnpm, so the package directory is located by
+ * globbing, never by a hoisted top-level path. */
+async function ensureFsExtBinding(target) {
+  const fsExtCandidates = globSync(join(target, 'node_modules', '.pnpm', 'fs-ext@*', 'node_modules', 'fs-ext'))
+  if (fsExtCandidates.length === 0) return
+  const fsExtDir = fsExtCandidates[0]
+  const binding = join(fsExtDir, 'build', 'Release', 'fs_ext.node')
+  if (existsSync(binding)) return
+  // node-gyp ships inside the npm installation; resolve it the same way the
+  // repo's E2E harnesses do (npm root -g), falling back to a PATH binary.
+  const npmRoot = await runBounded('npm', ['root', '-g'], { timeoutMs: 30_000, label: 'npm root -g' })
+  const bundled = npmRoot.status === 0 ? join(npmRoot.stdout.trim(), 'npm', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js') : ''
+  const gyp = bundled !== '' && existsSync(bundled) ? bundled : 'node-gyp'
+  const result = gyp === 'node-gyp'
+    ? await runBounded(gyp, ['configure', 'build'], { cwd: fsExtDir, env: { ...process.env, npm_config_ignore_scripts: 'false' }, timeoutMs: 5 * 60_000, label: 'fs-ext native binding build' })
+    : await runBounded(process.execPath, [gyp, 'configure', 'build'], { cwd: fsExtDir, env: { ...process.env, npm_config_ignore_scripts: 'false' }, timeoutMs: 5 * 60_000, label: 'fs-ext native binding build' })
+  if (result.status !== 0) {
+    fail(`fs-ext native binding build failed${result.error ? `: ${result.error.message}` : ` with exit ${result.status ?? 'unknown'}`}`)
+  }
 }
 
 function parseCli() {
@@ -136,6 +163,10 @@ export async function prepareDshTestEnvironment({
     restoreDshInstall(prepared)
   }
   if (selected.kind === 'source-pack') {
+    // The source-mode install runs with --ignore-scripts, so fs-ext's
+    // node-gyp build never ran; the JSONL backend needs the real flock
+    // addon to boot (official preset matrix, ownership E2E).
+    await ensureFsExtBinding(target)
     const packageJson = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'))
     assertSourceResolution(target, selected, sourceInstallPackages(selected, packageJson))
   }
