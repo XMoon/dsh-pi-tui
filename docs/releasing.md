@@ -18,6 +18,16 @@ vendored build dependency and must never be published separately.
 - Never create or push a release tag until the local verification below is
   green. Never push without the user's explicit confirmation.
 
+## main / next synchronization
+
+- Shared fixes, installation guidance, and branch-neutral documentation land on
+  `main` first, then merge `main` into `next`.
+- Unreleased features and unpublished DSH compatibility work land on `next`.
+- Release promotion merges `next` into `main`.
+- After promotion, merge `main` back into `next`.
+- README files are branch-neutral. Do not rewrite `@latest` to `@next` or vice
+  versa during branch merges; both channels remain documented simultaneously.
+
 ## 1. Inspect the release range
 
 Start from a clean working tree and confirm the previous tag and the intended
@@ -42,8 +52,8 @@ supported while M2–M8 remain unfinished.
 
 ## 2. Update release metadata and documentation
 
-If a stable release is based on a mature `next` snapshot, first promote that
-snapshot into `main` as described in
+If a stable release is based on a mature `next` snapshot, first merge that
+snapshot from `next` into `main` as described in
 [docs/local-development.md](local-development.md). Complete this release
 checklist on `main`, then merge the resulting released `main` state back into
 `next` as the final promotion step.
