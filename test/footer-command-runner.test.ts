@@ -546,9 +546,8 @@ test('the app renders the command surface; the Host instruction still merges on 
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('red line'), `the command surface must render:\n${view}`)
-  // The Ctrl+D exit hint (Host-owned) still merges on top of the command
-  // surface — the command can never hide it.
-  app.setDraft('unsent')
+  // With an EMPTY editor, the Ctrl+D exit hint (Host-owned) still merges on
+  // top of the command surface — the command can never hide it.
   vt.sendInput('\x04')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')

@@ -338,6 +338,27 @@ test('TuiApp: ordinary input fires onUserInput; focus reports do not', async () 
   app.stop()
 })
 
+test('injected batched text containing Kitty suffixes remains editable', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let userInputs = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onUserInput: () => { userInputs += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  vt.sendInput('hello:2u')
+  vt.sendInput('hello:3u')
+  vt.sendInput('foo:2A')
+  vt.sendInput('foo:3~')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'hello:2uhello:3ufoo:2Afoo:3~')
+  assert.equal(userInputs, 4, 'batched ordinary text must count as user activity')
+  app.stop()
+})
+
 test('user activity restores focused after a missed FOCUS_IN — no false notification (markFocused wiring)', () => {
   // The runner's exact wiring: onTerminalFocus feeds the tracker and the
   // controller; onUserInput restores 'focused'. Scenario: FOCUS_OUT

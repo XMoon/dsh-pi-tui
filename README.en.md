@@ -299,7 +299,7 @@ For the full `/footer` workflow, Custom Text / Command items, YAML reference, se
 | `Esc`         | Cancel current interaction / interrupt running work |
 | `Esc Esc`     | Open Rewind while idle                              |
 | `Ctrl+C`      | Keyboard exit confirmation; clears the draft first |
-| `Ctrl+D`      | Keyboard exit confirmation; press it again to quit  |
+| `Ctrl+D`      | Keyboard exit confirmation when empty; forward-delete with draft text |
 | `Ctrl+S`      | Steer queued messages and the draft into the running turn |
 | `Ctrl+T`      | Toggle the todo panel                               |
 | `Ctrl+R`      | Search input history                                |

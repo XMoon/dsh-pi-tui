@@ -3902,6 +3902,14 @@ export class TuiApp {
       return this.handleInterruptAction(data) !== undefined
     }
     if (action === 'app.exit.request') {
+      // The default Ctrl+D remains an editor-owned forward-delete while the
+      // visible editor has content. Only an EMPTY editor may promote that
+      // physical key to a Host exit request; explicit custom exit keys and
+      // leader completions stay Host-owned.
+      if (key === 'ctrl+d' && trigger === undefined && this.seatEditor().getText() !== '') {
+        this.clearExitConfirmation()
+        return false
+      }
       // The resolver's effective KeyId is the confirmation identity. A
       // missing key can only come from an internal legacy caller; fail closed
       // instead of treating an unknown trigger as an immediate exit.

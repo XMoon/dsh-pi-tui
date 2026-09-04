@@ -91,6 +91,8 @@ const STRING_ALLOWLIST = [
   '[esc/ctrl+c] cancel',
   // The exit path's key-id comparison is semantic behavior, not UI copy.
   "clearsDraft: key === 'ctrl+c'",
+  // The default Ctrl+D editor-ownership branch is semantic routing, not UI copy.
+  "key === 'ctrl+d'",
   // Dynamic exit-confirmation labels are intentionally not allowlisted.
 ]
 

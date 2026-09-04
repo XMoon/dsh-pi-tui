@@ -298,16 +298,18 @@ test('Ctrl+D requires a same-key second press', async () => {
   assert.equal(surface.exits, 1)
 })
 
-test('Ctrl+D preserves a non-empty draft while arming', async () => {
+test('Ctrl+D with a non-empty draft stays editor-owned for forward delete', async () => {
   const surface = startAppWithExits({ exitConfirmWindowMs: 200 })
   await surface.vt.waitForRender()
-  surface.vt.sendInput('hello')
-  await surface.vt.waitForRender()
+  surface.vt.sendInput('abc')
+  surface.vt.sendInput('\x1b[H') // move the cursor to the start
+  surface.vt.sendInput('\x04')
   surface.vt.sendInput('\x04')
   await surface.vt.waitForRender()
-  assert.equal(surface.app.seatTextForTest(), 'hello')
-  assert.equal(surface.exits, 0)
-  assert.ok(footerLine(surface.vt).includes('Press Ctrl+D again to exit'))
+  assert.equal(surface.app.seatTextForTest(), 'c', 'Ctrl+D must delete forward in non-empty text')
+  assert.equal(surface.exits, 0, 'editor-owned Ctrl+D must never exit')
+  assert.ok(!footerLine(surface.vt).includes('Press Ctrl+D again to exit'),
+    'editor-owned Ctrl+D must not arm Host exit confirmation')
 })
 
 test('Ctrl+D → Ctrl+C replaces the armed key without exiting', async () => {
@@ -334,7 +336,9 @@ test('an ordinary editor key disarms the keyboard exit confirmation', async () =
   surface.vt.sendInput('\x04')
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 0, 'typing between exit presses must disarm')
-  assert.ok(footerLine(surface.vt).includes('Press Ctrl+D again to exit'))
+  assert.equal(surface.app.seatTextForTest(), 'a', 'Ctrl+D must remain an editor key with text')
+  assert.ok(!footerLine(surface.vt).includes('Press Ctrl+D again to exit'),
+    'editor-owned Ctrl+D must not re-arm Host confirmation')
 })
 
 test('a host action disarms the keyboard exit confirmation', async () => {

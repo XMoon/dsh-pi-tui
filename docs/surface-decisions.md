@@ -153,10 +153,11 @@ the Host itself. Decisions a future change must not silently reverse:
   commands are NOT executed against the parent, and the child gets no
   command-execution wire. Parent-only actions (Ctrl+S steer, Ctrl+Enter
   queue, Alt+↑ dequeue, Shift+Tab permission, Ctrl+F/Ctrl+Shift+F main
-  search, keyboard exit bindings (same-key confirmation; Ctrl+C clears the draft
-   first, Ctrl+D/custom keys preserve it), ↓ task browser, Ctrl+G external editor,
-  Ctrl+V image intake) are consumed by the host BEFORE the ladder reaches
-  the editor, so the viewer can never act on the parent session.
+  search, keyboard exit bindings (same-key confirmation; Ctrl+C clears the
+  draft first, default Ctrl+D is editor-owned when content is present, custom
+  keys preserve it), ↓ task browser, Ctrl+G external editor, Ctrl+V image
+  intake) are consumed by the host BEFORE the ladder reaches the editor, so
+  the viewer can never act on the parent session.
 - **The write path is exactly one**: the runner's `onSubagentSubmit` →
   `submitSubagentPrompt` (src/subagent-viewer-submit.ts) → the official
   `ctx.subagents.prompt`. Never `ctx.subagents.sendMessage(...)` (that is

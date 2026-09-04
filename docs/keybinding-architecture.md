@@ -292,10 +292,12 @@ the user's live bindings:
 - **The single source of truth for DEFAULT keys is `definitions.ts`**
   (plus the `RESERVED_HOST_KEYS` inventory in keybinding-registry.ts).
   `src/tui-app.ts` and `src/index.ts` carry a header note pointing here.
-- **Keyboard exit requests use same-key confirmation.** Every effective direct
-  binding and full `<leader>X` sequence arms its own 1.5-second window and
-  must be repeated with the same trigger; a different exit key replaces the
-  armed trigger. The footer renders the effective trigger label dynamically.
+- **Keyboard exit requests use same-key confirmation.** Every effective exit
+  request that reaches the Host — including full `<leader>X` sequences — arms
+  its own 1.5-second window and must be repeated with the same trigger; a
+  different exit key replaces the armed trigger. The default Ctrl+D remains
+  editor-owned while the visible editor has content. The footer renders the
+  effective trigger label dynamically.
 - **User-facing strings derive key labels from the keymap**
   (`keyHint()` / `keysFor()` — e.g. the guard notices and the `/settings`
   row descriptions). A remap updates the copy automatically; a disabled

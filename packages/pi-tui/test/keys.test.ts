@@ -8,6 +8,8 @@ import { decodePrintableKey as decodePrintableKeyFromRoot } from "../src/index.t
 import {
 	decodeKittyPrintable,
 	decodePrintableKey,
+	isKeyRelease,
+	isKeyRepeat,
 	Key,
 	matchesKey,
 	parseKey,
@@ -588,6 +590,29 @@ describe("parseKey", () => {
 			setKittyProtocolActive(true);
 			assert.strictEqual(parseKey("\x1b[99;17u"), undefined);
 			setKittyProtocolActive(false);
+		});
+	});
+
+	describe("Kitty event classification", () => {
+		it("recognizes complete events and leaves batched text alone", () => {
+			assert.strictEqual(isKeyRepeat("\x1b[100;5:2u"), true);
+			assert.strictEqual(isKeyRelease("\x1b[100;5:3u"), true);
+			assert.strictEqual(isKeyRepeat("\x1b[1;5:2A"), true);
+			assert.strictEqual(isKeyRelease("\x1b[1;5:3F"), true);
+			assert.strictEqual(isKeyRelease("\x1b[5;1:3~"), true);
+			assert.strictEqual(isKeyRelease("\x1b[1089::99;5:3u"), true);
+			assert.strictEqual(isKeyRepeat("hello:2u"), false);
+			assert.strictEqual(isKeyRelease("hello:3u"), false);
+			assert.strictEqual(isKeyRepeat("foo:2A"), false);
+			assert.strictEqual(isKeyRelease("foo:3~"), false);
+			assert.strictEqual(isKeyRepeat("\x1b[100;5:2u trailing"), false);
+			assert.strictEqual(isKeyRelease("\x1b[100;5:3"), false);
+		});
+
+		it("does not classify bracketed paste payload as a key event", () => {
+			const paste = "\x1b[200~hello:2u hello:3~\x1b[201~";
+			assert.strictEqual(isKeyRepeat(paste), false);
+			assert.strictEqual(isKeyRelease(paste), false);
 		});
 	});
 

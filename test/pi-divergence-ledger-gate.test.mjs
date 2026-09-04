@@ -176,6 +176,7 @@ test('report rendering is deterministic and naturally sorts mixed IDs', () => {
   assert.ok(first.indexOf('### X004A') < first.indexOf('### X004B'))
   assert.ok(first.indexOf('### X044') < first.indexOf('### X045'))
   assert.ok(first.indexOf('### X045') < first.indexOf('### X046'))
+  assert.ok(first.indexOf('### X046') < first.indexOf('### X047'))
   assert.ok(first.includes('- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`'))
   assert.ok(first.includes('- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`'))
   assert.equal(first.endsWith('\n'), true)
