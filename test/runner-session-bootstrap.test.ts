@@ -1117,11 +1117,11 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
   context.emit('session/event', parent as never, event('assistant/chunk', {
     turn: 1,
     step: 0,
-    chunk: { type: 'tool-call-delta', index: 0, id: 'parent-call-a' as ToolCallId, name: 'edit', argumentsDelta: '{' },
+    chunk: { type: 'tool-call-delta', index: 0, id: '' as ToolCallId, name: 'edit', argumentsDelta: '{' },
   }, 11))
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
-  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => preview.callId), ['parent-call-a'])
+  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => preview.callId), [''])
 
   // /tasks opens the real runner browser, and Enter mounts the child viewer.
   const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
@@ -1139,13 +1139,22 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
   context.emit('session/event', parent as never, event('assistant/chunk', {
     turn: 1,
     step: 0,
-    chunk: { type: 'tool-call-delta', index: 0, id: 'parent-call-a' as ToolCallId, name: 'write', argumentsDelta: '}' },
+    chunk: { type: 'tool-call-delta', index: 0, id: '' as ToolCallId, name: 'write', argumentsDelta: '}' },
   }, 12))
   context.emit('session/event', parent as never, event('assistant/chunk', {
     turn: 1,
     step: 0,
     chunk: { type: 'tool-call-delta', index: 1, id: 'parent-call-b' as ToolCallId, name: 'read', argumentsDelta: '{' },
   }, 13))
+  context.emit('session/event', parent as never, event('assistant/chunk', {
+    turn: 1,
+    step: 0,
+    chunk: {
+      type: 'block-end',
+      index: 0,
+      block: { type: 'tool-call', id: 'parent-call-a' as ToolCallId, name: 'write', arguments: '{}' },
+    },
+  }, 14))
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
 
@@ -1161,7 +1170,7 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
 
   // A parent call that materializes while the child remains visible must be
   // removed from the hidden main map, not recreated when the viewer closes.
-  context.emit('session/event', parent as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 14))
+  context.emit('session/event', parent as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 15))
   await vt.waitForRender()
   await tasksHandler()
   await settle()
@@ -1170,12 +1179,12 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
   await settle()
   await vt.waitForRender()
   assert.equal(app.getViewerGeneration(), 3, 'the child viewer must reopen')
-  context.emit('session/event', parent as never, event('turn/start', { turn: 2 }, 15))
+  context.emit('session/event', parent as never, event('turn/start', { turn: 2 }, 16))
   context.emit('session/event', parent as never, event('assistant/chunk', {
     turn: 2,
     step: 0,
     chunk: { type: 'tool-call-delta', index: 0, id: 'parent-call-c' as ToolCallId, name: 'edit', argumentsDelta: '{' },
-  }, 16))
+  }, 17))
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
   context.emit('session/event', parent as never, event('tool/call', {
@@ -1184,7 +1193,7 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
     callId: 'parent-call-c' as ToolCallId,
     name: 'edit',
     arguments: '{}',
-  }, 17))
+  }, 18))
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
   input('\x1b')

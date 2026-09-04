@@ -918,6 +918,24 @@ function applyStreamingToolPreviewEvent(
     })
     return
   }
+  if (
+    event.type === 'assistant/chunk'
+    && event.data.chunk.type === 'block-end'
+    && event.data.chunk.block.type === 'tool-call'
+  ) {
+    const chunk = event.data.chunk
+    // ContentBlock is merge-extensible, so retain the runtime tag guard above
+    // and narrow the known tool-call fields structurally here.
+    const block = chunk.block as { type: 'tool-call'; id: ToolCallId; name: string }
+    upsertStreamingToolPreview(previews, {
+      callId: block.id,
+      turn: event.data.turn,
+      step: event.data.step,
+      index: chunk.index,
+      name: block.name,
+    })
+    return
+  }
   if (event.type === 'tool/call') {
     removeStreamingToolPreview(previews, event.data.callId, event.data.turn, event.data.step)
     return

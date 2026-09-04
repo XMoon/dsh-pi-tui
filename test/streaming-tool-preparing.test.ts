@@ -58,6 +58,22 @@ function applyPreviewEvent(previews: Map<string, StreamingToolPreview>, event: S
     })
     return
   }
+  if (
+    event.type === 'assistant/chunk'
+    && event.data.chunk.type === 'block-end'
+    && event.data.chunk.block.type === 'tool-call'
+  ) {
+    const chunk = event.data.chunk
+    const block = chunk.block as { type: 'tool-call'; id: ToolCallId; name: string }
+    upsertStreamingToolPreview(previews, {
+      callId: block.id,
+      turn: event.data.turn,
+      step: event.data.step,
+      index: chunk.index,
+      name: block.name,
+    })
+    return
+  }
   if (event.type === 'tool/call') {
     removeStreamingToolPreview(previews, event.data.callId, event.data.turn, event.data.step)
     return
@@ -135,6 +151,57 @@ test('empty ids use the stable chunk position and migrate to a later call id', (
     arguments: '{}',
   }, 21))
   assert.deepEqual(streamingToolPreviewSnapshot(previews), [])
+})
+
+test('empty-id deltas migrate to the authoritative block-end id before materialization', () => {
+  const previews = new Map<string, StreamingToolPreview>()
+  applyPreviewEvent(previews, delta(3, 0, 0, '', '{', 'edit'))
+  applyPreviewEvent(previews, event('assistant/chunk', {
+    turn: 3,
+    step: 0,
+    chunk: {
+      type: 'block-end',
+      index: 0,
+      block: { type: 'tool-call', id: 'real-edit' as ToolCallId, name: 'edit', arguments: '{}' },
+    },
+  }, 301))
+  assert.deepEqual(streamingToolPreviewSnapshot(previews).map(preview => preview.callId), ['real-edit'])
+
+  applyPreviewEvent(previews, event('tool/call', {
+    turn: 3,
+    step: 0,
+    callId: 'real-edit' as ToolCallId,
+    name: 'edit',
+    arguments: '{}',
+  }, 302))
+  assert.deepEqual(streamingToolPreviewSnapshot(previews), [])
+})
+
+test('block-end materialization removes one empty-id preview without dropping its parallel peer', () => {
+  const previews = new Map<string, StreamingToolPreview>()
+  applyPreviewEvent(previews, delta(4, 0, 0, '', '{', 'edit'))
+  applyPreviewEvent(previews, delta(4, 0, 1, '', '{', 'write'))
+  applyPreviewEvent(previews, event('assistant/chunk', {
+    turn: 4,
+    step: 0,
+    chunk: {
+      type: 'block-end',
+      index: 0,
+      block: { type: 'tool-call', id: 'real-edit' as ToolCallId, name: 'edit', arguments: '{}' },
+    },
+  }, 401))
+  applyPreviewEvent(previews, event('tool/call', {
+    turn: 4,
+    step: 0,
+    callId: 'real-edit' as ToolCallId,
+    name: 'edit',
+    arguments: '{}',
+  }, 402))
+  assert.deepEqual(streamingToolPreviewSnapshot(previews).map(preview => ({
+    callId: preview.callId,
+    index: preview.index,
+    name: preview.name,
+  })), [{ callId: '', index: 1, name: 'write' }])
 })
 
 test('retry boundaries clear partial previews before the next request attempt', () => {
