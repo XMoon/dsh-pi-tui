@@ -663,18 +663,17 @@ test('search never sorts the query list in place (the shared array stays untouch
   assert.deepEqual(shared, before, 'the shared array keeps its original order')
 })
 
-test('readExportData serializes the observed logical log as canonical JSONL', async () => {
-  const observedHeader = header('session-export', 100, { cwd: '/ws' })
+test('readExportData serializes the COMMITTED log through a persistence read handle as canonical JSONL', async () => {
+  const committedHeader = header('session-export', 100, { cwd: '/ws' })
+  let closed = 0
   const reader = new DirectSessionReader(host({
-    sessionQuery: query(
-      [{ header: observedHeader, live: false }],
-      undefined,
-      async () => ({
-        header: observedHeader,
-        events: [{ type: 'message/user', seq: 1, time: 100, content: 'hi' }],
-        [Symbol.dispose]: () => {},
+    sessionPersistence: {
+      open: async () => ({
+        header: committedHeader,
+        read: async () => [{ type: 'message/user', seq: 1, time: 100, content: 'hi' }],
+        close: async () => { closed += 1 },
       }),
-    ),
+    },
   }))
   const result = await reader.readExportData('session-export')
   assert.equal(result.kind, 'found')
@@ -686,19 +685,93 @@ test('readExportData serializes the observed logical log as canonical JSONL', as
     assert.equal(JSON.parse(lines[0]!).id, 'session-export')
     assert.equal(JSON.parse(lines[1]!).type, 'message/user')
   }
+  assert.equal(closed, 1, 'the read handle is always closed')
 })
 
-test('readExportData without the session-query engine is an explicit unavailable', async () => {
+test('readExportData flushes a LIVE session through the store before the committed read', async () => {
+  const committedHeader = header('session-flush', 100)
+  let flushed = 0
+  let opened = false
+  const reader = new DirectSessionReader(host({
+    sessions: {
+      get: () => ({ id: 'session-flush' }),
+      flush: async () => { flushed += 1 },
+    },
+    sessionPersistence: {
+      open: async () => {
+        opened = true
+        return { header: committedHeader, read: async () => [], close: async () => {} }
+      },
+    },
+  }))
+  const result = await reader.readExportData('session-flush')
+  assert.equal(result.kind, 'found')
+  assert.equal(flushed, 1, 'the live session flushes through the durability barrier first')
+  assert.equal(opened, true)
+})
+
+test('readExportData NEVER reads the observation seam (no synthetic cold closers in an export)', async () => {
+  // A crash-mid-turn COLD session: observeSession synthesizes an
+  // interrupted-turn closer for read-only balance; the canonical export
+  // reads the committed log only and must never contain it.
+  const committedHeader = header('session-crash', 100)
+  let observed = 0
+  const reader = new DirectSessionReader(host({
+    sessionQuery: {
+      listSessions: async () => [],
+      observeSession: async () => {
+        observed += 1
+        throw new Error('the export must never observe')
+      },
+    },
+    sessionPersistence: {
+      open: async () => ({
+        header: committedHeader,
+        read: async () => [
+          { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } },
+          // the durable tail ends mid-turn — NO synthetic closer here
+        ],
+        close: async () => {},
+      }),
+    },
+  }))
+  const result = await reader.readExportData('session-crash')
+  assert.equal(result.kind, 'found')
+  if (result.kind === 'found') {
+    const lines = result.data.content.trim().split('\n')
+    assert.equal(lines.length, 2, 'header + the committed events only')
+    assert.ok(!lines[1]!.includes('interrupted'), 'no synthetic interrupted closer in the export')
+  }
+  assert.equal(observed, 0)
+})
+
+test('readExportData without the persistence read seam is an explicit unavailable', async () => {
   const reader = new DirectSessionReader(host({}))
   const result = await reader.readExportData('session-any')
   assert.equal(result.kind, 'unavailable')
 })
 
+test('readExportData maps the official absence error to "no materialized log"', async () => {
+  const reader = new DirectSessionReader(host({
+    sessionPersistence: {
+      open: async () => {
+        throw Object.assign(new Error('session "session-gone" not found'), { name: 'SessionPersistenceNotFoundError' })
+      },
+    },
+  }))
+  const result = await reader.readExportData('session-gone')
+  assert.equal(result.kind, 'none')
+})
+
 test('readExportData preserves a REJECTED log read as an error with the diagnostic', async () => {
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([], undefined, async () => {
-      throw new Error('corrupt zstd frame')
-    }),
+    sessionPersistence: {
+      open: async () => ({
+        header: header('session-broken', 100),
+        read: async () => { throw new Error('corrupt zstd frame') },
+        close: async () => {},
+      }),
+    },
   }))
   const result = await reader.readExportData('session-broken')
   assert.equal(result.kind, 'error', 'a corrupt log is a REAL failure, never "no materialized log"')

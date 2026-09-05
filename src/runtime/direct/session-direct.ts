@@ -33,8 +33,11 @@ import type { ExportReadResult, SessionProjectionSummary, SessionSearchHit, Sess
  */
 export interface SessionQueryLike {
   listSessions(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; live: boolean }>>
-  /** One exact live or prepared logical Session observation (the export
-   * read plane): header + complete validated event log, caller-owned. */
+  /** One exact live or prepared logical Session observation (title/preset
+   * projection reads): header + complete validated event log, caller-owned.
+   * NOT the canonical export plane — a cold observation synthesizes
+   * interrupted-turn closers for read-only balance, which an export must
+   * never contain. */
   observeSession(
     sessionId: SessionId,
     options?: { readonly signal?: AbortSignal; readonly projectionMode?: 'all' | 'none' },
@@ -52,6 +55,29 @@ export interface SessionQueryLike {
     sessionId: SessionId,
     filters: readonly SessionEventResultFilterLike[],
   ) => Promise<readonly SessionEventSearchDocumentLike[]>
+}
+
+/** One read handle over the committed log (structural subset of the
+ * official `SessionHandle` — the export plane reads ONLY committed
+ * records, never cold-view synthesis). */
+export interface SessionReadHandleLike {
+  readonly header: SessionHeader
+  read(start?: number, end?: number): Promise<readonly SessionEvent[]>
+  close(): Promise<void>
+}
+
+/** The persistence service's public read-open (structural subset of
+ * `@deepseek-ai/dsh-session-persistence`). */
+export interface SessionPersistenceReadLike {
+  open(sessionId: SessionId, mode: 'read'): Promise<SessionReadHandleLike>
+}
+
+/** The live-session store used to flush before an export read (structural
+ * subset of the official `sessions` service — mirrors upstream
+ * `flushLiveSessionLog`). */
+export interface SessionStoreFlushLike {
+  get(id: SessionId): unknown
+  flush(session: unknown): Promise<void>
 }
 
 /** The public session-query text filter used by the semantic search. */
@@ -302,19 +328,45 @@ export class DirectSessionReader implements SessionReader {
   }
 
   async readExportData(sessionId: string): Promise<ExportReadResult> {
-    const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
-    // The semantic observation is the ONLY export plane (master contract):
-    // the reader never touches raw persistence artifacts. An unmounted
-    // session-query service is an explicit unavailable, not a JSONL scan.
-    if (query === undefined) return { kind: 'unavailable' }
-    let observation: { readonly header: SessionHeader; readonly events: readonly SessionEvent[]; [Symbol.dispose](): void } | undefined
+    // The canonical export plane (upstream `session-log-export`):
+    //   1. flush the live session through the store's durability barrier;
+    //   2. open a persistence READ handle — the committed log ONLY. A cold
+    //      `observeSession` synthesizes interrupted-turn closers for
+    //      read-only UI balance; an export must never contain them, so the
+    //      export never reads through the observation seam. Absence is
+    //      `open`'s decision; every other failure stays fail-loud.
+    const id = SessionId(sessionId)
+    const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceReadLike | undefined
+    const sessions = this.ctx.get('sessions') as SessionStoreFlushLike | undefined
+    // The public read-handle seam is master-baseline vocabulary: a host
+    // without it (an older DSH) is an explicit unavailable, never a crash.
+    if (persistence === undefined || typeof persistence.open !== 'function') return { kind: 'unavailable' }
+    const live = sessions?.get(id)
+    if (live !== undefined) {
+      try {
+        await sessions!.flush(live)
+      } catch (error) {
+        return { kind: 'error', message: safeErrorMessage(error) }
+      }
+    }
+    let handle: SessionReadHandleLike
     try {
-      observation = await query.observeSession(SessionId(sessionId), { projectionMode: 'none' })
+      handle = await persistence.open(id, 'read')
+    } catch (error) {
+      // The official absence error is classified structurally (the class is
+      // master-only; its NAME is the stable surface).
+      if (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'SessionPersistenceNotFoundError') {
+        return { kind: 'none' }
+      }
+      return { kind: 'error', message: safeErrorMessage(error) }
+    }
+    try {
+      const events = await handle.read(0, undefined)
       return {
         kind: 'found',
         data: {
           filename: `${sessionId}.jsonl`,
-          content: serializeLogicalSessionLog(observation.header, observation.events),
+          content: serializeLogicalSessionLog(handle.header, events),
         },
       }
     } catch (error) {
@@ -322,7 +374,11 @@ export class DirectSessionReader implements SessionReader {
       // with a diagnostic — never misclassified as 'no materialized log'.
       return { kind: 'error', message: safeErrorMessage(error) }
     } finally {
-      observation?.[Symbol.dispose]()
+      try {
+        await handle.close()
+      } catch {
+        // Close is best-effort after the read outcome is settled.
+      }
     }
   }
 }
