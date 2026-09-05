@@ -74,8 +74,10 @@ recreate them as TUI-specific DTOs.
 ### Session query and raw export ownership
 
 Session list/projection/search/filter semantics belong to the public DSH
-`sessionQuery` + projection services. The picker's `title` and `agentPreset`
-values are Host-owned DSH projections read through ONE semantic port method,
+`sessionQuery` + projection services. The list keeps live Sessions even when
+`cwd` is absent, while cold Sessions without `cwd` are omitted; semantic search
+considers only cwd-bearing Sessions before applying its work bound. The picker's
+`title` and `agentPreset` values are Host-owned DSH projections read through ONE semantic port method,
 `SessionReader.projectionBatch()`: live rows read the `title` via
 `sessionProjections.snapshot()` while the live preset prefers the Agent's
 CURRENT composed roster entry (`agentPresets.composedPreset()`) — a
@@ -95,18 +97,19 @@ The Direct adapter may use the query engine's provider-independent
 `filterEvents` seam when the shipped SQLite full-text provider is disabled
 (`openAt: never`). If that semantic capability is absent or explicitly disabled,
 search is explicitly unavailable; it never falls back to raw persistence.
-`readRaw()` is reserved for raw-artifact fidelity such as export or repair, not
-as the long-term semantic search contract.
+No TUI semantic path uses `readRaw()` or scans physical persistence artifacts:
+`/export` reads the committed logical log through the persistence read handle,
+and the retired repair stack has no runtime owner.
 
-Raw session export is a separate Host streaming route:
+Session export is a separate Host streaming route:
 
 ```text
 ordinary session control/history/state -> official Session client object / generated Remote
 raw session export                    -> Connection HTTP GET/HEAD /api/session.export
 ```
 
-It is not an ordinary JSON-RPC payload and must not be implemented by sending a
-complete raw transcript to the Client for recompression.
+It is not an ordinary JSON-RPC payload and must not be implemented by sending
+physical persistence bytes to the Client for recompression.
 
 ## Phases (one behavior axis per phase; each independently mergeable/verifiable/rollback-able)
 
