@@ -979,6 +979,15 @@ function applyAssistantLiveInput(
   stats.applyLiveInput(input)
 }
 
+/** Join a durable observation with the opening journal after its snapshot cut. */
+function mergeSessionEventCut(
+  snapshot: readonly SessionEvent[],
+  opening: readonly SessionEvent[],
+): SessionEvent[] {
+  const cut = snapshot.length === 0 ? -1 : Number(snapshot[snapshot.length - 1]!.seq)
+  return [...snapshot, ...opening.filter(event => Number(event.seq) > cut)]
+}
+
 /**
  * Repaint the transcript from the active folder's bounded window. Messages,
  * navigation facts, turn activities and live preparing rows come from one
@@ -1817,7 +1826,7 @@ export function apply(ctx: Context, config: Config): void {
     // the Direct session lifecycle can resolve preset compositions.
     const backend = createDirectBackend(
       new DirectSubagentPort(ctx),
-      new DirectSessionReader(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined, diag),
+      new DirectSessionReader(ctx, diag),
       new DirectSessionWriter(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent as never : undefined),
       new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
       new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
@@ -2080,7 +2089,8 @@ export function apply(ctx: Context, config: Config): void {
       turns: folder.groupedTurns(),
     })
     let statsFolder = new StatsFolder()
-    let goalText: string | undefined
+    let openingSession: { id: string; events: SessionEvent[] } | undefined
+     let goalText: string | undefined
 
     /** Repaint the welcome card from the live agent's current facts. Re-read
      * on every call so a still-blank session's preset switch shows up. */
@@ -2164,6 +2174,8 @@ export function apply(ctx: Context, config: Config): void {
 // the exact extraction the transition commit uses.
     const transitionTo = async <T>(steps: TransitionSteps<T> & { inheritSelection?: ModelSelection }): Promise<TransitionOutcome<T>> => {
       const from = liveAgent?.session.id
+        const opening = { id: steps.target.id, events: [] as SessionEvent[] }
+        openingSession = opening
       const oldHandle = liveHandle
       return runTransitionTo<T>({
         quiesceOld: async () => {
@@ -2211,7 +2223,16 @@ export function apply(ctx: Context, config: Config): void {
             // fold is null-safe, so a hostile log can never throw here.
             const folded = foldPendingModelSelection(target.session.snapshotEvents())
             if (folded.lastUsed === undefined && folded.pending === undefined) {
-              modelSelections.selectForNextRequest(target, steps.inheritSelection)
+              try {
+                 modelSelections.selectForNextRequest(target, steps.inheritSelection)
+               } catch (error) {
+                 // A failed seed must not leave a published target without
+                 // its post-commit surface initialization.
+                 diag.error('transition selection seed failed', {
+                   session: target.session.id,
+                   error: safeErrorMessage(error),
+                 })
+               }
             }
           }
         },
@@ -2242,7 +2263,10 @@ export function apply(ctx: Context, config: Config): void {
           } catch (error) {
             retired.push(`surface rebuild: ${safeErrorMessage(error)}`)
           }
-          // The new owner's catalog refresh is AWAITED before the switch is
+          {
+             if (openingSession === opening) openingSession = undefined
+           }
+           // The new owner's catalog refresh is AWAITED before the switch is
           // reported: the old wrappers became revalidating transitions at
           // the target change, and the report must not precede the new
           // catalog (a failed attempt still returns a successful switch —
@@ -2253,15 +2277,19 @@ export function apply(ctx: Context, config: Config): void {
           } catch (error) {
             retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
           }
-          if (retired.length > 0) {
+          if (openingSession === opening) openingSession = undefined
+           if (retired.length > 0) {
             diag.error('transition retire failed (child committed)', { to: (directAgentOf(next) as Agent).session.id, failures: retired })
           }
           diag.info('switch ok', { from: from ?? '(none)', to: (directAgentOf(next) as Agent).session.id, seq: Number((directAgentOf(next) as Agent).session.seq) })
         },
         recordFailure: (phase, error) => {
           diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
+           if (openingSession === opening) openingSession = undefined
         },
-      }, steps)
+      }, steps).finally(() => {
+         if (openingSession === opening) openingSession = undefined
+       })
     }
 
     /** Hand the TUI over to another persisted session. Never throws: every
@@ -3362,6 +3390,7 @@ export function apply(ctx: Context, config: Config): void {
       // draft (the user's unsent text) restores into the new session's
       // editor — cross-session draft retention is the existing behavior.
       teardownViewerForSessionSwap(viewerOpen, viewing !== undefined, () => {
+        openingViewer = undefined
         viewing = undefined
         viewerSessionAbort?.abort()
         viewerSessionAbort = undefined
@@ -3443,6 +3472,10 @@ export function apply(ctx: Context, config: Config): void {
      * viewerOpen token), so a slow open can never commit an obsolete child
      * over the current surface (round-4/5 findings). */
     const viewerOpen = createViewerOpenToken()
+    /** Events for the child are buffered while its cold observation is in flight.
+     * The buffer closes the snapshot → live opening gap; the request token fences
+     * stale opens so an exited/superseded viewer never retains another child's events. */
+    let openingViewer: { request: number; childId: SessionId; events: SessionEvent[] } | undefined
     /** The CURRENT viewer session's abort source: aborted when the viewer
      * session ends (Esc / child switch / session swap), so an in-flight
      * follow-up that has NOT reached inbox acceptance is cancelled (the
@@ -3488,6 +3521,9 @@ export function apply(ctx: Context, config: Config): void {
         ? 'readonly-nested'
         : mode === 'one-shot' ? 'readonly-one-shot' : 'interactive-direct-child'
       const request = viewerOpen.open()
+      const opening = { request, childId, events: [] as SessionEvent[] }
+      openingViewer = opening
+       try {
       const childFolder = new TranscriptFolder()
       const childWindow = new TranscriptWindowController({
         windowTurns: TRANSCRIPT_WINDOW_TURNS,
@@ -3501,17 +3537,11 @@ export function apply(ctx: Context, config: Config): void {
       // the child with the parent's completed-turn history (session/end-seed
       // boundary), and the parent's records — its subagent completion
       // notices included — must never render as the child's transcript.
-      const child = sessions.get(childId)
-      const childAgent = agents.get(childId)
-      if (child !== undefined) {
-        const own = childOwnEvents(child.snapshotEvents())
-        childFolder.hydrate(own)
-        childStats.hydrate(own)
-        // The live child's session header carries its workspace (the child
-        // may have been born in another directory).
-        childCwd = typeof (child as { header?: { cwd?: unknown } }).header?.cwd === 'string'
-          ? (child as { header: { cwd: string } }).header.cwd
-          : ''
+      const initialChild = sessions.get(childId)
+      let observedEvents: readonly SessionEvent[] = initialChild?.snapshotEvents() ?? []
+      let observedHeader: { cwd?: unknown } | undefined = initialChild?.header
+      if (initialChild !== undefined) {
+        observedHeader = initialChild.header
       } else {
         // An inactive child is no longer in the live store; load its log
         // through the semantic session-query seam (the raw persistence
@@ -3521,9 +3551,8 @@ export function apply(ctx: Context, config: Config): void {
           try {
             const observation = await query.observeSession(SessionId(childId), { projectionMode: 'none' })
             try {
-              const own = childOwnEvents(observation.events)
-              childFolder.hydrate(own)
-              childStats.hydrate(own)
+              observedEvents = observation.events
+              observedHeader = observation.header
             } finally {
               observation[Symbol.dispose]()
             }
@@ -3532,7 +3561,26 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
       }
-      // A live child may already have emitted transient assistant frames before
+      // If the child cold-resumed while observation was in flight, its live
+      // Session snapshot is the authoritative durable cut. Otherwise append
+      // only buffered events beyond the observation cut, never replaying a
+      // duplicated seq from the snapshot.
+      const currentChild = sessions.get(childId)
+      const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)
+       const own = childOwnEvents(durableEvents)
+       childFolder.hydrate(own)
+       childStats.hydrate(own)
+       const header = currentChild?.header ?? observedHeader
+       // The live/cold child's session header carries its workspace (the child
+       // may have been born in another directory).
+       childCwd = typeof header?.cwd === 'string' ? header.cwd : ''
+       const childAgent = agents.get(childId)
+       let childActivity = activity
+       for (const event of own) {
+         if (event.type === 'turn/start') childActivity = 'running'
+         else if (event.type === 'turn/end') childActivity = 'inactive'
+       }
+       // A live child may already have emitted transient assistant frames before
       // the viewer existed. Replay only the exact Agent's active baseline after
       // durable hydration and before the child surface is mounted.
       if (childAgent !== undefined) {
@@ -3553,7 +3601,11 @@ export function apply(ctx: Context, config: Config): void {
       // of those invalidates the viewerOpen token. A stale request must not
       // commit its child over the current surface (no viewing write, no
       // repaint, no viewer mount, no auto-pop match).
-      if (!viewerOpen.isCurrent(request)) return
+      if (!viewerOpen.isCurrent(request)) {
+        if (openingViewer === opening) openingViewer = undefined
+        return
+      }
+      openingViewer = undefined
       // The viewer replaces the main transcript presentation owner, but the
       // main session's live preview state continues updating off-screen.
       const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
@@ -3567,7 +3619,7 @@ export function apply(ctx: Context, config: Config): void {
         parentSessionId,
         label: label ?? childId,
         mode,
-        activity,
+        activity: childActivity,
         access,
         cwd: childCwd,
         previews: childPreviews,
@@ -3582,7 +3634,11 @@ export function apply(ctx: Context, config: Config): void {
       // badges the mode — the transient notify is no longer the only "you
       // are elsewhere" signal. The FOOTER switches to the child's own
       // identity at the same time.
-      app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity, access })
+      app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity: childActivity, access })
+
+       } finally {
+         if (openingViewer === opening) openingViewer = undefined
+       }
       refreshViewerFooter()
     }
     /** Leave the subagent viewer (single Esc). Returns whether it exited.
@@ -3592,6 +3648,7 @@ export function apply(ctx: Context, config: Config): void {
      * no viewer is currently mounted (the open is still in flight). */
     const exitView = (): boolean => {
       viewerOpen.invalidate()
+      openingViewer = undefined
       if (viewing === undefined) return false
       const previousViewing = viewing
       previousViewing.previews.clear()
@@ -6398,7 +6455,10 @@ export function apply(ctx: Context, config: Config): void {
       // the all-directory search): a legacy-only history file in this cwd
       // becomes recoverable immediately, even if it predates this process.
       rememberHistoryCwd(agent.session.header.cwd ?? '')
-      const events = agent.session.snapshotEvents()
+      const opening = openingSession?.id === agent.session.id ? openingSession : undefined
+       const events = opening === undefined
+         ? agent.session.snapshotEvents()
+         : mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)
       // This is the single cold-hydration path for a live session. Do not
       // pre-apply the same event log during runner wiring: a resumed session
       // otherwise pays for two full transcript and stats replays before its
@@ -6407,6 +6467,9 @@ export function apply(ctx: Context, config: Config): void {
       folder = hydrated.folder
        windowController.setTurns(folder.groupedTurns())
       statsFolder = hydrated.statsFolder
+       for (const input of assistantStreamBaselineFor(agent)) {
+         applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
+       }
       diag.debug('session bootstrap scan', {
         scan: 'transcript',
         eventCount: events.length,
@@ -6505,6 +6568,7 @@ export function apply(ctx: Context, config: Config): void {
         // (no pin, no second fresh fallback).
         const createFirstSession = async (composition: { agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }): Promise<SessionHandle> => {
           const sessionId = SessionId(`session-${randomUUID()}`)
+           openingSession = { id: String(sessionId), events: [] }
           // Read the sessionless facade at the actual create boundary so a
           // `/model` choice made while composition was loading is used by
           // the first deferred Session. The intent and its generation are
@@ -6555,6 +6619,7 @@ export function apply(ctx: Context, config: Config): void {
         // A successful Direct create always yields the live agent (the
         // port contract: direct.agent is present on Direct backends).
         const createdAgent = created.direct!.agent as Agent
+         const opening = openingSession
         liveHandle = created.direct!.ownerHandle as AgentHandle
         liveAgent = createdAgent
         // First-session commit: the notification controller resets with
@@ -6575,7 +6640,10 @@ export function apply(ctx: Context, config: Config): void {
         } catch (error) {
           diag.warn('first session surface rebuild failed', { error: safeErrorMessage(error) })
         }
-        // The first real session's catalog comes from the REAL agent:
+        {
+           if (openingSession === opening) openingSession = undefined
+         }
+         // The first real session's catalog comes from the REAL agent:
         // await the coordinator refresh so the first submission rides the
         // live scope (the probe snapshot is never execution
         // authorization). Provider issues degrade fields inside the
@@ -6589,7 +6657,10 @@ export function apply(ctx: Context, config: Config): void {
           app.notify(resumeFailure, 'error')
           resumeFailure = undefined
         }
-      })).finally(() => { creating = undefined })
+      })).finally(() => {
+         creating = undefined
+         openingSession = undefined
+       })
       return creating
     }
     // The TUI-owned slash commands live on the commands service's global
@@ -7018,7 +7089,17 @@ export function apply(ctx: Context, config: Config): void {
       resumeFailure = undefined
     }
     ctx.on('session/event', (session, event) => {
-      // The subagent viewer follows its own session's events; everything
+      const mainOpening = openingSession
+       if (mainOpening !== undefined && session.id === mainOpening.id && (viewing === undefined || viewing.id !== session.id)) {
+         mainOpening.events.push(event)
+         return
+       }
+       const opening = openingViewer
+       if (opening !== undefined && viewerOpen.isCurrent(opening.request) && session.id === opening.childId) {
+         opening.events.push(event)
+         return
+       }
+       // The subagent viewer follows its own session's events; everything
       // else routes to the live agent's folder as before. Without a live
       // session (deferred start) there is nothing to route to.
       if (liveAgent === undefined) return
@@ -7288,7 +7369,8 @@ export function apply(ctx: Context, config: Config): void {
         // attempt (abandoned end or a committed `assistant/attempt`
         // settlement) clears the step's tool previews — its deltas never
         // materialized into durable calls.
-        if (viewing !== undefined && input.sessionId === viewing.id) {
+        if (openingSession !== undefined && input.sessionId === openingSession.id && (viewing === undefined || viewing.id !== input.sessionId)) return
+         if (viewing !== undefined && input.sessionId === viewing.id) {
           applyAssistantLiveInput(viewing.folder, viewing.stats, viewing.previews, input)
           schedulePaint()
           return

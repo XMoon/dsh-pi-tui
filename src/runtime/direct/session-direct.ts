@@ -146,14 +146,14 @@ function errorCodeOf(error: unknown): string | undefined {
 function activityTimestamp(
   header: SessionHeader,
   liveRow: boolean,
-  live: LiveAgentLike | undefined,
+  live: Session | undefined,
   projections: SessionProjectionReaderLike | undefined,
   cache: SessionProjectionCacheLike | undefined,
 ): number {
   let lastPromptAt: number | undefined
   try {
     if (liveRow && live !== undefined && projections !== undefined) {
-      const metadata = projections.cachedSnapshot(live.session, ['sessionListMetadata'])?.values?.sessionListMetadata
+      const metadata = projections.cachedSnapshot(live, ['sessionListMetadata'])?.values?.sessionListMetadata
       if (typeof metadata?.lastPromptAt === 'number') lastPromptAt = metadata.lastPromptAt
     } else if (!liveRow && live === undefined && header.isSeeded === false && cache !== undefined) {
       const metadata = cache.cachedSnapshot(header, SessionLogOffset(0), ['sessionListMetadata'])?.values?.sessionListMetadata
@@ -192,7 +192,6 @@ function serializeLogicalSessionLog(header: SessionHeader, events: readonly Sess
  * `SessionReader` interface. */
 export class DirectSessionReader implements SessionReader {
   private readonly ctx: HostContextLike
-  private readonly agentFor: (sessionId: string) => unknown | undefined
   private readonly diag: SessionReaderDiagLike | undefined
   /**
    * The most recent listing's complete `SessionHeader` values, keyed by
@@ -204,18 +203,20 @@ export class DirectSessionReader implements SessionReader {
    */
   private headerSnapshot = new Map<string, SessionHeader>()
 
-  constructor(
-    ctx: HostContextLike,
-    agentFor?: (sessionId: string) => unknown | undefined,
-    diag?: SessionReaderDiagLike,
-  ) {
+  constructor(ctx: HostContextLike, diag?: SessionReaderDiagLike) {
     this.ctx = ctx
-    this.agentFor = agentFor ?? (() => undefined)
     this.diag = diag
   }
 
   private liveAgent(sessionId: string): LiveAgentLike | undefined {
-    return this.agentFor(sessionId) as LiveAgentLike | undefined
+    const agents = this.ctx.get('agents') as { get(id: SessionId): unknown } | undefined
+    return agents?.get(SessionId(sessionId)) as LiveAgentLike | undefined
+  }
+
+  /** Resolve the attached Session independently from the current TUI owner. */
+  private liveSession(sessionId: string): Session | undefined {
+    const sessions = this.ctx.get('sessions') as { get(id: SessionId): unknown } | undefined
+    return sessions?.get(SessionId(sessionId)) as Session | undefined
   }
 
   /** Resolve the actual preset of a currently loaded agent, when DSH exposes
@@ -269,11 +270,20 @@ export class DirectSessionReader implements SessionReader {
     // picker frame without waiting on every historical session log.
     const records = await query.listSessions(signal)
     signal?.throwIfAborted()
-    // Match DSH master ApiSessionList.list(): a live session remains visible
-    // even without cwd, while an unmounted cold header needs cwd to be a
-    // resolvable picker row. Keep filtered headers out of the enrichment
-    // snapshot so projectionBatch cannot resurrect them later.
-    const visibleRecords = records.filter(record => record.live || record.header.cwd !== undefined)
+    // Match DSH master ApiSessionList.list(): re-read attachment after the
+    // semantic query await, then keep live rows visible even without cwd.
+    // An unmounted cold header still needs cwd to be a resolvable picker row.
+    const currentRecords = records.map(record => {
+      const live = this.liveSession(record.header.id)
+      return {
+        session: live,
+        header: live?.header ?? record.header,
+        live: live !== undefined,
+      }
+    })
+    // Keep filtered headers out of the enrichment snapshot so projectionBatch
+    // cannot resurrect them later.
+    const visibleRecords = currentRecords.filter(record => record.live || record.header.cwd !== undefined)
     this.headerSnapshot = new Map(visibleRecords.map(record => [String(record.header.id), record.header]))
     const projections = this.ctx.get('sessionProjections') as SessionProjectionReaderLike | undefined
     const cache = this.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
@@ -286,7 +296,7 @@ export class DirectSessionReader implements SessionReader {
         origin: record.header.origin,
         live: record.live,
       },
-      activity: activityTimestamp(record.header, record.live, record.live ? this.liveAgent(record.header.id) : undefined, projections, cache),
+      activity: activityTimestamp(record.header, record.live, record.session, projections, cache),
     }))
     signal?.throwIfAborted()
     rows.sort((a, b) => b.activity - a.activity)
@@ -307,7 +317,7 @@ export class DirectSessionReader implements SessionReader {
       ctx: this.ctx,
       rows,
       headerOf: id => this.headerSnapshot.get(id),
-      liveAgentOf: id => this.liveAgent(id),
+      liveSessionOf: id => this.liveSession(id),
       livePresetOf: id => this.livePreset(id),
       rosterIds: signal => this.presetRosterIds(signal),
       diag: this.diag,
