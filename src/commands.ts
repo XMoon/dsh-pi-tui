@@ -2349,8 +2349,8 @@ export function registerTuiCommands(
       await scheduler.yield()
       scanSignal.throwIfAborted()
 
-      // The session READ port (migration M1.3): live-preferred listing with
-      // the persistence fallback lives in the Direct adapter, never here.
+      // The session READ port (migration M1.3): semantic listing with
+      // capability-aware activity ordering lives in the Direct adapter, never here.
       let listed: readonly SessionSummary[] | undefined
       try {
         listed = await runner.sessionReader.list(currentId, scanSignal)
@@ -2419,10 +2419,10 @@ export function registerTuiCommands(
       // PROJECTION_FIRST_BATCH rows fill the visible window, then
       // PROJECTION_BATCH_SIZE chunks refresh behind it. Each row's title
       // and preset arrive TOGETHER from the one DSH projection batch (one
-      // cold read per session, never one scan per field), and the yield
+      // cache lookup per session, never one scan per field), and the yield
       // between batches keeps the event loop responsive to input while the
-      // cold observations drain. The batches cover MAIN rows only (the
-      // categories never show subagents) and the FULL main-row set — NOT
+      // cache hints settle. Cold misses remain unknown. The batches cover MAIN
+      // rows only (the categories never show subagents) and the FULL main-row set — NOT
       // the `shown` window: a session beyond MAX_PICKER_SESSIONS that IS
       // displayed (e.g. an old session in the "Current directory" scope)
       // would otherwise never be enriched and would show a bare short id

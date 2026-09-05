@@ -83,20 +83,20 @@ deliberate live-only exception (the running Agent's actual composition is
 the authoritative effective preset even while it trails the durable
 projection mid-switch), with the projection value as the fallback;
 cold rows via the zero-I/O `sessionProjectionCache.cachedSnapshot()` checkpoint
-keyed by the listing's header identity, and at most ONE bounded
-`sessionQuery.observeSession()` per cold cache miss, whose projection cut
-resolves BOTH fields together. A future Remote adapter maps this port method
-onto the official DSH client projection contract — it must not copy the Direct
-adapter's cache/observation ladder, and the TUI must never keep a second
-(private) persistence of session derived state (the retired
+keyed by the listing's header identity (with the official predecessor-title hint
+where applicable). A cold cache miss remains unknown: the picker never activates
+or observes a historical Session merely to fill labels. A future Remote adapter
+maps this port method onto the official DSH client projection contract — it must
+not copy private Direct state, and the TUI must never keep a second (private)
+persistence of session derived state (the retired
 `$DSH_HOME/cache/pi-tui-session-titles.json` title cache was exactly that).
 
 The Direct adapter may use the query engine's provider-independent
 `filterEvents` seam when the shipped SQLite full-text provider is disabled
-(`openAt: never`), and may retain a narrowly scoped raw-persistence fallback
-only when that semantic capability is absent or explicitly disabled. `readRaw()`
-is reserved for raw-artifact fidelity such as export or repair, not as the
-long-term semantic search contract.
+(`openAt: never`). If that semantic capability is absent or explicitly disabled,
+search is explicitly unavailable; it never falls back to raw persistence.
+`readRaw()` is reserved for raw-artifact fidelity such as export or repair, not
+as the long-term semantic search contract.
 
 Raw session export is a separate Host streaming route:
 
@@ -183,10 +183,10 @@ The M2/M3 Remote backend maps to the official seams below (first shipped in
 the alpha.2 line and still current in alpha.4) — it must
 not copy Direct Host implementation or invent parallel protocols. The Direct
 backend already consumes the same seams in-process (the session-preset
-adapter reads cold sessions through `sessionQuery.observeSession()` and the
-picker's preset enrichment consults `sessionProjectionCache.cachedSnapshot`
-before any observation), so the Remote adapter's job is transport mapping,
-not reimplementation.
+adapter uses `sessionQuery.observeSession()` only for explicit preset/resume
+paths, while picker enrichment uses live projections and
+`sessionProjectionCache.cachedSnapshot` without cold observation), so the Remote
+adapter's job is transport mapping, not reimplementation.
 
 - **Session history** — `session.follow` / `session.page` are the Remote
   history authority. The client renders from the official Session client

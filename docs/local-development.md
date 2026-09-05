@@ -427,15 +427,17 @@ These cost real debugging time once; record new ones here instead of relearning.
   advances for unconsumed chunk kinds too. Master's own headless consumer
   filters with strict Agent OBJECT identity (`subject !== agent`), never a
   session id.
-- `assistant/message` is the ONLY surface settlement; `assistant/attempt` is
-  log-only and must leave NO transient surface text (retry must not
-  concatenate onto the failed attempt). Live output is attempt-scoped
-  transient state until one of those two settlements.
-- Cold `observeSession(projectionMode:'none')` SYNTHESIZES interrupted-turn
-  closers for read-only balance — never use it for a canonical export. Export
-  = flush the live session (`sessions.flush`) then
-  `persistence.open(id, 'read')` → `handle.read(0)` → serialize.
-  Absence surfaces as `error.name === 'SessionPersistenceNotFoundError'`.
+- `assistant/message` is the ONLY normal surface settlement; `assistant/attempt`
+  is durable attempt evidence that stays transient until `llm/retry` resets it
+  or `turn/end` marks it interrupted. Interrupted prefixes are never selected
+  as final answers. Live output is attempt-scoped transient state.
+- The `/sessions` picker uses live projections and zero-I/O cache hints only;
+  a cold cache miss remains unknown. Explicit resume may use
+  `observeSession(projectionMode:'none')`, which synthesizes interrupted-turn
+  closers — never use that observation for canonical export. Export = flush
+  the live session (`sessions.flush`) then `persistence.open(id, 'read')` →
+  `handle.read(0)` → serialize; close failures remain errors. Absence surfaces
+  as `error.name === 'SessionPersistenceNotFoundError'`.
 - The installed dsh may be OLDER than master (e.g. 0.1.2-rc.1 locally while
   the gate runs 0.1.3-alpha.1): master-only fields/events must be read
   structurally (casts + `(event.type as string)` guards); the real proof is

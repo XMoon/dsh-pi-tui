@@ -30,6 +30,21 @@ PINNED quarantine, no manual lock recovery. A clean exit needs no lock
 release — the DSH session teardown releases the lease. The TUI's physical
 owner.lock / lease / cooling / PINNED stack is removed legacy.
 
+## Session v2 event planes
+
+The TUI keeps DSH's two Session v2 event planes distinct:
+
+- durable `assistant/message` is the surface settlement; durable
+  `assistant/attempt` is non-surface attempt evidence that may be projected as
+  interrupted UI evidence but never as a model-visible message;
+- transient `agent/assistant-stream` carries live deltas and controls before
+  durable settlement, and is not used as a second persistence format.
+
+The session picker consumes the semantic list and zero-I/O projection-cache
+seams only. It never observes a cold Session merely to fill a label and never
+triggers historical migration; DSH persistence owns migration when an explicit
+resume opens the Session.
+
 ### The field-observed worst shape
 
 Without the open-time refusal, the worst corruption shape unfolds

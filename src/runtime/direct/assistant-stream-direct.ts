@@ -10,7 +10,8 @@
  * and resolves turn/step from it. Upstream `revision` (strictly dense within
  * one attached Agent lifecycle) and the dense per-attempt `index` guard against
  * stale or reordered frames: a non-dense revision or index is dropped at the
- * boundary and clears open attempts. The runner injects the identity check — a
+ * boundary and clears open attempts. Valid control chunks are forwarded after
+ * those ordering checks. The runner injects the identity check — a
  * frame whose emitting Agent is not the exact current Agent object never reaches
  * the presentation (master's own headless consumer compares `subject !==
  * agent` the same way). Durable settlement is NOT synthesized here:
@@ -21,7 +22,13 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/assistant-stream-direct
  */
 
-import type { AssistantLiveChunk, AssistantLiveInput } from '../assistant-stream-port.ts'
+import type {
+  AssistantLiveChunk,
+  AssistantLiveContentBlock,
+  AssistantLiveFinishReason,
+  AssistantLiveInput,
+  AssistantLiveUsage,
+} from '../assistant-stream-port.ts'
 
 /** The minimal Host event surface the adapter needs (structural — never a
  * package dependency; the service resolves from the dsh installation).
@@ -108,7 +115,19 @@ function isNonnegativeSafeInteger(value: unknown): value is number {
 /** Validate a raw upstream chunk before it can advance the Agent fence. */
 function isValidStreamChunk(chunk: unknown): boolean {
   if (typeof chunk !== 'object' || chunk === null) return false
-  const value = chunk as { type?: unknown; index?: unknown; blockType?: unknown; text?: unknown; id?: unknown; name?: unknown; argumentsDelta?: unknown; block?: unknown; usage?: unknown; reason?: unknown }
+  const value = chunk as {
+    type?: unknown
+    index?: unknown
+    blockType?: unknown
+    text?: unknown
+    id?: unknown
+    name?: unknown
+    argumentsDelta?: unknown
+    block?: unknown
+    usage?: unknown
+    reason?: unknown
+    replayState?: unknown
+  }
   switch (value.type) {
     case 'block-start':
       return isNonnegativeSafeInteger(value.index) && typeof value.blockType === 'string' && value.blockType !== ''
@@ -125,11 +144,22 @@ function isValidStreamChunk(chunk: unknown): boolean {
       return isNonnegativeSafeInteger(value.index) && typeof block?.type === 'string' && block.type !== ''
     }
     case 'usage': {
-      const usage = value.usage as { inputTokens?: unknown; outputTokens?: unknown } | undefined
+      const usage = value.usage as {
+        inputTokens?: unknown
+        outputTokens?: unknown
+        totalTokens?: unknown
+        cacheReadTokens?: unknown
+        cacheWriteTokens?: unknown
+        reasoningTokens?: unknown
+      } | undefined
       return typeof usage?.inputTokens === 'number'
         && Number.isFinite(usage.inputTokens)
         && typeof usage.outputTokens === 'number'
         && Number.isFinite(usage.outputTokens)
+        && (usage.totalTokens === undefined || typeof usage.totalTokens === 'number' && Number.isFinite(usage.totalTokens))
+        && (usage.cacheReadTokens === undefined || typeof usage.cacheReadTokens === 'number' && Number.isFinite(usage.cacheReadTokens))
+        && (usage.cacheWriteTokens === undefined || typeof usage.cacheWriteTokens === 'number' && Number.isFinite(usage.cacheWriteTokens))
+        && (usage.reasoningTokens === undefined || typeof usage.reasoningTokens === 'number' && Number.isFinite(usage.reasoningTokens))
     }
     case 'finish':
       return typeof (value.reason as { kind?: unknown } | undefined)?.kind === 'string'
@@ -143,8 +173,25 @@ function isValidStreamChunk(chunk: unknown): boolean {
 
 function toLiveChunk(chunk: unknown): AssistantLiveChunk | undefined {
   if (typeof chunk !== 'object' || chunk === null) return undefined
-  const value = chunk as { type?: unknown; index?: unknown; text?: unknown; id?: unknown; name?: unknown; argumentsDelta?: unknown; block?: unknown; blockType?: unknown; usage?: unknown; reason?: unknown }
+  const value = chunk as {
+    type?: unknown
+    index?: unknown
+    text?: unknown
+    id?: unknown
+    name?: unknown
+    argumentsDelta?: unknown
+    block?: unknown
+    blockType?: unknown
+    usage?: unknown
+    reason?: unknown
+    replayState?: unknown
+  }
   switch (value.type) {
+    case 'block-start':
+      if (typeof value.index === 'number' && typeof value.blockType === 'string') {
+        return { type: 'block-start', index: value.index, blockType: value.blockType }
+      }
+      return undefined
     case 'text-delta':
       if (typeof value.index === 'number' && typeof value.text === 'string') {
         return { type: 'text-delta', index: value.index, text: value.text }
@@ -168,34 +215,52 @@ function toLiveChunk(chunk: unknown): AssistantLiveChunk | undefined {
       }
     }
     case 'block-end': {
-      const block = value.block as { type?: unknown; id?: unknown; name?: unknown } | undefined
+      const block = value.block as { type?: unknown } | undefined
       if (typeof value.index !== 'number' || typeof block?.type !== 'string') return undefined
       return {
         type: 'block-end',
         index: value.index,
-        block: {
-          type: block.type,
-          ...typeof block.id === 'string' ? { id: block.id } : {},
-          ...typeof block.name === 'string' ? { name: block.name } : {},
-        },
+        // The assembled block is authoritative. Preserve the complete
+        // structural payload, including attachments, tool arguments, nested
+        // content, and merge-extensible fields.
+        block: value.block as AssistantLiveContentBlock,
       }
     }
     case 'usage': {
-      const usage = value.usage as { inputTokens?: unknown; outputTokens?: unknown; cacheReadTokens?: unknown; cacheWriteTokens?: unknown } | undefined
+      const usage = value.usage as {
+        inputTokens?: unknown
+        outputTokens?: unknown
+        totalTokens?: unknown
+        cacheReadTokens?: unknown
+        cacheWriteTokens?: unknown
+        reasoningTokens?: unknown
+      } | undefined
       if (typeof usage?.inputTokens !== 'number' || typeof usage.outputTokens !== 'number') return undefined
       return {
         type: 'usage',
         usage: {
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
+          ...typeof usage.totalTokens === 'number' ? { totalTokens: usage.totalTokens } : {},
           ...typeof usage.cacheReadTokens === 'number' ? { cacheReadTokens: usage.cacheReadTokens } : {},
           ...typeof usage.cacheWriteTokens === 'number' ? { cacheWriteTokens: usage.cacheWriteTokens } : {},
+          ...typeof usage.reasoningTokens === 'number' ? { reasoningTokens: usage.reasoningTokens } : {},
         },
       }
     }
+    case 'finish': {
+      const reason = value.reason as { kind?: unknown } | undefined
+      if (typeof reason?.kind !== 'string' || reason.kind === '') return undefined
+      return {
+        type: 'finish',
+        reason: value.reason as AssistantLiveFinishReason,
+        ...(value.replayState === undefined ? {} : { replayState: value.replayState }),
+      }
+    }
     default:
-      // Chunk kinds the presentation does not consume (block-start, finish,
-      // unknown future kinds) are dropped at the boundary.
+      // Unknown chunk kinds are rejected at the boundary; the supported
+      // control chunks remain available to neutral consumers even when they
+      // choose not to render them.
       return undefined
   }
 }

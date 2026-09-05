@@ -31,7 +31,14 @@
  */
 
 import { isReplacementSurfaceEvent, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { formatTokens, StepUsageAccumulator, usageFromAssistantStream, type UsageLike } from './token-usage.ts'
+import {
+  firstTokenTimeFromAssistantStream,
+  formatTokens,
+  isAssistantTokenDelta,
+  StepUsageAccumulator,
+  usageFromAssistantSettlement,
+  type UsageLike,
+} from './token-usage.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 
 /** Aggregated session statistics. */
@@ -280,24 +287,6 @@ function advanceTimingTurn(
 }
 
 /**
- * The Web's first-token predicate (dsh-llm `isTokenDelta`): any non-empty
- * text or reasoning delta, or a tool-call delta carrying content. The TUI
- * must stamp the SAME boundary or its TTFT starts at the first
- * visible token and inflates on reasoning models.
- */
-function isTokenDelta(chunk: { type: string; text?: string; argumentsDelta?: string; name?: unknown }): boolean {
-  switch (chunk.type) {
-    case 'text-delta':
-    case 'reasoning-delta':
-      return chunk.text !== undefined && chunk.text !== ''
-    case 'tool-call-delta':
-      return (chunk.argumentsDelta ?? '') !== '' || chunk.name !== undefined
-    default:
-      return false
-  }
-}
-
-/**
  * Fold the session log into performance statistics.
  * @param events - the session log.
  * @returns aggregated statistics.
@@ -347,7 +336,14 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
     // open for a possible retry and eventual assistant/message settlement.
     if (kind === 'assistant/attempt') {
       const failed = event.data as { turn: number; step: number; stream?: readonly unknown[] }
-      usage.onAssistantAttempt(failed.turn, failed.step, usageFromAssistantStream(failed.stream ?? []))
+      const stream = failed.stream ?? []
+      const timing = settledTurn === failed.turn
+        ? perStep.get(stepKey(failed.turn, failed.step))
+        : undefined
+      if (timing !== undefined && timing.firstDelta === undefined) {
+        timing.firstDelta = firstTokenTimeFromAssistantStream(stream)
+      }
+      usage.onAssistantAttempt(failed.turn, failed.step, usageFromAssistantSettlement('attempt', undefined, stream))
       // Keep the open logical-step timing: a retry reuses this (turn, step)
       // and the eventual assistant/message must settle its wall/TTFT sample.
       continue
@@ -413,10 +409,12 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
       case 'assistant/message': {
         enterSettledTurn(event.data.turn)
         const key = stepKey(event.data.turn, event.data.step)
-        const messageUsage = event.data.usage
+        const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
+        const messageFirstToken = firstTokenTimeFromAssistantStream(event.data.stream)
         const timing = settledTurn === event.data.turn
           ? perStep.get(key) ?? settledPerStep.get(key)
           : undefined
+        if (timing !== undefined && timing.firstDelta === undefined) timing.firstDelta = messageFirstToken
         if (timing !== undefined) {
           // The message time is the step's LLM wall end and its usage is the
           // authoritative one; the whole step settles HERE (projection
@@ -645,7 +643,7 @@ export class StatsFolder {
         // the same replace rule as the shared accumulator.
         timing.usage = chunk.usage
       }
-    } else if (isTokenDelta(chunk)) {
+    } else if (isAssistantTokenDelta(chunk)) {
       const timing = this.settledTurn === turn
         ? this.perStep.get(stepKey(turn, step))
         : undefined
@@ -695,10 +693,17 @@ export class StatsFolder {
     // keep logical-step timing open for a retry and final message.
     if (kind === 'assistant/attempt') {
       const data = event.data as { turn: number; step: number; stream?: readonly unknown[] }
+      const stream = data.stream ?? []
+      const timing = this.settledTurn === data.turn
+        ? this.perStep.get(stepKey(data.turn, data.step))
+        : undefined
+      if (timing !== undefined && timing.firstDelta === undefined) {
+        timing.firstDelta = firstTokenTimeFromAssistantStream(stream)
+      }
       // Keep timing open across the retry: assistant/attempt is evidence for
       // the failed attempt, not the logical step's final timing boundary.
       this.settleFailedAttempt(data.turn, data.step, true, false)
-      this.usage.onAssistantAttempt(data.turn, data.step, usageFromAssistantStream(data.stream ?? []))
+      this.usage.onAssistantAttempt(data.turn, data.step, usageFromAssistantSettlement('attempt', undefined, stream))
       return
     }
     switch (event.type) {
@@ -762,10 +767,12 @@ export class StatsFolder {
       case 'assistant/message': {
         this.enterSettledTurn(event.data.turn)
         const key = stepKey(event.data.turn, event.data.step)
-        const messageUsage = event.data.usage
+        const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
+        const messageFirstToken = firstTokenTimeFromAssistantStream(event.data.stream)
         const timing = this.settledTurn === event.data.turn
           ? this.perStep.get(key) ?? this.settledPerStep.get(key)
           : undefined
+        if (timing !== undefined && timing.firstDelta === undefined) timing.firstDelta = messageFirstToken
         if (timing !== undefined) {
           // Keep timing and performance sampling idempotent if a
           // malformed/replayed log carries the same authoritative message

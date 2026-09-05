@@ -190,7 +190,7 @@ test('a revision gap clears open attempts, consumes dropped frames, and recovers
   }
 })
 
-test('chunk kinds the presentation ignores still occupy their dense index slot', () => {
+test('control chunks are forwarded while dense indexes remain authoritative', () => {
   const current = agent('e')
   const { emit, sink, dispose } = harness(subject => subject === current)
   try {
@@ -200,8 +200,39 @@ test('chunk kinds the presentation ignores still occupy their dense index slot',
     emit(current, chunkFrame('e1', 2, { type: 'finish', reason: { kind: 'stop' } })) // unconsumed kind
     emit(current, chunkFrame('e1', 3, textChunk(3, 'tail')))
     emit(current, committedEnd('e1', 4, 'assistant/message'))
-    const texts = sink.inputs.filter(input => input.kind === 'chunk').map(input => (input as { chunk: { text: string } }).chunk.text)
-    assert.deepEqual(texts, ['after block-start', 'tail'], 'index slots advance across unconsumed kinds')
+    const chunks = sink.inputs.filter(input => input.kind === 'chunk').map(input => (input as { chunk: { type: string; text?: string } }).chunk)
+    assert.deepEqual(chunks.map(chunk => chunk.type), ['block-start', 'text-delta', 'finish', 'text-delta'])
+    assert.deepEqual(chunks.map(chunk => chunk.text), [undefined, 'after block-start', undefined, 'tail'])
+    assert.deepEqual(chunks.map(chunk => (chunk as { index?: number }).index), [0, 1, undefined, 3], 'index slots remain authoritative')
+  } finally {
+    dispose()
+  }
+})
+
+test('block-end keeps the complete block and control payload fields', () => {
+  const current = agent('payload')
+  const { emit, sink, dispose } = harness(subject => subject === current)
+  try {
+    emit(current, startFrame('payload-1', 0, 0))
+    const block = {
+      type: 'tool-call',
+      id: 'call-1',
+      name: 'edit',
+      arguments: '{"path":"file"}',
+      providerMetadata: { traceId: 'trace-1' },
+    }
+    emit(current, chunkFrame('payload-1', 0, { type: 'block-end', index: 0, block }))
+    emit(current, chunkFrame('payload-1', 1, {
+      type: 'usage',
+      usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, reasoningTokens: 2 },
+    }))
+    emit(current, chunkFrame('payload-1', 2, { type: 'finish', reason: { kind: 'tool-calls' }, replayState: 'complete' }))
+    const chunks = sink.inputs.filter(input => input.kind === 'chunk').map(input => input.chunk)
+    assert.deepEqual(chunks, [
+      { type: 'block-end', index: 0, block },
+      { type: 'usage', usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, reasoningTokens: 2 } },
+      { type: 'finish', reason: { kind: 'tool-calls' }, replayState: 'complete' },
+    ])
   } finally {
     dispose()
   }

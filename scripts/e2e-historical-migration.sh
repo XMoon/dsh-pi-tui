@@ -12,16 +12,15 @@
 #   2. the official persistence API (list/stat) discovers it — and does NOT
 #      migrate it (read-only header observation);
 #   3. the TUI session picker displays it (official sessionQuery listing +
-#      observation);
+#      cache-only projection hints);
 #   4. the old generation's file hash is recorded;
 #   5. the TUI resume action opens it through the official Direct runtime /
 #      SessionHandle (agents.resume → sessionPersistence.open);
 #   6. NO TUI raw parser / repair / manual migration is ever invoked — the
 #      only readers are the official persistence API and the TUI itself;
 #   7. the official migration publishes the current v2 successor beside the
-#      unchanged source (the first official full-log read — the picker's
-#      observeSession or the resume's open — publishes it; never a manual
-#      step);
+#      unchanged source (the first official full-log read — the resume's
+#      SessionHandle open — publishes it; never a manual step);
 #   8. the resumed transcript renders the migrated historical content
 #      (user messages, assistant reply, compaction summary);
 #   9. the session is CONTINUED through the REAL Agent loop (P1-3): the TUI
@@ -694,10 +693,20 @@ console.log('--' + slug.slice(0, 251) + '--');
   else
     bad "$label: picker row missing: $(pane_text "$PANE")"
   fi
+  if [ -e "$SESSION_DIR/session.v2.jsonl.zstd" ]; then
+    bad "$label: picker display migrated the historical session"
+  else
+    ok "$label: picker display did not publish session.v2.jsonl.zstd"
+  fi
   # Close the picker (Esc) before /exit — /exit typed into the picker's
   # search box would filter sessions instead of quitting.
   tmux send-keys -t "$PANE" Escape
   sleep 0.5
+  if [ -e "$SESSION_DIR/session.v2.jsonl.zstd" ]; then
+    bad "$label: closing the picker published session.v2.jsonl.zstd"
+  else
+    ok "$label: closing the picker left the historical generation unmigrated"
+  fi
   quit_pane
 
   # ── 9. TUI resume → official migration publishes the successor (5/6/7) ─

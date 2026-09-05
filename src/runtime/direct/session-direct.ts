@@ -6,20 +6,24 @@
  * and a Remote adapter will implement the same interface in a later
  * milestone.
  *
- * The domain semantics live here: live-preferred listing with the
- * persistence fallback and the bounded content search; the combined
+ * The domain semantics live here: semantic session-query listing with
+ * capability-aware activity ordering and bounded content search; the combined
  * `title`+`agentPreset` projection batch delegates to
- * `session-projection-direct.ts` (the official projection/cache/observation
- * ladder).
+ * `session-projection-direct.ts` (the official projection/cache ladder).
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-direct
  */
 
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import { projectionBatch, type SessionQueryObservationLike, type SessionReaderDiagLike } from './session-projection-direct.ts'
+import {
+  projectionBatch,
+  type SessionProjectionCacheLike,
+  type SessionProjectionReaderLike,
+  type SessionReaderDiagLike,
+} from './session-projection-direct.ts'
 import { sessionPresetOf } from './session-preset-direct.ts'
 import type { ExportReadResult, SessionProjectionSummary, SessionSearchHit, SessionReader, SessionSummary } from '../session-reader-port.ts'
 
@@ -33,12 +37,12 @@ import type { ExportReadResult, SessionProjectionSummary, SessionSearchHit, Sess
  */
 export interface SessionQueryLike {
   listSessions(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; live: boolean }>>
-  /** One exact live or prepared logical Session observation (title/preset
-   * projection reads): header + complete validated event log, caller-owned.
+  /** One exact live or prepared logical Session observation for explicit
+   * viewer/resume paths: header + complete validated event log, caller-owned.
    * NOT the canonical export plane — a cold observation synthesizes
    * interrupted-turn closers for read-only balance, which an export must
    * never contain. */
-  observeSession(
+  observeSession?(
     sessionId: SessionId,
     options?: { readonly signal?: AbortSignal; readonly projectionMode?: 'all' | 'none' },
   ): Promise<{
@@ -48,8 +52,8 @@ export interface SessionQueryLike {
   }>
   /**
    * Provider-independent semantic text filtering. The method is optional so
-   * older test doubles and intentionally rosterless deployments can still use
-   * the persistence capability fallback; it is not a DSH runtime fallback.
+   * deployments without the semantic search capability can report an explicit
+   * unavailable result; the reader never falls back to raw persistence search.
    */
   filterEvents?: (
     sessionId: SessionId,
@@ -134,11 +138,36 @@ function errorCodeOf(error: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined
 }
 
+/** Read the optional activity projection without activating a cold Session.
+ * Missing projection capability, seeded headers without an exact cut, and
+ * derived-cache failures all safely fall back to header creation time. */
+function activityTimestamp(
+  header: SessionHeader,
+  live: LiveAgentLike | undefined,
+  projections: SessionProjectionReaderLike | undefined,
+  cache: SessionProjectionCacheLike | undefined,
+): number {
+  let lastPromptAt: number | undefined
+  try {
+    if (live !== undefined && projections !== undefined) {
+      const metadata = projections.snapshot(live.session, ['sessionListMetadata'])?.values?.sessionListMetadata
+      if (typeof metadata?.lastPromptAt === 'number') lastPromptAt = metadata.lastPromptAt
+    } else if (live === undefined && header.isSeeded === false && cache !== undefined) {
+      const metadata = cache.cachedSnapshot(header, SessionLogOffset(0), ['sessionListMetadata'])?.values?.sessionListMetadata
+      if (typeof metadata?.lastPromptAt === 'number') lastPromptAt = metadata.lastPromptAt
+    }
+  } catch {
+    // Activity is an optional list capability; a stale/broken derived value
+    // must never make the semantic session roster unavailable.
+  }
+  return Math.max(header.createdAt, lastPromptAt ?? 0)
+}
+
 /** Serialize one session's logical log as canonical JSONL text (the
  * upstream `session-log-export` contract): the header line, then one line
  * per event, with a trailing newline. The TUI never touches physical
  * artifacts or compression suffixes — the logical events come from the
- * semantic observation, so the export is provider-independent. */
+ * committed read handle, so the export is provider-independent. */
 function serializeLogicalSessionLog(header: SessionHeader, events: readonly SessionEvent[]): string {
   const lines = [JSON.stringify({
     type: 'session',
@@ -237,17 +266,22 @@ export class DirectSessionReader implements SessionReader {
     const records = await query.listSessions(signal)
     signal?.throwIfAborted()
     this.headerSnapshot = new Map(records.map(record => [String(record.header.id), record.header]))
+    const projections = this.ctx.get('sessionProjections') as SessionProjectionReaderLike | undefined
+    const cache = this.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
     const rows = records.map(record => ({
-      id: record.header.id,
-      createdAt: record.header.createdAt,
-      cwd: record.header.cwd,
-      parentSession: record.header.parentSession,
-      origin: record.header.origin,
-      live: record.live,
+      row: {
+        id: record.header.id,
+        createdAt: record.header.createdAt,
+        cwd: record.header.cwd,
+        parentSession: record.header.parentSession,
+        origin: record.header.origin,
+        live: record.live,
+      },
+      activity: activityTimestamp(record.header, record.live ? this.liveAgent(record.header.id) : undefined, projections, cache),
     }))
     signal?.throwIfAborted()
-    rows.sort((a, b) => b.createdAt - a.createdAt)
-    return rows
+    rows.sort((a, b) => b.activity - a.activity)
+    return rows.map(({ row }) => row)
   }
 
   /**
@@ -256,11 +290,8 @@ export class DirectSessionReader implements SessionReader {
    * `session-projection-direct.ts`: live projection snapshot → zero-I/O
    * projection-cache checkpoint (`sessionProjectionCache.cachedSnapshot`,
    * keyed by the header identity captured by the preceding `list()` — no
-   * second corpus listing) → at most ONE bounded, cancellable
-   * `observeSession()` observation per cold cache miss, resolving BOTH
-   * fields together. Corrupt or unsupported logs are omitted rather than
-   * being treated as an empty value, and never trigger a second raw-log
-   * read.
+   * second corpus listing). Cold cache misses remain unknown; the picker
+   * never activates a historical Session for labels.
    */
   projectionBatch(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, SessionProjectionSummary>> {
     return projectionBatch({
@@ -374,11 +405,9 @@ export class DirectSessionReader implements SessionReader {
       // with a diagnostic — never misclassified as 'no materialized log'.
       return { kind: 'error', message: safeErrorMessage(error) }
     } finally {
-      try {
-        await handle.close()
-      } catch {
-        // Close is best-effort after the read outcome is settled.
-      }
+      // A successful read with a failed close is still a failed export: do not
+      // return an artifact while hiding a persistence lifecycle error.
+      await handle.close()
     }
   }
 }
