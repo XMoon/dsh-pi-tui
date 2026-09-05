@@ -338,24 +338,6 @@ test('agent disposal removes its late-viewer baseline', () => {
   }
 })
 
-test('a revision-one start resets a restarted Agent lifecycle', () => {
-  const current = agent('restart')
-  const { emit, sink, dispose } = harness(subject => subject === current)
-  try {
-    emit(current, { type: 'start', attemptId: 'old', revision: 1, turn: 0, step: 0 })
-    emit(current, { type: 'chunk', attemptId: 'old', revision: 2, index: 0, time: 1, chunk: textChunk(0, 'old') })
-    emit(current, { type: 'start', attemptId: 'new', revision: 1, turn: 1, step: 0 })
-    emit(current, { type: 'chunk', attemptId: 'new', revision: 2, index: 0, time: 2, chunk: textChunk(0, 'new') })
-    assert.deepEqual(sink.inputs.filter(input => input.kind === 'start').map(input => input.attemptId), ['old', 'new'])
-    assert.deepEqual(dispose.baselineFor(current).map(input => input.kind), ['start', 'chunk'])
-    const chunk = dispose.baselineFor(current)[1]
-    assert.ok(chunk !== undefined && chunk.kind === 'chunk' && chunk.chunk.type === 'text-delta')
-    if (chunk !== undefined && chunk.kind === 'chunk' && chunk.chunk.type === 'text-delta') assert.equal(chunk.chunk.text, 'new')
-  } finally {
-    dispose()
-  }
-})
-
 test('a newer start replaces an abandoned active baseline on one Agent', () => {
   const child = agent('replace')
   const { dispose, emit } = harness(() => false)

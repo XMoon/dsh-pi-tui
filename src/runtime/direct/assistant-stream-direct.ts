@@ -357,13 +357,6 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): A
         if (!isNonnegativeSafeInteger(frame.turn) || !isNonnegativeSafeInteger(frame.step)) return
         if (typeof frame.attemptId !== 'string' || frame.attemptId === '') return
         const attemptId = frame.attemptId
-        // A revision-one start is the official reset edge for a restarted
-        // Agent lifecycle. Accept it even when the prior lifecycle ended at a
-        // nonzero revision, then continue with the dense fence.
-        if (frame.revision === 1 && state.revision !== 0) {
-          state.attempts.clear()
-          state.revision = 0
-        }
         if (!acceptRevision(state, frame.revision)) return
         const existing = recordFor(state, attemptId)
         // A duplicate start for the same attempt is a protocol violation.
