@@ -410,9 +410,10 @@ test('an empty assistant/message without a prior chunk still owns the final slot
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1000 + 12, 22),
   ])
   const messages = folder.messages()
-  const last = messages.findLast(m => m.kind === 'assistant')
-  assert.ok(last !== undefined && last.kind === 'assistant' && last.text === '',
-    'the empty message must be preserved as the exact last assistant')
+  assert.equal(messages.findLast(m => m.kind === 'assistant')?.text, 'final answer 0',
+    'the earlier text row remains visible while the empty authority stays hidden')
+  assert.equal(folder.turnActivity(0)?.lastAssistantVisible, false,
+    'the hidden exact-last marker prevents earlier final fallback')
   const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
   assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
     'an empty last step must suppress the final — never fall back to the earlier text assistant')
@@ -1902,8 +1903,9 @@ test('the final is the EXACT last assistant: an empty last step yields NO final 
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1000 + 12, 22),
   ])
   const messages = folder.messages()
-  const last = messages.findLast(m => m.kind === 'assistant')
-  assert.ok(last !== undefined && last.kind === 'assistant' && last.text === '', 'fixture: the exact last assistant is empty')
+  assert.equal(messages.findLast(m => m.kind === 'assistant')?.text, 'final answer 0',
+    'the earlier text row remains visible while the empty exact-last row stays hidden')
+  assert.equal(folder.turnActivity(0)?.lastAssistantVisible, false)
   const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
   assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
     'an empty last step must suppress the final — never fall back to the earlier text assistant')
@@ -1956,9 +1958,9 @@ test('a reasoning-only exact last assistant is NOT renderable — no final', () 
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1000 + 12, 22),
   ])
   const messages = folder.messages()
-  const last = messages.findLast(m => m.kind === 'assistant')
-  assert.ok(last !== undefined && last.kind === 'assistant' && last.text === '' && last.content !== undefined,
-    'precondition: the exact last assistant is reasoning-only')
+  assert.equal(messages.findLast(m => m.kind === 'assistant')?.text, 'final answer 0',
+    'the earlier text row remains visible while the reasoning-only exact-last row stays hidden')
+  assert.equal(folder.turnActivity(0)?.lastAssistantVisible, false)
   const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
   assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
     'a reasoning-only last step must not be promoted to the final')

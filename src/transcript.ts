@@ -223,6 +223,10 @@ export interface TurnActivity {
   readonly usage?: TokenUsageTotals
   /** The display total (input + cache read + cache write + output). */
   readonly totalTokens?: number
+  /** Whether the exact last assistant has a visible Assistant projection.
+   * This remains separate from the visible row list so an empty authoritative
+   * settlement cannot make final selection fall back to an earlier answer. */
+  readonly lastAssistantVisible?: boolean
   /** Settled assistant/message count for the turn. */
   readonly assistantMessages: number
   /** tool/call count (never double-counted on tool/result). */
@@ -275,6 +279,8 @@ interface MutableTurnActivity {
    * — the turn/end final-answer check compares the candidate's step
    * against this. */
   lastAssistantStep?: number
+  /** Whether the exact last assistant has a visible Assistant projection. */
+  lastAssistantVisible?: boolean
   /** The materialized Message slot (candidate ?? confirmed, bounded
    * multiline tail). */
   message?: { text: string }
@@ -327,14 +333,14 @@ export function textOf(blocks: readonly ContentBlock[]): string {
     .join('')
 }
 
-/** Reconstruct the logical blocks used by an assistant attempt entry. */
-function assistantAttemptBlocks(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): readonly ContentBlock[] {
+/** Reconstruct the logical blocks used by any Assistant entry. */
+function assistantEntryBlocks(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): readonly ContentBlock[] {
   if (entry.content !== undefined) return entry.content
   return entry.text === '' ? [] : [{ type: 'text', text: entry.text }]
 }
 
-/** Whether an attempt has assistant content that is visible before closure. */
-function assistantAttemptVisibleNow(blocks: readonly ContentBlock[]): boolean {
+/** Whether Assistant content is visible before an interruption override. */
+export function assistantBlocksVisibleNow(blocks: readonly ContentBlock[]): boolean {
   for (const block of blocks) {
     if (block.type === 'text') {
       if (block.text.trim() !== '') return true
@@ -348,8 +354,8 @@ function assistantAttemptVisibleNow(blocks: readonly ContentBlock[]): boolean {
   return false
 }
 
-/** Whether a closed attempt retains interruption evidence. */
-function assistantAttemptHasInterruptionEvidence(blocks: readonly ContentBlock[]): boolean {
+/** Whether Assistant blocks retain evidence at a closed attempt boundary. */
+function assistantBlocksHaveInterruptionEvidence(blocks: readonly ContentBlock[]): boolean {
   for (const block of blocks) {
     if (block.type === 'text') {
       if (block.text.trim() !== '') return true
@@ -1150,15 +1156,16 @@ export class TranscriptFolder {
    this.groupedTurnIndexDirty = false
   }
 
-  /** Whether one raw item is still visible output. Durable attempt evidence
-   * is hidden until it is either visibly populated or marked interrupted at a
-   * closed boundary; explicit assistant/message rows remain visible even when
-   * their body is empty. */
+  /** Whether one raw item is still visible output. Every Assistant entry uses
+   * the same DSH block predicate; an interruption flag overrides it, while
+   * hidden entries remain internal for authoritative settlement/final choice.
+   * Thinking and Tool rows own their corresponding non-visible Assistant
+   * blocks. */
   private isVisible(item: TranscriptMessage): boolean {
     if (item.kind === 'assistant') {
       if (this.hiddenAssistantEntries.has(item)) return false
-      if (!this.attemptAssistantEntries.has(item) || item.interrupted === true) return true
-      return assistantAttemptVisibleNow(assistantAttemptBlocks(item))
+      if (item.interrupted === true) return true
+      return assistantBlocksVisibleNow(assistantEntryBlocks(item))
     }
     if (item.kind === 'thinking') return !this.hiddenThinkingEntries.has(item)
     return true
@@ -1665,11 +1672,13 @@ export class TranscriptFolder {
     const key = stepKey(turn, step)
     const blocks = assistantContentFromBlocks(this.liveBlocksFor(turn, step))
     const text = textOf(blocks)
-    const hasImage = blocks.some(block => block.type === 'image')
+    const activity = this.activityFor(turn)
+    const visibleNow = assistantBlocksVisibleNow(blocks)
+    if (step >= (activity.lastAssistantStep ?? -1)) activity.lastAssistantVisible = visibleNow
     const entry = this.assistantEntries.get(key)
-    if (text === '' && !hasImage) {
+    if (!visibleNow) {
       if (entry !== undefined && this.transientAssistantEntries.has(entry)) this.hideTransientAssistantEntry(turn, step)
-      this.replaceMessageCandidate(this.activityFor(turn), step, '')
+      this.replaceMessageCandidate(activity, step, '')
     } else {
       const target = entry ?? this.assistantEntry(turn, step)
       this.transientAssistantEntries.add(target)
@@ -1679,7 +1688,7 @@ export class TranscriptFolder {
       target.content = blocks.some(block => block.type !== 'text') ? blocks : undefined
       target.interrupted = undefined
       this.markStreamingEntryDirty(`assistant:${key}`)
-      this.replaceMessageCandidate(this.activityFor(turn), step, text)
+      this.replaceMessageCandidate(activity, step, text)
     }
 
     const reasoning = blocks
@@ -1755,8 +1764,8 @@ export class TranscriptFolder {
    * reset it. */
   private restoreAssistantAttempt(turn: number, step: number, stream: readonly unknown[]): void {
     const blocks = this.assistantBlocksFromStream(stream)
-    const visibleNow = assistantAttemptVisibleNow(blocks)
-    const hasEvidence = assistantAttemptHasInterruptionEvidence(blocks)
+    const visibleNow = assistantBlocksVisibleNow(blocks)
+    const hasEvidence = assistantBlocksHaveInterruptionEvidence(blocks)
     const text = textOf(blocks)
     const key = stepKey(turn, step)
     const existing = this.assistantEntries.get(key)
@@ -1777,6 +1786,9 @@ export class TranscriptFolder {
     entry.content = blocks.some(block => block.type !== 'text') ? blocks : undefined
     entry.interrupted = undefined
     this.markStreamingEntryDirty(`assistant:${key}`)
+    // Assistant block visibility can change independently of entry ownership;
+    // defer the grouped-turn projection to its next bounded rebuild.
+    this.groupedTurnIndexDirty = true
   }
 
   /** Mark durable attempt evidence visible at the closed boundary. Empty and
@@ -1785,9 +1797,10 @@ export class TranscriptFolder {
   private markAttemptEvidenceInterrupted(turn: number): void {
     for (const item of this.items) {
       if (item.kind !== 'assistant' || item.turn !== turn || !this.attemptAssistantEntries.has(item)) continue
-      if (!assistantAttemptHasInterruptionEvidence(assistantAttemptBlocks(item))) continue
+      if (!assistantBlocksHaveInterruptionEvidence(assistantEntryBlocks(item))) continue
       if (this.hiddenAssistantEntries.has(item)) continue
       item.interrupted = true
+       this.groupedTurnIndexDirty = true
     }
   }
 
@@ -2507,6 +2520,9 @@ export class TranscriptFolder {
         // earlier step's output was intermediate: confirm it first (plan
         // §5.3 C — a later step's output confirms the earlier candidate).
         const priorLast = activity.lastAssistantStep ?? -1
+        if (event.data.step >= priorLast) {
+          activity.lastAssistantVisible = event.data.interrupted === true || assistantBlocksVisibleNow(messageBlocks)
+        }
         const prior = activity.messageCandidate
         // Only a message for a NEWER step confirms the open candidate
         // (plan §5.3 C); a message for an older step is stale and must
@@ -2555,6 +2571,9 @@ export class TranscriptFolder {
         }
         this.syncMessage(activity)
         this.usage.onAssistantMessage(event.data.turn, event.data.step, messageUsage)
+        // Settled Assistant content can become hidden without deleting its
+        // authoritative entry; rebuild bounded turn projections lazily.
+        this.groupedTurnIndexDirty = true
         this.syncUsage(activity)
         activity.revision += 1
         break

@@ -1774,18 +1774,27 @@ function liveAttemptEnd(turn: number, step: number, status: 'committed' | 'aband
   }
 }
 
-function assistantMessage(seq: number, text: string, opts: { turn?: number; step?: number } = {}): SessionEvent {
+function assistantMessageWithBlocks(
+  seq: number,
+  content: readonly ContentBlock[],
+  opts: { turn?: number; step?: number; interrupted?: boolean } = {},
+): SessionEvent {
   return event('assistant/message', {
     turn: opts.turn ?? 0,
     step: opts.step ?? 0,
     message: {
       id: MessageId(`a-${seq}`),
       role: 'assistant',
-      content: [{ type: 'text', text }],
+      content: [...content],
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
+    ...(opts.interrupted === true ? { interrupted: true } : {}),
     stream: [],
   }, seq)
+}
+
+function assistantMessage(seq: number, text: string, opts: { turn?: number; step?: number } = {}): SessionEvent {
+  return assistantMessageWithBlocks(seq, [{ type: 'text', text }], opts)
 }
 
 test('live block-end text is authoritative and survives durable settlement without duplication', () => {
@@ -1841,6 +1850,45 @@ test('live reasoning block-end restores the reasoning body and tool-call block-e
     block: { type: 'tool-call', id: 'call-1', name: 'bash', arguments: '{"command":"ls"}' },
   }, 2))
   assert.deepEqual(tool.messages(), [], 'a live assistant tool-call block is preview-only until its durable tool events settle')
+})
+
+test('live generic finalized blocks use the same Assistant visibility predicate', () => {
+  const futureBlock = { type: 'future-block', payload: { revision: 1, value: 'live-kept' } } as unknown as AssistantLiveContentBlock
+  const folder = new TranscriptFolder()
+  folder.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: futureBlock,
+  }, 2))
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.deepEqual(assistant.content, [futureBlock as unknown as ContentBlock])
+})
+
+test('settled Assistant rows follow block visibility while retaining empty authority', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    assistantMessageWithBlocks(1, [], { step: 0 }),
+    assistantMessageWithBlocks(2, [{ type: 'text', text: '   ' }], { step: 1 }),
+    assistantMessageWithBlocks(3, [{ type: 'reasoning', text: 'thinking only' }], { step: 2 }),
+    assistantMessageWithBlocks(4, [{ type: 'tool-call', id: ToolCallId('call-message-only'), name: 'bash', arguments: '{}' }], { step: 3 }),
+  ])
+  assert.equal(folder.messages().filter(message => message.kind === 'assistant').length, 0)
+  assert.equal(folder.messages({ maxTurns: 1 }).filter(message => message.kind === 'assistant').length, 0)
+  assert.equal(folder.turnActivity(0)?.assistantMessages, 4)
+
+  const toolRow = new TranscriptFolder()
+  toolRow.apply([
+    assistantMessageWithBlocks(6, [{ type: 'tool-call', id: ToolCallId('call-row'), name: 'bash', arguments: '{}' }], { step: 0 }),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('call-row'), name: 'bash', arguments: '{}' }, 7),
+  ])
+  assert.equal(toolRow.messages().filter(message => message.kind === 'assistant').length, 0)
+  assert.equal(toolRow.messages().filter(message => message.kind === 'tool').length, 1)
+
+  folder.apply([assistantMessageWithBlocks(5, [], { step: 4, interrupted: true })])
+  const interrupted = folder.messages().filter(message => message.kind === 'assistant')
+  assert.equal(interrupted.length, 1)
+  assert.equal(interrupted[0]?.interrupted, true)
 })
 
 test('partial text attempt evidence has no undefined prefix and matches cold replay', () => {
