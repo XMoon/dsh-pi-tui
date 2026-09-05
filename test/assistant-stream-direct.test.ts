@@ -14,9 +14,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   installAssistantStreamDirect,
+  type AssistantStreamDirectHandle,
   type AssistantStreamFrameLike,
 } from '../src/runtime/direct/assistant-stream-direct.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
+import { TranscriptFolder } from '../src/transcript.ts'
 
 /** A minimal current Agent object (the identity fence compares OBJECTS). */
 function agent(id: string): { id: string; session: { id: string } } {
@@ -36,18 +38,24 @@ function makeSink(): Sink {
 
 /** One upstream-shaped frame sequence helper: installs the adapter over a
  * current-agent predicate and returns { emit, sink, dispose }. */
-function harness(accept: (subject: unknown) => boolean): { emit: (agent: unknown, frame: AssistantStreamFrameLike) => void; sink: Sink; dispose: () => void } {
+function harness(accept: (subject: unknown) => boolean): {
+  emit: (agent: unknown, frame: AssistantStreamFrameLike) => void
+  disposeAgent: (agent: unknown) => void
+  sink: Sink
+  dispose: AssistantStreamDirectHandle
+} {
   const sink = makeSink()
-  let listener: ((payload: unknown) => void) | undefined
+  const listeners = new Map<string, (payload: unknown) => void>()
   const ctx = {
-    on: (_event: string, handler: (payload: unknown) => void) => {
-      listener = handler
-      return () => { listener = undefined }
+    on: (event: string, handler: (payload: unknown) => void) => {
+      listeners.set(event, handler)
+      return () => { listeners.delete(event) }
     },
   }
   const dispose = installAssistantStreamDirect({ ctx, isCurrentAgent: accept, onInput: sink.onInput })
   return {
-    emit: (subject, frame) => { listener?.({ agent: subject, frame }) },
+    emit: (subject, frame) => { listeners.get('agent/assistant-stream')?.({ agent: subject, frame }) },
+    disposeAgent: subject => { listeners.get('agent/disposed')?.({ agent: subject }) },
     sink,
     dispose,
   }
@@ -252,6 +260,115 @@ test('the identity fence is EXACT Agent object identity: a retired agent is refu
     emit(current, { type: 'end', attemptId: 'f1', revision: 3, index: 1, outcome: { kind: 'committed', eventType: 'assistant/message', seq: 7 } })
     const texts = sink.inputs.filter(input => input.kind === 'chunk').map(input => (input as { chunk: { text: string } }).chunk.text)
     assert.deepEqual(texts, ['current stream'], 'only the exact current Agent object flows')
+  } finally {
+    dispose()
+  }
+})
+
+test('an unseen Agent keeps an active transient baseline for a late viewer attach', () => {
+  const child = agent('late')
+  let current: unknown
+  const { emit, sink, dispose } = harness(subject => subject === current)
+  try {
+    emit(child, startFrame('late-1', 2, 0))
+    emit(child, chunkFrame('late-1', 0, textChunk(0, 'hello ')))
+    assert.deepEqual(sink.inputs, [], 'unviewed child frames stay out of the current presentation')
+    assert.deepEqual(dispose.baselineFor(child).map(input => input.kind), ['start', 'chunk'])
+    const baselineChunk = dispose.baselineFor(child)[1]
+    assert.ok(baselineChunk !== undefined && baselineChunk.kind === 'chunk')
+    assert.equal(baselineChunk.chunk.type, 'text-delta')
+    if (baselineChunk.chunk.type === 'text-delta') assert.equal(baselineChunk.chunk.text, 'hello ')
+
+    const folder = new TranscriptFolder()
+    for (const input of dispose.baselineFor(child)) folder.applyLiveInput(input)
+    const prefix = folder.messages().find(message => message.kind === 'assistant')
+    assert.ok(prefix !== undefined && prefix.kind === 'assistant')
+    assert.equal(prefix.text, 'hello ')
+
+    current = child
+    emit(child, chunkFrame('late-1', 1, textChunk(1, 'world')))
+    const suffix = sink.inputs[0]
+    assert.ok(suffix !== undefined)
+    folder.applyLiveInput(suffix)
+    const combined = folder.messages().find(message => message.kind === 'assistant')
+    assert.ok(combined !== undefined && combined.kind === 'assistant')
+    assert.equal(combined.text, 'hello world')
+    assert.deepEqual(sink.inputs.map(input => (input as { kind: string }).kind), ['chunk'], 'frames after attach continue normally')
+    emit(child, abandonedEnd('late-1', 2))
+    assert.deepEqual(dispose.baselineFor(child), [], 'terminal frames clear the transient baseline')
+  } finally {
+    dispose()
+  }
+})
+
+test('a same-session Agent rollover follows the new lifecycle without accepting old frames', () => {
+  const first = agent('rollover')
+  const second = agent('rollover')
+  let current: unknown = first
+  const { emit, disposeAgent, sink, dispose } = harness(subject => subject === current)
+  try {
+    emit(first, { type: 'start', attemptId: 'old', revision: 1, turn: 1, step: 0 })
+    emit(first, { type: 'chunk', attemptId: 'old', revision: 2, index: 0, time: 1, chunk: textChunk(0, 'old') })
+    current = second
+    disposeAgent(first)
+    // A delayed old frame is rejected by the lifecycle predicate and cannot
+    // become the new Agent's baseline.
+    emit(first, { type: 'chunk', attemptId: 'old', revision: 3, index: 1, time: 2, chunk: textChunk(1, 'stale') })
+    assert.deepEqual(dispose.baselineFor(first), [], 'disposed Agent frames cannot recreate its baseline')
+    emit(second, { type: 'start', attemptId: 'new', revision: 1, turn: 2, step: 0 })
+    emit(second, { type: 'chunk', attemptId: 'new', revision: 2, index: 0, time: 3, chunk: textChunk(0, 'new') })
+    assert.deepEqual(sink.inputs.filter(input => input.kind === 'chunk').map(input => (input as { chunk: { text: string } }).chunk.text), ['old', 'new'])
+    assert.deepEqual(dispose.baselineFor(second).map(input => input.kind), ['start', 'chunk'])
+  } finally {
+    dispose()
+  }
+})
+
+test('agent disposal removes its late-viewer baseline', () => {
+  const child = agent('disposed')
+  const { emit, disposeAgent, dispose } = harness(() => false)
+  try {
+    emit(child, startFrame('disposed-1', 0, 0))
+    emit(child, chunkFrame('disposed-1', 0, textChunk(0, 'stale')))
+    assert.notDeepEqual(dispose.baselineFor(child), [])
+    disposeAgent(child)
+    assert.deepEqual(dispose.baselineFor(child), [])
+  } finally {
+    dispose()
+  }
+})
+
+test('a revision-one start resets a restarted Agent lifecycle', () => {
+  const current = agent('restart')
+  const { emit, sink, dispose } = harness(subject => subject === current)
+  try {
+    emit(current, { type: 'start', attemptId: 'old', revision: 1, turn: 0, step: 0 })
+    emit(current, { type: 'chunk', attemptId: 'old', revision: 2, index: 0, time: 1, chunk: textChunk(0, 'old') })
+    emit(current, { type: 'start', attemptId: 'new', revision: 1, turn: 1, step: 0 })
+    emit(current, { type: 'chunk', attemptId: 'new', revision: 2, index: 0, time: 2, chunk: textChunk(0, 'new') })
+    assert.deepEqual(sink.inputs.filter(input => input.kind === 'start').map(input => input.attemptId), ['old', 'new'])
+    assert.deepEqual(dispose.baselineFor(current).map(input => input.kind), ['start', 'chunk'])
+    const chunk = dispose.baselineFor(current)[1]
+    assert.ok(chunk !== undefined && chunk.kind === 'chunk' && chunk.chunk.type === 'text-delta')
+    if (chunk !== undefined && chunk.kind === 'chunk' && chunk.chunk.type === 'text-delta') assert.equal(chunk.chunk.text, 'new')
+  } finally {
+    dispose()
+  }
+})
+
+test('a newer start replaces an abandoned active baseline on one Agent', () => {
+  const child = agent('replace')
+  const { dispose, emit } = harness(() => false)
+  try {
+    emit(child, startFrame('replace-a', 0, 0))
+    emit(child, chunkFrame('replace-a', 0, textChunk(0, 'old')))
+    emit(child, startFrame('replace-b', 0, 0))
+    emit(child, chunkFrame('replace-b', 0, textChunk(0, 'new')))
+    const baseline = dispose.baselineFor(child)
+    assert.deepEqual(baseline.map(input => input.kind), ['start', 'chunk'])
+    const chunk = baseline[1]
+    assert.ok(chunk !== undefined && chunk.kind === 'chunk' && chunk.chunk.type === 'text-delta')
+    if (chunk !== undefined && chunk.kind === 'chunk' && chunk.chunk.type === 'text-delta') assert.equal(chunk.chunk.text, 'new')
   } finally {
     dispose()
   }

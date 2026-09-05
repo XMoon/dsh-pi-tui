@@ -24,7 +24,6 @@ import {
   type SessionProjectionReaderLike,
   type SessionReaderDiagLike,
 } from './session-projection-direct.ts'
-import { sessionPresetOf } from './session-preset-direct.ts'
 import type { ExportReadResult, SessionProjectionSummary, SessionSearchHit, SessionReader, SessionSummary } from '../session-reader-port.ts'
 
 /**
@@ -146,16 +145,17 @@ function errorCodeOf(error: unknown): string | undefined {
  * derived-cache failures all safely fall back to header creation time. */
 function activityTimestamp(
   header: SessionHeader,
+  liveRow: boolean,
   live: LiveAgentLike | undefined,
   projections: SessionProjectionReaderLike | undefined,
   cache: SessionProjectionCacheLike | undefined,
 ): number {
   let lastPromptAt: number | undefined
   try {
-    if (live !== undefined && projections !== undefined) {
-      const metadata = projections.snapshot(live.session, ['sessionListMetadata'])?.values?.sessionListMetadata
+    if (liveRow && live !== undefined && projections !== undefined) {
+      const metadata = projections.cachedSnapshot(live.session, ['sessionListMetadata'])?.values?.sessionListMetadata
       if (typeof metadata?.lastPromptAt === 'number') lastPromptAt = metadata.lastPromptAt
-    } else if (live === undefined && header.isSeeded === false && cache !== undefined) {
+    } else if (!liveRow && live === undefined && header.isSeeded === false && cache !== undefined) {
       const metadata = cache.cachedSnapshot(header, SessionLogOffset(0), ['sessionListMetadata'])?.values?.sessionListMetadata
       if (typeof metadata?.lastPromptAt === 'number') lastPromptAt = metadata.lastPromptAt
     }
@@ -219,9 +219,8 @@ export class DirectSessionReader implements SessionReader {
   }
 
   /** Resolve the actual preset of a currently loaded agent, when DSH exposes
-   * its composed roster entry. The projection fallback is intentionally raw:
-   * without a roster it cannot distinguish a legal custom `code` id from old
-   * pi-tui data. */
+   * its composed roster entry. Cached projection fallback is handled by the
+   * live projection branch without materializing the Session. */
   private livePreset(sessionId: string): string | undefined {
     const live = this.liveAgent(sessionId)
     if (live === undefined) return undefined
@@ -236,7 +235,7 @@ export class DirectSessionReader implements SessionReader {
         // A live composition that is being torn down is not a picker error.
       }
     }
-    return sessionPresetOf(this.ctx, live.session)
+    return undefined
   }
 
   private async presetRosterIds(signal?: AbortSignal): Promise<readonly string[] | undefined> {
@@ -287,7 +286,7 @@ export class DirectSessionReader implements SessionReader {
         origin: record.header.origin,
         live: record.live,
       },
-      activity: activityTimestamp(record.header, record.live ? this.liveAgent(record.header.id) : undefined, projections, cache),
+      activity: activityTimestamp(record.header, record.live, record.live ? this.liveAgent(record.header.id) : undefined, projections, cache),
     }))
     signal?.throwIfAborted()
     rows.sort((a, b) => b.activity - a.activity)
@@ -297,7 +296,7 @@ export class DirectSessionReader implements SessionReader {
   /**
    * Enrich already-listed rows with the combined DSH projections (`title` +
    * `agentPreset`) through the official ladder in
-   * `session-projection-direct.ts`: live projection snapshot → zero-I/O
+   * `session-projection-direct.ts`: live cached projection → zero-I/O
    * projection-cache checkpoint (`sessionProjectionCache.cachedSnapshot`,
    * keyed by the header identity captured by the preceding `list()` — no
    * second corpus listing). Cold cache misses remain unknown; the picker

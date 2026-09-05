@@ -963,6 +963,22 @@ function applyStreamingToolPreviewInput(
   }
 }
 
+/** Apply one transient input to a presentation owner and its independent stats. */
+function applyAssistantLiveInput(
+  owner: TranscriptFolder,
+  stats: StatsFolder,
+  previews: Map<string, StreamingToolPreview>,
+  input: AssistantLiveInput,
+): void {
+  if (input.kind === 'end' && (input.status === 'abandoned' || input.settlement === 'attempt')) {
+    clearStreamingToolPreviewsForStep(previews, input.turn, input.step)
+  } else if (!(input.kind === 'chunk' && owner.turnActivity(input.turn)?.completed === true)) {
+    applyStreamingToolPreviewInput(previews, input)
+  }
+  owner.applyLiveInput(input)
+  stats.applyLiveInput(input)
+}
+
 /**
  * Repaint the transcript from the active folder's bounded window. Messages,
  * navigation facts, turn activities and live preparing rows come from one
@@ -3221,13 +3237,17 @@ export function apply(ctx: Context, config: Config): void {
       cwd: string
       /** Live-only preparing rows for this child presentation owner. */
       previews: Map<string, StreamingToolPreview>
-      /** The EXACT live Agent object owning the viewed session, pinned on
-       * the first accepted stream frame of this viewer lifetime. The live
-       * seam's identity fence compares Agent object identity (never a
+      /** The EXACT current Agent object owning the viewed session, rebound on
+       * same-session Activation rollover. The live seam's
+       * identity fence compares Agent object identity (never a
        * re-derived session id), so a late frame from a retired child agent
        * can never reach the viewer after a replacement. */
       viewAgent?: Agent
     } | undefined
+    // The Direct stream adapter keeps active prefixes for Agents that were not
+    // being displayed yet; enterView replays this exact-agent baseline before
+    // mounting the child surface.
+    let assistantStreamBaselineFor: (agent: object) => readonly AssistantLiveInput[] = () => []
     // Unsettled subagent delegations in the live session, in tool/call order.
     // The viewer matches one of these by description when the user opens a
     // child transcript, so the child's tool/result can pop the viewer back.
@@ -3475,12 +3495,14 @@ export function apply(ctx: Context, config: Config): void {
         turns: childFolder.groupedTurns(),
       })
       const childStats = new StatsFolder()
+      const childPreviews = new Map<string, StreamingToolPreview>()
       let childCwd = ''
       // Only the child's OWN events enter the viewer: a fork provider seeds
       // the child with the parent's completed-turn history (session/end-seed
       // boundary), and the parent's records — its subagent completion
       // notices included — must never render as the child's transcript.
       const child = sessions.get(childId)
+      const childAgent = agents.get(childId)
       if (child !== undefined) {
         const own = childOwnEvents(child.snapshotEvents())
         childFolder.hydrate(own)
@@ -3508,6 +3530,14 @@ export function apply(ctx: Context, config: Config): void {
           } catch {
             // No persisted log either: the view stays empty.
           }
+        }
+      }
+      // A live child may already have emitted transient assistant frames before
+      // the viewer existed. Replay only the exact Agent's active baseline after
+      // durable hydration and before the child surface is mounted.
+      if (childAgent !== undefined) {
+        for (const input of assistantStreamBaselineFor(childAgent)) {
+          applyAssistantLiveInput(childFolder, childStats, childPreviews, input)
         }
       }
       // The user's deliberate look is the anchor for the auto-pop: match the
@@ -3540,7 +3570,8 @@ export function apply(ctx: Context, config: Config): void {
         activity,
         access,
         cwd: childCwd,
-        previews: new Map(),
+        previews: childPreviews,
+        ...(childAgent === undefined ? {} : { viewAgent: childAgent }),
       }
       // The child's turn numbers are its OWN namespace: the parent's Focus
       // disclosures must not leak into the child transcript (plan §26).
@@ -7219,7 +7250,7 @@ export function apply(ctx: Context, config: Config): void {
     // child — and stamps the first-token latency. The identity fence
     // re-reads the live surface so a stale stream from a retired agent
     // never reaches the presentation.
-    const disposeAssistantStream = installAssistantStreamDirect({
+    const assistantStreamHandle = installAssistantStreamDirect({
       ctx,
       isCurrentAgent: (agent) => {
         // EXACT Agent object identity (master's own headless consumer
@@ -7228,14 +7259,24 @@ export function apply(ctx: Context, config: Config): void {
         // replacement agent drives the SAME session.
         if (typeof agent !== 'object' || agent === null) return false
         const subject = agent as Agent
-        if (liveAgent !== undefined && subject === liveAgent) return true
-        if (viewing === undefined) return false
-        // The viewed child: pin the exact Agent object on the first
-        // accepted frame of this viewer lifetime (one live agent per
-        // session is guaranteed by the DSH writer lease).
-        if (viewing.viewAgent !== undefined) return viewing.viewAgent === subject
         const candidateId = (subject as { session?: { id?: unknown } }).session?.id
-        if (typeof candidateId !== 'string' || candidateId !== viewing.id) return false
+        if (typeof candidateId !== 'string' || agents.get(SessionId(candidateId)) !== subject) return false
+        if (liveAgent !== undefined && subject === liveAgent) return true
+        // The adapter accepts every registered live Agent so an unviewed child
+        // can retain its transient baseline without entering the main surface.
+        if (viewing === undefined) return true
+        if (candidateId !== viewing.id) return false
+        // The viewed child follows one exact Agent object at a time. A same-session
+        // cold-resume replaces a disposed Agent; the registry
+        // identity change is the lifecycle rollover edge for this viewer.
+        if (viewing.viewAgent !== undefined) {
+          if (viewing.viewAgent === subject) return true
+          if (agents.get(viewing.id) !== viewing.viewAgent) {
+            viewing.viewAgent = subject
+            return true
+          }
+          return false
+        }
         viewing.viewAgent = subject
         return true
       },
@@ -7247,32 +7288,21 @@ export function apply(ctx: Context, config: Config): void {
         // attempt (abandoned end or a committed `assistant/attempt`
         // settlement) clears the step's tool previews — its deltas never
         // materialized into durable calls.
-        const previewsLive = (owner: TranscriptFolder, previews: Map<string, StreamingToolPreview>): void => {
-          if (input.kind === 'end' && (input.status === 'abandoned' || input.settlement === 'attempt')) {
-            clearStreamingToolPreviewsForStep(previews, input.turn, input.step)
-            return
-          }
-          if (input.kind === 'chunk' && owner.turnActivity(input.turn)?.completed === true) return
-          applyStreamingToolPreviewInput(previews, input)
-        }
         if (viewing !== undefined && input.sessionId === viewing.id) {
-          previewsLive(viewing.folder, viewing.previews)
-          viewing.folder.applyLiveInput(input)
-          viewing.stats.applyLiveInput(input)
+          applyAssistantLiveInput(viewing.folder, viewing.stats, viewing.previews, input)
           schedulePaint()
           return
         }
         if (liveAgent === undefined || input.sessionId !== liveAgent.session.id) return
-        previewsLive(folder, mainStreamingToolPreviews)
-        folder.applyLiveInput(input)
-        statsFolder.applyLiveInput(input)
+        applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
         if (input.kind === 'chunk' && isAssistantTokenDelta(input.chunk)) {
           submitLatencyTracker.mark(liveAgent.session.id, 'assistant.first')
         }
         schedulePaint()
       },
     })
-    lifecycleController.signal.addEventListener('abort', disposeAssistantStream, { once: true })
+    assistantStreamBaselineFor = assistantStreamHandle.baselineFor
+    lifecycleController.signal.addEventListener('abort', assistantStreamHandle, { once: true })
     // Subagent lifecycle events drive the continuable-children half of the
     // dock badge (they never register jobs). The events are scoped by the
     // delegating parent, but an UNTAGGED listener (this runner) receives

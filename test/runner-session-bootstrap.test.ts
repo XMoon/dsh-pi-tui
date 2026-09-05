@@ -389,7 +389,9 @@ interface RunnerProbe {
   transcriptHydrateCount: number
   statsHydrateCount: number
   capturedMessages: readonly { kind: string; text?: string }[] | undefined
+  capturedActivities: ReadonlyMap<number, unknown> | undefined
   capturedStreamingToolPreviews: readonly StreamingToolPreview[] | undefined
+  capturedViewerUsage: unknown
   scrollToBottomCount: number
   capturedModels: string[]
   capturedWelcomeModels: string[]
@@ -405,7 +407,9 @@ function installProbe(): RunnerProbe {
     transcriptHydrateCount: 0,
     statsHydrateCount: 0,
     capturedMessages: undefined,
+    capturedActivities: undefined,
     capturedStreamingToolPreviews: undefined,
+    capturedViewerUsage: undefined,
     scrollToBottomCount: 0,
     capturedModels: [],
     capturedWelcomeModels: [],
@@ -417,6 +421,7 @@ function installProbe(): RunnerProbe {
   const originalTranscriptHydrate = TranscriptFolder.prototype.hydrate
   const originalStatsHydrate = StatsFolder.prototype.hydrate
   const originalSetTranscript = TuiApp.prototype.setTranscript
+  const originalSetViewerFooter = TuiApp.prototype.setViewerFooter
   const originalSetStatus = TuiApp.prototype.setStatus
   const originalSetWelcomeCard = TuiApp.prototype.setWelcomeCard
   const originalStart = TuiApp.prototype.start
@@ -439,8 +444,13 @@ function installProbe(): RunnerProbe {
   }
   TuiApp.prototype.setTranscript = function (messages, activities, window, streamingToolPreviews) {
     probe.capturedMessages = messages
+    probe.capturedActivities = activities
     probe.capturedStreamingToolPreviews = streamingToolPreviews
     return originalSetTranscript.call(this, messages, activities, window, streamingToolPreviews)
+  }
+  TuiApp.prototype.setViewerFooter = function (footer) {
+    probe.capturedViewerUsage = footer?.usage
+    return originalSetViewerFooter.call(this, footer)
   }
   TuiApp.prototype.setStatus = function (status) {
     if (typeof status.model === 'string') probe.capturedModels.push(status.model)
@@ -464,6 +474,7 @@ function installProbe(): RunnerProbe {
     TranscriptFolder.prototype.hydrate = originalTranscriptHydrate
     StatsFolder.prototype.hydrate = originalStatsHydrate
     TuiApp.prototype.setTranscript = originalSetTranscript
+    TuiApp.prototype.setViewerFooter = originalSetViewerFooter
     TuiApp.prototype.setStatus = originalSetStatus
     TuiApp.prototype.setWelcomeCard = originalSetWelcomeCard
     TuiApp.prototype.start = originalStart
@@ -1126,7 +1137,7 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
   assert.equal(following.scrollTop, following.maxScrollTop, JSON.stringify(following))
 })
 
-test('the parent Preparing projection keeps updating behind a child viewer', async (t) => {
+test('the parent Preparing projection and child viewer lifecycle rollover stay live', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-parent-preparing-viewer-')
   const previousHome = process.env.DSH_HOME
@@ -1168,6 +1179,8 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
     }],
   }
   const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => childHandle.dispose())
   context = new Context()
   fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
   const app = probe.apps.at(-1)
@@ -1186,6 +1199,19 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
   await vt.waitForRender()
   assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => preview.callId), [''])
 
+  // The child Agent is already live, but its viewer has not mounted yet. Its
+  // active prefix must remain available for the later exact-Agent replay.
+  const childAgent = liveAgentOf(harness, child.id)
+  emitLiveStream(context, childAgent, { type: 'start', attemptId: 'c1', revision: 1, turn: 1, step: 0 })
+  emitLiveStream(context, childAgent, {
+    type: 'chunk', attemptId: 'c1', revision: 2, index: 0,
+    time: 1_700_000_000_100, chunk: { type: 'text-delta', index: 0, text: 'late child answer' },
+  })
+  emitLiveStream(context, childAgent, {
+    type: 'chunk', attemptId: 'c1', revision: 3, index: 1,
+    time: 1_700_000_000_101, chunk: { type: 'tool-call-delta', index: 1, id: 'child-call', name: 'bash', argumentsDelta: '{' },
+  })
+
   // /tasks opens the real runner browser, and Enter mounts the child viewer.
   const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
   assert.ok(tasksHandler, 'the real runner must register /tasks')
@@ -1196,6 +1222,77 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
   await settle()
   await vt.waitForRender()
   assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must be mounted')
+  assert.ok(probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'late child answer'),
+    'a late child viewer must replay the exact Agent baseline after durable hydration')
+  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => [preview.callId, preview.name]), [['child-call', 'bash']])
+
+  // The same continuable child can roll from Activation A to a new Agent B
+  // without closing the viewer. A's delayed frame must stay fenced while B's
+  // first live text is immediately visible.
+  emitLiveStream(context, childAgent, {
+    type: 'end', attemptId: 'c1', revision: 4, index: 2,
+    outcome: { kind: 'abandoned' },
+  })
+  const childBHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => childBHandle.dispose())
+  const childAgentB = liveAgentOf(harness, child.id)
+  context.emit('agent/disposed', { agent: childAgent } as never)
+  emitLiveStream(context, childAgent, {
+    type: 'chunk', attemptId: 'c1', revision: 5, index: 2,
+    time: 1_700_000_000_102, chunk: { type: 'text-delta', index: 0, text: 'STALE-A' },
+  })
+  context.emit('session/event', child as never, event('turn/start', { turn: 2 }, 25))
+  context.emit('session/event', child as never, event('step/start', { turn: 2, step: 0 }, 26))
+  emitLiveStream(context, childAgentB, { type: 'start', attemptId: 'c2', revision: 1, turn: 2, step: 0 })
+  emitLiveStream(context, childAgentB, {
+    type: 'chunk', attemptId: 'c2', revision: 2, index: 0,
+    time: 1_700_000_026_100, chunk: { type: 'text-delta', index: 0, text: 'follow-up live' },
+  })
+  emitLiveStream(context, childAgentB, {
+    type: 'chunk', attemptId: 'c2', revision: 3, index: 1,
+    time: 1_700_000_026_101, chunk: { type: 'usage', usage: { inputTokens: 11, outputTokens: 3, totalTokens: 14 } },
+  })
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.ok(probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'follow-up live'),
+    'the replacement Agent must feed the still-open viewer immediately')
+
+  emitLiveStream(context, childAgentB, {
+    type: 'end', attemptId: 'c2', revision: 4, index: 2,
+    outcome: { kind: 'committed', eventType: 'assistant/message', seq: 30 },
+  })
+  context.emit('session/event', child as never, event('assistant/message', {
+    turn: 2,
+    step: 0,
+    message: {
+      id: MessageId('child-rollover-message'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'follow-up durable' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    usage: { inputTokens: 11, outputTokens: 3 },
+    stream: [],
+  }, 30, 'append'))
+  context.emit('session/event', child as never, event('step/end', { turn: 2, step: 0 }, 31))
+  context.emit('session/event', child as never, event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 32))
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedMessages?.filter(message => message.kind === 'assistant' && message.text === 'follow-up durable').length, 1,
+    'B durable settlement must replace its live row exactly once')
+  assert.equal(probe.capturedMessages?.some(message => message.text === 'STALE-A'), false,
+    'A delayed frames must not contaminate B')
+  const rolloverActivity = probe.capturedActivities?.get(2) as {
+    lastAssistantVisible?: boolean
+    usage?: { inputTokens: number; outputTokens: number }
+  } | undefined
+  assert.equal(rolloverActivity?.lastAssistantVisible, true, 'Focus must follow B visibility')
+  assert.deepEqual(rolloverActivity?.usage, { inputTokens: 11, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 })
+  const viewerUsage = probe.capturedViewerUsage as {
+    tokens?: { input: number; output: number }
+    performance?: { firstTokenMs: number }
+  } | undefined
+  assert.deepEqual(viewerUsage?.tokens, { input: 21, output: 5, cacheRead: 0, cacheWrite: 0 })
+  assert.ok((viewerUsage?.performance?.firstTokenMs ?? 0) > 0, 'B first-token timing must reach the child stats footer')
 
   // Parent events continue through the runner while the child owns the
   // visible transcript. Updating A and adding B must both survive the visit.

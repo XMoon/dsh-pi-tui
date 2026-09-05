@@ -11,10 +11,9 @@
  * one attached Agent lifecycle) and the dense per-attempt `index` guard against
  * stale or reordered frames: a non-dense revision or index is dropped at the
  * boundary and clears open attempts. Valid control chunks are forwarded after
- * those ordering checks. The runner injects the identity check — a
- * frame whose emitting Agent is not the exact current Agent object never reaches
- * the presentation (master's own headless consumer compares `subject !==
- * agent` the same way). Durable settlement is NOT synthesized here:
+ * those ordering checks. Every Agent's active inputs remain in a process-local
+ * baseline; the runner injects the identity check only when deciding which
+ * accepted frame reaches the presentation. Durable settlement is NOT synthesized here:
  * `assistant/message` / `assistant/attempt` continue to arrive through the
  * ordinary `session/event` plane.
  *
@@ -84,6 +83,8 @@ interface AttemptRecord {
   readonly step: number
   /** Number of accepted chunk frames (the dense index must match). */
   chunkCount: number
+  /** Accepted transient inputs retained for a late viewer attach. */
+  readonly baseline: AssistantLiveInput[]
 }
 
 /** Ordering state for one Agent lifecycle. The Agent's revision is global
@@ -97,9 +98,9 @@ interface AgentState {
 export interface AssistantStreamDirectDeps {
   /** The Host event surface (`ctx`). */
   readonly ctx: HostEventSurface
-  /** Whether the emitting agent IS the current live Agent OBJECT for the
-   * surface it would reach (exact identity — a stale stream from a
-   * retired agent must never reach the presentation). */
+  /** Whether the emitting agent IS the current registered Agent OBJECT for
+   * its session lifecycle (exact identity — the runner may retain an
+   * unviewed Agent's baseline while routing its inputs off-surface). */
   readonly isCurrentAgent: (agent: unknown) => boolean
   /** The TUI-neutral sink (the runner routes by session id). */
   readonly onInput: (input: AssistantLiveInput) => void
@@ -265,6 +266,13 @@ function toLiveChunk(chunk: unknown): AssistantLiveChunk | undefined {
   }
 }
 
+/** Handle returned by the Direct stream listener. */
+export interface AssistantStreamDirectHandle {
+  (): void
+  /** Return the active transient baseline for one exact Agent object. */
+  baselineFor(agent: object): readonly AssistantLiveInput[]
+}
+
 /**
  * Install the Direct live-stream listener. Returns the uninstall function
  * (the runner binds it to the lifecycle controller). Attempt state is kept
@@ -275,11 +283,12 @@ function toLiveChunk(chunk: unknown): AssistantLiveChunk | undefined {
  * fenced strictly and densely at the Agent-lifecycle level; a gap clears all
  * open attempts, while chunk indexes remain dense within each attempt.
  */
-export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): () => void {
+export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): AssistantStreamDirectHandle {
   /** Agent object → attemptId → open attempt. Bounded: an entry lives only
    * between its `start` and terminal `end`; the cap is a safety net for a
    * lost terminal frame (an agent dying mid-attempt). */
   const stateByAgent = new WeakMap<object, AgentState>()
+  const disposedAgents = new WeakSet<object>()
   const AGENT_ATTEMPT_CAP = 64
 
   const stateFor = (agent: object): AgentState => {
@@ -289,6 +298,16 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
       stateByAgent.set(agent, state)
     }
     return state
+  }
+
+  const emit = (agent: object, input: AssistantLiveInput): void => {
+    if (deps.isCurrentAgent(agent)) deps.onInput(input)
+  }
+
+  const baselineFor = (agent: object): readonly AssistantLiveInput[] => {
+    const state = stateByAgent.get(agent)
+    if (state === undefined) return []
+    return [...state.attempts.values()].flatMap(attempt => attempt.baseline)
   }
 
   const acceptRevision = (state: AgentState, revision: number): boolean => {
@@ -325,10 +344,11 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
   const handler = (payload: unknown): void => {
     const envelope = payload as { agent?: unknown; frame?: unknown } | undefined
     if (envelope === undefined || typeof envelope.agent !== 'object' || envelope.agent === null || envelope.frame === undefined) return
-    // Identity fence FIRST (exact Agent object identity): a stale stream
-    // from a retired agent must never reach the presentation.
-    if (!deps.isCurrentAgent(envelope.agent)) return
+    // Every Agent is folded into its own process-local baseline. Identity is
+    // checked only when deciding whether an accepted frame reaches the live
+    // presentation, so a child opened later can replay its active prefix.
     const agent = envelope.agent
+    if (disposedAgents.has(agent)) return
     const frame = envelope.frame as AssistantStreamFrameLike
     if (typeof frame !== 'object' || frame === null || !Number.isSafeInteger(frame.revision) || frame.revision < 0) return
     const state = stateFor(agent)
@@ -337,23 +357,35 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
         if (!isNonnegativeSafeInteger(frame.turn) || !isNonnegativeSafeInteger(frame.step)) return
         if (typeof frame.attemptId !== 'string' || frame.attemptId === '') return
         const attemptId = frame.attemptId
+        // A revision-one start is the official reset edge for a restarted
+        // Agent lifecycle. Accept it even when the prior lifecycle ended at a
+        // nonzero revision, then continue with the dense fence.
+        if (frame.revision === 1 && state.revision !== 0) {
+          state.attempts.clear()
+          state.revision = 0
+        }
         if (!acceptRevision(state, frame.revision)) return
         const existing = recordFor(state, attemptId)
         // A duplicate start for the same attempt is a protocol violation.
         if (existing !== undefined) return
-        openAttempt(state, {
-          attemptId,
-          turn: frame.turn,
-          step: frame.step,
-          chunkCount: 0,
-        })
-        deps.onInput({
+        // The official per-Agent accumulator has one active attempt. A new
+        // start replaces a lost/late prior attempt without replaying both.
+        state.attempts.clear()
+        const input: AssistantLiveInput = {
           kind: 'start',
           sessionId: String((agent as { session?: { id?: unknown } }).session?.id ?? ''),
           attemptId,
           turn: frame.turn,
           step: frame.step,
+        }
+        openAttempt(state, {
+          attemptId,
+          turn: frame.turn,
+          step: frame.step,
+          chunkCount: 0,
+          baseline: [input],
         })
+        emit(agent, input)
         break
       }
       case 'chunk': {
@@ -380,7 +412,7 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
         record.chunkCount += 1
         const chunk = toLiveChunk(frame.chunk)
         if (chunk === undefined) return
-        deps.onInput({
+        const input: AssistantLiveInput = {
           kind: 'chunk',
           sessionId: String((agent as { session?: { id?: unknown } }).session?.id ?? ''),
           attemptId,
@@ -388,7 +420,9 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
           step: record.step,
           time: frame.time,
           chunk,
-        })
+        }
+        record.baseline.push(input)
+        emit(agent, input)
         break
       }
       case 'end': {
@@ -415,8 +449,7 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
           state.attempts.clear()
           return
         }
-        closeAttempt(state, attemptId)
-        deps.onInput({
+        const input: AssistantLiveInput = {
           kind: 'end',
           sessionId: String((agent as { session?: { id?: unknown } }).session?.id ?? ''),
           attemptId,
@@ -424,13 +457,27 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
           step: record.step,
           status: committed ? 'committed' : 'abandoned',
           ...(settlement === undefined ? {} : { settlement }),
-        })
+        }
+        emit(agent, input)
+        closeAttempt(state, attemptId)
         break
       }
     }
   }
-  const dispose = deps.ctx.on('agent/assistant-stream', handler)
-  return () => {
-    dispose()
-  }
+  const disposeStream = deps.ctx.on('agent/assistant-stream', handler)
+  const disposeAgent = deps.ctx.on('agent/disposed', (payload) => {
+    const value = payload as { agent?: unknown } | unknown
+    const agent = typeof value === 'object' && value !== null && 'agent' in value
+      ? (value as { agent?: unknown }).agent
+      : value
+    if (typeof agent === 'object' && agent !== null) {
+      disposedAgents.add(agent)
+      stateByAgent.delete(agent)
+    }
+  })
+  const handle = Object.assign(() => {
+    disposeStream()
+    disposeAgent()
+  }, { baselineFor })
+  return handle
 }
