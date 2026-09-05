@@ -327,6 +327,42 @@ export function textOf(blocks: readonly ContentBlock[]): string {
     .join('')
 }
 
+/** Reconstruct the logical blocks used by an assistant attempt entry. */
+function assistantAttemptBlocks(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): readonly ContentBlock[] {
+  if (entry.content !== undefined) return entry.content
+  return entry.text === '' ? [] : [{ type: 'text', text: entry.text }]
+}
+
+/** Whether an attempt has assistant content that is visible before closure. */
+function assistantAttemptVisibleNow(blocks: readonly ContentBlock[]): boolean {
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      if (block.text.trim() !== '') return true
+      continue
+    }
+    if (block.type === 'reasoning' || block.type === 'tool-call') continue
+    // Any finalized non-text block is visible content, including future
+    // ContentBlock extensions the TUI does not name yet.
+    return true
+  }
+  return false
+}
+
+/** Whether a closed attempt retains interruption evidence. */
+function assistantAttemptHasInterruptionEvidence(blocks: readonly ContentBlock[]): boolean {
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      if (block.text.trim() !== '') return true
+      continue
+    }
+    if (block.type === 'reasoning') continue
+    // Tool calls are hidden while running but become evidence at closure;
+    // every other finalized block is evidence as well.
+    return true
+  }
+  return false
+}
+
 /** Flat text with image positions preserved: text blocks verbatim, image
  * blocks as an inline `🖼️ name` marker AT their position (the queue-preview
  * format; U+FE0F keeps the marker 2 cells wide in emoji fonts). A marker
@@ -1122,7 +1158,7 @@ export class TranscriptFolder {
     if (item.kind === 'assistant') {
       if (this.hiddenAssistantEntries.has(item)) return false
       if (!this.attemptAssistantEntries.has(item) || item.interrupted === true) return true
-      return item.text !== '' || (item.content?.some(block => block.type === 'tool-call') ?? false)
+      return assistantAttemptVisibleNow(assistantAttemptBlocks(item))
     }
     if (item.kind === 'thinking') return !this.hiddenThinkingEntries.has(item)
     return true
@@ -1713,18 +1749,21 @@ export class TranscriptFolder {
   }
 
   /** Restore assistant interruption evidence from a durable attempt. Text and
-   * completed tool-call blocks are retained; reasoning remains in the Think
-   * entry. The attempt entry is still transient so `llm/retry` can reset it. */
+   * finalized non-text blocks are retained; reasoning remains in the Think
+   * entry. Tool-call-only content is retained as hidden evidence until the
+   * closed boundary. The attempt entry is still transient so `llm/retry` can
+   * reset it. */
   private restoreAssistantAttempt(turn: number, step: number, stream: readonly unknown[]): void {
     const blocks = this.assistantBlocksFromStream(stream)
+    const visibleNow = assistantAttemptVisibleNow(blocks)
+    const hasEvidence = assistantAttemptHasInterruptionEvidence(blocks)
     const text = textOf(blocks)
-    const hasToolCall = blocks.some(block => block.type === 'tool-call')
     const key = stepKey(turn, step)
     const existing = this.assistantEntries.get(key)
-    if (text === '' && !hasToolCall) {
+    if (!visibleNow && !hasEvidence) {
       // A live prefix may be the only evidence when the compact settlement
-      // carries no blocks. Keep that prefix as attempt evidence instead of
-      // promoting it to a normal settled message.
+      // carries no visible blocks. Keep that prefix as attempt evidence
+      // instead of promoting it to a normal settled message.
       if (existing !== undefined && this.transientAssistantEntries.has(existing)) {
         this.attemptAssistantEntries.add(existing)
       }
@@ -1740,13 +1779,14 @@ export class TranscriptFolder {
     this.markStreamingEntryDirty(`assistant:${key}`)
   }
 
-  /** Mark durable attempt evidence visible at the closed boundary. Empty
-   * attempts remain hidden; a tool-call-only attempt is still evidence. */
+  /** Mark durable attempt evidence visible at the closed boundary. Empty and
+   * reasoning-only attempts remain hidden; tool-call and generic finalized
+   * blocks become interrupted assistant evidence here, not while running. */
   private markAttemptEvidenceInterrupted(turn: number): void {
     for (const item of this.items) {
       if (item.kind !== 'assistant' || item.turn !== turn || !this.attemptAssistantEntries.has(item)) continue
-      const hasEvidence = item.text !== '' || (item.content?.length ?? 0) > 0
-      if (!hasEvidence || this.hiddenAssistantEntries.has(item)) continue
+      if (!assistantAttemptHasInterruptionEvidence(assistantAttemptBlocks(item))) continue
+      if (this.hiddenAssistantEntries.has(item)) continue
       item.interrupted = true
     }
   }
@@ -2892,7 +2932,7 @@ export function renderTranscriptMarkdown(session: {
       : [`- agent preset: ${session.header.agentPreset}`],
     '',
   ]
-  // Alpha.4 Session shape: the raw log arrives as a snapshot read, never a
+  // Alpha.4 Session shape: the event log arrives as a snapshot read, never a
   // live array — the markdown export is a full-log fold by definition.
   for (const event of session.snapshotEvents()) {
     // The same append-origin contract as the transcript fold: a surface

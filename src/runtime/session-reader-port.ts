@@ -57,18 +57,18 @@ export interface SessionExportData {
   content: string
 }
 
-/** The outcome of one export read (/export): the raw log, or WHY it cannot
- * be exported (the failure kinds are distinct — the persistence service
- * may be absent, the log simply not materialized, or the read itself
- * failed with a real diagnostic). */
+/** The outcome of reading one canonical committed logical Session export,
+ * or WHY it cannot be exported (the failure kinds are distinct — the
+ * persistence service may be absent, the Session may be absent from the
+ * active backend, or the committed read may fail with a real diagnostic). */
 export type ExportReadResult =
   | { readonly kind: 'found'; readonly data: SessionExportData }
   /** The persistence service is unavailable in this deployment. */
   | { readonly kind: 'unavailable' }
-  /** The persistence service exists but holds no materialized log. */
+  /** The Session is not present in the active persistence backend. */
   | { readonly kind: 'none' }
-  /** The log READ failed (corrupt/validation/I-O): the error text is
-   * preserved for the user, never misclassified as 'no log'. */
+  /** The committed logical Session read failed (corrupt/validation/I-O): the
+   * error text is preserved for the user, never misclassified as absence. */
   | { readonly kind: 'error'; readonly message: string }
 
 /** The session READ domain port. */

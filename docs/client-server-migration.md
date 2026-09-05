@@ -71,7 +71,7 @@ recreate them as TUI-specific DTOs.
 - **Host domain services** — persistence, sessions, tools, approvals, jobs and
   other stateful services that remain composed and owned by DSH.
 
-### Session query and raw export ownership
+### Session query and export ownership
 
 Session list/projection/search/filter semantics belong to the public DSH
 `sessionQuery` + projection services. The list keeps live Sessions even when
@@ -105,7 +105,7 @@ Session export is a separate Host streaming route:
 
 ```text
 ordinary session control/history/state -> official Session client object / generated Remote
-raw session export                    -> Connection HTTP GET/HEAD /api/session.export
+canonical session-log export           -> Connection HTTP GET/HEAD /api/session.export
 ```
 
 It is not an ordinary JSON-RPC payload and must not be implemented by sending
