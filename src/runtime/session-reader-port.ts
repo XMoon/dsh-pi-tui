@@ -2,9 +2,9 @@
  * The session READ domain port (M1.3) — the semantic contract between the
  * TUI and persisted-session reads (list / projection / search), implemented
  * by `src/runtime/direct/` (Direct) today and by a Remote adapter in a later
- * milestone. The port owns the domain semantics (live-preferred lightweight
- * listing, the combined `title`+`agentPreset` projection batch with at most
- * one cold observation per session, bounded content search); the consumer
+ * milestone. The port owns the domain semantics (semantic lightweight listing,
+ * the combined `title`+`agentPreset` projection batch with zero-I/O cold cache
+ * hints and unknown-on-miss semantics, bounded content search); the consumer
  * keeps the picker presentation.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
@@ -73,24 +73,19 @@ export type ExportReadResult =
 
 /** The session READ domain port. */
 export interface SessionReader {
-  /** List persisted sessions newest-first, live-preferred (the session
-   * query engine when available, the persistence fallback otherwise).
-   * `undefined` = the persistence service is unavailable. `signal` cancels
-   * cold-session projection inspection without changing the row contract. */
+  /** List persisted sessions newest-first through the semantic session-query
+   * corpus. `undefined` = that listing capability is unavailable. `signal`
+   * cancels optional cache inspection without changing the row contract. */
   list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined>
   /** Read the Host-owned DSH session projections (`title` + `agentPreset`)
    * for a batch of already-listed rows: one combined semantic read per
-   * batch — live projection snapshot for live rows, the zero-I/O
-   * projection-cache checkpoint for cold rows, and AT MOST ONE
-   * `observeSession()` observation per cold cache miss, which resolves
-   * BOTH title and agentPreset together. This is deliberate: the port
-   * never exposes per-field read paths (a second corpus scan per field is
-   * exactly the cost this port exists to remove), and a future Remote
-   * adapter maps it onto the official DSH client projection contract.
-   * Implementations omit a field for a corrupt/unsupported session (the
-   * row keeps its short-id presentation) and must honor signal
-   * cancellation with bounded concurrency; an aborted signal rejects the
-   * whole batch. */
+   * batch — live projection snapshot for live rows and the zero-I/O
+   * projection-cache checkpoint for eligible cold rows. Cold cache misses
+   * remain unknown; this port never activates a historical Session merely to
+   * fill picker labels. Implementations omit a field for a
+   * corrupt/unsupported session (the row keeps its short-id presentation)
+   * and must honor signal cancellation; an aborted signal rejects the whole
+   * batch. */
   projectionBatch(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, SessionProjectionSummary>>
   /** Search semantic session content for a query (bounded: newest 100
    * sessions, first 20 hits). The Direct adapter uses SessionQuery when its

@@ -2163,6 +2163,38 @@ test('fullscreen drag selection copies through the host copySelection policy (is
   app.stop()
 })
 
+test('an interrupted assistant message keeps its body and renders a separate marker', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    {
+      type: 'assistant/message',
+      seq: 0,
+      time: 1_700_000_000_000,
+      data: {
+        turn: 0,
+        step: 0,
+        message: {
+          id: MessageId('interrupted-message'),
+          role: 'assistant',
+          content: [{ type: 'text', text: 'partial answer' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        interrupted: true,
+      },
+    } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('partial answer'), `interrupted body must remain visible:\n${view}`)
+  assert.ok(view.includes('(interrupted)'), `interrupted marker must render separately:\n${view}`)
+  const [message] = folder.messages()
+  assert.ok(message?.kind === 'assistant')
+  assert.equal(message.text, 'partial answer')
+  app.stop()
+})
+
 test('a reasoning-only assistant message (no text) adds no blank row between cards', async () => {
   const vt = new VirtualTerminal(60, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })

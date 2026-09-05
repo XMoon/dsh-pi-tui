@@ -223,6 +223,136 @@ test('accumulates usage and computes cache hit rate', () => {
   assert.equal(stats.cacheHitPct, 10)
 })
 
+test('assistant/message falls back to the final embedded stream usage when top-level usage is absent', () => {
+  const embedded = { inputTokens: 111, outputTokens: 22, cacheReadTokens: 7, cacheWriteTokens: 3 }
+  const stats = computeStats([
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('m-embedded-usage'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'usage', usage: embedded } },
+      ],
+    }, 0),
+  ])
+  assert.equal(stats.inputTokens, embedded.inputTokens)
+  assert.equal(stats.outputTokens, embedded.outputTokens)
+  assert.equal(stats.cacheReadTokens, embedded.cacheReadTokens)
+  assert.equal(stats.cacheWriteTokens, embedded.cacheWriteTokens)
+})
+
+test('assistant/message embedded stream supplies durable first-token timing', () => {
+  const t = 1_700_000_000_000
+  const stats = computeStats([
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 100),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('m-embedded-ttft'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [
+        { type: 'text-chunks' as const, time0: t + 250, index: 0, dt: [], texts: ['ok'] },
+        { type: 'chunk' as const, time: t + 300, chunk: { type: 'usage' as const, usage: { inputTokens: 10, outputTokens: 2 } } },
+      ],
+    }, 2, t + 900),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 950),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4, t + 1000),
+  ])
+  assert.equal(stats.firstTokenMsAvg, 150)
+  assert.equal(stats.inputTokens, 10)
+  assert.equal(stats.outputTokens, 2)
+})
+
+test('live and cold StatsFolder keep reasoning/tool compact-stream TTFT parity', () => {
+  const t = 1_700_000_000_000
+  const cases = [
+    {
+      name: 'reasoning',
+      chunk: { type: 'reasoning-delta' as const, index: 0, text: 'think' },
+      content: [{ type: 'text' as const, text: 'answer' }],
+      firstTime: t + 250,
+      expected: 150,
+    },
+    {
+      name: 'tool-call',
+      chunk: { type: 'tool-call-delta' as const, index: 0, id: 'ttft-tool' as ToolCallId, name: 'bash', argumentsDelta: '{' },
+      content: [{ type: 'tool-call' as const, id: 'ttft-tool' as ToolCallId, name: 'bash', arguments: '{}' }],
+      firstTime: t + 300,
+      expected: 200,
+    },
+    {
+      name: 'no-token',
+      chunk: { type: 'block-start' as const, index: 0, blockType: 'text' as const },
+      content: [{ type: 'text' as const, text: 'answer' }],
+      firstTime: t + 250,
+      expected: 0,
+    },
+  ]
+  for (const [index, item] of cases.entries()) {
+    const stream = [{ type: 'chunk' as const, time: item.firstTime, chunk: item.chunk }]
+    const message = event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId(`m-compact-ttft-${item.name}`),
+        role: 'assistant',
+        content: item.content,
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream,
+    }, index + 2, t + 900)
+    const boundary = [
+      event('turn/start', { turn: 0 }, 0, t),
+      event('step/start', { turn: 0, step: 0 }, 1, t + 100),
+      message,
+      event('step/end', { turn: 0, step: 0 }, 3, t + 950),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4, t + 1000),
+    ]
+    const live = new StatsFolder()
+    live.apply([boundary[0]!, boundary[1]!])
+    live.applyLiveInput(liveChunk(0, 0, item.chunk, item.firstTime))
+    live.apply(boundary.slice(2))
+    const cold = new StatsFolder()
+    cold.apply(boundary)
+    assert.equal(live.snapshot().firstTokenMsAvg, item.expected, `${item.name}: live TTFT`)
+    assert.equal(cold.snapshot().firstTokenMsAvg, item.expected, `${item.name}: cold TTFT`)
+  }
+})
+
+test('assistant/message top-level usage wins over conflicting embedded stream usage', () => {
+  const topLevel = { inputTokens: 200, outputTokens: 30, cacheReadTokens: 4, cacheWriteTokens: 5 }
+  const stats = computeStats([
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('m-top-level-usage'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: topLevel,
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'usage', usage: { inputTokens: 999, outputTokens: 888, cacheReadTokens: 777, cacheWriteTokens: 666 } } },
+      ],
+    }, 0),
+  ])
+  assert.equal(stats.inputTokens, topLevel.inputTokens)
+  assert.equal(stats.outputTokens, topLevel.outputTokens)
+  assert.equal(stats.cacheReadTokens, topLevel.cacheReadTokens)
+  assert.equal(stats.cacheWriteTokens, topLevel.cacheWriteTokens)
+})
+
 test('reads the context window from request/context', () => {
   const stats = computeStats([
     event('request/context', { provider: 'p', model: 'm', contextWindow: 1_000_000 }, 0),

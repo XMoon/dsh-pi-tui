@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 /**
- * Verify the intentional 0.4/DSH runtime boundary with a real candidate
- * tarball and the last 0.1.1 runtime. The candidate must fail on the
- * unsupported runtime. The startup row prints upgrade/rollback guidance when
- * Loader ordering allows it, but that friendly notice is best-effort rather
- * than a hard ordering contract.
+ * Verify the Source Mode/DSH runtime boundary with a real candidate tarball
+ * and the last published 0.1.1 runtime. The candidate must fail on the
+ * unsupported runtime. The startup row points to the pinned master source
+ * distribution; it never suggests installing an unpublished npm alpha.
  *
  * Usage: node scripts/dsh-runtime-boundary-smoke.mjs [path-to-candidate.tgz]
  *       pnpm smoke:boundary -- [path-to-candidate.tgz]
@@ -27,19 +26,11 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 
-// The minimum-supported boundary: every DSH below the 0.4 floor must be
-// rejected. Only PUBLISHED versions can be installed here, and the
-// published lines below the floor are 0.1.1-rc.2 plus the
-// 0.1.2-alpha.2/alpha.3/alpha.4/alpha.5 baselines, so the real-install
-// rejection case is 0.1.1-rc.2 (the oldest reproducible one). The finer
-// alpha/rc floor regressions are pinned by the startup-gate unit tests
-// instead.
+// Only PUBLISHED versions can be installed by this smoke. The real
+// rejection case is 0.1.1-rc.2; the exact prerelease floor is covered by the
+// startup-gate unit tests because the pinned alpha is Source Mode only.
 const OLD_DSH_VERSION = '0.1.1-rc.2'
-const MIN_DSH_VERSION = '0.1.2-alpha.4'
-const TARGET_DSH_VERSION = '0.1.2-rc.1'
-const OLD_TUI_LINE = '0.3'
-const ALPHA23_TUI_LINE = '0.4.0-alpha.1'
-const ALPHA45_TUI_LINE = '0.4.0-alpha.2'
+const TARGET_DSH_VERSION = '0.1.3-alpha.1'
 const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
 const EXPECTED_BOUNDARY_IMPORT = /@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|session|session-persistence|settings)/iu
 
@@ -133,21 +124,12 @@ function installCandidate(invocation, tarball, harnessDir, env) {
   if (result.status !== 0) throw new Error(`candidate plugin install failed:\n${outputOf(result)}`)
 }
 
-// Mirrors src/startup.ts HARNESS_COMPAT (the startup-gate unit tests pin
-// the table itself): runtimes below the alpha.2 baseline fall back to the
-// 0.3 TUI line with the historical alpha.2 requirement text, the
-// alpha.2/alpha.3 baseline falls back to 0.4.0-alpha.1 with the alpha.4
-// requirement text, and the alpha.4/alpha.5 baseline falls back to
-// 0.4.0-alpha.2 with the rc.1 requirement text.
+// Mirrors src/startup.ts HARNESS_COMPAT: every runtime below the pinned
+// master source floor is rejected. The exact prerelease boundary is tested by
+// startup.test.ts because only the 0.1.1 line is installed by this smoke.
 function floorNoticeFor(oldVersion) {
-  if (semver.lt(oldVersion, '0.1.2-alpha.2')) {
-    return { requires: '0.1.2-alpha.2', upgrade: TARGET_DSH_VERSION, fallbackTui: OLD_TUI_LINE }
-  }
-  if (semver.lt(oldVersion, '0.1.2-alpha.4')) {
-    return { requires: MIN_DSH_VERSION, upgrade: TARGET_DSH_VERSION, fallbackTui: ALPHA23_TUI_LINE }
-  }
-  if (semver.lt(oldVersion, '0.1.2-rc.1')) {
-    return { requires: TARGET_DSH_VERSION, upgrade: TARGET_DSH_VERSION, fallbackTui: ALPHA45_TUI_LINE }
+  if (semver.lt(oldVersion, TARGET_DSH_VERSION)) {
+    return { requires: TARGET_DSH_VERSION }
   }
   return undefined
 }
@@ -157,18 +139,20 @@ function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION) {
   const notice = floorNoticeFor(oldVersion)
   if (notice === undefined) throw new Error(`no floor notice tier for DSH ${oldVersion}`)
   const friendly = output.includes(`running dsh ${oldVersion}`)
-    && output.includes(`DeepSeek Harness ${notice.requires} or later`)
+    && output.includes(`DeepSeek Harness ${notice.requires} pinned master source baseline or later`)
   if (friendly) {
     const required = [
       'dsh-pi-tui',
       `running dsh ${oldVersion}`,
-      `DeepSeek Harness ${notice.requires} or later`,
-      `npm install -g @deepseek-ai/dsh@${notice.upgrade}`,
-      `dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@${notice.fallbackTui}`,
+      `DeepSeek Harness ${notice.requires} pinned master source baseline or later`,
+      'pinned DSH master source distribution',
       'dsh --profile pi-tui',
     ]
     for (const text of required) {
       if (!output.includes(text)) throw new Error(`boundary output is missing ${JSON.stringify(text)}:\n${output}`)
+    }
+    if (output.includes(`@deepseek-ai/dsh@${TARGET_DSH_VERSION}`)) {
+      throw new Error(`boundary output must not suggest installing unpublished npm alpha ${TARGET_DSH_VERSION}:\n${output}`)
     }
     return
   }

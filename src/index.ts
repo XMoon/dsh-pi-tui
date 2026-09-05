@@ -98,6 +98,7 @@ import { parseNotificationMethod, parseNotificationMode } from './notification/s
 import { DISABLE_FOCUS_REPORTING, ENABLE_FOCUS_REPORTING, FOCUS_IN_SEQUENCE, FOCUS_OUT_SEQUENCE, TerminalFocusTracker } from './notification/terminal-focus.ts'
 import { guardedStreamWriter, TerminalNotifier } from './notification/terminal-notifier.ts'
 import { formatStats, StatsFolder } from './stats.ts'
+import { isAssistantTokenDelta } from './token-usage.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
 import { plainSectionEqual } from './status/equal.ts'
 import { deriveRunnerPermission } from './status/derive-permission.ts'
@@ -950,12 +951,14 @@ function applyStreamingToolPreviewInput(
     return
   }
   if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+    const callId = typeof chunk.block.id === 'string' ? chunk.block.id : ''
+    const name = typeof chunk.block.name === 'string' ? chunk.block.name : undefined
     upsertStreamingToolPreview(previews, {
-      callId: chunk.block.id ?? '',
+      callId,
       turn: input.turn,
       step: input.step,
       index: chunk.index,
-      name: chunk.block.name,
+      name,
     })
   }
 }
@@ -3492,7 +3495,7 @@ export function apply(ctx: Context, config: Config): void {
         // through the semantic session-query seam (the raw persistence
         // fallback is removed legacy on the master baseline).
         const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
-        if (query !== undefined) {
+        if (query?.observeSession !== undefined) {
           try {
             const observation = await query.observeSession(SessionId(childId), { projectionMode: 'none' })
             try {
@@ -7237,10 +7240,10 @@ export function apply(ctx: Context, config: Config): void {
         return true
       },
       onInput: (input) => {
-        // The preview projection keeps the durable completed-turn guard
-        // (the old `assistant/chunk` path): a late live chunk for a
-        // completed turn is a replay artifact and must not resurrect a
-        // preview. The folder/stats folds carry their own gates. A FAILED
+        // The preview projection keeps the durable completed-turn guard:
+        // a late live chunk for a completed turn is a replay artifact and must
+        // not resurrect a preview. The folder/stats folds carry their own
+        // gates. A FAILED
         // attempt (abandoned end or a committed `assistant/attempt`
         // settlement) clears the step's tool previews — its deltas never
         // materialized into durable calls.
@@ -7263,7 +7266,7 @@ export function apply(ctx: Context, config: Config): void {
         previewsLive(folder, mainStreamingToolPreviews)
         folder.applyLiveInput(input)
         statsFolder.applyLiveInput(input)
-        if (input.kind === 'chunk') {
+        if (input.kind === 'chunk' && isAssistantTokenDelta(input.chunk)) {
           submitLatencyTracker.mark(liveAgent.session.id, 'assistant.first')
         }
         schedulePaint()

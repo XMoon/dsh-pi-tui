@@ -65,13 +65,56 @@ function turnOfKey(key: string): number {
   return slash === -1 ? -1 : Number(key.slice(0, slash))
 }
 
+/** The canonical first-token predicate shared by live and durable folds. */
+export function isAssistantTokenDelta(chunk: {
+  type: string
+  text?: string
+  argumentsDelta?: string
+  name?: unknown
+}): boolean {
+  switch (chunk.type) {
+    case 'text-delta':
+    case 'reasoning-delta':
+      return chunk.text !== undefined && chunk.text !== ''
+    case 'tool-call-delta':
+      return (chunk.argumentsDelta ?? '') !== '' || chunk.name !== undefined
+    default:
+      return false
+  }
+}
+
+/** Return the first token timestamp embedded in a compact assistant stream.
+ * Older compatible event records may omit the optional stream. */
+export function firstTokenTimeFromAssistantStream(stream: readonly unknown[] | undefined): number | undefined {
+  if (stream === undefined) return undefined
+  for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
+    if (isAssistantTokenDelta(member.chunk)) return member.time
+  }
+  return undefined
+}
+
 /** Return the latest provider usage embedded in a compact assistant stream. */
-export function usageFromAssistantStream(stream: readonly unknown[]): UsageLike | undefined {
+export function usageFromAssistantStream(stream: readonly unknown[] | undefined): UsageLike | undefined {
+  if (stream === undefined) return undefined
   let sample: UsageLike | undefined
   for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
     if (member.chunk.type === 'usage') sample = member.chunk.usage
   }
   return sample
+}
+
+/** Resolve the usage committed by one durable assistant settlement. Message
+ * records prefer their top-level usage; when it is absent, their embedded
+ * stream's final usage is authoritative. Attempt records always use the
+ * embedded stream because they have no top-level settlement usage. */
+export function usageFromAssistantSettlement(
+  kind: 'message' | 'attempt',
+  topLevelUsage: UsageLike | undefined,
+  stream: readonly unknown[] | undefined,
+): UsageLike | undefined {
+  return kind === 'message' && topLevelUsage !== undefined
+    ? topLevelUsage
+    : usageFromAssistantStream(stream)
 }
 
 /**

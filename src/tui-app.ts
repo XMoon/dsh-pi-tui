@@ -1963,6 +1963,9 @@ interface MessageComponentEntry {
    * from — an immutable array identity, so a settled image block landing
    * on a text-only component marks it stale (round-1 finding 2). */
   content?: unknown
+  /** Durable assistant interruption metadata; the marker is rendered outside
+   * the assistant body so searchable/model-facing text stays unchanged. */
+  interrupted?: boolean
   /** The tool card's result content blocks identity (review finding 7): a
    * resultBlocks transition to image-bearing content must rebuild the
    * card even when the flattened result text barely changed. */
@@ -8519,6 +8522,7 @@ export class TuiApp {
       case 'system':
         entry.text = message.text
         entry.content = message.kind === 'user' || message.kind === 'assistant' ? message.content : undefined
+        entry.interrupted = message.kind === 'assistant' ? message.interrupted === true : undefined
         entry.running = message.kind === 'thinking' ? message.running : undefined
         entry.label = message.kind === 'system' ? message.label : undefined
         entry.summary = message.kind === 'system' ? message.summary : undefined
@@ -8548,8 +8552,10 @@ export class TuiApp {
   private componentStale(entry: MessageComponentEntry, message: TranscriptMessage): boolean {
     switch (message.kind) {
       case 'user':
+        return entry.text !== message.text || entry.content !== message.content
       case 'assistant':
         return entry.text !== message.text || entry.content !== message.content
+          || entry.interrupted !== (message.interrupted === true)
       case 'thinking':
         return entry.text !== message.text || entry.running !== message.running
       case 'system':
@@ -8683,11 +8689,15 @@ export class TuiApp {
       // re-renders it at the new width, so tables reflow instead of
       // re-wrapping a frozen render (the 5a76526 regression).
       const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
-      if (message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined) {
-        return this.renderBlockSequence(message.content, (text) =>
+      const body = message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined
+        ? this.renderBlockSequence(message.content, (text) =>
           new BulletedComponent(new Markdown(text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet), message)
-      }
-      return new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
+        : new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
+      if (!message.interrupted) return body
+      const interrupted = new Container()
+      interrupted.addChild(body)
+      interrupted.addChild(new Text(color.textDimItalic('  (interrupted)'), 0, 0))
+      return interrupted
     }
     if (message.kind === 'thinking') {
       // The unified Thinking disclosure card (plan §4/§13): COMPACT is

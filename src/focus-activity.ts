@@ -515,6 +515,8 @@ function finalAssistantSelection(
   const reason = activity.reason?.kind
   if (reason !== 'completed' && reason !== 'max-tokens') return undefined
   const last = lastAssistant(group)
-  if (last === undefined || !assistantRenderable(last)) return undefined
+  // Interrupted prefixes are process evidence, never a completed/max-token
+  // final answer, even when a malformed log reports a successful reason.
+  if (last === undefined || last.interrupted === true || !assistantRenderable(last)) return undefined
   return { message: last, truncated: reason === 'max-tokens' }
 }

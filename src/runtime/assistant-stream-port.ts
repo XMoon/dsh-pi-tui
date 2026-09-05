@@ -18,11 +18,48 @@
  * @module @xmoon76/dsh-pi-tui/runtime/assistant-stream-port
  */
 
-/** The chunk surface the TUI presentation consumes (structural subset of
- * the official `StreamChunk` — never a package dependency). Unknown chunk
- * kinds are ignored by consumers; the union is deliberately open-ended via
- * the `finish`/`block-start` members the presentation may need later. */
+/** Structural content-block mirror used by the live boundary. The final
+ * catch-all preserves merge-extensible DSH block kinds without discarding
+ * fields that this TUI does not render. */
+interface AssistantLiveContentBlockBase {
+  readonly type: string
+  readonly id?: string
+  readonly name?: string
+  readonly [key: string]: unknown
+}
+
+export type AssistantLiveContentBlock = AssistantLiveContentBlockBase & (
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'reasoning'; readonly text: string }
+  | { readonly type: 'image'; readonly attachment: unknown }
+  | { readonly type: 'file'; readonly attachment: unknown }
+  | { readonly type: 'tool-call'; readonly id: string; readonly name: string; readonly arguments: string }
+  | { readonly type: 'tool-result'; readonly toolCallId: string; readonly content: readonly AssistantLiveContentBlock[]; readonly isError?: boolean }
+  | { readonly type: string }
+)
+
+/** Structural finish-reason mirror; provider-specific fields remain intact. */
+export interface AssistantLiveFinishReason {
+  readonly kind: string
+  readonly [key: string]: unknown
+}
+
+/** Structural usage mirror. Accounting uses the four token fields while the
+ * transport preserves the richer official usage payload. */
+export interface AssistantLiveUsage {
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly totalTokens?: number
+  readonly cacheReadTokens?: number
+  readonly cacheWriteTokens?: number
+  readonly reasoningTokens?: number
+  readonly [key: string]: unknown
+}
+
+/** The chunk surface the TUI presentation consumes (structural mirror of the
+ * official `StreamChunk` — never a package dependency). */
 export type AssistantLiveChunk =
+  | { readonly type: 'block-start'; readonly index: number; readonly blockType: string }
   | { readonly type: 'text-delta'; readonly index: number; readonly text: string }
   | { readonly type: 'reasoning-delta'; readonly index: number; readonly text: string }
   | {
@@ -32,27 +69,25 @@ export type AssistantLiveChunk =
     readonly name?: string
     readonly argumentsDelta: string
   }
-  | { readonly type: 'block-end'; readonly index: number; readonly block: { readonly type: string; readonly id?: string; readonly name?: string } }
+  | { readonly type: 'block-end'; readonly index: number; readonly block: AssistantLiveContentBlock }
+  | { readonly type: 'usage'; readonly usage: AssistantLiveUsage }
   | {
-    readonly type: 'usage'
-    readonly usage: {
-      readonly inputTokens: number
-      readonly outputTokens: number
-      readonly cacheReadTokens?: number
-      readonly cacheWriteTokens?: number
-    }
+    readonly type: 'finish'
+    readonly reason: AssistantLiveFinishReason
+    readonly replayState?: unknown
+    readonly [key: string]: unknown
   }
 
 /** One live assistant stream input, transport-neutral. */
 export type AssistantLiveInput =
   /** The attempt opened: a new model attempt for one turn/step. */
   | { readonly kind: 'start'; readonly sessionId: string; readonly attemptId: string; readonly turn: number; readonly step: number }
-  /** One delivered chunk of the attempt (text/reasoning/tool-call/usage). */
+  /** One delivered chunk of the attempt (deltas, block controls, usage, or finish). */
   | { readonly kind: 'chunk'; readonly sessionId: string; readonly attemptId: string; readonly turn: number; readonly step: number; readonly time: number; readonly chunk: AssistantLiveChunk }
   /** The attempt settled: `committed` = a durable event was committed
    * before this notification (`settlement` names it — an
-   * `assistant/attempt` settlement must never leave transient surface
-   * text behind, because no surface message exists for it);
+   * `assistant/attempt` settlement remains transient attempt evidence until
+   * retry or turn end, while `assistant/message` owns the normal surface);
    * `abandoned` = no durable settlement exists (stream error). */
   | {
     readonly kind: 'end'

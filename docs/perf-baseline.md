@@ -174,7 +174,8 @@ then started TWO eager detached enrichment paths (an `observeSession` preset
 replay plus a per-session full-log title fold over every main row, ~848 MB
 of zstd) that starved the event loop — the Tab re-render did not land for
 over a minute, on every open. The new path opens the overlay before any
-Host read, keeps the loop yielding between bounded batches, resolves title
-AND agentPreset in one observation per cold cache miss, and drops the
-TUI-private title cache (DSH's projection cache owns the durability), so a
-warm reopen is metadata-only.
+Host read, keeps the loop yielding between bounded batches, resolves title and
+agentPreset from live projections or zero-I/O cache hints, and leaves cold
+misses unknown. It drops the TUI-private title cache (DSH's
+projection cache owns the durability) and never activates a cold Session for
+picker labels.
