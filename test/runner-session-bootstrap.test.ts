@@ -44,7 +44,7 @@ function event<K extends string>(
 /** One Session v2 live assistant-stream frame (the transient plane
  * replaces durable `assistant/chunk` events). The shape is the EXACT
  * upstream `AssistantStreamFrame`: only `start` carries turn/step; chunk
- * and end name their attempt plus the monotone revision and dense index. */
+ * and end name their attempt plus the dense revision and dense index. */
 type LiveStreamFrame =
   | { type: 'start'; attemptId: string; revision: number; turn: number; step: number }
   | { type: 'chunk'; attemptId: string; revision: number; index: number; time: number; chunk: unknown }
@@ -57,6 +57,7 @@ type LiveStreamFrame =
   }
 
 let liveStreamRevision = 0
+test.beforeEach(() => { liveStreamRevision = 0 })
 
 /** Start one live attempt (upstream: AssistantStreamAttempt.start). */
 function liveStart(attemptId: string, turn: number, step: number): LiveStreamFrame {

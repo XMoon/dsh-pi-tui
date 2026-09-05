@@ -4,7 +4,7 @@
  * `start` — a chunk/end names its attempt, and the adapter resolves
  * turn/step through per-Agent attempt state. These tests build the frames
  * EXACTLY as upstream `AssistantStreamAttempt` emits them (no invented
- * fields) and pin the ordering guards (monotone revision, dense index),
+ * fields) and pin the ordering guards (dense revision, dense index),
  * the Agent-object identity fence, and the committed/abandoned settlement
  * vocabulary.
  * @module @xmoon76/dsh-pi-tui/assistant-stream-direct.test
@@ -57,6 +57,7 @@ function harness(accept: (subject: unknown) => boolean): { emit: (agent: unknown
  * AssistantStreamAttempt.start/push/settle in @deepseek-ai/dsh-agent-loop). */
 let revision = 0
 function nextRevision(): number { return ++revision }
+test.beforeEach(() => { revision = 0 })
 
 function startFrame(attemptId: string, turn: number, step: number): AssistantStreamFrameLike {
   return { type: 'start', attemptId, revision: nextRevision(), turn, step }
@@ -134,12 +135,12 @@ test('a chunk or end without an open attempt (missed start, after end, unknown a
   const current = agent('c')
   const { emit, sink, dispose } = harness(subject => subject === current)
   try {
-    emit(current, chunkFrame('c1', 0, textChunk(0, 'orphan'))) // no start
-    emit(current, committedEnd('c1', 0, 'assistant/message')) // no start
-    emit(current, startFrame('c1', 1, 0))
-    emit(current, chunkFrame('c1', 0, textChunk(0, 'ok')))
-    emit(current, committedEnd('c1', 1, 'assistant/message'))
-    emit(current, chunkFrame('c1', 1, textChunk(1, 'late'))) // after end
+    emit(current, { type: 'chunk', attemptId: 'orphan', revision: 1, index: 0, time: 1, chunk: textChunk(0, 'orphan') })
+    emit(current, { type: 'end', attemptId: 'orphan', revision: 1, index: 0, outcome: { kind: 'abandoned' } })
+    emit(current, { type: 'start', attemptId: 'c1', revision: 1, turn: 1, step: 0 })
+    emit(current, { type: 'chunk', attemptId: 'c1', revision: 2, index: 0, time: 2, chunk: textChunk(0, 'ok') })
+    emit(current, { type: 'end', attemptId: 'c1', revision: 3, index: 1, outcome: { kind: 'committed', eventType: 'assistant/message', seq: 7 } })
+    emit(current, { type: 'chunk', attemptId: 'c1', revision: 4, index: 1, time: 3, chunk: textChunk(1, 'late') }) // after end
     assert.equal(sink.inputs.length, 3, 'only the complete attempt flows')
   } finally {
     dispose()
@@ -160,6 +161,26 @@ test('ordering guards: a stale revision or a non-dense chunk index is dropped', 
     emit(current, committedEnd('d1', 2, 'assistant/message'))
     const texts = sink.inputs.filter(input => input.kind === 'chunk').map(input => (input as { chunk: { text: string } }).chunk.text)
     assert.deepEqual(texts, ['first', 'second'], 'stale and gapped chunks never reach the presentation')
+  } finally {
+    dispose()
+  }
+})
+
+test('a revision gap clears open attempts and drops the gap frame', () => {
+  const current = agent('gap')
+  const { emit, sink, dispose } = harness(subject => subject === current)
+  try {
+    emit(current, { type: 'start', attemptId: 'a', revision: 1, turn: 0, step: 0 })
+    emit(current, { type: 'chunk', attemptId: 'a', revision: 2, index: 0, time: 1, chunk: textChunk(0, 'A') })
+    // Rev 3 is missing: the gap frame is dropped and A is no longer open.
+    emit(current, { type: 'start', attemptId: 'b', revision: 4, turn: 0, step: 0 })
+    emit(current, { type: 'chunk', attemptId: 'a', revision: 5, index: 1, time: 2, chunk: textChunk(1, 'stale A') })
+    // A fresh start at the next revision can recover the seam.
+    emit(current, { type: 'start', attemptId: 'b', revision: 5, turn: 0, step: 0 })
+    emit(current, { type: 'chunk', attemptId: 'b', revision: 6, index: 0, time: 3, chunk: textChunk(0, 'B') })
+    emit(current, { type: 'end', attemptId: 'b', revision: 7, index: 1, outcome: { kind: 'abandoned' } })
+    assert.deepEqual(sink.inputs.map(input => input.kind), ['start', 'chunk', 'start', 'chunk', 'end'])
+    assert.deepEqual(sink.inputs.filter(input => input.kind === 'chunk').map(input => (input as { chunk: { text: string } }).chunk.text), ['A', 'B'])
   } finally {
     dispose()
   }
@@ -191,9 +212,9 @@ test('the identity fence is EXACT Agent object identity: a retired agent is refu
     emit(retired, startFrame('f1', 1, 0))
     emit(retired, chunkFrame('f1', 0, textChunk(0, 'stale stream')))
     emit(retired, committedEnd('f1', 1, 'assistant/message'))
-    emit(current, startFrame('f1', 1, 0))
-    emit(current, chunkFrame('f1', 0, textChunk(0, 'current stream')))
-    emit(current, committedEnd('f1', 1, 'assistant/message'))
+    emit(current, { type: 'start', attemptId: 'f1', revision: 1, turn: 1, step: 0 })
+    emit(current, { type: 'chunk', attemptId: 'f1', revision: 2, index: 0, time: 1, chunk: textChunk(0, 'current stream') })
+    emit(current, { type: 'end', attemptId: 'f1', revision: 3, index: 1, outcome: { kind: 'committed', eventType: 'assistant/message', seq: 7 } })
     const texts = sink.inputs.filter(input => input.kind === 'chunk').map(input => (input as { chunk: { text: string } }).chunk.text)
     assert.deepEqual(texts, ['current stream'], 'only the exact current Agent object flows')
   } finally {
