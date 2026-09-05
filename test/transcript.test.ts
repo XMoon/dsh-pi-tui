@@ -10,6 +10,7 @@ import test from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import { foldTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
@@ -1798,22 +1799,34 @@ test('a durable assistant/attempt removes the failed attempt\'s transient text (
   ])
   folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hello wor' }, 2))
   assert.deepEqual(kinds(folder.messages()), ['assistant'], 'streaming text is visible while the attempt runs')
-  folder.apply([event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3)])
-  assert.deepEqual(folder.messages(), [], 'a failed attempt leaves NO surface text')
+  const failedStream = [
+    { type: 'chunk' as const, time: 1, chunk: { type: 'reasoning-delta' as const, index: 0, text: 'durable diagnostic' } },
+    { type: 'chunk' as const, time: 2, chunk: { type: 'usage' as const, usage: { inputTokens: 120, outputTokens: 7 } } },
+  ]
+  folder.apply([event('assistant/attempt', { turn: 0, step: 0, stream: failedStream }, 3)])
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant'), [], 'a failed attempt leaves NO surface text')
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['durable diagnostic'])
+  assert.deepEqual(folder.turnActivity(0)?.usage, { inputTokens: 120, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 0 })
+  assert.equal(folder.turnActivity(0)?.totalTokens, 127)
+  assert.equal(folder.turnActivity(0)?.think?.text, 'durable diagnostic')
   folder.apply([event('step/end', { turn: 0, step: 0 }, 4), event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5)])
   assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant'), [],
     'the failed step never renders an assistant row after the turn ends')
-  // Reopen: a cold replay of the same durable log shows the same (nothing).
+  // Reopen: a cold replay removes only surface text and keeps diagnostic reasoning.
   const reopened = new TranscriptFolder()
   reopened.hydrate([
     event('turn/start', { turn: 0 }, 0),
     event('step/start', { turn: 0, step: 0 }, 1),
-    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3),
+    event('assistant/attempt', { turn: 0, step: 0, stream: failedStream }, 3),
     event('step/end', { turn: 0, step: 0 }, 4),
     event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
   ])
   assert.deepEqual(reopened.messages().filter(message => message.kind === 'assistant'), [],
     'cold replay never restores failed-attempt text')
+  assert.deepEqual(reopened.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['durable diagnostic'])
+  assert.deepEqual(reopened.turnActivity(0)?.usage, { inputTokens: 120, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 0 })
+  assert.equal(reopened.turnActivity(0)?.totalTokens, 127)
+  assert.equal(reopened.turnActivity(0)?.think?.text, 'durable diagnostic')
 })
 
 test('an ABANDONED live end removes the transient text (no durable settlement exists)', () => {
@@ -1823,8 +1836,15 @@ test('an ABANDONED live end removes the transient text (no durable settlement ex
     event('step/start', { turn: 0, step: 0 }, 1),
   ])
   folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'partial' }, 2))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'transient thought' }, 3))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } }, 4))
   folder.applyLiveInput(liveAttemptEnd(0, 0, 'abandoned'))
-  assert.deepEqual(folder.messages(), [], 'abandoned output never stays on the surface')
+  assert.deepEqual(folder.messages(), [], 'abandoned output and reasoning never stay on the surface')
+  const activity = folder.turnActivity(0)
+  assert.equal(activity?.message, undefined)
+  assert.equal(activity?.think, undefined)
+  assert.equal(activity?.usage, undefined)
+  assert.equal(activity?.totalTokens, undefined)
 })
 
 test('a retry never concatenates: the durable message carries only the retry text', () => {
@@ -1861,6 +1881,47 @@ test('a retry never concatenates: the durable message carries only the retry tex
   assert.equal(replayed[0].text, 'final answer', 'reopen shows exactly the retry, never the failed prefix')
 })
 
+test('a retry-started durable message replaces prior reasoning, including no reasoning', () => {
+  const attemptA = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'chunk', time: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'A reasoning' } }],
+  }, 2)
+  const retry = event('llm/retry-started', { retryId: 'retry-message' as RetryId, turn: 0, step: 0, retry: 1 }, 3)
+  const messageB = event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId('retry-message-b'),
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'B reasoning' },
+        { type: 'text', text: 'answer' },
+      ],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [],
+  }, 4)
+  const noReasoningB = event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId('retry-message-empty-reasoning'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [],
+  }, 5)
+  const folder = new TranscriptFolder()
+  folder.hydrate([event('turn/start', { turn: 0 }, 0), attemptA, retry, messageB])
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['B reasoning'])
+  assert.equal(folder.turnActivity(0)?.think?.text, 'B reasoning')
+  folder.apply([noReasoningB])
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'thinking'), [])
+  assert.equal(folder.turnActivity(0)?.think, undefined)
+})
+
 test('a committed MESSAGE settlement never removes text — the durable message owns the entry', () => {
   const folder = new TranscriptFolder()
   folder.apply([
@@ -1882,7 +1943,8 @@ test('failed-attempt reasoning resets on retry and matches a cold replay', () =>
     event('turn/start', { turn: 0 }, 0),
     event('step/start', { turn: 0, step: 0 }, 1),
     event('assistant/attempt', { turn: 0, step: 0, stream: [{ type: 'chunk', time: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'attempt A reasoning' } }] }, 3),
-    event('assistant/attempt', { turn: 0, step: 0, stream: [{ type: 'chunk', time: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'attempt B reasoning' } }] }, 4),
+    event('llm/retry-started', { retryId: 'retry-1' as RetryId, turn: 0, step: 0, retry: 1 }, 4),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [{ type: 'chunk', time: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'attempt B reasoning' } }] }, 5),
     event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
   ]
   const reopened = new TranscriptFolder()

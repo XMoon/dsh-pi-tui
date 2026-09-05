@@ -54,7 +54,7 @@ import {
   restoreDshInstall,
   sourceInstallPackages,
 } from './lib/dsh-distribution.mjs'
-import { cleanupTimedOutProcessTree, pnpmExecutable } from './lib/process.mjs'
+import { cleanupTimedOutProcessTree, pnpmBundledNodeGyp, pnpmExecutable } from './lib/process.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -812,7 +812,7 @@ function runPnpmInstall(harnessDir, env, distribution) {
     // node-gyp build never ran; the JSONL backend needs the real flock
     // addon to boot (official preset matrix boots dsh against this
     // harness). Master's pnpm-workspace allowBuilds excludes fs-ext.
-    ensureFsExtBinding(harnessDir)
+    ensureFsExtBinding(harnessDir, env)
   }
   return prepared
 }
@@ -823,20 +823,26 @@ function runPnpmInstall(harnessDir, env, distribution) {
  * cannot boot without it). pnpm keeps fs-ext inside its isolated store
  * under node_modules/.pnpm, so the package directory is located by
  * globbing, never by a hoisted top-level path. */
-function ensureFsExtBinding(harnessDir) {
+function ensureFsExtBinding(harnessDir, env = process.env) {
   const fsExtCandidates = globSync(join(harnessDir, 'node_modules', '.pnpm', 'fs-ext@*', 'node_modules', 'fs-ext'))
   if (fsExtCandidates.length === 0) return
   const fsExtDir = fsExtCandidates[0]
   const binding = join(fsExtDir, 'build', 'Release', 'fs_ext.node')
   if (existsSync(binding)) return
-  // node-gyp ships inside the npm installation; resolve it the same way the
-  // repo's E2E harnesses do (npm root -g), falling back to a PATH binary.
-  const npmRoot = run('npm', ['root', '-g'], { timeout: 30_000, ignoreGateDeadline: true })
-  const bundled = npmRoot.status === 0 ? join(npmRoot.stdout.trim(), 'npm', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js') : ''
-  const gyp = bundled !== '' && existsSync(bundled) ? bundled : 'node-gyp'
+  // pnpm/setup installs a self-contained pnpm executable with its runtime
+  // dependencies beside it. Prefer that bundled node-gyp: the runtime may not
+  // ship npm, and a runner-provided npm can target a different Node ABI.
+  let gyp = pnpmBundledNodeGyp(PNPM_COMMAND, env) ?? ''
+  if (gyp === '') {
+    // Keep the npm/PATH fallback for ordinary local and older pnpm installs.
+    const npmRoot = run('npm', ['root', '-g'], { env, timeout: 30_000, ignoreGateDeadline: true })
+    const npmGyp = npmRoot.status === 0 ? join(npmRoot.stdout.trim(), 'npm', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js') : ''
+    gyp = npmGyp !== '' && existsSync(npmGyp) ? npmGyp : 'node-gyp'
+  }
+  const buildEnv = { ...env, npm_config_ignore_scripts: 'false' }
   const result = gyp === 'node-gyp'
-    ? run(gyp, ['configure', 'build'], { cwd: fsExtDir, env: { ...process.env, npm_config_ignore_scripts: 'false' }, timeout: 5 * 60_000, ignoreGateDeadline: true })
-    : run(process.execPath, [gyp, 'configure', 'build'], { cwd: fsExtDir, env: { ...process.env, npm_config_ignore_scripts: 'false' }, timeout: 5 * 60_000, ignoreGateDeadline: true })
+    ? run(gyp, ['configure', 'build'], { cwd: fsExtDir, env: buildEnv, timeout: 5 * 60_000, ignoreGateDeadline: true })
+    : run(process.execPath, [gyp, 'configure', 'build'], { cwd: fsExtDir, env: buildEnv, timeout: 5 * 60_000, ignoreGateDeadline: true })
   if (result.status !== 0) {
     fail('INFRA_INSTALL_FAILURE', `fs-ext native binding build failed:\n${resultText(result)}`)
   }

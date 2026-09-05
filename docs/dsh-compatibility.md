@@ -97,10 +97,10 @@ cannot be consulted for unpublished DSH metadata;
 The CI policy is deliberately explicit: pushes to `next` and pull requests
 whose base is `next` follow the tracked `test/compat/dsh-mode.json` policy;
 `main` and every tag, including `next-v*`, always use registry-backed npm mode
-with a frozen lockfile. In either `next` mode, the current validated DSH target
-comes from `test/compat/dsh-source.json`'s `expectedVersion`. Source Mode builds
-and validates that pinned source family; npm mode validates the corresponding
-published family from the registry. The Source Mode ecosystem check prints
+with a frozen lockfile. Source Mode builds and validates the pinned source
+family from `test/compat/dsh-source.json`'s `expectedVersion`; npm Mode uses the
+exact DSH version declared by the checkout's `package.json` and resolved by its
+frozen lockfile. The Source Mode ecosystem check prints
 `SKIPPED: requires published compatible DSH/pi2dsh combination` because the
 published `pi2dsh` bridge cannot prove compatibility against an unpublished
 source family. That check remains blocking in npm mode.

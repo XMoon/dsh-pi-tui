@@ -67,7 +67,7 @@ test('context uses the current DSH target in every mode and exposes the source p
   const life = testLifecycle(t)
   const main = resolveDshContext({ eventName: 'push', ref: 'refs/heads/main' })
   assert.equal(main.mode, 'npm')
-  assert.equal(main.version, '0.1.3-alpha.1')
+  assert.equal(main.version, '0.1.2-rc.1')
   assert.equal(main.sourceRef, '')
   assert.equal(main.sourceExpectedVersion, '')
 

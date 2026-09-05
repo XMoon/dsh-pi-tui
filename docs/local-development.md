@@ -165,10 +165,10 @@ have separate responsibilities:
 
 - `dsh-mode.json` selects the branch's normal local/CI development
   distribution.
-- `dsh-source.json` records the current validated DSH family, including the
-  exact source identity used when Source Mode is selected. Its
-  `expectedVersion` is also the npm compatibility target, so it remains
-  tracked when the branch is in npm mode.
+- `dsh-source.json` records the current validated DSH source family, including
+  the exact source identity used when Source Mode is selected. npm Mode instead
+  follows the exact DSH version declared in the checkout's `package.json` and
+  frozen lockfile.
 
 `main` must keep `mode: "npm"`. `next` may change its mode as upstream
 development requires. Release tags always use the npm distribution regardless
@@ -387,9 +387,13 @@ These cost real debugging time once; record new ones here instead of relearning.
   every fresh source-mode install lacks the native flock addon and the JSONL
   backend crashes at boot (`Cannot find module .../fs-ext/build/Release/fs_ext.node`).
   After a source install, build it with node-gyp when the binding is missing.
-  node-gyp lives inside npm: resolve via `npm root -g` (use `spawnSync` to
-  capture stdout — `runBounded` streams stdio and captures nothing) and run
-  `node <that node-gyp.js> configure build` in the fs-ext package dir. Do NOT
+  Prefer pnpm's bundled node-gyp at
+  `<pnpm-dir>/dist/node_modules/node-gyp/bin/node-gyp.js`, executing it with
+  the current `node` (`node <that node-gyp.js> configure build`). This is
+  deterministic under `pnpm/setup@v2`, whose Node runtime may omit npm. Keep
+  the `npm root -g`/PATH fallback only for ordinary local or older pnpm
+  installs; use `spawnSync` for the npm probe because `runBounded` streams
+  stdio and captures nothing. The build runs in the fs-ext package dir. Do NOT
   run bare `node-gyp` through `node <name>` (node treats it as a script path).
 - Never write a glob containing `*/` inside a doc comment
   (e.g. `` `.pnpm/fs-ext@*/node_modules/fs-ext` ``): the `*/` closes the block
@@ -408,9 +412,10 @@ These cost real debugging time once; record new ones here instead of relearning.
   it. Register your own `LlmAdapter` (only `stream(options)` is abstract) for
   that provider id via `ctx.llm.registerAdapter(['mock'], adapter)`.
 - `dsh-mode.json` is the tracked CI switch: next events resolve npm unless it
-  says `source`. npm mode installs `dsh-source.json`'s `expectedVersion` — an
-  unpublished version (e.g. 0.1.3-alpha.1) makes npm-mode CI fail by design,
-  so the 1.3 line must stay in Source Mode.
+  says `source`. Source Mode uses `dsh-source.json`'s `expectedVersion` and its
+  pinned source pack; npm Mode uses the exact DSH version declared by the
+  checkout's `package.json` and resolved by the frozen lockfile. This keeps an
+  unpublished source version (e.g. 0.1.3-alpha.1) out of registry installs.
 
 ### DSH master API/contract cheat sheet
 

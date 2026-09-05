@@ -18,6 +18,7 @@ import {
   loadDshDistribution,
   loadDshSourceConfig,
   npmDshDistribution,
+  npmDshVersion,
   prepareDshInstall,
   restoreDshInstall,
   sourceInstallPackages,
@@ -25,21 +26,13 @@ import {
   validateDshSourceConfig,
   printDshProvenance,
 } from './lib/dsh-distribution.mjs'
-import { pnpmExecutable, runBounded } from './lib/process.mjs'
+import { pnpmBundledNodeGyp, pnpmExecutable, runBounded } from './lib/process.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const PI2DSH_MANIFEST = join(ROOT, 'test', 'compat', 'pi2dsh.json')
 
 function fail(message) {
   throw new Error(message)
-}
-
-function readTargetVersion() {
-  const path = join(ROOT, 'test', 'compat', 'pi2dsh.json')
-  const manifest = JSON.parse(readFileSync(path, 'utf8'))
-  if (typeof manifest.dshVersion !== 'string' || manifest.dshVersion === '') fail(`${path} has no exact dshVersion`)
-  return manifest.dshVersion
 }
 
 /** Build the fs-ext native binding in the target workspace when the
@@ -56,12 +49,17 @@ async function ensureFsExtBinding(target) {
   const fsExtDir = fsExtCandidates[0]
   const binding = join(fsExtDir, 'build', 'Release', 'fs_ext.node')
   if (existsSync(binding)) return
-  // node-gyp ships inside the npm installation; resolve it the same way the
-  // repo's E2E harnesses do (npm root -g), falling back to a PATH binary.
-  // runBounded streams stdio (no capture), so the probe uses spawnSync.
-  const probe = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', timeout: 30_000 })
-  const bundled = probe.status === 0 ? join(probe.stdout.trim(), 'npm', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js') : ''
-  const gyp = bundled !== '' && existsSync(bundled) ? bundled : 'node-gyp'
+  // pnpm/setup installs a self-contained pnpm executable with its runtime
+  // dependencies beside it. Prefer that bundled node-gyp: the runtime may not
+  // ship npm, and a runner-provided npm can target a different Node ABI.
+  let gyp = pnpmBundledNodeGyp(PNPM_COMMAND) ?? ''
+  if (gyp === '') {
+    // Keep the npm/PATH fallback for ordinary local and older pnpm installs.
+    // runBounded streams stdio (no capture), so the probe uses spawnSync.
+    const probe = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', timeout: 30_000 })
+    const npmGyp = probe.status === 0 ? join(probe.stdout.trim(), 'npm', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js') : ''
+    gyp = npmGyp !== '' && existsSync(npmGyp) ? npmGyp : 'node-gyp'
+  }
   const result = gyp === 'node-gyp'
     ? await runBounded(gyp, ['configure', 'build'], { cwd: fsExtDir, env: { ...process.env, npm_config_ignore_scripts: 'false' }, timeoutMs: 5 * 60_000, label: 'fs-ext native binding build' })
     : await runBounded(process.execPath, [gyp, 'configure', 'build'], { cwd: fsExtDir, env: { ...process.env, npm_config_ignore_scripts: 'false' }, timeoutMs: 5 * 60_000, label: 'fs-ext native binding build' })
@@ -131,7 +129,7 @@ export async function prepareDshTestEnvironment({
   mode = process.env.DSH_MODE ?? 'npm',
   distribution,
   workspace = ROOT,
-  dshVersion = readTargetVersion(),
+  dshVersion,
   config = DEFAULT_SOURCE_CONFIG,
   ref,
   expectedVersion,
@@ -153,7 +151,7 @@ export async function prepareDshTestEnvironment({
       sourceConfig,
       allowDirty,
     })
-    : npmDshDistribution(dshVersion)
+    : npmDshDistribution(dshVersion ?? npmDshVersion())
   const prepared = prepareDshInstall(selected, target, {
     materializeSourceDependencies: selected.kind === 'source-pack',
     stripPackageManager: true,
@@ -184,7 +182,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
       mode: values.mode,
       distribution: values.distribution,
       workspace: values.workspace ?? ROOT,
-      dshVersion: values['dsh-version'] ?? readTargetVersion(),
+      dshVersion: values['dsh-version'],
       config: values.config ?? DEFAULT_SOURCE_CONFIG,
       ref: values.ref,
       expectedVersion: values['expected-version'],

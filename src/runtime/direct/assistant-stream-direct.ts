@@ -69,15 +69,21 @@ export type AssistantStreamFrameLike =
 export type AssistantStreamAgentLike = object
 
 /** One accepted in-flight attempt: the durable turn/step owning the
- * request plus the upstream ordering guard state. */
+ * request plus its dense chunk position. Revision fencing belongs to the
+ * Agent lifecycle, not to this attempt record. */
 interface AttemptRecord {
   readonly attemptId: string
   readonly turn: number
   readonly step: number
-  /** Revision of the last ACCEPTED frame (upstream monotone). */
-  lastRevision: number
   /** Number of accepted chunk frames (the dense index must match). */
   chunkCount: number
+}
+
+/** Ordering state for one Agent lifecycle. The Agent's revision is global
+ * across attempts, including retries, and therefore survives closed records. */
+interface AgentState {
+  revision: number
+  readonly attempts: Map<string, AttemptRecord>
 }
 
 /** The adapter's dependencies. */
@@ -93,8 +99,48 @@ export interface AssistantStreamDirectDeps {
 }
 
 /** Narrow an official frame chunk to the presentation chunk surface. The
- * official `StreamChunk` is structurally compatible; unknown chunk kinds
- * are dropped (the presentation has nothing to do with them). */
+ * official `StreamChunk` is structurally compatible; valid kinds the
+ * presentation does not consume are ignored after fencing. */
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/** Validate a raw upstream chunk before it can advance the Agent fence. */
+function isValidStreamChunk(chunk: unknown): boolean {
+  if (typeof chunk !== 'object' || chunk === null) return false
+  const value = chunk as { type?: unknown; index?: unknown; blockType?: unknown; text?: unknown; id?: unknown; name?: unknown; argumentsDelta?: unknown; block?: unknown; usage?: unknown; reason?: unknown }
+  switch (value.type) {
+    case 'block-start':
+      return isNonnegativeSafeInteger(value.index) && typeof value.blockType === 'string' && value.blockType !== ''
+    case 'text-delta':
+    case 'reasoning-delta':
+      return isNonnegativeSafeInteger(value.index) && typeof value.text === 'string'
+    case 'tool-call-delta':
+      return isNonnegativeSafeInteger(value.index)
+        && typeof value.id === 'string'
+        && (value.name === undefined || typeof value.name === 'string')
+        && typeof value.argumentsDelta === 'string'
+    case 'block-end': {
+      const block = value.block as { type?: unknown } | undefined
+      return isNonnegativeSafeInteger(value.index) && typeof block?.type === 'string' && block.type !== ''
+    }
+    case 'usage': {
+      const usage = value.usage as { inputTokens?: unknown; outputTokens?: unknown } | undefined
+      return typeof usage?.inputTokens === 'number'
+        && Number.isFinite(usage.inputTokens)
+        && typeof usage.outputTokens === 'number'
+        && Number.isFinite(usage.outputTokens)
+    }
+    case 'finish':
+      return typeof (value.reason as { kind?: unknown } | undefined)?.kind === 'string'
+        && (value.reason as { kind: string }).kind !== ''
+    default:
+      // Unknown chunk kinds are not part of the accepted master contract; do
+      // not let an unvalidated frame advance the Agent revision fence.
+      return false
+  }
+}
+
 function toLiveChunk(chunk: unknown): AssistantLiveChunk | undefined {
   if (typeof chunk !== 'object' || chunk === null) return undefined
   const value = chunk as { type?: unknown; index?: unknown; text?: unknown; id?: unknown; name?: unknown; argumentsDelta?: unknown; block?: unknown; blockType?: unknown; usage?: unknown; reason?: unknown }
@@ -160,41 +206,52 @@ function toLiveChunk(chunk: unknown): AssistantLiveChunk | undefined {
  * PER EMITTING AGENT OBJECT: the official `start` frame carries the only
  * turn/step, and every chunk/end resolves its turn/step through the
  * attempt record. A chunk/end without a matching open attempt (protocol
- * violation or a replay after the terminal frame) is dropped, as is any
- * frame whose upstream revision is not strictly newer than the last
- * accepted one or whose chunk index is not the next dense position.
+ * violation or a replay after the terminal frame) is dropped. Revisions are
+ * fenced strictly at the Agent-lifecycle level; larger gaps are tolerated at
+ * this local seam, while chunk indexes remain dense within each attempt.
  */
 export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): () => void {
   /** Agent object → attemptId → open attempt. Bounded: an entry lives only
    * between its `start` and terminal `end`; the cap is a safety net for a
    * lost terminal frame (an agent dying mid-attempt). */
-  const attemptsByAgent = new Map<object, Map<string, AttemptRecord>>()
+  const stateByAgent = new Map<object, AgentState>()
   const AGENT_ATTEMPT_CAP = 64
 
-  const recordFor = (agent: object, attemptId: string): AttemptRecord | undefined => {
-    return attemptsByAgent.get(agent)?.get(attemptId)
+  const stateFor = (agent: object): AgentState => {
+    let state = stateByAgent.get(agent)
+    if (state === undefined) {
+      state = { revision: 0, attempts: new Map() }
+      stateByAgent.set(agent, state)
+    }
+    return state
   }
 
-  const openAttempt = (agent: object, record: AttemptRecord): void => {
-    let attempts = attemptsByAgent.get(agent)
-    if (attempts === undefined) {
-      attempts = new Map()
-      attemptsByAgent.set(agent, attempts)
-    }
-    if (attempts.size >= AGENT_ATTEMPT_CAP && !attempts.has(record.attemptId)) {
+  const acceptRevision = (state: AgentState, revision: number): boolean => {
+    // Revisions are global to the Agent lifecycle, not to an attempt. A
+    // delayed/replayed frame from a closed attempt must therefore be rejected
+    // even though that attempt's record is already gone. Gaps are tolerated at
+    // this local event seam; only non-newer revisions are stale.
+    if (revision <= state.revision) return false
+    state.revision = revision
+    return true
+  }
+
+  const recordFor = (state: AgentState, attemptId: string): AttemptRecord | undefined => {
+    return state.attempts.get(attemptId)
+  }
+
+  const openAttempt = (state: AgentState, record: AttemptRecord): void => {
+    if (state.attempts.size >= AGENT_ATTEMPT_CAP && !state.attempts.has(record.attemptId)) {
       // Safety net: evict the oldest open attempt (its terminal frame was
       // lost). Maps preserve insertion order.
-      const oldest = attempts.keys().next().value
-      if (oldest !== undefined) attempts.delete(oldest)
+      const oldest = state.attempts.keys().next().value
+      if (oldest !== undefined) state.attempts.delete(oldest)
     }
-    attempts.set(record.attemptId, record)
+    state.attempts.set(record.attemptId, record)
   }
 
-  const closeAttempt = (agent: object, attemptId: string): void => {
-    const attempts = attemptsByAgent.get(agent)
-    if (attempts === undefined) return
-    attempts.delete(attemptId)
-    if (attempts.size === 0) attemptsByAgent.delete(agent)
+  const closeAttempt = (state: AgentState, attemptId: string): void => {
+    state.attempts.delete(attemptId)
   }
 
   const handler = (payload: unknown): void => {
@@ -205,21 +262,20 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
     if (!deps.isCurrentAgent(envelope.agent)) return
     const agent = envelope.agent
     const frame = envelope.frame as AssistantStreamFrameLike
-    if (typeof frame !== 'object' || frame === null || typeof frame.revision !== 'number') return
+    if (typeof frame !== 'object' || frame === null || !Number.isSafeInteger(frame.revision) || frame.revision < 0) return
+    const state = stateFor(agent)
     switch (frame.type) {
       case 'start': {
-        if (typeof frame.turn !== 'number' || typeof frame.step !== 'number') return
-        const attemptId = String(frame.attemptId)
-        if (attemptId === '') return
-        const existing = recordFor(agent, attemptId)
-        // A duplicate start for the same attempt is a protocol violation;
-        // a strictly newer revision wins (upstream revision is monotone).
-        if (existing !== undefined && frame.revision <= existing.lastRevision) return
-        openAttempt(agent, {
+        if (!isNonnegativeSafeInteger(frame.turn) || !isNonnegativeSafeInteger(frame.step)) return
+        if (typeof frame.attemptId !== 'string' || frame.attemptId === '') return
+        const attemptId = frame.attemptId
+        const existing = recordFor(state, attemptId)
+        // A duplicate start for the same attempt is a protocol violation.
+        if (existing !== undefined || !acceptRevision(state, frame.revision)) return
+        openAttempt(state, {
           attemptId,
           turn: frame.turn,
           step: frame.step,
-          lastRevision: frame.revision,
           chunkCount: 0,
         })
         deps.onInput({
@@ -232,18 +288,16 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
         break
       }
       case 'chunk': {
-        if (typeof frame.index !== 'number' || typeof frame.time !== 'number') return
-        const attemptId = String(frame.attemptId)
-        const record = recordFor(agent, attemptId)
+        if (!isNonnegativeSafeInteger(frame.index) || !Number.isSafeInteger(frame.time)) return
+        if (typeof frame.attemptId !== 'string' || frame.attemptId === '') return
+        const attemptId = frame.attemptId
+        const record = recordFor(state, attemptId)
         if (record === undefined) return
-        // Ordering guards: the upstream revision is monotone within the
-        // agent lifecycle, and chunk index is dense within the attempt.
-        // The dense position advances for EVERY delivered frame — kinds
-        // the presentation does not consume (block-start, finish, ...)
-        // still occupy an index slot upstream.
-        if (frame.revision <= record.lastRevision) return
-        if (frame.index !== record.chunkCount) return
-        record.lastRevision = frame.revision
+        // The dense position advances for EVERY accepted valid frame — kinds
+        // the presentation does not consume (block-start, finish, ...) still
+        // occupy an index slot upstream.
+        if (frame.index !== record.chunkCount || !isValidStreamChunk(frame.chunk)) return
+        if (!acceptRevision(state, frame.revision)) return
         record.chunkCount += 1
         const chunk = toLiveChunk(frame.chunk)
         if (chunk === undefined) return
@@ -259,19 +313,24 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
         break
       }
       case 'end': {
-        if (typeof frame.index !== 'number') return
-        const attemptId = String(frame.attemptId)
-        const record = recordFor(agent, attemptId)
+        if (!isNonnegativeSafeInteger(frame.index)) return
+        if (typeof frame.attemptId !== 'string' || frame.attemptId === '') return
+        const attemptId = frame.attemptId
+        const record = recordFor(state, attemptId)
         if (record === undefined) return
-        if (frame.revision <= record.lastRevision) return
+        // The terminal index is the next dense position after all chunks.
+        if (frame.index !== record.chunkCount) return
         const outcome = frame.outcome
         if (typeof outcome !== 'object' || outcome === null) return
         const committed = outcome.kind === 'committed'
+        if (!committed && outcome.kind !== 'abandoned') return
         const settlement: 'message' | 'attempt' | undefined = committed
           ? outcome.eventType === 'assistant/message' ? 'message'
             : outcome.eventType === 'assistant/attempt' ? 'attempt' : undefined
           : undefined
-        closeAttempt(agent, attemptId)
+        if (committed && (settlement === undefined || !isNonnegativeSafeInteger(outcome.seq))) return
+        if (!acceptRevision(state, frame.revision)) return
+        closeAttempt(state, attemptId)
         deps.onInput({
           kind: 'end',
           sessionId: String((agent as { session?: { id?: unknown } }).session?.id ?? ''),
@@ -288,5 +347,6 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
   const dispose = deps.ctx.on('agent/assistant-stream', handler)
   return () => {
     dispose()
+    stateByAgent.clear()
   }
 }

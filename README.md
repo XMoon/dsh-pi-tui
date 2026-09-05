@@ -544,7 +544,7 @@ pnpm compat:dsh:npm
 
 ### CI 验证策略
 
-CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。`next` 的两种 lane 都从 `test/compat/dsh-source.json` 读取当前 validated DSH target；Source Mode 会验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界，npm Mode 则运行冻结的 registry lane。对于尚未发布的 source family，已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md)。
+CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。Source Mode 从 `test/compat/dsh-source.json` 读取 source target 并验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界；npm Mode 则使用 checkout 的 `package.json`/冻结 lockfile 中声明的 DSH 版本运行 registry lane。对于尚未发布的 source family，已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md)。
 
 ## 项目结构
 

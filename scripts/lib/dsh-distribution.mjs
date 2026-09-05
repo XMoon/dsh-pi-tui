@@ -29,6 +29,7 @@ export const DEFAULT_SOURCE_CONFIG = join(PACKAGE_ROOT, 'test', 'compat', 'dsh-s
 export const SOURCE_MANIFEST_NAME = 'dsh-source-distribution.json'
 export const DSH_ROOT_PACKAGE = '@deepseek-ai/dsh-root'
 export const DSH_CLI_PACKAGE = '@deepseek-ai/dsh'
+export const DSH_AGENT_PACKAGE = '@deepseek-ai/dsh-agent'
 export const DSH_REPOSITORY = 'deepseek-ai/deepseek-harness'
 const FULL_SHA = /^[0-9a-f]{40}$/iu
 const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u
@@ -157,6 +158,18 @@ export function validateDshSourceConfig(config, path = '<inline>') {
     'DSH source config expectedVersion',
   )
   return { schemaVersion: 1, repository, ref, expectedVersion, path: resolve(path) }
+}
+
+/** Return the exact registry DSH version declared by this checkout.
+ * The lockfile is then authoritative for the frozen install; this exact
+ * package declaration selects the npm lane without reusing the unpublished
+ * Source Mode pin. */
+export function npmDshVersion(packageJson = readJson(join(PACKAGE_ROOT, 'package.json'), 'package.json')) {
+  const devDependencies = objectValue(packageJson.devDependencies ?? {}, 'package.json devDependencies')
+  return assertVersion(
+    stringValue(devDependencies[DSH_AGENT_PACKAGE], `package.json devDependencies.${DSH_AGENT_PACKAGE}`),
+    `package.json devDependencies.${DSH_AGENT_PACKAGE}`,
+  )
 }
 
 /**

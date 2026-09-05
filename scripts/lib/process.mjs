@@ -11,7 +11,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 /**
  * Resolve the installed pnpm binary instead of a project self-management shim.
@@ -35,6 +35,18 @@ export function pnpmExecutable() {
     // The platform may use a binary/cmd shim; let spawn resolve it normally.
   }
   return shim
+}
+
+/** Locate the node-gyp bundled with pnpm's self-contained executable. */
+export function pnpmBundledNodeGyp(command = pnpmExecutable(), env = process.env) {
+  const roots = [dirname(command)]
+  const home = env.PNPM_HOME
+  if (home !== undefined && home !== '') roots.push(home)
+  for (const root of roots) {
+    const candidate = join(root, 'dist', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js')
+    if (existsSync(candidate)) return candidate
+  }
+  return undefined
 }
 
 const active = new Set()

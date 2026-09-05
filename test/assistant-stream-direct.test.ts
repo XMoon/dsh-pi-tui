@@ -170,9 +170,9 @@ test('chunk kinds the presentation ignores still occupy their dense index slot',
   const { emit, sink, dispose } = harness(subject => subject === current)
   try {
     emit(current, startFrame('e1', 0, 0))
-    emit(current, chunkFrame('e1', 0, { type: 'block-start', blockType: 'reasoning' })) // unconsumed kind
+    emit(current, chunkFrame('e1', 0, { type: 'block-start', index: 0, blockType: 'reasoning' })) // unconsumed kind
     emit(current, chunkFrame('e1', 1, textChunk(1, 'after block-start')))
-    emit(current, chunkFrame('e1', 2, { type: 'finish', reason: 'stop' })) // unconsumed kind
+    emit(current, chunkFrame('e1', 2, { type: 'finish', reason: { kind: 'stop' } })) // unconsumed kind
     emit(current, chunkFrame('e1', 3, textChunk(3, 'tail')))
     emit(current, committedEnd('e1', 4, 'assistant/message'))
     const texts = sink.inputs.filter(input => input.kind === 'chunk').map(input => (input as { chunk: { text: string } }).chunk.text)
@@ -201,22 +201,44 @@ test('the identity fence is EXACT Agent object identity: a retired agent is refu
   }
 })
 
-test('two live Agents (main + viewed child) keep separate attempt state', () => {
+test('two live Agents (main + viewed child) keep separate revision and attempt state', () => {
   const main = agent('m')
   const child = agent('k')
   const { emit, sink, dispose } = harness(subject => subject === main || subject === child)
   try {
-    emit(main, startFrame('m1', 5, 0))
-    emit(child, startFrame('k1', 1, 0))
-    emit(main, chunkFrame('m1', 0, textChunk(0, 'main text')))
-    emit(child, chunkFrame('k1', 0, textChunk(0, 'child text')))
-    emit(child, committedEnd('k1', 1, 'assistant/attempt'))
-    emit(main, chunkFrame('m1', 1, textChunk(1, 'main tail')))
-    emit(main, committedEnd('m1', 2, 'assistant/message'))
+    emit(main, { type: 'start', attemptId: 'm1', revision: 1, turn: 5, step: 0 })
+    emit(child, { type: 'start', attemptId: 'k1', revision: 1, turn: 1, step: 0 })
+    emit(main, { type: 'chunk', attemptId: 'm1', revision: 2, index: 0, time: 1, chunk: textChunk(0, 'main text') })
+    emit(child, { type: 'chunk', attemptId: 'k1', revision: 2, index: 0, time: 1, chunk: textChunk(0, 'child text') })
+    emit(child, { type: 'end', attemptId: 'k1', revision: 3, index: 1, outcome: { kind: 'committed', eventType: 'assistant/attempt', seq: 7 } })
+    emit(main, { type: 'chunk', attemptId: 'm1', revision: 3, index: 1, time: 2, chunk: textChunk(1, 'main tail') })
+    emit(main, { type: 'end', attemptId: 'm1', revision: 4, index: 2, outcome: { kind: 'committed', eventType: 'assistant/message', seq: 7 } })
     const mainChunks = sink.inputs.filter(input => input.kind === 'chunk' && input.sessionId === 'session-m')
     const childChunks = sink.inputs.filter(input => input.kind === 'chunk' && input.sessionId === 'session-k')
     assert.deepEqual(mainChunks.map(input => (input as { chunk: { text: string } }).chunk.text), ['main text', 'main tail'])
     assert.deepEqual(childChunks.map(input => (input as { chunk: { text: string } }).chunk.text), ['child text'])
+  } finally {
+    dispose()
+  }
+})
+
+test('the Agent revision fence survives closed attempts and rejects delayed old frames', () => {
+  const current = agent('retry')
+  const { emit, sink, dispose } = harness(subject => subject === current)
+  try {
+    const oldChunk = { type: 'chunk' as const, attemptId: 'a', revision: 2, index: 0, time: 1, chunk: textChunk(0, 'A') }
+    emit(current, { type: 'start', attemptId: 'a', revision: 1, turn: 0, step: 0 })
+    emit(current, oldChunk)
+    emit(current, { type: 'end', attemptId: 'a', revision: 3, index: 1, outcome: { kind: 'committed', eventType: 'assistant/attempt', seq: 7 } })
+    emit(current, { type: 'start', attemptId: 'b', revision: 4, turn: 0, step: 0 })
+    emit(current, { type: 'chunk', attemptId: 'b', revision: 5, index: 0, time: 2, chunk: textChunk(0, 'B') })
+    // This old frame names a closed attempt; it must not reset the Agent fence
+    // or reach the current attempt.
+    emit(current, oldChunk)
+    emit(current, { type: 'chunk', attemptId: 'b', revision: 6, index: 1, time: 3, chunk: textChunk(1, 'B tail') })
+    emit(current, { type: 'end', attemptId: 'b', revision: 7, index: 2, outcome: { kind: 'committed', eventType: 'assistant/message', seq: 8 } })
+    const chunks = sink.inputs.filter(input => input.kind === 'chunk')
+    assert.deepEqual(chunks.map(input => (input as { chunk: { text: string } }).chunk.text), ['A', 'B', 'B tail'])
   } finally {
     dispose()
   }
@@ -231,9 +253,16 @@ test('malformed frames are dropped without throwing', () => {
     const malformed = (frame: unknown): AssistantStreamFrameLike => frame as AssistantStreamFrameLike
     emit(current, malformed({ type: 'start', attemptId: '', revision: 1, turn: 0, step: 0 })) // empty attempt id
     emit(current, malformed({ type: 'chunk', attemptId: 'g1', revision: 2, index: 0, time: 1, chunk: null })) // null chunk
+    emit(current, malformed({ type: 'chunk', attemptId: 'g1', revision: 100, index: 0, time: 1, chunk: textChunk(0, 'unknown attempt') })) // high unknown revision
     emit(current, malformed({ type: 'chunk', attemptId: 'g1', revision: 'x', index: 0, time: 1, chunk: { type: 'text-delta' } })) // bad revision
     emit(current, malformed({ type: 'end', attemptId: 'g1', revision: 3, index: 0, outcome: { kind: 'bogus' } })) // bad outcome
-    assert.equal(sink.inputs.length, 0)
+    // Invalid/unknown frames must not advance the Agent fence.
+    emit(current, malformed({ type: 'start', attemptId: 'g1', revision: 1, turn: 0, step: 0 }))
+    emit(current, malformed({ type: 'chunk', attemptId: 'g1', revision: 2, index: 0, time: 1, chunk: { type: 'future-chunk' } })) // unknown chunk kind
+    emit(current, malformed({ type: 'chunk', attemptId: 'g1', revision: 2, index: 0, time: 1, chunk: textChunk(0, 'valid') }))
+    emit(current, malformed({ type: 'end', attemptId: 'g1', revision: 100, index: 2, outcome: { kind: 'abandoned' } })) // invalid dense terminal index
+    emit(current, malformed({ type: 'end', attemptId: 'g1', revision: 3, index: 1, outcome: { kind: 'abandoned' } }))
+    assert.deepEqual(sink.inputs.map(input => input.kind), ['start', 'chunk', 'end'])
   } finally {
     dispose()
   }

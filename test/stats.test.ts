@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { computeStats, formatStats, StatsFolder, type SessionStats } from '../src/stats.ts'
 import { StepUsageAccumulator } from '../src/token-usage.ts'
@@ -827,23 +828,31 @@ test('late usage after turn/end is ignored by BOTH the stats fold and the Focus 
   assert.equal(folder.turnActivity(0)!.totalTokens, 100, 'the Focus per-turn total must agree with the footer')
 })
 
-test('a FAILED attempt (assistant/attempt) leaves NO usage in BOTH folds (live == reopen)', () => {
+test('an assistant/attempt counts the last usage in its durable stream', () => {
   const t = 1_700_000_000_000
   const events = [
     event('turn/start', { turn: 0 }, 0, t),
     event('step/start', { turn: 0, step: 0 }, 1, t + 1),
-    // provisional streaming usage of the doomed attempt
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } } }, 2, t + 2),
-    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3, t + 3),
+    // The live value is provisional and differs from the durable settlement.
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 90, outputTokens: 4 } } }, 2, t + 2),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [
+        { type: 'chunk', time: t + 3, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } } },
+        { type: 'chunk', time: t + 4, chunk: { type: 'usage', usage: { inputTokens: 120, outputTokens: 7 } } },
+      ],
+    }, 3, t + 3),
     event('step/end', { turn: 0, step: 0 }, 4, t + 4),
     event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5, t + 5),
   ]
   const stats = foldStats(events)
-  assert.equal(stats.inputTokens, 0, "the failed attempt provisional usage must not be committed")
-  assert.equal(stats.outputTokens, 0)
-  // Reopen parity: a cold durable replay (no live chunks) shows the same zeros.
+  assert.equal(stats.inputTokens, 120, 'the durable attempt replaces, not adds to, live provisional usage')
+  assert.equal(stats.outputTokens, 7)
+  // Reopen parity: the cold durable replay sees the same authoritative usage.
   const cold = computeStats(events.filter(item => (item.type as string) !== 'assistant/chunk'))
-  assert.equal(cold.inputTokens, 0, 'cold replay agrees with the live fold')
+  assert.equal(cold.inputTokens, 120, 'cold replay agrees with the live fold')
+  assert.equal(cold.outputTokens, 7)
 })
 
 test('a FAILED attempt never settles TTFT/timing in BOTH folds', () => {
@@ -865,26 +874,113 @@ test('a FAILED attempt never settles TTFT/timing in BOTH folds', () => {
   assert.equal(liveStats.llmMs, 0)
 })
 
-test("a SUCCESSFUL retry usage survives: only the failed attempt is discarded", () => {
+test('a retry accumulates attempts while settling logical-step timing once', () => {
   const t = 1_700_000_000_000
   const events = [
     event('turn/start', { turn: 0 }, 0, t),
-    event('step/start', { turn: 0, step: 0 }, 1, t + 1),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } } }, 2, t + 2),
-    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3, t + 3),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 100),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'failed' } }, 2, t + 200),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } } }, 3, t + 220),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'chunk', time: t + 300, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } } }],
+    }, 4, t + 300),
+    event('llm/retry', {
+      retryId: 'retry-1' as RetryId,
+      turn: 0,
+      step: 0,
+      provider: 'p',
+      mode: 'normal',
+      policyKey: 'test',
+      retry: 1,
+      maxRetries: 2,
+      delayMs: 0,
+      failure: { message: 'failed', code: 'TEST' },
+    }, 5, t + 400),
+    event('llm/retry-started', { retryId: 'retry-1' as RetryId, turn: 0, step: 0, retry: 1 }, 6, t + 500),
     // retry on the SAME step streams a fresh cumulative usage fact
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 200, outputTokens: 9 } } }, 4, t + 4),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 200, outputTokens: 9 } } }, 7, t + 600),
     event('assistant/message', {
       turn: 0, step: 0,
       message: { id: MessageId('m-retry'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
       usage: { inputTokens: 200, outputTokens: 9 },
       stream: [],
-    }, 5, t + 5),
-    event('step/end', { turn: 0, step: 0 }, 6, t + 6),
-    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7, t + 7),
+    }, 8, t + 800),
+    event('step/end', { turn: 0, step: 0 }, 9, t + 900),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 10, t + 1_000),
   ]
   const stats = foldStats(events)
-  assert.equal(stats.inputTokens, 200, "the failed attempt is discarded; the retry authoritative usage is counted once")
+  assert.equal(stats.inputTokens, 300, 'the failed attempt and retry usage are both billed')
+  assert.equal(stats.outputTokens, 14)
+  assert.equal(stats.llmMs, 700, 'the retry reuses the original step start for wall time')
+  assert.equal(stats.firstTokenMsAvg, 100, 'the first token of the logical step survives the failed attempt')
+  const cold = computeStats(events.filter(item => (item.type as string) !== 'assistant/chunk'))
+  assert.equal(cold.inputTokens, 300, 'cold replay keeps both attempt totals')
+  assert.equal(cold.outputTokens, 14)
+  assert.equal(cold.llmMs, 700, 'cold replay retains the open timing until the final message')
+})
+
+test('a live assistant/attempt settlement keeps timing open for its retry', () => {
+  const t = 1_700_000_000_000
+  const folder = new StatsFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 100),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'failed' }, t + 200))
+  folder.applyLiveInput({
+    kind: 'end',
+    sessionId: 'test',
+    attemptId: 'attempt-1',
+    turn: 0,
+    step: 0,
+    status: 'committed',
+    settlement: 'attempt',
+  })
+  folder.apply([
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'chunk', time: t + 300, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } } }],
+    }, 2, t + 300),
+    event('llm/retry-started', { retryId: 'retry-live' as RetryId, turn: 0, step: 0, retry: 1 }, 3, t + 500),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: { id: MessageId('m-live-retry'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 200, outputTokens: 9 },
+      stream: [],
+    }, 4, t + 800),
+    event('step/end', { turn: 0, step: 0 }, 5, t + 900),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6, t + 1_000),
+  ])
+  const stats = folder.snapshot()
+  assert.equal(stats.llmMs, 700)
+  assert.equal(stats.firstTokenMsAvg, 100)
+  assert.equal(stats.inputTokens, 300)
+  assert.equal(stats.outputTokens, 14)
+})
+
+test('without llm/retry-started, a later same-step settlement replaces the slot', () => {
+  const usageA = { inputTokens: 100, outputTokens: 5 }
+  const usageB = { inputTokens: 200, outputTokens: 9 }
+  const events = [
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'chunk', time: 1, chunk: { type: 'usage', usage: usageA } }],
+    }, 0),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: { id: MessageId('m-no-retry'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: usageB,
+      stream: [],
+    }, 1),
+  ]
+  const stats = computeStats(events)
+  assert.equal(stats.inputTokens, 200)
   assert.equal(stats.outputTokens, 9)
 })
 
@@ -897,11 +993,25 @@ test('a duplicate step/start never leaks the open step pending usage', () => {
   assert.equal(acc.sessionTotals().inputTokens, 100, 'the duplicate start must not lose the pending usage')
 })
 
-test('discardStep drops a FAILED attempt\'s provisional usage without committing it', () => {
+test('a durable failed attempt commits usage and retry-started opens an additive slot', () => {
+  const acc = new StepUsageAccumulator()
+  acc.onStepStart(0, 0)
+  acc.onUsageChunk(0, 0, { inputTokens: 90, outputTokens: 4 })
+  acc.onAssistantAttempt(0, 0, { inputTokens: 100, outputTokens: 5 })
+  assert.equal(acc.sessionTotals().inputTokens, 100)
+  acc.onRetryStarted(0, 0)
+  acc.onUsageChunk(0, 0, { inputTokens: 200, outputTokens: 9 })
+  acc.onAssistantMessage(0, 0, { inputTokens: 200, outputTokens: 9 })
+  acc.onStepEnd(0, 0)
+  assert.equal(acc.sessionTotals().inputTokens, 300)
+  assert.equal(acc.sessionTotals().outputTokens, 14)
+})
+
+test('discardStep drops an ABANDONED attempt\'s provisional usage without committing it', () => {
   const acc = new StepUsageAccumulator()
   acc.onStepStart(0, 0)
   acc.onUsageChunk(0, 0, { inputTokens: 100, outputTokens: 0 })
-  acc.discardStep(0, 0) // the attempt failed — assistant/attempt carries no usage
+  acc.discardStep(0, 0) // the live attempt was abandoned without a durable event
   assert.equal(acc.sessionTotals().inputTokens, 0, 'nothing was committed for the failed attempt')
   assert.equal(acc.turnUsageWithPending(0), undefined, 'the turn shows no usage for the failed step')
   acc.onStepEnd(0, 0)

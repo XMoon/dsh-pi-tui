@@ -18,10 +18,9 @@ import { parseArgs } from 'node:util'
 
 import { pnpmExecutable, runBounded } from './lib/process.mjs'
 import {
-  DEFAULT_SOURCE_CONFIG,
   PACKAGE_ROOT,
-  loadDshSourceConfig,
   npmDshDistribution,
+  npmDshVersion,
   prepareDshInstall,
   restoreDshInstall,
   assertNoSourceLeak,
@@ -59,7 +58,6 @@ function parseCli() {
     args,
     options: {
       'dsh-version': { type: 'string' },
-      config: { type: 'string' },
       keep: { type: 'boolean' },
     },
     allowPositionals: false,
@@ -123,8 +121,7 @@ export function candidateTarball(workspace) {
 
 async function main() {
   const values = parseCli()
-  const config = loadDshSourceConfig(values.config ?? DEFAULT_SOURCE_CONFIG)
-  const distribution = npmDshDistribution(values['dsh-version'] ?? config.expectedVersion)
+  const distribution = npmDshDistribution(values['dsh-version'] ?? npmDshVersion())
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-npm-'))
   const workspace = join(root, 'workspace')
   const npmConfigPath = join(root, 'npmrc')
