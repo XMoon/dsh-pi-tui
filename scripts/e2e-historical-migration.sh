@@ -24,14 +24,30 @@
 #      step);
 #   8. the resumed transcript renders the migrated historical content
 #      (user messages, assistant reply, compaction summary);
-#   9. a new user turn + completed assistant turn is appended through the
-#      OFFICIAL persistence API (TUI input needs a live model, so the
-#      sanctioned fallback is used: official append, then TUI reopen);
-#  10. the TUI is disposed (/exit);
+#   9. the session is CONTINUED through the REAL Agent loop (P1-3): the TUI
+#      editor submits the user turn "continue", the resumed Agent runs a
+#      real llm.stream against a DETERMINISTIC MOCK LLM (an in-script
+#      OpenAI-compatible SSE server behind the official deepseek-official
+#      route via the `llm-deepseek` settings section), the assistant reply
+#      settles, and the turn/end event lands in the official log — no
+#      manual append through the persistence API is involved;
+#  10. the TUI is disposed (/exit) — a clean process exit that flushes the
+#      live log;
 #  11. the TUI reopens the session;
-#  12. historical content AND the new turn both render;
+#  12. historical content AND the real new turn (user "continue" + mock
+#      assistant reply) both render;
 #  13. the old generation's hash is unchanged (source immutability);
 #  14. the current generation is readable through the official persistence.
+#
+# The mock LLM is a self-contained node script (no dependencies) started by
+# this script on a random port and killed by PID at teardown. It answers
+# every POST /v1/chat/completions with one fixed plain-text reply and no
+# tool_calls, so the Agent completes exactly one assistant turn per user
+# turn. The E2E profile never needs a real model credential: the official
+# DeepSeek adapter (route `deepseek-official`, model `deepseek-v4-flash`)
+# resolves its base URL from the profile's `$DSH_HOME/settings.yaml`
+# `llm-deepseek:` section and its key from `$DSH_HOME/.credentials.yaml` /
+# the environment.
 #
 # Both chains (v0 and v1) run in SEPARATE fresh DSH_HOMEs: the v1 fixture is
 # the official identity migration of the v0 fixture, so both carry the same
@@ -40,21 +56,25 @@
 # Usage:
 #   scripts/e2e-historical-migration.sh [--keep]
 #
-#   --keep    keep the tmux session and DSH_HOMEs on failure for inspection
+#   --keep    keep the tmux session, DSH_HOMEs, and the mock LLM process on
+#             failure for inspection
 #
 # Environment:
 #   MASTER_ENV   path to the master DSH environment (default
-#                /tmp/dsh-pi-tui-audit-bnktVF); its node_modules must hold
+#                /tmp/dsh-pi-tui-master-env); its node_modules must hold
 #                the master @deepseek-ai packages and its .bin/dsh CLI.
+#                Regenerate it with scripts/dsh-source-pack.mjs +
+#                scripts/prepare-dsh-test-environment.mjs (source mode)
+#                against the pinned deepseek-harness checkout.
 #
 # This script is intentionally NOT part of `pnpm test:bundle` (it needs a
-# real TTY via tmux, the master environment, and ~2min of wall time). Run
+# real TTY via tmux, the master environment, and ~3min of wall time). Run
 # it on demand:  scripts/e2e-historical-migration.sh
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MASTER_ENV="${MASTER_ENV:-/tmp/dsh-pi-tui-audit-bnktVF}"
+MASTER_ENV="${MASTER_ENV:-/tmp/dsh-pi-tui-master-env}"
 PROFILE_NAME="e2e-historical-migration"
 KEEP=0
 for arg in "$@"; do
@@ -70,10 +90,17 @@ say() { printf '%s\n' "$*"; }
 ok()  { PASS=$((PASS+1)); printf '  \033[32mok\033[0m  %s\n' "$*"; }
 bad() { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 
+# Deterministic mock LLM vocabulary (P1-3). The typed user turn is exactly
+# "continue" (the review's required gesture); the mock's fixed reply is the
+# marker every render/settle assertion searches for.
+USER_CONTINUE_TEXT="continue"
+MOCK_REPLY_TEXT="deterministic mock reply: continuing the old session"
+
 # ── 0. environment validation ──────────────────────────────────────────
 if [ ! -x "$MASTER_ENV/node_modules/.bin/dsh" ]; then
   echo "FAIL: master dsh CLI not found at $MASTER_ENV/node_modules/.bin/dsh" >&2
   echo "      set MASTER_ENV to the master DSH environment" >&2
+  echo "      (regenerate: scripts/dsh-source-pack.mjs + scripts/prepare-dsh-test-environment.mjs --mode source)" >&2
   exit 1
 fi
 if [ ! -d "$MASTER_ENV/node_modules/@deepseek-ai/dsh-session-persistence-jsonl" ]; then
@@ -96,6 +123,9 @@ fi
 
 TMUX_SESSION="dsh-e2e-historical-migration-$$"
 E2E_HOMES=()
+# Mock LLM server PIDs started by THIS script (one per chain), killed by PID
+# in cleanup — never a broad pkill.
+MOCK_PIDS=()
 
 # Only this script's own dsh processes: the master CLI's real process
 # command line is `node .../@deepseek-ai/dsh/lib/bin.js --profile
@@ -106,9 +136,12 @@ dsh_pids() { pgrep -f "^node .*dsh/lib/bin\.js --profile $PROFILE_NAME" || true;
 cleanup() {
   for pid in $(dsh_pids); do kill "$pid" 2>/dev/null || true; done
   if [ "$KEEP" -eq 1 ]; then
-    echo "== kept for inspection: tmux session $TMUX_SESSION, DSH_HOMEs: ${E2E_HOMES[*]:-none} =="
+    echo "== kept for inspection: tmux session $TMUX_SESSION, DSH_HOMEs: ${E2E_HOMES[*]:-none}, mock pids: ${MOCK_PIDS[*]:-none} =="
   else
     tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    for pid in "${MOCK_PIDS[@]:-}"; do
+      [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
     for home in "${E2E_HOMES[@]:-}"; do
       [ -n "$home" ] && rm -rf "$home"
     done
@@ -116,8 +149,42 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ── deterministic mock LLM (in-script, dependency-free) ─────────────────
+# start_mock <home> — starts <home>/mock-llm.mjs, waits for its
+# MOCK-READY <port> line, echoes the port ("" on failure).
+start_mock() {
+  local home="$1"
+  local pid log="$home/mock-llm.log"
+  local port="" elapsed=0
+  node "$home/mock-llm.mjs" >"$log" 2>&1 &
+  pid=$!
+  MOCK_PIDS+=("$pid")
+  while [ "$elapsed" -lt 40 ]; do
+    port="$(sed -n 's/^MOCK-READY \([0-9][0-9]*\)$/\1/p' "$log" | head -1)"
+    [ -n "$port" ] && break
+    sleep 0.5
+    elapsed=$((elapsed+1))
+  done
+  if [ -z "$port" ]; then
+    echo "mock llm failed to start:" >&2
+    sed 's/^/  /' "$log" >&2 || true
+  fi
+  echo "$port"
+}
+# wait_mock_requests <home> <need> <timeout_s> — 0 once the mock served at
+# least <need> POST /chat/completions requests (a real llm.stream hit it).
+wait_mock_requests() {
+  local home="$1" need="$2" timeout="$3" elapsed=0
+  while [ "$(grep -c '^REQUEST ' "$home/mock-llm.log" 2>/dev/null || true)" -lt "$need" ]; do
+    sleep 0.5
+    elapsed=$((elapsed+1))
+    if [ "$elapsed" -ge $((timeout*2)) ]; then return 1; fi
+  done
+  return 0
+}
+
 # ── tmux harness (one pane, reused across both chains) ──────────────────
-tmux new-session -d -s "$TMUX_SESSION" -x 120 -y 34
+tmux new-session -d -s "$TMUX_SESSION" -x 120 -y 50
 PANE="$TMUX_SESSION:0.0"
 
 pane_text() { tmux capture-pane -t "$1" -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr '\n' ' '; }
@@ -150,10 +217,15 @@ wait_pane_text() { # wait_pane_text <pane> <needle> <timeout_s> — 0 when the p
 }
 launch_tui() { # launch_tui <workDir> [--session <id>] — a real dsh process
   local work="$1"; shift
+  # The deterministic-mock environment rides on every launch: the
+  # e2e-mock-provider profile bundle registers an LlmAdapter for the
+  # fixture's durable provider route "mock" and streams REAL HTTP chat
+  # completions against the in-script mock server (E2E_MOCK_BASE_URL).
+  # DEEPSEEK_API_KEY satisfies the credential plane of the base layer.
   tmux send-keys -t "$PANE" -l "cd $work"
   tmux send-keys -t "$PANE" Enter
   sleep 0.6
-  tmux send-keys -t "$PANE" -l "env -u NO_COLOR DSH_TELEMETRY_DISABLED=1 DSH_HOME=$E2E_HOME $MASTER_ENV/node_modules/.bin/dsh --profile $PROFILE_NAME $*"
+  tmux send-keys -t "$PANE" -l "env -u NO_COLOR DSH_TELEMETRY_DISABLED=1 DEEPSEEK_API_KEY=e2e-mock-key E2E_MOCK_BASE_URL=http://127.0.0.1:$MOCK_PORT/v1 E2E_MOCK_REPLY_TEXT="$MOCK_REPLY_TEXT" DSH_HOME=$E2E_HOME $MASTER_ENV/node_modules/.bin/dsh --profile $PROFILE_NAME $*"
   sleep 0.4
   tmux send-keys -t "$PANE" Enter
 }
@@ -194,7 +266,7 @@ quit_pane() { # quit_pane — clean /exit if a TUI is up, then wait for ITS proc
   return 0
 }
 
-# ── one full chain: disk-only historical generation → migrated + new turn ──
+# ── one full chain: disk-only historical generation → migrated + REAL continuation ──
 # run_chain <generation> <fixture> <sourceName> <label>
 #   generation  v0 | v1
 #   fixture     repo fixture path (plain JSONL)
@@ -215,7 +287,7 @@ run_chain() {
 
   # ── 1. E2E home layout ────────────────────────────────────────────────
   mkdir -p "$WORK_DIR" "$PROFILE_DIR/node_modules/@xmoon76"
-  # The helper scripts (probe/append/place) resolve @deepseek-ai from the
+  # The helper scripts (probe/mock) resolve @deepseek-ai from the
   # master environment through this node_modules link.
   ln -s "$MASTER_ENV/node_modules" "$E2E_HOME/node_modules"
   # The dedicated profile links THIS worktree's bundle (the fresh dist).
@@ -229,11 +301,112 @@ run_chain() {
   },
   "dsh": {
     "profile": {
-      "bundles": ["@deepseek-ai/dsh-base", "@xmoon76/dsh-pi-tui"]
+      "bundles": ["@deepseek-ai/dsh-base", "@xmoon76/dsh-pi-tui", "e2e-mock-provider"]
     }
   }
 }
 EOF
+
+  # The e2e-mock-provider bundle: registers an LlmAdapter for the fixture's
+  # durable provider route "mock" (the released v0 fixture ran against a
+  # harness named "mock"; no adapter for it ships in dsh-base). Its stream()
+  # makes a REAL HTTP chat-completions request against the in-script mock
+  # server, so the continued Agent loop exercises the true llm.stream path.
+  mkdir -p "$PROFILE_DIR/node_modules/e2e-mock-provider"
+  cat > "$PROFILE_DIR/node_modules/e2e-mock-provider/package.json" <<'PKG'
+{
+  "name": "e2e-mock-provider",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "exports": { ".": "./index.mjs" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}
+PKG
+  cat > "$PROFILE_DIR/node_modules/e2e-mock-provider/cordis.patch.yml" <<'PATCH'
+- insert:
+    - id: e2e-mock-provider
+      name: 'e2e-mock-provider'
+      inject: [llm]
+PATCH
+  cat > "$PROFILE_DIR/node_modules/e2e-mock-provider/index.mjs" <<'PLUGIN'
+// Deterministic mock LLM adapter (E2E only): the fixture sessions carry a
+// durable provider route "mock" (they were recorded against a harness of
+// that name), which no shipped dsh-base adapter owns. This bundle registers
+// a minimal LlmAdapter for "mock" that performs a REAL OpenAI-compatible
+// chat-completions request against E2E_MOCK_BASE_URL (the in-script mock
+// server) and emits the canonical text block (block-start -> text-deltas ->
+// block-end -> usage -> finish), so the Agent loop's llm.stream really runs.
+import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+
+const REPLY = process.env.E2E_MOCK_REPLY_TEXT ?? 'deterministic mock reply: continuing the old session'
+const BASE = process.env.E2E_MOCK_BASE_URL
+
+export const name = 'e2e-mock-provider'
+export const inject = ['llm']
+
+export function apply(ctx) {
+  const adapter = new (class extends LlmAdapter {
+    async *stream(options) {
+      if (BASE === undefined) throw new Error('e2e mock provider: E2E_MOCK_BASE_URL is not set')
+      const messages = [
+        ...(options.system === undefined || options.system === '' ? [] : [{ role: 'system', content: options.system }]),
+        ...(options.messages ?? []).map(message => ({ role: message.role, content: JSON.stringify(message.content) })),
+      ]
+      const response = await fetch(`${BASE}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer e2e-mock-key' },
+        body: JSON.stringify({ model: options.model, stream: true, messages }),
+        signal: options.signal,
+      })
+      if (!response.ok || response.body === null) {
+        throw new Error(`e2e mock provider: HTTP ${response.status}`)
+      }
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let text = ''
+      let index = 0
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          let newline
+          while ((newline = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, newline).trim()
+            buffer = buffer.slice(newline + 1)
+            if (!line.startsWith('data:')) continue
+            const payload = line.slice(5).trim()
+            if (payload === '[DONE]') {
+              buffer = ''
+              break
+            }
+            if (payload === '') continue
+            let parsed
+            try { parsed = JSON.parse(payload) } catch { continue }
+            const delta = parsed?.choices?.[0]?.delta
+            const piece = typeof delta?.content === 'string' ? delta.content : ''
+            if (piece === '') continue
+            if (text === '') yield { type: 'block-start', index, blockType: 'text' }
+            text += piece
+            yield { type: 'text-delta', index, text: piece }
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+      if (text !== '') {
+        yield { type: 'block-end', index, block: { type: 'text', text } }
+      }
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: REPLY.length } }
+      yield { type: 'finish', reason: 'completed' }
+    }
+  })()
+  ctx.llm.registerAdapter(['mock'], adapter)
+}
+PLUGIN
   echo '[]' > "$PROFILE_DIR/cordis.patch.yml"
 
   # ── 2. helper scripts (official master API only) ──────────────────────
@@ -266,10 +439,26 @@ EOF
 //   read <root> <id>  — open(id, 'read') + read(0); prints
 //                       READ-OK <id>: <n> events or
 //                       READ-FAILED <id>: <message>.
+//   scan <root> <id> <userNeedle> <assistantNeedle>
+//                     — committed-log scan for the real-continuation turn:
+//                       prints SCAN events:<n> user-hit:<0|1>
+//                       assistant-hit:<0|1> assistant-msgs:<n> turn-ends:<n>
+//                       (user/message text containing userNeedle,
+//                       assistant/message text containing assistantNeedle).
 import { Context } from '@deepseek-ai/cordis'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 
 const [mode, root, id] = process.argv.slice(2)
+
+function contentText(content) {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('')
+}
+
 const ctx = new Context()
 const persistence = new JsonlSessionPersistence(ctx, { root })
 
@@ -288,56 +477,125 @@ if (mode === 'list') {
   } catch (error) {
     console.log(`READ-FAILED ${id}: ${error?.message ?? String(error)}`)
   }
+} else if (mode === 'scan') {
+  const [userNeedle, assistantNeedle] = process.argv.slice(5)
+  try {
+    const handle = await persistence.open(id, 'read')
+    const events = await handle.read(0)
+    await handle.close()
+    let userHit = 0
+    let assistantHit = 0
+    let assistantMsgs = 0
+    let turnEnds = 0
+    for (const event of events) {
+      const data = event.data ?? event
+      if (event.type === 'user/message') {
+        if (contentText(data.content).includes(userNeedle)) userHit = 1
+      } else if (event.type === 'assistant/message') {
+        assistantMsgs += 1
+        if (contentText(data.message?.content ?? data.content).includes(assistantNeedle)) assistantHit = 1
+      } else if (event.type === 'turn/end') {
+        turnEnds += 1
+      }
+    }
+    console.log(`SCAN events:${events.length} user-hit:${userHit} assistant-hit:${assistantHit} assistant-msgs:${assistantMsgs} turn-ends:${turnEnds}`)
+  } catch (error) {
+    console.log(`SCAN-FAILED ${id}: ${error?.message ?? String(error)}`)
+  }
 } else {
   console.error(`unknown mode: ${mode}`)
   process.exit(2)
 }
 EOF
 
-  cat > "$E2E_HOME/append-turn.mjs" <<'EOF'
+  # The dependency-free deterministic mock LLM (OpenAI-compatible SSE). The
+  # resumed Agent's real llm.stream hits POST {base}/chat/completions; the
+  # mock replies with one fixed plain-text stream and no tool_calls, so the
+  # Agent settles exactly one assistant turn.
+  cat > "$E2E_HOME/mock-llm.mjs" <<EOF
 #!/usr/bin/env node
-// Append one complete new turn (user + assistant) through the OFFICIAL
-// master JSONL persistence API (write open + append + flush + close).
-// The assistant/message carries the v2 embedded stream (chunk events),
-// matching the shape the official v1→v2 migration produces.
-// Usage: node append-turn.mjs <sessionsRoot> <sessionId> <userText> <assistantText>
-import { Context } from '@deepseek-ai/cordis'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+// Deterministic OpenAI-compatible SSE mock for the historical-migration
+// E2E real-continuation chain (P1-3). No dependencies.
+// Usage: node mock-llm.mjs [replyText]
+import { createServer } from 'node:http'
 
-const [root, id, userText, assistantText] = process.argv.slice(2)
-const ctx = new Context()
-const persistence = new JsonlSessionPersistence(ctx, { root })
-const handle = await persistence.open(id, 'write')
-const events = await handle.read(0)
-const next = events.length
-const turn = 2
-const now = Date.now()
-const batch = [
-  { type: 'turn/start', seq: next, time: now, data: { turn } },
-  { type: 'step/start', seq: next + 1, time: now, data: { turn, step: 1 } },
-  { type: 'user/message', seq: next + 2, time: now, data: { id: `e2e-user-${next}`, role: 'user', content: [{ type: 'text', text: userText }], source: { kind: 'user' } }, surfaceOp: 'append' },
-  { type: 'assistant/message', seq: next + 3, time: now, data: {
-      turn, step: 1,
-      message: { id: `e2e-assistant-${next}`, role: 'assistant', content: [{ type: 'text', text: assistantText }], source: { kind: 'model', provider: 'mock', model: 'mock' } },
-      usage: { inputTokens: 1, outputTokens: 1 },
-      stream: [
-        { type: 'chunk', time: now, chunk: { type: 'block-start', index: 0, blockType: 'text' } },
-        { type: 'text-chunks', time0: now, index: 0, dt: [], texts: [assistantText] },
-        { type: 'chunk', time: now, chunk: { type: 'block-end', index: 0, block: { type: 'text', text: assistantText } } },
-        { type: 'chunk', time: now, chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } } },
-        { type: 'chunk', time: now, chunk: { type: 'finish', reason: { kind: 'stop' } } },
-      ],
-    }, surfaceOp: 'append' },
-  { type: 'step/end', seq: next + 4, time: now, data: { turn, step: 1 } },
-  { type: 'turn/end', seq: next + 5, time: now, data: { turn, reason: { kind: 'completed' } } },
-]
-await handle.append(batch)
-await handle.flush()
-await handle.close()
-console.log(`appended turn 2 at seq ${next}: ${userText} / ${assistantText}`)
+const reply = process.argv[2] ?? '$MOCK_REPLY_TEXT'
+
+const server = createServer((req, res) => {
+  const chunks = []
+  req.on('data', (chunk) => chunks.push(chunk))
+  req.on('end', () => {
+    const raw = Buffer.concat(chunks).toString('utf8')
+    let model = null
+    try {
+      const body = raw === '' ? {} : JSON.parse(raw)
+      model = body.model ?? null
+    } catch {
+      // request without JSON body: not a chat completion
+    }
+    console.log(\`REQUEST \${JSON.stringify({ method: req.method, url: req.url, model })}\`)
+    if (req.method !== 'POST' || !(req.url ?? '').endsWith('/chat/completions')) {
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: 'mock: not a chat completion' } }))
+      return
+    }
+    const id = 'chatcmpl-e2e-mock'
+    const created = Math.floor(Date.now() / 1000)
+    const send = (obj) => res.write(\`data: \${JSON.stringify(obj)}\n\n\`)
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    // The first role-only delta is a no-op (must not open a text block).
+    send({ id, object: 'chat.completion.chunk', created, model: model ?? 'deepseek-v4-flash', choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] })
+    const step = Math.max(1, Math.ceil(reply.length / 8))
+    for (let i = 0; i < reply.length; i += step) {
+      send({ id, object: 'chat.completion.chunk', created, model: model ?? 'deepseek-v4-flash', choices: [{ index: 0, delta: { content: reply.slice(i, i + step) }, finish_reason: null }] })
+    }
+    send({
+      id, object: 'chat.completion.chunk', created, model: model ?? 'deepseek-v4-flash',
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 64, completion_tokens: 8, total_tokens: 72 },
+    })
+    res.write('data: [DONE]\n\n')
+    res.end()
+  })
+})
+
+server.listen(0, '127.0.0.1', () => {
+  console.log(\`MOCK-READY \${server.address().port}\`)
+})
 EOF
 
-  # ── 3. fs-ext native binding (write-lease prerequisite) ────────────────
+  # ── 3. mock LLM + official model configuration (P1-3) ─────────────────
+  # The resumed Agent must be able to run a REAL llm.stream. The profile
+  # mounts the official dsh-base, whose default model selection is route
+  # `deepseek-official` / model `deepseek-v4-flash` (agent-default-model) —
+  # the session header of a historical session carries no durable model, so
+  # the resume falls back to that default. The `llm-deepseek` settings
+  # section points the adapter at the local mock (per-request resolution)
+  # and pins reasoning off; the key comes from the managed credentials
+  # document and the inherited environment.
+  MOCK_PORT="$(start_mock "$E2E_HOME")"
+  if [ -z "$MOCK_PORT" ]; then
+    bad "$label: mock LLM server did not start"
+    return 0
+  fi
+  cat > "$E2E_HOME/settings.yaml" <<EOF
+llm-deepseek:
+  baseURL: http://127.0.0.1:$MOCK_PORT/v1
+  reasoningEffort: off
+EOF
+  cat > "$E2E_HOME/.credentials.yaml" <<'EOF'
+version: 1
+refs:
+  DEEPSEEK_API_KEY: e2e-mock-key
+EOF
+  chmod 600 "$E2E_HOME/settings.yaml" "$E2E_HOME/.credentials.yaml"
+  ok "$label: deterministic mock LLM ready on 127.0.0.1:$MOCK_PORT (deepseek-official route)"
+
+  # ── 4. fs-ext native binding (write-lease prerequisite) ────────────────
   # The master env's pnpm allowBuilds excludes fs-ext, so the native addon
   # may be absent; build it in place so the official write-open really runs.
   FS_EXT_DIR="$(cd "$E2E_HOME" && node -e "
@@ -360,7 +618,7 @@ console.log(dirname(req.resolve('fs-ext')));
     }
   fi
 
-  # ── 4. place the historical generation on disk (step 1) ───────────────
+  # ── 5. place the historical generation on disk (step 1) ───────────────
   # The fixture header names the session id and cwd; derive the on-disk
   # project/session layout from them (official projectKey + encodeSegment).
   SESSION_ID="$(node -e "
@@ -393,7 +651,7 @@ console.log('--' + slug.slice(0, 251) + '--');
   fi
   ok "$label: historical generation placed on disk ($source_name)"
 
-  # ── 5. official list/stat discovers it, WITHOUT migrating (step 2) ─────
+  # ── 6. official list/stat discovers it, WITHOUT migrating (step 2) ─────
   PROBE_OUT="$(node "$E2E_HOME/probe.mjs" list "$E2E_HOME/sessions" "$SESSION_ID")"
   echo "$PROBE_OUT" | sed 's/^/  /'
   if echo "$PROBE_OUT" | grep -q "LIST FOUND" && echo "$PROBE_OUT" | grep -q "STAT FOUND"; then
@@ -409,11 +667,11 @@ console.log('--' + slug.slice(0, 251) + '--');
     ok "$label: disk still holds only the historical generation after list/stat"
   fi
 
-  # ── 6. record the old generation hash (step 4) ────────────────────────
+  # ── 7. record the old generation hash (step 4) ────────────────────────
   HASH_BEFORE="$(sha256sum "$SESSION_DIR/$source_name" | cut -d' ' -f1)"
   ok "$label: recorded source hash $HASH_BEFORE"
 
-  # ── 7. TUI picker displays the session (step 3) ───────────────────────
+  # ── 8. TUI picker displays the session (step 3) ───────────────────────
   launch_tui "$WORK_DIR"
   if wait_pane_text "$PANE" "type a message to start a session" 40; then
     ok "$label: TUI home up"
@@ -442,7 +700,7 @@ console.log('--' + slug.slice(0, 251) + '--');
   sleep 0.5
   quit_pane
 
-  # ── 8. TUI resume → official migration publishes the successor (5/6/7) ─
+  # ── 9. TUI resume → official migration publishes the successor (5/6/7) ─
   launch_tui "$WORK_DIR" --session "$SESSION_ID"
   if wait_pane_mounted "$PANE" "$SESSION_ID" 40; then
     ok "$label: TUI resumed the session (official Direct open)"
@@ -461,7 +719,7 @@ console.log('--' + slug.slice(0, 251) + '--');
     bad "$label: source hash CHANGED after the TUI open ($HASH_BEFORE → $HASH_AFTER_OPEN)"
   fi
 
-  # ── 9. resumed transcript renders the migrated history (step 8) ────────
+  # ── 10. resumed transcript renders the migrated history (step 8) ───────
   PANE_NOW="$(pane_text "$PANE")"
   if echo "$PANE_NOW" | grep -q "hello" && echo "$PANE_NOW" | grep -q "late" \
     && echo "$PANE_NOW" | grep -q "Compacted 4 history items"; then
@@ -470,18 +728,80 @@ console.log('--' + slug.slice(0, 251) + '--');
     bad "$label: transcript missing migrated content: $PANE_NOW"
   fi
 
-  # ── 10. dispose/close, then append a new turn officially (steps 9/10) ──
-  quit_pane
-  APPEND_OUT="$(node "$E2E_HOME/append-turn.mjs" "$E2E_HOME/sessions" "$SESSION_ID" \
-    "new user turn from e2e" "new assistant turn from e2e")"
-  echo "$APPEND_OUT" | sed 's/^/  /'
-  if echo "$APPEND_OUT" | grep -q "appended turn 2"; then
-    ok "$label: new turn appended through the official persistence API"
+  # ── 11. REAL continuation through the live Agent loop (steps 9/10) ─────
+  # The review gap (P1-3): the old chain proved the persistence API can
+  # append after migration by quit + manual append-turn. THIS chain keeps
+  # the TUI mounted and submits "continue" in the editor: the real Agent
+  # loop follows up, calls the deterministic mock LLM over the wire, the
+  # assistant/message settles, and the official log records the turn.
+  tmux send-keys -t "$PANE" -l "$USER_CONTINUE_TEXT"
+  sleep 0.3
+  tmux send-keys -t "$PANE" Enter
+  # The mock must receive the real llm.stream request…
+  if wait_mock_requests "$E2E_HOME" 1 90; then
+    ok "$label: mock LLM received the Agent's llm.stream request"
   else
-    bad "$label: official append failed: $APPEND_OUT"
+    bad "$label: mock LLM received no request — agent loop did not run: $(tail -20 "$E2E_HOME/mock-llm.log" | sed 's/^/  /')"
   fi
+  # …and the TUI must render the assistant reply live.
+  if wait_pane_text "$PANE" "continuing the old session" 90; then
+    ok "$label: real agent reply rendered in the live TUI"
+  else
+    bad "$label: agent reply not rendered: $(pane_text "$PANE")"
+  fi
+  # Settle evidence while the process is still alive: the official committed
+  # log must come to hold the real turn (user "continue" + the mock
+  # assistant reply + a second turn/end) BEFORE /exit — recorded by the
+  # Agent loop itself, never by a manual persistence append. Poll the
+  # official read handle; converging on the same state across two reads
+  # spaced apart means the Agent has settled (no further writes).
+  SCAN_OK=0
+  elapsed=0
+  SCAN_STABLE=0
+  SCAN_OUT=""
+  while [ "$elapsed" -lt 100 ]; do
+    SCAN_OUT="$(node "$E2E_HOME/probe.mjs" scan "$E2E_HOME/sessions" "$SESSION_ID" "$USER_CONTINUE_TEXT" "continuing the old session")"
+    SCAN_TURNS="$(echo "$SCAN_OUT" | sed -n 's/.*turn-ends:\([0-9][0-9]*\).*/\1/p')"
+    if echo "$SCAN_OUT" | grep -q "user-hit:1" \
+      && echo "$SCAN_OUT" | grep -q "assistant-hit:1" \
+      && [ "${SCAN_TURNS:-0}" -ge 2 ]; then
+      SCAN_OK=1
+      sleep 2
+      SCAN_AFTER="$(node "$E2E_HOME/probe.mjs" scan "$E2E_HOME/sessions" "$SESSION_ID" "$USER_CONTINUE_TEXT" "continuing the old session")"
+      if [ "$SCAN_AFTER" = "$SCAN_OUT" ]; then
+        SCAN_STABLE=1
+        break
+      fi
+    fi
+    sleep 0.5
+    elapsed=$((elapsed+1))
+  done
+  echo "$SCAN_OUT" | sed 's/^/  /'
+  if [ "$SCAN_OK" -eq 1 ] && [ "$SCAN_STABLE" -eq 1 ]; then
+    ok "$label: committed log settled BEFORE /exit (user + mock assistant + turn/end, stable)"
+  elif [ "$SCAN_OK" -eq 1 ]; then
+    ok "$label: committed log holds the real turn (settle confirmed after /exit flush)"
+  else
+    bad "$label: committed log missing the real turn while live: $SCAN_OUT"
+  fi
+  # Clean dispose flushes the live log (/exit), then the committed log must
+  # still hold the REAL turn — the post-exit authoritative re-check.
+  quit_pane
+  SCAN_OUT="$(node "$E2E_HOME/probe.mjs" scan "$E2E_HOME/sessions" "$SESSION_ID" "$USER_CONTINUE_TEXT" "continuing the old session")"
+  echo "$SCAN_OUT" | sed 's/^/  /'
+  SCAN_TURNS="$(echo "$SCAN_OUT" | sed -n 's/.*turn-ends:\([0-9][0-9]*\).*/\1/p')"
+  if echo "$SCAN_OUT" | grep -q "user-hit:1" \
+    && echo "$SCAN_OUT" | grep -q "assistant-hit:1" \
+    && [ "${SCAN_TURNS:-0}" -ge 2 ]; then
+    ok "$label: committed log holds the real continue turn after /exit (user + mock assistant + turn/end)"
+  else
+    bad "$label: committed log missing the real turn after /exit: $SCAN_OUT"
+  fi
+  MOCK_REQS="$(grep -c '^REQUEST ' "$E2E_HOME/mock-llm.log" || true)"
+  echo "  mock llm served $MOCK_REQS chat-completion request(s):"
+  grep '^REQUEST ' "$E2E_HOME/mock-llm.log" | sed 's/^/    /'
 
-  # ── 11. reopen: history + new turn both render (steps 11/12) ───────────
+  # ── 12. reopen: history + real continuation turn both render (11/12) ───
   launch_tui "$WORK_DIR" --session "$SESSION_ID"
   if wait_pane_mounted "$PANE" "$SESSION_ID" 40; then
     ok "$label: TUI reopened the session"
@@ -490,15 +810,15 @@ console.log('--' + slug.slice(0, 251) + '--');
   fi
   PANE_NOW="$(pane_text "$PANE")"
   if echo "$PANE_NOW" | grep -q "hello" && echo "$PANE_NOW" | grep -q "late" \
-    && echo "$PANE_NOW" | grep -q "new user turn from e2e" \
-    && echo "$PANE_NOW" | grep -q "new assistant turn from e2e"; then
-    ok "$label: reopened transcript renders history AND the new turn"
+    && echo "$PANE_NOW" | grep -q "continuing the old session" \
+    && echo "$PANE_NOW" | grep -wq "$USER_CONTINUE_TEXT"; then
+    ok "$label: reopened transcript renders history AND the real continue turn"
   else
     bad "$label: reopened transcript incomplete: $PANE_NOW"
   fi
   quit_pane
 
-  # ── 12. source immutability + official read of the current gen (13/14) ─
+  # ── 13. source immutability + official read of the current gen (13/14) ─
   HASH_AFTER="$(sha256sum "$SESSION_DIR/$source_name" | cut -d' ' -f1)"
   if [ "$HASH_AFTER" = "$HASH_BEFORE" ]; then
     ok "$label: source hash unchanged after the full chain (immutable source)"
@@ -511,6 +831,12 @@ console.log('--' + slug.slice(0, 251) + '--');
     READ-OK*) ok "$label: current generation readable through the official persistence ($READ_OUT)" ;;
     *) bad "$label: current generation NOT readable: $READ_OUT" ;;
   esac
+
+  # Chain teardown: stop THIS chain's mock (cleanup covers leftovers too).
+  for pid in "${MOCK_PIDS[@]:-}"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  done
+  MOCK_PIDS=()
 }
 
 # ── run both chains ────────────────────────────────────────────────────
