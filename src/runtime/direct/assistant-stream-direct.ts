@@ -33,7 +33,7 @@ export interface HostEventSurface {
 /** The official frame surface — the EXACT upstream `AssistantStreamFrame`
  * shape (from `@deepseek-ai/dsh-agent`), read structurally at the unknown
  * boundary. Only `start` carries turn/step; chunk/end name their attempt
- * plus the upstream monotone revision and the dense per-attempt index. */
+ * plus the upstream dense revision and the dense per-attempt index. */
 export type AssistantStreamFrameLike =
   | {
     readonly type: 'start'
@@ -272,9 +272,10 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
         if (!isNonnegativeSafeInteger(frame.turn) || !isNonnegativeSafeInteger(frame.step)) return
         if (typeof frame.attemptId !== 'string' || frame.attemptId === '') return
         const attemptId = frame.attemptId
+        if (!acceptRevision(state, frame.revision)) return
         const existing = recordFor(state, attemptId)
         // A duplicate start for the same attempt is a protocol violation.
-        if (existing !== undefined || !acceptRevision(state, frame.revision)) return
+        if (existing !== undefined) return
         openAttempt(state, {
           attemptId,
           turn: frame.turn,
@@ -293,14 +294,24 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
       case 'chunk': {
         if (!isNonnegativeSafeInteger(frame.index) || !Number.isSafeInteger(frame.time)) return
         if (typeof frame.attemptId !== 'string' || frame.attemptId === '') return
+        // Validate the chunk shape before consuming the Agent revision. Once
+        // the frame is structurally valid, the revision advances even when
+        // its attempt record is already gone.
+        if (!isValidStreamChunk(frame.chunk)) return
         const attemptId = frame.attemptId
+        if (!acceptRevision(state, frame.revision)) return
         const record = recordFor(state, attemptId)
-        if (record === undefined) return
+        if (record === undefined) {
+          state.attempts.clear()
+          return
+        }
         // The dense position advances for EVERY accepted valid frame — kinds
         // the presentation does not consume (block-start, finish, ...) still
         // occupy an index slot upstream.
-        if (frame.index !== record.chunkCount || !isValidStreamChunk(frame.chunk)) return
-        if (!acceptRevision(state, frame.revision)) return
+        if (frame.index !== record.chunkCount) {
+          state.attempts.clear()
+          return
+        }
         record.chunkCount += 1
         const chunk = toLiveChunk(frame.chunk)
         if (chunk === undefined) return
@@ -319,10 +330,6 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
         if (!isNonnegativeSafeInteger(frame.index)) return
         if (typeof frame.attemptId !== 'string' || frame.attemptId === '') return
         const attemptId = frame.attemptId
-        const record = recordFor(state, attemptId)
-        if (record === undefined) return
-        // The terminal index is the next dense position after all chunks.
-        if (frame.index !== record.chunkCount) return
         const outcome = frame.outcome
         if (typeof outcome !== 'object' || outcome === null) return
         const committed = outcome.kind === 'committed'
@@ -333,6 +340,16 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
           : undefined
         if (committed && (settlement === undefined || !isNonnegativeSafeInteger(outcome.seq))) return
         if (!acceptRevision(state, frame.revision)) return
+        const record = recordFor(state, attemptId)
+        if (record === undefined) {
+          state.attempts.clear()
+          return
+        }
+        // The terminal index is the next dense position after all chunks.
+        if (frame.index !== record.chunkCount) {
+          state.attempts.clear()
+          return
+        }
         closeAttempt(state, attemptId)
         deps.onInput({
           kind: 'end',
