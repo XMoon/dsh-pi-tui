@@ -6,8 +6,9 @@
  * next follow the TRACKED branch-level mode policy
  * (test/compat/dsh-mode.json) — one line flips the whole branch between
  * the pinned source pack and the registry-backed npm distribution. All
- * other branches/PR bases use npm mode. The current validated DSH version
- * comes from test/compat/dsh-source.json; the pi2dsh manifest is an external
+ * other branches/PR bases use npm mode. Source Mode reads its version from
+ * test/compat/dsh-source.json; npm Mode reads the exact DSH version declared
+ * in this checkout's package.json. The pi2dsh manifest is an external
  * consumer pairing and is not a CI target-version source.
  *
  * @module dsh-ci-context
@@ -18,7 +19,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
-import { DEFAULT_SOURCE_CONFIG, loadDshSourceConfig } from './lib/dsh-distribution.mjs'
+import { DEFAULT_SOURCE_CONFIG, loadDshSourceConfig, npmDshVersion } from './lib/dsh-distribution.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(SCRIPT_DIR, '..')
@@ -79,7 +80,7 @@ export function resolveDshContext({ eventName, ref, baseRef, configPath = DEFAUL
   const mode = resolveDshMode({ eventName, ref, baseRef, forcedMode, modeConfigPath })
   return {
     mode,
-    version: config.expectedVersion,
+    version: mode === 'source' ? config.expectedVersion : npmDshVersion(),
     sourceRef: mode === 'source' ? config.ref : '',
     sourceExpectedVersion: mode === 'source' ? config.expectedVersion : '',
     sourceConfig: config.path,

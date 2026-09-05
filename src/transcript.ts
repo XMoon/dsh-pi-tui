@@ -22,7 +22,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
 import type { IconSemantic } from './icons.ts'
 import { firstLine, latestLine, type JsonValue } from './present.ts'
-import { StepUsageAccumulator, totalTokens, type TokenUsageTotals } from './token-usage.ts'
+import { StepUsageAccumulator, totalTokens, usageFromAssistantStream, type TokenUsageTotals } from './token-usage.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 // Load the official command event declarations.
 import type {} from '@deepseek-ai/dsh-commands'
@@ -229,6 +229,8 @@ interface MutableTurnActivity {
   thinkingTail: string
   /** The materialized Think slot (latest meaningful line). */
   think?: { text: string }
+  /** The step that currently owns the Focus reasoning preview. */
+  thinkingStep?: number
   /** The streaming assistant text of the CURRENT step (bounded tail —
    * the authoritative settled text replaces the tail once
    * assistant/message lands; never a second full copy of the output,
@@ -504,6 +506,10 @@ export class TranscriptFolder {
    * entries, groups) keeps its stable indexes, but every visible projection
    * skips them — a tombstone, never a mid-array splice. */
   private readonly hiddenAssistantEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** Reasoning entries from a live-abandoned attempt are transient too. Keep
+   * their raw indexes stable, but tombstone them so abandoned live and cold
+   * replay projections agree. */
+  private readonly hiddenThinkingEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'thinking' }>>()
   /** The thinking entry object per (turn, step), for in-place text updates. */
   private readonly thinkingEntries = new Map<string, Extract<TranscriptMessage, { kind: 'thinking' }>>()
   /** Thinking entries that still need a lifecycle boundary to settle. The
@@ -653,14 +659,34 @@ export class TranscriptFolder {
     return this.activityByTurn as ReadonlyMap<number, TurnActivity>
   }
 
+  /** Restore one authoritative reasoning body into the bounded Focus preview. */
+  private restoreThinkingPreview(activity: MutableTurnActivity, step: number, text: string): void {
+    activity.thinkingStep = step
+    activity.thinkingTail = text.slice(-TranscriptFolder.THINKING_TAIL_CAP)
+    const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
+    activity.think = line === '' ? undefined : { text: line }
+    activity.revision += 1
+  }
+
+  /** Clear the Focus reasoning preview owned by one authoritative step. */
+  private clearThinkingPreview(activity: MutableTurnActivity, step: number): void {
+    if (activity.thinkingStep !== step) return
+    activity.thinkingStep = undefined
+    if (activity.thinkingTail === '' && activity.think === undefined) return
+    activity.thinkingTail = ''
+    activity.think = undefined
+    activity.revision += 1
+  }
+
   /** Fold one reasoning delta into the activity's Think slot: the rolling
    * tail keeps the LAST fragment (bounded), and the preview is the tail's
    * latest non-empty line — never the whole stream (plan §10.6). */
-  private foldThinking(activity: MutableTurnActivity, delta: string): void {
+  private foldThinking(activity: MutableTurnActivity, step: number, delta: string): void {
     // After turn/end the Think slot was settled: a late reasoning delta
     // (replay artifact) must not mutate it (review finding). The thinking
     // transcript entry still accumulates the delta.
     if (activity.completed) return
+    activity.thinkingStep = step
     activity.thinkingTail = (activity.thinkingTail + delta).slice(-TranscriptFolder.THINKING_TAIL_CAP)
     const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
     activity.think = line === '' ? undefined : { text: line }
@@ -968,9 +994,11 @@ export class TranscriptFolder {
   }
 
   /** Whether one raw item is still visible output (failed-attempt assistant
-   * text is tombstoned, never shown). */
+   * text and abandoned reasoning are tombstoned, never shown). */
   private isVisible(item: TranscriptMessage): boolean {
-    return item.kind !== 'assistant' || !this.hiddenAssistantEntries.has(item)
+    if (item.kind === 'assistant') return !this.hiddenAssistantEntries.has(item)
+    if (item.kind === 'thinking') return !this.hiddenThinkingEntries.has(item)
+    return true
   }
 
   /** Ensure exact grouped-turn counts before a cross-turn projection. */
@@ -1306,12 +1334,16 @@ export class TranscriptFolder {
         const thinking = this.thinkingEntries.get(key)
         if (thinking !== undefined && thinking.running === false) {
           thinking.text = ''
-          const activity = this.activityByTurn.get(input.turn)
-          if (activity !== undefined) {
-            activity.thinkingTail = ''
-            activity.think = undefined
-            activity.revision += 1
+          thinking.running = true
+          this.markStreamingEntryDirty(`thinking:${key}`)
+          let open = this.openThinkingByTurn.get(input.turn)
+          if (open === undefined) {
+            open = new Set()
+            this.openThinkingByTurn.set(input.turn, open)
           }
+          open.add(thinking)
+          const activity = this.activityByTurn.get(input.turn)
+          if (activity !== undefined) this.clearThinkingPreview(activity, input.step)
         }
         break
       }
@@ -1322,16 +1354,16 @@ export class TranscriptFolder {
         // Session v2 attempt settlement: an attempt that committed NO
         // surface message (abandoned, or committed as `assistant/attempt`)
         // must leave no transient surface text behind — live and reopen
-        // agree, because the durable log has nothing for it. A committed
+        // agree. A committed
         // `assistant/message` end does NOT remove anything: the durable
         // message owns the entry (it arrives on the event plane either
         // before this notification or moments later).
         if (input.status === 'abandoned' || input.settlement === 'attempt') {
-          this.settleFailedAttempt(input.turn, input.step)
+          this.settleFailedAttempt(input.turn, input.step, input.status === 'abandoned', input.status === 'abandoned')
         }
-        // The attempt's open thinking entries stop animating. The partial
-        // reasoning stays as diagnostic evidence — a cold replay restores
-        // the same attempt's reasoning from its embedded durable stream.
+        // A committed failed attempt keeps diagnostic reasoning for cold
+        // replay; an abandoned attempt has no durable settlement and was
+        // tombstoned above. Any remaining open entries stop animating.
         {
           const open = this.openThinkingByTurn.get(input.turn)
           if (open !== undefined) {
@@ -1347,25 +1379,38 @@ export class TranscriptFolder {
    * `assistant/attempt` end, or the durable `assistant/attempt` event —
    * idempotent, whichever arrives first): remove the step's still
    * TRANSIENT assistant text (an attempt never forms a surface message),
-   * drop the provisional usage, and clear the Focus Message candidate if
-   * it still belongs to the failed step. Settled/durable content is never
-   * touched. */
-  private settleFailedAttempt(turn: number, step: number): void {
+   * optionally drop provisional usage, and clear the Focus Message candidate if
+   * it still belongs to the failed step. An abandoned live attempt also
+   * tombstones its transient reasoning because no durable event can restore
+   * it; committed `assistant/attempt` reasoning remains diagnostic evidence.
+   * Its provisional usage is discarded only for an abandoned live attempt;
+   * durable attempt usage is folded separately from the event stream. */
+  private settleFailedAttempt(turn: number, step: number, abandoned = false, discardUsage = true): void {
     const key = stepKey(turn, step)
     const entry = this.assistantEntries.get(key)
     if (entry !== undefined && this.transientAssistantEntries.has(entry)) {
       // Tombstone: hide the item from every visible projection (display,
       // grouping, search) without shifting the index-keyed structures.
       this.assistantEntries.delete(key)
+      entry.text = ''
       this.transientAssistantEntries.delete(entry)
       this.hiddenAssistantEntries.add(entry)
+      this.markStreamingEntryDirty(`assistant:${key}`)
       this.removeGroupedTurn(entry.turn)
     }
-    // Provisional live usage of the failed attempt vanishes (the durable
-    // log carries none for it — cold replay shows the same totals).
-    this.usage.discardStep(turn, step)
+    if (abandoned) {
+      // Tombstone abandoned reasoning too: the raw item remains index-stable
+      // while every visible/search/grouped projection skips it.
+      this.hideThinkingEntry(turn, step)
+    }
+    // An abandoned attempt's provisional usage vanishes because no durable
+    // fact exists for cold replay. A committed assistant/attempt keeps its
+    // provisional value until the durable event replaces it with the embedded
+    // authoritative usage.
+    if (discardUsage) this.usage.discardStep(turn, step)
     const activity = this.activityByTurn.get(turn)
     if (activity === undefined) return
+    if (abandoned) this.clearThinkingPreview(activity, step)
     const candidate = activity.messageCandidate
     if (candidate !== undefined && candidate.step === step
       && !activity.settledSteps.has(step) && !activity.confirmedSteps.has(step)) {
@@ -1416,7 +1461,7 @@ export class TranscriptFolder {
       this.markStreamingEntryDirty(`thinking:${stepKey(turn, step)}`)
       // Focus aggregation: keep a compact reasoning preview (the
       // rolling tail — never the full stream, plan §10.6/§42).
-      this.foldThinking(this.activityFor(turn), chunk.text)
+      this.foldThinking(this.activityFor(turn), step, chunk.text)
     } else if (chunk.type === 'usage') {
       // Focus aggregation: per-turn token facts (the shared
       // accumulator — the footer and Focus can never drift).
@@ -1446,26 +1491,47 @@ export class TranscriptFolder {
       }
     }
     if (text === '') return
+    const key = stepKey(turn, step)
     const entry = this.thinkingEntry(turn, step)
+    this.hiddenThinkingEntries.delete(entry)
     entry.text = text
+    this.markStreamingEntryDirty(`thinking:${key}`)
     this.closeThinking(entry)
+    this.restoreThinkingPreview(this.activityFor(turn), step, text)
   }
 
   /** Restore a SETTLED thinking entry from the reasoning blocks of a
    * durable assistant message (Session v2 cold replay — the assembled
    * `message.content` carries `reasoning` blocks the live plane streamed
-   * as deltas). No-op when the entry already exists (live path). */
+   * as deltas). The durable message is authoritative: it replaces any
+   * earlier same-step reasoning, including replacing it with no entry. */
   private restoreThinkingFromMessage(turn: number, step: number, blocks: readonly ContentBlock[]): void {
     const key = stepKey(turn, step)
-    if (this.thinkingEntries.has(key)) return
     let text = ''
     for (const block of blocks) {
       if (block.type === 'reasoning') text += block.text
     }
-    if (text === '') return
+    if (text === '') {
+      const existing = this.thinkingEntries.get(key)
+      // Legacy/live messages may omit reasoning blocks even though the live
+      // entry already has useful text; close that entry in place. A closed
+      // retry entry (or an empty reset entry) is authoritative-empty and is
+      // tombstoned instead.
+      if (existing !== undefined && existing.running && existing.text !== '') {
+        this.closeThinking(existing)
+      } else {
+        this.hideThinkingEntry(turn, step)
+        const activity = this.activityByTurn.get(turn)
+        if (activity !== undefined) this.clearThinkingPreview(activity, step)
+      }
+      return
+    }
     const entry = this.thinkingEntry(turn, step)
+    this.hiddenThinkingEntries.delete(entry)
     entry.text = text
+    this.markStreamingEntryDirty(`thinking:${key}`)
     this.closeThinking(entry)
+    this.restoreThinkingPreview(this.activityFor(turn), step, text)
   }
 
   /**
@@ -1807,6 +1873,31 @@ export class TranscriptFolder {
     if (open.size === 0) this.openThinkingByTurn.delete(entry.turn)
   }
 
+  /** Tombstone one thinking entry while preserving raw item indexes. */
+  private hideThinkingEntry(turn: number, step: number): void {
+    const key = stepKey(turn, step)
+    const entry = this.thinkingEntries.get(key)
+    if (entry === undefined) return
+    entry.text = ''
+    this.closeThinking(entry)
+    this.thinkingEntries.delete(key)
+    if (!this.hiddenThinkingEntries.has(entry)) {
+      this.hiddenThinkingEntries.add(entry)
+      this.markStreamingEntryDirty(`thinking:${key}`)
+      this.removeGroupedTurn(entry.turn)
+    }
+  }
+
+  /** Reset same-step reasoning when a retry opens without a live start frame. */
+  private resetThinkingForRetry(turn: number, step: number): void {
+    this.hideThinkingEntry(turn, step)
+    const activity = this.activityByTurn.get(turn)
+    if (activity === undefined) return
+    this.clearThinkingPreview(activity, step)
+    this.syncUsage(activity)
+    activity.revision += 1
+  }
+
   /** Settle only the thinking entries owned by one ended turn. */
   private closeThinkingForTurn(turn: number): void {
     const open = this.openThinkingByTurn.get(turn)
@@ -1923,6 +2014,13 @@ export class TranscriptFolder {
       this.applyCompactionEvent(event as { type: string; data: Record<string, unknown> }, kind)
       return
     }
+    if (kind === 'llm/retry-started') {
+      const data = event.data as { turn: number; step: number }
+      if (this.activityByTurn.get(data.turn)?.completed === true) return
+      this.usage.onRetryStarted(data.turn, data.step)
+      this.resetThinkingForRetry(data.turn, data.step)
+      return
+    }
     // `assistant/attempt` is a Session v2 durable settlement (master
     // vocabulary — the installed dsh-session may lag, so it is typed
     // STRUCTURALLY like the compaction events). One model attempt that
@@ -1934,9 +2032,12 @@ export class TranscriptFolder {
     // (plan §A2.1).
     if (kind === 'assistant/attempt') {
       const data = event.data as { turn: number; step: number; stream?: readonly unknown[] }
+      if (this.activityByTurn.get(data.turn)?.completed === true) return
       // Session v2: the attempt committed NO surface message — remove any
-      // still-transient live text of the step so live and reopen agree.
-      this.settleFailedAttempt(data.turn, data.step)
+      // still-transient live text of the step so live and reopen agree. Its
+      // compact stream still carries the authoritative usage sample.
+      this.settleFailedAttempt(data.turn, data.step, false, true)
+      this.usage.onAssistantAttempt(data.turn, data.step, usageFromAssistantStream(data.stream ?? []))
       const activity = this.activityFor(data.turn)
       const key = stepKey(data.turn, data.step)
       // The durable embedded stream is the COMPLETE reasoning evidence:
@@ -1945,6 +2046,7 @@ export class TranscriptFolder {
       // RETRY's later attempt replaces the failed one's reasoning (reopen
       // parity with the live start-reset).
       this.restoreThinkingFromStream(data.turn, data.step, data.stream ?? [])
+      this.syncUsage(activity)
       const thinking = this.thinkingEntries.get(key)
       if (thinking !== undefined && thinking.running) this.closeThinking(thinking)
       // Focus aggregation: a failed/retried attempt is orchestration —
@@ -2049,6 +2151,7 @@ export class TranscriptFolder {
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
         const key = stepKey(event.data.turn, event.data.step)
+        const messageUsage = event.data.usage
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
         const text = textOf(messageBlocks)
@@ -2085,12 +2188,7 @@ export class TranscriptFolder {
         // On a COLD replay no live reasoning deltas ever arrived — the
         // assembled `reasoning` blocks in the durable message restore the
         // settled thinking entry (Session v2 embedded-stream parity).
-        const thinking = this.thinkingEntries.get(key)
-        if (thinking !== undefined) {
-          this.closeThinking(thinking)
-        } else {
-          this.restoreThinkingFromMessage(event.data.turn, event.data.step, messageBlocks)
-        }
+        this.restoreThinkingFromMessage(event.data.turn, event.data.step, messageBlocks)
         // Focus aggregation: the settled assistant text OVERWRITES the
         // candidate's text (authoritative — plan §5.4) but does NOT decide
         // whether it is the final answer; the candidate keeps its step
@@ -2155,7 +2253,7 @@ export class TranscriptFolder {
           }
         }
         this.syncMessage(activity)
-        this.usage.onAssistantMessage(event.data.turn, event.data.step, event.data.usage)
+        this.usage.onAssistantMessage(event.data.turn, event.data.step, messageUsage)
         this.syncUsage(activity)
         activity.revision += 1
         break

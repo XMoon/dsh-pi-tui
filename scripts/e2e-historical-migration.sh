@@ -401,7 +401,7 @@ export function apply(ctx) {
         yield { type: 'block-end', index, block: { type: 'text', text } }
       }
       yield { type: 'usage', usage: { inputTokens: 10, outputTokens: REPLY.length } }
-      yield { type: 'finish', reason: 'completed' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
     }
   })()
   ctx.llm.registerAdapter(['mock'], adapter)

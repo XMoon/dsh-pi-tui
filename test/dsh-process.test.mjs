@@ -6,7 +6,17 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
 
 import { testLifecycle } from './support/temp-lifecycle.ts'
-import { cleanupTimedOutProcessTree, runBounded } from '../scripts/lib/process.mjs'
+import { cleanupTimedOutProcessTree, pnpmBundledNodeGyp, runBounded } from '../scripts/lib/process.mjs'
+
+test('pnpm bundled node-gyp resolver prefers the executable-adjacent dist', (t) => {
+  const life = testLifecycle(t)
+  const pnpmRoot = life.tempDir('dsh-pnpm-bundle-')
+  const command = join(pnpmRoot, 'pnpm')
+  const gyp = join(pnpmRoot, 'dist', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js')
+  mkdirSync(join(pnpmRoot, 'dist', 'node_modules', 'node-gyp', 'bin'), { recursive: true })
+  writeFileSync(gyp, '#!/usr/bin/env node\\n')
+  assert.equal(pnpmBundledNodeGyp(command), gyp)
+})
 
 function isAlive(pid) {
   try {
