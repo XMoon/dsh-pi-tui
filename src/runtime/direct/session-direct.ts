@@ -36,6 +36,7 @@ import type { ExportReadResult, SessionProjectionSummary, SessionSearchHit, Sess
  * read off the live context at runtime.
  */
 export interface SessionQueryLike {
+  /** Returns master-visible rows: live rows plus cold rows with cwd. */
   listSessions(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; live: boolean }>>
   /** One exact live or prepared logical Session observation for explicit
    * viewer/resume paths: header + complete validated event log, caller-owned.
@@ -253,6 +254,8 @@ export class DirectSessionReader implements SessionReader {
     }
   }
 
+  /** List the master-visible semantic session roster: live rows are retained
+   * even without cwd; cold rows require cwd before ordering/enrichment. */
   async list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined> {
     const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
     signal?.throwIfAborted()
@@ -265,10 +268,15 @@ export class DirectSessionReader implements SessionReader {
     // picker frame without waiting on every historical session log.
     const records = await query.listSessions(signal)
     signal?.throwIfAborted()
-    this.headerSnapshot = new Map(records.map(record => [String(record.header.id), record.header]))
+    // Match DSH master ApiSessionList.list(): a live session remains visible
+    // even without cwd, while an unmounted cold header needs cwd to be a
+    // resolvable picker row. Keep filtered headers out of the enrichment
+    // snapshot so projectionBatch cannot resurrect them later.
+    const visibleRecords = records.filter(record => record.live || record.header.cwd !== undefined)
+    this.headerSnapshot = new Map(visibleRecords.map(record => [String(record.header.id), record.header]))
     const projections = this.ctx.get('sessionProjections') as SessionProjectionReaderLike | undefined
     const cache = this.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
-    const rows = records.map(record => ({
+    const rows = visibleRecords.map(record => ({
       row: {
         id: record.header.id,
         createdAt: record.header.createdAt,
@@ -305,6 +313,8 @@ export class DirectSessionReader implements SessionReader {
     }, signal)
   }
 
+  /** Search only the cwd-bearing semantic session roster; live cwd-less
+   * sessions remain list-visible but are outside the master search contract. */
   async search(query: string): Promise<SessionSearchHit[] | undefined> {
     const searchText = query.trim()
     if (searchText === '') return []
@@ -319,7 +329,11 @@ export class DirectSessionReader implements SessionReader {
     // session-query provider (`openAt: never`). `filterEvents` remains the
     // public semantic seam, so use it over the query engine's live-preferred
     // corpus.
+    // Search follows the master visibility contract before applying the
+    // newest-100 work bound: only cwd-bearing persisted sessions participate.
+    // This prevents invisible cwd-less rows from consuming the search budget.
     const records = [...await sessionQuery.listSessions()]
+      .filter(record => record.header.cwd !== undefined)
       .sort((a, b) => b.header.createdAt - a.header.createdAt)
       .slice(0, 100)
     const hits: SessionSearchHit[] = []

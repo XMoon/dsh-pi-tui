@@ -30,6 +30,7 @@ function header(id: string, createdAt: number, extra: Partial<{
     createdAt,
     version: 2 as const,
     isSeeded: false,
+    cwd: '/workspace',
     ...rest,
     ...(parentSession === undefined ? {} : { parentSession: SessionId(parentSession) }),
   }
@@ -66,6 +67,31 @@ test('list prefers the semantic query engine and sorts newest-first', async () =
   assert.ok(rows !== undefined)
   assert.deepEqual(rows.map(r => r.id), ['session-new', 'session-old'])
   assert.equal(rows[0].live, true)
+})
+
+test('list matches master visibility: cold cwd-less rows are omitted but live rows remain visible', async () => {
+  const cacheReads: string[] = []
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([
+      { header: header('cold-hidden', 400, { cwd: undefined }), live: false },
+      { header: header('live-no-cwd', 300, { cwd: undefined }), live: true },
+      { header: header('cold-visible', 200, { cwd: '/workspace' }), live: false },
+    ]),
+    sessionProjectionCache: {
+      cachedSnapshot: (meta: { id: string }) => {
+        cacheReads.push(meta.id)
+        return undefined
+      },
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.deepEqual(rows?.map(row => row.id), ['live-no-cwd', 'cold-visible'])
+  const projections = await reader.projectionBatch([
+    ...rows!,
+    row('cold-hidden', 400),
+  ])
+  assert.equal(projections.has('cold-hidden'), false)
+  assert.equal(cacheReads.includes('cold-hidden'), false)
 })
 
 test('list uses sessionListMetadata activity when the optional capability exists', async () => {
@@ -301,8 +327,8 @@ test('projectionBatch rejects an already-aborted signal before reading', async (
 test('search uses semantic sessionQuery filtering without persistence', async () => {
   const records = [
     { header: header('session-live', 300), live: true },
-    { header: header('session-hit', 200), live: false },
-    { header: header('session-miss', 100), live: false },
+    { header: header('session-hit', 200, { cwd: '/workspace' }), live: false },
+    { header: header('session-miss', 100, { cwd: '/workspace' }), live: false },
   ]
   const reader = new DirectSessionReader(host({
     sessionQuery: query(records, async (id, filters) => {
@@ -314,6 +340,37 @@ test('search uses semantic sessionQuery filtering without persistence', async ()
   assert.deepEqual(await reader.search('needle'), [{ id: 'session-hit', createdAt: 200, snippet: 'prefix Needle suffix' }])
 })
 
+test('search excludes cold cwd-less sessions before semantic filtering', async () => {
+  const queried: string[] = []
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([
+      { header: header('hidden-match', 300, { cwd: undefined }), live: false },
+      { header: header('visible-match', 200, { cwd: '/workspace' }), live: false },
+    ], async id => {
+      queried.push(String(id))
+      return String(id) === 'visible-match'
+        ? [{ sessionId: id, seq: 1, type: 'message/user', time: 200, surface: 'current', text: 'needle' }]
+        : []
+    }),
+  }))
+  assert.deepEqual(await reader.search('needle'), [{ id: 'visible-match', createdAt: 200, snippet: 'needle' }])
+  assert.deepEqual(queried, ['visible-match'])
+})
+
+test('search applies visibility before the newest-100 work bound', async () => {
+  const hidden = Array.from({ length: 101 }, (_, index) => ({
+    header: header(`hidden-${index}`, 10_000 - index, { cwd: undefined }),
+    live: false,
+  }))
+  const visible = { header: header('visible-old', 1, { cwd: '/workspace' }), live: false }
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([...hidden, visible], async id => [
+      { sessionId: id, seq: 1, type: 'message/user', time: 1, surface: 'current', text: 'needle' },
+    ]),
+  }))
+  assert.deepEqual(await reader.search('needle'), [{ id: 'visible-old', createdAt: 1, snippet: 'needle' }])
+})
+
 test('search without semantic filtering is explicitly unavailable', async () => {
   const reader = new DirectSessionReader(host({ sessionQuery: query([{ header: header('session-hit', 200), live: false }]) }))
   assert.equal(await reader.search('needle'), undefined)
@@ -321,7 +378,7 @@ test('search without semantic filtering is explicitly unavailable', async () => 
 
 test('search returns undefined when semantic search is explicitly disabled', async () => {
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: header('session-hit', 200), live: false }], async () => {
+    sessionQuery: query([{ header: header('session-hit', 200, { cwd: '/workspace' }), live: false }], async () => {
       throw Object.assign(new Error('search disabled'), { code: 'SESSION_QUERY_SEARCH_DISABLED' })
     }),
   }))
@@ -331,8 +388,8 @@ test('search returns undefined when semantic search is explicitly disabled', asy
 test('search scans newest sessions and returns bounded snippets', async () => {
   const reader = new DirectSessionReader(host({
     sessionQuery: query([
-      { header: header('session-hit', 200), live: false },
-      { header: header('session-miss', 100), live: false },
+      { header: header('session-hit', 200, { cwd: '/workspace' }), live: false },
+      { header: header('session-miss', 100, { cwd: '/workspace' }), live: false },
     ], async id => String(id) === 'session-hit'
       ? [{ sessionId: id, seq: 4, type: 'message/user', time: 200, surface: 'current', text: 'prefix needle suffix' }]
       : []),
@@ -344,7 +401,7 @@ test('search scans newest sessions and returns bounded snippets', async () => {
 })
 
 test('search caps at 20 hits', async () => {
-  const headers = Array.from({ length: 30 }, (_, i) => header(`session-${i}`, 1000 - i))
+  const headers = Array.from({ length: 30 }, (_, i) => header(`session-${i}`, 1000 - i, { cwd: '/workspace' }))
   const reader = new DirectSessionReader(host({
     sessionQuery: query(headers.map(item => ({ header: item, live: false })), async id => [
       { sessionId: id, seq: 1, type: 'message/user', time: 1000, surface: 'current', text: `x needle ${id}` },
@@ -357,13 +414,13 @@ test('search caps at 20 hits', async () => {
 test('search preserves an unsupported session-format refusal', async () => {
   const refusal = Object.assign(new Error('unknown durable event'), { name: 'SessionFormatUnsupportedError' })
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: header('session-unknown', 100), live: false }], async () => { throw refusal }),
+    sessionQuery: query([{ header: header('session-unknown', 100, { cwd: '/workspace' }), live: false }], async () => { throw refusal }),
   }))
   await assert.rejects(reader.search('needle'), error => error === refusal)
 })
 
 test('search never sorts the shared query list in place', async () => {
-  const shared = [header('session-old', 100), header('session-new', 300)]
+  const shared = [header('session-old', 100, { cwd: '/workspace' }), header('session-new', 300, { cwd: '/workspace' })]
   const before = [...shared]
   const reader = new DirectSessionReader(host({
     sessionQuery: query(shared.map(item => ({ header: item, live: false })), async id => String(id) === 'session-new'
