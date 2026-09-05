@@ -493,6 +493,17 @@ export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
   /** The assistant message object per (turn, step); streaming text lands in place. */
   private readonly assistantEntries = new Map<string, Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** Assistant entries created by the LIVE text path and not yet taken
+   * over by a durable `assistant/message`. Session v2: an attempt that
+   * settles without a message never forms surface text, so a failed
+   * attempt settlement removes its still-transient entry (live and reopen
+   * must agree — the durable log has nothing for it). */
+  private readonly transientAssistantEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** Assistant entries REMOVED by a failed-attempt settlement. They stay in
+   * the raw item list so every index-keyed projection (turn starts, search
+   * entries, groups) keeps its stable indexes, but every visible projection
+   * skips them — a tombstone, never a mid-array splice. */
+  private readonly hiddenAssistantEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'assistant' }>>()
   /** The thinking entry object per (turn, step), for in-place text updates. */
   private readonly thinkingEntries = new Map<string, Extract<TranscriptMessage, { kind: 'thinking' }>>()
   /** Thinking entries that still need a lifecycle boundary to settle. The
@@ -950,9 +961,16 @@ export class TranscriptFolder {
         continue
       }
       const item = this.items[index]
-      if (item !== undefined && 'turn' in item) this.addGroupedTurn(item.turn)
+      // Tombstoned failed-attempt text is never visible output.
+      if (item !== undefined && 'turn' in item && this.isVisible(item)) this.addGroupedTurn(item.turn)
     }
    this.groupedTurnIndexDirty = false
+  }
+
+  /** Whether one raw item is still visible output (failed-attempt assistant
+   * text is tombstoned, never shown). */
+  private isVisible(item: TranscriptMessage): boolean {
+    return item.kind !== 'assistant' || !this.hiddenAssistantEntries.has(item)
   }
 
   /** Ensure exact grouped-turn counts before a cross-turn projection. */
@@ -1036,6 +1054,12 @@ export class TranscriptFolder {
     this.crossTurnGroups = 0
     for (let start = 0; start < this.items.length;) {
       const item = this.items[start]!
+      // Tombstoned failed-attempt text is never visible output and never
+      // separates an adjacent read run.
+      if (!this.isVisible(item)) {
+        start += 1
+        continue
+      }
       if (item.kind !== 'tool' || item.name !== 'read' || item.status !== 'ok') {
         if (item.kind === 'tool') this.groupedToolCount += 1
          if ('turn' in item) this.addGroupedTurn(item.turn)
@@ -1271,18 +1295,44 @@ export class TranscriptFolder {
    */
   applyLiveInput(input: AssistantLiveInput): void {
     switch (input.kind) {
-      case 'start':
-        // The attempt opened: entries are created on their first delta;
-        // the Focus preparing state is runner-owned.
+      case 'start': {
+        // A RETRY reopens the same (turn, step) after a failed attempt:
+        // the previous attempt's reasoning entry was CLOSED but kept as
+        // diagnostic evidence — reset its text (and the Focus preview
+        // tail) so the new attempt's reasoning never concatenates onto
+        // the failed one's. Reopen parity: the durable log restores the
+        // step's reasoning from its LATEST source.
+        const key = stepKey(input.turn, input.step)
+        const thinking = this.thinkingEntries.get(key)
+        if (thinking !== undefined && thinking.running === false) {
+          thinking.text = ''
+          const activity = this.activityByTurn.get(input.turn)
+          if (activity !== undefined) {
+            activity.thinkingTail = ''
+            activity.think = undefined
+            activity.revision += 1
+          }
+        }
         break
+      }
       case 'chunk':
         this.applyAssistantChunk(input.turn, input.step, input.chunk)
         break
       case 'end':
-        if (input.status === 'abandoned') {
-          // No durable settlement exists (the append failed upstream):
-          // close the attempt's open thinking entries so the partial
-          // reasoning stops animating — the partial text stays visible.
+        // Session v2 attempt settlement: an attempt that committed NO
+        // surface message (abandoned, or committed as `assistant/attempt`)
+        // must leave no transient surface text behind — live and reopen
+        // agree, because the durable log has nothing for it. A committed
+        // `assistant/message` end does NOT remove anything: the durable
+        // message owns the entry (it arrives on the event plane either
+        // before this notification or moments later).
+        if (input.status === 'abandoned' || input.settlement === 'attempt') {
+          this.settleFailedAttempt(input.turn, input.step)
+        }
+        // The attempt's open thinking entries stop animating. The partial
+        // reasoning stays as diagnostic evidence — a cold replay restores
+        // the same attempt's reasoning from its embedded durable stream.
+        {
           const open = this.openThinkingByTurn.get(input.turn)
           if (open !== undefined) {
             for (const entry of open) entry.running = false
@@ -1291,6 +1341,39 @@ export class TranscriptFolder {
         }
         break
     }
+  }
+
+  /** A failed-attempt settlement (live abandoned end, committed
+   * `assistant/attempt` end, or the durable `assistant/attempt` event —
+   * idempotent, whichever arrives first): remove the step's still
+   * TRANSIENT assistant text (an attempt never forms a surface message),
+   * drop the provisional usage, and clear the Focus Message candidate if
+   * it still belongs to the failed step. Settled/durable content is never
+   * touched. */
+  private settleFailedAttempt(turn: number, step: number): void {
+    const key = stepKey(turn, step)
+    const entry = this.assistantEntries.get(key)
+    if (entry !== undefined && this.transientAssistantEntries.has(entry)) {
+      // Tombstone: hide the item from every visible projection (display,
+      // grouping, search) without shifting the index-keyed structures.
+      this.assistantEntries.delete(key)
+      this.transientAssistantEntries.delete(entry)
+      this.hiddenAssistantEntries.add(entry)
+      this.removeGroupedTurn(entry.turn)
+    }
+    // Provisional live usage of the failed attempt vanishes (the durable
+    // log carries none for it — cold replay shows the same totals).
+    this.usage.discardStep(turn, step)
+    const activity = this.activityByTurn.get(turn)
+    if (activity === undefined) return
+    const candidate = activity.messageCandidate
+    if (candidate !== undefined && candidate.step === step
+      && !activity.settledSteps.has(step) && !activity.confirmedSteps.has(step)) {
+      activity.messageCandidate = undefined
+      this.syncMessage(activity)
+      activity.revision += 1
+    }
+    this.syncUsage(activity)
   }
 
   /** Fold one live assistant chunk (Session v2 transient plane) into the
@@ -1305,12 +1388,23 @@ export class TranscriptFolder {
     // no separate accumulator map, so a long session's text is stored
     // once, not twice.
     if (chunk.type === 'text-delta') {
-      this.assistantEntry(turn, step).text += chunk.text
+      // Streaming text accumulates in place on the entry itself; there is
+      // no separate accumulator map, so a long session's text is stored
+      // once, not twice. An entry CREATED by the live path is transient:
+      // only a durable `assistant/message` turns it into surface text
+      // (Session v2 — a failed attempt must leave no text behind).
+      const key = stepKey(turn, step)
+      let entry = this.assistantEntries.get(key)
+      if (entry === undefined) {
+        entry = this.assistantEntry(turn, step)
+        this.transientAssistantEntries.add(entry)
+      }
+      entry.text += chunk.text
       // Search projection: O(1) dirty mark — the entry is re-normalized
       // as a WHOLE string at the next search (Unicode lowercasing is
       // not chunk-splittable — Greek sigma — but the live streaming
       // path must never pay per-chunk lowercase).
-      this.markStreamingEntryDirty(`assistant:${stepKey(turn, step)}`)
+      this.markStreamingEntryDirty(`assistant:${key}`)
       // Focus aggregation: the streaming assistant text feeds the
       // Message candidate IMMEDIATELY (no assistant/message wait —
       // plan §5.2), so the running card previews the intermediate
@@ -1411,7 +1505,11 @@ export class TranscriptFolder {
         if (members !== undefined && members[0] === index) grouped.push(group)
         continue
       }
-      grouped.push(this.items[index]!)
+      const item = this.items[index]
+      if (item === undefined) continue
+      // Tombstoned failed-attempt text never renders.
+      if (!this.isVisible(item)) continue
+      grouped.push(item)
     }
     return grouped
   }
@@ -1487,6 +1585,8 @@ export class TranscriptFolder {
       }
       const message = this.items[index]
       if (message === undefined) continue
+      // Tombstoned failed-attempt text never renders.
+      if (!this.isVisible(message)) continue
       kept.push(message)
       if (message.kind === 'tool') tools += 1
     }
@@ -1650,6 +1750,9 @@ export class TranscriptFolder {
       // merged group's text lives ONLY on the representative entry (a
       // group expansion marks exactly that one entry dirty).
       if (representative !== id) return
+      // Tombstoned failed-attempt text is not part of the corpus.
+      const item = this.items[id]
+      if (item !== undefined && !this.isVisible(item)) return
       if (!entry.normalizedText.includes(needle)) return
       if (seen.has(representative)) return
       seen.add(representative)
@@ -1831,14 +1934,19 @@ export class TranscriptFolder {
     // (plan §A2.1).
     if (kind === 'assistant/attempt') {
       const data = event.data as { turn: number; step: number; stream?: readonly unknown[] }
+      // Session v2: the attempt committed NO surface message — remove any
+      // still-transient live text of the step so live and reopen agree.
+      this.settleFailedAttempt(data.turn, data.step)
       const activity = this.activityFor(data.turn)
       const key = stepKey(data.turn, data.step)
+      // The durable embedded stream is the COMPLETE reasoning evidence:
+      // overwrite any live partial (or an earlier attempt's restore) so a
+      // cold replay shows exactly what the live surface showed — and a
+      // RETRY's later attempt replaces the failed one's reasoning (reopen
+      // parity with the live start-reset).
+      this.restoreThinkingFromStream(data.turn, data.step, data.stream ?? [])
       const thinking = this.thinkingEntries.get(key)
-      if (thinking !== undefined) {
-        this.closeThinking(thinking)
-      } else {
-        this.restoreThinkingFromStream(data.turn, data.step, data.stream ?? [])
-      }
+      if (thinking !== undefined && thinking.running) this.closeThinking(thinking)
       // Focus aggregation: a failed/retried attempt is orchestration —
       // it never touches the Message slot (the llm/retry event carries
       // the retry evidence).
@@ -1947,6 +2055,10 @@ export class TranscriptFolder {
         const entry = this.assistantEntries.get(key)
         if (entry !== undefined) {
           entry.text = text
+          // The durable message takes over the live-created entry: it is no
+          // longer transient, so a failed-attempt settlement can never
+          // remove settled surface text.
+          this.transientAssistantEntries.delete(entry)
           // The settled full blocks (kept when the step carried images or
           // other non-text blocks — text-only steps stay on the text path).
           if (messageBlocks.some(block => block.type !== 'text')) entry.content = messageBlocks

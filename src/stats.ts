@@ -335,6 +335,17 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
       const eventTurn = (event.data as { turn?: unknown }).turn
       if (typeof eventTurn === 'number' && completedTurnFence !== undefined && eventTurn <= completedTurnFence) continue
     }
+    // `assistant/attempt` (Session v2, typed STRUCTURALLY): the attempt
+    // committed NO surface message — discard its provisional live usage
+    // and open timing (parity with the class fold and with cold replay).
+    if ((event.type as string) === 'assistant/attempt') {
+      const failed = event.data as { turn: number; step: number }
+      usage.discardStep(failed.turn, failed.step)
+      const failedKey = stepKey(failed.turn, failed.step)
+      const failedTiming = settledTurn === failed.turn ? perStep.get(failedKey) : undefined
+      if (failedTiming !== undefined && failedTiming.settled !== true) perStep.delete(failedKey)
+      continue
+    }
     switch (event.type) {
       case 'turn/start': {
         // Advance the shared usage accounting (review finding).
@@ -571,13 +582,36 @@ export class StatsFolder {
    * Apply one live assistant stream input (Session v2 TRANSIENT plane).
    * Live performance metrics (TTFT, recent throughput samples) come from
    * the transient stream's timestamps/content; the durable plane carries
-   * no per-chunk accounting anymore. `start`/`end` frames carry no
-   * performance content — the timing settles at the durable
-   * `assistant/message` on the `session/event` plane.
+   * no per-chunk accounting anymore. Chunk frames carry the performance
+   * content; the timing settles at the durable `assistant/message` on the
+   * `session/event` plane. A FAILED attempt (abandoned end, or a
+   * committed end whose durable settlement is `assistant/attempt`) leaves
+   * no durable usage or timing — its provisional live accounting is
+   * discarded so live and reopen agree.
    */
   applyLiveInput(input: AssistantLiveInput): void {
+    if (input.kind === 'end' && (input.status === 'abandoned' || input.settlement === 'attempt')) {
+      this.settleFailedAttempt(input.turn, input.step)
+      return
+    }
     if (input.kind !== 'chunk') return
     this.applyAssistantChunk(input.turn, input.step, input.time, input.chunk)
+  }
+
+  /** A failed-attempt settlement (Session v2): discard the step's
+   * provisional live usage and open timing — the durable log carries
+   * neither (an `assistant/attempt` embeds no usage; an abandoned attempt
+   * has no durable fact at all), so cold replay shows the same numbers. */
+  private settleFailedAttempt(turn: number, step: number): void {
+    if (this.completedTurnFence !== undefined && turn <= this.completedTurnFence) return
+    this.usage.discardStep(turn, step)
+    const key = stepKey(turn, step)
+    const timing = this.perStep.get(key)
+    if (timing !== undefined && timing.settled !== true) {
+      // Drop the open timing entry: a late step/end must commit nothing
+      // for the failed step (its provisional usage is already gone).
+      this.perStep.delete(key)
+    }
   }
 
   /** Fold one live assistant chunk (Session v2 transient plane) into the
@@ -635,6 +669,16 @@ export class StatsFolder {
     if (event.type !== 'turn/end' && event.type !== 'request/context') {
       const eventTurn = (event.data as { turn?: unknown }).turn
       if (typeof eventTurn === 'number' && this.completedTurnFence !== undefined && eventTurn <= this.completedTurnFence) return
+    }
+    // `assistant/attempt` is a Session v2 durable settlement (master
+    // vocabulary — typed STRUCTURALLY like the transcript fold): the
+    // attempt committed NO surface message, so its provisional live usage
+    // and timing are discarded (a cold replay of the same log shows the
+    // same numbers).
+    if ((event.type as string) === 'assistant/attempt') {
+      const data = event.data as { turn: number; step: number }
+      this.settleFailedAttempt(data.turn, data.step)
+      return
     }
     switch (event.type) {
       case 'turn/start': {

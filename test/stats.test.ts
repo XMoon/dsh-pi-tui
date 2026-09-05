@@ -827,6 +827,67 @@ test('late usage after turn/end is ignored by BOTH the stats fold and the Focus 
   assert.equal(folder.turnActivity(0)!.totalTokens, 100, 'the Focus per-turn total must agree with the footer')
 })
 
+test('a FAILED attempt (assistant/attempt) leaves NO usage in BOTH folds (live == reopen)', () => {
+  const t = 1_700_000_000_000
+  const events = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 1),
+    // provisional streaming usage of the doomed attempt
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } } }, 2, t + 2),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3, t + 3),
+    event('step/end', { turn: 0, step: 0 }, 4, t + 4),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5, t + 5),
+  ]
+  const stats = foldStats(events)
+  assert.equal(stats.inputTokens, 0, "the failed attempt provisional usage must not be committed")
+  assert.equal(stats.outputTokens, 0)
+  // Reopen parity: a cold durable replay (no live chunks) shows the same zeros.
+  const cold = computeStats(events.filter(item => (item.type as string) !== 'assistant/chunk'))
+  assert.equal(cold.inputTokens, 0, 'cold replay agrees with the live fold')
+})
+
+test('a FAILED attempt never settles TTFT/timing in BOTH folds', () => {
+  const t = 1_700_000_000_000
+  const events = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'x' } }, 2, t + 2_000),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3, t + 3_000),
+    event('step/end', { turn: 0, step: 0 }, 4, t + 4_000),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5, t + 5_000),
+  ]
+  const stats = foldStats(events)
+  assert.equal(stats.llmMs, 0, 'a failed attempt adds no LLM wall time')
+  assert.equal(stats.firstTokenMsAvg, 0, 'no TTFT sample for a failed attempt')
+  const folder = new StatsFolder()
+  applyMixed(folder, events)
+  const liveStats = folder.snapshot()
+  assert.equal(liveStats.llmMs, 0)
+})
+
+test("a SUCCESSFUL retry usage survives: only the failed attempt is discarded", () => {
+  const t = 1_700_000_000_000
+  const events = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } } }, 2, t + 2),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3, t + 3),
+    // retry on the SAME step streams a fresh cumulative usage fact
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 200, outputTokens: 9 } } }, 4, t + 4),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('m-retry'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 200, outputTokens: 9 },
+      stream: [],
+    }, 5, t + 5),
+    event('step/end', { turn: 0, step: 0 }, 6, t + 6),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7, t + 7),
+  ]
+  const stats = foldStats(events)
+  assert.equal(stats.inputTokens, 200, "the failed attempt is discarded; the retry authoritative usage is counted once")
+  assert.equal(stats.outputTokens, 9)
+})
+
 test('a duplicate step/start never leaks the open step pending usage', () => {
   const acc = new StepUsageAccumulator()
   acc.onStepStart(0, 0)
@@ -834,6 +895,27 @@ test('a duplicate step/start never leaks the open step pending usage', () => {
   acc.onStepStart(0, 0) // duplicate
   acc.onStepEnd(0, 0)
   assert.equal(acc.sessionTotals().inputTokens, 100, 'the duplicate start must not lose the pending usage')
+})
+
+test('discardStep drops a FAILED attempt\'s provisional usage without committing it', () => {
+  const acc = new StepUsageAccumulator()
+  acc.onStepStart(0, 0)
+  acc.onUsageChunk(0, 0, { inputTokens: 100, outputTokens: 0 })
+  acc.discardStep(0, 0) // the attempt failed — assistant/attempt carries no usage
+  assert.equal(acc.sessionTotals().inputTokens, 0, 'nothing was committed for the failed attempt')
+  assert.equal(acc.turnUsageWithPending(0), undefined, 'the turn shows no usage for the failed step')
+  acc.onStepEnd(0, 0)
+  assert.equal(acc.sessionTotals().inputTokens, 0, 'the closed failed step commits nothing')
+})
+
+test('discardStep never discards an AUTHORITATIVE value the durable log owns', () => {
+  const acc = new StepUsageAccumulator()
+  acc.onStepStart(0, 0)
+  acc.onUsageChunk(0, 0, { inputTokens: 100, outputTokens: 0 })
+  acc.onAssistantMessage(0, 0, { inputTokens: 200, outputTokens: 0 }) // durable settlement
+  acc.discardStep(0, 0) // a stale replay artifact must not wipe the settled usage
+  acc.onStepEnd(0, 0)
+  assert.equal(acc.sessionTotals().inputTokens, 200, 'the authoritative usage survives')
 })
 
 test('a late fact for an OLDER turn is ignored after the turn advanced (no double count)', () => {

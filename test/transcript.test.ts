@@ -1755,3 +1755,152 @@ test('the final answer never enters the Message slot (multiline final included)'
 
 
 
+
+// ── Session v2 failed-attempt transient lifecycle (P0-2) ────────────────
+
+/** One live attempt OPEN frame (the neutral input, not the wire). */
+function liveAttemptStart(turn: number, step: number) {
+  return { kind: 'start' as const, sessionId: 'test', attemptId: 'attempt-x', turn, step }
+}
+
+/** One live attempt settlement frame (the neutral input, not the wire). */
+function liveAttemptEnd(turn: number, step: number, status: 'committed' | 'abandoned', settlement?: 'message' | 'attempt') {
+  return {
+    kind: 'end' as const,
+    sessionId: 'test',
+    attemptId: 'attempt-x',
+    turn,
+    step,
+    status,
+    ...(settlement === undefined ? {} : { settlement }),
+  }
+}
+
+function assistantMessage(seq: number, text: string, opts: { turn?: number; step?: number } = {}): SessionEvent {
+  return event('assistant/message', {
+    turn: opts.turn ?? 0,
+    step: opts.step ?? 0,
+    message: {
+      id: MessageId(`a-${seq}`),
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [],
+  }, seq)
+}
+
+test('a durable assistant/attempt removes the failed attempt\'s transient text (live == reopen)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hello wor' }, 2))
+  assert.deepEqual(kinds(folder.messages()), ['assistant'], 'streaming text is visible while the attempt runs')
+  folder.apply([event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3)])
+  assert.deepEqual(folder.messages(), [], 'a failed attempt leaves NO surface text')
+  folder.apply([event('step/end', { turn: 0, step: 0 }, 4), event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5)])
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant'), [],
+    'the failed step never renders an assistant row after the turn ends')
+  // Reopen: a cold replay of the same durable log shows the same (nothing).
+  const reopened = new TranscriptFolder()
+  reopened.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3),
+    event('step/end', { turn: 0, step: 0 }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
+  ])
+  assert.deepEqual(reopened.messages().filter(message => message.kind === 'assistant'), [],
+    'cold replay never restores failed-attempt text')
+})
+
+test('an ABANDONED live end removes the transient text (no durable settlement exists)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'partial' }, 2))
+  folder.applyLiveInput(liveAttemptEnd(0, 0, 'abandoned'))
+  assert.deepEqual(folder.messages(), [], 'abandoned output never stays on the surface')
+})
+
+test('a retry never concatenates: the durable message carries only the retry text', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hello wor' }, 2)) // attempt A
+  folder.apply([event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3)]) // A failed
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'final answer' }, 4)) // attempt B
+  const streaming = folder.messages()
+  assert.equal(streaming.length, 1)
+  assert.ok(streaming[0] !== undefined && streaming[0].kind === 'assistant')
+  assert.equal(streaming[0].text, 'final answer', 'B starts from an empty entry — never "hello worfinal answer"')
+  folder.apply([assistantMessage(5, 'final answer'), event('step/end', { turn: 0, step: 0 }, 6), event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7)])
+  const settled = folder.messages()
+  assert.equal(settled.length, 1)
+  assert.ok(settled[0] !== undefined && settled[0].kind === 'assistant')
+  assert.equal(settled[0].text, 'final answer')
+  // Reopen parity: the same durable log replays to the same single message.
+  const reopened = new TranscriptFolder()
+  reopened.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3),
+    assistantMessage(5, 'final answer'),
+    event('step/end', { turn: 0, step: 0 }, 6),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7),
+  ])
+  const replayed = reopened.messages()
+  assert.equal(replayed.length, 1)
+  assert.ok(replayed[0] !== undefined && replayed[0].kind === 'assistant')
+  assert.equal(replayed[0].text, 'final answer', 'reopen shows exactly the retry, never the failed prefix')
+})
+
+test('a committed MESSAGE settlement never removes text — the durable message owns the entry', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'streamed' }, 2))
+  // The durable message lands (event plane) BEFORE the committed end frame.
+  folder.apply([assistantMessage(3, 'authoritative')])
+  folder.applyLiveInput(liveAttemptEnd(0, 0, 'committed', 'message'))
+  const messages = folder.messages()
+  assert.equal(messages.length, 1)
+  assert.ok(messages[0] !== undefined && messages[0].kind === 'assistant')
+  assert.equal(messages[0].text, 'authoritative', 'the settled message text survives the end frame')
+})
+
+test('failed-attempt reasoning resets on retry and matches a cold replay', () => {
+  const durable = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [{ type: 'chunk', time: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'attempt A reasoning' } }] }, 3),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [{ type: 'chunk', time: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'attempt B reasoning' } }] }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
+  ]
+  const reopened = new TranscriptFolder()
+  reopened.hydrate(durable)
+  const coldThinking = reopened.messages().filter(message => message.kind === 'thinking')
+  assert.equal(coldThinking.length, 1)
+  assert.ok(coldThinking[0] !== undefined && coldThinking[0].kind === 'thinking')
+  assert.equal(coldThinking[0].text, 'attempt B reasoning', 'a retry REPLACES the failed attempt\'s reasoning on replay')
+
+  const live = new TranscriptFolder()
+  live.apply([event('turn/start', { turn: 0 }, 0), event('step/start', { turn: 0, step: 0 }, 1)])
+  live.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'attempt A reasoning' }, 2))
+  live.apply([event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3)]) // A fails; reasoning closed
+  live.applyLiveInput(liveAttemptStart(0, 0)) // B opens: resets the closed attempt's reasoning
+  live.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'attempt B reasoning' }, 4)) // B retry
+  live.apply([event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5)])
+  const liveThinking = live.messages().filter(message => message.kind === 'thinking')
+  assert.equal(liveThinking.length, 1)
+  assert.ok(liveThinking[0] !== undefined && liveThinking[0].kind === 'thinking')
+  assert.equal(liveThinking[0].text, 'attempt B reasoning', 'the retry reset the failed attempt\'s reasoning text')
+})

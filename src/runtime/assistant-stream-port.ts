@@ -49,10 +49,20 @@ export type AssistantLiveInput =
   | { readonly kind: 'start'; readonly sessionId: string; readonly attemptId: string; readonly turn: number; readonly step: number }
   /** One delivered chunk of the attempt (text/reasoning/tool-call/usage). */
   | { readonly kind: 'chunk'; readonly sessionId: string; readonly attemptId: string; readonly turn: number; readonly step: number; readonly time: number; readonly chunk: AssistantLiveChunk }
-  /** The attempt settled: `committed` = a durable `assistant/message` or
-   * `assistant/attempt` event was committed before this notification;
+  /** The attempt settled: `committed` = a durable event was committed
+   * before this notification (`settlement` names it — an
+   * `assistant/attempt` settlement must never leave transient surface
+   * text behind, because no surface message exists for it);
    * `abandoned` = no durable settlement exists (stream error). */
-  | { readonly kind: 'end'; readonly sessionId: string; readonly attemptId: string; readonly turn: number; readonly step: number; readonly status: 'committed' | 'abandoned' }
+  | {
+    readonly kind: 'end'
+    readonly sessionId: string
+    readonly attemptId: string
+    readonly turn: number
+    readonly step: number
+    readonly status: 'committed' | 'abandoned'
+    readonly settlement?: 'message' | 'attempt'
+  }
 
 /** The live-stream sink the runner installs (routes by session id to the
  * main folder, the subagent viewer, stats, and tool previews). */
