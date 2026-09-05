@@ -42,22 +42,54 @@ function event<K extends string>(
 }
 
 /** One Session v2 live assistant-stream frame (the transient plane
- * replaces durable `assistant/chunk` events). */
-interface LiveStreamFrame {
-  type: 'chunk'
-  attemptId: string
-  turn: number
-  step: number
-  time: number
-  chunk: unknown
+ * replaces durable `assistant/chunk` events). The shape is the EXACT
+ * upstream `AssistantStreamFrame`: only `start` carries turn/step; chunk
+ * and end name their attempt plus the monotone revision and dense index. */
+type LiveStreamFrame =
+  | { type: 'start'; attemptId: string; revision: number; turn: number; step: number }
+  | { type: 'chunk'; attemptId: string; revision: number; index: number; time: number; chunk: unknown }
+  | {
+    type: 'end'
+    attemptId: string
+    revision: number
+    index: number
+    outcome: { kind: 'committed'; eventType: 'assistant/message' | 'assistant/attempt'; seq: number } | { kind: 'abandoned' }
+  }
+
+let liveStreamRevision = 0
+
+/** Start one live attempt (upstream: AssistantStreamAttempt.start). */
+function liveStart(attemptId: string, turn: number, step: number): LiveStreamFrame {
+  return { type: 'start', attemptId, revision: ++liveStreamRevision, turn, step }
 }
 
-/** Emit one live assistant-stream frame on the Cordis context. The event
- * name is master-only (absent from the local Cordis Events map), so the
- * context is read through a loose emit surface. */
-function emitLiveStream(ctx: Context, sessionId: string, frame: LiveStreamFrame): void {
+/** One live attempt chunk (upstream push — no turn/step on the wire). */
+function liveChunkFrame(attemptId: string, index: number, chunk: unknown): LiveStreamFrame {
+  return { type: 'chunk', attemptId, revision: ++liveStreamRevision, index, time: 1_700_000_000_000 + index, chunk }
+}
+
+/** Settle a live attempt after its durable event committed. */
+function liveCommittedEnd(attemptId: string, chunkCount: number, eventType: 'assistant/message' | 'assistant/attempt'): LiveStreamFrame {
+  return { type: 'end', attemptId, revision: ++liveStreamRevision, index: chunkCount, outcome: { kind: 'committed', eventType, seq: 100 } }
+}
+
+/** Emit one live assistant-stream frame on the Cordis context with the
+ * REAL emitting Agent object (the runner's identity fence compares exact
+ * Agent identity — never a session id). The event name is master-only
+ * (absent from the local Cordis Events map), so the context is read
+ * through a loose emit surface. */
+function emitLiveStream(ctx: Context, subject: unknown, frame: LiveStreamFrame): void {
   const emit = (ctx as unknown as { emit(name: string, payload: unknown): void }).emit
-  emit('agent/assistant-stream', { agent: { session: { id: sessionId } }, frame })
+  emit('agent/assistant-stream', { agent: subject, frame })
+}
+
+/** Resolve a harness's live Agent object by session id (the same object
+ * the resume returned — required for the exact-identity fence). */
+function liveAgentOf(harness: RunnerHarness, sessionId: string): unknown {
+  const agents = harness.agents as { get?(id: string): unknown }
+  const agent = agents.get?.(sessionId)
+  assert.ok(agent !== undefined, `live agent for ${sessionId} must exist`)
+  return agent
 }
 
 function modelEvent(type: 'model/selection' | 'request/header', data: unknown, seq: number): SessionEvent {
@@ -1045,14 +1077,10 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
   probe.scrollToBottomCount = 0
 
   context.emit('session/event', resumed as never, event('turn/start', { turn: 1 }, 10))
-  emitLiveStream(context, resumed.id, {
-    type: 'chunk', attemptId: 'attempt-1', turn: 1, step: 0, time: 1_700_000_000_011,
-    chunk: { type: 'text-delta', index: 0, text: 'streaming while scrolled up' },
-  })
-  emitLiveStream(context, resumed.id, {
-    type: 'chunk', attemptId: 'attempt-1', turn: 1, step: 0, time: 1_700_000_000_012,
-    chunk: { type: 'tool-call-delta', index: 0, id: 'preview-call', name: 'edit', argumentsDelta: '{"path"' },
-  })
+  const resumedAgent = liveAgentOf(harness, resumed.id)
+  emitLiveStream(context, resumedAgent, liveStart('attempt-1', 1, 0))
+  emitLiveStream(context, resumedAgent, liveChunkFrame('attempt-1', 0, { type: 'text-delta', index: 0, text: 'streaming while scrolled up' }))
+  emitLiveStream(context, resumedAgent, liveChunkFrame('attempt-1', 1, { type: 'tool-call-delta', index: 0, id: 'preview-call', name: 'edit', argumentsDelta: '{"path"' }))
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
   assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => preview.name), ['edit'])
@@ -1063,16 +1091,18 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
     name: 'edit',
     arguments: '{"path":"x"}',
   }, 13))
+  emitLiveStream(context, resumedAgent, liveCommittedEnd('attempt-1', 2, 'assistant/message'))
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
   assert.deepEqual(probe.capturedStreamingToolPreviews, [])
 
   context.emit('session/event', resumed as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 14))
   await vt.waitForRender()
-  emitLiveStream(context, resumed.id, {
-    type: 'chunk', attemptId: 'attempt-1', turn: 1, step: 0, time: 1_700_000_000_015,
-    chunk: { type: 'tool-call-delta', index: 0, id: 'late-preview', name: 'write', argumentsDelta: '{' },
-  })
+  // A late REPLAY attempt after turn/end: its own start still opens an
+  // attempt record, but the completed-turn gates drop every effect.
+  emitLiveStream(context, resumedAgent, liveStart('attempt-late', 1, 0))
+  emitLiveStream(context, resumedAgent, liveChunkFrame('attempt-late', 0, { type: 'tool-call-delta', index: 0, id: 'late-preview', name: 'write', argumentsDelta: '{' }))
+  emitLiveStream(context, resumedAgent, liveCommittedEnd('attempt-late', 1, 'assistant/attempt'))
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
   assert.deepEqual(probe.capturedStreamingToolPreviews, [], 'late chunks after turn/end must not resurrect a preview')
@@ -1085,10 +1115,8 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
   assert.equal(readScroll().isFollowingEnd, true, 'an explicit bottom jump must re-enable follow-end')
   probe.scrollToBottomCount = 0
   context.emit('session/event', resumed as never, event('turn/start', { turn: 2 }, 16))
-  emitLiveStream(context, resumed.id, {
-    type: 'chunk', attemptId: 'attempt-1', turn: 2, step: 0, time: 1_700_000_000_017,
-    chunk: { type: 'text-delta', index: 0, text: 'streaming while following' },
-  })
+  emitLiveStream(context, resumedAgent, liveStart('attempt-2', 2, 0))
+  emitLiveStream(context, resumedAgent, liveChunkFrame('attempt-2', 0, { type: 'text-delta', index: 0, text: 'streaming while following' }))
   context.emit('session/event', resumed as never, event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 18))
   await vt.waitForRender()
   assert.equal(probe.scrollToBottomCount, 0, 'ScrollView follow-end must handle live output without an imperative jump')
@@ -1150,10 +1178,9 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
 
   // The main session owns the first preview before the viewer opens.
   context.emit('session/event', parent as never, event('turn/start', { turn: 1 }, 10))
-  emitLiveStream(context, parent.id, {
-    type: 'chunk', attemptId: 'attempt-1', turn: 1, step: 0, time: 1_700_000_000_011,
-    chunk: { type: 'tool-call-delta', index: 0, id: '', name: 'edit', argumentsDelta: '{' },
-  })
+  const parentAgent = liveAgentOf(harness, parent.id)
+  emitLiveStream(context, parentAgent, liveStart('p1', 1, 0))
+  emitLiveStream(context, parentAgent, liveChunkFrame('p1', 0, { type: 'tool-call-delta', index: 0, id: '', name: 'edit', argumentsDelta: '{' }))
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
   assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => preview.callId), [''])
@@ -1171,22 +1198,14 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
 
   // Parent events continue through the runner while the child owns the
   // visible transcript. Updating A and adding B must both survive the visit.
-  emitLiveStream(context, parent.id, {
-    type: 'chunk', attemptId: 'attempt-1', turn: 1, step: 0, time: 1_700_000_000_012,
-    chunk: { type: 'tool-call-delta', index: 0, id: '', name: 'write', argumentsDelta: '}' },
-  })
-  emitLiveStream(context, parent.id, {
-    type: 'chunk', attemptId: 'attempt-1', turn: 1, step: 0, time: 1_700_000_000_013,
-    chunk: { type: 'tool-call-delta', index: 1, id: 'parent-call-b', name: 'read', argumentsDelta: '{' },
-  })
-  emitLiveStream(context, parent.id, {
-    type: 'chunk', attemptId: 'attempt-1', turn: 1, step: 0, time: 1_700_000_000_014,
-    chunk: {
-      type: 'block-end',
-      index: 0,
-      block: { type: 'tool-call', id: 'parent-call-a', name: 'write' },
-    },
-  })
+  emitLiveStream(context, parentAgent, liveChunkFrame('p1', 1, { type: 'tool-call-delta', index: 0, id: '', name: 'write', argumentsDelta: '}' }))
+  emitLiveStream(context, parentAgent, liveChunkFrame('p1', 2, { type: 'tool-call-delta', index: 1, id: 'parent-call-b', name: 'read', argumentsDelta: '{' }))
+  emitLiveStream(context, parentAgent, liveChunkFrame('p1', 3, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'tool-call', id: 'parent-call-a', name: 'write' },
+  }))
+  emitLiveStream(context, parentAgent, liveCommittedEnd('p1', 4, 'assistant/message'))
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
 
@@ -1212,10 +1231,8 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
   await vt.waitForRender()
   assert.equal(app.getViewerGeneration(), 3, 'the child viewer must reopen')
   context.emit('session/event', parent as never, event('turn/start', { turn: 2 }, 16))
-  emitLiveStream(context, parent.id, {
-    type: 'chunk', attemptId: 'attempt-1', turn: 2, step: 0, time: 1_700_000_000_017,
-    chunk: { type: 'tool-call-delta', index: 0, id: 'parent-call-c', name: 'edit', argumentsDelta: '{' },
-  })
+  emitLiveStream(context, parentAgent, liveStart('p2', 2, 0))
+  emitLiveStream(context, parentAgent, liveChunkFrame('p2', 0, { type: 'tool-call-delta', index: 0, id: 'parent-call-c', name: 'edit', argumentsDelta: '{' }))
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
   context.emit('session/event', parent as never, event('tool/call', {
@@ -1232,6 +1249,76 @@ test('the parent Preparing projection keeps updating behind a child viewer', asy
   await vt.waitForRender()
   assert.deepEqual(probe.capturedStreamingToolPreviews, [],
     'a parent preview materialized behind the viewer must not return on exit')
+})
+
+test('a FAILED attempt clears its streaming tool previews (durable settlement and abandoned end)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-failed-attempt-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'runner-failed-attempt-session',
+    header: { id: 'runner-failed-attempt-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const agent = liveAgentOf(harness, resumed.id)
+
+  // Attempt A streams a tool-call preview, then FAILS (durable log-only
+  // settlement): the preview must not survive as a ghost row.
+  context.emit('session/event', resumed as never, event('turn/start', { turn: 1 }, 10))
+  context.emit('session/event', resumed as never, event('step/start', { turn: 1, step: 0 }, 11))
+  emitLiveStream(context, agent, liveStart('fa-1', 1, 0))
+  emitLiveStream(context, agent, liveChunkFrame('fa-1', 0, { type: 'tool-call-delta', index: 0, id: 'ghost-call', name: 'edit', argumentsDelta: '{' }))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  const previewsAfterA: readonly StreamingToolPreview[] | undefined = probe.capturedStreamingToolPreviews
+  assert.ok(previewsAfterA !== undefined)
+  assert.deepEqual(previewsAfterA.map(preview => preview.callId), ['ghost-call'])
+  context.emit('session/event', resumed as never, event('assistant/attempt', { turn: 1, step: 0, stream: [] }, 12))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews, [],
+    'a durable assistant/attempt clears the step\'s previews — its deltas never materialized')
+  context.emit('session/event', resumed as never, event('step/end', { turn: 1, step: 0 }, 13))
+
+  // Attempt B streams another preview and is ABANDONED live (no durable
+  // settlement at all): the preview vanishes with the transient attempt.
+  context.emit('session/event', resumed as never, event('turn/start', { turn: 2 }, 14))
+  emitLiveStream(context, agent, liveStart('fa-2', 2, 0))
+  emitLiveStream(context, agent, liveChunkFrame('fa-2', 0, { type: 'tool-call-delta', index: 0, id: 'abandoned-call', name: 'bash', argumentsDelta: '{' }))
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  const previewsAfterB: readonly StreamingToolPreview[] | undefined = probe.capturedStreamingToolPreviews
+  assert.ok(previewsAfterB !== undefined)
+  assert.deepEqual(previewsAfterB.map(preview => preview.callId), ['abandoned-call'])
+  emitLiveStream(context, agent, {
+    type: 'end', attemptId: 'fa-2', revision: ++liveStreamRevision, index: 1,
+    outcome: { kind: 'abandoned' },
+  })
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedStreamingToolPreviews, [],
+    'an abandoned end clears the step\'s previews with the transient attempt')
 })
 
 test('explicit cold resume shows the pre-mount status and clears it before mount; fresh start stays silent', async (t) => {

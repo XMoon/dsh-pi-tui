@@ -254,6 +254,22 @@ export class StepUsageAccumulator {
     }
   }
 
+  /** Discard an OPEN step's provisional accounting WITHOUT committing it —
+   * the Session v2 failed-attempt settlement (`assistant/attempt` carries
+   * no usage; a live abandoned attempt has no durable fact at all). The
+   * provisional live usage must vanish exactly as if it never existed so a
+   * cold replay of the same log shows the same totals. An authoritative
+   * value (a durable `assistant/message` already settled the step) and a
+   * committed fact are never discarded — the durable log owns them. */
+  discardStep(turn: number, step: number): void {
+    if (this.staleTurn(turn)) return
+    const key = stepKey(turn, step)
+    const entry = this.perStep.get(key)
+    if (entry === undefined || entry.authoritative === true) return
+    if (entry.usage !== undefined) this.subtractPending(turn, entry.usage)
+    this.perStep.delete(key)
+  }
+
   /** The committed per-turn totals (completed steps + orphan facts);
    * undefined when the turn has no committed usage fact. */
   turnUsage(turn: number): TokenUsageTotals | undefined {
@@ -306,6 +322,11 @@ export class StepUsageAccumulator {
     pending.outputTokens -= usage.outputTokens
     pending.cacheReadTokens -= usage.cacheReadTokens ?? 0
     pending.cacheWriteTokens -= usage.cacheWriteTokens ?? 0
+    // A fully drained pending bucket is dropped so a turn with NO open
+    // usage reads as absent (never a fake `0 tok` segment).
+    if (pending.inputTokens === 0 && pending.outputTokens === 0 && pending.cacheReadTokens === 0 && pending.cacheWriteTokens === 0) {
+      this.turnPending.delete(turn)
+    }
   }
 
   /** A usage fact without an open step (replay edge) is a settled fact:

@@ -907,6 +907,14 @@ function applyStreamingToolPreviewEvent(
     removeStreamingToolPreview(previews, event.data.callId, event.data.turn, event.data.step)
     return
   }
+  // `assistant/attempt` (Session v2, typed STRUCTURALLY): the attempt's
+  // tool-call deltas never materialized — its step's previews must not
+  // survive as ghost rows.
+  if ((event.type as string) === 'assistant/attempt') {
+    const data = event.data as { turn: number; step: number }
+    clearStreamingToolPreviewsForStep(previews, data.turn, data.step)
+    return
+  }
   if (event.type === 'llm/retry' || event.type === 'llm/retry-started') {
     clearStreamingToolPreviewsForStep(previews, event.data.turn, event.data.step)
     return
@@ -3210,6 +3218,12 @@ export function apply(ctx: Context, config: Config): void {
       cwd: string
       /** Live-only preparing rows for this child presentation owner. */
       previews: Map<string, StreamingToolPreview>
+      /** The EXACT live Agent object owning the viewed session, pinned on
+       * the first accepted stream frame of this viewer lifetime. The live
+       * seam's identity fence compares Agent object identity (never a
+       * re-derived session id), so a late frame from a retired child agent
+       * can never reach the viewer after a replacement. */
+      viewAgent?: Agent
     } | undefined
     // Unsettled subagent delegations in the live session, in tool/call order.
     // The viewer matches one of these by description when the user opens a
@@ -7205,18 +7219,36 @@ export function apply(ctx: Context, config: Config): void {
     const disposeAssistantStream = installAssistantStreamDirect({
       ctx,
       isCurrentAgent: (agent) => {
-        const candidate = agent as { session?: { id?: unknown } } | undefined
-        const id = candidate?.session?.id
-        if (typeof id !== 'string') return false
-        if (liveAgent !== undefined && id === liveAgent.session.id) return true
-        return viewing !== undefined && id === viewing.id
+        // EXACT Agent object identity (master's own headless consumer
+        // compares `subject !== agent` the same way): a stale stream from
+        // a retired agent must never reach the presentation, even when the
+        // replacement agent drives the SAME session.
+        if (typeof agent !== 'object' || agent === null) return false
+        const subject = agent as Agent
+        if (liveAgent !== undefined && subject === liveAgent) return true
+        if (viewing === undefined) return false
+        // The viewed child: pin the exact Agent object on the first
+        // accepted frame of this viewer lifetime (one live agent per
+        // session is guaranteed by the DSH writer lease).
+        if (viewing.viewAgent !== undefined) return viewing.viewAgent === subject
+        const candidateId = (subject as { session?: { id?: unknown } }).session?.id
+        if (typeof candidateId !== 'string' || candidateId !== viewing.id) return false
+        viewing.viewAgent = subject
+        return true
       },
       onInput: (input) => {
         // The preview projection keeps the durable completed-turn guard
         // (the old `assistant/chunk` path): a late live chunk for a
         // completed turn is a replay artifact and must not resurrect a
-        // preview. The folder/stats folds carry their own gates.
+        // preview. The folder/stats folds carry their own gates. A FAILED
+        // attempt (abandoned end or a committed `assistant/attempt`
+        // settlement) clears the step's tool previews — its deltas never
+        // materialized into durable calls.
         const previewsLive = (owner: TranscriptFolder, previews: Map<string, StreamingToolPreview>): void => {
+          if (input.kind === 'end' && (input.status === 'abandoned' || input.settlement === 'attempt')) {
+            clearStreamingToolPreviewsForStep(previews, input.turn, input.step)
+            return
+          }
           if (input.kind === 'chunk' && owner.turnActivity(input.turn)?.completed === true) return
           applyStreamingToolPreviewInput(previews, input)
         }
