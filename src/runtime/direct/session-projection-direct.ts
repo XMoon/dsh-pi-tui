@@ -108,8 +108,8 @@ export interface ProjectionBatchDeps {
   readonly rows: readonly SessionSummary[]
   /** The header identity witness captured by the preceding `list()`. */
   readonly headerOf: (sessionId: string) => SessionHeader | undefined
-  /** The currently loaded agent for a session id, when live. */
-  readonly liveAgentOf: (sessionId: string) => { readonly session: Session } | undefined
+  /** The currently attached Session for a session id, when live. */
+  readonly liveSessionOf: (sessionId: string) => Session | undefined
   /** The authoritative live preset composition for a session id. */
   readonly livePresetOf: (sessionId: string) => string | undefined
   /** One roster snapshot shared by the whole batch (legacy `code` mapping). */
@@ -163,6 +163,7 @@ function liveProjection(
   deps: ProjectionBatchDeps,
   projections: SessionProjectionReaderLike | undefined,
   sessionId: string,
+  liveSession: Session,
 ): SessionProjectionSummary | undefined {
   let preset: string | undefined
   try {
@@ -171,16 +172,10 @@ function liveProjection(
     // A composition read racing teardown is not a picker error; the title
     // (or the short-id presentation) still applies.
   }
-  let live: { readonly session: Session } | undefined
-  try {
-    live = deps.liveAgentOf(sessionId)
-  } catch {
-    // Same teardown race as above: the title still applies.
-  }
   let title: string | undefined
-  if (live !== undefined && projections !== undefined) {
+  if (projections !== undefined) {
     try {
-      const values = projections.cachedSnapshot(live.session, ['title', 'agentPreset'])?.values
+      const values = projections.cachedSnapshot(liveSession, ['title', 'agentPreset'])?.values
       if (typeof values?.title === 'string') title = values.title
       if (preset === undefined && typeof values?.agentPreset === 'string') preset = values.agentPreset
     } catch {
@@ -218,10 +213,16 @@ export async function projectionBatch(
   // hint, which could expose stale persisted metadata.
   const coldRows: SessionSummary[] = []
   for (const row of deps.rows) {
-    if (row.live) {
-      const live = liveProjection(deps, projections, row.id)
+    let liveSession: Session | undefined
+    try {
+      liveSession = deps.liveSessionOf(row.id)
+    } catch {
+      // A live Session disappearing during a batch is treated as a cold miss.
+    }
+    if (liveSession !== undefined) {
+      const live = liveProjection(deps, projections, row.id, liveSession)
       if (live !== undefined) result.set(row.id, live)
-    } else {
+    } else if (!row.live) {
       coldRows.push(row)
     }
   }

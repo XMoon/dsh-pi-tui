@@ -200,7 +200,7 @@ interface RunnerHarness {
   readonly subagents?: unknown
 }
 
-function fakeAgent(session: FakeSession): Agent {
+function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<void>): Agent {
   // A small structural Agent context is sufficient for the Direct setup
   // callbacks and lets the harness expose the public `ctx.agent` setup seam.
   const agentContext = {
@@ -213,7 +213,7 @@ function fakeAgent(session: FakeSession): Agent {
     ctx: agentContext,
     options: { provider: 'p', model: 'm' },
     inbox: { nextTurn: [], nextStep: [] },
-    whenIdle: async () => {},
+    whenIdle: async () => { await whenIdleGate?.() },
   } as unknown as Agent
   agentContext.agent = agent
   return agent
@@ -227,6 +227,8 @@ function makeHarness(
   saveDefault?: (next: { provider: string; model: string; reasoningEffort?: string }) => Promise<unknown>,
   createGate?: () => Promise<unknown>,
   subagents?: unknown,
+  whenIdleGate?: (sessionId: string) => Promise<void>,
+  resumeGate?: (sessionId: string) => Promise<void>,
 ): RunnerHarness {
   const persisted = new Map<string, FakeSession>()
   const live = new Map<string, Agent>()
@@ -237,7 +239,7 @@ function makeHarness(
   }
 
   const makeHandle = (session: FakeSession): { agent: Agent; dispose: () => Promise<void> } => {
-    const agent = fakeAgent(session)
+    const agent = fakeAgent(session, whenIdleGate === undefined ? undefined : () => whenIdleGate(session.id))
     live.set(session.id, agent)
     return {
       agent,
@@ -275,6 +277,7 @@ function makeHarness(
       if (session === undefined) throw new Error(`unknown test session ${String(resumeSessionId)}`)
       const handle = makeHandle(session)
       await setup?.(handle.agent.ctx)
+      await resumeGate?.(String(resumeSessionId))
       return handle
     },
     create: async ({ sessionId, agentOptions, setup }: {
@@ -392,6 +395,7 @@ interface RunnerProbe {
   capturedActivities: ReadonlyMap<number, unknown> | undefined
   capturedStreamingToolPreviews: readonly StreamingToolPreview[] | undefined
   capturedViewerUsage: unknown
+  capturedViewerMode: unknown
   scrollToBottomCount: number
   capturedModels: string[]
   capturedWelcomeModels: string[]
@@ -410,6 +414,7 @@ function installProbe(): RunnerProbe {
     capturedActivities: undefined,
     capturedStreamingToolPreviews: undefined,
     capturedViewerUsage: undefined,
+    capturedViewerMode: undefined,
     scrollToBottomCount: 0,
     capturedModels: [],
     capturedWelcomeModels: [],
@@ -422,6 +427,7 @@ function installProbe(): RunnerProbe {
   const originalStatsHydrate = StatsFolder.prototype.hydrate
   const originalSetTranscript = TuiApp.prototype.setTranscript
   const originalSetViewerFooter = TuiApp.prototype.setViewerFooter
+  const originalSetViewerMode = TuiApp.prototype.setViewerMode
   const originalSetStatus = TuiApp.prototype.setStatus
   const originalSetWelcomeCard = TuiApp.prototype.setWelcomeCard
   const originalStart = TuiApp.prototype.start
@@ -452,6 +458,10 @@ function installProbe(): RunnerProbe {
     probe.capturedViewerUsage = footer?.usage
     return originalSetViewerFooter.call(this, footer)
   }
+  TuiApp.prototype.setViewerMode = function (mode) {
+    probe.capturedViewerMode = mode
+    return originalSetViewerMode.call(this, mode)
+  }
   TuiApp.prototype.setStatus = function (status) {
     if (typeof status.model === 'string') probe.capturedModels.push(status.model)
     return originalSetStatus.call(this, status)
@@ -475,6 +485,7 @@ function installProbe(): RunnerProbe {
     StatsFolder.prototype.hydrate = originalStatsHydrate
     TuiApp.prototype.setTranscript = originalSetTranscript
     TuiApp.prototype.setViewerFooter = originalSetViewerFooter
+    TuiApp.prototype.setViewerMode = originalSetViewerMode
     TuiApp.prototype.setStatus = originalSetStatus
     TuiApp.prototype.setWelcomeCard = originalSetWelcomeCard
     TuiApp.prototype.start = originalStart
@@ -630,6 +641,123 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
   assert.ok(probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'created answer'))
 })
 
+
+test('a main Session opening cut never mixes A with B or loses B transient state', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-main-opening-gap-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const sessionA: FakeSession = fakeSession({
+    id: 'main-opening-a',
+    header: { id: 'main-opening-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A answer'),
+  })
+  let nextOpeningSeq = 6
+  const sessionB: FakeSession = fakeSession({
+    id: 'main-opening-b',
+    header: { id: 'main-opening-b', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('B history'),
+    append: (type, data) => ({ type, seq: nextOpeningSeq++, time: Date.now(), data }) as unknown as SessionEvent,
+  })
+  let releaseBResume!: () => void
+  const bResume = new Promise<void>(resolve => { releaseBResume = resolve })
+  let bResumeStarted!: () => void
+  const bResumeStartedPromise = new Promise<void>(resolve => { bResumeStarted = resolve })
+  let releaseBIdle!: () => void
+  const bIdle = new Promise<void>(resolve => { releaseBIdle = resolve })
+  let bIdleStarted!: () => void
+  const bIdleStartedPromise = new Promise<void>(resolve => { bIdleStarted = resolve })
+  const harness = makeHarness(
+    home,
+    [sessionA, sessionB],
+    { provider: 'p', model: 'm' },
+    undefined,
+    undefined,
+    undefined,
+    async id => {
+      if (id !== sessionB.id) return
+      bIdleStarted()
+      await bIdle
+    },
+    async id => {
+      if (id !== sessionB.id) return
+      bResumeStarted()
+      await bResume
+    },
+  )
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+  const switchPromise = (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: sessionB.id })
+  await bResumeStartedPromise
+
+  const emitDurable = (type: string, data: unknown): SessionEvent => {
+    const next = sessionB.append!(type, data) as SessionEvent
+    context!.emit('session/event', sessionB as never, next)
+    return next
+  }
+  const bAgent = liveAgentOf(harness, sessionB.id)
+  emitDurable('turn/start', { turn: 1 })
+  emitDurable('step/start', { turn: 1, step: 0 })
+  emitLiveStream(context, bAgent, { type: 'start', attemptId: 'main-opening-b', revision: 1, turn: 1, step: 0 })
+  emitLiveStream(context, bAgent, {
+    type: 'chunk', attemptId: 'main-opening-b', revision: 2, index: 0,
+    time: 1_700_000_000_100, chunk: { type: 'text-delta', index: 0, text: 'B opening prefix' },
+  })
+  emitLiveStream(context, bAgent, {
+    type: 'chunk', attemptId: 'main-opening-b', revision: 3, index: 1,
+    time: 1_700_000_000_101, chunk: { type: 'usage', usage: { inputTokens: 13, outputTokens: 5, totalTokens: 18 } },
+  })
+  releaseBResume()
+  await bIdleStartedPromise
+  releaseBIdle()
+  await switchPromise
+  await settle()
+  await new Promise(resolve => setTimeout(resolve, 70))
+  const openingMessages = probe.capturedMessages ?? []
+  assert.ok(openingMessages.some(message => message.text === 'B opening prefix'),
+    'B transient prefix must survive the commit-to-init opening gap')
+  emitDurable('assistant/message', {
+    turn: 1,
+    step: 0,
+    message: {
+      id: MessageId('main-opening-b-message'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'B durable answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    usage: { inputTokens: 13, outputTokens: 5 },
+    stream: [],
+  })
+  emitLiveStream(context, bAgent, {
+    type: 'end', attemptId: 'main-opening-b', revision: 4, index: 2,
+    outcome: { kind: 'committed', eventType: 'assistant/message', seq: 9 },
+  })
+  emitDurable('step/end', { turn: 1, step: 0 })
+  emitDurable('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await settle()
+  await new Promise(resolve => setTimeout(resolve, 70))
+
+  const messages = probe.capturedMessages ?? []
+  assert.equal(messages.some(message => message.text === 'A answer'), false,
+    'the committed B surface must never repaint the old A transcript')
+  assert.ok(messages.some(message => message.text === 'B history'),
+    'the committed B surface must hydrate its own durable history')
+  assert.equal(messages.filter(message => message.text === 'B durable answer').length, 1,
+    'B durable settlement must appear exactly once')
+})
 
 test('switching between two old Sessions restores each Session own model', async (t) => {
   const life = testLifecycle(t)
@@ -1135,6 +1263,200 @@ test('live repaint preserves manual scrolling in the latest window', async (t) =
   assert.equal(readScroll().isFollowingEnd, true, 'a viewport following the end must remain attached to live output')
   const following = readScroll()
   assert.equal(following.scrollTop, following.maxScrollTop, JSON.stringify(following))
+})
+
+test('an inactive child completion during observeSession is replayed by the viewer opening cut', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-viewer-opening-gap-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'viewer-opening-parent',
+    header: { id: 'viewer-opening-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child: FakeSession = fakeSession({
+    id: 'viewer-opening-child',
+    header: { id: 'viewer-opening-child', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('child history'),
+  })
+  const subagents = {
+    listDescendants: async () => [{
+      kind: 'child', id: child.id, label: 'opening child', mode: 'continuable', activity: 'inactive',
+      hasChildren: false, parentId: parent.id, depth: 1,
+    }],
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  let releaseObservation!: () => void
+  const observationGate = new Promise<void>(resolve => { releaseObservation = resolve })
+  let observationStarted!: () => void
+  const observationStartedPromise = new Promise<void>(resolve => { observationStarted = resolve })
+  const sessionQuery = harness.sessionQuery as {
+    observeSession: (id: unknown, options?: unknown) => Promise<{ header: unknown; events: readonly SessionEvent[]; [Symbol.dispose](): void }>
+  }
+  const originalObserve = sessionQuery.observeSession
+  sessionQuery.observeSession = async (id, options) => {
+    const snapshot = await originalObserve(id, options)
+    if (String(id) === child.id) {
+      observationStarted()
+      await observationGate
+    }
+    return snapshot
+  }
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await observationStartedPromise
+
+  const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  const childAgent = liveAgentOf(harness, child.id)
+  const emitDurable = (type: string, data: unknown): void => {
+    const next = child.append!(type, data) as SessionEvent
+    context!.emit('session/event', child as never, next)
+  }
+  emitDurable('turn/start', { turn: 1 })
+  emitDurable('step/start', { turn: 1, step: 0 })
+  emitDurable('assistant/message', {
+    turn: 1,
+    step: 0,
+    message: {
+      id: MessageId('viewer-opening-completed'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'child completed during opening' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    usage: { inputTokens: 9, outputTokens: 3 },
+    stream: [],
+  })
+  emitDurable('step/end', { turn: 1, step: 0 })
+  emitDurable('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  context.emit('agent/disposed', { agent: childAgent } as never)
+  await childHandle.dispose()
+
+  releaseObservation()
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must mount after the cold observation returns')
+  const messages = probe.capturedMessages ?? []
+  assert.equal(messages.filter(message => message.text === 'child completed during opening').length, 1,
+    'buffered child durable events must be hydrated exactly once after the stale observation cut')
+})
+
+test('an inactive child cold-resume replays its opening prefix and running activity', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-viewer-opening-live-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'viewer-opening-live-parent',
+    header: { id: 'viewer-opening-live-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child: FakeSession = fakeSession({
+    id: 'viewer-opening-live-child',
+    header: { id: 'viewer-opening-live-child', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('child history'),
+  })
+  const subagents = {
+    listDescendants: async () => [{
+      kind: 'child', id: child.id, label: 'opening live child', mode: 'continuable', activity: 'inactive',
+      hasChildren: false, parentId: parent.id, depth: 1,
+    }],
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  let releaseObservation!: () => void
+  const observationGate = new Promise<void>(resolve => { releaseObservation = resolve })
+  let observationStarted!: () => void
+  const observationStartedPromise = new Promise<void>(resolve => { observationStarted = resolve })
+  const sessionQuery = harness.sessionQuery as {
+    observeSession: (id: unknown, options?: unknown) => Promise<{ header: unknown; events: readonly SessionEvent[]; [Symbol.dispose](): void }>
+  }
+  const originalObserve = sessionQuery.observeSession
+  sessionQuery.observeSession = async (id, options) => {
+    const snapshot = await originalObserve(id, options)
+    if (String(id) === child.id) {
+      observationStarted()
+      await observationGate
+    }
+    return snapshot
+  }
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await observationStartedPromise
+
+  const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => childHandle.dispose())
+  const childAgent = liveAgentOf(harness, child.id)
+  const emitDurable = (type: string, data: unknown): void => {
+    const next = child.append!(type, data) as SessionEvent
+    context!.emit('session/event', child as never, next)
+  }
+  emitDurable('turn/start', { turn: 1 })
+  emitDurable('step/start', { turn: 1, step: 0 })
+  emitLiveStream(context, childAgent, { type: 'start', attemptId: 'viewer-opening-live', revision: 1, turn: 1, step: 0 })
+  emitLiveStream(context, childAgent, {
+    type: 'chunk', attemptId: 'viewer-opening-live', revision: 2, index: 0,
+    time: 1_700_000_000_200, chunk: { type: 'text-delta', index: 0, text: 'child opening prefix' },
+  })
+  releaseObservation()
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must mount after observation')
+  assert.equal((probe.capturedViewerMode as { activity?: string } | undefined)?.activity, 'running',
+    'a buffered turn/start must make the first viewer footer activity running')
+  assert.ok((probe.capturedMessages ?? []).some(message => message.text === 'child opening prefix'),
+    'the exact child Agent baseline must replay after durable opening hydration')
 })
 
 test('the parent Preparing projection and child viewer lifecycle rollover stay live', async (t) => {

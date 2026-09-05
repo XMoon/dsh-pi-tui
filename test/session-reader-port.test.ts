@@ -57,11 +57,14 @@ function row(id: string, createdAt: number, live = false) {
 }
 
 test('list prefers the semantic query engine and sorts newest-first', async () => {
+  const liveHeader = header('session-new', 300)
+  const liveSession = { header: liveHeader }
   const reader = new DirectSessionReader(host({
     sessionQuery: query([
       { header: header('session-old', 100), live: false },
-      { header: header('session-new', 300), live: true },
+      { header: liveHeader, live: false },
     ]),
+    sessions: { get: (id: SessionId) => String(id) === 'session-new' ? liveSession : undefined },
   }))
   const rows = await reader.list('session-new')
   assert.ok(rows !== undefined)
@@ -71,12 +74,15 @@ test('list prefers the semantic query engine and sorts newest-first', async () =
 
 test('list matches master visibility: cold cwd-less rows are omitted but live rows remain visible', async () => {
   const cacheReads: string[] = []
+  const liveHeader = header('live-no-cwd', 300, { cwd: undefined })
+  const liveSession = { header: liveHeader }
   const reader = new DirectSessionReader(host({
     sessionQuery: query([
       { header: header('cold-hidden', 400, { cwd: undefined }), live: false },
-      { header: header('live-no-cwd', 300, { cwd: undefined }), live: true },
+      { header: liveHeader, live: false },
       { header: header('cold-visible', 200, { cwd: '/workspace' }), live: false },
     ]),
+    sessions: { get: (id: SessionId) => String(id) === 'live-no-cwd' ? liveSession : undefined },
     sessionProjectionCache: {
       cachedSnapshot: (meta: { id: string }) => {
         cacheReads.push(meta.id)
@@ -157,6 +163,8 @@ test('projectionBatch uses live projection and composed preset without cold read
   const liveAgent = { session, ctx: {} }
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: liveHeader, live: true }]),
+    sessions: { get: (id: SessionId) => String(id) === 'session-live' ? session : undefined },
+    agents: { get: (id: SessionId) => String(id) === 'session-live' ? liveAgent : undefined },
     sessionProjections: {
       cachedSnapshot: (target: unknown) => target === session
         ? { values: { title: 'live title' } }
@@ -167,7 +175,7 @@ test('projectionBatch uses live projection and composed preset without cold read
       list: async () => [{ id: 'minimal' }],
       resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
     },
-  }), id => id === 'session-live' ? liveAgent : undefined)
+  }))
   const rows = await reader.list(undefined)
   assert.equal((await reader.projectionBatch(rows!)).get('session-live')?.title, 'live title')
   assert.equal((await reader.projectionBatch(rows!)).get('session-live')?.preset, 'minimal')
@@ -181,6 +189,8 @@ test('live projection uses cached cells and never falls back to cold metadata', 
   let coldCacheReads = 0
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: liveHeader, live: true }]),
+    sessions: { get: (id: SessionId) => String(id) === 'session-live-miss' ? session : undefined },
+    agents: { get: (id: SessionId) => String(id) === 'session-live-miss' ? liveAgent : undefined },
     sessionProjections: {
       snapshot: () => {
         materializingSnapshots += 1
@@ -199,7 +209,7 @@ test('live projection uses cached cells and never falls back to cold metadata', 
       list: async () => [{ id: 'minimal' }],
       resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
     },
-  }), id => id === 'session-live-miss' ? liveAgent : undefined)
+  }))
   const rows = await reader.list(undefined)
   assert.deepEqual(await reader.projectionBatch(rows!), new Map())
   assert.equal(materializingSnapshots, 0)
@@ -208,10 +218,13 @@ test('live projection uses cached cells and never falls back to cold metadata', 
 
 test('a live row stays cache-free when its Agent mapping races teardown', async () => {
   const liveHeader = header('session-live-race', 500)
+  const session = { header: liveHeader }
   let coldCacheReads = 0
   let rosterReads = 0
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: liveHeader, live: true }]),
+    sessions: { get: (id: SessionId) => String(id) === 'session-live-race' ? session : undefined },
+    agents: { get: () => undefined },
     sessionProjectionCache: {
       cachedSnapshot: () => {
         coldCacheReads += 1
@@ -224,12 +237,80 @@ test('a live row stays cache-free when its Agent mapping races teardown', async 
         throw new Error('live row must not read the cold roster')
       },
     },
-  }), () => undefined)
+  }))
   const rows = await reader.list(undefined)
   assert.deepEqual(rows?.map(row => row.id), ['session-live-race'])
   assert.deepEqual(await reader.projectionBatch(rows!), new Map())
   assert.equal(coldCacheReads, 0)
   assert.equal(rosterReads, 0)
+})
+
+test('list captures the attached Session header and live activity after query listing', async () => {
+  const queryHeader = header('session-live-header', 100, { cwd: '/query' })
+  const liveHeader = header('session-live-header', 900, { cwd: '/attached' })
+  const liveSession = { header: liveHeader }
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: queryHeader, live: false }]),
+    sessions: { get: (id: SessionId) => String(id) === 'session-live-header' ? liveSession : undefined },
+    sessionProjections: {
+      cachedSnapshot: (target: unknown, keys?: readonly string[]) => {
+        assert.equal(target, liveSession)
+        assert.deepEqual(keys, ['sessionListMetadata'])
+        return { values: { sessionListMetadata: { blank: false, lastPromptAt: 1_200 } } }
+      },
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.deepEqual(rows, [{ id: 'session-live-header', createdAt: 900, cwd: '/attached', parentSession: undefined, origin: undefined, live: true }])
+})
+
+test('projectionBatch classifies live rows from the attached Session without cold fallback', async () => {
+  const liveHeader = header('session-toctou', 500)
+  const session = { header: liveHeader }
+  const agent = { session, ctx: {} }
+  let attached = true
+  let coldReads = 0
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: liveHeader, live: false }]),
+    sessions: { get: (id: SessionId) => attached && String(id) === 'session-toctou' ? session : undefined },
+    agents: { get: (id: SessionId) => attached && String(id) === 'session-toctou' ? agent : undefined },
+    sessionProjections: {
+      cachedSnapshot: (target: unknown) => target === session ? { values: { title: 'attached title' } } : undefined,
+    },
+    sessionProjectionCache: {
+      cachedSnapshot: () => {
+        coldReads += 1
+        throw new Error('a previously live row must not fall through to cold cache')
+      },
+    },
+    agentPresets: { composedPreset: () => 'attached' },
+  }))
+  const liveNow = await reader.projectionBatch([{ id: 'session-toctou', createdAt: 500, live: false }])
+  assert.deepEqual(liveNow.get('session-toctou'), { title: 'attached title', preset: 'attached' })
+  attached = false
+  const staleRows = await reader.projectionBatch([{ id: 'session-toctou', createdAt: 500, live: true }])
+  assert.deepEqual(staleRows, new Map())
+  assert.equal(coldReads, 0)
+})
+
+test('projectionBatch treats a row that became live after listing as live', async () => {
+  const headerValue = header('session-late-live', 600)
+  const session = { header: headerValue }
+  const agent = { session, ctx: {} }
+  let attached = false
+  let coldReads = 0
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: headerValue, live: false }]),
+    sessions: { get: (id: SessionId) => attached && String(id) === 'session-late-live' ? session : undefined },
+    agents: { get: (id: SessionId) => attached && String(id) === 'session-late-live' ? agent : undefined },
+    sessionProjections: { cachedSnapshot: () => ({ values: { title: 'late live title' } }) },
+    sessionProjectionCache: { cachedSnapshot: () => { coldReads += 1; return { values: { title: 'wrong cold title' } } } },
+    agentPresets: { composedPreset: () => 'late-live' },
+  }))
+  attached = true
+  const projections = await reader.projectionBatch([{ id: 'session-late-live', createdAt: 600, live: false }])
+  assert.equal(projections.get('session-late-live')?.title, 'late live title')
+  assert.equal(coldReads, 0)
 })
 
 test('projectionBatch passes exact cut zero and reads a fully cached row', async () => {
@@ -363,7 +444,7 @@ test('projectionBatch isolates a throwing cached preset resolver', async () => {
       list: async () => { throw new Error('roster service down') },
       resolve: async () => { throw new Error('resolver exploded') },
     },
-  }), undefined, { info: (message, fields) => diagnostics.push({ message, fields }) })
+  }), { info: (message, fields) => diagnostics.push({ message, fields }) })
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
   assert.equal(projections.get('session-healthy')?.title, 'healthy title')
