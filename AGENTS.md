@@ -100,11 +100,13 @@ extension-facing contract.
 
 ## Correctness invariants
 
-- **One Direct surface per session.** Until Host-owned writes and cross-client
-  concurrency are proven, Direct permits one process-owned surface per session;
-  `owner.lock`, lease/cooling, PINNED, the transition gate, and
-  `SessionOperationBarrier` remain authoritative. Do not weaken them or
-  reintroduce per-submit persistence reads on the hot path. See
+- **One Direct surface per session.** DSH `SessionHandle` / `SessionWriteLease`
+  is the sole cross-process Session writer ownership authority on the master
+  baseline; one process-owned surface per session is guaranteed by DSH
+  authority. Do not add a second persistence/artifact-level owner lock in the
+  TUI. The TUI still owns process-local surface correctness:
+  `SessionTransitionGate`, `SessionOperationBarrier`, and stale/generation
+  fences. Keep the submit hot path free of persistence reads. See
   `docs/concurrency.md`.
 - **No bare fire-and-forget promises.** Use the repository's `runDetached` /
   `runOwned` ownership model and preserve its failure semantics. See
@@ -125,10 +127,6 @@ extension-facing contract.
 - **Context presentation does not rewrite model input.** Keep model-facing bytes
   untouched; render parsed skill/system envelopes, never raw XML. See
   `test/rendering.test.ts`.
-- **Repair real DSH frames only.** Never rewrite a whole log as one zstd frame;
-  refuse ambiguous duplicate-seq references, and make `--yes` repairs with a
-  backup, verification, and 0600 output. Do not validate serializers solely
-  through a self round-trip. See `docs/repair-session.md`.
 
 ## Development
 
@@ -191,7 +189,6 @@ Read these only when the task touches the corresponding area:
 * `docs/tmux-testing.md` — visual/TTY verification and real-testing traps.
 * `docs/dsh-compatibility.md` — DSH distribution compatibility.
 * `docs/releasing.md` — release/tag/publish procedure.
-* `docs/repair-session.md` — session-log repair contract.
 * `packages/pi-tui/AGENTS.md` — vendored-fork rules.
 
 When a subsystem already has a dedicated contract document, keep detailed

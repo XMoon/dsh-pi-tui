@@ -17,14 +17,47 @@ import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptSearchText, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
 import { refreshedSearchState, steppedSearchOverlayState } from '../src/search-overlay.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 
-/** Build a minimal event envelope for tests. */
-function event<K extends SessionEvent['type']>(
+/** Build a minimal event envelope for tests. The type parameter is widened
+ * to any string so legacy v1 `assistant/chunk` events (absent from master's
+ * SessionEventMap) can be constructed and fed through the live-seam bridge;
+ * known types keep their typed data surface, widened with
+ * `Record<string, unknown>` so Session v2 fields the installed dsh-session
+ * may lag (e.g. `assistant/message.stream`) can be supplied. */
+function event<K extends string>(
   type: K,
-  data: SessionEvent<K>['data'],
+  data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
 ): SessionEvent {
   return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+}
+
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(
+  turn: number,
+  step: number,
+  chunk: AssistantLiveChunk,
+  time = 1_700_000_000_000,
+): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+/** Apply a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function applyLive(folder: TranscriptFolder, events: readonly SessionEvent[]): void {
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
 }
 
 /** Build a surface event carrying its surface metadata marker. */
@@ -56,6 +89,7 @@ function assistantMessage(seq: number, turn: number, step: number, text: string)
   return event('assistant/message', {
     turn, step,
     message: { id: MessageId(`am-${seq}`), role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'model', provider: 'test', model: 'test' } },
+    stream: [],
   }, seq)
 }
 
@@ -149,7 +183,7 @@ function assertCorpusParity(folder: TranscriptFolder, queries: string[], label =
 
 test('parity: a plain user + assistant session (case-insensitive, empty query)', () => {
   const folder = new TranscriptFolder()
-  folder.hydrate([
+  applyLive(folder, [
     turnStart(0, 0),
     userMessage(1, 'Hello Searchable World'),
     ...assistantChunks(2, 0, 0, ['The ', 'quick brown ', 'fox.']),
@@ -167,7 +201,7 @@ test('parity: a plain user + assistant session (case-insensitive, empty query)',
 
 test('parity: streaming text is searchable as it accumulates (running -> settled)', () => {
   const folder = new TranscriptFolder()
-  folder.hydrate([
+  applyLive(folder, [
     turnStart(0, 0),
     ...assistantChunks(1, 0, 0, ['running ', 'needle', '-in-stream']),
   ])
@@ -450,7 +484,7 @@ test('live mutation while matches are held: no stale object, no crash, next quer
   const held = folder.search('needle')
   assert.equal(held.length, 1)
   // Stream a new message containing the needle while the old matches live.
-  folder.apply([
+  applyLive(folder, [
     turnStart(3, 1),
     ...assistantChunks(4, 1, 0, ['a brand new ', 'needle message']),
   ])
@@ -598,7 +632,7 @@ test('a settled assistant message created WITHOUT chunks stays searchable after 
   assertCorpusParity(folder, ['replaced authoritative'])
   assert.equal(folder.search('original settled').length, 0, 'the old text is gone from the corpus')
   // A late text delta after the replacement also lands in the projection.
-  folder.apply([
+  applyLive(folder, [
     ...assistantChunks(3, 0, 0, ['with a streamed tail']),
   ])
   assertCorpusParity(folder, ['replaced authoritative', 'streamed tail'])
@@ -606,12 +640,12 @@ test('a settled assistant message created WITHOUT chunks stays searchable after 
 
 test('interleaved reasoning and text deltas search their OWN entries (namespaced projection)', () => {
   const folder = new TranscriptFolder()
-  folder.hydrate([
+  applyLive(folder, [
     turnStart(0, 0),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning-corpse marker' } }, 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: 'reasoning-corpse marker' } }, 1),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'assistant-corpse marker' } }, 2),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: ' more reasoning deltas' } }, 3),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 1, text: ' more text deltas' } }, 4),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: ' more text deltas' } }, 4),
   ])
   assertCorpusParity(folder, ['reasoning-corpse', 'assistant-corpse', 'more reasoning', 'more text'])
   // Parity catches the contamination vector: a reasoning-only needle must
@@ -722,7 +756,7 @@ test('stale search overlay: Next/Prev refreshes matches when the transcript chan
 
 test('streaming lowercasing is whole-string — Greek sigma across chunk boundaries (P2)', () => {
   const folder = new TranscriptFolder()
-  folder.hydrate([
+  applyLive(folder, [
     turnStart(0, 0),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'Ο' } }, 1),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 1, text: 'Σ' } }, 2),
@@ -816,15 +850,15 @@ test('lazy normalization scans ONLY the dirty entries, never the history (P2)', 
   folder.search('answer')
   assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 0, 'no dirty entries -> zero normalization work')
   // One streaming chunk marks ONE entry: the next query normalizes exactly it.
-  folder.apply([...assistantChunks(seq++, 1000, 0, [' tail-one'])])
+  applyLive(folder, [...assistantChunks(seq++, 1000, 0, [' tail-one'])])
   folder.search('tail-one')
   assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 1)
   // Ten more chunks on the SAME entry: the Set dedupes — still one scan.
-  folder.apply([...assistantChunks(seq++, 1000, 0, [' tail-two', ' tail-three', ' tail-four', ' tail-five', ' tail-six', ' tail-seven', ' tail-eight', ' tail-nine', ' tail-ten', ' tail-eleven'])])
+  applyLive(folder, [...assistantChunks(seq++, 1000, 0, [' tail-two', ' tail-three', ' tail-four', ' tail-five', ' tail-six', ' tail-seven', ' tail-eight', ' tail-nine', ' tail-ten', ' tail-eleven'])])
   folder.search('tail-eleven')
   assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 2, 'repeated marks on one entry dedupe to one scan')
   // Five DISTINCT entries: five more scans.
-  folder.apply([
+  applyLive(folder, [
     ...assistantChunks(seq++, 1001, 0, [' x1']),
     ...assistantChunks(seq++, 1002, 0, [' x2']),
     ...assistantChunks(seq++, 1003, 0, [' x3']),

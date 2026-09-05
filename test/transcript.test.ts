@@ -7,16 +7,23 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, MessageId, type AssistantStreamRecord, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import { foldTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
+import type { AssistantLiveChunk, AssistantLiveContentBlock, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 
-/** Build a minimal event envelope for tests. */
-function event<K extends SessionEvent['type']>(
+/** Build a minimal event envelope for tests. The type parameter is widened
+ * to any string so legacy v1 `assistant/chunk` events (absent from master's
+ * SessionEventMap) can be constructed and fed through the live-seam bridge;
+ * known types keep their typed data surface, widened with
+ * `Record<string, unknown>` so Session v2 fields the installed dsh-session
+ * may lag (e.g. `assistant/message.stream`) can be supplied. */
+function event<K extends string>(
   type: K,
-  data: SessionEvent<K>['data'],
+  data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
 ): SessionEvent {
   return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
@@ -27,10 +34,41 @@ function rawEvent(type: string, data: Record<string, unknown>, seq: number): Ses
   return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
 }
 
-/** Build a surface event carrying its surface metadata marker. */
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(
+  turn: number,
+  step: number,
+  chunk: AssistantLiveChunk,
+  time = 1_700_000_000_000,
+): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+/** Fold a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function foldLive(events: readonly SessionEvent[]): TranscriptMessage[] {
+  const folder = new TranscriptFolder()
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
+  return folder.messages()
+}
+
+/** Build a surface event carrying its surface metadata marker. The data
+ * surface is widened like `event()` so Session v2 fields the installed
+ * dsh-session may lag (e.g. `assistant/message.stream`) can be supplied. */
 function surfaceEvent<K extends SessionEvent['type']>(
   type: K,
-  data: SessionEvent<K>['data'],
+  data: SessionEvent<K>['data'] & Record<string, unknown>,
   seq: number,
   surfaceOp: 'append' | { op: 'replace'; start: number; end: number },
 ): SessionEvent {
@@ -94,16 +132,11 @@ test('folds a user message into a You message', () => {
 })
 
 test('accumulates streaming text deltas into one assistant message', () => {
-  const chunk = (seq: number, text: string): SessionEvent => event('assistant/chunk', {
-    turn: 0,
-    step: 0,
-    chunk: { type: 'text-delta', index: 0, text },
-  }, seq)
-  const messages = foldTranscript([
+  const messages = foldLive([
     event('turn/start', { turn: 0 }, 0),
-    chunk(1, 'Hel'),
-    chunk(2, 'lo'),
-    chunk(3, ' world'),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'Hel' } }, 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'lo' } }, 2),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: ' world' } }, 3),
   ])
   assert.deepEqual(kinds(messages), ['assistant'])
   const first = messages[0]
@@ -112,7 +145,7 @@ test('accumulates streaming text deltas into one assistant message', () => {
 })
 
 test('assistant/message replaces the streamed text for its step', () => {
-  const messages = foldTranscript([
+  const messages = foldLive([
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'par' } }, 0),
     event('assistant/message', {
       turn: 0,
@@ -123,6 +156,7 @@ test('assistant/message replaces the streamed text for its step', () => {
         content: [{ type: 'text', text: 'partial' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, 1),
   ])
   assert.deepEqual(kinds(messages), ['assistant'])
@@ -167,7 +201,7 @@ test('turn/end error renders a failure line', () => {
   const tool = messages[0]
   assert.ok(tool !== undefined && tool.kind === 'tool')
   assert.equal(tool.name, 'error')
-  assert.equal(tool.result, 'AUTH: boom')
+  assert.equal(tool.result, 'authentication failed')
 })
 
 test('command/run + command/done fold into an executed line', () => {
@@ -283,17 +317,17 @@ test('parallel same-name tool calls pair results by callId', () => {
 test('interleaved steps keep separate assistant and thinking entries', () => {
   const chunk = (seq: number, step: number, delta: { type: 'text-delta' | 'reasoning-delta'; index: number; text: string }): SessionEvent =>
     event('assistant/chunk', { turn: 0, step, chunk: delta }, seq)
-  const messages = foldTranscript([
+  const messages = foldLive([
     event('turn/start', { turn: 0 }, 0),
     chunk(1, 0, { type: 'text-delta', index: 0, text: 'Hel' }),
-    chunk(2, 0, { type: 'reasoning-delta', index: 0, text: 't0-' }),
+    chunk(2, 0, { type: 'reasoning-delta', index: 1, text: 't0-' }),
     chunk(3, 0, { type: 'text-delta', index: 0, text: 'lo' }),
     chunk(4, 1, { type: 'text-delta', index: 0, text: 'x' }),
-    chunk(5, 1, { type: 'reasoning-delta', index: 0, text: 't1-' }),
+    chunk(5, 1, { type: 'reasoning-delta', index: 1, text: 't1-' }),
     chunk(6, 1, { type: 'text-delta', index: 0, text: 'y' }),
     // Step 0's reasoning continues AFTER step 1 started: it must update the
     // step-0 thinking entry, not the step-1 one (last-entry assumption bug).
-    chunk(7, 0, { type: 'reasoning-delta', index: 0, text: 'more' }),
+    chunk(7, 0, { type: 'reasoning-delta', index: 1, text: 'more' }),
   ])
   assert.deepEqual(kinds(messages), ['assistant', 'thinking', 'assistant', 'thinking'])
   const [first, thinking0, second, thinking1] = messages
@@ -309,11 +343,9 @@ test('thinking lifecycle index retains only unsettled entries by turn', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('assistant/chunk', {
-      turn: 0,
-      step: 0,
-      chunk: { type: 'reasoning-delta', index: 0, text: 'settled' },
-    }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'settled' }, 1_700_000_000_001))
+  folder.apply([
     event('assistant/message', {
       turn: 0,
       step: 0,
@@ -323,13 +355,12 @@ test('thinking lifecycle index retains only unsettled entries by turn', () => {
         content: [{ type: 'text', text: 'answer' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, 2),
     event('turn/start', { turn: 1 }, 3),
-    event('assistant/chunk', {
-      turn: 1,
-      step: 0,
-      chunk: { type: 'reasoning-delta', index: 0, text: 'still thinking' },
-    }, 4),
+  ])
+  folder.applyLiveInput(liveChunk(1, 0, { type: 'reasoning-delta', index: 0, text: 'still thinking' }, 1_700_000_000_004))
+  folder.apply([
     event('turn/end', { turn: 0, reason: { kind: 'interrupted' } }, 5),
   ])
 
@@ -349,12 +380,8 @@ test('thinking lifecycle index retains only unsettled entries by turn', () => {
 
 test('late reasoning keeps an assistant-settled thinking entry closed', () => {
   const folder = new TranscriptFolder()
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'before' }, 1_700_000_000_000))
   folder.apply([
-    event('assistant/chunk', {
-      turn: 0,
-      step: 0,
-      chunk: { type: 'reasoning-delta', index: 0, text: 'before' },
-    }, 0),
     event('assistant/message', {
       turn: 0,
       step: 0,
@@ -364,15 +391,12 @@ test('late reasoning keeps an assistant-settled thinking entry closed', () => {
         content: [{ type: 'text', text: 'answer' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, 1),
-    // The transcript preserves the late replay fragment, but it must not
-    // re-enter the open lifecycle set or become running again.
-    event('assistant/chunk', {
-      turn: 0,
-      step: 0,
-      chunk: { type: 'reasoning-delta', index: 0, text: ' after' },
-    }, 2),
   ])
+  // The transcript preserves the late replay fragment, but it must not
+  // re-enter the open lifecycle set or become running again.
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: ' after' }, 1_700_000_000_002))
   const thinking = folder.messages().find((message): message is Extract<TranscriptMessage, { kind: 'thinking' }> => message.kind === 'thinking')
   assert.ok(thinking)
   assert.equal(thinking.running, false)
@@ -413,6 +437,7 @@ test('windows older turns into one summary entry', () => {
         content: [{ type: 'text', text: 'a1' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, 6),
     // Turn 2: user prompt.
     event('turn/start', { turn: 2 }, 7),
@@ -456,6 +481,7 @@ test('the window projection reads incremental counts: deep history never rescann
         content: [{ type: 'text', text: `a${turn}` }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, seq++))
   }
   folder.apply(events)
@@ -530,6 +556,7 @@ test('non-monotonic windows derive metadata from the full fallback projection', 
         content: [{ type: 'text', text: `turn ${turn}` }],
         source: { kind: 'model', provider: 'test', model: 'test' },
       },
+      stream: [],
     }, seq++))
   }
   folder.apply(events)
@@ -559,6 +586,7 @@ test('non-monotonic raw turn indexes retain every turn for search navigation', (
         content: [{ type: 'text', text: `turn ${turn}` }],
         source: { kind: 'model', provider: 'test', model: 'test' },
       },
+      stream: [],
     }, seq++))
   }
   folder.apply(events)
@@ -591,6 +619,7 @@ test('unknown window anchors preserve latest summary semantics', () => {
         content: [{ type: 'text', text: `turn ${turn}` }],
         source: { kind: 'model', provider: 'test', model: 'test' },
       },
+      stream: [],
     }, seq++))
   }
   folder.apply(events)
@@ -712,10 +741,10 @@ test('window keeps everything when the log fits', () => {
 test('TranscriptFolder applies incrementally with stable objects', () => {
   const folder = new TranscriptFolder()
   folder.apply([event('turn/start', { turn: 0 }, 0)])
-  folder.apply([event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'Hel' } }, 1)])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'Hel' }, 1_700_000_000_001))
   const first = folder.messages()
   assert.equal(first.length, 1)
-  folder.apply([event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'lo' } }, 2)])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'lo' }, 1_700_000_000_002))
   const second = folder.messages()
   assert.equal(second.length, 1)
   const entry = second[0]
@@ -1019,7 +1048,7 @@ test('llm/retry folds into a system line with the delay', () => {
     event('turn/start', { turn: 0 }, 0),
     rawEvent('llm/retry', {
       retryId: 'r1', turn: 0, step: 0, provider: 'deepseek', mode: 'normal',
-      policyKey: 'k', retry: 0, maxRetries: 2, delayMs: 3000,
+      policyKey: 'k', retry: 1, maxRetries: 2, delayMs: 3000,
       failure: { message: 'boom', code: 'RATE_LIMITED' },
     }, 1),
   ])
@@ -1028,6 +1057,36 @@ test('llm/retry folds into a system line with the delay', () => {
   assert.ok(entry !== undefined && entry.kind === 'system')
   assert.ok(entry.text.includes('llm retry 1/2 in 3s'), `text:\n${entry.text}`)
   assert.ok(entry.text.includes('RATE_LIMITED'), `text:\n${entry.text}`)
+})
+
+test('AUTH failures use generic presentation text without leaking durable messages', () => {
+  const retry = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('llm/retry', {
+      retryId: 'auth-retry', turn: 0, step: 0, provider: 'deepseek', mode: 'normal',
+      policyKey: 'k', retry: 1, maxRetries: 2, delayMs: 3000,
+      failure: { message: 'secret-provider-credential', code: 'AUTH' },
+    }, 1),
+  ])
+  const retryRow = retry[0]
+  assert.ok(retryRow !== undefined && retryRow.kind === 'system')
+  assert.equal(retryRow.text, 'llm retry 1/2 in 3s — authentication failed')
+  assert.doesNotMatch(retryRow.text, /secret-provider-credential/)
+
+  const turn = foldTranscript([
+    event('turn/end', { turn: 0, reason: { kind: 'error', error: { message: 'secret-provider-credential', code: 'AUTH' } } }, 0),
+  ])
+  const turnRow = turn[0]
+  assert.ok(turnRow !== undefined && turnRow.kind === 'tool')
+  assert.equal(turnRow.result, 'authentication failed')
+  assert.doesNotMatch(turnRow.result, /secret-provider-credential/)
+
+  const server = foldTranscript([
+    event('turn/end', { turn: 0, reason: { kind: 'error', error: { message: 'provider down', code: 'SERVER' } } }, 0),
+  ])
+  const serverRow = server[0]
+  assert.ok(serverRow !== undefined && serverRow.kind === 'tool')
+  assert.equal(serverRow.result, 'SERVER: provider down')
 })
 
 test('max-tokens turn end folds into a notice', () => {
@@ -1058,6 +1117,7 @@ test('window anchored at endTurn shows the match turn instead of the newest', ()
         content: [{ type: 'text', text: `answer-${turn}` }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, seq++))
   }
   // Default window: newest 2 turns (3, 4).
@@ -1079,14 +1139,14 @@ test('window anchored at endTurn shows the match turn instead of the newest', ()
 })
 
 test('thinking entries run while deltas stream and settle on the step message', () => {
-  const messages = foldTranscript([
+  const messages = foldLive([
     event('turn/start', { turn: 0 }, 0),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1),
   ])
   const thinking = messages[0]
   assert.ok(thinking !== undefined && thinking.kind === 'thinking')
   assert.equal(thinking.running, true, 'streaming thinking must be running')
-  const settled = foldTranscript([
+  const settled = foldLive([
     event('turn/start', { turn: 0 }, 0),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1),
     event('assistant/message', {
@@ -1098,6 +1158,7 @@ test('thinking entries run while deltas stream and settle on the step message', 
         content: [{ type: 'text', text: 'done' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, 2),
   ])
   const done = settled[0]
@@ -1106,7 +1167,7 @@ test('thinking entries run while deltas stream and settle on the step message', 
 })
 
 test('an interrupted turn settles every live thinking entry', () => {
-  const messages = foldTranscript([
+  const messages = foldLive([
     event('turn/start', { turn: 0 }, 0),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1),
     event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 2),
@@ -1365,6 +1426,7 @@ test('Test E: a replacement assistant/message does not enter the transcript', ()
         content: [{ type: 'text', text: 'the original answer' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, 1, 'append'),
     surfaceEvent('assistant/message', {
       turn: 0,
@@ -1375,6 +1437,7 @@ test('Test E: a replacement assistant/message does not enter the transcript', ()
         content: [{ type: 'text', text: 'rewritten answer' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, 2, { op: 'replace', start: 1, end: 1 }),
   ])
   assert.deepEqual(kinds(messages), ['assistant'], 'no assistant card for the replacement')
@@ -1539,6 +1602,7 @@ test('a late duplicate assistant/message updates text once per step', () => {
         content: [{ type: 'text', text: 'first' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, 2),
     event('step/end', { turn: 0, step: 0 }, 3),
   ])
@@ -1556,6 +1620,7 @@ test('a late duplicate assistant/message updates text once per step', () => {
       content: [{ type: 'text', text: 'replacement' }],
       source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
     },
+    stream: [],
   }, 4)])
 
   const after = folder.turnActivity(0)
@@ -1580,6 +1645,7 @@ test('a replacement assistant/message does not mutate Focus activity', () => {
         content: [{ type: 'text', text: 'first answer' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, 1, 'append'),
   ]
   folder.apply(events)
@@ -1597,6 +1663,7 @@ test('a replacement assistant/message does not mutate Focus activity', () => {
       content: [{ type: 'text', text: 'rewritten' }],
       source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
     },
+    stream: [],
   }, 2, { op: 'replace', start: 1, end: 1 })])
   const after = folder.turnActivity(0)
   assert.ok(after !== undefined)
@@ -1617,8 +1684,8 @@ test('the Message slot keeps a MULTILINE candidate tail (never flattened to one 
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'line one\nline two\nline three' } }, 1),
   ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'line one\nline two\nline three' }, 1_700_000_000_001))
   const activity = folder.turnActivity(0)
   assert.ok(activity !== undefined)
   assert.equal(activity.message?.text, 'line one\nline two\nline three',
@@ -1630,8 +1697,10 @@ test('a confirmed intermediate message keeps its bounded LATEST tail (multiline)
   const long = 'head\n' + 'x'.repeat(600) + '\ntail marker'
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: long } }, 1),
-    // A tool call confirms the candidate as an intermediate message.
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: long }, 1_700_000_000_001))
+  // A tool call confirms the candidate as an intermediate message.
+  folder.apply([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 2),
   ])
   const activity = folder.turnActivity(0)
@@ -1648,10 +1717,13 @@ test('a later authoritative message updates the correct step in place (multiline
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'streamed\nfragment' } }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'streamed\nfragment' }, 1_700_000_000_001))
+  folder.apply([
     event('assistant/message', {
       turn: 0, step: 0,
       message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'settled\nmultiline\nanswer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
     }, 2),
   ])
   const activity = folder.turnActivity(0)
@@ -1664,22 +1736,28 @@ test('a stale older step never resurrects the Message slot', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'step zero text' } }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'step zero text' }, 1_700_000_000_001))
+  folder.apply([
     event('assistant/message', {
       turn: 0, step: 0,
       message: { id: MessageId('a0'), role: 'assistant', content: [{ type: 'text', text: 'step zero settled' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
     }, 2),
-    event('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: 'step one text' } }, 3),
+  ])
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'text-delta', index: 0, text: 'step one text' }, 1_700_000_000_003))
+  folder.apply([
     event('assistant/message', {
       turn: 0, step: 1,
       message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'step one settled' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
     }, 4),
   ])
   const before = folder.turnActivity(0)
   assert.ok(before !== undefined)
   assert.equal(before.message?.text, 'step one settled', 'the LATEST intermediate wins')
   // A late replay for the OLDER step must not roll the slot back.
-  folder.apply([event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'stale replay' } }, 5)])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'stale replay' }, 1_700_000_000_005))
   const after = folder.turnActivity(0)
   assert.equal(after?.message?.text, 'step one settled', 'a stale older-step delta never resurrects the slot')
 })
@@ -1688,10 +1766,13 @@ test('the final answer never enters the Message slot (multiline final included)'
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'final\nanswer\nlines' } }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'final\nanswer\nlines' }, 1_700_000_000_001))
+  folder.apply([
     event('assistant/message', {
       turn: 0, step: 0,
       message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'final\nanswer\nlines' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
     }, 2),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
   ])
@@ -1702,3 +1783,536 @@ test('the final answer never enters the Message slot (multiline final included)'
 
 
 
+
+// ── Session v2 failed-attempt transient lifecycle (P0-2) ────────────────
+
+/** One live attempt OPEN frame (the neutral input, not the wire). */
+function liveAttemptStart(turn: number, step: number) {
+  return { kind: 'start' as const, sessionId: 'test', attemptId: 'attempt-x', turn, step }
+}
+
+/** One live attempt settlement frame (the neutral input, not the wire). */
+function liveAttemptEnd(turn: number, step: number, status: 'committed' | 'abandoned', settlement?: 'message' | 'attempt') {
+  return {
+    kind: 'end' as const,
+    sessionId: 'test',
+    attemptId: 'attempt-x',
+    turn,
+    step,
+    status,
+    ...(settlement === undefined ? {} : { settlement }),
+  }
+}
+
+function assistantMessageWithBlocks(
+  seq: number,
+  content: readonly ContentBlock[],
+  opts: { turn?: number; step?: number; interrupted?: boolean } = {},
+): SessionEvent {
+  return event('assistant/message', {
+    turn: opts.turn ?? 0,
+    step: opts.step ?? 0,
+    message: {
+      id: MessageId(`a-${seq}`),
+      role: 'assistant',
+      content: [...content],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    ...(opts.interrupted === true ? { interrupted: true } : {}),
+    stream: [],
+  }, seq)
+}
+
+function assistantMessage(seq: number, text: string, opts: { turn?: number; step?: number } = {}): SessionEvent {
+  return assistantMessageWithBlocks(seq, [{ type: 'text', text }], opts)
+}
+
+test('live block-end text is authoritative and survives durable settlement without duplication', () => {
+  const onlyEnd = new TranscriptFolder()
+  onlyEnd.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'text', text: 'complete from block-end' },
+  }, 2))
+  assert.deepEqual(onlyEnd.messages().filter(message => message.kind === 'assistant').map(message => message.text), ['complete from block-end'])
+
+  const replacesDelta = new TranscriptFolder()
+  replacesDelta.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'text' as const }, 1))
+  replacesDelta.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'partial' }, 2))
+  replacesDelta.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'text', text: 'authoritative complete' },
+  }, 3))
+  assert.deepEqual(replacesDelta.messages().filter(message => message.kind === 'assistant').map(message => message.text), ['authoritative complete'])
+  assert.equal(replacesDelta.turnActivity(0)?.message?.text, 'authoritative complete')
+
+  const settles = new TranscriptFolder()
+  settles.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'text', text: 'live complete' },
+  }, 2))
+  settles.apply([assistantMessage(3, 'durable complete')])
+  // A late transient frame cannot roll the authoritative durable message back.
+  settles.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'text', text: 'stale live text' },
+  }, 4))
+  assert.deepEqual(settles.messages().filter(message => message.kind === 'assistant').map(message => message.text), ['durable complete'])
+})
+
+test('live reasoning block-end restores the reasoning body and tool-call block-end stays non-surface', () => {
+  const reasoning = new TranscriptFolder()
+  reasoning.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'reasoning', text: 'authoritative reasoning' },
+  }, 2))
+  assert.deepEqual(reasoning.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['authoritative reasoning'])
+  assert.equal(reasoning.turnActivity(0)?.think?.text, 'authoritative reasoning')
+
+  const tool = new TranscriptFolder()
+  tool.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'tool-call', id: 'call-1', name: 'bash', arguments: '{"command":"ls"}' },
+  }, 2))
+  assert.deepEqual(tool.messages(), [], 'a live assistant tool-call block is preview-only until its durable tool events settle')
+})
+
+test('live generic finalized blocks use the same Assistant visibility predicate', () => {
+  const futureBlock = { type: 'future-block', payload: { revision: 1, value: 'live-kept' } } as unknown as AssistantLiveContentBlock
+  const folder = new TranscriptFolder()
+  folder.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: futureBlock,
+  }, 2))
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.deepEqual(assistant.content, [futureBlock as unknown as ContentBlock])
+})
+
+test('settled Assistant rows follow block visibility while retaining empty authority', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    assistantMessageWithBlocks(1, [], { step: 0 }),
+    assistantMessageWithBlocks(2, [{ type: 'text', text: '   ' }], { step: 1 }),
+    assistantMessageWithBlocks(3, [{ type: 'reasoning', text: 'thinking only' }], { step: 2 }),
+    assistantMessageWithBlocks(4, [{ type: 'tool-call', id: ToolCallId('call-message-only'), name: 'bash', arguments: '{}' }], { step: 3 }),
+  ])
+  assert.equal(folder.messages().filter(message => message.kind === 'assistant').length, 0)
+  assert.equal(folder.messages({ maxTurns: 1 }).filter(message => message.kind === 'assistant').length, 0)
+  assert.equal(folder.turnActivity(0)?.assistantMessages, 4)
+
+  const toolRow = new TranscriptFolder()
+  toolRow.apply([
+    assistantMessageWithBlocks(6, [{ type: 'tool-call', id: ToolCallId('call-row'), name: 'bash', arguments: '{}' }], { step: 0 }),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('call-row'), name: 'bash', arguments: '{}' }, 7),
+  ])
+  assert.equal(toolRow.messages().filter(message => message.kind === 'assistant').length, 0)
+  assert.equal(toolRow.messages().filter(message => message.kind === 'tool').length, 1)
+
+  folder.apply([assistantMessageWithBlocks(5, [], { step: 4, interrupted: true })])
+  const interrupted = folder.messages().filter(message => message.kind === 'assistant')
+  assert.equal(interrupted.length, 1)
+  assert.equal(interrupted[0]?.interrupted, true)
+})
+
+test('partial text attempt evidence has no undefined prefix and matches cold replay', () => {
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const stream = [
+    { type: 'chunk' as const, time: 2, chunk: { type: 'block-start' as const, index: 0, blockType: 'text' as const } },
+    { type: 'chunk' as const, time: 3, chunk: { type: 'text-delta' as const, index: 0, text: 'partial' } },
+  ]
+  const suffix = [
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 4),
+    event('step/end', { turn: 0, step: 0 }, 5),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 6),
+  ]
+  const live = new TranscriptFolder()
+  live.apply(prefix)
+  live.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'text' as const }, 2))
+  live.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'partial' }, 3))
+  live.apply(suffix)
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, ...suffix])
+  assert.deepEqual(live.messages(), cold.messages())
+  const assistant = cold.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, 'partial')
+  assert.doesNotMatch(assistant.text, /undefined/)
+  assert.equal(assistant.interrupted, true)
+})
+
+test('partial reasoning attempt evidence has no undefined prefix and matches cold replay', () => {
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const stream = [
+    { type: 'chunk' as const, time: 2, chunk: { type: 'block-start' as const, index: 0, blockType: 'reasoning' as const } },
+    { type: 'chunk' as const, time: 3, chunk: { type: 'reasoning-delta' as const, index: 0, text: 'thinking' } },
+  ]
+  const suffix = [
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
+  ]
+  const live = new TranscriptFolder()
+  live.apply(prefix)
+  live.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'reasoning' as const }, 2))
+  live.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'thinking' }, 3))
+  live.apply(suffix)
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, ...suffix])
+  assert.deepEqual(live.messages(), cold.messages())
+  const thinking = cold.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'thinking')
+  assert.doesNotMatch(thinking.text, /undefined/)
+  assert.equal(thinking.running, false)
+})
+
+test('partial tool-call attempt evidence preserves id, name, and arguments across replay', () => {
+  const callId = ToolCallId('call-partial')
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const stream = [
+    { type: 'chunk' as const, time: 2, chunk: { type: 'block-start' as const, index: 0, blockType: 'tool-call' as const } },
+    { type: 'chunk' as const, time: 3, chunk: { type: 'tool-call-delta' as const, index: 0, id: callId, name: 'bash', argumentsDelta: '{"command":' } },
+  ]
+  const suffix = [
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
+  ]
+  const live = new TranscriptFolder()
+  live.apply(prefix)
+  live.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'tool-call' as const }, 2))
+  live.applyLiveInput(liveChunk(0, 0, { type: 'tool-call-delta', index: 0, id: callId, name: 'bash', argumentsDelta: '{"command":' }, 3))
+  live.apply(suffix)
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, ...suffix])
+  assert.deepEqual(live.messages(), cold.messages())
+  const assistant = cold.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.interrupted, true)
+  const toolCall = assistant.content?.find(block => block.type === 'tool-call')
+  assert.ok(toolCall !== undefined && toolCall.type === 'tool-call')
+  assert.equal(toolCall.id, callId)
+  assert.equal(toolCall.name, 'bash')
+  assert.equal(toolCall.arguments, '{"command":')
+  assert.doesNotMatch(toolCall.arguments, /undefined/)
+})
+
+test('image-only assistant attempts preserve live/cold parity and interruption evidence', () => {
+  const image = {
+    type: 'image' as const,
+    attachment: {
+      attachmentId: 'att-attempt-image' as never,
+      mediaType: 'image/png',
+      bytes: 100,
+      width: 1920,
+      height: 1080,
+      name: 'attempt.png',
+    },
+  } as const
+  const durableImage = image as unknown as ContentBlock
+  const liveImage = image as unknown as AssistantLiveContentBlock
+  const stream: AssistantStreamRecord[] = [{
+    type: 'chunk',
+    time: 2,
+    chunk: { type: 'block-end', index: 0, block: durableImage },
+  }]
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const attempt = event('assistant/attempt', { turn: 0, step: 0, stream }, 3)
+  const end = event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 4)
+  const live = new TranscriptFolder()
+  live.apply(prefix)
+  live.applyLiveInput(liveChunk(0, 0, { type: 'block-end', index: 0, block: liveImage }, 2))
+  live.apply([attempt, end])
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, attempt, end])
+  assert.deepEqual(live.messages(), cold.messages())
+  const assistant = cold.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.interrupted, true)
+  assert.deepEqual(assistant.content, [durableImage])
+  const assistantImage = assistant.content?.[0]
+  assert.ok(assistantImage !== undefined && assistantImage.type === 'image')
+  assert.deepEqual(assistantImage.attachment, image.attachment)
+})
+
+test('tool-call-only assistant attempts stay hidden until the closed boundary', () => {
+  const callId = ToolCallId('call-delayed')
+  const stream = [
+    { type: 'chunk' as const, time: 2, chunk: { type: 'block-start' as const, index: 0, blockType: 'tool-call' as const } },
+    { type: 'chunk' as const, time: 3, chunk: { type: 'tool-call-delta' as const, index: 0, id: callId, name: 'bash', argumentsDelta: '{"command":"pwd"}' } },
+  ]
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const attempt = event('assistant/attempt', { turn: 0, step: 0, stream }, 4)
+  const folder = new TranscriptFolder()
+  folder.apply([...prefix, attempt])
+  assert.equal(folder.messages().some(message => message.kind === 'assistant'), false)
+  const beforeRevision = folder.searchRevision()
+  const beforeWindow = folder.window({ maxTurns: 1 })
+  assert.equal(beforeWindow.messages.some(message => message.kind === 'assistant'), false)
+  const stepEnd = event('step/end', { turn: 0, step: 0 }, 5)
+  folder.apply([stepEnd])
+  const afterStepEnd = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(afterStepEnd !== undefined && afterStepEnd.kind === 'assistant')
+  assert.equal(afterStepEnd.interrupted, true)
+  assert.ok(folder.searchRevision() > beforeRevision)
+  const afterWindow = folder.window({ maxTurns: 1 })
+  assert.ok(afterWindow.messages.some(message => message.kind === 'assistant'))
+  const end = event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 6)
+  folder.apply([end])
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, attempt, stepEnd, end])
+  assert.deepEqual(folder.messages(), cold.messages())
+  const assistant = cold.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.interrupted, true)
+  const toolCall = assistant.content?.find(block => block.type === 'tool-call')
+  assert.ok(toolCall !== undefined && toolCall.type === 'tool-call')
+  assert.equal(toolCall.id, callId)
+  assert.equal(toolCall.name, 'bash')
+  assert.equal(toolCall.arguments, '{"command":"pwd"}')
+})
+
+test('generic finalized attempt blocks remain interruption evidence', () => {
+  const futureBlock = { type: 'future-block', payload: { revision: 1, value: 'kept' } } as unknown as ContentBlock
+  const stream: AssistantStreamRecord[] = [{
+    type: 'chunk',
+    time: 2,
+    chunk: { type: 'block-end', index: 0, block: futureBlock },
+  }]
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 1),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 2),
+  ])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.interrupted, true)
+  assert.deepEqual(assistant.content, [futureBlock])
+})
+
+test('a durable assistant/attempt with only block-end evidence reopens as interrupted content', () => {
+  const stream = [{
+    type: 'chunk' as const,
+    time: 2,
+    chunk: {
+      type: 'block-end' as const,
+      index: 0,
+      block: { type: 'text' as const, text: 'attempt block-end evidence' },
+    },
+  }]
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 0),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 1),
+  ])
+  const interrupted = folder.messages().filter(message => message.kind === 'assistant')
+  assert.equal(interrupted.length, 1)
+  assert.equal(interrupted[0]?.text, 'attempt block-end evidence')
+  assert.equal(interrupted[0]?.interrupted, true)
+})
+
+test('a durable assistant/attempt remains interruption evidence until turn end (live == reopen)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hello wor' }, 2))
+  assert.deepEqual(kinds(folder.messages()), ['assistant'], 'streaming text is visible while the attempt runs')
+  const failedStream = [
+    { type: 'text-chunks' as const, time0: 1, index: 0, dt: [], texts: ['durable prefix'] },
+    { type: 'reasoning-chunks' as const, time0: 2, index: 1, dt: [1], texts: ['durable ', 'diagnostic'] },
+    { type: 'chunk' as const, time: 4, chunk: { type: 'usage' as const, usage: { inputTokens: 120, outputTokens: 7 } } },
+  ]
+  folder.apply([event('assistant/attempt', { turn: 0, step: 0, stream: failedStream }, 3)])
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), ['durable prefix'],
+    'a committed attempt preserves its durable assistant evidence while the turn is open')
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['durable diagnostic'])
+  assert.deepEqual(folder.turnActivity(0)?.usage, { inputTokens: 120, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 0 })
+  assert.equal(folder.turnActivity(0)?.totalTokens, 127)
+  assert.equal(folder.turnActivity(0)?.think?.text, 'durable diagnostic')
+  folder.apply([event('step/end', { turn: 0, step: 0 }, 4), event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5)])
+  const interrupted = folder.messages().filter(message => message.kind === 'assistant')
+  assert.equal(interrupted.length, 1, 'closed attempt evidence remains visible as an interrupted prefix')
+  assert.equal(interrupted[0]?.interrupted, true, 'turn/end marks attempt evidence interrupted')
+  // Reopen: a cold replay removes only surface text and keeps diagnostic reasoning.
+  const reopened = new TranscriptFolder()
+  reopened.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/attempt', { turn: 0, step: 0, stream: failedStream }, 3),
+    event('step/end', { turn: 0, step: 0 }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
+  ])
+  const reopenedInterrupted = reopened.messages().filter(message => message.kind === 'assistant')
+  assert.equal(reopenedInterrupted.length, 1, 'cold replay restores the interrupted attempt evidence')
+  assert.equal(reopenedInterrupted[0]?.interrupted, true, 'cold replay preserves interruption metadata')
+  assert.deepEqual(reopened.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['durable diagnostic'])
+  assert.deepEqual(reopened.turnActivity(0)?.usage, { inputTokens: 120, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 0 })
+  assert.equal(reopened.turnActivity(0)?.totalTokens, 127)
+  assert.equal(reopened.turnActivity(0)?.think?.text, 'durable diagnostic')
+})
+
+test('an ABANDONED live end removes the transient text (no durable settlement exists)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'partial' }, 2))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'transient thought' }, 3))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } }, 4))
+  folder.applyLiveInput(liveAttemptEnd(0, 0, 'abandoned'))
+  assert.deepEqual(folder.messages(), [], 'abandoned output and reasoning never stay on the surface')
+  const activity = folder.turnActivity(0)
+  assert.equal(activity?.message, undefined)
+  assert.equal(activity?.think, undefined)
+  assert.equal(activity?.usage, undefined)
+  assert.equal(activity?.totalTokens, undefined)
+})
+
+test('a retry never concatenates: the durable message carries only the retry text', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hello wor' }, 2)) // attempt A
+  folder.apply([event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3)]) // A failed
+  folder.apply([rawEvent('llm/retry', {
+    retryId: 'retry-transcript', turn: 0, step: 0, provider: 'p', mode: 'normal',
+    policyKey: 'test', retry: 1, maxRetries: 2, delayMs: 0,
+    failure: { message: 'failed', code: 'TEST' },
+  }, 3.5)])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'final answer' }, 4)) // attempt B
+  const streaming = folder.messages().filter(message => message.kind === 'assistant')
+  assert.equal(streaming.length, 1)
+  assert.ok(streaming[0] !== undefined && streaming[0].kind === 'assistant')
+  assert.equal(streaming[0].text, 'final answer', 'B starts from an empty entry — never "hello worfinal answer"')
+  folder.apply([assistantMessage(5, 'final answer'), event('step/end', { turn: 0, step: 0 }, 6), event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7)])
+  const settled = folder.messages().filter(message => message.kind === 'assistant')
+  assert.equal(settled.length, 1)
+  assert.ok(settled[0] !== undefined && settled[0].kind === 'assistant')
+  assert.equal(settled[0].text, 'final answer')
+  // Reopen parity: the same durable log replays to the same single message.
+  const reopened = new TranscriptFolder()
+  reopened.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3),
+    assistantMessage(5, 'final answer'),
+    event('step/end', { turn: 0, step: 0 }, 6),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7),
+  ])
+  const replayed = reopened.messages()
+  assert.equal(replayed.length, 1)
+  assert.ok(replayed[0] !== undefined && replayed[0].kind === 'assistant')
+  assert.equal(replayed[0].text, 'final answer', 'reopen shows exactly the retry, never the failed prefix')
+})
+
+test('a retry-started durable message replaces prior reasoning, including no reasoning', () => {
+  const attemptA = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'chunk', time: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'A reasoning' } }],
+  }, 2)
+  const retry = event('llm/retry-started', { retryId: 'retry-message' as RetryId, turn: 0, step: 0, retry: 1 }, 3)
+  const messageB = event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId('retry-message-b'),
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'B reasoning' },
+        { type: 'text', text: 'answer' },
+      ],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [],
+  }, 4)
+  const noReasoningB = event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId('retry-message-empty-reasoning'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [],
+  }, 5)
+  const folder = new TranscriptFolder()
+  folder.hydrate([event('turn/start', { turn: 0 }, 0), attemptA, retry, messageB])
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['B reasoning'])
+  assert.equal(folder.turnActivity(0)?.think?.text, 'B reasoning')
+  folder.apply([noReasoningB])
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'thinking'), [])
+  assert.equal(folder.turnActivity(0)?.think, undefined)
+})
+
+test('a committed MESSAGE settlement never removes text — the durable message owns the entry', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'streamed' }, 2))
+  // The durable message lands (event plane) BEFORE the committed end frame.
+  folder.apply([assistantMessage(3, 'authoritative')])
+  folder.applyLiveInput(liveAttemptEnd(0, 0, 'committed', 'message'))
+  const messages = folder.messages()
+  assert.equal(messages.length, 1)
+  assert.ok(messages[0] !== undefined && messages[0].kind === 'assistant')
+  assert.equal(messages[0].text, 'authoritative', 'the settled message text survives the end frame')
+})
+
+test('failed-attempt reasoning resets on retry and matches a cold replay', () => {
+  const durable = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [{ type: 'chunk', time: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'attempt A reasoning' } }] }, 3),
+    event('llm/retry-started', { retryId: 'retry-1' as RetryId, turn: 0, step: 0, retry: 1 }, 4),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [{ type: 'chunk', time: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'attempt B reasoning' } }] }, 5),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
+  ]
+  const reopened = new TranscriptFolder()
+  reopened.hydrate(durable)
+  const coldThinking = reopened.messages().filter(message => message.kind === 'thinking')
+  assert.equal(coldThinking.length, 1)
+  assert.ok(coldThinking[0] !== undefined && coldThinking[0].kind === 'thinking')
+  assert.equal(coldThinking[0].text, 'attempt B reasoning', 'a retry REPLACES the failed attempt\'s reasoning on replay')
+
+  const live = new TranscriptFolder()
+  live.apply([event('turn/start', { turn: 0 }, 0), event('step/start', { turn: 0, step: 0 }, 1)])
+  live.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'attempt A reasoning' }, 2))
+  live.apply([event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3)]) // A fails; reasoning closed
+  live.applyLiveInput(liveAttemptStart(0, 0)) // B opens: resets the closed attempt's reasoning
+  live.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'attempt B reasoning' }, 4)) // B retry
+  live.apply([event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5)])
+  const liveThinking = live.messages().filter(message => message.kind === 'thinking')
+  assert.equal(liveThinking.length, 1)
+  assert.ok(liveThinking[0] !== undefined && liveThinking[0].kind === 'thinking')
+  assert.equal(liveThinking[0].text, 'attempt B reasoning', 'the retry reset the failed attempt\'s reasoning text')
+})

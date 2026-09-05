@@ -165,10 +165,10 @@ have separate responsibilities:
 
 - `dsh-mode.json` selects the branch's normal local/CI development
   distribution.
-- `dsh-source.json` records the current validated DSH family, including the
-  exact source identity used when Source Mode is selected. Its
-  `expectedVersion` is also the npm compatibility target, so it remains
-  tracked when the branch is in npm mode.
+- `dsh-source.json` records the current validated DSH source family, including
+  the exact source identity used when Source Mode is selected. npm Mode instead
+  follows the exact DSH version declared in the checkout's `package.json` and
+  frozen lockfile.
 
 `main` must keep `mode: "npm"`. `next` may change its mode as upstream
 development requires. Release tags always use the npm distribution regardless
@@ -354,3 +354,99 @@ authoritative for routine PR compatibility.
 
 The bootstrap commands pass source-mode pnpm settings to every subprocess, so
 an agent does not need to manually reproduce the CI source-distribution flow.
+
+## Debugging field notes (master-source work)
+
+Field-tested pitfalls from the DSH master (0.1.3-alpha.1, Source Mode) work.
+These cost real debugging time once; record new ones here instead of relearning.
+
+### Test / gate verification
+
+- **The node `--test` spec reporter is NOT trustworthy for the full suite**
+  (≈200 parallel files): it once reported `3531 pass / 0 fail` while the TAP
+  reporter showed `3443 / 70 fail`. For full-suite acceptance ALWAYS use
+  `node scripts/run-with-temp-root.mjs node --test --test-reporter=tap test/*.test.ts`
+  and require `# fail 0`. The spec reporter IS reliable for a single file or
+  a small explicit list.
+- A single file run in isolation can fail while the same file passes in the
+  full suite (and vice versa). Before assuming a regression, re-run the file
+  in the full-suite configuration.
+- **Background bash jobs may ignore the `workdir` parameter** and execute in
+  the session default workspace (a different checkout!). Prefix background
+  commands with an explicit `cd <repo> && ...`. Foreground `workdir` is
+  honored; the author once "fixed" a phantom SHA mismatch that was only the
+  gate reading the OTHER checkout's `dsh-source.json` (old pin).
+- To prove an intermediate commit compiles: stage it, then
+  `git stash push -u --keep-index` (stash UNSTAGED + untracked, keep the
+  index), run `tsc`, then `git stash pop`. Plain `git stash push` also resets
+  the index — the typecheck then validates HEAD, not your staged commit.
+
+### DSH master source environment
+
+- Master's `pnpm-workspace.yaml` `allowBuilds` does NOT include `fs-ext`, so
+  every fresh source-mode install lacks the native flock addon and the JSONL
+  backend crashes at boot (`Cannot find module .../fs-ext/build/Release/fs_ext.node`).
+  After a source install, build it with node-gyp when the binding is missing.
+  Prefer pnpm's bundled node-gyp at
+  `<pnpm-dir>/dist/node_modules/node-gyp/bin/node-gyp.js`, executing it with
+  the current `node` (`node <that node-gyp.js> configure build`). This is
+  deterministic under `pnpm/setup@v2`, whose Node runtime may omit npm. Keep
+  the `npm root -g`/PATH fallback only for ordinary local or older pnpm
+  installs; use `spawnSync` for the npm probe because `runBounded` streams
+  stdio and captures nothing. The build runs in the fs-ext package dir. Do NOT
+  run bare `node-gyp` through `node <name>` (node treats it as a script path).
+- Never write a glob containing `*/` inside a doc comment
+  (e.g. `` `.pnpm/fs-ext@*/node_modules/fs-ext` ``): the `*/` closes the block
+  comment early and the parser explodes at a random later line.
+- When a shell script embeds generated JS via heredoc, use a QUOTED delimiter
+  (`<<'EOF'`) AND keep `${...}` out of the generated code — otherwise the
+  shell expands template slots and the emitted module is syntactically broken
+  ("Invalid or unexpected token" at load).
+- The dsh CLI has no session-create command. Seed sessions through the
+  official JSONL persistence API; an on-disk fixture is zstd DOUBLE frames
+  [header line][body], exactly what `encodePhysicalJsonl` writes.
+- The base layer's only LLM adapter route is `deepseek-official` (llm-deepseek
+  registers just that provider; its `llm-deepseek.baseURL` setting only affects
+  that route). Official released v0 fixtures may carry a DURABLE provider
+  route like `mock` — resuming them selects `mock`, and NO adapter exists for
+  it. Register your own `LlmAdapter` (only `stream(options)` is abstract) for
+  that provider id via `ctx.llm.registerAdapter(['mock'], adapter)`.
+- `dsh-mode.json` is the tracked CI switch: next events resolve npm unless it
+  says `source`. Source Mode uses `dsh-source.json`'s `expectedVersion` and its
+  pinned source pack; npm Mode uses the exact DSH version declared by the
+  checkout's `package.json` and resolved by the frozen lockfile. This keeps an
+  unpublished source version (e.g. 0.1.3-alpha.1) out of registry installs.
+
+### DSH master API/contract cheat sheet
+
+- `agent/assistant-stream` frames: ONLY `start` carries `turn`/`step`; a
+  `chunk` is `{attemptId, revision, index, time, chunk}` and an `end` is
+  `{attemptId, revision, index, outcome:{kind:'committed', eventType, seq} | {kind:'abandoned'}}`
+  — NO turn/step on chunk/end. `revision` increments on EVERY frame within one
+  Agent lifecycle (monotone stale guard); `index` is dense per attempt and
+  advances for unconsumed chunk kinds too. Master's own headless consumer
+  filters with strict Agent OBJECT identity (`subject !== agent`), never a
+  session id.
+- `assistant/message` is the ONLY normal surface settlement; `assistant/attempt`
+  is durable attempt evidence that stays transient until `llm/retry` resets it
+  or `turn/end` marks it interrupted. Interrupted prefixes are never selected
+  as final answers. Live output is attempt-scoped transient state.
+- The `/sessions` picker uses live projections and zero-I/O cache hints only;
+  a cold cache miss remains unknown. Explicit resume may use
+  `observeSession(projectionMode:'none')`, which synthesizes interrupted-turn
+  closers — never use that observation for canonical export. Export = flush
+  the live session (`sessions.flush`) then `persistence.open(id, 'read')` →
+  `handle.read(0)` → serialize; close failures remain errors. Absence surfaces
+  as `error.name === 'SessionPersistenceNotFoundError'`.
+- The installed dsh may be OLDER than master (e.g. 0.1.2-rc.1 locally while
+  the gate runs 0.1.3-alpha.1): master-only fields/events must be read
+  structurally (casts + `(event.type as string)` guards); the real proof is
+  the gate's `typecheck:bundle` against the pinned master types.
+
+### Agent-workflow notes
+
+- Long environment setup (master env installs, full gates) belongs in
+  background bash jobs, not inside a subagent that then runs out of context
+  mid-task. Delegate bounded tasks; keep the parent's own narration short.
+- When a subagent stalls for multiple rounds with no file changes, interrupt
+  it and take the task over — inspect what it left, then finish it directly.

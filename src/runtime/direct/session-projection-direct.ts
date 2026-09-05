@@ -9,8 +9,8 @@
  * module consumes exactly those official semantics and never folds a second
  * copy of either:
  *
- * 1. live session  → the `title` comes from `sessionProjections.snapshot()`
- *    (in-memory, zero I/O); the preset prefers the agent's CURRENT composed
+ * 1. live session  → already-materialized values come from
+ *    `sessionProjections.cachedSnapshot()` (in-memory, zero I/O); the preset prefers the agent's CURRENT composed
  *    roster entry (`agentPresets.composedPreset()`) — a deliberate
  *    live-only exception: the running Agent's actual composition is the
  *    authoritative effective preset even while it trails or leads the
@@ -19,22 +19,18 @@
  * 2. cold + cache  → `sessionProjectionCache.cachedSnapshot(header, keys)`
  *    (a durable checkpoint read keyed by the `list()` header identity — no
  *    full-log fold);
- * 3. cold + miss   → ONE `sessionQuery.observeSession(id, …)` per session,
- *    whose projection cut resolves BOTH title and agentPreset together
- *    (never two independent cold scans of the same log), then
- *    `observation[Symbol.dispose]()`.
+ * 3. cold + miss   → leave the optional fields unknown. The picker must not
+ *    activate a historical Session or synthesize a cold observation merely to
+ *    fill a label.
  *
- * Everything is bounded (one worker pool per batch) and cancellable (an
- * aborted signal rejects the whole batch; per-row corruption — including a
- * throwing live composition read or a broken preset resolver on the cache
- * path — is isolated instead of hiding the picker: log-backed reads land an
- * info diagnostic, while a live teardown race fail-softs silently to the
- * other field — a dying composition is not worth polluting INFO).
+ * Per-row cache/resolver failures are isolated instead of hiding the picker:
+ * a live teardown race fail-softs silently to the other field, while a broken
+ * derived cache value is reported and omitted.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-projection-direct
  */
 
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import { safeErrorMessage } from '../../error-boundary.ts'
@@ -42,43 +38,48 @@ import type { SessionProjectionSummary, SessionSummary } from '../session-reader
 import { resolveProjectedPresetId } from './session-preset-direct.ts'
 
 /** The projection keys this batch reads (the official registered units). */
-type ProjectionKey = typeof agentPresetProjectionDefinition.key | 'title'
+type ProjectionKey = typeof agentPresetProjectionDefinition.key | 'title' | 'sessionListMetadata'
+
+/** The list metadata capability is provided by the optional API controller;
+ * deployments without it simply fall back to header creation time. */
+export interface SessionListMetadataLike {
+  readonly blank?: boolean
+  readonly lastPromptAt?: number | null
+}
 
 /** The official live projection read surface (structural subset of
  * `sessionProjections` — the value table carries both keys). */
 export interface SessionProjectionReaderLike {
-  snapshot(
+  /** Read only already-materialized cells; never fold the live Session. */
+  cachedSnapshot(
     session: Session,
     keys?: readonly ProjectionKey[],
-  ): { readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } } | undefined
+  ): { readonly values?: {
+    readonly title?: string | null
+    readonly agentPreset?: string | null
+    readonly sessionListMetadata?: SessionListMetadataLike
+  } } | undefined
 }
 
 /** The zero-I/O projection-cache hint (structural subset of
  * `sessionProjectionCache`). A row is possibly stale but never wrong; the
  * caller's `list()` header is the identity witness, so no log read and no
- * second corpus listing is needed. */
+ * second corpus listing is needed. Seeded list headers without an exact cut
+ * are deliberately skipped. */
 export interface SessionProjectionCacheLike {
   cachedSnapshot(
     meta: SessionHeader,
+    inheritedEventCount: ReturnType<typeof SessionLogOffset>,
     keys?: readonly ProjectionKey[],
-  ): { readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } } | undefined
-}
-
-/** The official observation lease (structural subset of `SessionObservation`,
- * widened to both projection values). */
-export interface SessionObservationLike {
-  readonly source: 'live' | 'prepared'
-  readonly header: SessionHeader
-  readonly projections?: { readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } }
-  [Symbol.dispose](): void
-}
-
-/** The official observation seam (structural subset of `sessionQuery`). */
-export interface SessionQueryObservationLike {
-  observeSession(
-    sessionId: SessionId,
-    options?: { readonly signal?: AbortSignal; readonly projectionMode?: 'all' | 'none' },
-  ): Promise<SessionObservationLike>
+  ): { readonly values?: {
+    readonly title?: string | null
+    readonly agentPreset?: string | null
+    readonly sessionListMetadata?: SessionListMetadataLike
+  } } | undefined
+  cachedPredecessorTitle?(
+    meta: SessionHeader,
+    inheritedEventCount: ReturnType<typeof SessionLogOffset>,
+  ): { readonly values?: { readonly title?: string | null } } | undefined
 }
 
 /** The diagnostics sink for isolated per-row failures (a structural subset
@@ -116,12 +117,6 @@ export interface ProjectionBatchDeps {
   readonly diag?: SessionReaderDiagLike
 }
 
-/** Keep cold-session projection observations below the persistence engine's
- * own small inspection batch size. This bounds log replay/FD/memory pressure
- * when the picker contains many historical sessions. ONE pool serves the
- * whole combined batch — never one per field. */
-export const SESSION_PROJECTION_READ_CONCURRENCY = 4
-
 /** Read a typed query-service error without depending on its package surface. */
 function errorCodeOf(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined
@@ -129,26 +124,35 @@ function errorCodeOf(error: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined
 }
 
+/** The exact cache cut available from a lightweight list header. Unseeded
+ * sessions always start at cut 0. A seeded list record has no exact inherited
+ * cut, so it must skip the cache rather than guessing from unrelated metadata. */
+function inheritedCutOf(header: SessionHeader): ReturnType<typeof SessionLogOffset> | undefined {
+  return header.isSeeded === false ? SessionLogOffset(0) : undefined
+}
+
 /**
- * Read the projection-cache hint for one header WITHOUT letting a throwing
- * cache read escalate: the cache is derived data (DSH's own consumers do the
- * same), so damage falls through to the authoritative observation instead of
- * failing the row.
+ * Read the projection-cache hint for one header. A seeded header without an
+ * exact inherited cut skips the cache entirely — a guessed cut could seed
+ * values folded from an unrelated log prefix (master contract §3.5).
  */
 function safeCachedSnapshot(
   cache: SessionProjectionCacheLike | undefined,
   header: SessionHeader,
 ): { readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } } | undefined {
   if (cache === undefined) return undefined
+  const cut = inheritedCutOf(header)
+  if (cut === undefined) return undefined
   try {
-    return cache.cachedSnapshot(header, ['title', 'agentPreset'])
+    return cache.cachedSnapshot(header, cut, ['title', 'agentPreset'])
+      ?? cache.cachedPredecessorTitle?.(header, cut)
   } catch {
     return undefined
   }
 }
 
-/** The live fast path: title from the official projection snapshot over the
- * in-memory log (zero I/O), preset from the authoritative composed
+/** The live fast path: title and cached fallback preset from already-materialized
+ * projection cells (zero history folding), with preset first from the authoritative composed
  * composition (a DELIBERATE live-only exception: the composed roster entry
  * reflects the running Agent's actual composition, which can trail or lead
  * the durable projection during a switch; the projection value remains the
@@ -176,8 +180,9 @@ function liveProjection(
   let title: string | undefined
   if (live !== undefined && projections !== undefined) {
     try {
-      const values = projections.snapshot(live.session, ['title'])?.values
+      const values = projections.cachedSnapshot(live.session, ['title', 'agentPreset'])?.values
       if (typeof values?.title === 'string') title = values.title
+      if (preset === undefined && typeof values?.agentPreset === 'string') preset = values.agentPreset
     } catch {
       // A live session being torn down is not a picker error; the preset or
       // the short-id presentation still applies.
@@ -190,42 +195,11 @@ function liveProjection(
   }
 }
 
-/** Run one bounded worker pool over the batch's cold observations. Claims are
- * synchronous after the abort check, so a worker that observes cancellation
- * never starts another cold read. */
-async function mapConcurrent<T, R>(
-  items: readonly T[],
-  limit: number,
-  map: (item: T, index: number) => Promise<R>,
-  signal?: AbortSignal,
-): Promise<R[]> {
-  if (items.length === 0) return []
-  const results = new Array<R>(items.length)
-  let next = 0
-  const worker = async (): Promise<void> => {
-    while (true) {
-      signal?.throwIfAborted()
-      const index = next++
-      if (index >= items.length) return
-      results[index] = await map(items[index]!, index)
-    }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(Math.max(1, limit), items.length) }, () => worker()),
-  )
-  return results
-}
-
 /**
  * The combined projection batch (the port's `projectionBatch` semantics):
- * live fast path → zero-I/O cache fast path → at most ONE observation per
- * remaining cold row, whose cut resolves title AND agentPreset together.
- *
- * Per-row isolation: a corrupt/unsupported session is omitted (short-id /
- * preset-less presentation survives) with an info diagnostic carrying the
- * engine's code — never a fallback second raw-log read. Cancellation: an
- * aborted signal rejects the WHOLE batch as an AbortError (the detached
- * caller classifies it as a cancellation, not a failure).
+ * live fast path → zero-I/O cache fast path → unknown fields on a cold miss.
+ * A picker enrichment must never activate a historical Session or replay its
+ * full log merely to fill a label. Cancellation still rejects the whole batch.
  */
 export async function projectionBatch(
   deps: ProjectionBatchDeps,
@@ -237,115 +211,52 @@ export async function projectionBatch(
 
   const projections = deps.ctx.get('sessionProjections') as SessionProjectionReaderLike | undefined
   const cache = deps.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
-  const query = deps.ctx.get('sessionQuery') as SessionQueryObservationLike | undefined
   const presets = deps.ctx.get('agentPresets') as PresetsServiceLike | undefined
 
-  // (1) Live rows: the in-memory projection cut is authoritative and free.
+  // (1) Live rows: only the live branch may read live composed/cached values.
+  // A live row with no cached title must never fall through to a cold cache
+  // hint, which could expose stale persisted metadata.
+  const coldRows: SessionSummary[] = []
   for (const row of deps.rows) {
-    const live = liveProjection(deps, projections, row.id)
-    if (live !== undefined) result.set(row.id, live)
+    if (row.live) {
+      const live = liveProjection(deps, projections, row.id)
+      if (live !== undefined) result.set(row.id, live)
+    } else {
+      coldRows.push(row)
+    }
   }
-
-  const coldRows = deps.rows.filter(row => !result.has(row.id))
   if (coldRows.length === 0) return result
 
   // One roster snapshot shared by every cold row: legacy `code` data maps to
   // `ptc` only when the roster proves no real `code` preset exists.
   const rosterIds = await deps.rosterIds(signal)
 
-  // (2) Zero-I/O cache hints. `title: null` IS a final answer ("no title
-  // yet") while an unusable cached preset identity stays fail-closed (a
-  // later selection may have landed after the checkpoint) — a `null`
-  // agentPreset is NOT a usable identity.
-  const misses: SessionSummary[] = []
+  // (2) Zero-I/O cache hints. `title: null` means "no title yet" while an
+  // unusable cached preset identity stays fail-closed; a cold cache miss does
+  // not trigger a historical observation or a second raw-log read.
   for (const row of coldRows) {
     const header = deps.headerOf(row.id)
     const cached = header === undefined ? undefined : safeCachedSnapshot(cache, header)
-    let titleKnown = false
-    let presetKnown = false
-    if (cached !== undefined) {
-      const values = cached.values ?? {}
-      if ('title' in values) {
-        titleKnown = true
-        if (typeof values.title === 'string') {
-          result.set(row.id, { ...result.get(row.id), title: values.title })
-        }
-      }
-      if (typeof values.agentPreset === 'string') {
-        // An identity that fails roster resolution is final for this batch:
-        // the observation would return the same value and resolve the same
-        // way, so spending a cold read on it would buy nothing.
-        presetKnown = true
-        try {
-          const resolved = await resolveProjectedPresetId(values.agentPreset, rosterIds, presets)
-          if (resolved !== undefined) {
-            result.set(row.id, { ...result.get(row.id), preset: resolved })
-          }
-        } catch (error) {
-          // Per-row isolation on the cache path too: a throwing resolver
-          // (e.g. a broken roster service) must not fail the WHOLE batch —
-          // the cached title above survives, the preset stays absent, and
-          // the row is final for this batch (a cold observation would
-          // usually reproduce the same value and the same resolver failure).
-          signal?.throwIfAborted()
-          deps.diag?.info('session projection unavailable', {
-            session: row.id,
-            code: errorCodeOf(error),
-            reason: safeErrorMessage(error),
-          })
-        }
-      }
+    if (cached === undefined) continue
+    const values = cached.values ?? {}
+    if (typeof values.title === 'string') {
+      result.set(row.id, { ...result.get(row.id), title: values.title })
     }
-    if ((titleKnown && presetKnown) || query === undefined) continue
-    misses.push(row)
-  }
-  // Without the observation seam there is nothing authoritative left to do:
-  // partial cache hints stay as they are.
-  if (query === undefined || misses.length === 0) return result
-
-  // (3) ONE observation per cold miss — its projection cut resolves BOTH
-  // fields, replacing any partial cached values with the fresher read.
-  const values = await mapConcurrent(misses, SESSION_PROJECTION_READ_CONCURRENCY, async row => {
-    try {
-      const observation = await query.observeSession(SessionId(row.id), { signal, projectionMode: 'all' })
+    if (typeof values.agentPreset === 'string') {
       try {
-        const observed = observation.projections?.values ?? {}
-        const title = typeof observed.title === 'string' ? observed.title : undefined
-        const preset = await resolveProjectedPresetId(observed.agentPreset, rosterIds, presets)
-        return { title, preset }
-      } finally {
-        observation[Symbol.dispose]()
+        const resolved = await resolveProjectedPresetId(values.agentPreset, rosterIds, presets)
+        if (resolved !== undefined) {
+          result.set(row.id, { ...result.get(row.id), preset: resolved })
+        }
+      } catch (error) {
+        signal?.throwIfAborted()
+        deps.diag?.info('session projection unavailable', {
+          session: row.id,
+          code: errorCodeOf(error),
+          reason: safeErrorMessage(error),
+        })
       }
-    } catch (error) {
-      // Cancellation is the ONE error that outlives row isolation: re-checked
-      // first so an aborted batch never degrades into per-row omissions.
-      signal?.throwIfAborted()
-      // Fail closed per row: a corrupt/unsupported log cannot invent a title
-      // or an effective preset, but it must not hide other valid picker rows
-      // either — and it never falls back to a second raw-log read.
-      deps.diag?.info('session projection unavailable', {
-        session: row.id,
-        code: errorCodeOf(error),
-        reason: safeErrorMessage(error),
-      })
-      return undefined
     }
-  }, signal)
-  signal?.throwIfAborted()
-  for (let index = 0; index < misses.length; index += 1) {
-    const value = values[index]
-    if (value === undefined) continue
-    const summary: SessionProjectionSummary = {
-      ...(value.title === undefined ? {} : { title: value.title }),
-      ...(value.preset === undefined ? {} : { preset: value.preset }),
-    }
-    if (titleOrPreset(summary)) result.set(misses[index]!.id, summary)
   }
   return result
-}
-
-/** Whether a summary carries at least one usable field (an all-empty summary
- * is an omission, not an enrichment). */
-function titleOrPreset(summary: SessionProjectionSummary): boolean {
-  return summary.title !== undefined || summary.preset !== undefined
 }

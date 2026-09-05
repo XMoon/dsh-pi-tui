@@ -10,7 +10,7 @@
 
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
-M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
+M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
 M2  NOT STARTED   (experimental Remote backend against an existing DSH Host)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
@@ -29,9 +29,13 @@ Direct rollback:           available
 
 `dsh --profile pi-tui` runs in-process: the TUI consumes Host services
 directly (`ctx.get(...)` — see `docs/client-server-coupling.md` for the
-inventory). Session ownership (owner.lock, lease/cooling, PINNED,
-transition gate, operation barrier) is Direct-mode machinery and stays
-authoritative until M8.
+inventory). Session writer ownership is DSH's `SessionHandle` /
+`SessionWriteLease` (kernel flock) — the natural Server-side authority,
+already in place on the master baseline; the TUI adds no physical
+persistence lock (the owner.lock / lease / cooling / PINNED stack is
+removed legacy). The TUI keeps only process-local surface coordination
+(transition gate, operation barrier, generation/stale fences) around the
+port calls.
 
 ### Model-selection ownership
 
@@ -67,42 +71,45 @@ recreate them as TUI-specific DTOs.
 - **Host domain services** — persistence, sessions, tools, approvals, jobs and
   other stateful services that remain composed and owned by DSH.
 
-### Session query and raw export ownership
+### Session query and export ownership
 
 Session list/projection/search/filter semantics belong to the public DSH
-`sessionQuery` + projection services. The picker's `title` and `agentPreset`
-values are Host-owned DSH projections read through ONE semantic port method,
-`SessionReader.projectionBatch()`: live rows read the `title` via
-`sessionProjections.snapshot()` while the live preset prefers the Agent's
+`sessionQuery` + projection services. The list keeps live Sessions even when
+`cwd` is absent, while cold Sessions without `cwd` are omitted; semantic search
+considers only cwd-bearing Sessions before applying its work bound. The picker's
+`title` and `agentPreset` values are Host-owned DSH projections read through ONE semantic port method,
+`SessionReader.projectionBatch()`: live rows read already-materialized `title`
+and cached `agentPreset` cells via `sessionProjections.cachedSnapshot()` while the live preset prefers the Agent's
 CURRENT composed roster entry (`agentPresets.composedPreset()`) — a
 deliberate live-only exception (the running Agent's actual composition is
 the authoritative effective preset even while it trails the durable
 projection mid-switch), with the projection value as the fallback;
 cold rows via the zero-I/O `sessionProjectionCache.cachedSnapshot()` checkpoint
-keyed by the listing's header identity, and at most ONE bounded
-`sessionQuery.observeSession()` per cold cache miss, whose projection cut
-resolves BOTH fields together. A future Remote adapter maps this port method
-onto the official DSH client projection contract — it must not copy the Direct
-adapter's cache/observation ladder, and the TUI must never keep a second
-(private) persistence of session derived state (the retired
+keyed by the listing's header identity (with the official predecessor-title hint
+where applicable). A cold cache miss remains unknown: the picker never activates
+or observes a historical Session merely to fill labels. A future Remote adapter
+maps this port method onto the official DSH client projection contract — it must
+not copy private Direct state, and the TUI must never keep a second (private)
+persistence of session derived state (the retired
 `$DSH_HOME/cache/pi-tui-session-titles.json` title cache was exactly that).
 
 The Direct adapter may use the query engine's provider-independent
 `filterEvents` seam when the shipped SQLite full-text provider is disabled
-(`openAt: never`), and may retain a narrowly scoped raw-persistence fallback
-only when that semantic capability is absent or explicitly disabled. `readRaw()`
-is reserved for raw-artifact fidelity such as export or repair, not as the
-long-term semantic search contract.
+(`openAt: never`). If that semantic capability is absent or explicitly disabled,
+search is explicitly unavailable; it never falls back to raw persistence.
+No TUI semantic path uses `readRaw()` or scans physical persistence artifacts:
+`/export` reads the committed logical log through the persistence read handle,
+and the retired repair stack has no runtime owner.
 
-Raw session export is a separate Host streaming route:
+Session export is a separate Host streaming route:
 
 ```text
 ordinary session control/history/state -> official Session client object / generated Remote
-raw session export                    -> Connection HTTP GET/HEAD /api/session.export
+canonical session-log export           -> Connection HTTP GET/HEAD /api/session.export
 ```
 
-It is not an ordinary JSON-RPC payload and must not be implemented by sending a
-complete raw transcript to the Client for recompression.
+It is not an ordinary JSON-RPC payload and must not be implemented by sending
+physical persistence bytes to the Client for recompression.
 
 ## Phases (one behavior axis per phase; each independently mergeable/verifiable/rollback-able)
 
@@ -110,13 +117,13 @@ complete raw transcript to the Client for recompression.
 |---|---|---|
 | M0 | Guardrails (AGENTS.md), this doc, coupling inventory, `scripts/client-boundary-gate.mjs` (baseline + no-new-debt) | Zero runtime behavior change; no new runtime dependency; all tests green |
 | M1 | Semantic ports + Direct adapters (subagent first, then session read/write/lifecycle, catalog/config, interaction); narrow `TuiCommandContext` | Per domain: old-behavior test + adapter contract test both green; backend stays `direct` |
-| M2 | Experimental Remote Adapter against an existing DSH Host: Semantic Port reads first, then writes, then approval/question via the DSH Connection | Shadow parity on read paths; no session lock/lease in Remote mode |
+| M2 | Experimental Remote Adapter against an existing DSH Host: Semantic Port reads first, then writes, then approval/question via the DSH Connection | Shadow parity on read paths; no physical session lock in Remote mode — DSH writer ownership stays Host-side |
 | M3 | Experimental in-process wire: separate Host/Client Cordis contexts, DSH Connection over the Semantic Port, no TCP | Wire parity on the transcript parity suite; Host composition stays experimental |
 | M4 | Local Host process / IPC split; crash semantics (TUI↔Host, Ctrl+C/D, SIGTERM, HMR, parent/child death) | IPC integration lane green; ordinary local mode: TUI owns ephemeral Host lifecycle |
 | M5 | `dsh-pi-tui attach <url>`; localhost + SSH tunnel only; remote `!` disabled until a Host-side shell seam; remote external editor unsupported | Security review; fail-closed locality checks |
 | M6 | Production dual stack: `--backend wire-local` opt-in, direct default; extension CI matrix (direct × wire-local) | One stable observation cycle; no perceptible regression |
 | M7 | Default flip to wire-local; `--backend direct` rollback kept for ≥ 1 release | Rollback verified on the release train |
-| M8 | Direct ownership retirement (lock/lease/PINNED/transition/barrier) | Proof: all TUI writes Host-owned, cross-client concurrency safe (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) |
+| M8 | Direct ownership retirement (the SessionHandle `direct` escape — live Agent/AgentHandle; the physical lock stack is already removed legacy) | Proof: all TUI writes Host-owned, cross-client concurrency safe (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) |
 
 The former in-process client wording is obsolete upstream architecture, not an
 implementation target. Redesign the adapter around the DSH Connection, official
@@ -179,10 +186,10 @@ The M2/M3 Remote backend maps to the official seams below (first shipped in
 the alpha.2 line and still current in alpha.4) — it must
 not copy Direct Host implementation or invent parallel protocols. The Direct
 backend already consumes the same seams in-process (the session-preset
-adapter reads cold sessions through `sessionQuery.observeSession()` and the
-picker's preset enrichment consults `sessionProjectionCache.cachedSnapshot`
-before any observation), so the Remote adapter's job is transport mapping,
-not reimplementation.
+adapter uses `sessionQuery.observeSession()` only for explicit preset/resume
+paths, while picker enrichment uses live projections and
+`sessionProjectionCache.cachedSnapshot` without cold observation), so the Remote
+adapter's job is transport mapping, not reimplementation.
 
 - **Session history** — `session.follow` / `session.page` are the Remote
   history authority. The client renders from the official Session client
@@ -335,7 +342,7 @@ the official Connection.
 | Client Runtime still carries web assembly assumptions (`dsh.client.platform: web`) | High | M2 consumes the protocol directly; M3 validates runtime packaging |
 | DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | Experimental host composition; redesign the Remote Adapter before M3; never replace the default patch |
 | Extension Cordis ownership across the split | High | Stable API untouched; ClientContext from M3 |
-| Session lock removal before Host owns all writes | Critical | Deferred to M8 by rule |
+| Cross-client concurrency safety (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) | Critical | DSH SessionWriteLease is the cross-process writer authority; the full matrix is proven at M8 |
 | Shell execution on the wrong machine | Critical | Locality hard rule; remote `!` fails closed |
 | `@file` resolving on the Client filesystem | High | M1.10 sealed the locality boundary: all `@` discovery/canonicalization goes through `HostFilePort`; the M2 Remote adapter maps it to Host fileReferences |
 | Credentials exposure beyond loopback | Critical | Attach limited to localhost/SSH until real auth |

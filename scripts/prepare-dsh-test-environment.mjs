@@ -7,7 +7,8 @@
  * @module prepare-dsh-test-environment
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, globSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -17,6 +18,7 @@ import {
   loadDshDistribution,
   loadDshSourceConfig,
   npmDshDistribution,
+  npmDshVersion,
   prepareDshInstall,
   restoreDshInstall,
   sourceInstallPackages,
@@ -24,21 +26,46 @@ import {
   validateDshSourceConfig,
   printDshProvenance,
 } from './lib/dsh-distribution.mjs'
-import { pnpmExecutable, runBounded } from './lib/process.mjs'
+import { pnpmBundledNodeGyp, pnpmExecutable, runBounded } from './lib/process.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const PI2DSH_MANIFEST = join(ROOT, 'test', 'compat', 'pi2dsh.json')
 
 function fail(message) {
   throw new Error(message)
 }
 
-function readTargetVersion() {
-  const path = join(ROOT, 'test', 'compat', 'pi2dsh.json')
-  const manifest = JSON.parse(readFileSync(path, 'utf8'))
-  if (typeof manifest.dshVersion !== 'string' || manifest.dshVersion === '') fail(`${path} has no exact dshVersion`)
-  return manifest.dshVersion
+/** Build the fs-ext native binding in the target workspace when the
+ * source-mode install skipped it. Master's pnpm-workspace allowBuilds does
+ * not include fs-ext, so a fresh install has no flock addon and the JSONL
+ * backend cannot boot (the official preset matrix and the ownership E2E
+ * both need the real kernel-flock path). Idempotent: a present binding is
+ * left alone. pnpm keeps fs-ext inside its isolated store
+ * under node_modules/.pnpm, so the package directory is located by
+ * globbing, never by a hoisted top-level path. */
+async function ensureFsExtBinding(target) {
+  const fsExtCandidates = globSync(join(target, 'node_modules', '.pnpm', 'fs-ext@*', 'node_modules', 'fs-ext'))
+  if (fsExtCandidates.length === 0) return
+  const fsExtDir = fsExtCandidates[0]
+  const binding = join(fsExtDir, 'build', 'Release', 'fs_ext.node')
+  if (existsSync(binding)) return
+  // pnpm/setup installs a self-contained pnpm executable with its runtime
+  // dependencies beside it. Prefer that bundled node-gyp: the runtime may not
+  // ship npm, and a runner-provided npm can target a different Node ABI.
+  let gyp = pnpmBundledNodeGyp(PNPM_COMMAND) ?? ''
+  if (gyp === '') {
+    // Keep the npm/PATH fallback for ordinary local and older pnpm installs.
+    // runBounded streams stdio (no capture), so the probe uses spawnSync.
+    const probe = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', timeout: 30_000 })
+    const npmGyp = probe.status === 0 ? join(probe.stdout.trim(), 'npm', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js') : ''
+    gyp = npmGyp !== '' && existsSync(npmGyp) ? npmGyp : 'node-gyp'
+  }
+  const result = gyp === 'node-gyp'
+    ? await runBounded(gyp, ['configure', 'build'], { cwd: fsExtDir, env: { ...process.env, npm_config_ignore_scripts: 'false' }, timeoutMs: 5 * 60_000, label: 'fs-ext native binding build' })
+    : await runBounded(process.execPath, [gyp, 'configure', 'build'], { cwd: fsExtDir, env: { ...process.env, npm_config_ignore_scripts: 'false' }, timeoutMs: 5 * 60_000, label: 'fs-ext native binding build' })
+  if (result.status !== 0) {
+    fail(`fs-ext native binding build failed${result.error ? `: ${result.error.message}` : ` with exit ${result.status ?? 'unknown'}`}`)
+  }
 }
 
 function parseCli() {
@@ -102,7 +129,7 @@ export async function prepareDshTestEnvironment({
   mode = process.env.DSH_MODE ?? 'npm',
   distribution,
   workspace = ROOT,
-  dshVersion = readTargetVersion(),
+  dshVersion,
   config = DEFAULT_SOURCE_CONFIG,
   ref,
   expectedVersion,
@@ -124,7 +151,7 @@ export async function prepareDshTestEnvironment({
       sourceConfig,
       allowDirty,
     })
-    : npmDshDistribution(dshVersion)
+    : npmDshDistribution(dshVersion ?? npmDshVersion())
   const prepared = prepareDshInstall(selected, target, {
     materializeSourceDependencies: selected.kind === 'source-pack',
     stripPackageManager: true,
@@ -136,6 +163,10 @@ export async function prepareDshTestEnvironment({
     restoreDshInstall(prepared)
   }
   if (selected.kind === 'source-pack') {
+    // The source-mode install runs with --ignore-scripts, so fs-ext's
+    // node-gyp build never ran; the JSONL backend needs the real flock
+    // addon to boot (official preset matrix, ownership E2E).
+    await ensureFsExtBinding(target)
     const packageJson = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'))
     assertSourceResolution(target, selected, sourceInstallPackages(selected, packageJson))
   }
@@ -151,7 +182,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
       mode: values.mode,
       distribution: values.distribution,
       workspace: values.workspace ?? ROOT,
-      dshVersion: values['dsh-version'] ?? readTargetVersion(),
+      dshVersion: values['dsh-version'],
       config: values.config ?? DEFAULT_SOURCE_CONFIG,
       ref: values.ref,
       expectedVersion: values['expected-version'],

@@ -8,17 +8,17 @@ boundary.
 | dsh-pi-tui line | DeepSeek Harness line | Policy |
 |---|---|---|
 | `0.3.x` | `0.1.1-rc.2` | Supported legacy runtime line |
-| `0.4.1` | `>=0.1.2-rc.1` | Current stable; validated against the rc.1 DSH family |
-| `0.4.x-alpha` | `>=0.1.2-rc.1` | Following prerelease line; each release validates the concrete DSH family |
+| `0.4.1` (published) | `>=0.1.2-rc.1` | Historical stable; validated against the rc.1 DSH family |
+| `next` Source Mode (this checkout; release version remains `0.4.1`) | `>=0.1.3-alpha.1` | Pinned DSH master source baseline; validation-only, not an npm installation line |
 | `0.4.0-alpha.2` | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; validated the alpha.4/alpha.5 DSH family |
 | `0.4.0-alpha.1` | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 DSH family |
 
-The 0.4 line has no 0.1.1 runtime shim. An old Harness remains outside the
-supported peer window and must fail at the normal incompatible-runtime
-boundary. The startup row prints both recovery paths when its concurrent
-Loader mount gets to run first, but that friendly notice is best-effort. The
-published peer contract intentionally uses a lower bound only: later DSH
-versions remain eligible until a concrete compatibility failure is found.
+The published 0.4.1 line has no 0.1.1 runtime shim. An old Harness remains
+outside its supported peer window and must fail at the normal incompatible-
+runtime boundary. The current `next` checkout raises that floor to the pinned
+`0.1.3-alpha.1` master source baseline. Its startup notice is best-effort because
+Loader rows mount concurrently. The pinned alpha is not a registry release and
+must not be suggested as an npm installation.
 
 For the current stable 0.4 line, install the validated Harness family and the
 stable TUI:
@@ -28,12 +28,16 @@ npm install -g @deepseek-ai/dsh@0.1.2-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 ```
 
-To try the preview channel, use the DSH `next` line with the TUI `@next` channel:
+The current `next` checkout is Source Mode only. Use the isolated driver, which
+packs the exact source commit from `test/compat/dsh-source.json` and installs
+its temporary tarball family:
 
 ```sh
-npm install -g @deepseek-ai/dsh@next
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
 ```
+
+Do not install `@deepseek-ai/dsh@0.1.3-alpha.1` from npm; that version is the
+expected version of the pinned source distribution.
 
 If the legacy DSH runtime must be kept, use the compatible 0.3 TUI line:
 
@@ -42,20 +46,17 @@ npm install -g @deepseek-ai/dsh@0.1.1-rc.2
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 ```
 
-The stable pair uses the concrete `0.1.2-rc.1` family; the peer contract stays
-lower-bound-only at `>=0.1.2-rc.1`. A Harness on the alpha.2/alpha.3 baseline
-uses `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, and a Harness on the alpha.4/alpha.5
-baseline uses `@xmoon76/dsh-pi-tui@0.4.0-alpha.2` — the last lines that accept
-them. Later DSH versions remain eligible under the lower-bound-only peer
-contract; each release still runs its concrete runtime and preset gates. The
-startup notice reports versions below `0.1.2-rc.1`; an incompatible future
-runtime fails through the normal package contract rather than an early
-TUI-specific API branch. Peer prerelease tuples are validated separately before
-each release.
+The published stable pair uses the concrete `0.1.2-rc.1` family and retains the
+historical lower-bound contract `>=0.1.2-rc.1`. A Harness on the alpha.2/alpha.3
+baseline uses `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, and alpha.4/alpha.5 uses
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.2` — the last published lines that accept them.
+The current Source Mode checkout is separate: its peer floor is
+`>=0.1.3-alpha.1`, and its exact source identity is verified before use.
 
 Note that `npm install -g @deepseek-ai/dsh` without an explicit version follows
-npm's `latest` dist-tag, which is the older 0.1.1 line — always name the exact
-version or the `next` channel explicitly.
+npm's `latest` dist-tag, which may be an older runtime line. Always name a
+published version explicitly; never use npm to install the unpublished pinned
+alpha.
 
 ## Data compatibility
 
@@ -97,10 +98,10 @@ cannot be consulted for unpublished DSH metadata;
 The CI policy is deliberately explicit: pushes to `next` and pull requests
 whose base is `next` follow the tracked `test/compat/dsh-mode.json` policy;
 `main` and every tag, including `next-v*`, always use registry-backed npm mode
-with a frozen lockfile. In either `next` mode, the current validated DSH target
-comes from `test/compat/dsh-source.json`'s `expectedVersion`. Source Mode builds
-and validates that pinned source family; npm mode validates the corresponding
-published family from the registry. The Source Mode ecosystem check prints
+with a frozen lockfile. Source Mode builds and validates the pinned source
+family from `test/compat/dsh-source.json`'s `expectedVersion`; npm Mode uses the
+exact DSH version declared by the checkout's `package.json` and resolved by its
+frozen lockfile. The Source Mode ecosystem check prints
 `SKIPPED: requires published compatible DSH/pi2dsh combination` because the
 published `pi2dsh` bridge cannot prove compatibility against an unpublished
 source family. That check remains blocking in npm mode.

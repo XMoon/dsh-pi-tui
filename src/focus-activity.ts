@@ -26,8 +26,8 @@ import { color } from './theme.ts'
 import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import { toolTitle } from './present.ts'
-import type { TurnActivity } from './transcript.ts'
-import type { TranscriptMessage } from './transcript.ts'
+import { assistantBlocksVisibleNow, type TurnActivity, type TranscriptMessage } from './transcript.ts'
+import { displayFailureText } from './failure-presentation.ts'
 
 /** The max tool-type names the header stats show before the `+N` tail
  * (plan §10.4). */
@@ -264,7 +264,7 @@ export function focusCollapsedBody(
   }
   const reason = activity.reason
   if (reason?.kind === 'error' && reason.error !== undefined) {
-    lines.push(previewLine('Error:', `${reason.error.code}: ${reason.error.message}`, width))
+    lines.push(previewLine('Error:', displayFailureText(reason.error), width))
   }
   return lines
 }
@@ -488,18 +488,12 @@ function initialPromptBoundary(group: readonly TranscriptMessage[]): number {
   return firstUserIndex < 0 ? 0 : firstUserIndex + 1
 }
 
-/** Whether one assistant message truly renders visible rows. The flat
- * `text` already aggregates EVERY text block (textOf), so the only
- * non-text block the TUI's assistant renderer paints is an `image` —
- * `reasoning` / `tool-call` / `tool-result` content (and any future
- * merge-extended block) is SKIPPED by renderBlockSequence. A content
- * array made only of those renders zero rows and can never be presented
- * as a final answer: a max-tokens turn must not end in a bare
- * "(output may be truncated)" marker with no actual output (review
- * edge). Keep this in sync with the renderer's painted block types. */
+/** Whether one assistant message has visible Assistant content. Keep final
+ * selection on the same block predicate as the transcript row projection;
+ * an empty authoritative entry may remain internal without becoming a final
+ * answer, while generic finalized blocks retain their Stage A identity. */
 function assistantRenderable(assistant: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
-  if (assistant.text !== '') return true
-  return assistant.content?.some(block => block.type === 'image') === true
+  return assistantBlocksVisibleNow(assistant.content ?? [{ type: 'text', text: assistant.text }])
 }
 
 /** The turn's final assistant selection: only after the authoritative
@@ -514,7 +508,12 @@ function finalAssistantSelection(
   if (activity === undefined || !activity.completed) return undefined
   const reason = activity.reason?.kind
   if (reason !== 'completed' && reason !== 'max-tokens') return undefined
+  // The exact authoritative assistant may be retained internally but hidden
+  // from the normal transcript projection; never fall back to an earlier row.
+  if (activity.lastAssistantVisible === false) return undefined
   const last = lastAssistant(group)
-  if (last === undefined || !assistantRenderable(last)) return undefined
+  // Interrupted prefixes are process evidence, never a completed/max-token
+  // final answer, even when a malformed log reports a successful reason.
+  if (last === undefined || last.interrupted === true || !assistantRenderable(last)) return undefined
   return { message: last, truncated: reason === 'max-tokens' }
 }

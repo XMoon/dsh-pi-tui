@@ -1,74 +1,50 @@
 /**
  * Adapter contract tests for the Direct session reader
- * (runtime/direct/session-direct.ts, migration M1.3): the port is the
- * semantic boundary — the consumer (commands.ts) depends on `SessionReader`,
- * the Direct adapter owns the `ctx` access, and a Remote adapter must
- * satisfy the SAME contract in a later milestone. These tests pin the
- * contract with a fake Host context, so the two backends cannot drift.
+ * (runtime/direct/session-direct.ts, migration M1.3). The port is the
+ * semantic boundary: the consumer depends on SessionReader and the Direct
+ * adapter owns Host service access.
  *
- * The projection-batch tests pin the official ladder (plan §15): a fully
- * cached row reads ZERO cold observations, a cache miss performs at most ONE
- * `observeSession()` whose cut resolves title AND agentPreset together, and
- * per-row corruption is isolated with a diagnostic instead of hiding the
- * picker.
+ * Projection tests pin the master-safe ladder: live snapshots, zero-I/O cache
+ * hints for eligible cold rows, and unknown fields on cold cache misses. A
+ * picker must never activate a historical Session just to fill labels.
  * @module @xmoon76/dsh-pi-tui/session-reader-port.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SessionId } from '@deepseek-ai/dsh-session'
-import { DirectSessionReader, type HostContextLike, type SessionPersistenceLike, type SessionQueryLike } from '../src/runtime/direct/session-direct.ts'
-import { SESSION_PROJECTION_READ_CONCURRENCY } from '../src/runtime/direct/session-projection-direct.ts'
+import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { DirectSessionReader, type HostContextLike, type SessionQueryLike } from '../src/runtime/direct/session-direct.ts'
 
-function header(id: string, createdAt: number, extra: Partial<{ cwd: string; agentPreset: string; parentSession: string; origin: 'subagent' }> = {}) {
-  return { id, createdAt, version: 0, ...extra }
-}
-
-function persistence(headers: Array<{ id: string; createdAt: number; version: number; cwd?: string; agentPreset?: string; parentSession?: string; origin?: 'subagent' }>, contents: Record<string, string> = {}): SessionPersistenceLike {
+function header(id: string, createdAt: number, extra: Partial<{
+  cwd: string
+  agentPreset: string
+  parentSession: string
+  origin: 'subagent'
+  isSeeded: boolean
+}> = {}) {
+  // `isSeeded: false` completes the cache identity: an unseeded row's exact
+  // inherited cut is zero.
+  const { parentSession, ...rest } = extra
   return {
-    list: async () => headers,
-    readRaw: async (id) => (contents[id] === undefined ? undefined : { content: contents[id] }),
+    id: SessionId(id),
+    createdAt,
+    version: 2 as const,
+    isSeeded: false,
+    cwd: '/workspace',
+    ...rest,
+    ...(parentSession === undefined ? {} : { parentSession: SessionId(parentSession) }),
   }
-}
-
-type ObserveSession = (id: SessionId, options?: { signal?: AbortSignal }) => Promise<unknown>
-
-/** A fake query engine. `titleSnapshotReads` counts calls to the RETIRED
- * legacy batch title read (no longer part of the adapter's structural
- * surface) so tests can assert the projection path never touches it. */
-type FakeQuery = SessionQueryLike & {
-  titleSnapshotReads: number
-  readTitleSnapshots(ids: readonly unknown[]): Promise<unknown[]>
 }
 
 function query(
   records: Array<{ header: ReturnType<typeof header>; live: boolean }>,
   filterEvents?: NonNullable<SessionQueryLike['filterEvents']>,
-  observeSession?: ObserveSession,
-): FakeQuery {
-  let titleSnapshotReads = 0
+): SessionQueryLike {
   return {
-    listSessions: async () => records as unknown as SessionQueryLike['listSessions'] extends Promise<infer T> ? T : never,
-    readTitleSnapshots: async () => {
-      titleSnapshotReads += 1
-      return []
-    },
+    listSessions: async () => records,
     ...(filterEvents === undefined ? {} : { filterEvents }),
-    ...(observeSession === undefined ? {} : { observeSession }),
-    get titleSnapshotReads() {
-      return titleSnapshotReads
-    },
-  }
-}
-
-/** One fake observation lease over the official `observeSession` seam,
- * carrying BOTH projection values in its cut. */
-function observation(agentPreset: string | null | undefined, title: string | null = 'title-of-session') {
-  return {
-    source: 'prepared' as const,
-    header: { id: 'session-x', createdAt: 0, version: 0 },
-    ...(agentPreset === undefined && title === undefined ? {} : { projections: { values: { ...(title === undefined ? {} : { title }), ...(agentPreset === undefined ? {} : { agentPreset }) } } }),
-    [Symbol.dispose]: () => {},
+    // The explicit observation seam is intentionally absent from picker
+    // fixtures. It remains optional for the child viewer's resume path.
   }
 }
 
@@ -76,13 +52,16 @@ function host(services: Record<string, unknown>): HostContextLike {
   return { get: (name) => services[name] }
 }
 
-test('list prefers the session-query engine and sorts newest-first', async () => {
+function row(id: string, createdAt: number, live = false) {
+  return { id, createdAt, live }
+}
+
+test('list prefers the semantic query engine and sorts newest-first', async () => {
   const reader = new DirectSessionReader(host({
     sessionQuery: query([
       { header: header('session-old', 100), live: false },
       { header: header('session-new', 300), live: true },
     ]),
-    sessionPersistence: persistence([header('session-old', 100), header('session-new', 300)]),
   }))
   const rows = await reader.list('session-new')
   assert.ok(rows !== undefined)
@@ -90,235 +69,181 @@ test('list prefers the session-query engine and sorts newest-first', async () =>
   assert.equal(rows[0].live, true)
 })
 
-test('list falls back to persistence and marks the current session live', async () => {
-  const reader = new DirectSessionReader(host({
-    sessionPersistence: persistence([header('session-a', 100), header('session-b', 200)]),
-  }))
-  const rows = await reader.list('session-b')
-  assert.ok(rows !== undefined)
-  assert.deepEqual(rows.map(r => r.id), ['session-b', 'session-a'])
-  assert.equal(rows[0].live, true)
-  assert.equal(rows[1].live, false)
-})
-
-test('list uses the semantic query roster without requiring raw persistence', async () => {
+test('list matches master visibility: cold cwd-less rows are omitted but live rows remain visible', async () => {
+  const cacheReads: string[] = []
   const reader = new DirectSessionReader(host({
     sessionQuery: query([
-      { header: header('session-a', 100), live: false },
-      { header: header('session-b', 200), live: true },
+      { header: header('cold-hidden', 400, { cwd: undefined }), live: false },
+      { header: header('live-no-cwd', 300, { cwd: undefined }), live: true },
+      { header: header('cold-visible', 200, { cwd: '/workspace' }), live: false },
+    ]),
+    sessionProjectionCache: {
+      cachedSnapshot: (meta: { id: string }) => {
+        cacheReads.push(meta.id)
+        return undefined
+      },
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.deepEqual(rows?.map(row => row.id), ['live-no-cwd', 'cold-visible'])
+  const projections = await reader.projectionBatch([
+    ...rows!,
+    row('cold-hidden', 400),
+  ])
+  assert.equal(projections.has('cold-hidden'), false)
+  assert.equal(cacheReads.includes('cold-hidden'), false)
+})
+
+test('list uses sessionListMetadata activity when the optional capability exists', async () => {
+  const old = header('session-old', 100)
+  const newer = header('session-new', 300)
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([
+      { header: old, live: false },
+      { header: newer, live: false },
+    ]),
+    sessionProjectionCache: {
+      cachedSnapshot: (meta: { id: string }, cut: unknown, keys?: readonly string[]) => {
+        assert.equal(cut, SessionLogOffset(0))
+        assert.deepEqual(keys, ['sessionListMetadata'])
+        return meta.id === 'session-old'
+          ? { values: { sessionListMetadata: { blank: false, lastPromptAt: 900 } } }
+          : undefined
+      },
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.ok(rows !== undefined)
+  assert.deepEqual(rows.map(r => r.id), ['session-old', 'session-new'])
+})
+
+test('list falls back to createdAt when activity projection is unavailable', async () => {
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([
+      { header: header('session-old', 100), live: false },
+      { header: header('session-new', 300), live: false },
     ]),
   }))
   const rows = await reader.list(undefined)
   assert.ok(rows !== undefined)
-  assert.deepEqual(rows.map(row => row.id), ['session-b', 'session-a'])
-  assert.equal(rows[0].live, true)
+  assert.deepEqual(rows.map(r => r.id), ['session-new', 'session-old'])
 })
 
-test('list is lightweight and projectionBatch uses the observation seam for effective state', async () => {
-  const persistedHeader = header('session-selected', 100, { agentPreset: 'standard' })
-  let observed = 0
+test('list never reads a seeded cold cache without an exact inherited cut', async () => {
+  const seeded = header('session-seeded', 100, { isSeeded: true })
+  let cacheReads = 0
   const reader = new DirectSessionReader(host({
-    sessionQuery: query(
-      [{ header: persistedHeader, live: false }],
-      undefined,
-      async () => {
-        observed += 1
-        return observation('ptc')
-      },
-    ),
-    sessionProjections: { stateOf: () => 'ptc' },
-    sessionPersistence: {
-      list: async () => [persistedHeader],
-      readRaw: async () => undefined,
-    },
-  }))
-  const rows = await reader.list(undefined)
-  assert.ok(rows !== undefined)
-  assert.equal(rows[0]?.preset, undefined, 'initial rows do not wait for projection replay')
-  const projections = await reader.projectionBatch(rows)
-  assert.equal(projections.get('session-selected')?.preset, 'ptc')
-  assert.equal(observed, 1)
-})
-
-test('projectionBatch preserves a projected custom code preset when the roster contains code', async () => {
-  const persistedHeader = header('session-custom-code', 100, { agentPreset: 'standard' })
-  const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: persistedHeader, live: false }], undefined, () => Promise.resolve(observation('code'))),
-    sessionProjections: { stateOf: () => 'code' },
-    sessionPersistence: {
-      list: async () => [persistedHeader],
-      readRaw: async () => undefined,
-    },
-    agentPresets: {
-      list: async () => [{ id: 'ptc' }, { id: 'code' }],
-      resolve: async (id?: string) => ({ id: id ?? 'ptc' }),
-    },
-  }))
-  const rows = await reader.list(undefined)
-  assert.equal((await reader.projectionBatch(rows!)).get('session-custom-code')?.preset, 'code')
-})
-
-test('projectionBatch omits legacy code when the roster has neither code nor ptc', async () => {
-  const persistedHeader = header('session-empty-roster', 100, { agentPreset: 'code' })
-  const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: persistedHeader, live: false }], undefined, () => Promise.resolve(observation('code', null))),
-    sessionProjections: { stateOf: () => 'code' },
-    sessionPersistence: {
-      list: async () => [persistedHeader],
-      readRaw: async () => undefined,
-    },
-    agentPresets: {
-      list: async () => [],
-      resolve: async (id?: string) => ({ id: id ?? 'ptc' }),
-    },
-  }))
-  const rows = await reader.list(undefined)
-  // The unusable preset identity is dropped; the combined observation still
-  // yields the (here null → absent) title without a second read.
-  assert.deepEqual(await reader.projectionBatch(rows!), new Map())
-})
-
-test('list does not treat a persisted header as effective preset without the observation seam', async () => {
-  const persistedHeader = header('session-unprojected', 100, { agentPreset: 'standard' })
-  const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: persistedHeader, live: false }]),
-    sessionPersistence: {
-      list: async () => [persistedHeader],
-      readRaw: async () => undefined,
-    },
-  }))
-  const rows = await reader.list(undefined)
-  assert.ok(rows !== undefined)
-  assert.equal(rows[0]?.preset, undefined)
-  assert.deepEqual(await reader.projectionBatch(rows), new Map(), 'no observation seam means no cold projection enrichment')
-})
-
-test('projectionBatch bounds cold-session observations', async () => {
-  let active = 0
-  let maximum = 0
-  let persistenceLists = 0
-  const headers = Array.from({ length: SESSION_PROJECTION_READ_CONCURRENCY * 3 }, (_, index) => header(`session-cold-${index}`, index))
-  const reader = new DirectSessionReader(host({
-    sessionQuery: query(
-      headers.map(item => ({ header: item, live: false })),
-      undefined,
-      async () => {
-        active += 1
-        maximum = Math.max(maximum, active)
-        await new Promise(resolve => setTimeout(resolve, 5))
-        active -= 1
-        return observation('standard')
-      },
-    ),
-    sessionProjections: { stateOf: () => 'standard' },
-    sessionPersistence: {
-      list: async () => {
-        persistenceLists += 1
-        return headers
-      },
-      readRaw: async () => undefined,
-    },
-  }))
-  const rows = await reader.list(undefined)
-  assert.equal(rows?.length, headers.length)
-  await reader.projectionBatch(rows!)
-  assert.ok(maximum <= SESSION_PROJECTION_READ_CONCURRENCY,
-    `cold-session observations exceeded the bound: ${maximum}`)
-  assert.equal(persistenceLists, 0, 'enrichment must use the list() header snapshot and never list persistence again')
-})
-
-test('projectionBatch fails closed per row when one cold observation rejects', async () => {
-  const corrupt = Object.assign(new Error('corrupt session log'), { code: 'SESSION_QUERY_CORRUPT_SESSION' })
-  const diagnostics: Array<{ message: string; fields?: Record<string, unknown> }> = []
-  const healthy = header('session-healthy', 110)
-  const broken = header('session-broken', 100)
-  const reader = new DirectSessionReader(host({
-    sessionQuery: query(
-      [{ header: healthy, live: false }, { header: broken, live: false }],
-      undefined,
-      id => String(id) === 'session-broken' ? Promise.reject(corrupt) : Promise.resolve(observation('ptc', 'healthy title')),
-    ),
-    sessionPersistence: {
-      list: async () => [healthy, broken],
-      readRaw: async () => undefined,
-    },
-  }), undefined, {
-    info: (message, fields) => diagnostics.push({ message, fields }),
-  })
-  const rows = await reader.list(undefined)
-  const projections = await reader.projectionBatch(rows!)
-  assert.equal(projections.get('session-healthy')?.title, 'healthy title', 'the healthy row keeps its enrichment')
-  assert.equal(projections.get('session-healthy')?.preset, 'ptc')
-  assert.equal(projections.has('session-broken'), false, 'a corrupt row is omitted, never faked')
-  assert.equal(diagnostics.length, 1, 'the corrupt row lands in diagnostics')
-  assert.equal(diagnostics[0]!.message, 'session projection unavailable')
-  assert.equal(diagnostics[0]!.fields?.session, 'session-broken')
-  assert.equal(diagnostics[0]!.fields?.code, 'SESSION_QUERY_CORRUPT_SESSION')
-})
-
-test('list cancellation stops new cold observations and forwards the signal', async () => {
-  const controller = new AbortController()
-  const refusal = new Error('listing cancelled')
-  const headers = Array.from({ length: SESSION_PROJECTION_READ_CONCURRENCY * 2 }, (_, index) =>
-    header(`session-cancel-${index}`, index))
-  let observations = 0
-  let receivedSignal: AbortSignal | undefined
-  const reader = new DirectSessionReader(host({
-    sessionQuery: query(
-      headers.map(item => ({ header: item, live: false })),
-      undefined,
-      async (_id, options) => {
-        receivedSignal = options?.signal
-        observations += 1
-        if (observations === 1) controller.abort(refusal)
-        options?.signal?.throwIfAborted()
-        return observation('standard')
-      },
-    ),
-    sessionProjections: { stateOf: () => 'standard' },
-    sessionPersistence: {
-      list: async () => headers,
-      readRaw: async () => undefined,
-    },
-  }))
-  const rows = await reader.list(undefined, controller.signal)
-  await assert.rejects(reader.projectionBatch(rows!, controller.signal), error => error === refusal)
-  assert.equal(receivedSignal, controller.signal)
-  assert.equal(observations, 1, 'no cold observation may start after cancellation')
-})
-
-test('projectionBatch rejects an already-aborted signal without observing', async () => {
-  const controller = new AbortController()
-  controller.abort()
-  const reader = new DirectSessionReader(host({
-    sessionQuery: query([header('session-a', 100)].map(item => ({ header: item, live: false })), undefined, () => {
-      throw new Error('an aborted batch must never observe')
-    }),
-  }))
-  await assert.rejects(
-    reader.projectionBatch([{ id: 'session-a', createdAt: 100, live: false }], controller.signal),
-    /abort/i,
-  )
-})
-
-test('projectionBatch serves a fully cached title+preset with ZERO cold observations', async () => {
-  const headers = Array.from({ length: 250 }, (_, index) => header(`session-cached-${index}`, index))
-  let observed = 0
-  const fakeQuery = query(
-    headers.map(item => ({ header: item, live: false })),
-    undefined,
-    () => {
-      observed += 1
-      return Promise.reject(new Error('a cache hit must not observe the session'))
-    },
-  )
-  const reader = new DirectSessionReader(host({
-    sessionQuery: fakeQuery,
+    sessionQuery: query([{ header: seeded, live: false }]),
     sessionProjectionCache: {
-      cachedSnapshot: (meta: { id: unknown }) => ({
-        asOfSeq: 3,
-        values: { title: `title-of-${String(meta.id)}`, agentPreset: 'ptc' },
-      }),
+      cachedSnapshot: () => {
+        cacheReads += 1
+        return { values: { sessionListMetadata: { blank: false, lastPromptAt: 900 } } }
+      },
+    },
+  }))
+  const rows = await reader.list(undefined)
+  assert.deepEqual(rows?.map(r => r.id), ['session-seeded'])
+  assert.equal(cacheReads, 0)
+})
+
+test('list without the session-query engine is explicitly unavailable', async () => {
+  const reader = new DirectSessionReader(host({}))
+  assert.equal(await reader.list('session-b'), undefined)
+})
+
+test('projectionBatch uses live projection and composed preset without cold reads', async () => {
+  const liveHeader = header('session-live', 400)
+  const session = { header: liveHeader }
+  const liveAgent = { session, ctx: {} }
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: liveHeader, live: true }]),
+    sessionProjections: {
+      cachedSnapshot: (target: unknown) => target === session
+        ? { values: { title: 'live title' } }
+        : undefined,
+    },
+    agentPresets: {
+      composedPreset: () => 'minimal',
+      list: async () => [{ id: 'minimal' }],
+      resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+    },
+  }), id => id === 'session-live' ? liveAgent : undefined)
+  const rows = await reader.list(undefined)
+  assert.equal((await reader.projectionBatch(rows!)).get('session-live')?.title, 'live title')
+  assert.equal((await reader.projectionBatch(rows!)).get('session-live')?.preset, 'minimal')
+})
+
+test('live projection uses cached cells and never falls back to cold metadata', async () => {
+  const liveHeader = header('session-live-miss', 400)
+  const session = { header: liveHeader }
+  const liveAgent = { session, ctx: {} }
+  let materializingSnapshots = 0
+  let coldCacheReads = 0
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: liveHeader, live: true }]),
+    sessionProjections: {
+      snapshot: () => {
+        materializingSnapshots += 1
+        throw new Error('live listing must not materialize projections')
+      },
+      cachedSnapshot: () => undefined,
+    },
+    sessionProjectionCache: {
+      cachedSnapshot: () => {
+        coldCacheReads += 1
+        throw new Error('live rows must not read cold cache')
+      },
+    },
+    agentPresets: {
+      composedPreset: () => undefined,
+      list: async () => [{ id: 'minimal' }],
+      resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+    },
+  }), id => id === 'session-live-miss' ? liveAgent : undefined)
+  const rows = await reader.list(undefined)
+  assert.deepEqual(await reader.projectionBatch(rows!), new Map())
+  assert.equal(materializingSnapshots, 0)
+  assert.equal(coldCacheReads, 0)
+})
+
+test('a live row stays cache-free when its Agent mapping races teardown', async () => {
+  const liveHeader = header('session-live-race', 500)
+  let coldCacheReads = 0
+  let rosterReads = 0
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: liveHeader, live: true }]),
+    sessionProjectionCache: {
+      cachedSnapshot: () => {
+        coldCacheReads += 1
+        throw new Error('live row must not use the cold cache')
+      },
+    },
+    agentPresets: {
+      list: async () => {
+        rosterReads += 1
+        throw new Error('live row must not read the cold roster')
+      },
+    },
+  }), () => undefined)
+  const rows = await reader.list(undefined)
+  assert.deepEqual(rows?.map(row => row.id), ['session-live-race'])
+  assert.deepEqual(await reader.projectionBatch(rows!), new Map())
+  assert.equal(coldCacheReads, 0)
+  assert.equal(rosterReads, 0)
+})
+
+test('projectionBatch passes exact cut zero and reads a fully cached row', async () => {
+  const persisted = header('session-cached', 100)
+  const cuts: unknown[] = []
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: persisted, live: false }]),
+    sessionProjectionCache: {
+      cachedSnapshot: (_meta: unknown, cut: unknown, keys?: readonly string[]) => {
+        cuts.push(cut)
+        if (cuts.length === 1) assert.deepEqual(keys, ['sessionListMetadata'])
+        else assert.deepEqual(keys, ['title', 'agentPreset'])
+        return { values: { title: 'cached title', agentPreset: 'ptc' } }
+      },
     },
     agentPresets: {
       list: async () => [{ id: 'ptc' }],
@@ -327,111 +252,92 @@ test('projectionBatch serves a fully cached title+preset with ZERO cold observat
   }))
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
-  assert.equal(projections.size, 250)
-  assert.equal(projections.get('session-cached-42')?.title, 'title-of-session-cached-42')
-  assert.equal(projections.get('session-cached-42')?.preset, 'ptc')
-  assert.equal(observed, 0, 'a cache hit must not observe the session')
-  assert.equal(fakeQuery.titleSnapshotReads, 0, 'the legacy batch title read is retired')
+  assert.deepEqual(cuts, [SessionLogOffset(0), SessionLogOffset(0)])
+  assert.deepEqual(projections.get('session-cached'), { title: 'cached title', preset: 'ptc' })
 })
 
-test('projectionBatch resolves title AND preset from ONE observation on a cache miss', async () => {
-  const persistedHeader = header('session-cold', 100)
+test('projectionBatch uses the predecessor title hint without a cold observation', async () => {
+  const persisted = header('session-predecessor', 100)
   let observed = 0
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: persistedHeader, live: false }], undefined, async () => {
-      observed += 1
-      return observation('standard', 'foo')
-    }),
+    sessionQuery: {
+      ...query([{ header: persisted, live: false }]),
+      observeSession: async () => {
+        observed += 1
+        throw new Error('picker projection must not observe')
+      },
+    },
     sessionProjectionCache: {
       cachedSnapshot: () => undefined,
+      cachedPredecessorTitle: () => ({ values: { title: 'predecessor title' } }),
     },
   }))
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
-  assert.equal(projections.get('session-cold')?.title, 'foo')
-  assert.equal(projections.get('session-cold')?.preset, 'standard')
-  assert.equal(observed, 1, 'a cache miss observes the session exactly once — never once per field')
+  assert.equal(projections.get('session-predecessor')?.title, 'predecessor title')
+  assert.equal(observed, 0)
 })
 
-test('projectionBatch treats a null cached title as final and a null cached preset as a miss', async () => {
-  const persistedHeader = header('session-nulls', 100)
+test('projectionBatch keeps partial cache values and leaves misses unknown', async () => {
+  const partial = header('session-partial', 200)
+  const miss = header('session-miss', 100)
   let observed = 0
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: persistedHeader, live: false }], undefined, async () => {
-      observed += 1
-      return observation('minimal', null)
-    }),
+    sessionQuery: {
+      ...query([{ header: partial, live: false }, { header: miss, live: false }]),
+      observeSession: async () => {
+        observed += 1
+        throw new Error('cache miss must not activate a Session')
+      },
+    },
     sessionProjectionCache: {
-      cachedSnapshot: () => ({ asOfSeq: 1, values: { title: null, agentPreset: null } }),
+      cachedSnapshot: (meta: { id: string }) => meta.id === 'session-partial'
+        ? { values: { title: 'partial title', agentPreset: null } }
+        : undefined,
     },
   }))
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
-  assert.equal(observed, 1, 'a null agentPreset is not a usable identity — the row is observed')
-  assert.deepEqual(projections.get('session-nulls'), { preset: 'minimal' }, 'the observed preset resolves; the null title stays absent')
+  assert.deepEqual(projections.get('session-partial'), { title: 'partial title' })
+  assert.equal(projections.has('session-miss'), false)
+  assert.equal(observed, 0)
 })
 
-test('projectionBatch observes only what the ladder leaves open (mixed hit/miss/live)', async () => {
-  const liveHeader = header('session-live', 400)
-  const hitHeader = header('session-hit', 300)
-  const partialHeader = header('session-partial', 200)
-  const missHeader = header('session-miss', 100)
-  const observed: string[] = []
-  const session = { header: liveHeader }
-  const liveAgent = { session }
+test('projectionBatch skips all cache reads for a seeded row without an exact cut', async () => {
+  const seeded = header('session-seeded', 100, { isSeeded: true })
+  let cacheReads = 0
+  let observed = 0
   const reader = new DirectSessionReader(host({
-    sessionQuery: query(
-      [{ header: liveHeader, live: true }, { header: hitHeader, live: false }, { header: partialHeader, live: false }, { header: missHeader, live: false }],
-      undefined,
-      async id => {
-        observed.push(String(id))
-        // The partial row's fresher cut reports the title CLEARED (null).
-        const title = String(id) === 'session-partial' ? null : `title-${String(id)}`
-        return observation('standard', title)
+    sessionQuery: {
+      ...query([{ header: seeded, live: false }]),
+      observeSession: async () => {
+        observed += 1
+        throw new Error('seeded picker row must remain unknown')
       },
-    ),
-    sessionProjections: {
-      stateOf: () => 'minimal',
-      snapshot: (target: unknown) => (target === session ? { asOfSeq: 9, values: { title: 'live title' } } : undefined),
     },
     sessionProjectionCache: {
-      cachedSnapshot: (meta: { id: unknown }) => {
-        const id = String(meta.id)
-        if (id === 'session-hit') return { asOfSeq: 2, values: { title: 'cached title', agentPreset: 'ptc' } }
-        if (id === 'session-partial') return { asOfSeq: 1, values: { title: 'stale title', agentPreset: null } }
-        return undefined
+      cachedSnapshot: () => {
+        cacheReads += 1
+        return { values: { title: 'wrong', agentPreset: 'wrong' } }
+      },
+      cachedPredecessorTitle: () => {
+        cacheReads += 1
+        return { values: { title: 'wrong' } }
       },
     },
-    agentPresets: {
-      list: async () => [{ id: 'ptc' }, { id: 'minimal' }],
-      resolve: async (id?: string) => ({ id: id ?? 'ptc' }),
-    },
-  }), id => (id === 'session-live' ? liveAgent : undefined))
+  }))
   const rows = await reader.list(undefined)
-  const projections = await reader.projectionBatch(rows!)
-  // Live: in-memory projection + composed preset, never observed.
-  assert.equal(projections.get('session-live')?.title, 'live title')
-  assert.equal(projections.get('session-live')?.preset, 'minimal')
-  // Full hit: cache only.
-  assert.equal(projections.get('session-hit')?.title, 'cached title')
-  assert.equal(projections.get('session-hit')?.preset, 'ptc')
-  // Partial hit: ONE observation replaces the cached partial values with the
-  // fresher cut (null observed title = no title NOW — the stale cached title
-  // is dropped).
-  assert.equal(projections.get('session-partial')?.title, undefined)
-  assert.equal(projections.get('session-partial')?.preset, 'standard')
-  // Miss: ONE observation for BOTH fields.
-  assert.equal(projections.get('session-miss')?.title, 'title-session-miss')
-  assert.equal(projections.get('session-miss')?.preset, 'standard')
-  assert.deepEqual(observed, ['session-partial', 'session-miss'], 'live and full-hit rows are never observed')
+  assert.deepEqual(await reader.projectionBatch(rows!), new Map())
+  assert.equal(cacheReads, 0)
+  assert.equal(observed, 0)
 })
 
 test('projectionBatch normalizes a cached legacy code through the roster', async () => {
-  const persistedHeader = header('session-cached-code', 100)
+  const persisted = header('session-code', 100)
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: persistedHeader, live: false }], undefined, () => Promise.reject(new Error('a cache hit must not observe the session'))),
+    sessionQuery: query([{ header: persisted, live: false }]),
     sessionProjectionCache: {
-      cachedSnapshot: () => ({ asOfSeq: 1, values: { title: 'kept title', agentPreset: 'code' } }),
+      cachedSnapshot: () => ({ values: { title: 'kept title', agentPreset: 'code' } }),
     },
     agentPresets: {
       list: async () => [{ id: 'ptc' }],
@@ -439,226 +345,251 @@ test('projectionBatch normalizes a cached legacy code through the roster', async
     },
   }))
   const rows = await reader.list(undefined)
-  const projections = await reader.projectionBatch(rows!)
-  assert.equal(projections.get('session-cached-code')?.preset, 'ptc')
-  assert.equal(projections.get('session-cached-code')?.title, 'kept title')
+  assert.deepEqual((await reader.projectionBatch(rows!)).get('session-code'), { title: 'kept title', preset: 'ptc' })
 })
 
-test('projectionBatch isolates a throwing preset resolver on the cache path', async () => {
-  // The isolation hole: a cached legacy `code` identity + a failed roster
-  // read routes resolution through presets.resolve, whose NON-unknown
-  // failure used to reject the WHOLE batch — killing every other row's
-  // enrichment despite valid cached titles.
+test('projectionBatch isolates a throwing cached preset resolver', async () => {
   const diagnostics: Array<{ message: string; fields?: Record<string, unknown> }> = []
   const healthy = header('session-healthy', 110)
   const legacy = header('session-legacy-code', 100)
   const reader = new DirectSessionReader(host({
-    sessionQuery: query(
-      [{ header: healthy, live: false }, { header: legacy, live: false }],
-      undefined,
-      () => Promise.reject(new Error('a resolver failure must never reach the observation seam')),
-    ),
+    sessionQuery: query([{ header: healthy, live: false }, { header: legacy, live: false }]),
     sessionProjectionCache: {
-      cachedSnapshot: (meta: { id: unknown }) => String(meta.id) === 'session-healthy'
-        ? { asOfSeq: 1, values: { title: 'healthy title', agentPreset: 'ptc' } }
-        : { asOfSeq: 1, values: { title: 'kept title', agentPreset: 'code' } },
+      cachedSnapshot: (meta: { id: string }) => meta.id === 'session-healthy'
+        ? { values: { title: 'healthy title', agentPreset: 'ptc' } }
+        : { values: { title: 'kept title', agentPreset: 'code' } },
     },
     agentPresets: {
       list: async () => { throw new Error('roster service down') },
       resolve: async () => { throw new Error('resolver exploded') },
     },
-  }), undefined, {
-    info: (message, fields) => diagnostics.push({ message, fields }),
-  })
+  }), undefined, { info: (message, fields) => diagnostics.push({ message, fields }) })
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
-  assert.equal(projections.get('session-healthy')?.title, 'healthy title', 'the untouched row keeps its full cache hit')
-  assert.equal(projections.get('session-healthy')?.preset, 'ptc')
-  assert.equal(projections.get('session-legacy-code')?.title, 'kept title', 'the cached title survives the resolver failure')
-  assert.equal(projections.get('session-legacy-code')?.preset, undefined, 'the unusable identity stays absent — never faked')
-  assert.equal(diagnostics.length, 1, 'the isolated failure lands in diagnostics')
-  assert.equal(diagnostics[0]!.fields?.session, 'session-legacy-code')
+  assert.equal(projections.get('session-healthy')?.title, 'healthy title')
+  assert.equal(projections.get('session-legacy-code')?.title, 'kept title')
+  assert.equal(projections.get('session-legacy-code')?.preset, undefined)
+  assert.equal(diagnostics.length, 1)
   assert.match(String(diagnostics[0]!.fields?.reason), /resolver exploded/)
 })
 
-test('projectionBatch degrades a live row whose composition read throws', async () => {
-  const liveHeader = header('session-live', 300)
-  const session = { header: liveHeader }
-  const liveAgent = { session }
+test('projectionBatch rejects an already-aborted signal before reading', async () => {
+  const controller = new AbortController()
+  controller.abort()
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: liveHeader, live: true }], undefined, () => {
-      throw new Error('a live row is never observed')
-    }),
-    sessionProjections: {
-      // The preset projection read races a teardown and throws; the title
-      // snapshot over the same in-memory log still answers.
-      stateOf: () => { throw new Error('teardown race') },
-      snapshot: (target: unknown) => (target === session ? { asOfSeq: 9, values: { title: 'live title' } } : undefined),
-    },
-  }), id => (id === 'session-live' ? liveAgent : undefined))
-  const rows = await reader.list(undefined)
-  const projections = await reader.projectionBatch(rows!)
-  assert.deepEqual(projections.get('session-live'), { title: 'live title' },
-    'a throwing composition read degrades to the title instead of failing the batch')
+    sessionQuery: query([{ header: header('session-a', 100), live: false }]),
+    sessionProjectionCache: { cachedSnapshot: () => { throw new Error('must not read') } },
+  }))
+  await assert.rejects(reader.projectionBatch([row('session-a', 100)], controller.signal), /abort/i)
 })
 
-test('projectionBatch keeps the cached partial fields when the observation rejects', async () => {
-  const persistedHeader = header('session-partial-broken', 100)
-  const diagnostics: Array<{ message: string; fields?: Record<string, unknown> }> = []
-  const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: persistedHeader, live: false }], undefined, () => Promise.reject(new Error('corrupt log'))),
-    sessionProjectionCache: {
-      cachedSnapshot: () => ({ asOfSeq: 1, values: { title: 'kept title', agentPreset: null } }),
-    },
-  }), undefined, {
-    info: (message, fields) => diagnostics.push({ message, fields }),
-  })
-  const rows = await reader.list(undefined)
-  const projections = await reader.projectionBatch(rows!)
-  assert.equal(projections.get('session-partial-broken')?.title, 'kept title', 'a cached field survives an isolated observation failure')
-  assert.equal(projections.get('session-partial-broken')?.preset, undefined)
-  assert.equal(diagnostics.length, 1)
-})
-
-test('list returns undefined when persistence is unavailable', async () => {
-  const reader = new DirectSessionReader(host({}))
-  assert.equal(await reader.list(undefined), undefined)
-})
-
-test('search uses semantic sessionQuery filtering without requiring persistence', async () => {
-  let listedFromPersistence = 0
-  let readRaw = 0
+test('search uses semantic sessionQuery filtering without persistence', async () => {
   const records = [
     { header: header('session-live', 300), live: true },
-    { header: header('session-hit', 200), live: false },
-    { header: header('session-miss', 100), live: false },
+    { header: header('session-hit', 200, { cwd: '/workspace' }), live: false },
+    { header: header('session-miss', 100, { cwd: '/workspace' }), live: false },
   ]
   const reader = new DirectSessionReader(host({
     sessionQuery: query(records, async (id, filters) => {
       assert.deepEqual(filters, [{ kind: 'text', text: 'needle' }])
       if (String(id) !== 'session-hit') return []
-      return [{
-        sessionId: id,
-        seq: 4,
-        type: 'message/user',
-        time: 200,
-        surface: 'current',
-        text: 'prefix Needle suffix',
-      }]
+      return [{ sessionId: id, seq: 4, type: 'message/user', time: 200, surface: 'current', text: 'prefix Needle suffix' }]
     }),
-    sessionPersistence: {
-      list: async () => {
-        listedFromPersistence += 1
-        throw new Error('semantic search must not list persistence')
-      },
-      readRaw: async () => {
-        readRaw += 1
-        throw new Error('semantic search must not read raw artifacts')
-      },
-    },
   }))
-  const hits = await reader.search('needle')
-  assert.deepEqual(hits, [{ id: 'session-hit', createdAt: 200, snippet: 'prefix Needle suffix' }])
-  assert.equal(listedFromPersistence, 0)
-  assert.equal(readRaw, 0)
+  assert.deepEqual(await reader.search('needle'), [{ id: 'session-hit', createdAt: 200, snippet: 'prefix Needle suffix' }])
 })
 
-test('search keeps the raw traversal only as an explicit no-query capability fallback', async () => {
+test('search excludes cold cwd-less sessions before semantic filtering', async () => {
+  const queried: string[] = []
   const reader = new DirectSessionReader(host({
-    sessionPersistence: persistence(
-      [header('session-hit', 200), header('session-miss', 100)],
-      { 'session-hit': 'prefix needle suffix' },
-    ),
+    sessionQuery: query([
+      { header: header('hidden-match', 300, { cwd: undefined }), live: false },
+      { header: header('visible-match', 200, { cwd: '/workspace' }), live: false },
+    ], async id => {
+      queried.push(String(id))
+      return String(id) === 'visible-match'
+        ? [{ sessionId: id, seq: 1, type: 'message/user', time: 200, surface: 'current', text: 'needle' }]
+        : []
+    }),
   }))
-  const hits = await reader.search('needle')
-  assert.ok(hits !== undefined)
-  assert.equal(hits.length, 1)
-  assert.equal(hits[0].id, 'session-hit')
-  assert.ok(hits[0].snippet.includes('needle'))
+  assert.deepEqual(await reader.search('needle'), [{ id: 'visible-match', createdAt: 200, snippet: 'needle' }])
+  assert.deepEqual(queried, ['visible-match'])
 })
 
-test('search falls back to raw artifacts only when semantic search is explicitly disabled', async () => {
+test('search applies visibility before the newest-100 work bound', async () => {
+  const hidden = Array.from({ length: 101 }, (_, index) => ({
+    header: header(`hidden-${index}`, 10_000 - index, { cwd: undefined }),
+    live: false,
+  }))
+  const visible = { header: header('visible-old', 1, { cwd: '/workspace' }), live: false }
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: header('session-hit', 200), live: false }], async () => {
+    sessionQuery: query([...hidden, visible], async id => [
+      { sessionId: id, seq: 1, type: 'message/user', time: 1, surface: 'current', text: 'needle' },
+    ]),
+  }))
+  assert.deepEqual(await reader.search('needle'), [{ id: 'visible-old', createdAt: 1, snippet: 'needle' }])
+})
+
+test('search without semantic filtering is explicitly unavailable', async () => {
+  const reader = new DirectSessionReader(host({ sessionQuery: query([{ header: header('session-hit', 200), live: false }]) }))
+  assert.equal(await reader.search('needle'), undefined)
+})
+
+test('search returns undefined when semantic search is explicitly disabled', async () => {
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: header('session-hit', 200, { cwd: '/workspace' }), live: false }], async () => {
       throw Object.assign(new Error('search disabled'), { code: 'SESSION_QUERY_SEARCH_DISABLED' })
     }),
-    sessionPersistence: persistence(
-      [header('session-hit', 200)],
-      { 'session-hit': 'prefix needle suffix' },
-    ),
   }))
-  const hits = await reader.search('needle')
-  assert.ok(hits !== undefined)
-  assert.equal(hits[0].id, 'session-hit')
+  assert.equal(await reader.search('needle'), undefined)
 })
 
-test('search scans the newest 100 sessions and returns bounded snippets', async () => {
+test('search scans newest sessions and returns bounded snippets', async () => {
   const reader = new DirectSessionReader(host({
-    sessionPersistence: persistence(
-      [header('session-hit', 200), header('session-miss', 100)],
-      { 'session-hit': 'prefix needle suffix' },
-    ),
+    sessionQuery: query([
+      { header: header('session-hit', 200, { cwd: '/workspace' }), live: false },
+      { header: header('session-miss', 100, { cwd: '/workspace' }), live: false },
+    ], async id => String(id) === 'session-hit'
+      ? [{ sessionId: id, seq: 4, type: 'message/user', time: 200, surface: 'current', text: 'prefix needle suffix' }]
+      : []),
   }))
   const hits = await reader.search('needle')
   assert.ok(hits !== undefined)
   assert.equal(hits.length, 1)
   assert.equal(hits[0].id, 'session-hit')
-  assert.ok(hits[0].snippet.includes('needle'))
 })
 
-test('search skips unreadable sessions and caps at 20 hits', async () => {
-  const headers = Array.from({ length: 30 }, (_, i) => header(`session-${i}`, 1000 - i))
-  const contents: Record<string, string> = {}
-  for (let i = 0; i < 30; i++) contents[`session-${i}`] = `x needle ${i}`
+test('search caps at 20 hits', async () => {
+  const headers = Array.from({ length: 30 }, (_, i) => header(`session-${i}`, 1000 - i, { cwd: '/workspace' }))
   const reader = new DirectSessionReader(host({
-    sessionPersistence: {
-      list: async () => headers,
-      readRaw: async (id: string) => (id === 'session-0' ? Promise.reject(new Error('boom')) : { content: contents[id] }),
-    },
+    sessionQuery: query(headers.map(item => ({ header: item, live: false })), async id => [
+      { sessionId: id, seq: 1, type: 'message/user', time: 1000, surface: 'current', text: `x needle ${id}` },
+    ]),
   }))
   const hits = await reader.search('needle')
-  assert.ok(hits !== undefined)
-  assert.equal(hits.length, 20, 'capped at 20')
-  assert.ok(!hits.some(h => h.id === 'session-0'), 'unreadable session skipped')
+  assert.equal(hits?.length, 20)
 })
 
 test('search preserves an unsupported session-format refusal', async () => {
   const refusal = Object.assign(new Error('unknown durable event'), { name: 'SessionFormatUnsupportedError' })
   const reader = new DirectSessionReader(host({
-    sessionPersistence: {
-      list: async () => [header('session-unknown', 100)],
-      readRaw: async () => { throw refusal },
-    },
+    sessionQuery: query([{ header: header('session-unknown', 100, { cwd: '/workspace' }), live: false }], async () => { throw refusal }),
   }))
   await assert.rejects(reader.search('needle'), error => error === refusal)
 })
 
-test('search never sorts the persistence list in place (the shared array stays untouched)', async () => {
-  // The persistence service may hand out a SHARED array: an in-place sort
-  // inside the adapter would reorder it for every other consumer (review
-  // finding). The adapter must copy before sorting.
-  const shared = [header('session-old', 100), header('session-new', 300)]
+test('search never sorts the shared query list in place', async () => {
+  const shared = [header('session-old', 100, { cwd: '/workspace' }), header('session-new', 300, { cwd: '/workspace' })]
   const before = [...shared]
   const reader = new DirectSessionReader(host({
-    sessionPersistence: {
-      list: async () => shared,
-      readRaw: async (id: string) => (id === 'session-new' ? { content: 'needle here' } : undefined),
-    },
+    sessionQuery: query(shared.map(item => ({ header: item, live: false })), async id => String(id) === 'session-new'
+      ? [{ sessionId: id, seq: 1, type: 'message/user', time: 300, surface: 'current', text: 'needle here' }]
+      : []),
   }))
   const hits = await reader.search('needle')
-  assert.ok(hits !== undefined)
-  assert.equal(hits[0].id, 'session-new')
-  assert.deepEqual(shared, before, 'the shared array keeps its original order')
+  assert.equal(hits?.[0]?.id, 'session-new')
+  assert.deepEqual(shared, before)
 })
 
-test('readExportData preserves a REJECTED log read as an error with the diagnostic', async () => {
+test('readExportData serializes the committed log through a read handle', async () => {
+  const committedHeader = header('session-export', 100, { cwd: '/ws' })
+  let closed = 0
   const reader = new DirectSessionReader(host({
     sessionPersistence: {
-      list: async () => [],
-      readRaw: async () => { throw new Error('corrupt zstd frame') },
+      open: async () => ({
+        header: committedHeader,
+        read: async () => [{ type: 'message/user', seq: 1, time: 100, content: 'hi' }],
+        close: async () => { closed += 1 },
+      }),
+    },
+  }))
+  const result = await reader.readExportData('session-export')
+  assert.equal(result.kind, 'found')
+  if (result.kind === 'found') {
+    assert.equal(result.data.filename, 'session-export.jsonl')
+    const lines = result.data.content.trim().split('\n')
+    assert.equal(lines.length, 2)
+    assert.equal(JSON.parse(lines[0]!).type, 'session')
+    assert.equal(JSON.parse(lines[0]!).id, 'session-export')
+    assert.equal(JSON.parse(lines[1]!).type, 'message/user')
+  }
+  assert.equal(closed, 1)
+})
+
+test('readExportData flushes a live session before the committed read', async () => {
+  const committedHeader = header('session-flush', 100)
+  let flushed = 0
+  let opened = false
+  const reader = new DirectSessionReader(host({
+    sessions: { get: () => ({ id: 'session-flush' }), flush: async () => { flushed += 1 } },
+    sessionPersistence: {
+      open: async () => {
+        opened = true
+        return { header: committedHeader, read: async () => [], close: async () => {} }
+      },
+    },
+  }))
+  const result = await reader.readExportData('session-flush')
+  assert.equal(result.kind, 'found')
+  assert.equal(flushed, 1)
+  assert.equal(opened, true)
+})
+
+test('readExportData reads committed events only and never needs sessionQuery', async () => {
+  const committedHeader = header('session-crash', 100)
+  const reader = new DirectSessionReader(host({
+    sessionPersistence: {
+      open: async () => ({
+        header: committedHeader,
+        read: async () => [{ type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } }],
+        close: async () => {},
+      }),
+    },
+  }))
+  const result = await reader.readExportData('session-crash')
+  assert.equal(result.kind, 'found')
+  if (result.kind === 'found') assert.equal(result.data.content.trim().split('\n').length, 2)
+})
+
+test('readExportData without the persistence read seam is unavailable', async () => {
+  const reader = new DirectSessionReader(host({}))
+  assert.equal((await reader.readExportData('session-any')).kind, 'unavailable')
+})
+
+test('readExportData maps the official absence error to no materialized log', async () => {
+  const reader = new DirectSessionReader(host({
+    sessionPersistence: {
+      open: async () => { throw Object.assign(new Error('session not found'), { name: 'SessionPersistenceNotFoundError' }) },
+    },
+  }))
+  assert.equal((await reader.readExportData('session-gone')).kind, 'none')
+})
+
+test('readExportData preserves a rejected log read as an error', async () => {
+  const reader = new DirectSessionReader(host({
+    sessionPersistence: {
+      open: async () => ({
+        header: header('session-broken', 100),
+        read: async () => { throw new Error('corrupt zstd frame') },
+        close: async () => {},
+      }),
     },
   }))
   const result = await reader.readExportData('session-broken')
-  assert.equal(result.kind, 'error', 'a corrupt log is a REAL failure, never "no materialized log"')
-  if (result.kind === 'error') assert.ok(result.message.includes('corrupt zstd frame'))
+  assert.equal(result.kind, 'error')
+  if (result.kind === 'error') assert.match(result.message, /corrupt zstd frame/)
+})
+
+test('readExportData fails loudly when closing a successful read fails', async () => {
+  const closeFailure = new Error('close failed')
+  const reader = new DirectSessionReader(host({
+    sessionPersistence: {
+      open: async () => ({
+        header: header('session-close-failure', 100),
+        read: async () => [],
+        close: async () => { throw closeFailure },
+      }),
+    },
+  }))
+  await assert.rejects(reader.readExportData('session-close-failure'), error => error === closeFailure)
 })

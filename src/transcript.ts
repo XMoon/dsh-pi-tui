@@ -18,11 +18,22 @@
 
 import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { expandAssistantStream, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
+import { displayFailure, displayFailureText } from './failure-presentation.ts'
 import type { IconSemantic } from './icons.ts'
 import { firstLine, latestLine, type JsonValue } from './present.ts'
-import { StepUsageAccumulator, totalTokens, type TokenUsageTotals } from './token-usage.ts'
+import {
+  StepUsageAccumulator,
+  totalTokens,
+  usageFromAssistantSettlement,
+  type TokenUsageTotals,
+} from './token-usage.ts'
+import type {
+  AssistantLiveChunk,
+  AssistantLiveContentBlock,
+  AssistantLiveInput,
+} from './runtime/assistant-stream-port.ts'
 // Load the official command event declarations.
 import type {} from '@deepseek-ai/dsh-commands'
 // Load the official subagent event declarations.
@@ -45,7 +56,14 @@ export type TranscriptMessage =
    * settled message's full blocks when the step carried any (role-neutral
    * `ImageBlock`s render rather than crash, plan §15.3).
    */
-  | { kind: 'assistant'; turn: number; text: string; content?: readonly ContentBlock[] }
+  | {
+    kind: 'assistant'
+    turn: number
+    text: string
+    content?: readonly ContentBlock[]
+    /** Durable interruption evidence; presentation metadata, not body text. */
+    interrupted?: true
+  }
   | { kind: 'thinking'; turn: number; text: string; /** Still streaming reasoning deltas for its step. */ running?: boolean }
   /**
    * Injected context (system reminders, skill content) from non-user sources.
@@ -206,6 +224,10 @@ export interface TurnActivity {
   readonly usage?: TokenUsageTotals
   /** The display total (input + cache read + cache write + output). */
   readonly totalTokens?: number
+  /** Whether the exact last assistant has a visible Assistant projection.
+   * This remains separate from the visible row list so an empty authoritative
+   * settlement cannot make final selection fall back to an earlier answer. */
+  readonly lastAssistantVisible?: boolean
   /** Settled assistant/message count for the turn. */
   readonly assistantMessages: number
   /** tool/call count (never double-counted on tool/result). */
@@ -228,6 +250,8 @@ interface MutableTurnActivity {
   thinkingTail: string
   /** The materialized Think slot (latest meaningful line). */
   think?: { text: string }
+  /** The step that currently owns the Focus reasoning preview. */
+  thinkingStep?: number
   /** The streaming assistant text of the CURRENT step (bounded tail —
    * the authoritative settled text replaces the tail once
    * assistant/message lands; never a second full copy of the output,
@@ -256,6 +280,8 @@ interface MutableTurnActivity {
    * — the turn/end final-answer check compares the candidate's step
    * against this. */
   lastAssistantStep?: number
+  /** Whether the exact last assistant has a visible Assistant projection. */
+  lastAssistantVisible?: boolean
   /** The materialized Message slot (candidate ?? confirmed, bounded
    * multiline tail). */
   message?: { text: string }
@@ -308,6 +334,42 @@ export function textOf(blocks: readonly ContentBlock[]): string {
     .join('')
 }
 
+/** Reconstruct the logical blocks used by any Assistant entry. */
+function assistantEntryBlocks(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): readonly ContentBlock[] {
+  if (entry.content !== undefined) return entry.content
+  return entry.text === '' ? [] : [{ type: 'text', text: entry.text }]
+}
+
+/** Whether Assistant content is visible before an interruption override. */
+export function assistantBlocksVisibleNow(blocks: readonly ContentBlock[]): boolean {
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      if (block.text.trim() !== '') return true
+      continue
+    }
+    if (block.type === 'reasoning' || block.type === 'tool-call') continue
+    // Any finalized non-text block is visible content, including future
+    // ContentBlock extensions the TUI does not name yet.
+    return true
+  }
+  return false
+}
+
+/** Whether Assistant blocks retain evidence at a closed attempt boundary. */
+function assistantBlocksHaveInterruptionEvidence(blocks: readonly ContentBlock[]): boolean {
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      if (block.text.trim() !== '') return true
+      continue
+    }
+    if (block.type === 'reasoning') continue
+    // Tool calls are hidden while running but become evidence at closure;
+    // every other finalized block is evidence as well.
+    return true
+  }
+  return false
+}
+
 /** Flat text with image positions preserved: text blocks verbatim, image
  * blocks as an inline `🖼️ name` marker AT their position (the queue-preview
  * format; U+FE0F keeps the marker 2 cells wide in emoji fonts). A marker
@@ -342,6 +404,104 @@ export function textWithImageMarkers(blocks: readonly ContentBlock[]): string {
 /** Key identifying one step's model output (turn + step). */
 function stepKey(turn: number, step: number): string {
   return `${turn}/${step}`
+}
+
+type AssistantBlockState =
+  | { kind: 'text'; text: string }
+  | { kind: 'reasoning'; text: string }
+  | { kind: 'tool-call'; id: string; name: string; arguments: string }
+  | { kind: 'complete'; block: AssistantLiveContentBlock | ContentBlock }
+  | { kind: 'opaque'; blockType: string }
+
+type AssistantBlockChunk =
+  | { readonly type: 'block-start'; readonly index: number; readonly blockType: string }
+  | { readonly type: 'text-delta'; readonly index: number; readonly text: string }
+  | { readonly type: 'reasoning-delta'; readonly index: number; readonly text: string }
+  | { readonly type: 'tool-call-delta'; readonly index: number; readonly id: string; readonly name?: string; readonly argumentsDelta: string }
+  | { readonly type: 'block-end'; readonly index: number; readonly block: AssistantLiveContentBlock | ContentBlock }
+
+/** Start one typed partial block without pretending it is a finalized block. */
+function emptyAssistantBlockState(blockType: string): AssistantBlockState {
+  switch (blockType) {
+    case 'text': return { kind: 'text', text: '' }
+    case 'reasoning': return { kind: 'reasoning', text: '' }
+    case 'tool-call': return { kind: 'tool-call', id: '', name: '', arguments: '' }
+    default: return { kind: 'opaque', blockType }
+  }
+}
+
+/**
+ * Apply the shared block-folding semantics used by both transient live input
+ * and durable embedded assistant streams. A numeric upstream index owns one
+ * state at a time; block-end replaces that state authoritatively.
+ */
+function applyAssistantBlockChunk(blocks: Map<number, AssistantBlockState>, chunk: AssistantBlockChunk): void {
+  switch (chunk.type) {
+    case 'block-start':
+      blocks.set(chunk.index, emptyAssistantBlockState(chunk.blockType))
+      break
+    case 'text-delta': {
+      const previous = blocks.get(chunk.index)
+      blocks.set(chunk.index, {
+        kind: 'text',
+        text: previous?.kind === 'text' ? previous.text + chunk.text : chunk.text,
+      })
+      break
+    }
+    case 'reasoning-delta': {
+      const previous = blocks.get(chunk.index)
+      blocks.set(chunk.index, {
+        kind: 'reasoning',
+        text: previous?.kind === 'reasoning' ? previous.text + chunk.text : chunk.text,
+      })
+      break
+    }
+    case 'tool-call-delta': {
+      const previous = blocks.get(chunk.index)
+      const base = previous?.kind === 'tool-call'
+        ? previous
+        : { kind: 'tool-call' as const, id: '', name: '', arguments: '' }
+      blocks.set(chunk.index, {
+        kind: 'tool-call',
+        id: base.id || chunk.id,
+        name: chunk.name ?? base.name,
+        arguments: base.arguments + chunk.argumentsDelta,
+      })
+      break
+    }
+    case 'block-end':
+      blocks.set(chunk.index, { kind: 'complete', block: chunk.block })
+      break
+  }
+}
+
+/** Preserve an already-authoritative block-end payload without using a
+ * finalized ContentBlock shape for incomplete block-start state. The live port
+ * is intentionally structural and the adapter guarantees block-end payloads
+ * are complete official blocks. */
+function authoritativeContentBlock(block: AssistantLiveContentBlock | ContentBlock): ContentBlock {
+  return block as unknown as ContentBlock
+}
+
+function assistantContentFromBlockState(state: AssistantBlockState): ContentBlock | undefined {
+  switch (state.kind) {
+    case 'text': return { type: 'text', text: state.text }
+    case 'reasoning': return { type: 'reasoning', text: state.text }
+    case 'tool-call':
+      return state.id === ''
+        ? undefined
+        : { type: 'tool-call', id: ToolCallId(state.id), name: state.name, arguments: state.arguments }
+    case 'complete': return authoritativeContentBlock(state.block)
+    case 'opaque': return undefined
+  }
+}
+
+/** Project indexed block state in stable upstream index order. */
+function assistantContentFromBlocks(blocks: Map<number, AssistantBlockState>): ContentBlock[] {
+  return [...blocks.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, state]) => assistantContentFromBlockState(state))
+    .filter((block): block is ContentBlock => block !== undefined)
 }
 
 /**
@@ -492,6 +652,28 @@ export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
   /** The assistant message object per (turn, step); streaming text lands in place. */
   private readonly assistantEntries = new Map<string, Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** In-flight live block state keyed by logical step. This is required for
+   * authoritative block-end replacement: deltas may be partial, while a
+   * completed block replaces the entire indexed state without duplication. */
+  private readonly liveAssistantBlocks = new Map<string, Map<number, AssistantBlockState>>()
+  /** Assistant entries created by the LIVE stream path and not yet taken
+   * over by a durable settlement. Attempt evidence remains transient until
+   * retry or turn end; abandoned attempts have no durable surface and are
+   * tombstoned so live and reopen agree. */
+  private readonly transientAssistantEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** Entries reconstructed from a durable `assistant/attempt`. They remain
+   * diagnostic evidence until a retry resets them or turn/end marks them as
+   * interrupted; they never become a normal settled message. */
+  private readonly attemptAssistantEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** Assistant entries REMOVED by a failed-attempt settlement. They stay in
+   * the raw item list so every index-keyed projection (turn starts, search
+   * entries, groups) keeps its stable indexes, but every visible projection
+   * skips them — a tombstone, never a mid-array splice. */
+  private readonly hiddenAssistantEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** Reasoning entries from a live-abandoned attempt are transient too. Keep
+   * their raw indexes stable, but tombstone them so abandoned live and cold
+   * replay projections agree. */
+  private readonly hiddenThinkingEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'thinking' }>>()
   /** The thinking entry object per (turn, step), for in-place text updates. */
   private readonly thinkingEntries = new Map<string, Extract<TranscriptMessage, { kind: 'thinking' }>>()
   /** Thinking entries that still need a lifecycle boundary to settle. The
@@ -641,14 +823,34 @@ export class TranscriptFolder {
     return this.activityByTurn as ReadonlyMap<number, TurnActivity>
   }
 
+  /** Restore one authoritative reasoning body into the bounded Focus preview. */
+  private restoreThinkingPreview(activity: MutableTurnActivity, step: number, text: string): void {
+    activity.thinkingStep = step
+    activity.thinkingTail = text.slice(-TranscriptFolder.THINKING_TAIL_CAP)
+    const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
+    activity.think = line === '' ? undefined : { text: line }
+    activity.revision += 1
+  }
+
+  /** Clear the Focus reasoning preview owned by one authoritative step. */
+  private clearThinkingPreview(activity: MutableTurnActivity, step: number): void {
+    if (activity.thinkingStep !== step) return
+    activity.thinkingStep = undefined
+    if (activity.thinkingTail === '' && activity.think === undefined) return
+    activity.thinkingTail = ''
+    activity.think = undefined
+    activity.revision += 1
+  }
+
   /** Fold one reasoning delta into the activity's Think slot: the rolling
    * tail keeps the LAST fragment (bounded), and the preview is the tail's
    * latest non-empty line — never the whole stream (plan §10.6). */
-  private foldThinking(activity: MutableTurnActivity, delta: string): void {
+  private foldThinking(activity: MutableTurnActivity, step: number, delta: string): void {
     // After turn/end the Think slot was settled: a late reasoning delta
     // (replay artifact) must not mutate it (review finding). The thinking
     // transcript entry still accumulates the delta.
     if (activity.completed) return
+    activity.thinkingStep = step
     activity.thinkingTail = (activity.thinkingTail + delta).slice(-TranscriptFolder.THINKING_TAIL_CAP)
     const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
     activity.think = line === '' ? undefined : { text: line }
@@ -794,7 +996,7 @@ export class TranscriptFolder {
         this.appendTurnIndex(turn)
       }
     }
-    if (turn !== undefined) this.addGroupedTurn(turn)
+    if (turn !== undefined && message.kind !== 'assistant') this.addGroupedTurn(turn)
     if (message.kind === 'tool') this.groupedToolCount += 1
     return index
   }
@@ -949,9 +1151,45 @@ export class TranscriptFolder {
         continue
       }
       const item = this.items[index]
-      if (item !== undefined && 'turn' in item) this.addGroupedTurn(item.turn)
+      // Tombstoned failed-attempt text is never visible output.
+      if (item !== undefined && 'turn' in item && this.isVisible(item)) this.addGroupedTurn(item.turn)
     }
    this.groupedTurnIndexDirty = false
+  }
+
+  /** Whether one raw item is still visible output. Every Assistant entry uses
+   * the same DSH block predicate; an interruption flag overrides it, while
+   * hidden entries remain internal for authoritative settlement/final choice.
+   * Thinking and Tool rows own their corresponding non-visible Assistant
+   * blocks. */
+  private isVisible(item: TranscriptMessage): boolean {
+    if (item.kind === 'assistant') {
+      if (this.hiddenAssistantEntries.has(item)) return false
+      if (item.interrupted === true) return true
+      return assistantBlocksVisibleNow(assistantEntryBlocks(item))
+    }
+    if (item.kind === 'thinking') return !this.hiddenThinkingEntries.has(item)
+    return true
+  }
+
+  /**
+   * Apply one Assistant visibility transition to every derived projection.
+   * Authoritative hidden entries stay in `items`, but their grouped-turn and
+   * search memberships follow the same edge in one place.
+   */
+  private syncAssistantVisibility(
+    turn: number,
+    step: number,
+    item: Extract<TranscriptMessage, { kind: 'assistant' }>,
+    wasVisible: boolean,
+    markSearchDirty = true,
+  ): void {
+    const visible = this.isVisible(item)
+    if (visible === wasVisible) return
+    if (markSearchDirty) this.markStreamingEntryDirty(`assistant:${stepKey(turn, step)}`)
+    if (this.groupedTurnIndexDirty) return
+    if (visible) this.addGroupedTurn(turn)
+    else this.removeGroupedTurn(turn)
   }
 
   /** Ensure exact grouped-turn counts before a cross-turn projection. */
@@ -1035,6 +1273,12 @@ export class TranscriptFolder {
     this.crossTurnGroups = 0
     for (let start = 0; start < this.items.length;) {
       const item = this.items[start]!
+      // Tombstoned failed-attempt text is never visible output and never
+      // separates an adjacent read run.
+      if (!this.isVisible(item)) {
+        start += 1
+        continue
+      }
       if (item.kind !== 'tool' || item.name !== 'read' || item.status !== 'ok') {
         if (item.kind === 'tool') this.groupedToolCount += 1
          if ('turn' in item) this.addGroupedTurn(item.turn)
@@ -1258,6 +1502,369 @@ export class TranscriptFolder {
   }
 
   /**
+   * Apply one live assistant stream input (Session v2 TRANSIENT plane —
+   * `agent/assistant-stream` mapped through the neutral port). Live model
+   * output NEVER rides the durable log anymore: text/reasoning/usage
+   * deltas accumulate here, and the authoritative settlement arrives
+   * through the durable `assistant/message` / `assistant/attempt` events
+   * on the `session/event` plane. The `end` frame is a notification only:
+   * a committed attempt's durable event already settled the entries, and
+   * an abandoned attempt (no durable settlement) closes the open thinking
+   * entries so no live candidate stays "running" forever.
+   */
+  applyLiveInput(input: AssistantLiveInput): void {
+    switch (input.kind) {
+      case 'start': {
+        // A RETRY reopens the same (turn, step) after a failed attempt:
+        // the previous attempt's reasoning entry was CLOSED but kept as
+        // diagnostic evidence — reset its text (and the Focus preview
+        // tail) so the new attempt's reasoning never concatenates onto
+        // the failed one's. Reopen parity: the durable log restores the
+        // step's reasoning from its LATEST source.
+        const key = stepKey(input.turn, input.step)
+        this.liveAssistantBlocks.set(key, new Map())
+        const thinking = this.thinkingEntries.get(key)
+        if (thinking !== undefined && thinking.running === false) {
+          thinking.text = ''
+          thinking.running = true
+          this.markStreamingEntryDirty(`thinking:${key}`)
+          let open = this.openThinkingByTurn.get(input.turn)
+          if (open === undefined) {
+            open = new Set()
+            this.openThinkingByTurn.set(input.turn, open)
+          }
+          open.add(thinking)
+          const activity = this.activityByTurn.get(input.turn)
+          if (activity !== undefined) this.clearThinkingPreview(activity, input.step)
+        }
+        break
+      }
+      case 'chunk':
+        this.applyAssistantChunk(input.turn, input.step, input.chunk)
+        break
+      case 'end':
+        // An abandoned attempt has no durable settlement and is tombstoned.
+        // A committed `assistant/attempt` keeps its durable evidence visible
+        // as transient until `llm/retry` or `turn/end`; `assistant/message`
+        // owns the normal settled surface entry.
+        this.liveAssistantBlocks.delete(stepKey(input.turn, input.step))
+        if (input.status === 'abandoned') {
+          this.settleFailedAttempt(input.turn, input.step, true, true)
+        }
+        // Any remaining open reasoning entries stop animating at settlement.
+        {
+          const open = this.openThinkingByTurn.get(input.turn)
+          if (open !== undefined) {
+            for (const entry of open) entry.running = false
+            this.openThinkingByTurn.delete(input.turn)
+          }
+        }
+        break
+    }
+  }
+
+  /** Tombstone one transient assistant entry at a retry boundary. The
+   * first-token timing and usage live in their separate folds and are not
+   * touched here; only the presentation state is reset. */
+  private hideTransientAssistantEntry(turn: number, step: number): void {
+    const key = stepKey(turn, step)
+    const entry = this.assistantEntries.get(key)
+    if (entry === undefined || !this.transientAssistantEntries.has(entry)) return
+    const wasVisible = this.isVisible(entry)
+    this.assistantEntries.delete(key)
+    entry.text = ''
+    entry.content = undefined
+    entry.interrupted = undefined
+    this.transientAssistantEntries.delete(entry)
+    this.attemptAssistantEntries.delete(entry)
+    this.hiddenAssistantEntries.add(entry)
+    this.markStreamingEntryDirty(`assistant:${key}`)
+    this.syncAssistantVisibility(turn, step, entry, wasVisible, false)
+  }
+
+  /** A failed live attempt has no durable evidence and is therefore
+   * tombstoned. A committed `assistant/attempt` is restored separately and
+   * remains available as interruption evidence until retry/turn end. */
+  private settleFailedAttempt(turn: number, step: number, abandoned = false, discardUsage = true): void {
+    if (abandoned) this.hideTransientAssistantEntry(turn, step)
+    if (abandoned) {
+      // Tombstone abandoned reasoning too: the raw item remains index-stable
+      // while every visible/search/grouped projection skips it.
+      this.hideThinkingEntry(turn, step)
+    }
+    if (discardUsage) this.usage.discardStep(turn, step)
+    const activity = this.activityByTurn.get(turn)
+    if (activity === undefined) return
+    if (abandoned) this.clearThinkingPreview(activity, step)
+    if (abandoned) {
+      const candidate = activity.messageCandidate
+      if (candidate !== undefined && candidate.step === step
+        && !activity.settledSteps.has(step) && !activity.confirmedSteps.has(step)) {
+        activity.messageCandidate = undefined
+        this.syncMessage(activity)
+        activity.revision += 1
+      }
+    }
+    this.syncUsage(activity)
+  }
+
+  /** Fold one live assistant chunk (Session v2 transient plane) into the
+   * streaming entries and Focus aggregation. Live block state is retained per
+   * logical step so a completed block can replace earlier deltas exactly. */
+  private applyAssistantChunk(turn: number, step: number, chunk: AssistantLiveChunk): void {
+    // After turn/end a late assistant event is a replay artifact: it
+    // must not mutate the finalized surface entry — the final-answer
+    // selection reads the exact last assistant (review finding).
+    const activity = this.activityFor(turn)
+    const key = stepKey(turn, step)
+    if (activity.completed) return
+    // A late reasoning replay remains diagnostic transcript evidence, but a
+    // late text/block surface frame must never overwrite the durable message.
+    if (activity.settledSteps.has(step)) {
+      if (chunk.type === 'reasoning-delta') {
+        const thinking = this.thinkingEntry(turn, step)
+        thinking.text += chunk.text
+        thinking.running = false
+        this.closeThinking(thinking)
+        this.markStreamingEntryDirty(`thinking:${key}`)
+        this.foldThinking(activity, step, chunk.text)
+      } else if (chunk.type === 'block-end' && chunk.block.type === 'reasoning' && 'text' in chunk.block && typeof chunk.block.text === 'string') {
+        const thinking = this.thinkingEntry(turn, step)
+        thinking.text = chunk.block.text
+        thinking.running = false
+        this.closeThinking(thinking)
+        this.markStreamingEntryDirty(`thinking:${key}`)
+        this.restoreThinkingPreview(activity, step, chunk.block.text)
+      } else if (chunk.type === 'usage') {
+        this.usage.onUsageChunk(turn, step, chunk.usage)
+        this.syncUsage(activity)
+      }
+      return
+    }
+    const existing = this.assistantEntries.get(key)
+    if (existing !== undefined && this.attemptAssistantEntries.has(existing)) return
+    const blocks = this.liveBlocksFor(turn, step)
+    switch (chunk.type) {
+      case 'block-start':
+      case 'text-delta':
+      case 'reasoning-delta':
+      case 'tool-call-delta':
+      case 'block-end':
+        applyAssistantBlockChunk(blocks, chunk)
+        this.syncLiveAssistantPresentation(turn, step)
+        break
+      case 'usage':
+        // Focus aggregation: per-turn token facts (the shared
+        // accumulator — the footer and Focus can never drift).
+        this.usage.onUsageChunk(turn, step, chunk.usage)
+        this.syncUsage(activity)
+        break
+      case 'finish':
+        break
+    }
+  }
+
+  /** Return the current live block state in stable upstream index order. */
+  private liveBlocksFor(turn: number, step: number): Map<number, AssistantBlockState> {
+    const key = stepKey(turn, step)
+    let blocks = this.liveAssistantBlocks.get(key)
+    if (blocks === undefined) {
+      blocks = new Map()
+      this.liveAssistantBlocks.set(key, blocks)
+    }
+    return blocks
+  }
+
+  /** Replace the Focus message candidate with authoritative assembled text. */
+  private replaceMessageCandidate(activity: MutableTurnActivity, step: number, text: string): void {
+    if (activity.completed || activity.confirmedSteps.has(step) || activity.settledSteps.has(step)) return
+    if (step < (activity.lastAssistantStep ?? step)) return
+    const candidate = activity.messageCandidate
+    if (candidate !== undefined && candidate.step !== step) this.confirmMessageCandidate(activity)
+    activity.messageCandidate = text === ''
+      ? undefined
+      : { step, tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP) }
+    if (text !== '') activity.lastAssistantStep = Math.max(activity.lastAssistantStep ?? -1, step)
+    this.syncMessage(activity)
+    activity.revision += 1
+  }
+
+  /** Project the current live block map without duplicating block-end text. */
+  private syncLiveAssistantPresentation(turn: number, step: number): void {
+    const key = stepKey(turn, step)
+    const blocks = assistantContentFromBlocks(this.liveBlocksFor(turn, step))
+    const text = textOf(blocks)
+    const activity = this.activityFor(turn)
+    const visibleNow = assistantBlocksVisibleNow(blocks)
+    if (step >= (activity.lastAssistantStep ?? -1)) activity.lastAssistantVisible = visibleNow
+    const entry = this.assistantEntries.get(key)
+    const wasVisible = entry !== undefined && this.isVisible(entry)
+    if (!visibleNow) {
+      if (entry !== undefined && this.transientAssistantEntries.has(entry)) this.hideTransientAssistantEntry(turn, step)
+      this.replaceMessageCandidate(activity, step, '')
+    } else {
+      const target = entry ?? this.assistantEntry(turn, step)
+      this.transientAssistantEntries.add(target)
+      this.attemptAssistantEntries.delete(target)
+      this.hiddenAssistantEntries.delete(target)
+      target.text = text
+      target.content = blocks.some(block => block.type !== 'text') ? blocks : undefined
+      target.interrupted = undefined
+      this.markStreamingEntryDirty(`assistant:${key}`)
+      this.replaceMessageCandidate(activity, step, text)
+      this.syncAssistantVisibility(turn, step, target, wasVisible, false)
+    }
+
+    const reasoning = blocks
+      .filter((block): block is Extract<ContentBlock, { type: 'reasoning' }> => block.type === 'reasoning')
+      .map(block => block.text)
+      .join('')
+    const thinkingKey = `thinking:${key}`
+    if (reasoning === '') {
+      this.hideThinkingEntry(turn, step)
+      this.clearThinkingPreview(this.activityFor(turn), step)
+      return
+    }
+    const thinking = this.thinkingEntry(turn, step)
+    this.hiddenThinkingEntries.delete(thinking)
+    thinking.text = reasoning
+    thinking.running = true
+    this.markStreamingEntryDirty(thinkingKey)
+    this.restoreThinkingPreview(this.activityFor(turn), step, reasoning)
+  }
+
+  /** Reconstruct the authoritative assistant blocks from one compact stream.
+   * The durable path intentionally uses the same indexed state accumulator as
+   * live input, so partial attempt evidence and block-end replacement cannot
+   * drift between live and cold replay. */
+  private assistantBlocksFromStream(stream: readonly unknown[]): ContentBlock[] {
+    const blocks = new Map<number, AssistantBlockState>()
+    for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
+      const chunk = member.chunk
+      switch (chunk.type) {
+        case 'block-start':
+        case 'text-delta':
+        case 'reasoning-delta':
+        case 'tool-call-delta':
+        case 'block-end':
+          applyAssistantBlockChunk(blocks, chunk)
+          break
+        case 'usage':
+        case 'finish':
+          break
+      }
+    }
+    return assistantContentFromBlocks(blocks)
+  }
+
+  /** Restore a SETTLED thinking entry from a durable embedded stream
+   * (Session v2 cold replay — `assistant/message.stream` /
+   * `assistant/attempt.stream`). The canonical DSH decoder expands every
+   * compact representation, and block-end remains authoritative. */
+  private restoreThinkingFromStream(turn: number, step: number, stream: readonly unknown[]): void {
+    const text = this.assistantBlocksFromStream(stream)
+      .filter((block): block is Extract<ContentBlock, { type: 'reasoning' }> => block.type === 'reasoning')
+      .map(block => block.text)
+      .join('')
+    const key = stepKey(turn, step)
+    if (text === '') {
+      this.hideThinkingEntry(turn, step)
+      const activity = this.activityByTurn.get(turn)
+      if (activity !== undefined) this.clearThinkingPreview(activity, step)
+      return
+    }
+    const entry = this.thinkingEntry(turn, step)
+    this.hiddenThinkingEntries.delete(entry)
+    entry.text = text
+    this.markStreamingEntryDirty(`thinking:${key}`)
+    this.closeThinking(entry)
+    this.restoreThinkingPreview(this.activityFor(turn), step, text)
+  }
+
+  /** Restore assistant interruption evidence from a durable attempt. Text and
+   * finalized non-text blocks are retained; reasoning remains in the Think
+   * entry. Tool-call-only content is retained as hidden evidence until the
+   * closed boundary. The attempt entry is still transient so `llm/retry` can
+   * reset it. */
+  private restoreAssistantAttempt(turn: number, step: number, stream: readonly unknown[]): void {
+    const blocks = this.assistantBlocksFromStream(stream)
+    const visibleNow = assistantBlocksVisibleNow(blocks)
+    const hasEvidence = assistantBlocksHaveInterruptionEvidence(blocks)
+    const text = textOf(blocks)
+    const key = stepKey(turn, step)
+    const existing = this.assistantEntries.get(key)
+    const wasVisible = existing !== undefined && this.isVisible(existing)
+    if (!visibleNow && !hasEvidence) {
+      // A live prefix may be the only evidence when the compact settlement
+      // carries no visible blocks. Keep that prefix as attempt evidence
+      // instead of promoting it to a normal settled message.
+      if (existing !== undefined && this.transientAssistantEntries.has(existing)) {
+        this.attemptAssistantEntries.add(existing)
+      }
+      return
+    }
+    const entry = existing ?? this.assistantEntry(turn, step)
+    this.hiddenAssistantEntries.delete(entry)
+    this.transientAssistantEntries.add(entry)
+    this.attemptAssistantEntries.add(entry)
+    entry.text = text
+    entry.content = blocks.some(block => block.type !== 'text') ? blocks : undefined
+    entry.interrupted = undefined
+    this.markStreamingEntryDirty(`assistant:${key}`)
+    this.syncAssistantVisibility(turn, step, entry, wasVisible, false)
+  }
+
+  /** Mark durable attempt evidence visible at the closed boundary. Empty and
+   * reasoning-only attempts remain hidden; tool-call and generic finalized
+   * blocks become interrupted assistant evidence here, not while running. */
+  private markAttemptEvidenceInterrupted(turn: number, step?: number): void {
+    for (const [key, item] of this.assistantEntries) {
+      if (item.turn !== turn || !this.attemptAssistantEntries.has(item)) continue
+      const itemStep = Number(key.slice(key.indexOf('/') + 1))
+      if (step !== undefined && itemStep !== step) continue
+      if (!assistantBlocksHaveInterruptionEvidence(assistantEntryBlocks(item))) continue
+      if (this.hiddenAssistantEntries.has(item)) continue
+      const wasVisible = this.isVisible(item)
+      item.interrupted = true
+      this.syncAssistantVisibility(turn, itemStep, item, wasVisible)
+    }
+  }
+
+  /** Restore a SETTLED thinking entry from the reasoning blocks of a
+   * durable assistant message (Session v2 cold replay — the assembled
+   * `message.content` carries `reasoning` blocks the live plane streamed
+   * as deltas). The durable message is authoritative: it replaces any
+   * earlier same-step reasoning, including replacing it with no entry. */
+  private restoreThinkingFromMessage(turn: number, step: number, blocks: readonly ContentBlock[]): void {
+    const key = stepKey(turn, step)
+    let text = ''
+    for (const block of blocks) {
+      if (block.type === 'reasoning') text += block.text
+    }
+    if (text === '') {
+      const existing = this.thinkingEntries.get(key)
+      // Legacy/live messages may omit reasoning blocks even though the live
+      // entry already has useful text; close that entry in place. A closed
+      // retry entry (or an empty reset entry) is authoritative-empty and is
+      // tombstoned instead.
+      if (existing !== undefined && existing.running && existing.text !== '') {
+        this.closeThinking(existing)
+      } else {
+        this.hideThinkingEntry(turn, step)
+        const activity = this.activityByTurn.get(turn)
+        if (activity !== undefined) this.clearThinkingPreview(activity, step)
+      }
+      return
+    }
+    const entry = this.thinkingEntry(turn, step)
+    this.hiddenThinkingEntries.delete(entry)
+    entry.text = text
+    this.markStreamingEntryDirty(`thinking:${key}`)
+    this.closeThinking(entry)
+    this.restoreThinkingPreview(this.activityFor(turn), step, text)
+  }
+
+  /**
    * Hydrate a cold session log in one batch. Folding remains event-ordered,
    * but expensive read-run reflow is deferred until every event has settled;
    * live suffixes must continue to use {@link apply} for immediate grouping.
@@ -1294,7 +1901,11 @@ export class TranscriptFolder {
         if (members !== undefined && members[0] === index) grouped.push(group)
         continue
       }
-      grouped.push(this.items[index]!)
+      const item = this.items[index]
+      if (item === undefined) continue
+      // Tombstoned failed-attempt text never renders.
+      if (!this.isVisible(item)) continue
+      grouped.push(item)
     }
     return grouped
   }
@@ -1370,6 +1981,8 @@ export class TranscriptFolder {
       }
       const message = this.items[index]
       if (message === undefined) continue
+      // Tombstoned failed-attempt text never renders.
+      if (!this.isVisible(message)) continue
       kept.push(message)
       if (message.kind === 'tool') tools += 1
     }
@@ -1533,6 +2146,9 @@ export class TranscriptFolder {
       // merged group's text lives ONLY on the representative entry (a
       // group expansion marks exactly that one entry dirty).
       if (representative !== id) return
+      // Tombstoned failed-attempt text is not part of the corpus.
+      const item = this.items[id]
+      if (item !== undefined && !this.isVisible(item)) return
       if (!entry.normalizedText.includes(needle)) return
       if (seen.has(representative)) return
       seen.add(representative)
@@ -1585,6 +2201,41 @@ export class TranscriptFolder {
     if (open === undefined) return
     open.delete(entry)
     if (open.size === 0) this.openThinkingByTurn.delete(entry.turn)
+  }
+
+  /** Tombstone one thinking entry while preserving raw item indexes. */
+  private hideThinkingEntry(turn: number, step: number): void {
+    const key = stepKey(turn, step)
+    const entry = this.thinkingEntries.get(key)
+    if (entry === undefined) return
+    entry.text = ''
+    this.closeThinking(entry)
+    this.thinkingEntries.delete(key)
+    if (!this.hiddenThinkingEntries.has(entry)) {
+      this.hiddenThinkingEntries.add(entry)
+      this.markStreamingEntryDirty(`thinking:${key}`)
+      this.removeGroupedTurn(entry.turn)
+    }
+  }
+
+  /** Reset same-step presentation at the scheduled retry boundary. The
+   * separate usage fold intentionally remains untouched so first-token timing
+   * and committed usage span the retry wait. */
+  private resetThinkingForRetry(turn: number, step: number): void {
+    this.liveAssistantBlocks.delete(stepKey(turn, step))
+    this.hideTransientAssistantEntry(turn, step)
+    this.hideThinkingEntry(turn, step)
+    const activity = this.activityByTurn.get(turn)
+    if (activity === undefined) return
+    this.clearThinkingPreview(activity, step)
+    const candidate = activity.messageCandidate
+    if (candidate !== undefined && candidate.step === step
+      && !activity.settledSteps.has(step) && !activity.confirmedSteps.has(step)) {
+      activity.messageCandidate = undefined
+      this.syncMessage(activity)
+    }
+    this.syncUsage(activity)
+    activity.revision += 1
   }
 
   /** Settle only the thinking entries owned by one ended turn. */
@@ -1703,6 +2354,39 @@ export class TranscriptFolder {
       this.applyCompactionEvent(event as { type: string; data: Record<string, unknown> }, kind)
       return
     }
+    if (kind === 'llm/retry-started') {
+      const data = event.data as { turn: number; step: number }
+      if (this.activityByTurn.get(data.turn)?.completed === true) return
+      // This event only closes the usage replacement slot. Presentation was
+      // reset at the earlier scheduled `llm/retry` boundary. Keeping the two
+      // boundaries separate preserves the first-token timing across the wait.
+      this.usage.onRetryStarted(data.turn, data.step)
+      return
+    }
+    // `assistant/attempt` is a Session v2 durable settlement (master
+    // vocabulary — the installed dsh-session may lag, so it is typed
+    // structurally). It has no settled surface message, but its complete
+    // stream remains interruption evidence until a retry resets it or the
+    // turn closes. Usage is folded independently from the stream.
+    if (kind === 'assistant/attempt') {
+      const data = event.data as { turn: number; step: number; stream?: readonly unknown[] }
+      if (this.activityByTurn.get(data.turn)?.completed === true) return
+      const stream = data.stream ?? []
+      this.liveAssistantBlocks.delete(stepKey(data.turn, data.step))
+      this.restoreAssistantAttempt(data.turn, data.step, stream)
+      this.usage.onAssistantAttempt(data.turn, data.step, usageFromAssistantSettlement('attempt', undefined, stream))
+      const activity = this.activityFor(data.turn)
+      const key = stepKey(data.turn, data.step)
+      // The durable embedded stream is COMPLETE and authoritative for
+      // reasoning; overwrite any live partial so cold replay matches the
+      // settled attempt. A later retry resets this evidence at llm/retry.
+      this.restoreThinkingFromStream(data.turn, data.step, stream)
+      this.syncUsage(activity)
+      const thinking = this.thinkingEntries.get(key)
+      if (thinking !== undefined && thinking.running) this.closeThinking(thinking)
+      activity.revision += 1
+      return
+    }
     switch (event.type) {
       case 'step/start': {
         // Focus aggregation: a new step opens usage accounting, and a
@@ -1731,6 +2415,9 @@ export class TranscriptFolder {
         // a late step/end (replay artifact) is a no-op (review finding).
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
+        // A failed attempt closes at step/end even when the turn continues;
+        // expose its preserved evidence without waiting for turn/end.
+        this.markAttemptEvidenceInterrupted(event.data.turn, event.data.step)
         this.usage.onStepEnd(event.data.turn, event.data.step)
         this.syncUsage(activity)
         break
@@ -1792,44 +2479,6 @@ export class TranscriptFolder {
         }
         break
       }
-      case 'assistant/chunk': {
-        const { chunk } = event.data
-        const step = event.data.step
-        // After turn/end a late assistant event is a replay artifact: it
-        // must not mutate the transcript entries — the final-answer
-        // selection reads the exact last assistant (review finding).
-        const activity = this.activityFor(event.data.turn)
-        if (activity.completed) break
-        // Streaming text accumulates in place on the entry itself; there is
-        // no separate accumulator map, so a long session's text is stored
-        // once, not twice.
-        if (chunk.type === 'text-delta') {
-          this.assistantEntry(event.data.turn, step).text += chunk.text
-          // Search projection: O(1) dirty mark — the entry is re-normalized
-          // as a WHOLE string at the next search (Unicode lowercasing is
-          // not chunk-splittable — Greek sigma — but the live streaming
-          // path must never pay per-chunk lowercase).
-          this.markStreamingEntryDirty(`assistant:${stepKey(event.data.turn, step)}`)
-          // Focus aggregation: the streaming assistant text feeds the
-          // Message candidate IMMEDIATELY (no assistant/message wait —
-          // plan §5.2), so the running card previews the intermediate
-          // message in real time.
-          this.foldMessageCandidate(this.activityFor(event.data.turn), step, chunk.text)
-        } else if (chunk.type === 'reasoning-delta') {
-          this.thinkingEntry(event.data.turn, step).text += chunk.text
-          // Search projection: O(1) dirty mark (see the text-delta path).
-          this.markStreamingEntryDirty(`thinking:${stepKey(event.data.turn, step)}`)
-          // Focus aggregation: keep a compact reasoning preview (the
-          // rolling tail — never the full stream, plan §10.6/§42).
-          this.foldThinking(this.activityFor(event.data.turn), chunk.text)
-        } else if (chunk.type === 'usage') {
-          // Focus aggregation: per-turn token facts (the shared
-          // accumulator — the footer and Focus can never drift).
-          this.usage.onUsageChunk(event.data.turn, step, chunk.usage)
-          this.syncUsage(activity)
-        }
-        break
-      }
       case 'assistant/message': {
         // After turn/end a late message is a replay artifact: reject it
         // BEFORE mutating the transcript entries — the final-answer
@@ -1837,15 +2486,23 @@ export class TranscriptFolder {
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
         const key = stepKey(event.data.turn, event.data.step)
+        this.liveAssistantBlocks.delete(key)
+        const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
         const text = textOf(messageBlocks)
         const entry = this.assistantEntries.get(key)
+        const wasVisible = entry !== undefined && this.isVisible(entry)
         if (entry !== undefined) {
           entry.text = text
-          // The settled full blocks (kept when the step carried images or
-          // other non-text blocks — text-only steps stay on the text path).
-          if (messageBlocks.some(block => block.type !== 'text')) entry.content = messageBlocks
+          // The durable message takes over the live/attempt entry: it is no
+          // longer transient, so retry cleanup can never remove settled text.
+          this.transientAssistantEntries.delete(entry)
+          this.attemptAssistantEntries.delete(entry)
+          entry.interrupted = event.data.interrupted === true ? true : undefined
+          // The settled full blocks replace any earlier attempt evidence;
+          // text-only messages must also clear stale non-text content.
+          entry.content = messageBlocks.some(block => block.type !== 'text') ? messageBlocks : undefined
           // The settled text REPLACES the streamed tail: the search
           // projection must mirror the authoritative text, not the chunks
           // (lazy — mark dirty, O(1)).
@@ -1856,7 +2513,13 @@ export class TranscriptFolder {
           // preceding chunk (replay edge) must still own the exact-last
           // assistant slot, so the final selection never falls back to an
           // earlier answer (review finding).
-          const created: TranscriptMessage = { kind: 'assistant', turn: event.data.turn, text, ...(messageBlocks.some(block => block.type !== 'text') ? { content: messageBlocks } : {}) }
+          const created: TranscriptMessage = {
+            kind: 'assistant',
+            turn: event.data.turn,
+            text,
+            ...(messageBlocks.some(block => block.type !== 'text') ? { content: messageBlocks } : {}),
+            ...(event.data.interrupted === true ? { interrupted: true as const } : {}),
+          }
           this.assistantEntries.set(key, created)
           // The created entry must register its search index too: a later
           // replay replacement or text delta mutates this entry in place
@@ -1864,10 +2527,14 @@ export class TranscriptFolder {
           // finding — the streaming-created path already registers).
           this.searchIndexByStepKey.set(`assistant:${key}`, this.appendItem(created))
         }
+        const settledEntry = this.assistantEntries.get(key)
+        if (settledEntry !== undefined) this.syncAssistantVisibility(event.data.turn, event.data.step, settledEntry, wasVisible, false)
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.
-        const thinking = this.thinkingEntries.get(key)
-        if (thinking !== undefined) this.closeThinking(thinking)
+        // On a COLD replay no live reasoning deltas ever arrived — the
+        // assembled `reasoning` blocks in the durable message restore the
+        // settled thinking entry (Session v2 embedded-stream parity).
+        this.restoreThinkingFromMessage(event.data.turn, event.data.step, messageBlocks)
         // Focus aggregation: the settled assistant text OVERWRITES the
         // candidate's text (authoritative — plan §5.4) but does NOT decide
         // whether it is the final answer; the candidate keeps its step
@@ -1885,6 +2552,9 @@ export class TranscriptFolder {
         // earlier step's output was intermediate: confirm it first (plan
         // §5.3 C — a later step's output confirms the earlier candidate).
         const priorLast = activity.lastAssistantStep ?? -1
+        if (event.data.step >= priorLast) {
+          activity.lastAssistantVisible = event.data.interrupted === true || assistantBlocksVisibleNow(messageBlocks)
+        }
         const prior = activity.messageCandidate
         // Only a message for a NEWER step confirms the open candidate
         // (plan §5.3 C); a message for an older step is stale and must
@@ -1932,7 +2602,8 @@ export class TranscriptFolder {
           }
         }
         this.syncMessage(activity)
-        this.usage.onAssistantMessage(event.data.turn, event.data.step, event.data.usage)
+        this.usage.onAssistantMessage(event.data.turn, event.data.step, messageUsage)
+        // Settled Assistant visibility was synchronized above without deleting its authoritative entry.
         this.syncUsage(activity)
         activity.revision += 1
         break
@@ -2070,13 +2741,17 @@ export class TranscriptFolder {
         // this.currentTurn: a turn-start-less fragment's end must land in
         // its own turn (review finding).
         const endTurn = event.data.turn
+        for (const key of this.liveAssistantBlocks.keys()) {
+          if (key.startsWith(`${endTurn}/`)) this.liveAssistantBlocks.delete(key)
+        }
+        this.markAttemptEvidenceInterrupted(endTurn)
         this.closeThinkingForTurn(endTurn)
         if (event.data.reason.kind === 'error') {
           // Defensive: a malformed/legacy reason without the error detail
           // degrades to the bare marker instead of crashing the fold
           // (plan §10.2 — Focus aggregates the same events).
           const error = event.data.reason.error
-          this.appendItem({ kind: 'tool', turn: endTurn, name: 'error', args: '', result: error === undefined ? 'error' : `${error.code}: ${error.message}`, status: 'error' })
+          this.appendItem({ kind: 'tool', turn: endTurn, name: 'error', args: '', result: displayFailureText(error), status: 'error' })
         } else if (event.data.reason.kind === 'aborted') {
           this.appendItem({ kind: 'tool', turn: endTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error' })
         } else if (event.data.reason.kind === 'max-tokens') {
@@ -2097,7 +2772,10 @@ export class TranscriptFolder {
           ...(reasonError === undefined ? {} : {
             error: {
               code: typeof reasonError.code === 'string' ? reasonError.code : String(reasonError.code ?? ''),
-              message: typeof reasonError.message === 'string' ? reasonError.message : String(reasonError.message ?? ''),
+              message: displayFailure({
+                code: typeof reasonError.code === 'string' ? reasonError.code : String(reasonError.code ?? ''),
+                message: typeof reasonError.message === 'string' ? reasonError.message : String(reasonError.message ?? ''),
+              }).message,
             },
           }),
         }
@@ -2170,12 +2848,17 @@ export class TranscriptFolder {
         break
       }
       case 'llm/retry': {
-        const { retry, delayMs, failure } = event.data
+        const { retry, delayMs, failure, turn, step } = event.data
+        if (this.activityByTurn.get(turn)?.completed === true) break
+        // The scheduled retry is the presentation reset boundary. It hides
+        // the failed attempt immediately, while the later retry-started event
+        // only opens the next usage replacement slot.
+        this.resetThinkingForRetry(turn, step)
         const maxRetries = 'maxRetries' in event.data ? event.data.maxRetries : undefined
         const label = maxRetries === undefined
           ? `llm retry ${retry} in ${Math.round(delayMs / 1000)}s`
-          : `llm retry ${retry + 1}/${maxRetries} in ${Math.round(delayMs / 1000)}s`
-        this.appendItem({ kind: 'system', turn: this.currentTurn, text: `${label} — ${failure.code}: ${failure.message}` })
+          : `llm retry ${retry}/${maxRetries} in ${Math.round(delayMs / 1000)}s`
+        this.appendItem({ kind: 'system', turn, text: `${label} — ${displayFailureText(failure)}` })
         // Focus aggregation: retries are orchestration, not a Tool — they
         // stay in the expanded process and never touch the Tool slot
         // (plan §16.2).
@@ -2228,10 +2911,10 @@ export class TranscriptFolder {
 
 /**
  * Fold a session event log into the transcript messages, in log order.
- * `assistant/chunk` text deltas accumulate into the assistant message of
- * their own (turn, step); `reasoning-delta` chunks accumulate into a
- * thinking entry. A tool call and its result merge into one card; an
- * unanswered call stays `running`.
+ * Live text deltas accumulate into the assistant message of their own
+ * (turn, step); `reasoning-delta` chunks accumulate into a thinking entry.
+ * A tool call and its result merge into one card; an unanswered call stays
+ * `running`.
  * @param events - the session log.
  * @param options - optional display window (older turns collapse).
  * @returns ordered renderable messages.
@@ -2301,7 +2984,7 @@ export function renderTranscriptMarkdown(session: {
       : [`- agent preset: ${session.header.agentPreset}`],
     '',
   ]
-  // Alpha.4 Session shape: the raw log arrives as a snapshot read, never a
+  // Alpha.4 Session shape: the event log arrives as a snapshot read, never a
   // live array — the markdown export is a full-log fold by definition.
   for (const event of session.snapshotEvents()) {
     // The same append-origin contract as the transcript fold: a surface

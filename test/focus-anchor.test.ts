@@ -15,6 +15,7 @@ import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
@@ -43,6 +44,35 @@ const T0 = Date.now() - 60_000
 
 function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
   return { type, seq, time, data } as SessionEvent
+}
+
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(turn: number, step: number, chunk: AssistantLiveChunk, time: number): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+/** A folder that can fold both the durable event plane and the Session v2
+ * live input seam (TranscriptFolder shares this surface with StatsFolder). */
+interface LiveFoldable {
+  apply(events: readonly SessionEvent[]): void
+  applyLiveInput(input: AssistantLiveInput): void
+}
+
+/** Apply a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function applyMixed(folder: LiveFoldable, events: readonly SessionEvent[]): void {
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
 }
 
 /** A settled turn whose tool result is LONG (100+ rendered rows), with an
@@ -104,7 +134,7 @@ function click(vt: VirtualTerminal, x: number, y: number): void {
 test('expanding a collapsed SETTLED Thought preserves the viewport (plan 2026-08-25)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(longThoughtTurn(0))
+  applyMixed(folder, longThoughtTurn(0))
   app.setFocusMode(true)
   app.setWorking(true)
   show(app, folder)
@@ -154,7 +184,7 @@ test('clicking an expanded SECONDARY body collapses only the secondary (plan §3
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(longThoughtTurn(0))
+  applyMixed(folder, longThoughtTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -200,7 +230,7 @@ test('clicking an expanded SECONDARY body collapses only the secondary (plan §3
 test('clicking a NON-secondary process row collapses the owner Thought (plan §38)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
-  folder.apply(longThoughtTurn(0))
+  applyMixed(folder, longThoughtTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -234,7 +264,7 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(longThoughtTurn(0))
+  applyMixed(folder, longThoughtTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)
@@ -348,7 +378,7 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
   // A turn whose USER message carries an image (the attachment lives INSIDE
   // the turn's projected content).
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 2 }, T0, 100),
     eventAt('user/message', {
       id: { id: 'u2' }, role: 'user',
@@ -403,7 +433,7 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
   // A SHORT settled turn: the user row, the Thought, the tool result and
   // the final assistant all fit the 30-row viewport, so no scrolling is
   // needed to reach any of them.
-  folder.apply([
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 3 }, T0, 200),
     eventAt('user/message', {
       id: { id: 'u3' }, role: 'user',
@@ -487,7 +517,7 @@ test('resize keeps the click map aligned: secondary closes first, then the root 
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply(longThoughtTurn(0))
+  applyMixed(folder, longThoughtTurn(0))
   app.setFocusMode(true)
   show(app, folder)
   app.setFullscreen(true)

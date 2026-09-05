@@ -18,6 +18,7 @@
     "planMode",
     "sandboxPolicy",
     "sessionPersistence",
+    "sessionQuery",
     "sessions",
     "settings",
     "shell",
@@ -60,6 +61,7 @@
     "import:dsh-session",
     "sessionPersistence",
     "sessionQuery",
+    "sessions",
     "tokenMeter"
   ],
   "runtime/direct/session-preset-direct.ts": [

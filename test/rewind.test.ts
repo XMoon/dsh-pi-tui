@@ -55,8 +55,17 @@ afterEach(() => {
 
 // ── event fixtures ─────────────────────────────────────────────────────────
 
-/** Build a minimal event envelope for tests. */
-function event<K extends SessionEvent['type']>(type: K, data: SessionEvent<K>['data'], seq: number): SessionEvent {
+/** Build a minimal event envelope for tests. The type parameter is widened
+ * to any string so legacy v1 `assistant/chunk` events (absent from master's
+ * SessionEventMap) can be constructed; known types keep their typed data
+ * surface, widened with `Record<string, unknown>` so Session v2 fields the
+ * installed dsh-session may lag (e.g. `assistant/message.stream`) can be
+ * supplied. */
+function event<K extends string>(
+  type: K,
+  data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
+  seq: number,
+): SessionEvent {
   return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
 }
 
@@ -107,6 +116,7 @@ function turn(seq: number, turnNo: number, prompt: string): SessionEvent[] {
         content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, seq + 2),
     turnEnd(seq + 3, turnNo),
   ]
@@ -316,7 +326,7 @@ function makeRig(options: {
   composePreset?: string
   createError?: string
   /** Full transitionTo override (wins over the default implementation). */
-  transitionTo?: <T>(steps: { target?: { id: string; header?: { cwd?: string } }; fresh?: boolean; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
+  transitionTo?: <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
   createHook?: (call: CreatedCall) => void
 } = {}): ForkRig {
   const created: CreatedCall[] = []
@@ -352,7 +362,7 @@ function makeRig(options: {
       resume: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
     },
     liveIdentity: () => ({ sessionId: state.sessionId, generation: state.generation }),
-    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; fresh?: boolean; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       if (options.transitionTo !== undefined) return options.transitionTo(steps)
       await steps.prepare?.()
       try {

@@ -3,11 +3,10 @@
  * fold (footer) and the Focus per-turn token projection. One accounting
  * implementation, so the two surfaces can never drift:
  *
- * - usage is counted ONCE per step at step/end — the assistant/message
- *   usage replaces the streaming `usage` chunk (both carry the same
- *   assembler value; adding both would double the totals), and a step with
- *   only a usage chunk still counts (the projection's tokenUsage is
- *   step-keyed, not message-gated);
+ * - usage is counted ONCE per attempt. An assistant/message or
+ *   assistant/attempt settlement replaces that attempt's provisional stream
+ *   usage; `llm/retry-started` closes that replacement slot so the next
+ *   attempt on the same (turn, step) adds to the total;
  * - a usage fact without a step boundary (replay edge) counts immediately;
  * - the per-turn DISPLAY total is committed completed steps PLUS the open
  *   steps' current usage (provisional or authoritative) — provisional
@@ -15,6 +14,8 @@
  *   cannot double-count.
  * @module @xmoon76/dsh-pi-tui/token-usage
  */
+
+import { expandAssistantStream } from '@deepseek-ai/dsh-llm/assistant-stream'
 
 /** Usage shape the fold accepts (the dsh TokenUsage's accounting fields). */
 export interface UsageLike {
@@ -64,6 +65,58 @@ function turnOfKey(key: string): number {
   return slash === -1 ? -1 : Number(key.slice(0, slash))
 }
 
+/** The canonical first-token predicate shared by live and durable folds. */
+export function isAssistantTokenDelta(chunk: {
+  type: string
+  text?: string
+  argumentsDelta?: string
+  name?: unknown
+}): boolean {
+  switch (chunk.type) {
+    case 'text-delta':
+    case 'reasoning-delta':
+      return chunk.text !== undefined && chunk.text !== ''
+    case 'tool-call-delta':
+      return (chunk.argumentsDelta ?? '') !== '' || chunk.name !== undefined
+    default:
+      return false
+  }
+}
+
+/** Return the first token timestamp embedded in a compact assistant stream.
+ * Older compatible event records may omit the optional stream. */
+export function firstTokenTimeFromAssistantStream(stream: readonly unknown[] | undefined): number | undefined {
+  if (stream === undefined) return undefined
+  for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
+    if (isAssistantTokenDelta(member.chunk)) return member.time
+  }
+  return undefined
+}
+
+/** Return the latest provider usage embedded in a compact assistant stream. */
+export function usageFromAssistantStream(stream: readonly unknown[] | undefined): UsageLike | undefined {
+  if (stream === undefined) return undefined
+  let sample: UsageLike | undefined
+  for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
+    if (member.chunk.type === 'usage') sample = member.chunk.usage
+  }
+  return sample
+}
+
+/** Resolve the usage committed by one durable assistant settlement. Message
+ * records prefer their top-level usage; when it is absent, their embedded
+ * stream's final usage is authoritative. Attempt records always use the
+ * embedded stream because they have no top-level settlement usage. */
+export function usageFromAssistantSettlement(
+  kind: 'message' | 'attempt',
+  topLevelUsage: UsageLike | undefined,
+  stream: readonly unknown[] | undefined,
+): UsageLike | undefined {
+  return kind === 'message' && topLevelUsage !== undefined
+    ? topLevelUsage
+    : usageFromAssistantStream(stream)
+}
+
 /**
  * Per-step usage accounting shared by the session stats fold and the Focus
  * per-turn token projection. Feed it the same events in the same order and
@@ -71,12 +124,12 @@ function turnOfKey(key: string): number {
  * sum of the per-turn committed totals plus orphan usage — the invariant
  * that keeps `sum(per-turn) ≈ session` strict).
  *
- * Lifecycle: `onStepStart` opens a step; `onUsageChunk` records the LATEST
- * streaming usage (the assembler value is cumulative — later chunks
- * replace earlier ones); `onAssistantMessage` replaces it with the
- * authoritative usage; `onStepEnd` commits the step's usage once and drops
- * the open state. A usage fact with no open step counts immediately
- * (replay edge).
+ * Lifecycle: `onStepStart` opens an attempt; `onUsageChunk` records the
+ * LATEST streaming usage (the assembler value is cumulative — later chunks
+ * replace earlier ones); `onAssistantMessage` or `onAssistantAttempt` commits
+ * that attempt's authoritative usage; `onRetryStarted` opens a fresh
+ * replacement slot on the same (turn, step). A usage fact with no open step
+ * counts immediately (replay edge).
  */
 /** One usage fact with its provenance: authoritative (assistant/message)
  * or provisional (streaming chunk). */
@@ -209,6 +262,38 @@ export class StepUsageAccumulator {
     }
   }
 
+  /** Settle a failed attempt from its durable embedded stream. The attempt
+   * has no surface message, but its provider usage is still billed. Any live
+   * provisional value is replaced by the stream's last usage sample. */
+  onAssistantAttempt(turn: number, step: number, usage?: UsageLike): void {
+    this.noteTurn(turn)
+    if (this.staleTurn(turn)) return
+    const key = stepKey(turn, step)
+    const entry = this.perStep.get(key)
+    if (entry !== undefined) {
+      if (entry.usage !== undefined) this.subtractPending(turn, entry.usage)
+      this.perStep.delete(key)
+    }
+    if (usage !== undefined) this.commitSettled(turn, step, { usage, authoritative: true })
+  }
+
+  /** Close the current replacement slot before a retry opens the same
+   * (turn, step) again. The settled attempt remains in the totals; removing
+   * only the replacement record makes the retried attempt add rather than
+   * replace it. */
+  onRetryStarted(turn: number, step: number): void {
+    this.noteTurn(turn)
+    if (this.staleTurn(turn)) return
+    const key = stepKey(turn, step)
+    const entry = this.perStep.get(key)
+    if (entry !== undefined) {
+      if (entry.usage !== undefined) this.subtractPending(turn, entry.usage)
+      this.perStep.delete(key)
+    }
+    this.settledByStep.delete(key)
+    this.perStep.set(key, {})
+  }
+
   /** Advance the turn boundary: finalize the prior turn's still-open
    * steps and make its delayed facts stale. Called by the folds at
    * turn/start — a delayed usage event for the prior turn must not
@@ -252,6 +337,21 @@ export class StepUsageAccumulator {
       }
       this.perStep.delete(key)
     }
+  }
+
+  /** Discard an OPEN attempt's provisional accounting WITHOUT committing it
+   * when the live stream is abandoned and has no durable settlement. A
+   * durable `assistant/attempt` must use {@link onAssistantAttempt} instead,
+   * because its embedded stream carries real provider usage. An authoritative
+   * value (a durable `assistant/message` already settled the step) and a
+   * committed fact are never discarded — the durable log owns them. */
+  discardStep(turn: number, step: number): void {
+    if (this.staleTurn(turn)) return
+    const key = stepKey(turn, step)
+    const entry = this.perStep.get(key)
+    if (entry === undefined || entry.authoritative === true) return
+    if (entry.usage !== undefined) this.subtractPending(turn, entry.usage)
+    this.perStep.delete(key)
   }
 
   /** The committed per-turn totals (completed steps + orphan facts);
@@ -306,6 +406,11 @@ export class StepUsageAccumulator {
     pending.outputTokens -= usage.outputTokens
     pending.cacheReadTokens -= usage.cacheReadTokens ?? 0
     pending.cacheWriteTokens -= usage.cacheWriteTokens ?? 0
+    // A fully drained pending bucket is dropped so a turn with NO open
+    // usage reads as absent (never a fake `0 tok` segment).
+    if (pending.inputTokens === 0 && pending.outputTokens === 0 && pending.cacheReadTokens === 0 && pending.cacheWriteTokens === 0) {
+      this.turnPending.delete(turn)
+    }
   }
 
   /** A usage fact without an open step (replay edge) is a settled fact:

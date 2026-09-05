@@ -30,6 +30,7 @@ import { spawnSync } from 'node:child_process'
 import {
   cpSync,
   existsSync,
+  globSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -53,7 +54,7 @@ import {
   restoreDshInstall,
   sourceInstallPackages,
 } from './lib/dsh-distribution.mjs'
-import { cleanupTimedOutProcessTree, pnpmExecutable } from './lib/process.mjs'
+import { cleanupTimedOutProcessTree, pnpmBundledNodeGyp, pnpmExecutable } from './lib/process.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -807,8 +808,44 @@ function runPnpmInstall(harnessDir, env, distribution) {
     } catch (error) {
       fail('INFRA_INSTALL_FAILURE', error instanceof Error ? error.message : String(error))
     }
+    // The source-mode install runs with --ignore-scripts, so fs-ext's
+    // node-gyp build never ran; the JSONL backend needs the real flock
+    // addon to boot (official preset matrix boots dsh against this
+    // harness). Master's pnpm-workspace allowBuilds excludes fs-ext.
+    ensureFsExtBinding(harnessDir, env)
   }
   return prepared
+}
+
+/** Build the fs-ext native binding inside an installed harness when the
+ * source-mode install skipped it. Idempotent: a present binding is left
+ * alone. Fails the gate when the binding cannot be built (the backend
+ * cannot boot without it). pnpm keeps fs-ext inside its isolated store
+ * under node_modules/.pnpm, so the package directory is located by
+ * globbing, never by a hoisted top-level path. */
+function ensureFsExtBinding(harnessDir, env = process.env) {
+  const fsExtCandidates = globSync(join(harnessDir, 'node_modules', '.pnpm', 'fs-ext@*', 'node_modules', 'fs-ext'))
+  if (fsExtCandidates.length === 0) return
+  const fsExtDir = fsExtCandidates[0]
+  const binding = join(fsExtDir, 'build', 'Release', 'fs_ext.node')
+  if (existsSync(binding)) return
+  // pnpm/setup installs a self-contained pnpm executable with its runtime
+  // dependencies beside it. Prefer that bundled node-gyp: the runtime may not
+  // ship npm, and a runner-provided npm can target a different Node ABI.
+  let gyp = pnpmBundledNodeGyp(PNPM_COMMAND, env) ?? ''
+  if (gyp === '') {
+    // Keep the npm/PATH fallback for ordinary local and older pnpm installs.
+    const npmRoot = run('npm', ['root', '-g'], { env, timeout: 30_000, ignoreGateDeadline: true })
+    const npmGyp = npmRoot.status === 0 ? join(npmRoot.stdout.trim(), 'npm', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js') : ''
+    gyp = npmGyp !== '' && existsSync(npmGyp) ? npmGyp : 'node-gyp'
+  }
+  const buildEnv = { ...env, npm_config_ignore_scripts: 'false' }
+  const result = gyp === 'node-gyp'
+    ? run(gyp, ['configure', 'build'], { cwd: fsExtDir, env: buildEnv, timeout: 5 * 60_000, ignoreGateDeadline: true })
+    : run(process.execPath, [gyp, 'configure', 'build'], { cwd: fsExtDir, env: buildEnv, timeout: 5 * 60_000, ignoreGateDeadline: true })
+  if (result.status !== 0) {
+    fail('INFRA_INSTALL_FAILURE', `fs-ext native binding build failed:\n${resultText(result)}`)
+  }
 }
 
 function dshInvocation(harnessDir) {
@@ -893,7 +930,7 @@ function writeHeaderProbePackage(workDir) {
     '- insert:',
     '    - id: dsh-pi-tui-compat-header-probe',
     `      name: '${packageName}'`,
-    '      inject: [sessionPersistence]',
+    '      inject: [sessionQuery]',
     '',
   ].join('\n'), 'utf8')
   writeFileSync(join(probeDir, 'index.mjs'), [
@@ -906,12 +943,12 @@ function writeHeaderProbePackage(workDir) {
     '}',
     '',
     `export const name = '${packageName}'`,
-    "export const inject = ['sessionPersistence']",
+    "export const inject = ['sessionQuery']",
     '',
     'export function apply(ctx) {',
-    "  const persistence = ctx.get('sessionPersistence')",
-    "  if (persistence === undefined) {",
-    "    writeEvidence({ error: 'session persistence service unavailable' })",
+    "  const query = ctx.get('sessionQuery')",
+    "  if (query === undefined) {",
+    "    writeEvidence({ error: 'session query service unavailable' })",
     '    return',
     '  }',
     "  ctx.on('agent/created', ({ agent }) => {",
@@ -919,12 +956,18 @@ function writeHeaderProbePackage(workDir) {
     "    if (session === undefined || session.header?.origin === 'subagent') return",
     '    void (async () => {',
     '      try {',
-    "        if (typeof persistence.ensureMaterialized === 'function') await persistence.ensureMaterialized(session)",
-    '        const inspection = await persistence.inspect(session.id)',
-    '        writeEvidence({',
-    '          sessionId: String(inspection.meta.id),',
-    '          agentPreset: inspection.meta.agentPreset,',
-    '        })',
+    // The master baseline reads the durable header through the semantic
+    // session-query seam (observeSession) — raw persistence.inspect is
+    // removed legacy.
+    "        const observation = await query.observeSession(session.id, { projectionMode: 'none' })",
+    '        try {',
+    '          writeEvidence({',
+    '            sessionId: String(observation.header.id),',
+    '            agentPreset: observation.header.agentPreset,',
+    '          })',
+    '        } finally {',
+    "          observation[Symbol.dispose]?.()",
+    '        }',
     '      } catch (error) {',
     '        writeEvidence({',
     '          sessionId: String(session.id),',

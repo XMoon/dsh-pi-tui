@@ -67,7 +67,7 @@ export function consumeDraftImages(text: string, store: DraftImageStore): void {
  * the staged bytes in the store until capacity runs out — 16 stale
  * attachments then block the next /image with "Too many staged images".
  * Called BEFORE a new attach (the editor text at that moment is the truth
- * of what is still wanted). DRAFTS PINNED BY AN IN-FLIGHT SUBMISSION are
+ * of what is still wanted). Drafts pinned by an in-flight submission are
  * kept — the editor is cleared before dispatch, so an attach must never
  * delete the images a pending prepareUserMessage is about to admit
  * (review finding 1).

@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import {
@@ -123,7 +123,7 @@ test('sessionPickerItem marks the current session, subagents, forks, live', () =
 
 test('headerToPickerRow maps a header onto the row shape', () => {
   const row = headerToPickerRow({
-    version: 0, isSeeded: false,
+    version: SESSION_FORMAT_VERSION, isSeeded: false,
     id: SessionId('session-0123456789abcdef'),
     createdAt: 42,
     cwd: '/w',
@@ -142,7 +142,7 @@ test('headerToPickerRow maps a header onto the row shape', () => {
 
 test('headerToPickerRow preserves code until a roster-aware reader can disambiguate it', () => {
   const row = headerToPickerRow({
-    version: 0, isSeeded: false,
+    version: SESSION_FORMAT_VERSION, isSeeded: false,
     id: SessionId('session-legacy'),
     createdAt: 42,
     agentPreset: 'code',

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
  * Verify the shipped DSH preset assembly independently of any published
- * consumer bridge. This gate installs the exact currently validated DSH version
- * from test/compat/dsh-source.json, the candidate dsh-pi-tui package, and the
- * durable-header probe, then exercises standard/ptc/minimal/cordis through real
- * Agent/Session creation in tmux.
+ * consumer bridge. Source Mode installs the supplied pinned source pack; npm
+ * Mode installs the exact DSH version declared by this checkout's package.json.
+ * The gate then installs the candidate dsh-pi-tui package and durable-header
+ * probe, and exercises standard/ptc/minimal/cordis through real Agent/Session
+ * creation in tmux.
  *
  * Usage: node scripts/official-presets-smoke.mjs [path-to-candidate.tgz]
  *        pnpm smoke:official-presets -- [path-to-candidate.tgz]
@@ -37,6 +38,7 @@ import {
   DEFAULT_SOURCE_CONFIG,
   loadDshDistribution,
   loadDshSourceConfig,
+  npmDshVersion,
   validateDshSourceConfig,
 } from './lib/dsh-distribution.mjs'
 import { pnpmExecutable } from './lib/process.mjs'
@@ -89,8 +91,18 @@ async function main() {
   const tarball = resolveTarball(candidateArgument(smokeArgs))
   validateCandidateTarball(tarball)
   const distributionPath = distributionArgument(smokeArgs)
+  const configuredMode = process.env.DSH_MODE
+  if (configuredMode !== undefined && configuredMode !== 'source' && configuredMode !== 'npm') {
+    throw new Error(`unsupported DSH_MODE ${JSON.stringify(configuredMode)}; expected source or npm`)
+  }
+  if (configuredMode === 'source' && distributionPath === undefined) {
+    throw new Error('DSH_MODE=source requires --distribution')
+  }
+  if (configuredMode === 'npm' && distributionPath !== undefined) {
+    throw new Error('DSH_MODE=npm must not receive --distribution')
+  }
   const sourceConfig = sourceConfigForArgs(smokeArgs)
-  const targetDshVersion = sourceConfig?.expectedVersion ?? currentValidatedDshVersion()
+  const targetDshVersion = sourceConfig?.expectedVersion ?? npmDshVersion()
   const distribution = distributionPath === undefined
     ? loadDshDistribution({ mode: 'npm', version: targetDshVersion })
     : loadDshDistribution({
