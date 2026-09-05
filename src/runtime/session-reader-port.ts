@@ -49,11 +49,11 @@ export interface SessionProjectionSummary {
   readonly preset?: string
 }
 
-/** The raw materialized session log (the /export artifact). */
+/** A canonical logical committed Session serialization for /export. */
 export interface SessionExportData {
-  /** The physical log filename. */
+  /** A suggested client-local artifact filename. */
   filename: string
-  /** The verbatim JSONL content (decoded from its physical encoding). */
+  /** Canonical JSONL for the validated committed logical Session log. */
   content: string
 }
 
@@ -73,9 +73,10 @@ export type ExportReadResult =
 
 /** The session READ domain port. */
 export interface SessionReader {
-  /** List persisted sessions newest-first through the semantic session-query
-   * corpus. `undefined` = that listing capability is unavailable. `signal`
-   * cancels optional cache inspection without changing the row contract. */
+  /** List semantic session-query rows newest-first: live rows remain visible,
+   * while cold rows require cwd. `undefined` = that listing capability is
+   * unavailable. `signal` cancels optional cache inspection without changing
+   * the row contract. */
   list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined>
   /** Read the Host-owned DSH session projections (`title` + `agentPreset`)
    * for a batch of already-listed rows: one combined semantic read per
@@ -87,17 +88,17 @@ export interface SessionReader {
    * and must honor signal cancellation; an aborted signal rejects the whole
    * batch. */
   projectionBatch(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, SessionProjectionSummary>>
-  /** Search semantic session content for a query (bounded: newest 100
-   * sessions, first 20 hits). The Direct adapter uses SessionQuery when its
-   * semantic filter capability is available and only falls back to raw
-   * persistence when that capability is absent/explicitly disabled. */
+  /** Search semantic session content for a query (bounded: the newest 100
+   * cwd-bearing sessions, first 20 hits). The Direct adapter uses only the
+   * sessionQuery semantic filter capability; absent or explicitly disabled
+   * capability returns unavailable and never scans raw persistence. */
   search(query: string): Promise<SessionSearchHit[] | undefined>
   /** Best-effort context-pressure measurement for one session (the
    * /status context row). `undefined` = unmeasurable (service absent,
    * session unknown, or a measurement failure — never a crash). */
   measureContext(sessionId: string): number | undefined
-  /** The raw materialized session log for export (/export). The FILE WRITE
-   * stays a client-local export behavior — only the log READ is Host-owned
+  /** Export a canonical committed logical JSONL Session. The FILE WRITE stays
+   * a client-local behavior — only the committed log READ is Host-owned
    * (migration M1.11). */
   readExportData(sessionId: string): Promise<ExportReadResult>
 }
