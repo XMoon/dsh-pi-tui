@@ -3548,16 +3548,15 @@ export function registerTuiCommands(
           writeFileSync(target, renderTranscriptMarkdown(liveAgent.session))
           return { kind: 'success', text: `exported markdown transcript to ${target}` }
         }
-        // The raw artifact is the backend's verbatim JSONL (decoded from
-        // its physical encoding) — a faithful, portable session log. The
-        // log READ is a session-read semantic (migration M1.11); only the
-        // FILE WRITE below is client-local export behavior.
-        const raw = await runner.sessionReader.readExportData(liveAgent.session.id)
-        if (raw.kind === 'unavailable') return { kind: 'error', text: 'session persistence unavailable' }
-        if (raw.kind === 'none') return { kind: 'error', text: 'no materialized session log to export' }
-        if (raw.kind === 'error') return { kind: 'error', text: raw.message }
-        writeFileSync(target, raw.data.content)
-        return { kind: 'success', text: `exported ${raw.data.filename} to ${target}` }
+        // The committed logical Session read is semantic and canonical: the
+        // Host supplies validated v2 JSONL, while only the FILE WRITE below
+        // remains client-local export behavior (migration M1.11).
+        const exportData = await runner.sessionReader.readExportData(liveAgent.session.id)
+        if (exportData.kind === 'unavailable') return { kind: 'error', text: 'session persistence unavailable' }
+        if (exportData.kind === 'none') return { kind: 'error', text: 'session is not present in the active persistence backend' }
+        if (exportData.kind === 'error') return { kind: 'error', text: exportData.message }
+        writeFileSync(target, exportData.data.content)
+        return { kind: 'success', text: `exported ${exportData.data.filename} to ${target}` }
       } catch (error) {
         return { kind: 'error', text: safeErrorMessage(error) }
       }

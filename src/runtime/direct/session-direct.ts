@@ -36,7 +36,9 @@ import type { ExportReadResult, SessionProjectionSummary, SessionSearchHit, Sess
  * read off the live context at runtime.
  */
 export interface SessionQueryLike {
-  /** Returns master-visible rows: live rows plus cold rows with cwd. */
+  /** Returns the semantic live-preferred Session corpus from sessionQuery.
+   * ApiSessionList-compatible visibility policy is applied by this adapter:
+   * live rows remain visible; cold rows require cwd. */
   listSessions(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; live: boolean }>>
   /** One exact live or prepared logical Session observation for explicit
    * viewer/resume paths: header + complete validated event log, caller-owned.
@@ -415,8 +417,9 @@ export class DirectSessionReader implements SessionReader {
         },
       }
     } catch (error) {
-      // A REJECTED read (corrupt log, validation, I/O) is a real failure
-      // with a diagnostic — never misclassified as 'no materialized log'.
+      // A rejected committed logical Session read (corrupt log, validation,
+      // I/O) is a real failure with a diagnostic — never misclassified as
+      // absence.
       return { kind: 'error', message: safeErrorMessage(error) }
     } finally {
       // A successful read with a failed close is still a failed export: do not

@@ -7,13 +7,13 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, MessageId, type AssistantStreamRecord, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import { foldTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
-import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
+import type { AssistantLiveChunk, AssistantLiveContentBlock, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 
 /** Build a minimal event envelope for tests. The type parameter is widened
  * to any string so legacy v1 `assistant/chunk` events (absent from master's
@@ -1931,6 +1931,95 @@ test('partial tool-call attempt evidence preserves id, name, and arguments acros
   assert.equal(toolCall.name, 'bash')
   assert.equal(toolCall.arguments, '{"command":')
   assert.doesNotMatch(toolCall.arguments, /undefined/)
+})
+
+test('image-only assistant attempts preserve live/cold parity and interruption evidence', () => {
+  const image = {
+    type: 'image' as const,
+    attachment: {
+      attachmentId: 'att-attempt-image' as never,
+      mediaType: 'image/png',
+      bytes: 100,
+      width: 1920,
+      height: 1080,
+      name: 'attempt.png',
+    },
+  } as const
+  const durableImage = image as unknown as ContentBlock
+  const liveImage = image as unknown as AssistantLiveContentBlock
+  const stream: AssistantStreamRecord[] = [{
+    type: 'chunk',
+    time: 2,
+    chunk: { type: 'block-end', index: 0, block: durableImage },
+  }]
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const attempt = event('assistant/attempt', { turn: 0, step: 0, stream }, 3)
+  const end = event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 4)
+  const live = new TranscriptFolder()
+  live.apply(prefix)
+  live.applyLiveInput(liveChunk(0, 0, { type: 'block-end', index: 0, block: liveImage }, 2))
+  live.apply([attempt, end])
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, attempt, end])
+  assert.deepEqual(live.messages(), cold.messages())
+  const assistant = cold.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.interrupted, true)
+  assert.deepEqual(assistant.content, [durableImage])
+  const assistantImage = assistant.content?.[0]
+  assert.ok(assistantImage !== undefined && assistantImage.type === 'image')
+  assert.deepEqual(assistantImage.attachment, image.attachment)
+})
+
+test('tool-call-only assistant attempts stay hidden until the closed boundary', () => {
+  const callId = ToolCallId('call-delayed')
+  const stream = [
+    { type: 'chunk' as const, time: 2, chunk: { type: 'block-start' as const, index: 0, blockType: 'tool-call' as const } },
+    { type: 'chunk' as const, time: 3, chunk: { type: 'tool-call-delta' as const, index: 0, id: callId, name: 'bash', argumentsDelta: '{"command":"pwd"}' } },
+  ]
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const attempt = event('assistant/attempt', { turn: 0, step: 0, stream }, 4)
+  const folder = new TranscriptFolder()
+  folder.apply([...prefix, attempt])
+  assert.equal(folder.messages().some(message => message.kind === 'assistant'), false)
+  const end = event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5)
+  folder.apply([end])
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, attempt, end])
+  assert.deepEqual(folder.messages(), cold.messages())
+  const assistant = cold.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.interrupted, true)
+  const toolCall = assistant.content?.find(block => block.type === 'tool-call')
+  assert.ok(toolCall !== undefined && toolCall.type === 'tool-call')
+  assert.equal(toolCall.id, callId)
+  assert.equal(toolCall.name, 'bash')
+  assert.equal(toolCall.arguments, '{"command":"pwd"}')
+})
+
+test('generic finalized attempt blocks remain interruption evidence', () => {
+  const futureBlock = { type: 'future-block', payload: { revision: 1, value: 'kept' } } as unknown as ContentBlock
+  const stream: AssistantStreamRecord[] = [{
+    type: 'chunk',
+    time: 2,
+    chunk: { type: 'block-end', index: 0, block: futureBlock },
+  }]
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 1),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 2),
+  ])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.interrupted, true)
+  assert.deepEqual(assistant.content, [futureBlock])
 })
 
 test('a durable assistant/attempt with only block-end evidence reopens as interrupted content', () => {
