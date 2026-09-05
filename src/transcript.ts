@@ -18,7 +18,7 @@
 
 import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-import { expandAssistantStream, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { expandAssistantStream, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
 import type { IconSemantic } from './icons.ts'
 import { firstLine, latestLine, type JsonValue } from './present.ts'
@@ -363,6 +363,104 @@ function stepKey(turn: number, step: number): string {
   return `${turn}/${step}`
 }
 
+type AssistantBlockState =
+  | { kind: 'text'; text: string }
+  | { kind: 'reasoning'; text: string }
+  | { kind: 'tool-call'; id: string; name: string; arguments: string }
+  | { kind: 'complete'; block: AssistantLiveContentBlock | ContentBlock }
+  | { kind: 'opaque'; blockType: string }
+
+type AssistantBlockChunk =
+  | { readonly type: 'block-start'; readonly index: number; readonly blockType: string }
+  | { readonly type: 'text-delta'; readonly index: number; readonly text: string }
+  | { readonly type: 'reasoning-delta'; readonly index: number; readonly text: string }
+  | { readonly type: 'tool-call-delta'; readonly index: number; readonly id: string; readonly name?: string; readonly argumentsDelta: string }
+  | { readonly type: 'block-end'; readonly index: number; readonly block: AssistantLiveContentBlock | ContentBlock }
+
+/** Start one typed partial block without pretending it is a finalized block. */
+function emptyAssistantBlockState(blockType: string): AssistantBlockState {
+  switch (blockType) {
+    case 'text': return { kind: 'text', text: '' }
+    case 'reasoning': return { kind: 'reasoning', text: '' }
+    case 'tool-call': return { kind: 'tool-call', id: '', name: '', arguments: '' }
+    default: return { kind: 'opaque', blockType }
+  }
+}
+
+/**
+ * Apply the shared block-folding semantics used by both transient live input
+ * and durable embedded assistant streams. A numeric upstream index owns one
+ * state at a time; block-end replaces that state authoritatively.
+ */
+function applyAssistantBlockChunk(blocks: Map<number, AssistantBlockState>, chunk: AssistantBlockChunk): void {
+  switch (chunk.type) {
+    case 'block-start':
+      blocks.set(chunk.index, emptyAssistantBlockState(chunk.blockType))
+      break
+    case 'text-delta': {
+      const previous = blocks.get(chunk.index)
+      blocks.set(chunk.index, {
+        kind: 'text',
+        text: previous?.kind === 'text' ? previous.text + chunk.text : chunk.text,
+      })
+      break
+    }
+    case 'reasoning-delta': {
+      const previous = blocks.get(chunk.index)
+      blocks.set(chunk.index, {
+        kind: 'reasoning',
+        text: previous?.kind === 'reasoning' ? previous.text + chunk.text : chunk.text,
+      })
+      break
+    }
+    case 'tool-call-delta': {
+      const previous = blocks.get(chunk.index)
+      const base = previous?.kind === 'tool-call'
+        ? previous
+        : { kind: 'tool-call' as const, id: '', name: '', arguments: '' }
+      blocks.set(chunk.index, {
+        kind: 'tool-call',
+        id: base.id || chunk.id,
+        name: chunk.name ?? base.name,
+        arguments: base.arguments + chunk.argumentsDelta,
+      })
+      break
+    }
+    case 'block-end':
+      blocks.set(chunk.index, { kind: 'complete', block: chunk.block })
+      break
+  }
+}
+
+/** Preserve an already-authoritative block-end payload without using a
+ * finalized ContentBlock shape for incomplete block-start state. The live port
+ * is intentionally structural and the adapter guarantees block-end payloads
+ * are complete official blocks. */
+function authoritativeContentBlock(block: AssistantLiveContentBlock | ContentBlock): ContentBlock {
+  return block as unknown as ContentBlock
+}
+
+function assistantContentFromBlockState(state: AssistantBlockState): ContentBlock | undefined {
+  switch (state.kind) {
+    case 'text': return { type: 'text', text: state.text }
+    case 'reasoning': return { type: 'reasoning', text: state.text }
+    case 'tool-call':
+      return state.id === ''
+        ? undefined
+        : { type: 'tool-call', id: ToolCallId(state.id), name: state.name, arguments: state.arguments }
+    case 'complete': return authoritativeContentBlock(state.block)
+    case 'opaque': return undefined
+  }
+}
+
+/** Project indexed block state in stable upstream index order. */
+function assistantContentFromBlocks(blocks: Map<number, AssistantBlockState>): ContentBlock[] {
+  return [...blocks.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, state]) => assistantContentFromBlockState(state))
+    .filter((block): block is ContentBlock => block !== undefined)
+}
+
 /**
  * The turn threshold at or above which entries count as "recent": the
  * `recentTurns` most recent distinct turns among the given message kinds.
@@ -514,7 +612,7 @@ export class TranscriptFolder {
   /** In-flight live block state keyed by logical step. This is required for
    * authoritative block-end replacement: deltas may be partial, while a
    * completed block replaces the entire indexed state without duplication. */
-  private readonly liveAssistantBlocks = new Map<string, Map<string, AssistantLiveContentBlock>>()
+  private readonly liveAssistantBlocks = new Map<string, Map<number, AssistantBlockState>>()
   /** Assistant entries created by the LIVE stream path and not yet taken
    * over by a durable settlement. Attempt evidence remains transient until
    * retry or turn end; abandoned attempts have no durable surface and are
@@ -1483,55 +1581,11 @@ export class TranscriptFolder {
     const blocks = this.liveBlocksFor(turn, step)
     switch (chunk.type) {
       case 'block-start':
-        for (const lane of blocks.keys()) {
-          if (lane.startsWith(`${chunk.index}:`)) blocks.delete(lane)
-        }
-        blocks.set(`${chunk.index}:${chunk.blockType}`, { type: chunk.blockType })
-        this.syncLiveAssistantPresentation(turn, step)
-        break
-      case 'text-delta': {
-        const lane = `${chunk.index}:text`
-        const previous = blocks.get(lane)
-        const previousText = previous?.type === 'text' && 'text' in previous && typeof previous.text === 'string'
-          ? previous.text
-          : ''
-        blocks.set(lane, { type: 'text', text: previousText + chunk.text })
-        this.syncLiveAssistantPresentation(turn, step)
-        break
-      }
-      case 'reasoning-delta': {
-        const lane = `${chunk.index}:reasoning`
-        const previous = blocks.get(lane)
-        const previousText = previous?.type === 'reasoning' && 'text' in previous && typeof previous.text === 'string'
-          ? previous.text
-          : ''
-        blocks.set(lane, { type: 'reasoning', text: previousText + chunk.text })
-        this.syncLiveAssistantPresentation(turn, step)
-        break
-      }
-      case 'tool-call-delta': {
-        const lane = `${chunk.index}:tool-call`
-        const previous = blocks.get(lane)
-        const previousTool = previous?.type === 'tool-call'
-          && typeof (previous as { arguments?: unknown }).arguments === 'string'
-          ? previous as { type: 'tool-call'; id: string; name: string; arguments: string }
-          : undefined
-        blocks.set(lane, {
-          type: 'tool-call',
-          id: previousTool?.id || chunk.id,
-          name: chunk.name ?? previousTool?.name ?? '',
-          arguments: (previousTool?.arguments ?? '') + chunk.argumentsDelta,
-        })
-        this.syncLiveAssistantPresentation(turn, step)
-        break
-      }
+      case 'text-delta':
+      case 'reasoning-delta':
+      case 'tool-call-delta':
       case 'block-end':
-        // The completed block is authoritative: replace the indexed partial
-        // state instead of appending its contents a second time.
-        for (const lane of blocks.keys()) {
-          if (lane.startsWith(`${chunk.index}:`)) blocks.delete(lane)
-        }
-        blocks.set(`${chunk.index}:${chunk.block.type}`, chunk.block)
+        applyAssistantBlockChunk(blocks, chunk)
         this.syncLiveAssistantPresentation(turn, step)
         break
       case 'usage':
@@ -1545,8 +1599,8 @@ export class TranscriptFolder {
     }
   }
 
-  /** Return the current live blocks in stable stream order. */
-  private liveBlocksFor(turn: number, step: number): Map<string, AssistantLiveContentBlock> {
+  /** Return the current live block state in stable upstream index order. */
+  private liveBlocksFor(turn: number, step: number): Map<number, AssistantBlockState> {
     const key = stepKey(turn, step)
     let blocks = this.liveAssistantBlocks.get(key)
     if (blocks === undefined) {
@@ -1573,15 +1627,9 @@ export class TranscriptFolder {
   /** Project the current live block map without duplicating block-end text. */
   private syncLiveAssistantPresentation(turn: number, step: number): void {
     const key = stepKey(turn, step)
-    const blocks = [...this.liveBlocksFor(turn, step).entries()]
-      .sort(([left], [right]) => Number(left.slice(0, left.indexOf(':'))) - Number(right.slice(0, right.indexOf(':'))))
-      .map(([, block]) => block)
-    let text = ''
-    let hasImage = false
-    for (const block of blocks) {
-      if (block.type === 'text' && 'text' in block && typeof block.text === 'string') text += block.text
-      if (block.type === 'image') hasImage = true
-    }
+    const blocks = assistantContentFromBlocks(this.liveBlocksFor(turn, step))
+    const text = textOf(blocks)
+    const hasImage = blocks.some(block => block.type === 'image')
     const entry = this.assistantEntries.get(key)
     if (text === '' && !hasImage) {
       if (entry !== undefined && this.transientAssistantEntries.has(entry)) this.hideTransientAssistantEntry(turn, step)
@@ -1592,18 +1640,16 @@ export class TranscriptFolder {
       this.attemptAssistantEntries.delete(target)
       this.hiddenAssistantEntries.delete(target)
       target.text = text
-      target.content = blocks.some(block => block.type !== 'text')
-        ? blocks as unknown as readonly ContentBlock[]
-        : undefined
+      target.content = blocks.some(block => block.type !== 'text') ? blocks : undefined
       target.interrupted = undefined
       this.markStreamingEntryDirty(`assistant:${key}`)
       this.replaceMessageCandidate(this.activityFor(turn), step, text)
     }
 
-    let reasoning = ''
-    for (const block of blocks) {
-      if (block.type === 'reasoning' && 'text' in block && typeof block.text === 'string') reasoning += block.text
-    }
+    const reasoning = blocks
+      .filter((block): block is Extract<ContentBlock, { type: 'reasoning' }> => block.type === 'reasoning')
+      .map(block => block.text)
+      .join('')
     const thinkingKey = `thinking:${key}`
     if (reasoning === '') {
       this.hideThinkingEntry(turn, step)
@@ -1619,54 +1665,27 @@ export class TranscriptFolder {
   }
 
   /** Reconstruct the authoritative assistant blocks from one compact stream.
-   * Delta chunks are accumulated by block index, while each block-end replaces
-   * that index with the complete assembled block. This keeps durable replay
-   * faithful without appending a block-end payload twice after its deltas. */
+   * The durable path intentionally uses the same indexed state accumulator as
+   * live input, so partial attempt evidence and block-end replacement cannot
+   * drift between live and cold replay. */
   private assistantBlocksFromStream(stream: readonly unknown[]): ContentBlock[] {
-    const blocks: Array<ContentBlock | undefined> = []
+    const blocks = new Map<number, AssistantBlockState>()
     for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
       const chunk = member.chunk
       switch (chunk.type) {
         case 'block-start':
-          blocks[chunk.index] = { type: chunk.blockType } as ContentBlock
-          break
-        case 'text-delta': {
-          const previous = blocks[chunk.index]
-          blocks[chunk.index] = {
-            type: 'text',
-            text: previous?.type === 'text' ? previous.text + chunk.text : chunk.text,
-          }
-          break
-        }
-        case 'reasoning-delta': {
-          const previous = blocks[chunk.index]
-          blocks[chunk.index] = {
-            type: 'reasoning',
-            text: previous?.type === 'reasoning' ? previous.text + chunk.text : chunk.text,
-          }
-          break
-        }
-        case 'tool-call-delta': {
-          const previous = blocks[chunk.index]
-          const base = previous?.type === 'tool-call'
-            ? previous
-            : { type: 'tool-call' as const, id: chunk.id, name: '', arguments: '' }
-          blocks[chunk.index] = {
-            type: 'tool-call',
-            id: base.id || chunk.id,
-            name: chunk.name ?? base.name,
-            arguments: base.arguments + chunk.argumentsDelta,
-          }
-          break
-        }
+        case 'text-delta':
+        case 'reasoning-delta':
+        case 'tool-call-delta':
         case 'block-end':
-          blocks[chunk.index] = chunk.block
+          applyAssistantBlockChunk(blocks, chunk)
           break
-        default:
+        case 'usage':
+        case 'finish':
           break
       }
     }
-    return blocks.filter((block): block is ContentBlock => block !== undefined)
+    return assistantContentFromBlocks(blocks)
   }
 
   /** Restore a SETTLED thinking entry from a durable embedded stream

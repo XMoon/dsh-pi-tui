@@ -1356,7 +1356,7 @@ test('Focus collapsed Preparing temporarily overrides the formal Tool slot', () 
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: 'think' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/foo.ts' }) }, 1002, 2),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'message' } }, 1003, 3),
   ])
@@ -1387,7 +1387,7 @@ test('the collapsed body renders the three slots in fixed order — Think, Tool,
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: '这应该是 presenter fallback。' } }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: '这应该是 presenter fallback。' } }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '我已经找到 skill 的特殊处理。' } }, 1002, 2),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/present.ts' }) }, 1003, 3),
   ])
@@ -1423,7 +1423,7 @@ test('the Message slot is the THIRD process slot: Think, Tool, Message', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: 'think' } }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'message body' } }, 1002, 2),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'read', arguments: '{}' }, 1003, 3),
   ])
@@ -1696,7 +1696,7 @@ test('focusCollapsedBody keeps a multiline Tool slot on ONE physical row (ghost-
 test('every compact slot is ONE physical row even with multiline input (ghost-row fix, plan §6.3)', () => {
   const activity = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first think line\nsecond think line' } }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: 'first think line\nsecond think line' } }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'first message line\r\nsecond message line' } }, 1002, 2),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1003, 3),
     eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'E', message: 'first error line\nsecond error line' } } }, 2000, 4),

@@ -642,10 +642,10 @@ test('interleaved reasoning and text deltas search their OWN entries (namespaced
   const folder = new TranscriptFolder()
   applyLive(folder, [
     turnStart(0, 0),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning-corpse marker' } }, 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: 'reasoning-corpse marker' } }, 1),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'assistant-corpse marker' } }, 2),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: ' more reasoning deltas' } }, 3),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 1, text: ' more text deltas' } }, 4),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: ' more text deltas' } }, 4),
   ])
   assertCorpusParity(folder, ['reasoning-corpse', 'assistant-corpse', 'more reasoning', 'more text'])
   // Parity catches the contamination vector: a reasoning-only needle must
