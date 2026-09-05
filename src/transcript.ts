@@ -20,6 +20,7 @@ import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expandAssistantStream, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
+import { displayFailure, displayFailureText } from './failure-presentation.ts'
 import type { IconSemantic } from './icons.ts'
 import { firstLine, latestLine, type JsonValue } from './present.ts'
 import {
@@ -995,7 +996,7 @@ export class TranscriptFolder {
         this.appendTurnIndex(turn)
       }
     }
-    if (turn !== undefined) this.addGroupedTurn(turn)
+    if (turn !== undefined && message.kind !== 'assistant') this.addGroupedTurn(turn)
     if (message.kind === 'tool') this.groupedToolCount += 1
     return index
   }
@@ -1169,6 +1170,26 @@ export class TranscriptFolder {
     }
     if (item.kind === 'thinking') return !this.hiddenThinkingEntries.has(item)
     return true
+  }
+
+  /**
+   * Apply one Assistant visibility transition to every derived projection.
+   * Authoritative hidden entries stay in `items`, but their grouped-turn and
+   * search memberships follow the same edge in one place.
+   */
+  private syncAssistantVisibility(
+    turn: number,
+    step: number,
+    item: Extract<TranscriptMessage, { kind: 'assistant' }>,
+    wasVisible: boolean,
+    markSearchDirty = true,
+  ): void {
+    const visible = this.isVisible(item)
+    if (visible === wasVisible) return
+    if (markSearchDirty) this.markStreamingEntryDirty(`assistant:${stepKey(turn, step)}`)
+    if (this.groupedTurnIndexDirty) return
+    if (visible) this.addGroupedTurn(turn)
+    else this.removeGroupedTurn(turn)
   }
 
   /** Ensure exact grouped-turn counts before a cross-turn projection. */
@@ -1549,6 +1570,7 @@ export class TranscriptFolder {
     const key = stepKey(turn, step)
     const entry = this.assistantEntries.get(key)
     if (entry === undefined || !this.transientAssistantEntries.has(entry)) return
+    const wasVisible = this.isVisible(entry)
     this.assistantEntries.delete(key)
     entry.text = ''
     entry.content = undefined
@@ -1557,7 +1579,7 @@ export class TranscriptFolder {
     this.attemptAssistantEntries.delete(entry)
     this.hiddenAssistantEntries.add(entry)
     this.markStreamingEntryDirty(`assistant:${key}`)
-    this.removeGroupedTurn(entry.turn)
+    this.syncAssistantVisibility(turn, step, entry, wasVisible, false)
   }
 
   /** A failed live attempt has no durable evidence and is therefore
@@ -1676,6 +1698,7 @@ export class TranscriptFolder {
     const visibleNow = assistantBlocksVisibleNow(blocks)
     if (step >= (activity.lastAssistantStep ?? -1)) activity.lastAssistantVisible = visibleNow
     const entry = this.assistantEntries.get(key)
+    const wasVisible = entry !== undefined && this.isVisible(entry)
     if (!visibleNow) {
       if (entry !== undefined && this.transientAssistantEntries.has(entry)) this.hideTransientAssistantEntry(turn, step)
       this.replaceMessageCandidate(activity, step, '')
@@ -1689,6 +1712,7 @@ export class TranscriptFolder {
       target.interrupted = undefined
       this.markStreamingEntryDirty(`assistant:${key}`)
       this.replaceMessageCandidate(activity, step, text)
+      this.syncAssistantVisibility(turn, step, target, wasVisible, false)
     }
 
     const reasoning = blocks
@@ -1769,6 +1793,7 @@ export class TranscriptFolder {
     const text = textOf(blocks)
     const key = stepKey(turn, step)
     const existing = this.assistantEntries.get(key)
+    const wasVisible = existing !== undefined && this.isVisible(existing)
     if (!visibleNow && !hasEvidence) {
       // A live prefix may be the only evidence when the compact settlement
       // carries no visible blocks. Keep that prefix as attempt evidence
@@ -1786,21 +1811,22 @@ export class TranscriptFolder {
     entry.content = blocks.some(block => block.type !== 'text') ? blocks : undefined
     entry.interrupted = undefined
     this.markStreamingEntryDirty(`assistant:${key}`)
-    // Assistant block visibility can change independently of entry ownership;
-    // defer the grouped-turn projection to its next bounded rebuild.
-    this.groupedTurnIndexDirty = true
+    this.syncAssistantVisibility(turn, step, entry, wasVisible, false)
   }
 
   /** Mark durable attempt evidence visible at the closed boundary. Empty and
    * reasoning-only attempts remain hidden; tool-call and generic finalized
    * blocks become interrupted assistant evidence here, not while running. */
-  private markAttemptEvidenceInterrupted(turn: number): void {
-    for (const item of this.items) {
-      if (item.kind !== 'assistant' || item.turn !== turn || !this.attemptAssistantEntries.has(item)) continue
+  private markAttemptEvidenceInterrupted(turn: number, step?: number): void {
+    for (const [key, item] of this.assistantEntries) {
+      if (item.turn !== turn || !this.attemptAssistantEntries.has(item)) continue
+      const itemStep = Number(key.slice(key.indexOf('/') + 1))
+      if (step !== undefined && itemStep !== step) continue
       if (!assistantBlocksHaveInterruptionEvidence(assistantEntryBlocks(item))) continue
       if (this.hiddenAssistantEntries.has(item)) continue
+      const wasVisible = this.isVisible(item)
       item.interrupted = true
-       this.groupedTurnIndexDirty = true
+      this.syncAssistantVisibility(turn, itemStep, item, wasVisible)
     }
   }
 
@@ -2389,6 +2415,9 @@ export class TranscriptFolder {
         // a late step/end (replay artifact) is a no-op (review finding).
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
+        // A failed attempt closes at step/end even when the turn continues;
+        // expose its preserved evidence without waiting for turn/end.
+        this.markAttemptEvidenceInterrupted(event.data.turn, event.data.step)
         this.usage.onStepEnd(event.data.turn, event.data.step)
         this.syncUsage(activity)
         break
@@ -2463,6 +2492,7 @@ export class TranscriptFolder {
         const messageBlocks = event.data.message.content
         const text = textOf(messageBlocks)
         const entry = this.assistantEntries.get(key)
+        const wasVisible = entry !== undefined && this.isVisible(entry)
         if (entry !== undefined) {
           entry.text = text
           // The durable message takes over the live/attempt entry: it is no
@@ -2497,6 +2527,8 @@ export class TranscriptFolder {
           // finding — the streaming-created path already registers).
           this.searchIndexByStepKey.set(`assistant:${key}`, this.appendItem(created))
         }
+        const settledEntry = this.assistantEntries.get(key)
+        if (settledEntry !== undefined) this.syncAssistantVisibility(event.data.turn, event.data.step, settledEntry, wasVisible, false)
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.
         // On a COLD replay no live reasoning deltas ever arrived — the
@@ -2571,9 +2603,7 @@ export class TranscriptFolder {
         }
         this.syncMessage(activity)
         this.usage.onAssistantMessage(event.data.turn, event.data.step, messageUsage)
-        // Settled Assistant content can become hidden without deleting its
-        // authoritative entry; rebuild bounded turn projections lazily.
-        this.groupedTurnIndexDirty = true
+        // Settled Assistant visibility was synchronized above without deleting its authoritative entry.
         this.syncUsage(activity)
         activity.revision += 1
         break
@@ -2721,7 +2751,7 @@ export class TranscriptFolder {
           // degrades to the bare marker instead of crashing the fold
           // (plan §10.2 — Focus aggregates the same events).
           const error = event.data.reason.error
-          this.appendItem({ kind: 'tool', turn: endTurn, name: 'error', args: '', result: error === undefined ? 'error' : `${error.code}: ${error.message}`, status: 'error' })
+          this.appendItem({ kind: 'tool', turn: endTurn, name: 'error', args: '', result: displayFailureText(error), status: 'error' })
         } else if (event.data.reason.kind === 'aborted') {
           this.appendItem({ kind: 'tool', turn: endTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error' })
         } else if (event.data.reason.kind === 'max-tokens') {
@@ -2742,7 +2772,10 @@ export class TranscriptFolder {
           ...(reasonError === undefined ? {} : {
             error: {
               code: typeof reasonError.code === 'string' ? reasonError.code : String(reasonError.code ?? ''),
-              message: typeof reasonError.message === 'string' ? reasonError.message : String(reasonError.message ?? ''),
+              message: displayFailure({
+                code: typeof reasonError.code === 'string' ? reasonError.code : String(reasonError.code ?? ''),
+                message: typeof reasonError.message === 'string' ? reasonError.message : String(reasonError.message ?? ''),
+              }).message,
             },
           }),
         }
@@ -2825,7 +2858,7 @@ export class TranscriptFolder {
         const label = maxRetries === undefined
           ? `llm retry ${retry} in ${Math.round(delayMs / 1000)}s`
           : `llm retry ${retry}/${maxRetries} in ${Math.round(delayMs / 1000)}s`
-        this.appendItem({ kind: 'system', turn, text: `${label} — ${failure.code}: ${failure.message}` })
+        this.appendItem({ kind: 'system', turn, text: `${label} — ${displayFailureText(failure)}` })
         // Focus aggregation: retries are orchestration, not a Tool — they
         // stay in the expanded process and never touch the Tool slot
         // (plan §16.2).

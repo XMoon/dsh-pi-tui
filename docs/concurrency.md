@@ -41,6 +41,12 @@ The TUI keeps DSH's two Session v2 event planes distinct:
   durable settlement, and is not used as a second persistence format. Its
   `block-end` control carries the completed content block; the TUI replaces
   that block index in the live projection rather than appending a duplicate.
+  The Direct adapter also retains the active prefix per exact live Agent for a
+  late subagent-viewer attach, clears it at end/restart/disposal, and never
+  writes that transient baseline to the durable Session. A continuable child
+  viewer follows the current registered Agent lifecycle, so a same-session
+  cold-resume after disposal rebinds to the new Agent while delayed frames from
+  the retired Agent remain fenced.
 
 The session picker consumes the semantic list and zero-I/O projection-cache
 seams only. It never observes a cold Session merely to fill a label and never

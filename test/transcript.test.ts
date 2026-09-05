@@ -201,7 +201,7 @@ test('turn/end error renders a failure line', () => {
   const tool = messages[0]
   assert.ok(tool !== undefined && tool.kind === 'tool')
   assert.equal(tool.name, 'error')
-  assert.equal(tool.result, 'AUTH: boom')
+  assert.equal(tool.result, 'authentication failed')
 })
 
 test('command/run + command/done fold into an executed line', () => {
@@ -1057,6 +1057,36 @@ test('llm/retry folds into a system line with the delay', () => {
   assert.ok(entry !== undefined && entry.kind === 'system')
   assert.ok(entry.text.includes('llm retry 1/2 in 3s'), `text:\n${entry.text}`)
   assert.ok(entry.text.includes('RATE_LIMITED'), `text:\n${entry.text}`)
+})
+
+test('AUTH failures use generic presentation text without leaking durable messages', () => {
+  const retry = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('llm/retry', {
+      retryId: 'auth-retry', turn: 0, step: 0, provider: 'deepseek', mode: 'normal',
+      policyKey: 'k', retry: 1, maxRetries: 2, delayMs: 3000,
+      failure: { message: 'secret-provider-credential', code: 'AUTH' },
+    }, 1),
+  ])
+  const retryRow = retry[0]
+  assert.ok(retryRow !== undefined && retryRow.kind === 'system')
+  assert.equal(retryRow.text, 'llm retry 1/2 in 3s — authentication failed')
+  assert.doesNotMatch(retryRow.text, /secret-provider-credential/)
+
+  const turn = foldTranscript([
+    event('turn/end', { turn: 0, reason: { kind: 'error', error: { message: 'secret-provider-credential', code: 'AUTH' } } }, 0),
+  ])
+  const turnRow = turn[0]
+  assert.ok(turnRow !== undefined && turnRow.kind === 'tool')
+  assert.equal(turnRow.result, 'authentication failed')
+  assert.doesNotMatch(turnRow.result, /secret-provider-credential/)
+
+  const server = foldTranscript([
+    event('turn/end', { turn: 0, reason: { kind: 'error', error: { message: 'provider down', code: 'SERVER' } } }, 0),
+  ])
+  const serverRow = server[0]
+  assert.ok(serverRow !== undefined && serverRow.kind === 'tool')
+  assert.equal(serverRow.result, 'SERVER: provider down')
 })
 
 test('max-tokens turn end folds into a notice', () => {
@@ -2036,10 +2066,21 @@ test('tool-call-only assistant attempts stay hidden until the closed boundary', 
   const folder = new TranscriptFolder()
   folder.apply([...prefix, attempt])
   assert.equal(folder.messages().some(message => message.kind === 'assistant'), false)
-  const end = event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5)
+  const beforeRevision = folder.searchRevision()
+  const beforeWindow = folder.window({ maxTurns: 1 })
+  assert.equal(beforeWindow.messages.some(message => message.kind === 'assistant'), false)
+  const stepEnd = event('step/end', { turn: 0, step: 0 }, 5)
+  folder.apply([stepEnd])
+  const afterStepEnd = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(afterStepEnd !== undefined && afterStepEnd.kind === 'assistant')
+  assert.equal(afterStepEnd.interrupted, true)
+  assert.ok(folder.searchRevision() > beforeRevision)
+  const afterWindow = folder.window({ maxTurns: 1 })
+  assert.ok(afterWindow.messages.some(message => message.kind === 'assistant'))
+  const end = event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 6)
   folder.apply([end])
   const cold = new TranscriptFolder()
-  cold.hydrate([...prefix, attempt, end])
+  cold.hydrate([...prefix, attempt, stepEnd, end])
   assert.deepEqual(folder.messages(), cold.messages())
   const assistant = cold.messages().find(message => message.kind === 'assistant')
   assert.ok(assistant !== undefined && assistant.kind === 'assistant')

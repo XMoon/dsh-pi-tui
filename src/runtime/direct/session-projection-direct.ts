@@ -9,8 +9,8 @@
  * module consumes exactly those official semantics and never folds a second
  * copy of either:
  *
- * 1. live session  → the `title` comes from `sessionProjections.snapshot()`
- *    (in-memory, zero I/O); the preset prefers the agent's CURRENT composed
+ * 1. live session  → already-materialized values come from
+ *    `sessionProjections.cachedSnapshot()` (in-memory, zero I/O); the preset prefers the agent's CURRENT composed
  *    roster entry (`agentPresets.composedPreset()`) — a deliberate
  *    live-only exception: the running Agent's actual composition is the
  *    authoritative effective preset even while it trails or leads the
@@ -50,7 +50,8 @@ export interface SessionListMetadataLike {
 /** The official live projection read surface (structural subset of
  * `sessionProjections` — the value table carries both keys). */
 export interface SessionProjectionReaderLike {
-  snapshot(
+  /** Read only already-materialized cells; never fold the live Session. */
+  cachedSnapshot(
     session: Session,
     keys?: readonly ProjectionKey[],
   ): { readonly values?: {
@@ -150,8 +151,8 @@ function safeCachedSnapshot(
   }
 }
 
-/** The live fast path: title from the official projection snapshot over the
- * in-memory log (zero I/O), preset from the authoritative composed
+/** The live fast path: title and cached fallback preset from already-materialized
+ * projection cells (zero history folding), with preset first from the authoritative composed
  * composition (a DELIBERATE live-only exception: the composed roster entry
  * reflects the running Agent's actual composition, which can trail or lead
  * the durable projection during a switch; the projection value remains the
@@ -179,8 +180,9 @@ function liveProjection(
   let title: string | undefined
   if (live !== undefined && projections !== undefined) {
     try {
-      const values = projections.snapshot(live.session, ['title'])?.values
+      const values = projections.cachedSnapshot(live.session, ['title', 'agentPreset'])?.values
       if (typeof values?.title === 'string') title = values.title
+      if (preset === undefined && typeof values?.agentPreset === 'string') preset = values.agentPreset
     } catch {
       // A live session being torn down is not a picker error; the preset or
       // the short-id presentation still applies.
@@ -211,13 +213,18 @@ export async function projectionBatch(
   const cache = deps.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
   const presets = deps.ctx.get('agentPresets') as PresetsServiceLike | undefined
 
-  // (1) Live rows: the in-memory projection cut is authoritative and free.
+  // (1) Live rows: only the live branch may read live composed/cached values.
+  // A live row with no cached title must never fall through to a cold cache
+  // hint, which could expose stale persisted metadata.
+  const coldRows: SessionSummary[] = []
   for (const row of deps.rows) {
-    const live = liveProjection(deps, projections, row.id)
-    if (live !== undefined) result.set(row.id, live)
+    if (row.live) {
+      const live = liveProjection(deps, projections, row.id)
+      if (live !== undefined) result.set(row.id, live)
+    } else {
+      coldRows.push(row)
+    }
   }
-
-  const coldRows = deps.rows.filter(row => !result.has(row.id))
   if (coldRows.length === 0) return result
 
   // One roster snapshot shared by every cold row: legacy `code` data maps to

@@ -78,8 +78,8 @@ Session list/projection/search/filter semantics belong to the public DSH
 `cwd` is absent, while cold Sessions without `cwd` are omitted; semantic search
 considers only cwd-bearing Sessions before applying its work bound. The picker's
 `title` and `agentPreset` values are Host-owned DSH projections read through ONE semantic port method,
-`SessionReader.projectionBatch()`: live rows read the `title` via
-`sessionProjections.snapshot()` while the live preset prefers the Agent's
+`SessionReader.projectionBatch()`: live rows read already-materialized `title`
+and cached `agentPreset` cells via `sessionProjections.cachedSnapshot()` while the live preset prefers the Agent's
 CURRENT composed roster entry (`agentPresets.composedPreset()`) — a
 deliberate live-only exception (the running Agent's actual composition is
 the authoritative effective preset even while it trails the durable

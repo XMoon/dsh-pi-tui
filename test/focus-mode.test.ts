@@ -1587,6 +1587,16 @@ test('the error line follows the three slots (plan §24)', () => {
   assert.ok(body.some(line => line.startsWith('Error:   E: boom')), body.join('|'))
 })
 
+test('Focus Error sanitizes AUTH failure messages', () => {
+  const failed = activityOf(0, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'AUTH', message: 'secret-provider-credential' } } }, 2000, 1),
+  ])!
+  const body = focusCollapsedBody(failed, 60)
+  assert.ok(body.some(line => line.startsWith('Error:   authentication failed')), body.join('|'))
+  assert.ok(!body.some(line => line.includes('secret-provider-credential')), body.join('|'))
+})
+
 test('the component renders an indented muted card and refreshes duration live', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))

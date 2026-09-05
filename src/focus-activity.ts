@@ -27,6 +27,7 @@ import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import { toolTitle } from './present.ts'
 import { assistantBlocksVisibleNow, type TurnActivity, type TranscriptMessage } from './transcript.ts'
+import { displayFailureText } from './failure-presentation.ts'
 
 /** The max tool-type names the header stats show before the `+N` tail
  * (plan §10.4). */
@@ -263,7 +264,7 @@ export function focusCollapsedBody(
   }
   const reason = activity.reason
   if (reason?.kind === 'error' && reason.error !== undefined) {
-    lines.push(previewLine('Error:', `${reason.error.code}: ${reason.error.message}`, width))
+    lines.push(previewLine('Error:', displayFailureText(reason.error), width))
   }
   return lines
 }

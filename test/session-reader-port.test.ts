@@ -158,7 +158,7 @@ test('projectionBatch uses live projection and composed preset without cold read
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: liveHeader, live: true }]),
     sessionProjections: {
-      snapshot: (target: unknown) => target === session
+      cachedSnapshot: (target: unknown) => target === session
         ? { values: { title: 'live title' } }
         : undefined,
     },
@@ -171,6 +171,65 @@ test('projectionBatch uses live projection and composed preset without cold read
   const rows = await reader.list(undefined)
   assert.equal((await reader.projectionBatch(rows!)).get('session-live')?.title, 'live title')
   assert.equal((await reader.projectionBatch(rows!)).get('session-live')?.preset, 'minimal')
+})
+
+test('live projection uses cached cells and never falls back to cold metadata', async () => {
+  const liveHeader = header('session-live-miss', 400)
+  const session = { header: liveHeader }
+  const liveAgent = { session, ctx: {} }
+  let materializingSnapshots = 0
+  let coldCacheReads = 0
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: liveHeader, live: true }]),
+    sessionProjections: {
+      snapshot: () => {
+        materializingSnapshots += 1
+        throw new Error('live listing must not materialize projections')
+      },
+      cachedSnapshot: () => undefined,
+    },
+    sessionProjectionCache: {
+      cachedSnapshot: () => {
+        coldCacheReads += 1
+        throw new Error('live rows must not read cold cache')
+      },
+    },
+    agentPresets: {
+      composedPreset: () => undefined,
+      list: async () => [{ id: 'minimal' }],
+      resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+    },
+  }), id => id === 'session-live-miss' ? liveAgent : undefined)
+  const rows = await reader.list(undefined)
+  assert.deepEqual(await reader.projectionBatch(rows!), new Map())
+  assert.equal(materializingSnapshots, 0)
+  assert.equal(coldCacheReads, 0)
+})
+
+test('a live row stays cache-free when its Agent mapping races teardown', async () => {
+  const liveHeader = header('session-live-race', 500)
+  let coldCacheReads = 0
+  let rosterReads = 0
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: liveHeader, live: true }]),
+    sessionProjectionCache: {
+      cachedSnapshot: () => {
+        coldCacheReads += 1
+        throw new Error('live row must not use the cold cache')
+      },
+    },
+    agentPresets: {
+      list: async () => {
+        rosterReads += 1
+        throw new Error('live row must not read the cold roster')
+      },
+    },
+  }), () => undefined)
+  const rows = await reader.list(undefined)
+  assert.deepEqual(rows?.map(row => row.id), ['session-live-race'])
+  assert.deepEqual(await reader.projectionBatch(rows!), new Map())
+  assert.equal(coldCacheReads, 0)
+  assert.equal(rosterReads, 0)
 })
 
 test('projectionBatch passes exact cut zero and reads a fully cached row', async () => {
