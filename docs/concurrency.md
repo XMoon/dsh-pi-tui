@@ -38,7 +38,9 @@ The TUI keeps DSH's two Session v2 event planes distinct:
   `assistant/attempt` is non-surface attempt evidence that may be projected as
   interrupted UI evidence but never as a model-visible message;
 - transient `agent/assistant-stream` carries live deltas and controls before
-  durable settlement, and is not used as a second persistence format.
+  durable settlement, and is not used as a second persistence format. Its
+  `block-end` control carries the completed content block; the TUI replaces
+  that block index in the live projection rather than appending a duplicate.
 
 The session picker consumes the semantic list and zero-I/O projection-cache
 seams only. It never observes a cold Session merely to fill a label and never

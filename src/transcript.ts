@@ -28,7 +28,11 @@ import {
   usageFromAssistantSettlement,
   type TokenUsageTotals,
 } from './token-usage.ts'
-import type { AssistantLiveChunk, AssistantLiveInput } from './runtime/assistant-stream-port.ts'
+import type {
+  AssistantLiveChunk,
+  AssistantLiveContentBlock,
+  AssistantLiveInput,
+} from './runtime/assistant-stream-port.ts'
 // Load the official command event declarations.
 import type {} from '@deepseek-ai/dsh-commands'
 // Load the official subagent event declarations.
@@ -507,7 +511,11 @@ export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
   /** The assistant message object per (turn, step); streaming text lands in place. */
   private readonly assistantEntries = new Map<string, Extract<TranscriptMessage, { kind: 'assistant' }>>()
-  /** Assistant entries created by the LIVE text path and not yet taken
+  /** In-flight live block state keyed by logical step. This is required for
+   * authoritative block-end replacement: deltas may be partial, while a
+   * completed block replaces the entire indexed state without duplication. */
+  private readonly liveAssistantBlocks = new Map<string, Map<string, AssistantLiveContentBlock>>()
+  /** Assistant entries created by the LIVE stream path and not yet taken
    * over by a durable settlement. Attempt evidence remains transient until
    * retry or turn end; abandoned attempts have no durable surface and are
    * tombstoned so live and reopen agree. */
@@ -1352,6 +1360,7 @@ export class TranscriptFolder {
         // the failed one's. Reopen parity: the durable log restores the
         // step's reasoning from its LATEST source.
         const key = stepKey(input.turn, input.step)
+        this.liveAssistantBlocks.set(key, new Map())
         const thinking = this.thinkingEntries.get(key)
         if (thinking !== undefined && thinking.running === false) {
           thinking.text = ''
@@ -1376,6 +1385,7 @@ export class TranscriptFolder {
         // A committed `assistant/attempt` keeps its durable evidence visible
         // as transient until `llm/retry` or `turn/end`; `assistant/message`
         // owns the normal settled surface entry.
+        this.liveAssistantBlocks.delete(stepKey(input.turn, input.step))
         if (input.status === 'abandoned') {
           this.settleFailedAttempt(input.turn, input.step, true, true)
         }
@@ -1436,52 +1446,176 @@ export class TranscriptFolder {
   }
 
   /** Fold one live assistant chunk (Session v2 transient plane) into the
-   * streaming entries and Focus aggregation. */
+   * streaming entries and Focus aggregation. Live block state is retained per
+   * logical step so a completed block can replace earlier deltas exactly. */
   private applyAssistantChunk(turn: number, step: number, chunk: AssistantLiveChunk): void {
     // After turn/end a late assistant event is a replay artifact: it
-    // must not mutate the transcript entries — the final-answer
+    // must not mutate the finalized surface entry — the final-answer
     // selection reads the exact last assistant (review finding).
     const activity = this.activityFor(turn)
+    const key = stepKey(turn, step)
     if (activity.completed) return
-    // Streaming text accumulates in place on the entry itself; there is
-    // no separate accumulator map, so a long session's text is stored
-    // once, not twice.
-    if (chunk.type === 'text-delta') {
-      // Streaming text accumulates in place on the entry itself; there is
-      // no separate accumulator map, so a long session's text is stored
-      // once, not twice. An entry created by the live path is transient:
-      // a durable settlement either promotes it to a normal message or keeps it
-      // as attempt evidence until retry or turn end.
-      const key = stepKey(turn, step)
-      let entry = this.assistantEntries.get(key)
-      if (entry === undefined) {
-        entry = this.assistantEntry(turn, step)
-        this.transientAssistantEntries.add(entry)
+    // A late reasoning replay remains diagnostic transcript evidence, but a
+    // late text/block surface frame must never overwrite the durable message.
+    if (activity.settledSteps.has(step)) {
+      if (chunk.type === 'reasoning-delta') {
+        const thinking = this.thinkingEntry(turn, step)
+        thinking.text += chunk.text
+        thinking.running = false
+        this.closeThinking(thinking)
+        this.markStreamingEntryDirty(`thinking:${key}`)
+        this.foldThinking(activity, step, chunk.text)
+      } else if (chunk.type === 'block-end' && chunk.block.type === 'reasoning' && 'text' in chunk.block && typeof chunk.block.text === 'string') {
+        const thinking = this.thinkingEntry(turn, step)
+        thinking.text = chunk.block.text
+        thinking.running = false
+        this.closeThinking(thinking)
+        this.markStreamingEntryDirty(`thinking:${key}`)
+        this.restoreThinkingPreview(activity, step, chunk.block.text)
+      } else if (chunk.type === 'usage') {
+        this.usage.onUsageChunk(turn, step, chunk.usage)
+        this.syncUsage(activity)
       }
-      entry.text += chunk.text
-      // Search projection: O(1) dirty mark — the entry is re-normalized
-      // as a WHOLE string at the next search (Unicode lowercasing is
-      // not chunk-splittable — Greek sigma — but the live streaming
-      // path must never pay per-chunk lowercase).
-      this.markStreamingEntryDirty(`assistant:${key}`)
-      // Focus aggregation: the streaming assistant text feeds the
-      // Message candidate IMMEDIATELY (no assistant/message wait —
-      // plan §5.2), so the running card previews the intermediate
-      // message in real time.
-      this.foldMessageCandidate(this.activityFor(turn), step, chunk.text)
-    } else if (chunk.type === 'reasoning-delta') {
-      this.thinkingEntry(turn, step).text += chunk.text
-      // Search projection: O(1) dirty mark (see the text-delta path).
-      this.markStreamingEntryDirty(`thinking:${stepKey(turn, step)}`)
-      // Focus aggregation: keep a compact reasoning preview (the
-      // rolling tail — never the full stream, plan §10.6/§42).
-      this.foldThinking(this.activityFor(turn), step, chunk.text)
-    } else if (chunk.type === 'usage') {
-      // Focus aggregation: per-turn token facts (the shared
-      // accumulator — the footer and Focus can never drift).
-      this.usage.onUsageChunk(turn, step, chunk.usage)
-      this.syncUsage(activity)
+      return
     }
+    const existing = this.assistantEntries.get(key)
+    if (existing !== undefined && this.attemptAssistantEntries.has(existing)) return
+    const blocks = this.liveBlocksFor(turn, step)
+    switch (chunk.type) {
+      case 'block-start':
+        for (const lane of blocks.keys()) {
+          if (lane.startsWith(`${chunk.index}:`)) blocks.delete(lane)
+        }
+        blocks.set(`${chunk.index}:${chunk.blockType}`, { type: chunk.blockType })
+        this.syncLiveAssistantPresentation(turn, step)
+        break
+      case 'text-delta': {
+        const lane = `${chunk.index}:text`
+        const previous = blocks.get(lane)
+        const previousText = previous?.type === 'text' && 'text' in previous && typeof previous.text === 'string'
+          ? previous.text
+          : ''
+        blocks.set(lane, { type: 'text', text: previousText + chunk.text })
+        this.syncLiveAssistantPresentation(turn, step)
+        break
+      }
+      case 'reasoning-delta': {
+        const lane = `${chunk.index}:reasoning`
+        const previous = blocks.get(lane)
+        const previousText = previous?.type === 'reasoning' && 'text' in previous && typeof previous.text === 'string'
+          ? previous.text
+          : ''
+        blocks.set(lane, { type: 'reasoning', text: previousText + chunk.text })
+        this.syncLiveAssistantPresentation(turn, step)
+        break
+      }
+      case 'tool-call-delta': {
+        const lane = `${chunk.index}:tool-call`
+        const previous = blocks.get(lane)
+        const previousTool = previous?.type === 'tool-call'
+          && typeof (previous as { arguments?: unknown }).arguments === 'string'
+          ? previous as { type: 'tool-call'; id: string; name: string; arguments: string }
+          : undefined
+        blocks.set(lane, {
+          type: 'tool-call',
+          id: previousTool?.id || chunk.id,
+          name: chunk.name ?? previousTool?.name ?? '',
+          arguments: (previousTool?.arguments ?? '') + chunk.argumentsDelta,
+        })
+        this.syncLiveAssistantPresentation(turn, step)
+        break
+      }
+      case 'block-end':
+        // The completed block is authoritative: replace the indexed partial
+        // state instead of appending its contents a second time.
+        for (const lane of blocks.keys()) {
+          if (lane.startsWith(`${chunk.index}:`)) blocks.delete(lane)
+        }
+        blocks.set(`${chunk.index}:${chunk.block.type}`, chunk.block)
+        this.syncLiveAssistantPresentation(turn, step)
+        break
+      case 'usage':
+        // Focus aggregation: per-turn token facts (the shared
+        // accumulator — the footer and Focus can never drift).
+        this.usage.onUsageChunk(turn, step, chunk.usage)
+        this.syncUsage(activity)
+        break
+      case 'finish':
+        break
+    }
+  }
+
+  /** Return the current live blocks in stable stream order. */
+  private liveBlocksFor(turn: number, step: number): Map<string, AssistantLiveContentBlock> {
+    const key = stepKey(turn, step)
+    let blocks = this.liveAssistantBlocks.get(key)
+    if (blocks === undefined) {
+      blocks = new Map()
+      this.liveAssistantBlocks.set(key, blocks)
+    }
+    return blocks
+  }
+
+  /** Replace the Focus message candidate with authoritative assembled text. */
+  private replaceMessageCandidate(activity: MutableTurnActivity, step: number, text: string): void {
+    if (activity.completed || activity.confirmedSteps.has(step) || activity.settledSteps.has(step)) return
+    if (step < (activity.lastAssistantStep ?? step)) return
+    const candidate = activity.messageCandidate
+    if (candidate !== undefined && candidate.step !== step) this.confirmMessageCandidate(activity)
+    activity.messageCandidate = text === ''
+      ? undefined
+      : { step, tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP) }
+    if (text !== '') activity.lastAssistantStep = Math.max(activity.lastAssistantStep ?? -1, step)
+    this.syncMessage(activity)
+    activity.revision += 1
+  }
+
+  /** Project the current live block map without duplicating block-end text. */
+  private syncLiveAssistantPresentation(turn: number, step: number): void {
+    const key = stepKey(turn, step)
+    const blocks = [...this.liveBlocksFor(turn, step).entries()]
+      .sort(([left], [right]) => Number(left.slice(0, left.indexOf(':'))) - Number(right.slice(0, right.indexOf(':'))))
+      .map(([, block]) => block)
+    let text = ''
+    let hasImage = false
+    for (const block of blocks) {
+      if (block.type === 'text' && 'text' in block && typeof block.text === 'string') text += block.text
+      if (block.type === 'image') hasImage = true
+    }
+    const entry = this.assistantEntries.get(key)
+    if (text === '' && !hasImage) {
+      if (entry !== undefined && this.transientAssistantEntries.has(entry)) this.hideTransientAssistantEntry(turn, step)
+      this.replaceMessageCandidate(this.activityFor(turn), step, '')
+    } else {
+      const target = entry ?? this.assistantEntry(turn, step)
+      this.transientAssistantEntries.add(target)
+      this.attemptAssistantEntries.delete(target)
+      this.hiddenAssistantEntries.delete(target)
+      target.text = text
+      target.content = blocks.some(block => block.type !== 'text')
+        ? blocks as unknown as readonly ContentBlock[]
+        : undefined
+      target.interrupted = undefined
+      this.markStreamingEntryDirty(`assistant:${key}`)
+      this.replaceMessageCandidate(this.activityFor(turn), step, text)
+    }
+
+    let reasoning = ''
+    for (const block of blocks) {
+      if (block.type === 'reasoning' && 'text' in block && typeof block.text === 'string') reasoning += block.text
+    }
+    const thinkingKey = `thinking:${key}`
+    if (reasoning === '') {
+      this.hideThinkingEntry(turn, step)
+      this.clearThinkingPreview(this.activityFor(turn), step)
+      return
+    }
+    const thinking = this.thinkingEntry(turn, step)
+    this.hiddenThinkingEntries.delete(thinking)
+    thinking.text = reasoning
+    thinking.running = true
+    this.markStreamingEntryDirty(thinkingKey)
+    this.restoreThinkingPreview(this.activityFor(turn), step, reasoning)
   }
 
   /** Reconstruct the authoritative assistant blocks from one compact stream.
@@ -1990,6 +2124,7 @@ export class TranscriptFolder {
    * separate usage fold intentionally remains untouched so first-token timing
    * and committed usage span the retry wait. */
   private resetThinkingForRetry(turn: number, step: number): void {
+    this.liveAssistantBlocks.delete(stepKey(turn, step))
     this.hideTransientAssistantEntry(turn, step)
     this.hideThinkingEntry(turn, step)
     const activity = this.activityByTurn.get(turn)
@@ -2139,6 +2274,7 @@ export class TranscriptFolder {
       const data = event.data as { turn: number; step: number; stream?: readonly unknown[] }
       if (this.activityByTurn.get(data.turn)?.completed === true) return
       const stream = data.stream ?? []
+      this.liveAssistantBlocks.delete(stepKey(data.turn, data.step))
       this.restoreAssistantAttempt(data.turn, data.step, stream)
       this.usage.onAssistantAttempt(data.turn, data.step, usageFromAssistantSettlement('attempt', undefined, stream))
       const activity = this.activityFor(data.turn)
@@ -2249,6 +2385,7 @@ export class TranscriptFolder {
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
         const key = stepKey(event.data.turn, event.data.step)
+        this.liveAssistantBlocks.delete(key)
         const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
@@ -2496,6 +2633,9 @@ export class TranscriptFolder {
         // this.currentTurn: a turn-start-less fragment's end must land in
         // its own turn (review finding).
         const endTurn = event.data.turn
+        for (const key of this.liveAssistantBlocks.keys()) {
+          if (key.startsWith(`${endTurn}/`)) this.liveAssistantBlocks.delete(key)
+        }
         this.markAttemptEvidenceInterrupted(endTurn)
         this.closeThinkingForTurn(endTurn)
         if (event.data.reason.kind === 'error') {

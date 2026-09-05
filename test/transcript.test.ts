@@ -1788,6 +1788,81 @@ function assistantMessage(seq: number, text: string, opts: { turn?: number; step
   }, seq)
 }
 
+test('live block-end text is authoritative and survives durable settlement without duplication', () => {
+  const onlyEnd = new TranscriptFolder()
+  onlyEnd.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'text', text: 'complete from block-end' },
+  }, 2))
+  assert.deepEqual(onlyEnd.messages().filter(message => message.kind === 'assistant').map(message => message.text), ['complete from block-end'])
+
+  const replacesDelta = new TranscriptFolder()
+  replacesDelta.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'partial' }, 2))
+  replacesDelta.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'text', text: 'authoritative complete' },
+  }, 3))
+  assert.deepEqual(replacesDelta.messages().filter(message => message.kind === 'assistant').map(message => message.text), ['authoritative complete'])
+  assert.equal(replacesDelta.turnActivity(0)?.message?.text, 'authoritative complete')
+
+  const settles = new TranscriptFolder()
+  settles.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'text', text: 'live complete' },
+  }, 2))
+  settles.apply([assistantMessage(3, 'durable complete')])
+  // A late transient frame cannot roll the authoritative durable message back.
+  settles.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'text', text: 'stale live text' },
+  }, 4))
+  assert.deepEqual(settles.messages().filter(message => message.kind === 'assistant').map(message => message.text), ['durable complete'])
+})
+
+test('live reasoning block-end restores the reasoning body and tool-call block-end stays non-surface', () => {
+  const reasoning = new TranscriptFolder()
+  reasoning.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'reasoning', text: 'authoritative reasoning' },
+  }, 2))
+  assert.deepEqual(reasoning.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['authoritative reasoning'])
+  assert.equal(reasoning.turnActivity(0)?.think?.text, 'authoritative reasoning')
+
+  const tool = new TranscriptFolder()
+  tool.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'tool-call', id: 'call-1', name: 'bash', arguments: '{"command":"ls"}' },
+  }, 2))
+  assert.deepEqual(tool.messages(), [], 'a live assistant tool-call block is preview-only until its durable tool events settle')
+})
+
+test('a durable assistant/attempt with only block-end evidence reopens as interrupted content', () => {
+  const stream = [{
+    type: 'chunk' as const,
+    time: 2,
+    chunk: {
+      type: 'block-end' as const,
+      index: 0,
+      block: { type: 'text' as const, text: 'attempt block-end evidence' },
+    },
+  }]
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 0),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 1),
+  ])
+  const interrupted = folder.messages().filter(message => message.kind === 'assistant')
+  assert.equal(interrupted.length, 1)
+  assert.equal(interrupted[0]?.text, 'attempt block-end evidence')
+  assert.equal(interrupted[0]?.interrupted, true)
+})
+
 test('a durable assistant/attempt remains interruption evidence until turn end (live == reopen)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
