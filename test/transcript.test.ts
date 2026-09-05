@@ -320,14 +320,14 @@ test('interleaved steps keep separate assistant and thinking entries', () => {
   const messages = foldLive([
     event('turn/start', { turn: 0 }, 0),
     chunk(1, 0, { type: 'text-delta', index: 0, text: 'Hel' }),
-    chunk(2, 0, { type: 'reasoning-delta', index: 0, text: 't0-' }),
+    chunk(2, 0, { type: 'reasoning-delta', index: 1, text: 't0-' }),
     chunk(3, 0, { type: 'text-delta', index: 0, text: 'lo' }),
     chunk(4, 1, { type: 'text-delta', index: 0, text: 'x' }),
-    chunk(5, 1, { type: 'reasoning-delta', index: 0, text: 't1-' }),
+    chunk(5, 1, { type: 'reasoning-delta', index: 1, text: 't1-' }),
     chunk(6, 1, { type: 'text-delta', index: 0, text: 'y' }),
     // Step 0's reasoning continues AFTER step 1 started: it must update the
     // step-0 thinking entry, not the step-1 one (last-entry assumption bug).
-    chunk(7, 0, { type: 'reasoning-delta', index: 0, text: 'more' }),
+    chunk(7, 0, { type: 'reasoning-delta', index: 1, text: 'more' }),
   ])
   assert.deepEqual(kinds(messages), ['assistant', 'thinking', 'assistant', 'thinking'])
   const [first, thinking0, second, thinking1] = messages
@@ -1798,6 +1798,7 @@ test('live block-end text is authoritative and survives durable settlement witho
   assert.deepEqual(onlyEnd.messages().filter(message => message.kind === 'assistant').map(message => message.text), ['complete from block-end'])
 
   const replacesDelta = new TranscriptFolder()
+  replacesDelta.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'text' as const }, 1))
   replacesDelta.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'partial' }, 2))
   replacesDelta.applyLiveInput(liveChunk(0, 0, {
     type: 'block-end',
@@ -1840,6 +1841,96 @@ test('live reasoning block-end restores the reasoning body and tool-call block-e
     block: { type: 'tool-call', id: 'call-1', name: 'bash', arguments: '{"command":"ls"}' },
   }, 2))
   assert.deepEqual(tool.messages(), [], 'a live assistant tool-call block is preview-only until its durable tool events settle')
+})
+
+test('partial text attempt evidence has no undefined prefix and matches cold replay', () => {
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const stream = [
+    { type: 'chunk' as const, time: 2, chunk: { type: 'block-start' as const, index: 0, blockType: 'text' as const } },
+    { type: 'chunk' as const, time: 3, chunk: { type: 'text-delta' as const, index: 0, text: 'partial' } },
+  ]
+  const suffix = [
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 4),
+    event('step/end', { turn: 0, step: 0 }, 5),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 6),
+  ]
+  const live = new TranscriptFolder()
+  live.apply(prefix)
+  live.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'text' as const }, 2))
+  live.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'partial' }, 3))
+  live.apply(suffix)
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, ...suffix])
+  assert.deepEqual(live.messages(), cold.messages())
+  const assistant = cold.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, 'partial')
+  assert.doesNotMatch(assistant.text, /undefined/)
+  assert.equal(assistant.interrupted, true)
+})
+
+test('partial reasoning attempt evidence has no undefined prefix and matches cold replay', () => {
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const stream = [
+    { type: 'chunk' as const, time: 2, chunk: { type: 'block-start' as const, index: 0, blockType: 'reasoning' as const } },
+    { type: 'chunk' as const, time: 3, chunk: { type: 'reasoning-delta' as const, index: 0, text: 'thinking' } },
+  ]
+  const suffix = [
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
+  ]
+  const live = new TranscriptFolder()
+  live.apply(prefix)
+  live.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'reasoning' as const }, 2))
+  live.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'thinking' }, 3))
+  live.apply(suffix)
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, ...suffix])
+  assert.deepEqual(live.messages(), cold.messages())
+  const thinking = cold.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'thinking')
+  assert.doesNotMatch(thinking.text, /undefined/)
+  assert.equal(thinking.running, false)
+})
+
+test('partial tool-call attempt evidence preserves id, name, and arguments across replay', () => {
+  const callId = ToolCallId('call-partial')
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const stream = [
+    { type: 'chunk' as const, time: 2, chunk: { type: 'block-start' as const, index: 0, blockType: 'tool-call' as const } },
+    { type: 'chunk' as const, time: 3, chunk: { type: 'tool-call-delta' as const, index: 0, id: callId, name: 'bash', argumentsDelta: '{"command":' } },
+  ]
+  const suffix = [
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
+  ]
+  const live = new TranscriptFolder()
+  live.apply(prefix)
+  live.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'tool-call' as const }, 2))
+  live.applyLiveInput(liveChunk(0, 0, { type: 'tool-call-delta', index: 0, id: callId, name: 'bash', argumentsDelta: '{"command":' }, 3))
+  live.apply(suffix)
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, ...suffix])
+  assert.deepEqual(live.messages(), cold.messages())
+  const assistant = cold.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.interrupted, true)
+  const toolCall = assistant.content?.find(block => block.type === 'tool-call')
+  assert.ok(toolCall !== undefined && toolCall.type === 'tool-call')
+  assert.equal(toolCall.id, callId)
+  assert.equal(toolCall.name, 'bash')
+  assert.equal(toolCall.arguments, '{"command":')
+  assert.doesNotMatch(toolCall.arguments, /undefined/)
 })
 
 test('a durable assistant/attempt with only block-end evidence reopens as interrupted content', () => {
