@@ -18,7 +18,7 @@
 
 import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { expandAssistantStream, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
 import type { IconSemantic } from './icons.ts'
 import { firstLine, latestLine, type JsonValue } from './present.ts'
@@ -1472,23 +1472,13 @@ export class TranscriptFolder {
 
   /** Restore a SETTLED thinking entry from a durable embedded stream
    * (Session v2 cold replay — `assistant/message.stream` /
-   * `assistant/attempt.stream`). The live plane never delivered these
-   * reasoning deltas, so the compacted `reasoning-chunks` records (and
-   * raw `chunk` records carrying `reasoning-delta`) rebuild the entry;
-   * it is created closed (running=false) — the attempt already settled. */
+   * `assistant/attempt.stream`). The canonical DSH decoder expands every
+   * compact representation, and the entry is created closed (running=false)
+   * because the attempt already settled. */
   private restoreThinkingFromStream(turn: number, step: number, stream: readonly unknown[]): void {
     let text = ''
-    for (const record of stream) {
-      if (typeof record !== 'object' || record === null) continue
-      const value = record as { type?: unknown; texts?: unknown; chunk?: unknown }
-      if (value.type === 'reasoning-chunks' && Array.isArray(value.texts)) {
-        for (const member of value.texts) {
-          if (typeof member === 'string') text += member
-        }
-      } else if (value.type === 'chunk') {
-        const chunk = value.chunk as { type?: unknown; text?: unknown } | undefined
-        if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string') text += chunk.text
-      }
+    for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
+      if (member.chunk.type === 'reasoning-delta') text += member.chunk.text
     }
     if (text === '') return
     const key = stepKey(turn, step)

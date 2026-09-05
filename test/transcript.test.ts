@@ -1800,8 +1800,8 @@ test('a durable assistant/attempt removes the failed attempt\'s transient text (
   folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hello wor' }, 2))
   assert.deepEqual(kinds(folder.messages()), ['assistant'], 'streaming text is visible while the attempt runs')
   const failedStream = [
-    { type: 'chunk' as const, time: 1, chunk: { type: 'reasoning-delta' as const, index: 0, text: 'durable diagnostic' } },
-    { type: 'chunk' as const, time: 2, chunk: { type: 'usage' as const, usage: { inputTokens: 120, outputTokens: 7 } } },
+    { type: 'reasoning-chunks' as const, time0: 1, index: 0, dt: [1], texts: ['durable ', 'diagnostic'] },
+    { type: 'chunk' as const, time: 3, chunk: { type: 'usage' as const, usage: { inputTokens: 120, outputTokens: 7 } } },
   ]
   folder.apply([event('assistant/attempt', { turn: 0, step: 0, stream: failedStream }, 3)])
   assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant'), [], 'a failed attempt leaves NO surface text')

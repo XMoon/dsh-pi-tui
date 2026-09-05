@@ -7,11 +7,11 @@
  * DSH event surface. Official frames carry turn/step ONLY on `start`; a
  * chunk or end frame names its attempt, so the adapter keeps one attempt
  * record per emitting Agent (the master `AssistantStreamAttempt` contract)
- * and resolves turn/step from it. Upstream `revision` (monotone within one
- * attached Agent lifecycle) and the dense per-attempt `index` guard against
- * stale or reordered frames: anything older than the last accepted frame is
- * dropped at the boundary. The runner injects the identity check — a frame
- * whose emitting Agent is not the exact current Agent object never reaches
+ * and resolves turn/step from it. Upstream `revision` (strictly dense within
+ * one attached Agent lifecycle) and the dense per-attempt `index` guard against
+ * stale or reordered frames: a non-dense revision or index is dropped at the
+ * boundary and clears open attempts. The runner injects the identity check — a
+ * frame whose emitting Agent is not the exact current Agent object never reaches
  * the presentation (master's own headless consumer compares `subject !==
  * agent` the same way). Durable settlement is NOT synthesized here:
  * `assistant/message` / `assistant/attempt` continue to arrive through the
@@ -207,14 +207,14 @@ function toLiveChunk(chunk: unknown): AssistantLiveChunk | undefined {
  * turn/step, and every chunk/end resolves its turn/step through the
  * attempt record. A chunk/end without a matching open attempt (protocol
  * violation or a replay after the terminal frame) is dropped. Revisions are
- * fenced strictly at the Agent-lifecycle level; larger gaps are tolerated at
- * this local seam, while chunk indexes remain dense within each attempt.
+ * fenced strictly and densely at the Agent-lifecycle level; a gap clears all
+ * open attempts, while chunk indexes remain dense within each attempt.
  */
 export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): () => void {
   /** Agent object → attemptId → open attempt. Bounded: an entry lives only
    * between its `start` and terminal `end`; the cap is a safety net for a
    * lost terminal frame (an agent dying mid-attempt). */
-  const stateByAgent = new Map<object, AgentState>()
+  const stateByAgent = new WeakMap<object, AgentState>()
   const AGENT_ATTEMPT_CAP = 64
 
   const stateFor = (agent: object): AgentState => {
@@ -227,11 +227,14 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
   }
 
   const acceptRevision = (state: AgentState, revision: number): boolean => {
-    // Revisions are global to the Agent lifecycle, not to an attempt. A
-    // delayed/replayed frame from a closed attempt must therefore be rejected
-    // even though that attempt's record is already gone. Gaps are tolerated at
-    // this local event seam; only non-newer revisions are stale.
-    if (revision <= state.revision) return false
+    // Revisions are global to the Agent lifecycle, not to an attempt. A gap
+    // means the local listener can no longer trust any open attempt record;
+    // reset it just like the master accumulator and drop the gap frame.
+    if (revision !== state.revision + 1) {
+      state.attempts.clear()
+      state.revision = revision
+      return false
+    }
     state.revision = revision
     return true
   }
@@ -347,6 +350,5 @@ export function installAssistantStreamDirect(deps: AssistantStreamDirectDeps): (
   const dispose = deps.ctx.on('agent/assistant-stream', handler)
   return () => {
     dispose()
-    stateByAgent.clear()
   }
 }
