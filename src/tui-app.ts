@@ -66,7 +66,7 @@ import {
   themeOptOut,
   type ColorPalette,
 } from './theme.ts'
-import { isDiffResult, renderDiffLines, renderDiffView } from './diff.ts'
+import { isDiffResult, renderDiffLines, renderDiffView, summarizeDiffs } from './diff.ts'
 import { ENABLE_FOCUS_REPORTING, isFocusReport } from './notification/terminal-focus.ts'
 import { TaskBrowserPanel, type TaskBrowserViewState, type TaskPanelItem } from './task-panel.ts'
 import type { TaskBrowserSummary } from './task-browser-runtime.ts'
@@ -8870,6 +8870,35 @@ export class TuiApp {
       isError: message.status === 'error',
       ...(message.error === undefined ? {} : { error: message.error }),
     })
+    const callPreview = parseCallPreview(message.name, message.args)
+    // A settled Edit's structured result is the applied-diff source for both
+    // the folded preview and the expanded body. Other cards keep the existing
+    // result-presenter path below; running/error Edit cards use call preview.
+    const editResultView = message.name === 'edit' && message.status === 'ok'
+      ? this.toolResultView(message)
+      : undefined
+    const resultViewForEdit = editResultView?.card === 'diff' ? editResultView : undefined
+    const editDiffs = message.name === 'edit'
+      ? resultViewForEdit !== undefined
+        ? resultViewForEdit.diffs
+        : callPreview?.kind === 'diff'
+          ? callPreview.diffs
+          : undefined
+      : undefined
+    const diffBody = message.name === 'edit'
+      ? editDiffs
+      : callPreview?.kind === 'diff'
+        ? callPreview.diffs
+        : undefined
+    const statsDiffs = message.name === 'edit' && message.status !== 'error' ? editDiffs : undefined
+    const diffStats = statsDiffs === undefined ? undefined : summarizeDiffs(statsDiffs)
+    const diffStatsLabel = diffStats === undefined
+      ? ''
+      : [
+          diffStats.added > 0 ? `+${diffStats.added}` : '',
+          diffStats.removed > 0 ? `-${diffStats.removed}` : '',
+        ].filter(part => part !== '').join(' ')
+    const structuredEditDiff = message.name === 'edit' && message.status === 'ok' && resultViewForEdit?.card === 'diff'
     // Action identities use a dot separator (`Send message · child-1`) while
     // the existing Web-style rows retain their historical space separator.
     const summary = header.summary === '' ? '' : action !== undefined ? ` · ${header.summary}` : ` ${header.summary}`
@@ -8882,7 +8911,18 @@ export class TuiApp {
       : message.status === 'error'
         ? color.error('[error]')
         : color.textDim('[running]')
-    const head = `${color.textDim(`${icon}${header.title}${summary}`)} ${pill}`
+    const headIdentity = color.textDim(`${icon}${header.title}${summary}`)
+    const statusPart = ` ${pill}`
+    const statsPart = diffStatsLabel === '' ? '' : `  ${color.textDim(diffStatsLabel)}`
+    const head = `${headIdentity}${statusPart}${statsPart}`
+    const visibleStatus = truncateToWidth(statusPart, width, '…')
+    const identityBudget = Math.max(0, width - visibleWidth(visibleStatus))
+    const visibleIdentity = identityBudget === 0 ? '' : truncateToWidth(headIdentity, identityBudget, '…')
+    const headWithoutStats = `${visibleIdentity}${visibleStatus}`
+    const statsBudget = Math.max(0, width - visibleWidth(headWithoutStats))
+    const singleLineHead = statsPart === '' || statsBudget === 0
+      ? headWithoutStats
+      : `${headWithoutStats}${truncateToWidth(statsPart, statsBudget, '…')}`
     // LOCAL `!`/`!!` shell cards read the master expand switch (plan §5.3),
     // never the unbounded turn marker: collapsed by default so a long log
     // cannot fill the TUI, expanded only while the expand switch is on.
@@ -8890,13 +8930,15 @@ export class TuiApp {
     if (expanded) {
       // Action headers and payloads are live width-aware components; every
       // other host card keeps its existing Text path and cache behavior.
-      card.addChild(action === undefined ? new Text(head, 0, 0) : new CompactTextPreview(head, 1, ''))
+      card.addChild(action === undefined
+        ? new Text(singleLineHead, 0, 0)
+        : new CompactTextPreview(head, 1, ''))
       // An explicitly expanded card renders diff bodies in full; the
       // default recent-turn view caps them (kimi parity). The flag is
       // the FULL REVEAL: the per-card override (the fullscreen secondary
       // disclosure) or any REGULAR Focus expanded root — a capped diff in
       // regular mode would have no mouse affordance to open it.
-      this.renderToolBody(card, message, fullReveal)
+      this.renderToolBody(card, message, fullReveal, editResultView, editDiffs)
     } else {
       if (action !== undefined) {
         // Action cards deliberately keep the stable header separate from the
@@ -8927,7 +8969,6 @@ export class TuiApp {
         return card
       }
       const rows: string[] = []
-      const callPreview = parseCallPreview(message.name, message.args)
       // The header already carries friendly summaries (todo counts, web
       // query/url via SUMMARY_KEYS, skill name via the first string arg),
       // so the folded preview only adds a tool identity when the header
@@ -8992,8 +9033,9 @@ export class TuiApp {
           ? ''
           : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
       }
+      if (structuredEditDiff) resultPreview = ''
       const callHead = foldedCall === '' ? '' : foldedCall
-      const headWithPreview = `${head}${callHead}${resultPreview}`
+      const headWithPreview = `${singleLineHead}${callHead}${resultPreview}`
       if (callPreview?.kind === 'bash' && callPreview.command !== '') {
         // The command row owns the result preview's separate line (kimi
         // ShellExecution layout), so the head row carries no result text.
@@ -9015,14 +9057,19 @@ export class TuiApp {
         if (resultPreview !== '') {
           rows.push(color.textDim(`  ${resultPreview}`))
         }
-      } else if (callPreview?.kind === 'diff' && callPreview.diffs.length > 0) {
+      } else if (diffBody !== undefined && diffBody.length > 0) {
         rows.push(truncateToWidth(`${headWithPreview}`, width, '…'))
-        for (const line of renderDiffView(callPreview.diffs, this.workspaceRoot, {
+        for (const line of renderDiffView(diffBody, this.workspaceRoot, {
           maxLines: FOLDED_DIFF_LINES,
           expandHint: `${this.expandHint(expandHint)} to expand`,
+          headerMode: message.name === 'edit'
+            ? diffBody.length === 1 ? 'none' : 'stats-only'
+            : 'full',
         })) {
           rows.push(`  ${line}`)
         }
+      } else if (structuredEditDiff) {
+        rows.push(truncateToWidth(`${headWithPreview}`, width, '…'))
       } else {
         rows.push(truncateToWidth(headWithPreview, width, '…'))
       }
@@ -9167,6 +9214,16 @@ export class TuiApp {
     card.addChild(new Text(rows.join('\n'), 0, 0))
   }
 
+  private toolResultView(
+    message: Extract<TranscriptMessage, { kind: 'tool' }>,
+  ): ReturnType<ToolPresenter['result']> {
+    return this.present?.result(message.name, message.args, {
+      content: message.resultBlocks ?? [],
+      isError: message.status === 'error',
+      ...message.meta === undefined ? {} : { meta: message.meta },
+    })
+  }
+
   /**
    * Render one expanded tool card's body. When the runner wired a presenter,
    * the body follows the tool's own render intent (presentResult): a read
@@ -9175,17 +9232,21 @@ export class TuiApp {
    * terminal card shows the output and exit status, and a diff card shows
    * the LCS-aligned, clustered diff (capped in the default view, full when
    * the card was explicitly expanded). Without a view the raw result text
-   * renders, diff-colored when it looks like one; a diff-card call whose
-   * result carried no view reuses the call-time diff so the block never
+   * renders, diff-colored when it looks like one; a parsed Edit call whose
+   * result carried no view reuses its call-time diff so the block never
    * collapses (kimi parity).
    * @param card - the card container to fill.
    * @param message - the tool message.
    * @param explicitlyExpanded - whether the user expanded this card by hand.
+   * @param editResultView - the already-resolved Edit result view, if any.
+   * @param editDiffs - the effective Edit diff selected by the outer card.
    */
   private renderToolBody(
     card: Container,
     message: Extract<TranscriptMessage, { kind: 'tool' }>,
     explicitlyExpanded: boolean,
+    editResultView: ReturnType<ToolPresenter['result']>,
+    editDiffs: readonly FileDiff[] | undefined,
   ): void {
     // LOCAL `!`/`!!` shell cards render their own expanded body (plan
     // §5.1): the `$ command` row (the card's `args` IS the raw command
@@ -9278,10 +9339,14 @@ export class TuiApp {
       // call carries no override — official subagent calls stay unchanged).
       const modelLine = subagentModelDisplay(message.name, message.args)
       if (modelLine !== undefined) card.addChild(new Text(color.textDim(modelLine), 0, 0))
-      const callView = this.present?.call(message.name, message.args)
+      if (message.name === 'edit' && editDiffs !== undefined && editDiffs.length > 0) {
+        this.renderDiffBody(card, editDiffs, explicitlyExpanded, message.name)
+        return
+      }
+      const callView = message.name === 'edit' ? undefined : this.present?.call(message.name, message.args)
       if (callView !== undefined) {
-        if (callView.card === 'diff' && callView.diffs.length > 0) {
-          this.renderDiffBody(card, callView.diffs, explicitlyExpanded)
+        if (message.name !== 'edit' && callView.card === 'diff' && callView.diffs.length > 0) {
+          this.renderDiffBody(card, callView.diffs, explicitlyExpanded, message.name)
           return
         }
         // A terminal call (bash/pwsh) shows its command row right away (the
@@ -9362,20 +9427,25 @@ export class TuiApp {
       }
       // Unparseable or failed: fall through to the generic presentation.
     }
-    if (message.result === '' && (message.resultBlocks?.length ?? 0) === 0) return
+    const emptyResult = message.result === '' && (message.resultBlocks?.length ?? 0) === 0
+    // Edit presentation metadata can carry the entire structured diff even
+    // when the model-facing result text is empty; resolve that view before
+    // falling through to the generic empty-result behavior.
+    if (emptyResult && message.name !== 'edit') return
     // A settled subagent-family call keeps its model/provider line above the
     // result (only when the call args carried an explicit override).
     const settledModelLine = subagentModelDisplay(message.name, message.args)
     if (settledModelLine !== undefined) card.addChild(new Text(color.textDim(settledModelLine), 0, 0))
-    const resultView = this.present?.result(message.name, message.args, {
-      content: message.resultBlocks ?? [],
-      isError: message.status === 'error',
-      ...message.meta === undefined ? {} : { meta: message.meta },
-    })
+    const resultView = message.name === 'edit' && message.status === 'ok'
+      ? editResultView?.card === 'diff' ? editResultView : undefined
+      : this.toolResultView(message)
     // A dedicated terminal presenter, when available, remains authoritative
-    // for output and exit status. Without one, the legacy raw-result fallback
-    // below keeps the expanded viewport/wait/session snapshot intact.
-    if (resultView !== undefined) {
+    // for output and exit status. An error Edit's diff is an attempted change,
+    // not an applied result, so it follows the call-time fallback below.
+    const ignoreEditErrorDiff = message.name === 'edit'
+      && message.status === 'error'
+      && resultView?.card === 'diff'
+    if (resultView !== undefined && !ignoreEditErrorDiff) {
       switch (resultView.card) {
         case 'read': {
           for (const line of resultView.lines) {
@@ -9425,7 +9495,7 @@ export class TuiApp {
           return
         }
         case 'diff': {
-          this.renderDiffBody(card, resultView.diffs, explicitlyExpanded)
+          this.renderDiffBody(card, resultView.diffs, explicitlyExpanded, message.name)
           return
         }
         case 'web': {
@@ -9494,16 +9564,24 @@ export class TuiApp {
           break
       }
     }
-    // No completed view (e.g. replay metadata absent): a diff-card call
-    // reuses its call-time diff, so the block shown while running stays put
-    // instead of collapsing to raw text (kimi parity).
-    if (resultView === undefined) {
-      const callView = this.present?.call(message.name, message.args)
-      if (callView !== undefined && callView.card === 'diff' && callView.diffs.length > 0) {
-        this.renderDiffBody(card, callView.diffs, explicitlyExpanded)
+    // No completed view (e.g. replay metadata absent): an Edit reuses its
+    // parsed call-time diff, so the block shown while running stays put
+    // instead of accepting a second presenter source or collapsing to raw
+    // text (kimi parity).
+    if (resultView === undefined || ignoreEditErrorDiff) {
+      if (message.name === 'edit' && editDiffs !== undefined && editDiffs.length > 0) {
+        this.renderDiffBody(card, editDiffs, explicitlyExpanded, message.name)
         return
       }
+      if (message.name !== 'edit') {
+        const callView = this.present?.call(message.name, message.args)
+        if (callView !== undefined && callView.card === 'diff' && callView.diffs.length > 0) {
+          this.renderDiffBody(card, callView.diffs, explicitlyExpanded, message.name)
+          return
+        }
+      }
     }
+    if (emptyResult) return
     // Generic fallback: the raw result text dimmed (diffs keep their own
     // + / − colors, which already distinguish them from assistant output).
     // A read card without a presenter still renders its envelope as numbered
@@ -9671,10 +9749,19 @@ export class TuiApp {
    * @param card - the card container to fill.
    * @param diffs - the diff hunks.
    * @param explicitlyExpanded - explicit expansion disables the cap.
+   * @param toolName - selects Edit's outer-card header ownership.
    */
-  private renderDiffBody(card: Container, diffs: readonly FileDiff[], explicitlyExpanded: boolean): void {
+  private renderDiffBody(
+    card: Container,
+    diffs: readonly FileDiff[],
+    explicitlyExpanded: boolean,
+    toolName: string,
+  ): void {
     for (const line of renderDiffView(diffs, this.workspaceRoot, {
       maxLines: explicitlyExpanded ? undefined : DIFF_PREVIEW_LINES,
+      headerMode: toolName === 'edit'
+        ? diffs.length === 1 ? 'none' : 'stats-only'
+        : 'full',
     })) {
       card.addChild(new Text(line, 0, 0))
     }
