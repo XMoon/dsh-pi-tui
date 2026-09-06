@@ -208,6 +208,36 @@ export function isAnchoredFileDiff(hunk: FileDiff): hunk is AnchoredFileDiff {
     && Number.isInteger(anchored.newStart) && (anchored.newStart as number) >= 1
 }
 
+/** Compute the exact render rows for one hunk. */
+function diffLinesForHunk(hunk: FileDiff): DiffLine[] {
+  const anchored = isAnchoredFileDiff(hunk)
+  const oldStart = anchored ? hunk.oldStart! : 1
+  const newStart = anchored ? hunk.newStart! : 1
+  const oldSide = hunk.oldText === null || hunk.oldText === '' ? [] : hunk.oldText.split('\n')
+  const newSide = hunk.newText === '' ? [] : hunk.newText.split('\n')
+  if (oldSide.length === 0) return newSide.map((code, index) => ({ kind: 'add', lineNum: newStart + index, code }))
+  if (newSide.length === 0) return oldSide.map((code, index) => ({ kind: 'delete', lineNum: oldStart + index, code }))
+  return computeDiffLines(hunk.oldText!, hunk.newText, oldStart, newStart)
+}
+
+/** Aggregate add/delete counts from the same rows rendered in a diff body. */
+export interface DiffStats {
+  added: number
+  removed: number
+}
+
+export function summarizeDiffs(diffs: readonly FileDiff[]): DiffStats {
+  let added = 0
+  let removed = 0
+  for (const hunk of diffs) {
+    for (const line of diffLinesForHunk(hunk)) {
+      if (line.kind === 'add') added++
+      else if (line.kind === 'delete') removed++
+    }
+  }
+  return { added, removed }
+}
+
 /** Options for {@link renderDiffView}. */
 export interface DiffViewOptions {
   /** Context rows around each change cluster (default 3). */
@@ -216,13 +246,16 @@ export interface DiffViewOptions {
   maxLines?: number
   /** Hint text for the truncation footer (default 'click to expand'). */
   expandHint?: string
+  /** Whether each hunk header includes its path and/or aggregate stats. */
+  headerMode?: 'full' | 'stats-only' | 'none'
 }
 
 /**
  * Render a result-side diff view (a `card: 'diff'` presentResult intent) as
- * colored lines: one `+N -M path` header per hunk (kimi parity; counts in
- * add/remove colors, path workspace-relative), then the LCS-aligned body
- * with context clustering — unchanged runs between clusters elide to a
+ * colored lines: by default (`headerMode: 'full'`), one `+N -M path` header per
+ * hunk (kimi parity; counts in add/remove colors, path workspace-relative);
+ * `stats-only` keeps only `+N -M`, and `none` omits hunk headers. Then the
+ * LCS-aligned body with context clustering — unchanged runs between clusters elide to a
  * `… N unchanged lines …` separator, and `maxLines` caps the body at a
  * cluster boundary with a `… N more changes hidden (hint)` footer. A hunk
  * with `oldText: null` (create) shows only new lines; an empty newText
@@ -232,7 +265,7 @@ export interface DiffViewOptions {
  * them no gutter renders (never a fake 1..N gutter).
  * @param diffs - the diff view's hunks.
  * @param cwd - workspace root for path relativization; optional.
- * @param options - context/cap/hint tuning.
+ * @param options - context/cap/hint/header-mode tuning.
  * @returns the colored render lines.
  */
 export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options: DiffViewOptions = {}): string[] {
@@ -247,22 +280,18 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
     // no line numbers at all (never a fake 1..N gutter; plan: hide the
     // gutter, never guess it).
     const anchored = isAnchoredFileDiff(hunk)
-    const oldStart = anchored ? hunk.oldStart! : 1
-    const newStart = anchored ? hunk.newStart! : 1
-    const oldSide = hunk.oldText === null || hunk.oldText === '' ? [] : hunk.oldText.split('\n')
-    const newSide = hunk.newText === '' ? [] : hunk.newText.split('\n')
-    const diffLines: DiffLine[] = oldSide.length === 0
-      ? newSide.map((code, index) => ({ kind: 'add', lineNum: newStart + index, code }))
-      : newSide.length === 0
-        ? oldSide.map((code, index) => ({ kind: 'delete', lineNum: oldStart + index, code }))
-        : computeDiffLines(hunk.oldText!, hunk.newText, oldStart, newStart)
+    const diffLines = diffLinesForHunk(hunk)
     const { clusters, changedCount, addedCount, removedCount } = buildDiffClusters(diffLines, contextLines)
 
-    let header = ''
-    if (addedCount > 0) header += color.diffAdded(`+${addedCount} `)
-    if (removedCount > 0) header += color.diffRemoved(`-${removedCount} `)
-    header += relativizeToCwd(hunk.path, cwd)
-    out.push(header)
+    if ((options.headerMode ?? 'full') !== 'none') {
+      const stats: string[] = []
+      if (addedCount > 0) stats.push(color.diffAdded(`+${addedCount}`))
+      if (removedCount > 0) stats.push(color.diffRemoved(`-${removedCount}`))
+      const header = (options.headerMode ?? 'full') === 'full'
+        ? `${stats.join(' ')}${stats.length === 0 ? '' : ' '}${relativizeToCwd(hunk.path, cwd)}`
+        : stats.join(' ')
+      out.push(header)
+    }
     if (clusters.length === 0) continue
 
     // The elision/footer indent mirrors the gutter column when the gutter
@@ -306,12 +335,12 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
     }
     if (truncated) {
       const hidden = changedCount - shownChanges
-      if (hidden > 0) {
-        const hint = options.expandHint ?? 'click to expand'
-        out.push(color.diffMeta(
-          `${elideIndent}… ${hidden} more change${hidden > 1 ? 's' : ''} hidden (${hint})`,
-        ))
-      }
+      const hint = options.expandHint ?? 'click to expand'
+      out.push(color.diffMeta(
+        hidden > 0
+          ? `${elideIndent}… ${hidden} more change${hidden > 1 ? 's' : ''} hidden (${hint})`
+          : `${elideIndent}… more diff lines hidden (${hint})`,
+      ))
     }
   }
   return out

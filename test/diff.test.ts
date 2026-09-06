@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { computeDiffLines, renderDiffView, type AnchoredFileDiff } from '../src/diff.ts'
+import { computeDiffLines, renderDiffView, summarizeDiffs, type AnchoredFileDiff } from '../src/diff.ts'
 
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 
@@ -69,6 +69,32 @@ test('renderDiffView caps the body and appends a hidden-changes footer', () => {
   const body = lines.slice(1)
   assert.ok(body.length <= 10 + 1, `capped body too tall:\n${lines.join('\n')}`)
   assert.ok(lines.some(line => line.includes('more changes hidden (click to expand)')), `footer missing:\n${lines.join('\n')}`)
+})
+
+test('renderDiffView marks a cap that hides context after all changes', () => {
+  const oldText = ['old', 'context 1', 'context 2', 'context 3', 'context 4', 'context 5'].join('\n')
+  const newText = ['new', 'context 1', 'context 2', 'context 3', 'context 4', 'context 5'].join('\n')
+  const lines = renderDiffView([{ path: 'f.ts', oldText, newText }], undefined, { maxLines: 2 }).map(strip)
+  assert.ok(lines.some(line => line.includes('more diff lines hidden (click to expand)')), `context marker missing:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.includes('0 more changes hidden')), `must not report zero hidden changes:\n${lines.join('\n')}`)
+})
+
+test('renderDiffView does not add a marker when the body fits its cap', () => {
+  const lines = renderDiffView([{ path: 'f.ts', oldText: 'old', newText: 'new' }], undefined, { maxLines: 3 }).map(strip)
+  assert.ok(!lines.some(line => line.includes('hidden')), `unexpected truncation marker:\n${lines.join('\n')}`)
+})
+
+test('diff header modes and stats share the rendered diff rows', () => {
+  const diffs = [
+    { path: 'src/foo.ts', oldText: 'same\nold', newText: 'same\nnew\nadded' },
+    { path: 'src/foo.ts', oldText: 'before', newText: 'after' },
+  ]
+  assert.deepEqual(summarizeDiffs(diffs), { added: 3, removed: 2 })
+  const statsOnly = renderDiffView(diffs.slice(0, 1), undefined, { headerMode: 'stats-only' }).map(strip)
+  assert.equal(statsOnly[0], '+2 -1')
+  assert.ok(!statsOnly[0]!.includes('src/foo.ts'))
+  const noHeader = renderDiffView(diffs.slice(0, 1), undefined, { headerMode: 'none' }).map(strip)
+  assert.ok(!noHeader.some(line => line.includes('src/foo.ts')), `body must not repeat path:\n${noHeader.join('\n')}`)
 })
 
 test('renderDiffView shows only new lines for a create and only old lines for a deletion', () => {

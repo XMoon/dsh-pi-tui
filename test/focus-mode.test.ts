@@ -1642,6 +1642,14 @@ test('the Tool display is presenter-first with a static fallback (plan §9/§43)
       if (name === 'bash') {
         return { card: 'terminal', title: 'pnpm test --filter provider' }
       }
+      if (name === 'edit') {
+        return {
+          card: 'diff',
+          title: 'Edit src/foo.ts',
+          diffs: [{ path: 'src/foo.ts', oldText: 'a', newText: 'b' }],
+          locations: [],
+        }
+      }
       return undefined
     },
     result() { return undefined },
@@ -1650,6 +1658,15 @@ test('the Tool display is presenter-first with a static fallback (plan §9/§43)
   assert.equal(focusToolDisplay({ name: 'skill', args: JSON.stringify({ name: 'session-review' }) }, { presenter }), 'Load skill session-review')
   assert.equal(focusToolDisplay({ name: 'vendor_probe', args: JSON.stringify({ host: 'cache-01' }) }, { presenter }), 'Probe Redis cache-01')
   assert.equal(focusToolDisplay({ name: 'bash', args: JSON.stringify({ command: 'pnpm test --filter provider' }) }, { presenter }), 'pnpm test --filter provider')
+  const editDisplay = focusToolDisplay({ name: 'edit', args: JSON.stringify({ file_path: 'src/foo.ts' }) }, { presenter })
+  assert.equal(editDisplay, 'Edit src/foo.ts')
+  assert.equal(editDisplay.split('src/foo.ts').length - 1, 1, 'the presenter-owned path must appear once')
+  for (const title of ['Edit src/foo.ts\r\ncontinued', 'Edit src/foo.ts\rcontinued']) {
+    const display = focusToolDisplay({ name: 'edit', args: '{}' }, {
+      presenter: { call: () => ({ card: 'diff' as const, title, diffs: [], locations: [] }), result: () => undefined },
+    })
+    assert.equal(display, 'Edit src/foo.ts', `diff title must remain one line: ${JSON.stringify(title)}`)
+  }
   // Fallback (replay / registry unavailable): the same semantic.
   assert.equal(focusToolDisplay({ name: 'skill', args: JSON.stringify({ name: 'session-review' }) }, {}), 'Load skill session-review')
   assert.equal(focusToolDisplay({ name: 'bash', args: JSON.stringify({ command: 'pnpm test --filter provider' }) }, {}), 'Bash pnpm test --filter provider')

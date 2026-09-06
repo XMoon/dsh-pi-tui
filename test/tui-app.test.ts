@@ -1549,16 +1549,16 @@ function diffCallArgs(): string {
   return JSON.stringify({ file_path: 'src/foo.ts', old_string: 'a\nb\nc', new_string: 'a\nB\nc' })
 }
 
-function diffCallEvent(seq: number, callId: string): SessionEvent {
+function diffCallEvent(seq: number, callId: string, args = diffCallArgs()): SessionEvent {
   return {
     type: 'tool/call',
     seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
-    data: { turn: 0, step: 0, callId: ToolCallId(callId), name: 'edit', arguments: diffCallArgs() },
+    data: { turn: 0, step: 0, callId: ToolCallId(callId), name: 'edit', arguments: args },
   }
 }
 
-function diffResultEvent(seq: number, callId: string, text: string): SessionEvent {
+function diffResultEvent(seq: number, callId: string, text: string, isError = false): SessionEvent {
   return {
     type: 'tool/result',
     seq: SessionSeq(seq),
@@ -1566,7 +1566,20 @@ function diffResultEvent(seq: number, callId: string, text: string): SessionEven
     data: {
       turn: 0,
       step: 0,
-      message: createToolResultMessage({ callId: ToolCallId(callId), content: [{ type: 'text', text }], isError: false }),
+      message: createToolResultMessage({ callId: ToolCallId(callId), content: [{ type: 'text', text }], isError }),
+    },
+  }
+}
+
+function emptyResultEvent(seq: number, callId: string, isError = false): SessionEvent {
+  return {
+    type: 'tool/result',
+    seq: SessionSeq(seq),
+    time: 1_700_000_000_000 + seq,
+    data: {
+      turn: 0,
+      step: 0,
+      message: createToolResultMessage({ callId: ToolCallId(callId), content: [], isError }),
     },
   }
 }
@@ -1604,7 +1617,7 @@ test('a running edit card renders its call-time diff', async () => {
       call: () => ({
         card: 'diff' as const,
         title: 'Edit src/foo.ts',
-        diffs: [{ path: 'src/foo.ts', oldText: 'a\nb\nc', newText: 'a\nB\nc' }],
+        diffs: [{ path: 'src/foo.ts', oldText: 'PRESENTER_OLD', newText: 'PRESENTER_NEW' }],
         locations: [],
       }),
       result: () => undefined,
@@ -1619,9 +1632,11 @@ test('a running edit card renders its call-time diff', async () => {
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('+1 -1 src/foo.ts'), `diff header missing:\n${view}`)
+  assert.ok(view.includes('Edit src/foo.ts [running]  +1 -1'), `diff stats missing from the card header:\n${view}`)
+  assert.ok(!view.includes('+1 -1 src/foo.ts'), `the Edit body must not repeat its path header:\n${view}`)
   assert.ok(view.includes('- b'), `delete row missing:\n${view}`)
   assert.ok(view.includes('+ B'), `add row missing:\n${view}`)
+  assert.ok(!view.includes('PRESENTER_OLD') && !view.includes('PRESENTER_NEW'), `running Edit must use call-time data:\n${view}`)
   app.stop()
 })
 
@@ -1692,9 +1707,304 @@ test('a completed diff card renders the applied result diffs', async () => {
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('+2 -1 src/foo.ts'), `applied diff header missing:\n${view}`)
+  assert.ok(view.includes('Edit src/foo.ts [ok]  +2 -1'), `applied diff stats missing from the card header:\n${view}`)
+  assert.ok(!view.includes('+2 -1 src/foo.ts'), `the Edit body must not repeat its path header:\n${view}`)
   assert.ok(view.includes('+ Y'), `applied add row missing:\n${view}`)
   assert.ok(!view.includes('updated successfully'), `raw result text must not replace the diff:\n${view}`)
+  app.stop()
+})
+
+test('a settled Edit keeps folded and expanded views on the applied result diff', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const resultOld = ['context before', 'RESULT_OLD', 'context after 1', 'context after 2', 'context after 3'].join('\n')
+  const resultNew = ['context before', 'RESULT_NEW', 'context after 1', 'context after 2', 'context after 3'].join('\n')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'CALL_OLD', newText: 'CALL_NEW' }],
+        locations: [],
+      }),
+      result: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: resultOld, newText: resultNew }],
+        locations: [],
+      }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-applied'), diffResultEvent(1, 'call-diff-applied', 'The file src/foo.ts has been updated successfully.')])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('Edit src/foo.ts [ok]  +1 -1'), `folded result stats missing:\n${folded}`)
+  assert.ok(folded.includes('RESULT_OLD') && folded.includes('RESULT_NEW'), `folded card must use applied diff:\n${folded}`)
+  assert.ok(!folded.includes('CALL_OLD') && !folded.includes('CALL_NEW'), `folded card used call-time diff:\n${folded}`)
+  assert.ok(!folded.includes('updated successfully'), `structured success must suppress raw result text:\n${folded}`)
+  assert.equal(folded.split('src/foo.ts').length - 1, 1, `Edit path must belong only to the card header:\n${folded}`)
+  assert.ok(folded.includes('more diff lines hidden'), `folded cap must explain hidden context:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('Edit src/foo.ts [ok]  +1 -1'), `expanded result stats missing:\n${expanded}`)
+  assert.ok(expanded.includes('RESULT_OLD') && expanded.includes('RESULT_NEW') && expanded.includes('context after 3'), `expanded card must reveal the same applied diff:\n${expanded}`)
+  assert.ok(!expanded.includes('CALL_OLD') && !expanded.includes('CALL_NEW'), `expanded card switched to call-time diff:\n${expanded}`)
+  assert.equal(expanded.split('src/foo.ts').length - 1, 1, `expanded Edit path must appear once:\n${expanded}`)
+  app.stop()
+})
+
+test('a multi-hunk Edit keeps path ownership in the card header', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'call-old', newText: 'call-new' }],
+        locations: [],
+      }),
+      result: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [
+          { path: 'src/foo.ts', oldText: 'first-old', newText: 'first-new' },
+          { path: 'src/foo.ts', oldText: 'second-old', newText: 'second-new' },
+        ],
+        locations: [],
+      }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setToolOutputExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-multi'), diffResultEvent(1, 'call-diff-multi', 'The file src/foo.ts has been updated successfully.')])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(view.includes('Edit src/foo.ts [ok]  +2 -2'), `aggregate stats missing:\n${view}`)
+  assert.ok((view.match(/\+1 -1/g) ?? []).length >= 2, `multi-hunk stats-only separators missing:\n${view}`)
+  assert.equal(view.split('src/foo.ts').length - 1, 1, `multi-hunk Edit path must appear once:\n${view}`)
+  assert.ok(!view.includes('+1 -1 src/foo.ts'), `multi-hunk body must not repeat the path:\n${view}`)
+  app.stop()
+})
+
+test('narrow Edit headers preserve status across running, success, and error states', async () => {
+  const vt = new VirtualTerminal(24, 24)
+  const args = JSON.stringify({
+    file_path: 'src/very-long-file-name.ts',
+    old_string: 'old',
+    new_string: 'new',
+  })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/very-long-file-name.ts',
+        diffs: [{ path: 'src/very-long-file-name.ts', oldText: 'old', newText: 'new' }],
+        locations: [],
+      }),
+      result: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/very-long-file-name.ts',
+        diffs: [{ path: 'src/very-long-file-name.ts', oldText: 'old', newText: 'new' }],
+        locations: [],
+      }),
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setToolOutputExpanded(true)
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const assertHeaderStatus = async (expected: string, events: SessionEvent[]): Promise<void> => {
+    const folder = new TranscriptFolder()
+    folder.apply(events)
+    app.setTranscript(folder.messages())
+    await vt.waitForRender()
+    const rows = vt.getViewport().map(stripAnsi)
+    const header = rows.find(line => line.includes('Edit')) ?? ''
+    assert.ok(header.includes(expected), `operation/path/status must stay on one header row:\n${rows.join('\n')}`)
+    assert.equal(rows.filter(line => line.includes('Edit')).length, 1, `Edit header wrapped unexpectedly:\n${rows.join('\n')}`)
+  }
+
+  await assertHeaderStatus('[running]', [diffCallEvent(0, 'call-diff-narrow', args)])
+  await assertHeaderStatus('[ok]', [diffCallEvent(2, 'call-diff-narrow-ok', args), diffResultEvent(3, 'call-diff-narrow-ok', 'done')])
+  await assertHeaderStatus('[error]', [diffCallEvent(4, 'call-diff-narrow-error', args), diffResultEvent(5, 'call-diff-narrow-error', 'failed', true)])
+  app.stop()
+})
+
+test('a successful Edit with a non-diff result view falls back consistently', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/foo.ts', old_string: 'CALL_OLD', new_string: 'CALL_NEW' })
+  const resultErrors: boolean[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'CALL_OLD', newText: 'CALL_NEW' }],
+        locations: [],
+      }),
+      result: (_name, _args, result) => {
+        resultErrors.push(result.isError)
+        return { card: 'generic' as const, title: 'Not an applied diff', content: [{ type: 'text', text: 'GENERIC_RESULT' }] }
+      },
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-generic', args), diffResultEvent(1, 'call-diff-generic', 'raw result')])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `folded fallback diff missing:\n${folded}`)
+  assert.ok(!folded.includes('GENERIC_RESULT'), `folded card must not use a non-diff result view:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded fallback diff missing:\n${expanded}`)
+  assert.ok(!expanded.includes('GENERIC_RESULT'), `expanded card switched to a non-diff result view:\n${expanded}`)
+  assert.deepEqual(resultErrors, [false, false], 'each folded/expanded rebuild resolves the successful result without an error flag')
+  app.stop()
+})
+
+test('metadata-only successful Edit results render in folded and expanded views', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/foo.ts', old_string: 'CALL_OLD', new_string: 'CALL_NEW' })
+  const resultErrors: boolean[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: (_name, _args, result) => {
+        resultErrors.push(result.isError)
+        return {
+          card: 'diff' as const,
+          title: 'Edit src/foo.ts',
+          diffs: [{ path: 'src/foo.ts', oldText: 'RESULT_OLD', newText: 'RESULT_NEW' }],
+          locations: [],
+        }
+      },
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-empty-success', args), emptyResultEvent(1, 'call-diff-empty-success')])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('RESULT_OLD') && folded.includes('RESULT_NEW'), `folded metadata diff missing:\n${folded}`)
+  assert.ok(!folded.includes('CALL_OLD') && !folded.includes('CALL_NEW'), `folded view used call data over structured result:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('RESULT_OLD') && expanded.includes('RESULT_NEW'), `expanded metadata diff missing:\n${expanded}`)
+  assert.ok(!expanded.includes('CALL_OLD') && !expanded.includes('CALL_NEW'), `expanded view lost the structured result diff:\n${expanded}`)
+  assert.deepEqual(resultErrors, [false, false], 'metadata-only success remains non-error in both views')
+  app.stop()
+})
+
+test('metadata-only error Edit results stay error and use the attempted call diff', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/foo.ts', old_string: 'CALL_OLD', new_string: 'CALL_NEW' })
+  const resultErrors: boolean[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'CALL_OLD', newText: 'CALL_NEW' }],
+        locations: [],
+      }),
+      result: (_name, _args, result) => {
+        resultErrors.push(result.isError)
+        return {
+          card: 'diff' as const,
+          title: 'Edit src/foo.ts',
+          diffs: [{ path: 'src/foo.ts', oldText: 'RESULT_OLD', newText: 'RESULT_NEW' }],
+          locations: [],
+        }
+      },
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-empty-error', args), emptyResultEvent(1, 'call-diff-empty-error', true)])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('Edit src/foo.ts [error]'), `folded error identity missing:\n${folded}`)
+  assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `folded attempted diff missing:\n${folded}`)
+  assert.ok(!folded.includes('RESULT_OLD') && !folded.includes('RESULT_NEW'), `folded error used applied data:\n${folded}`)
+  assert.ok(!folded.includes('+1 -1'), `folded error fabricated success stats:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('Edit src/foo.ts [error]'), `expanded error identity missing:\n${expanded}`)
+  assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded attempted diff missing:\n${expanded}`)
+  assert.ok(!expanded.includes('RESULT_OLD') && !expanded.includes('RESULT_NEW'), `expanded error used applied data:\n${expanded}`)
+  assert.deepEqual(resultErrors, [true], 'expanded error forwards isError to the presenter')
+  app.stop()
+})
+
+test('malformed Edit args never substitute presenter call diffs', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let callCount = 0
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => {
+        callCount += 1
+        return {
+          card: 'diff' as const,
+          title: 'Edit src/presenter-only.ts',
+          diffs: [{ path: 'src/presenter-only.ts', oldText: 'PRESENTER_OLD', newText: 'PRESENTER_NEW' }],
+          locations: [],
+        }
+      },
+      result: () => undefined,
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-malformed-edit', '{not-json'), diffResultEvent(1, 'call-malformed-edit', 'unstructured result')])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(!folded.includes('PRESENTER_OLD') && !folded.includes('PRESENTER_NEW'), `folded malformed Edit used presenter call data:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(!expanded.includes('PRESENTER_OLD') && !expanded.includes('PRESENTER_NEW'), `expanded malformed Edit used presenter call data:\n${expanded}`)
+  assert.equal(callCount, 0, 'malformed Edit args must not invoke a presenter call diff fallback')
   app.stop()
 })
 
@@ -1720,20 +2030,68 @@ test('a completed diff card without a result view falls back to the call-time di
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('+1 -1 src/foo.ts'), `call diff header missing:\n${view}`)
+  assert.ok(view.includes('Edit src/foo.ts [ok]  +1 -1'), `call diff stats missing from the card header:\n${view}`)
+  assert.ok(!view.includes('+1 -1 src/foo.ts'), `the Edit body must not repeat its path header:\n${view}`)
   assert.ok(!view.includes('updated successfully'), `raw result text must not replace the diff:\n${view}`)
+  app.stop()
+})
+
+test('an error Edit stays an error and never renders an applied result diff', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/foo.ts', old_string: 'CALL_OLD', new_string: 'CALL_NEW' })
+  const resultErrors: boolean[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'CALL_OLD', newText: 'CALL_NEW' }],
+        locations: [],
+      }),
+      result: (_name, _args, result) => {
+        resultErrors.push(result.isError)
+        return {
+          card: 'diff' as const,
+          title: 'Edit src/foo.ts',
+          diffs: [{ path: 'src/foo.ts', oldText: 'RESULT_OLD', newText: 'RESULT_NEW' }],
+          locations: [],
+        }
+      },
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-error', args), diffResultEvent(1, 'call-diff-error', 'edit failed', true)])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('Edit src/foo.ts [error]'), `error identity missing:\n${folded}`)
+  assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `error card should show the attempted call diff:\n${folded}`)
+  assert.ok(!folded.includes('RESULT_OLD') && !folded.includes('RESULT_NEW'), `error card must not show an applied result diff:\n${folded}`)
+  assert.ok(!folded.includes('+1 -1'), `error card must not fabricate success stats:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('Edit src/foo.ts [error]'), `expanded error identity missing:\n${expanded}`)
+  assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded error card switched diff source:\n${expanded}`)
+  assert.ok(!expanded.includes('RESULT_OLD') && !expanded.includes('RESULT_NEW'), `expanded error card rendered applied data:\n${expanded}`)
+  assert.deepEqual(resultErrors, [true], 'expanded error rendering preserves isError')
   app.stop()
 })
 
 test('a big diff card caps in the default view with an expand hint', async () => {
   const vt = new VirtualTerminal(100, 40)
-  const oldLines = Array.from({ length: 30 }, (_, i) => `old ${i}`).join('\n')
   const newLines = Array.from({ length: 30 }, (_, i) => `new ${i}`).join('\n')
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     present: {
       call: () => ({
         card: 'diff' as const,
-        title: 'Write src/big.ts',
+        title: 'Edit src/big.ts',
         diffs: [{ path: 'src/big.ts', oldText: null, newText: newLines }],
         locations: [],
       }),
@@ -1745,11 +2103,23 @@ test('a big diff card caps in the default view with an expand hint', async () =>
   startedApps.add(app)
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
-  folder.apply([diffCallEvent(0, 'call-diff-4')])
+  folder.apply([{
+    type: 'tool/call',
+    seq: SessionSeq(0),
+    time: 1_700_000_000_000,
+    data: {
+      turn: 0,
+      step: 0,
+      callId: ToolCallId('call-diff-4'),
+      name: 'edit',
+      arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: '', new_string: newLines }),
+    },
+  }])
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('+30 src/big.ts'), `create header missing:\n${view}`)
+  assert.ok(view.includes('Edit src/big.ts [running]  +30'), `create stats missing from the card header:\n${view}`)
+  assert.ok(!view.includes('+30 src/big.ts'), `the Edit body must not repeat its path header:\n${view}`)
   assert.ok(view.includes('more changes hidden (click to expand)'), `cap footer missing:\n${view}`)
   app.stop()
 })

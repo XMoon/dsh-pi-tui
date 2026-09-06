@@ -1500,10 +1500,7 @@ export function focusToolDisplay(
  * full multiline command (ghost-row fix). */
 function formatOwnedCallForCompactFocus(view: ToolCallView): string {
   if (view.card === 'terminal') return firstLine(view.title.replace(/\r\n|\r/g, '\n'))
-  if (view.card === 'diff') {
-    const path = view.diffs[0]?.path
-    return path === undefined ? view.title : `${view.title} ${path}`
-  }
+  if (view.card === 'diff') return firstLine(view.title.replace(/\r\n|\r/g, '\n'))
   const raw = typeof view.rawInput === 'string' ? view.rawInput.trim() : undefined
   if (raw === undefined || raw === '') return view.title
   return view.title.endsWith(raw) ? view.title : `${view.title} ${firstLine(raw)}`

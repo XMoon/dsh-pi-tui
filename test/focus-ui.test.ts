@@ -147,6 +147,42 @@ function show(app: TuiApp, folder: TranscriptFolder, previews?: readonly Streami
   app.setTranscript(folder.messages(), folder.turnActivities(), undefined, previews)
 }
 
+test('Focus collapsed Edit Tool slot keeps the presenter-owned path once', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'old', newText: 'new' }],
+        locations: [],
+      }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u-edit'), role: 'user',
+      content: [{ type: 'text', text: 'edit the file' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('edit-focus'), name: 'edit',
+      arguments: JSON.stringify({ file_path: 'src/foo.ts', old_string: 'old', new_string: 'new' }),
+    }, T0 + 2, 2),
+  ])
+  app.setFocusMode(true)
+  show(app, folder)
+  await vt.waitForRender()
+  const toolLine = vt.getViewport().find(line => line.includes('Tool:')) ?? ''
+  assert.ok(toolLine.includes('Edit src/foo.ts'), `presenter-owned Edit title missing:\n${vt.getViewport().join('\n')}`)
+  assert.equal(toolLine.split('src/foo.ts').length - 1, 1, `Focus Tool path duplicated:\n${toolLine}`)
+  app.stop()
+})
+
 test('Focus ON running: the Thought card is collapsed with previews, the process is hidden, the WorkingIndicator stays', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
@@ -1053,12 +1089,13 @@ test('regular search reveal of a NON-recent root full-reveals its process (no de
 test('regular Focus expanded roots render large diffs in FULL (no mouse, no cap)', async () => {
   const vt = new VirtualTerminal(100, 40)
   const newLines = Array.from({ length: 30 }, (_, i) => `new ${i}`).join('\n')
+  const presenterLines = Array.from({ length: 30 }, (_, i) => `presenter ${i}`).join('\n')
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     present: {
       call: () => ({
         card: 'diff' as const,
         title: 'Edit src/big.ts',
-        diffs: [{ path: 'src/big.ts', oldText: null, newText: newLines }],
+        diffs: [{ path: 'src/big.ts', oldText: null, newText: presenterLines }],
         locations: [],
       }),
       result: () => undefined,
@@ -1072,7 +1109,7 @@ test('regular Focus expanded roots render large diffs in FULL (no mouse, no cap)
     eventAt('tool/call', {
       turn: 1, step: 0, callId: ToolCallId('cdiff'),
       name: 'edit',
-      arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }),
+      arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'new 0', new_string: newLines }),
     }, T0 + 1, 1),
     eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
   ])
@@ -1088,8 +1125,9 @@ test('regular Focus expanded roots render large diffs in FULL (no mouse, no cap)
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('🐳 Thought'), 'the derived root must expand')
-  assert.ok(joined.includes('new 15'), 'the regular Focus expanded root must render the diff in FULL')
-  assert.ok(!joined.includes('more changes hidden'), 'no cap footer in the regular Focus reveal')
+  assert.ok(joined.includes('new 15'), 'the regular Focus expanded root must render the call-time diff in FULL')
+  assert.ok(!joined.includes('presenter 15'), 'the expanded running Edit must not switch to presentCall data')
+   assert.ok(!joined.includes('more changes hidden'), 'no cap footer in the regular Focus reveal')
   app.stop()
 })
 
@@ -1112,7 +1150,7 @@ test('cache identity: Ctrl+O ON caps a large diff, then /focus on FULL-REVEALS t
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'new 0', new_string: newLines }) }, T0 + 1, 1),
     eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
   ])
   // Focus OFF + Ctrl+O ON: the ordinary fold expands the card, the diff CAPS.
@@ -1151,7 +1189,7 @@ test('cache identity: /focus off restores the ordinary CAPPED diff presentation 
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'a\nb\nc', new_string: newLines }) }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cdiff'), name: 'edit', arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: 'new 0', new_string: newLines }) }, T0 + 1, 1),
     eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
   ])
   // Focus ON + Ctrl+O ON: the derived root full-reveals the diff.
