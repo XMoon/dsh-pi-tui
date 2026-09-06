@@ -260,3 +260,33 @@ test('fullscreen: selected /image rows marquee on the active alt screen', async 
   await vt.waitForRender()
   assert.equal(marqueeDeadline(app), -1, '/image close must reset the file marquee')
 })
+
+test('final app disposal disposes the host file-completion marquee', async (t) => {
+  const life = testLifecycle(t)
+  const root = marqueeFixture(life)
+  const marqueeNow = { value: 0 }
+  const { vt, app, screen } = await startFullscreen(life, root, 'image', marqueeNow)
+
+  app.setEditorText('/image src/file-completion/very-long-file-completion-path-')
+  vt.sendInput('\t')
+  await pollImmediate(() => isAutocompleteActive(app), 'dispose: dropdown must open')
+  resetFileMarqueeForTest(app)
+  const timers = captureMarqueeTimers(() => screen.renderNow(true))
+  const timer = timers.find(candidate => candidate.delay === 800)
+  await flushTerminal(vt)
+  if (timer === undefined) assert.fail('dispose: initial marquee timer must be armed')
+  assert.notEqual(marqueeDeadline(app), -1, 'dispose: marquee timer must be armed before final teardown')
+
+  app.dispose()
+  assert.equal(marqueeDeadline(app), -1, 'final app disposal must clear the host marquee timer')
+
+  let repaintRequests = 0
+  const host = app as unknown as { requestRender(force?: boolean): void }
+  const requestRender = host.requestRender.bind(app)
+  host.requestRender = (force?: boolean) => {
+    repaintRequests += 1
+    requestRender(force)
+  }
+  timer.fire()
+  assert.equal(repaintRequests, 0, 'a captured timer callback must not request a repaint after disposal')
+})
