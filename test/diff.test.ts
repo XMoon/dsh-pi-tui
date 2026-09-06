@@ -84,6 +84,14 @@ test('renderDiffView does not add a marker when the body fits its cap', () => {
   assert.ok(!lines.some(line => line.includes('hidden')), `unexpected truncation marker:\n${lines.join('\n')}`)
 })
 
+test('renderDiffView ignores a trailing no-op hunk when the body cap is full', () => {
+  const lines = renderDiffView([
+    { path: 'changed.ts', oldText: 'old', newText: 'new' },
+    { path: 'same.ts', oldText: 'same', newText: 'same' },
+  ], undefined, { maxLines: 2 }).map(strip)
+  assert.ok(!lines.some(line => line.includes('hidden')), `a no-op hunk must not trigger truncation:\n${lines.join('\n')}`)
+})
+
 test('diff header modes and stats share the rendered diff rows', () => {
   const diffs = [
     { path: 'src/foo.ts', oldText: 'same\nold', newText: 'same\nnew\nadded' },

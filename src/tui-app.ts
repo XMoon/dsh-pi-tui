@@ -8456,16 +8456,17 @@ export class TuiApp {
    * Whether a HOST build bakes width-dependent truncation into the
    * component at build time — the FOLDED system / compaction / legacy tool
    * cards (their preview rows truncate to the content width once, so a
-   * terminal resize must rebuild them at the new width). Render-time
-   * width-aware builds (assistant/user markdown and bubbles, Thinking
-   * compact with its per-width cache, expanded card bodies) re-derive
-   * every frame and are deliberately excluded: keying them by width
+   * terminal resize must rebuild them at the new width) and expanded Edit
+   * headers (their status-preserving single-line header is built at one
+   * width). Render-time width-aware builds (assistant/user markdown and
+   * bubbles, Thinking compact with its per-width cache, other expanded card
+   * bodies) re-derive every frame and are deliberately excluded: keying them by width
    * would invalidate the whole message cache on every resize and re-run
    * plugin renderers for unchanged content (the renderer-cache
    * contract, plan §23).
    */
   private bakesFoldedWidth(message: TranscriptMessage, expanded: boolean): boolean {
-    if (expanded) return false
+    if (expanded) return message.kind === 'tool' && message.name === 'edit'
     return message.kind === 'system' || message.kind === 'compaction'
       || (message.kind === 'tool' && !isCompactActionTool(message.name, message.args))
   }
@@ -9441,12 +9442,13 @@ export class TuiApp {
       ? editResultView?.card === 'diff' ? editResultView : undefined
       : this.toolResultView(message)
     // A dedicated terminal presenter, when available, remains authoritative
-    // for output and exit status. An error Edit's diff is an attempted change,
-    // not an applied result, so it follows the call-time fallback below.
-    const ignoreEditErrorDiff = message.name === 'edit'
+    // for output and exit status. An error Edit's result is an attempted
+    // change, not an applied result, so every result view follows the
+    // call-time fallback below.
+    const ignoreEditErrorResult = message.name === 'edit'
       && message.status === 'error'
-      && resultView?.card === 'diff'
-    if (resultView !== undefined && !ignoreEditErrorDiff) {
+      && resultView !== undefined
+    if (resultView !== undefined && !ignoreEditErrorResult) {
       switch (resultView.card) {
         case 'read': {
           for (const line of resultView.lines) {
@@ -9569,7 +9571,7 @@ export class TuiApp {
     // parsed call-time diff, so the block shown while running stays put
     // instead of accepting a second presenter source or collapsing to raw
     // text (kimi parity).
-    if (resultView === undefined || ignoreEditErrorDiff) {
+    if (resultView === undefined || ignoreEditErrorResult) {
       if (message.name === 'edit' && editDiffs !== undefined && editDiffs.length > 0) {
         this.renderDiffBody(card, editDiffs, explicitlyExpanded, message.name)
         return
