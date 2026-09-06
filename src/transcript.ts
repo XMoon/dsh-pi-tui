@@ -433,7 +433,8 @@ function emptyAssistantBlockState(blockType: string): AssistantBlockState {
 /**
  * Apply the shared block-folding semantics used by both transient live input
  * and durable embedded assistant streams. A numeric upstream index owns one
- * state at a time; block-end replaces that state authoritatively.
+ * state at a time; its first block-end replaces the partial state
+ * authoritatively and then freezes the completed block.
  */
 function applyAssistantBlockChunk(blocks: Map<number, AssistantBlockState>, chunk: AssistantBlockChunk): void {
   switch (chunk.type) {
