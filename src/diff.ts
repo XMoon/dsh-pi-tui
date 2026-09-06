@@ -293,6 +293,18 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
   let sawHunk = false
 
   outer: for (const { hunk, anchored, diffLines, clusters, addedCount, removedCount } of hunkViews) {
+    const stats: string[] = []
+    if (addedCount > 0) stats.push(color.diffAdded(`+${addedCount}`))
+    if (removedCount > 0) stats.push(color.diffRemoved(`-${removedCount}`))
+    const header = headerMode === 'full'
+      ? `${stats.join(' ')}${stats.length === 0 ? '' : ' '}${relativizeToCwd(hunk.path, cwd)}`
+      : stats.join(' ')
+    // A no-op hunk has no body rows to consume or hide, so it must not turn
+    // an exactly-full budget into a false truncation marker.
+    if (clusters.length === 0) {
+      if (headerMode !== 'none') out.push(header)
+      continue
+    }
     // Keep later hunk headers from defeating the global folded body budget.
     // The first header remains visible even when maxLines is zero, matching
     // the single-hunk behavior and preserving the card's identity.
@@ -303,17 +315,7 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
     const elideIndent = anchored ? '     ' : ''
     lastElideIndent = elideIndent
     sawHunk = true
-
-    if (headerMode !== 'none') {
-      const stats: string[] = []
-      if (addedCount > 0) stats.push(color.diffAdded(`+${addedCount}`))
-      if (removedCount > 0) stats.push(color.diffRemoved(`-${removedCount}`))
-      const header = headerMode === 'full'
-        ? `${stats.join(' ')}${stats.length === 0 ? '' : ' '}${relativizeToCwd(hunk.path, cwd)}`
-        : stats.join(' ')
-      out.push(header)
-    }
-    if (clusters.length === 0) continue
+    if (headerMode !== 'none') out.push(header)
 
     let prevEnd = -1
     for (const cluster of clusters) {

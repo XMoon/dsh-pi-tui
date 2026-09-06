@@ -1833,6 +1833,42 @@ test('a multi-hunk Edit keeps path ownership in the card header', async () => {
   app.stop()
 })
 
+test('expanded Edit headers reflow with terminal width changes', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/very-long-file-name.ts', old_string: 'old', new_string: 'new' })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/very-long-file-name.ts',
+        diffs: [{ path: 'src/very-long-file-name.ts', oldText: 'old', newText: 'new' }],
+        locations: [],
+      }),
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setToolOutputExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-resize', args), diffResultEvent(1, 'call-diff-resize', 'done')])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+
+  vt.resize(24, 24)
+  await vt.waitForRender()
+  const narrowRows = vt.getViewport()
+  const narrowHeader = narrowRows.find(line => line.includes('Edit') && line.includes('[ok]')) ?? ''
+  assert.notEqual(narrowHeader, '', `expanded Edit header lost status after narrowing:\n${narrowRows.join('\\n')}`)
+
+  vt.resize(100, 24)
+  await vt.waitForRender()
+  const wideRows = vt.getViewport()
+  const wideHeader = wideRows.find(line => line.includes('Edit')) ?? ''
+  assert.ok(wideHeader.includes('src/very-long-file-name.ts') && wideHeader.includes('[ok]'), `expanded Edit header did not recover at wide width:\n${wideRows.join('\\n')}`)
+  app.stop()
+})
+
 test('narrow Edit headers preserve status across running, success, and error states', async () => {
   const vt = new VirtualTerminal(24, 24)
   const args = JSON.stringify({
@@ -2134,6 +2170,46 @@ test('an error Edit stays an error and never renders an applied result diff', as
   assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded error card switched diff source:\n${expanded}`)
   assert.ok(!expanded.includes('RESULT_OLD') && !expanded.includes('RESULT_NEW'), `expanded error card rendered applied data:\n${expanded}`)
   assert.deepEqual(resultErrors, [true], 'expanded error rendering preserves isError')
+  app.stop()
+})
+
+test('an error Edit ignores non-diff result views and keeps the call diff', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/foo.ts', old_string: 'CALL_OLD', new_string: 'CALL_NEW' })
+  const resultErrors: boolean[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'CALL_OLD', newText: 'CALL_NEW' }],
+        locations: [],
+      }),
+      result: (_name, _args, result) => {
+        resultErrors.push(result.isError)
+        return { card: 'generic' as const, title: 'Failed Edit', content: [{ type: 'text', text: 'RESULT_GENERIC' }] }
+      },
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-error-generic', args), diffResultEvent(1, 'call-diff-error-generic', 'edit failed', true)])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `folded attempted diff missing:\n${folded}`)
+  assert.ok(!folded.includes('RESULT_GENERIC'), `folded error should not show result content:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded attempted diff missing:\n${expanded}`)
+  assert.ok(!expanded.includes('RESULT_GENERIC'), `expanded error must not use a non-diff result view:\n${expanded}`)
+  assert.deepEqual(resultErrors, [true], 'expanded error forwards isError to the presenter')
   app.stop()
 })
 
