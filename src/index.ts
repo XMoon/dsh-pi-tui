@@ -7108,9 +7108,10 @@ export function apply(ctx: Context, config: Config): void {
       // Opening journals fence presentation only. Runtime bookkeeping must
       // continue to observe the target for selections, approvals, and cleanup.
       const mainOpening = openingSession
-      const mainEvent = mainOpening !== undefined
-        ? mainOpening.id === session.id
-        : session.id === liveAgent?.session.id
+      // The retiring committed Agent remains authoritative until quiesce
+      // completes; the published opening target may also emit before commit.
+      const mainEvent = session.id === liveAgent?.session.id
+        || (mainOpening !== undefined && mainOpening.id === session.id)
       const runtimeAgent = mainEvent ? agents.get(SessionId(session.id)) as Agent | undefined : undefined
       let settledViewChildId: SessionId | undefined
       if (mainEvent) {

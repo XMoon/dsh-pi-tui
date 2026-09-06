@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { ProcessTerminal } from '@xmoon76/pi-tui'
-import { MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, type Config } from '../src/index.ts'
@@ -651,7 +651,7 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
 })
 
 
-test('a main Session opening cut never mixes A with B or loses B transient state', async (t) => {
+test('a main Session opening cut preserves old-Agent bookkeeping and B transient state', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-main-opening-gap-')
   const previousHome = process.env.DSH_HOME
@@ -682,6 +682,11 @@ test('a main Session opening cut never mixes A with B or loses B transient state
     ],
     append: (type, data) => ({ type, seq: nextOpeningSeq++, time: Date.now(), data }) as unknown as SessionEvent,
   })
+  let holdAIdle = false
+  let releaseAIdle!: () => void
+  const aIdle = new Promise<void>(resolve => { releaseAIdle = resolve })
+  let aIdleStarted!: () => void
+  const aIdleStartedPromise = new Promise<void>(resolve => { aIdleStarted = resolve })
   let releaseBResume!: () => void
   const bResume = new Promise<void>(resolve => { releaseBResume = resolve })
   let bResumeStarted!: () => void
@@ -698,9 +703,14 @@ test('a main Session opening cut never mixes A with B or loses B transient state
     undefined,
     undefined,
     async id => {
-      if (id !== sessionB.id) return
-      bIdleStarted()
-      await bIdle
+      if (id === sessionA.id && holdAIdle) {
+        aIdleStarted()
+        await aIdle
+      }
+      if (id === sessionB.id) {
+        bIdleStarted()
+        await bIdle
+      }
     },
     async id => {
       if (id !== sessionB.id) return
@@ -712,7 +722,49 @@ test('a main Session opening cut never mixes A with B or loses B transient state
   fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
   const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
   assert.ok(resumeHandler, 'the real runner must register /resume')
+  const aAgent = liveAgentOf(harness, sessionA.id)
+  ;(aAgent as { status: 'idle' | 'running' }).status = 'running'
+  holdAIdle = true
   const switchPromise = (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: sessionB.id })
+  await aIdleStartedPromise
+  const oldCallId = 'main-opening-old-tool' as ToolCallId
+  context.emit('session/event', sessionA as never, event('tool/call', {
+    turn: 1,
+    step: 0,
+    callId: oldCallId,
+    name: 'bash',
+    arguments: '{"command":"rm -rf /tmp/old-opening-test"}',
+  }, 6))
+  context.emit('approval/request', {
+    callId: oldCallId,
+    toolName: 'bash',
+    reason: 'old opening approval',
+  } as never, undefined as never)
+  await settle()
+  assert.equal(probe.capturedApproval?.arguments, '{"command":"rm -rf /tmp/old-opening-test"}',
+    'the committed main Agent must keep approval arguments while quiesce waits')
+  assert.equal(probe.capturedApproval?.danger, true,
+    'the committed main Agent must keep dangerous-command classification while quiesce waits')
+  context.emit('session/event', sessionA as never, event('tool/result', {
+    turn: 1,
+    step: 0,
+    message: createToolResultMessage({
+      callId: oldCallId,
+      content: [{ type: 'text', text: 'done' }],
+      isError: false,
+    }),
+  }, 7))
+  context.emit('approval/request', {
+    callId: oldCallId,
+    toolName: 'bash',
+    reason: 'old result cleanup check',
+  } as never, undefined as never)
+  await settle()
+  assert.equal(probe.capturedApproval?.arguments, undefined,
+    'the old tool/result cleanup must remove arguments before the target commits')
+  assert.equal(probe.capturedApproval?.danger, undefined,
+    'the old tool/result cleanup must remove danger state before the target commits')
+  releaseAIdle()
   await bResumeStartedPromise
 
   const emitDurable = (type: string, data: unknown): SessionEvent => {
