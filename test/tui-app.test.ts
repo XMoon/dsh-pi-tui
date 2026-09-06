@@ -1761,6 +1761,40 @@ test('a settled Edit keeps folded and expanded views on the applied result diff'
   app.stop()
 })
 
+test('a folded settled Edit caps the result diff across all hunks', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const resultDiffs = Array.from({ length: 8 }, (_, index) => ({
+    path: 'src/foo.ts',
+    oldText: `old-${index}`,
+    newText: `new-${index}`,
+  }))
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: resultDiffs,
+        locations: [],
+      }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-folded-hunks'), diffResultEvent(1, 'call-diff-folded-hunks', 'updated')])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  const changedRows = folded.split('\n').filter(line => /(?:old|new)-\d+/.test(line))
+  assert.equal(changedRows.length, 4, `folded result body must share one global four-row budget:\n${folded}`)
+  assert.ok(folded.includes('more changes hidden'), `folded multi-hunk result must show an omission marker:\n${folded}`)
+  app.stop()
+})
+
 test('a multi-hunk Edit keeps path ownership in the card header', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
@@ -1840,6 +1874,25 @@ test('narrow Edit headers preserve status across running, success, and error sta
   await assertHeaderStatus('[running]', [diffCallEvent(0, 'call-diff-narrow', args)])
   await assertHeaderStatus('[ok]', [diffCallEvent(2, 'call-diff-narrow-ok', args), diffResultEvent(3, 'call-diff-narrow-ok', 'done')])
   await assertHeaderStatus('[error]', [diffCallEvent(4, 'call-diff-narrow-error', args), diffResultEvent(5, 'call-diff-narrow-error', 'failed', true)])
+  app.stop()
+})
+
+test('expanded non-Edit headers retain full wrapped descriptions', async () => {
+  const vt = new VirtualTerminal(28, 24)
+  const pattern = 'needle-that-must-wrap-12345'
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep',
+    args: JSON.stringify({ pattern, path: 'src' }),
+    result: 'match', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.replace(/\n/g, '').includes(pattern), `non-Edit expanded header must wrap instead of truncating:\n${view}`)
   app.stop()
 })
 
