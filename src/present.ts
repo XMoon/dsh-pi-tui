@@ -13,6 +13,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type {
   FileDiff, ToolCallView, ToolResult, ToolResultView, WebFetchResultView, WebSearchResultView,
 } from '@deepseek-ai/dsh-tools'
+import { finalizedBlockFallbackText, fileAttachmentSummary } from './content-block-presentation.ts'
 import { type IconSemantic } from './icons.ts'
 
 /**
@@ -1203,9 +1204,10 @@ export function genericRawInputLines(name: string, rawInput: unknown): string[] 
 
 /**
  * Flatten a settled result's content blocks to display lines, with the Web's
- * `resultText` semantics: text blocks verbatim, other block shapes as pretty
- * JSON. Empty content on a failed call falls back to the structured error's
- * `name: code` line (the Web's error summary).
+ * `resultText` semantics: text blocks verbatim, known file blocks as a
+ * metadata-only row, images as a compact placeholder, and unknown finalized
+ * blocks as an explicit bounded fallback. Empty content on a failed call
+ * falls back to the structured error's `name: code` line.
  * @param blocks - the result content blocks.
  * @param error - the structured error, when the call failed.
  * @returns the display lines (may be empty).
@@ -1216,9 +1218,14 @@ export function resultTextLines(blocks: readonly ContentBlock[], error?: { name:
     if (block.type === 'text') lines.push(...block.text.split('\n'))
     // An image block carries base64 payload: never dump it into the
     // transcript as pretty JSON (read_image cards render their envelope
-    // summary instead). Other non-text blocks keep the JSON projection.
+    // summary instead).
     else if (block.type === 'image') lines.push('[image]')
-    else lines.push(JSON.stringify(block, null, 2))
+    else if (block.type === 'file') lines.push(fileAttachmentSummary(block.attachment))
+    else if (block.type === 'reasoning' || block.type === 'tool-call' || block.type === 'tool-result') {
+      // Preserve the existing raw projection for known process blocks; their
+      // dedicated transcript surfaces own ordinary rendering.
+      lines.push(JSON.stringify(block, null, 2))
+    } else lines.push(finalizedBlockFallbackText(block))
   }
   if (lines.length === 0 && error !== undefined) lines.push(`${error.name}: ${error.code}`)
   return lines

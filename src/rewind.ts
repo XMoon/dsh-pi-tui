@@ -20,6 +20,7 @@
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { userBlocksVisibleNow } from './content-block-presentation.ts'
 import { textOf } from './transcript.ts'
 import type { PickerItem } from './tui-app.ts'
 
@@ -36,9 +37,9 @@ export interface RewindCandidate {
   editorText: string
   /** One-line, width-bounded preview for the picker row. */
   preview: string
-  /** Whether the selected prompt contains non-text content (image blocks):
-   * the rewind still forks, the editor gets the text part only, and the UI
-   * must warn that attachments were not re-staged. */
+  /** Whether the selected prompt contains non-text content (attachment or
+   * future finalized blocks): the rewind still forks, the editor gets the
+   * text part only, and the UI warns that non-text content was not re-staged. */
   hasNonTextContent: boolean
 }
 
@@ -60,10 +61,10 @@ export function isHumanTurnMessage(event: SessionEvent<'user/message'>): boolean
   return event.data.source.kind === 'user'
 }
 
-/** Whether a message is empty for rewind purposes: no text and no image —
- * mirror of the transcript's empty-user-message rule. */
+/** Whether a message is empty for rewind purposes: mirror the
+ * transcript's finalized user-content visibility rule. */
 function isEmptyMessage(blocks: readonly ContentBlock[]): boolean {
-  return textOf(blocks) === '' && !blocks.some(block => block.type === 'image')
+  return !userBlocksVisibleNow(blocks)
 }
 
 /** One-line, width-bounded preview of a prompt (whitespace collapsed). */
@@ -150,13 +151,13 @@ export function rewindSeed(events: readonly SessionEvent[], candidate: RewindCan
  * the selection resolves against the candidate list captured at open time
  * (stale selections are rejected by the workflow's generation gates). */
 export function rewindPickerItem(candidate: RewindCandidate): PickerItem {
-  const tag = candidate.hasNonTextContent ? '[image] ' : ''
-  const preview = candidate.preview === '' && candidate.hasNonTextContent ? '(image only)' : candidate.preview
+  const tag = candidate.hasNonTextContent ? '[attachment] ' : ''
+  const preview = candidate.preview === '' && candidate.hasNonTextContent ? '(attachment only)' : candidate.preview
   return {
     value: String(candidate.turnStartSeq),
     label: `turn ${candidate.turn} · ${tag}${preview}`,
     ...(candidate.hasNonTextContent
-      ? { description: 'attachments are not re-staged on rewind' }
+      ? { description: 'non-text content is not re-staged on rewind' }
       : {}),
   }
 }

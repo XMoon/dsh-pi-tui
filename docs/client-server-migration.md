@@ -58,6 +58,20 @@ never serialized. A future Remote adapter must map it to official
 connection/client operation cancellation rather than sending the `AbortSignal`
 over the wire. Stage B completes this contract and is not Remote backend work.
 
+### Finalized content presentation (Stage C1 / pre-M2)
+
+Stage C1 presents already-finalized `ContentBlock` values without changing
+stream lifecycle or Host ownership. Transcript-facing flat projections retain
+image and file attachment markers; FileBlocks render from durable name/byte
+metadata only; and unknown finalized blocks use an explicit bounded JSON
+fallback. The shared visibility rule covers transcript search and rewind
+candidate eligibility/warnings; rewind preview/editor restoration remain
+text-only by policy. Readable markdown export uses the richer projection.
+Queue/steer/dequeue behavior remains outside this finalized-only stage; only
+its rewind notification wording is generalized, and rewind does not re-stage
+content. No attachment bytes/paths are resolved; migration remains
+M2 NOT STARTED with Direct as the production backend.
+
 ## Target
 
 A DSH-native client: the TUI keeps terminal/editor/overlays/keybindings/

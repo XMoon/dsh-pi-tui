@@ -113,8 +113,9 @@ had the right convention (`🖼️ shot.png` inline).
 
 ### Fix
 
-- `textWithImageMarkers(blocks)` (src/transcript.ts): text blocks verbatim,
-  image blocks as an inline `🖼️ name` marker AT their position. A marker
+- `textWithAttachmentMarkers(blocks)` (src/content-block-presentation.ts,
+  re-exported by `src/transcript.ts`): text blocks verbatim,
+  image/file blocks as inline `🖼️ name` / `📄 name` markers AT their position. A marker
   boundary always carries one separating space — the `/image` insertion
   leaves NO space before the placeholder, so `这张图是啥[image…]` must not
   read as `这张图是啥🖼️ shot.png` — while a space the user already typed is
