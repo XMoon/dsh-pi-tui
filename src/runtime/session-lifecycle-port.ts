@@ -5,9 +5,10 @@
  * adapter in a later milestone. The contract is deliberately
  * transport-neutral:
  *
- * - Requests carry SERIALIZABLE data only (session id, provider/model,
- *   preset id, seed, meta) — never callbacks. A Remote adapter maps them
- *   to the official DSH API.
+ * - Requests carry SERIALIZABLE data (session id, provider/model, preset id,
+ *   seed, meta) plus the explicitly client-local lifecycle signal — never
+ *   callbacks. The signal is never serialized; a Remote adapter maps the
+ *   serializable request data to the official DSH API.
  * - The result is a lightweight `SessionHandle` (session identity plus an
  *   optional Direct-only agent escape) — never the in-process
  *   `AgentHandle` object.
@@ -65,6 +66,11 @@ export interface ResumeSessionRequest {
   /** The recorded preset id (resolved from the session log); the Direct
    * adapter composes the setup from it. */
   agentPreset?: string
+  /** CLIENT-LOCAL control field (never serialized): resume-creation-only
+    * cancellation; it detaches when the handle is published. A future Remote
+    * adapter maps it to client/connection cancellation instead of serializing
+    * the AbortSignal. */
+  signal?: AbortSignal
 }
 
 /** The lightweight outcome of a lifecycle operation — the cross-backend

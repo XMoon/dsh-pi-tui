@@ -53,6 +53,7 @@ export interface AgentsServiceLike {
     resumeSessionId: ReturnType<typeof SessionId>
     agentOptions: { provider?: string; model?: string }
     setup: (agentCtx: Context) => Promise<void> | void
+    signal?: AbortSignal
   }): Promise<AgentHandle>
 }
 
@@ -100,6 +101,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       resumeSessionId: SessionId(request.resumeSessionId),
       agentOptions: { provider: request.provider, model: request.model },
       setup: composition.setup,
+      signal: request.signal,
     })
     return { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } }
   }

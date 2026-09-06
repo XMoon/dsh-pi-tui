@@ -195,6 +195,8 @@ interface RunnerHarness {
   readonly defaultModel: unknown
   readonly llm: unknown
   readonly createOptions: { provider?: string; model?: string }[]
+  readonly createSignals: (AbortSignal | undefined)[]
+  readonly resumeSignals: (AbortSignal | undefined)[]
   readonly createdSessions: FakeSession[]
   readonly commands: unknown
   readonly subagents?: unknown
@@ -230,10 +232,13 @@ function makeHarness(
   subagents?: unknown,
   whenIdleGate?: (sessionId: string) => Promise<void>,
   resumeGate?: (sessionId: string) => Promise<void>,
+  resumeError?: Error,
 ): RunnerHarness {
   const persisted = new Map<string, FakeSession>()
   const live = new Map<string, Agent>()
   const createOptions: { provider?: string; model?: string }[] = []
+  const createSignals: (AbortSignal | undefined)[] = []
+  const resumeSignals: (AbortSignal | undefined)[] = []
   const createdSessions: FakeSession[] = []
   for (const session of initial === undefined ? [] : Array.isArray(initial) ? initial : [initial]) {
     persisted.set(session.id, session)
@@ -273,7 +278,9 @@ function makeHarness(
     },
   }
   const agents = {
-    resume: async ({ resumeSessionId, setup }: { resumeSessionId: unknown; setup?: (agentCtx: unknown) => unknown }) => {
+    resume: async ({ resumeSessionId, setup, signal }: { resumeSessionId: unknown; setup?: (agentCtx: unknown) => unknown; signal?: AbortSignal }) => {
+      resumeSignals.push(signal)
+      if (resumeError !== undefined) throw resumeError
       const session = persisted.get(String(resumeSessionId))
       if (session === undefined) throw new Error(`unknown test session ${String(resumeSessionId)}`)
       const handle = makeHandle(session)
@@ -281,12 +288,14 @@ function makeHarness(
       await resumeGate?.(String(resumeSessionId))
       return handle
     },
-    create: async ({ sessionId, agentOptions, setup }: {
+    create: async ({ sessionId, agentOptions, setup, signal }: {
       sessionId: unknown
       agentOptions?: { provider?: string; model?: string }
       setup?: (agentCtx: unknown) => unknown
+      signal?: AbortSignal
     }) => {
       createOptions.push({ ...agentOptions })
+      createSignals.push(signal)
       if (createGate !== undefined) await createGate()
       const id = String(sessionId)
       const session: FakeSession = fakeSession({
@@ -332,7 +341,7 @@ function makeHarness(
     execute: async () => ({ result: { kind: 'success' } }),
     handler: (name: string) => definitions.get(name)?.handler,
   }
-  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createdSessions, commands, subagents }
+  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createSignals, resumeSignals, createdSessions, commands, subagents }
 }
 
 async function settle(): Promise<void> {
@@ -509,8 +518,9 @@ async function mountRunner(
   harness: RunnerHarness,
   startup: { sessionId?: string; presetId?: string },
   config: Config,
+  appExit: () => void = () => {},
 ) {
-  ctx.provide('appExit', () => {})
+  ctx.provide('appExit', appExit)
   ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
   ctx.provide('sessionPersistence', harness.persistence as never)
   ctx.provide('sessionQuery', harness.sessionQuery as never)
@@ -579,6 +589,7 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
   const resumeHarness = makeHarness(home, resumed, { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' })
   resumeContext = new Context()
   resumeFiber = await mountRunner(resumeContext, home, resumeHarness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  assert.ok(resumeHarness.resumeSignals[0], 'explicit resume must receive the runner lifecycle signal')
   assert.equal(probe.transcriptApplyCount, 1)
   assert.equal(probe.statsApplyCount, 1)
   assert.equal(probe.transcriptHydrateCount, 1)
@@ -605,6 +616,8 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
   assert.ok(probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'created answer'))
   assert.deepEqual(resumeHarness.createOptions[0], { provider: 'p', model: 'm2' },
     '/new must create with the latest DEFAULT intent, never the old Session selection')
+  assert.equal(resumeHarness.createSignals[0], resumeHarness.resumeSignals[0],
+    '/new must use the same runner lifecycle signal as the initial resume')
   assert.equal(durableSelectionOf(resumeHarness.createdSessions[0]!), undefined,
     '/new must not freeze a durable choice into the fresh Session once the default save settled (blank-session dynamic default)')
 
@@ -641,6 +654,7 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
   await settle()
   assert.deepEqual(deferredHarness.createOptions[0], { provider: 'p', model: 'm2' },
     'deferred create must read the latest sessionless model selection')
+  assert.ok(deferredHarness.createSignals[0], 'deferred create must receive the runner lifecycle signal')
   assert.equal(durableSelectionOf(deferredHarness.createdSessions[0]!), undefined,
     'the first Session must observe the settled default dynamically, not freeze a durable choice')
   assert.equal(probe.transcriptApplyCount, 3)
@@ -766,6 +780,8 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
     'the old tool/result cleanup must remove danger state before the target commits')
   releaseAIdle()
   await bResumeStartedPromise
+  assert.equal(harness.resumeSignals[1], harness.resumeSignals[0],
+    'session switch resume must use the runner lifecycle signal')
 
   const emitDurable = (type: string, data: unknown): SessionEvent => {
     const next = sessionB.append!(type, data) as SessionEvent
@@ -1917,8 +1933,24 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
   // line, so a logger write must never interleave with it (a TTY
   // shares one cursor between stdout and stderr).
   orderedLog.length = 0
-  const failHarness = makeHarness(home) // no persisted session
+  const failedSession: FakeSession = fakeSession({
+    id: 'missing-session',
+    header: { id: 'missing-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('failed resume history'),
+  })
+  const failHarness = makeHarness(
+    home,
+    failedSession,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Error('boom'),
+  )
   const failCtx = new Context()
+  const appsBeforeFailure = probe.apps.length
   failContext = failCtx
   // Capture the runner's failure logs through the cordis logger
   // exporter (the same sink a real deployment registers). The exporter
@@ -1936,6 +1968,12 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
   })
   await exporterFiber
   failFiber = await mountRunner(failContext, home, failHarness, { sessionId: 'missing-session' }, { sessionId: 'missing-session', startupStatusOutput: statusOutput })
+  assert.equal(failHarness.resumeSignals[0]?.aborted, false,
+    'an ordinary resume failure must observe a live lifecycle signal')
+  assert.equal(probe.apps.length, appsBeforeFailure + 1,
+    'an ordinary resume failure must keep the existing sessionless fallback mount')
+  assert.ok(orderedLog.some(write => write.includes('resume missing-session failed: boom')),
+    `the ordinary resume error must remain visible: ${JSON.stringify(orderedLog)}`)
   const failWrites = orderedLog.filter(write => write.includes('Resuming session') || write === 'stdout:\r\x1b[2K')
   assert.ok(failWrites.some(write => write.includes('Resuming session…')),
     `the failed resume still shows the status: ${JSON.stringify(failWrites)}`)
@@ -1945,6 +1983,85 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
   const warnIndexInLog = orderedLog.findIndex(write => write.startsWith('log:') && write.includes('resume missing-session failed'))
   assert.ok(clearIndexInLog >= 0 && warnIndexInLog > clearIndexInLog,
     `the status must be cleared BEFORE the failure log (clear at ${clearIndexInLog}, warn at ${warnIndexInLog}): ${JSON.stringify(orderedLog)}`)
+})
+
+
+test('disposing before explicit resume publication cancels startup without mounting a fallback surface', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-startup-cancel-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const resumed: FakeSession = fakeSession({
+    id: 'startup-cancel-session',
+    header: { id: 'startup-cancel-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  let resumeStarted!: () => void
+  const resumeStartedPromise = new Promise<void>(resolve => { resumeStarted = resolve })
+  let capturedSignal: AbortSignal | undefined
+  const agents = harness.agents as {
+    resume: (options: { resumeSessionId: unknown; signal?: AbortSignal }) => Promise<never>
+  }
+  agents.resume = async ({ signal }) => {
+    harness.resumeSignals.push(signal)
+    capturedSignal = signal
+    resumeStarted()
+    if (signal === undefined) throw new Error('test resume did not receive a lifecycle signal')
+    if (signal.aborted) throw new Error('resume cancelled')
+    return await new Promise<never>((_, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('resume cancelled')), { once: true })
+    })
+  }
+  let exitCalls = 0
+  const cancellationLogs: string[] = []
+  context = new Context()
+  const exporterFiber = context.plugin(pluginCtx => {
+    pluginCtx.logger.exporter({
+      levels: { default: 2 },
+      export: message => {
+        cancellationLogs.push(`${message.name}:${message.args.map(String).join(' ')}`)
+      },
+    })
+  })
+  await exporterFiber
+  fiber = await mountRunner(
+    context,
+    home,
+    harness,
+    { sessionId: resumed.id },
+    { sessionId: resumed.id },
+    () => { exitCalls += 1 },
+  )
+  await resumeStartedPromise
+  assert.equal(harness.resumeSignals[0], capturedSignal)
+  assert.ok(capturedSignal, 'explicit resume must receive a runner lifecycle signal')
+
+  await fiber.dispose()
+  fiber = undefined
+  assert.equal(capturedSignal.aborted, true, 'fiber disposal must abort the pending resume')
+  await settle()
+
+  assert.equal(probe.apps.length, 0, 'cancelled startup must not mount a TUI')
+  assert.equal(harness.createdSessions.length, 0, 'cancelled startup must not fall back to a fresh session')
+  assert.equal((harness.agents as { get: (id: string) => unknown }).get(resumed.id), undefined,
+    'the pre-publication fake must not publish a target Agent')
+  assert.equal(exitCalls, 0, 'lifecycle cancellation must not take the fatal startup exit path')
+  assert.ok(!cancellationLogs.some(log => log.includes('resume failed') || log.includes('fatal')),
+    `lifecycle cancellation must not emit ordinary/fatal startup failure logs: ${JSON.stringify(cancellationLogs)}`)
+  await disposeContext(context)
+  context = undefined
 })
 
 
