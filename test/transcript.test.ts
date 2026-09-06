@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ToolCallId, MessageId, type AssistantStreamRecord, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, ToolCallId, MessageId, type AssistantStreamRecord, type ContentBlock, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
@@ -1825,6 +1825,112 @@ function assistantMessageWithBlocks(
 
 function assistantMessage(seq: number, text: string, opts: { turn?: number; step?: number } = {}): SessionEvent {
   return assistantMessageWithBlocks(seq, [{ type: 'text', text }], opts)
+}
+
+type BlockFamily = 'text' | 'reasoning' | 'tool-call'
+
+interface BlockAssemblyCase {
+  name: string
+  chunks: readonly StreamChunk[]
+}
+
+function blockStart(family: BlockFamily): StreamChunk {
+  return { type: 'block-start', index: 0, blockType: family }
+}
+
+function blockDelta(family: BlockFamily, text: string): StreamChunk {
+  switch (family) {
+    case 'text': return { type: 'text-delta', index: 0, text }
+    case 'reasoning': return { type: 'reasoning-delta', index: 0, text }
+    case 'tool-call': return {
+      type: 'tool-call-delta',
+      index: 0,
+      id: ToolCallId('differential-call'),
+      name: 'bash',
+      argumentsDelta: text,
+    }
+  }
+}
+
+function completeBlock(family: BlockFamily, text: string): ContentBlock {
+  switch (family) {
+    case 'text': return { type: 'text', text }
+    case 'reasoning': return { type: 'reasoning', text }
+    case 'tool-call': return {
+      type: 'tool-call',
+      id: ToolCallId('differential-call'),
+      name: 'bash',
+      arguments: text,
+    }
+  }
+}
+
+function blockEnd(family: BlockFamily, text: string): StreamChunk {
+  return { type: 'block-end', index: 0, block: completeBlock(family, text) }
+}
+
+function blockAssemblyCases(family: BlockFamily): readonly BlockAssemblyCase[] {
+  const first = family === 'tool-call' ? '{"command":"echo ' : 'hello'
+  const second = family === 'tool-call' ? 'hi"}' : ' world'
+  const complete = family === 'tool-call' ? '{"command":"echo hi"}' : 'hello'
+  const straggler = family === 'tool-call' ? '{"command":"BAD"}' : 'BAD'
+  return [
+    { name: 'delta-only', chunks: [blockDelta(family, first)] },
+    { name: 'start + delta', chunks: [blockStart(family), blockDelta(family, first)] },
+    {
+      name: 'duplicate block-start',
+      chunks: [blockStart(family), blockDelta(family, first), blockStart(family), blockDelta(family, second)],
+    },
+    { name: 'close', chunks: [blockStart(family), blockDelta(family, first), blockEnd(family, complete)] },
+    {
+      name: 'delta after close',
+      chunks: [blockStart(family), blockDelta(family, first), blockEnd(family, complete), blockDelta(family, straggler)],
+    },
+    {
+      name: 'duplicate close',
+      chunks: [blockStart(family), blockDelta(family, first), blockEnd(family, complete), blockEnd(family, straggler)],
+    },
+  ]
+}
+
+function officialAssembly(chunks: readonly StreamChunk[]): ContentBlock[] {
+  const assembler = new BlockAssembler()
+  for (const chunk of chunks) assembler.push(chunk)
+  return assembler.blocks()
+}
+
+/** Read the TUI's same compact stream fold through the durable attempt seam.
+ * The closed boundary exposes tool-call evidence while preserving reasoning in
+ * the Think slot, which keeps this comparison about assembly rather than row
+ * visibility policy. */
+function tuiAssembly(chunks: readonly StreamChunk[]): ContentBlock[] {
+  const folder = new TranscriptFolder()
+  const stream: AssistantStreamRecord[] = chunks.map((chunk, index) => ({
+    type: 'chunk',
+    time: 1_700_000_000_000 + index,
+    chunk,
+  }))
+  folder.apply([
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 0),
+    event('step/end', { turn: 0, step: 0 }, 1),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+  ])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  const assistantBlocks = assistant?.kind !== 'assistant'
+    ? []
+    : assistant.content === undefined
+      ? (assistant.text === '' ? [] : [{ type: 'text' as const, text: assistant.text }])
+      : [...assistant.content]
+  const reasoning = folder.turnActivity(0)?.think?.text
+  return reasoning === undefined ? assistantBlocks : [{ type: 'reasoning', text: reasoning }]
+}
+
+for (const family of ['text', 'reasoning', 'tool-call'] as const) {
+  for (const assemblyCase of blockAssemblyCases(family)) {
+    test(`BlockAssembler parity: ${family} ${assemblyCase.name}`, () => {
+      assert.deepEqual(tuiAssembly(assemblyCase.chunks), officialAssembly(assemblyCase.chunks))
+    })
+  }
 }
 
 test('live block-end text is authoritative and survives durable settlement without duplication', () => {
