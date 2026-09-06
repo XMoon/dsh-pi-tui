@@ -3294,6 +3294,9 @@ export class TuiApp {
     // capability a plugin editor captured (replaceText, dispatch,
     // subscribe, invalidate) becomes inert; a late plugin callback can no
     // longer mutate the seat or dispatch a real submission.
+    // The seat holder is non-owning for the permanent host editor, so final
+    // surface teardown closes host-only resources explicitly here.
+    this.editor.disposeHostResources()
     this.editorSeatHolder.dispose()
     // Re-vendor lifecycle follow-up P3 (review-loop round 2): release the
     // process slot ONLY after the completed final teardown — the

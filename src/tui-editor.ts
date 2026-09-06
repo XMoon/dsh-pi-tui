@@ -202,6 +202,13 @@ export class TuiEditor extends Editor {
     return this.inputMode
   }
 
+  /** Dispose resources owned by the permanent host editor at final surface
+   * teardown. EditorSeatHolder is deliberately non-owning: plugin editor
+   * handoffs must never dispose this host editor. */
+  disposeHostResources(): void {
+    this.fileCompletionMarquee.dispose()
+  }
+
   /** Close any open autocomplete dropdown and abort any pending completion
    * request (the host-owned stale-context guard — the declined-key
    * fallback cancels when the staged document differs from the host's
