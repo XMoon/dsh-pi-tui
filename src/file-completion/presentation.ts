@@ -1,9 +1,9 @@
 /**
  * The shared path presentation (plan §8): how one path-only candidate
- * becomes an `AutocompleteItem`. The `@` mention shape and the `/image`
- * argument shape differ ONLY in the value prefix (`@` + quoting vs bare)
- * — the path math (trailing `/` for continuation, quoting, labels,
- * descriptions) is shared.
+ * becomes an `AutocompleteItem`. The `@` mention shape and the `/attach` +
+ * `/image` argument shapes differ ONLY in the value prefix (`@` + quoting vs
+ * bare) — the path math (trailing `/` for continuation, quoting, and labels)
+ * is shared.
  *
  * The SOURCE is responsible for reattaching the query's display base
  * (see {@link displayPathOf}): candidates reach this layer as FINAL
@@ -13,7 +13,7 @@
  */
 
 import type { AutocompleteItem } from '@xmoon76/pi-tui'
-import { basenameOfPath, type PathCandidate, type PathCompletionQuery } from './types.ts'
+import type { PathCandidate, PathCompletionQuery } from './types.ts'
 
 /** The joined display path for one candidate under a scoped query: the
  * display base (already in the user's own dialect, always ending with the
@@ -51,7 +51,7 @@ export function presentPathCandidate(
     // The vendored SelectList uses the slash marker to recognize a directory
     // item during apply. The accepted VALUE carries the user's actual
     // separator; keep this UI marker stable across path dialects.
-    label: `${basenameOfPath(candidate.path)}${candidate.kind === 'directory' ? '/' : ''}`,
-    description: displayPath,
+    label: `${displayPath}${candidate.kind === 'directory' ? '/' : ''}`,
+    description: undefined,
   }
 }

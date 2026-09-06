@@ -4,8 +4,9 @@
  * stays pristine). After every handled key, if the cursor sits on an
  * `@dir/` mention with the autocomplete closed, re-trigger completion so
  * Tab-accepting a directory immediately shows its children (kimi's
- * reopenAutocompleteAfterInput). Esc while autocomplete is active closes
- * it WITHOUT re-triggering (kimi parity).
+ * reopenAutocompleteAfterInput). The same path-argument behavior covers
+ * `/attach` and `/image`. Esc while autocomplete is active closes it WITHOUT
+ * re-triggering (kimi parity).
  *
  * The editor also carries the terminal-prompt prefix: the fork's Editor is
  * constructed with `paddingX: 2` (kimi's CustomEditor reserves padding for
@@ -21,7 +22,8 @@
  * @module @xmoon76/dsh-pi-tui/tui-editor
  */
 
-import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type EditorTheme, type TUI } from '@xmoon76/pi-tui'
+import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type EditorTheme, type SelectListLayoutOptions, type TUI } from '@xmoon76/pi-tui'
+import { SelectedMarquee } from './marquee.ts'
 import { color } from './theme.ts'
 import { classifyFileCompletionContext, FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input-mode.ts'
@@ -148,6 +150,8 @@ export class TuiEditor extends Editor {
   private placeholderText = ''
   /** The current input mode: `!` / `!!` are state, never document text. */
   private inputMode: EditorInputMode = 'prompt'
+  /** The selected file-completion row's horizontal marquee. */
+  private readonly fileCompletionMarquee: SelectedMarquee
   /** An in-flight bracketed paste captured at the RAW layer: whether it
    * began in an EMPTY PROMPT (the normalization gate) and the content
    * accumulated so far. While set, every input chunk belongs to the
@@ -167,6 +171,9 @@ export class TuiEditor extends Editor {
     // state repaints, incl. async autocomplete commits) at the host's
     // active screen — see TuiEditorOptions.requestRender.
     super(routeEditorRenders(tui, options.requestRender), theme, { paddingX: PROMPT_WIDTH })
+    this.fileCompletionMarquee = new SelectedMarquee({
+      requestRender: () => this.tui.requestRender(),
+    })
     // Dynamic border: shell modes use the shellMode token, the prompt the
     // normal border. The function reads the LIVE color helpers on every
     // call, so a theme switch repaints correctly (never a cached Chalk
@@ -246,8 +253,44 @@ export class TuiEditor extends Editor {
     return this.inputMode
   }
 
+  protected override getAutocompleteSelectListLayout(
+    prefix: string,
+  ): SelectListLayoutOptions | undefined {
+    if (this.inputMode !== 'prompt') {
+      this.fileCompletionMarquee.reset()
+      return super.getAutocompleteSelectListLayout(prefix)
+    }
+
+    const lines = this.getLines()
+    const cursor = this.getCursor()
+    const currentLine = lines[cursor.line] ?? ''
+    const textBeforeCursor = currentLine.slice(0, cursor.col)
+    const context = classifyFileCompletionContext(
+      textBeforeCursor,
+      FILE_ARGUMENT_COMMANDS,
+    )
+
+    if (context.kind === 'none') {
+      this.fileCompletionMarquee.reset()
+      return super.getAutocompleteSelectListLayout(prefix)
+    }
+
+    return {
+      truncatePrimary: ({ text, maxWidth, item, isSelected }) =>
+        this.fileCompletionMarquee.render({
+          key: item.value,
+          text,
+          maxWidth,
+          selected: isSelected,
+        }),
+    }
+  }
+
   override render(width: number): string[] {
     const lines = super.render(width)
+    if (!this.isShowingAutocomplete()) {
+      this.fileCompletionMarquee.reset()
+    }
     if (this.inputMode === 'prompt' && this.placeholderText !== '' && this.getText().trim() === '') {
       return injectEditorPlaceholder(lines, this.placeholderText, width)
     }

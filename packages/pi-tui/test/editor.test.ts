@@ -4899,12 +4899,20 @@ describe("protected autocomplete seam (X044)", () => {
 			exposedRequest(): void {
 				this.requestAutocomplete({ force: true, explicitTab: true });
 			}
+			exposedLayout(prefix: string) {
+				return this.getAutocompleteSelectListLayout(prefix);
+			}
 		}
 		const sub = new SubEditor(createTestTUI(), defaultEditorTheme);
 		// No provider: request must be a safe no-op, cancel must not throw
 		sub.exposedRequest();
 		sub.exposedCancel();
 		assert.strictEqual(sub.isShowingAutocomplete(), false);
+		assert.deepStrictEqual(sub.exposedLayout('/im'), {
+			minPrimaryColumnWidth: 12,
+			maxPrimaryColumnWidth: 32,
+		}, 'slash-command layout remains the default hook behavior');
+		assert.strictEqual(sub.exposedLayout('@path'), undefined, 'non-slash prefixes keep the default layout');
 		assert.ok(editor instanceof Editor);
 	});
 });
