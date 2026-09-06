@@ -52,7 +52,14 @@ export type TranscriptMessage =
    * non-text content — attachment and generic presentation renders it in
    * order (plan §15).
    */
-  | { kind: 'user'; turn: number; text: string; content?: readonly ContentBlock[]; steer?: true }
+  | {
+    kind: 'user'
+    turn: number
+    text: string
+    content?: readonly ContentBlock[]
+    /** Presentation-only marker for a next-step input inserted during this turn. */
+    steer?: true
+  }
   /**
    * One step's model output. `text` is the flat markdown; `content` is the
    * settled message's full blocks when the step carried any role-neutral
@@ -640,12 +647,18 @@ interface TranscriptSearchEntry {
   normalizedText: string
 }
 
+interface NextStepInboxIdentity {
+  id: string
+  /** The turn that was open when this identity entered next-step, if any. */
+  insertionTurn: number | undefined
+}
+
 export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
-  /** Durable next-step inbox ids awaiting a claim or replacement. */
-  private readonly pendingNextStepIds: string[] = []
-  /** Message ids removed by a non-canceled next-step claim. */
-  private readonly claimedNextStepIds = new Set<string>()
+  /** Durable next-step identities awaiting a claim or replacement. */
+  private readonly pendingNextSteps: NextStepInboxIdentity[] = []
+  /** Claimed next-step ids and the turn that was open at insertion. */
+  private readonly claimedNextStepTurns = new Map<string, number | undefined>()
   /** The assistant message object per (turn, step); streaming text lands in place. */
   private readonly assistantEntries = new Map<string, Extract<TranscriptMessage, { kind: 'assistant' }>>()
   /** In-flight live block state keyed by logical step. This is required for
@@ -690,6 +703,8 @@ export class TranscriptFolder {
   private readonly compacting = new Map<string, number>()
   /** The turn most recently opened by turn/start. */
   private currentTurn = 0
+  /** The turn currently between its turn/start and turn/end boundaries. */
+  private openTurn: number | undefined
   /**
    * Incremental consecutive-read grouping (stage J): `groupOf` maps an item
    * index to its merged group card (only the FIRST member emits it in the
@@ -2341,7 +2356,7 @@ export class TranscriptFolder {
     // keep their current behavior (no surfaceOp = not a surface event at
     // all — the helper requires the event type AND the marker).
     if (isReplacementSurfaceEvent(event)) {
-      if (event.type === 'user/message') this.claimedNextStepIds.delete(event.data.id)
+      if (event.type === 'user/message') this.claimedNextStepTurns.delete(event.data.id)
       return
     }
     // Compaction lifecycle events are typed STRUCTURALLY: dsh-compaction
@@ -2357,18 +2372,18 @@ export class TranscriptFolder {
         inserted: readonly { id: string }[]
         outcome?: 'canceled'
       }
-      const inserted = data.inserted.map(message => message.id)
-      let removed: string[] = []
+      const inserted = data.inserted.map(message => ({ id: message.id, insertionTurn: this.openTurn }))
+      let removed: NextStepInboxIdentity[] = []
       if (data.target === 'next-step') {
-        removed = this.pendingNextStepIds.splice(
+        removed = this.pendingNextSteps.splice(
           data.start,
           data.removedCount ?? 0,
           ...inserted,
         )
       }
-      for (const id of inserted) this.claimedNextStepIds.delete(id)
+      for (const { id } of inserted) this.claimedNextStepTurns.delete(id)
       if (data.target === 'next-step' && data.outcome !== 'canceled') {
-        for (const id of removed) this.claimedNextStepIds.add(id)
+        for (const { id, insertionTurn } of removed) this.claimedNextStepTurns.set(id, insertionTurn)
       }
       return
     }
@@ -2462,11 +2477,17 @@ export class TranscriptFolder {
         activity.startedAt = event.time
         activity.completed = false
         activity.reason = undefined
+        if (event.data.turn === this.currentTurn) this.openTurn = event.data.turn
         activity.revision += 1
         break
       }
       case 'user/message': {
-        const wasClaimedFromNextStep = this.claimedNextStepIds.delete(event.data.id)
+        const claimedInsertionTurn = this.claimedNextStepTurns.get(event.data.id)
+        const wasClaimedFromNextStep = this.claimedNextStepTurns.delete(event.data.id)
+        // Only a next-step identity inserted during this admission turn is a
+        // mid-turn steer; an idle wake or a claim carried across turns is an
+        // ordinary opening/follow-up user message.
+        const isMidTurnSteer = wasClaimedFromNextStep && claimedInsertionTurn === this.currentTurn
         const blocks = event.data.content
         // User messages keep known attachment markers at their original
         // positions in the FLAT text; the ordered `content` blocks stay the
@@ -2484,7 +2505,7 @@ export class TranscriptFolder {
             turn: this.currentTurn,
             text,
             content: blocks,
-            ...(wasClaimedFromNextStep ? { steer: true as const } : {}),
+            ...(isMidTurnSteer ? { steer: true as const } : {}),
           })
         } else {
           if (text === '') break
@@ -2760,7 +2781,9 @@ export class TranscriptFolder {
       case 'turn/end': {
         // Idempotent: a replayed turn/end must not re-append the
         // synthetic cards or re-settle the activity (review finding).
-        const endActivity = this.activityFor(event.data.turn)
+        const endTurn = event.data.turn
+        if (this.openTurn === endTurn) this.openTurn = undefined
+        const endActivity = this.activityFor(endTurn)
         if (endActivity.completed) break
         // Every still-open thinking entry of THIS turn stops streaming when
         // the turn closes (interrupted steps never see their
@@ -2770,7 +2793,6 @@ export class TranscriptFolder {
         // The synthetic cards carry the EVENT's own turn — never
         // this.currentTurn: a turn-start-less fragment's end must land in
         // its own turn (review finding).
-        const endTurn = event.data.turn
         for (const key of this.liveAssistantBlocks.keys()) {
           if (key.startsWith(`${endTurn}/`)) this.liveAssistantBlocks.delete(key)
         }

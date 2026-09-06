@@ -2314,6 +2314,35 @@ test('expanded: a claimed steer in a non-user turn stays after the Thought', () 
     'a claimed steer must remain after the Thought in a non-user turn')
 })
 
+test('an idle steer that opens a turn remains before the Thought', () => {
+  const message = {
+    id: MessageId('idle-open-steer'),
+    role: 'user',
+    content: [{ type: 'text', text: 'idle opening input' }],
+    source: { kind: 'user' },
+  }
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 1000, 0),
+    eventAt('turn/start', { turn: 0 }, 1001, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1002, 2),
+    eventAt('user/message', message, 1003, 3),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1004, 4),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('idle-open-answer'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 5),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 6),
+  ])
+  const user = folder.messages().find(message => message.kind === 'user')
+  assert.ok(user !== undefined && user.kind === 'user')
+  assert.equal(user.steer, undefined)
+  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  assert.deepEqual(blockKinds(expanded), ['user', 'activity', 'thinking', 'assistant'])
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant'])
+})
+
 test('metadata-free logs keep the first user as the initial-prompt fallback', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [

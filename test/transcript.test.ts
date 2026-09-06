@@ -154,6 +154,47 @@ test('next-step claims mark the matching human user message as steer', () => {
   assert.equal(message.steer, true)
 })
 
+test('an idle next-step wake is not a mid-turn steer', () => {
+  const message = {
+    id: MessageId('idle-steer'),
+    role: 'user',
+    content: [{ type: 'text', text: 'idle steer' }],
+    source: { kind: 'user' },
+  }
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 0),
+    event('turn/start', { turn: 0 }, 1),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2),
+    rawEvent('user/message', message, 3),
+  ])
+  const folded = folder.messages()[0]
+  assert.ok(folded !== undefined && folded.kind === 'user')
+  assert.equal(folded.steer, undefined)
+})
+
+test('a next-step claim carried across turns is not a steer in the later turn', () => {
+  const message = {
+    id: MessageId('cross-turn-steer'),
+    role: 'user',
+    content: [{ type: 'text', text: 'cross-turn steer' }],
+    source: { kind: 'user' },
+  }
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 1),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+    event('turn/start', { turn: 1 }, 3),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    rawEvent('user/message', message, 5),
+  ])
+  const folded = folder.messages()[0]
+  assert.ok(folded !== undefined && folded.kind === 'user')
+  assert.equal(folded.turn, 1)
+  assert.equal(folded.steer, undefined)
+})
+
 test('replacement user messages consume stale next-step claims', () => {
   const id = MessageId('replacement-steer')
   const folder = new TranscriptFolder()

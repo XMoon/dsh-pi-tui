@@ -338,10 +338,11 @@ export class FocusActivityComponent {
 /**
  * The Focus presentation projection over one windowed transcript (plan
  * §12/§33): a turn with an initial prompt is grouped as
- * `user(s) → FocusActivity`; a steer-only turn starts with `FocusActivity`
- * and keeps steers in process order. Expanded process/final and compaction
- * rows follow, so the raw TranscriptMessage union is never polluted with a
- * fake `focus-activity` kind and the session data stays lossless.
+ * `user(s) → FocusActivity`; a turn with only same-turn steers starts with
+ * `FocusActivity` and keeps those steers in process order. Expanded
+ * process/final and compaction rows follow, so the raw TranscriptMessage
+ * union is never polluted with a fake `focus-activity` kind and the session
+ * data stays lossless.
  *
  * Collapsed turns HIDE thinking/tool/system/intermediate-assistant rows
  * entirely — they cannot leak through Ctrl+O/Alt+T because they are not in
@@ -445,8 +446,8 @@ export function projectFocus(
       continue
     }
     // Collapsed: preserve the existing users-before-Thought summary when
-    // an initial prompt exists. A steer-only turn has no opening user row,
-    // so its Thought must lead and the claimed steer follows it.
+    // an initial prompt exists. A turn with no same-turn opening user row
+    // has its Thought lead, followed by the claimed mid-turn steers.
     const hasInitialPrompt = initialPromptBoundary(group) > 0
     if (hasInitialPrompt) {
       for (const member of group) {
@@ -486,12 +487,13 @@ function lastAssistant(
 }
 
 /** The initial-prompt boundary of one turn group: the index AFTER the
- * turn's FIRST non-steer user row. Rows before it (injected/system context)
+ * turn's FIRST unmarked user row. Rows before it (injected/system context)
  * and the initial user itself stay above the Thought; every later row
- * (steers included) returns to its chronological position. A steer-only turn
- * has no boundary, so the Thought leads with chronology intact. Without steer
- * metadata, the first non-steer user remains the initial-prompt fallback;
- * consecutive users are queue/steer input, not a multi-row initial prompt. */
+ * (same-turn steers included) returns to its chronological position. A turn
+ * whose user rows are all marked same-turn steers has no boundary, so the
+ * Thought leads with chronology intact. Without steer metadata, the first
+ * user remains the initial-prompt fallback; consecutive users are queue/steer
+ * input, not a multi-row initial prompt. */
 function initialPromptBoundary(group: readonly TranscriptMessage[]): number {
   const firstInitialUserIndex = group.findIndex(
     member => member.kind === 'user' && member.steer !== true,
