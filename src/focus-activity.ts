@@ -337,10 +337,11 @@ export class FocusActivityComponent {
 
 /**
  * The Focus presentation projection over one windowed transcript (plan
- * §12/§33): messages are grouped per turn into `user(s) → FocusActivity →
- * (process when expanded | final when settled) → compaction cards`, so the
- * raw TranscriptMessage union is never polluted with a fake `focus-activity`
- * kind and the session data stays lossless.
+ * §12/§33): a turn with an initial prompt is grouped as
+ * `user(s) → FocusActivity`; a steer-only turn starts with `FocusActivity`
+ * and keeps steers in process order. Expanded process/final and compaction
+ * rows follow, so the raw TranscriptMessage union is never polluted with a
+ * fake `focus-activity` kind and the session data stays lossless.
  *
  * Collapsed turns HIDE thinking/tool/system/intermediate-assistant rows
  * entirely — they cannot leak through Ctrl+O/Alt+T because they are not in
@@ -414,14 +415,15 @@ export function projectFocus(
       // turn's `max tokens reached` system row must never land after the
       // final: the settled order is User → Thought → process → final).
       // The INITIAL-PROMPT boundary precedes the Thought: rows before the
-      // turn's FIRST direct user (injected/system context) stay in place
-      // and the initial user itself stays above the Thought; every later
+      // turn's FIRST non-steer user (injected/system context) stay in place
+      // and that initial user itself stays above the Thought; every later
       // user/steer returns to its chronological position in the process
       // (plan: expanded chronology — the projection reorders, never the
-      // session events). Only the FIRST direct user is the initial
-      // prompt — consecutive users are queue/steer input, never a
-      // multi-row initial prompt (plan: no adjacency guessing). Every
-      // revealed process row carries the owner-turn collapse mark; the
+      // session events). With a non-steer user, the first such row is the
+      // compatibility boundary; when every user is a steer, the boundary is 0.
+      // Consecutive users after the boundary stay in chronological
+      // order; they are not a multi-row initial prompt (plan: no adjacency guessing).
+      // Every revealed process row carries the owner-turn collapse mark; the
       // user's rows and the FINAL assistant stay unmarked (clicking them
       // must not collapse the Thought — review P2).
       const boundary = initialPromptBoundary(group)
@@ -442,13 +444,21 @@ export function projectFocus(
       }
       continue
     }
-    // Collapsed: the user's own messages stay visible (steers included)
-    // and ALL of them precede the Thought (summary semantics unchanged).
-    for (const member of group) {
-      if (member.kind === 'user') out.push({ kind: 'message', message: member })
+    // Collapsed: preserve the existing users-before-Thought summary when
+    // an initial prompt exists. A steer-only turn has no opening user row,
+    // so its Thought must lead and the claimed steer follows it.
+    const hasInitialPrompt = initialPromptBoundary(group) > 0
+    if (hasInitialPrompt) {
+      for (const member of group) {
+        if (member.kind === 'user') out.push({ kind: 'message', message: member })
+      }
     }
-    // The Thought disclosure follows the user rows.
     if (activity !== undefined) out.push({ kind: 'activity', activity })
+    if (!hasInitialPrompt) {
+      for (const member of group) {
+        if (member.kind === 'user') out.push({ kind: 'message', message: member })
+      }
+    }
     // Compaction cards keep their existing lifecycle in the collapsed
     // view (plan §12.3 v1 — never hidden into the Thought).
     for (const member of group) {
@@ -476,16 +486,17 @@ function lastAssistant(
 }
 
 /** The initial-prompt boundary of one turn group: the index AFTER the
- * turn's FIRST direct user row. Rows before it (injected/system context)
+ * turn's FIRST non-steer user row. Rows before it (injected/system context)
  * and the initial user itself stay above the Thought; every later row
- * (steers included) returns to its chronological position. 0 when the
- * turn has no user row — the Thought then leads with chronology intact
- * (never a synthetic user, never a crash). Only the FIRST direct user is
- * the initial prompt: consecutive users are queue/steer input, not a
- * multi-row initial prompt (plan: no adjacency guessing). */
+ * (steers included) returns to its chronological position. A steer-only turn
+ * has no boundary, so the Thought leads with chronology intact. Without steer
+ * metadata, the first non-steer user remains the initial-prompt fallback;
+ * consecutive users are queue/steer input, not a multi-row initial prompt. */
 function initialPromptBoundary(group: readonly TranscriptMessage[]): number {
-  const firstUserIndex = group.findIndex(member => member.kind === 'user')
-  return firstUserIndex < 0 ? 0 : firstUserIndex + 1
+  const firstInitialUserIndex = group.findIndex(
+    member => member.kind === 'user' && member.steer !== true,
+  )
+  return firstInitialUserIndex < 0 ? 0 : firstInitialUserIndex + 1
 }
 
 /** Whether one assistant message has visible Assistant content. Keep final

@@ -52,7 +52,7 @@ export type TranscriptMessage =
    * non-text content — attachment and generic presentation renders it in
    * order (plan §15).
    */
-  | { kind: 'user'; turn: number; text: string; content?: readonly ContentBlock[] }
+  | { kind: 'user'; turn: number; text: string; content?: readonly ContentBlock[]; steer?: true }
   /**
    * One step's model output. `text` is the flat markdown; `content` is the
    * settled message's full blocks when the step carried any role-neutral
@@ -642,6 +642,10 @@ interface TranscriptSearchEntry {
 
 export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
+  /** Durable next-step inbox ids awaiting a claim or replacement. */
+  private readonly pendingNextStepIds: string[] = []
+  /** Message ids removed by a non-canceled next-step claim. */
+  private readonly claimedNextStepIds = new Set<string>()
   /** The assistant message object per (turn, step); streaming text lands in place. */
   private readonly assistantEntries = new Map<string, Extract<TranscriptMessage, { kind: 'assistant' }>>()
   /** In-flight live block state keyed by logical step. This is required for
@@ -2336,12 +2340,38 @@ export class TranscriptFolder {
     // Only an EXPLICIT replacement is filtered; unmarked legacy events
     // keep their current behavior (no surfaceOp = not a surface event at
     // all — the helper requires the event type AND the marker).
-    if (isReplacementSurfaceEvent(event)) return
+    if (isReplacementSurfaceEvent(event)) {
+      if (event.type === 'user/message') this.claimedNextStepIds.delete(event.data.id)
+      return
+    }
     // Compaction lifecycle events are typed STRUCTURALLY: dsh-compaction
     // is not a peer dependency, so its session-event augmentation never
     // enters our type graph (the same pattern as the structural service
     // types). An unknown event type is otherwise skipped by the switch.
     const kind = event.type as string
+    if (kind === 'agent/inbox/spliced') {
+      const data = event.data as {
+        target: 'next-turn' | 'next-step'
+        start: number
+        removedCount?: number
+        inserted: readonly { id: string }[]
+        outcome?: 'canceled'
+      }
+      const inserted = data.inserted.map(message => message.id)
+      let removed: string[] = []
+      if (data.target === 'next-step') {
+        removed = this.pendingNextStepIds.splice(
+          data.start,
+          data.removedCount ?? 0,
+          ...inserted,
+        )
+      }
+      for (const id of inserted) this.claimedNextStepIds.delete(id)
+      if (data.target === 'next-step' && data.outcome !== 'canceled') {
+        for (const id of removed) this.claimedNextStepIds.add(id)
+      }
+      return
+    }
     if (kind === 'compaction/start' || kind === 'compaction/summary' || kind === 'compaction/end' || kind === 'session/end-seed') {
       this.applyCompactionEvent(event as { type: string; data: Record<string, unknown> }, kind)
       return
@@ -2436,6 +2466,7 @@ export class TranscriptFolder {
         break
       }
       case 'user/message': {
+        const wasClaimedFromNextStep = this.claimedNextStepIds.delete(event.data.id)
         const blocks = event.data.content
         // User messages keep known attachment markers at their original
         // positions in the FLAT text; the ordered `content` blocks stay the
@@ -2448,7 +2479,13 @@ export class TranscriptFolder {
         // process block must not turn into an empty system row.
         if (event.data.source.kind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break
-          this.appendItem({ kind: 'user', turn: this.currentTurn, text, content: blocks })
+          this.appendItem({
+            kind: 'user',
+            turn: this.currentTurn,
+            text,
+            content: blocks,
+            ...(wasClaimedFromNextStep ? { steer: true as const } : {}),
+          })
         } else {
           if (text === '') break
           // Injected context: name the producer the way the Web row does
