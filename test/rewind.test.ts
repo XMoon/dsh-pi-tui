@@ -225,7 +225,7 @@ test('R08: a multimodal prompt sets hasNonTextContent and restores text only', (
   assert.equal(candidate.hasNonTextContent, true)
   assert.equal(candidate.editorText, 'analyse this screenshot', 'text blocks only')
   const item = rewindPickerItem(candidate)
-  assert.ok(item.label.startsWith('turn 1 · [image] '), `image marker missing: ${item.label}`)
+  assert.ok(item.label.startsWith('turn 1 · [attachment] '), `attachment marker missing: ${item.label}`)
 })
 
 test('R08: an image-only prompt is still a candidate with an explicit marker', () => {
@@ -243,7 +243,7 @@ test('R08: an image-only prompt is still a candidate with an explicit marker', (
   assert.equal(candidates.length, 1)
   assert.equal(candidates[0]!.hasNonTextContent, true)
   assert.equal(candidates[0]!.editorText, '')
-  assert.ok(rewindPickerItem(candidates[0]!).label.includes('(image only)'))
+  assert.ok(rewindPickerItem(candidates[0]!).label.includes('(attachment only)'))
 })
 
 test('R09: malformed spans are skipped, never thrown to the UI', () => {

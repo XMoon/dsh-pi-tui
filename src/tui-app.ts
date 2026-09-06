@@ -53,6 +53,7 @@ import {
 } from '@xmoon76/pi-tui'
 import { claimProcessTuiSlot, releaseProcessTuiSlot } from './process-tui-slot.ts'
 import { ImageThumbnail } from './components/media/image-thumbnail.ts'
+import { FileAttachmentComponent } from './components/media/file-attachment.ts'
 import {
   detectThemeFromBackground,
   detectThemeFromColorFgBg,
@@ -128,7 +129,8 @@ import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
-import { recentTurnThreshold, textWithImageMarkers, type TranscriptMessage, type TurnActivity } from './transcript.ts'
+import { recentTurnThreshold, textWithAttachmentMarkers, type TranscriptMessage, type TurnActivity } from './transcript.ts'
+import { finalizedBlockFallbackText, fileAttachmentSummary } from './content-block-presentation.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
 import { WorkingIndicator, workingFramesFor } from './working.ts'
@@ -8574,94 +8576,138 @@ export class TuiApp {
   }
 
   /**
-   * Render one transcript message as a pi-tui component — the HOST
-   * renderer (M7: extensions are consulted by buildMessage, which owns
-   * the plugin chain + identity; renderMessage itself never re-runs a
-   * renderer, so a throwing renderer is invoked exactly once per build
-   * and the host fallback is single-path).
-   */
-  /**
-   * Render a message's content blocks IN ORDER (plan §15.2): text blocks
-   * fold into one text component per run, image blocks render as inline
-   * thumbnails between them — `[text, image, text]` stays `text → image →
-   * text` on screen. Other block kinds (reasoning/tool-call) are skipped
-   * exactly like the flat `textWithImageMarkers` path. Only reached when
-   * the loader and theme are wired.
+   * Render finalized message blocks IN ORDER (plan §15.2): text blocks fold
+   * into one text component per run, images use the existing thumbnail path
+   * when available (or their flat marker without a loader), files use their
+   * metadata-only row, and unknown blocks use the bounded explicit fallback.
+   * Reasoning and tool-call blocks retain their existing process ownership.
    */
   private renderBlockSequence(
     content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[],
     makeText: (text: string) => Component,
     message: TranscriptMessage,
   ): Component {
-    if (this.imageLoader === undefined || this.imageTheme === undefined) {
-      // Loader-less hosts keep the image POSITION as an inline marker — a
-      // mixed message must never silently lose its images (the fold's flat
-      // text uses the same projection).
-      return makeText(textWithImageMarkers(content))
-    }
     const container = new Container()
-    let buffer = ''
-    const flush = (): void => {
-      if (buffer !== '') {
-        container.addChild(makeText(buffer))
-        buffer = ''
+    const canRenderImages = this.imageLoader !== undefined && this.imageTheme !== undefined
+    let textBlocks: import('@deepseek-ai/dsh-llm').ContentBlock[] = []
+    const flushText = (): void => {
+      if (textBlocks.length > 0) {
+        container.addChild(makeText(textWithAttachmentMarkers(textBlocks)))
+        textBlocks = []
       }
     }
     let imageIndex = 0
     for (const block of content) {
       if (block.type === 'text') {
-        buffer += block.text
+        textBlocks.push(block)
       } else if (block.type === 'image') {
-        flush()
-        container.addChild(new ImageThumbnail(
-          block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
-          this.imageLoader,
-          this.imageTheme,
-          this.occurrenceCollapsedRef(message, imageIndex),
-        ))
+        if (!canRenderImages) {
+          // Loader-less hosts keep the image position as an inline marker.
+          textBlocks.push(block)
+        } else {
+          flushText()
+          container.addChild(new ImageThumbnail(
+            block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+            this.imageLoader!,
+            this.imageTheme!,
+            this.occurrenceCollapsedRef(message, imageIndex),
+          ))
+        }
         imageIndex += 1
+      } else if (block.type === 'file') {
+        flushText()
+        container.addChild(new FileAttachmentComponent(block.attachment, { fallbackColor: color.textDim }))
+      } else if (block.type === 'reasoning' || block.type === 'tool-call' || block.type === 'tool-result') {
+        // These blocks belong to the existing thinking/tool surfaces, not the
+        // assistant's ordinary markdown body.
+        continue
+      } else {
+        flushText()
+        container.addChild(new Text(color.textDim(finalizedBlockFallbackText(block)), 0, 0))
       }
     }
-    flush()
+    flushText()
     return container
   }
 
   /**
-   * A user message with images: ONE bubble whose text keeps an inline
-   * `🖼️ name` placeholder at every image's ORIGINAL position — the user's
-   * own words then read like the draft they submitted (`what is this 🖼️
-   * shot.png`), instead of a bubble with the image silently moved to its
-   * own row. The thumbnails follow as attachment rows in block order; the
-   * bubble marker carries the position, the thumbnail carries the picture.
+   * Render a user message with its flat marker plus rich attachment rows.
+   * Existing image-only/mixed-image UX keeps one submitted bubble followed by
+   * thumbnail rows. When a file or generic block is present, segments become
+   * ordered bubble/row children so `[text, file, text, unknown, image]` keeps
+   * its finalized block order without resolving bytes or paths.
    */
   private renderUserBlocks(
     content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[],
     message: TranscriptMessage,
   ): Component {
     const container = new Container()
-    container.addChild(new UserBubbleComponent(
-      // The attachment marker is deliberately NOT style-swapped (the plan
-      // defers it): the flat text keeps the constant 🖼️ fact, so a
-      // user-typed 🖼️ in their own words is never rewritten.
-      new Text(textWithImageMarkers(content), 0, 0),
-      `${color.roleUser('❯')} `,
-      color.roleUserBg,
-    ))
-    let imageIndex = 0
-    for (const block of content) {
-      if (block.type === 'image') {
-        container.addChild(new ImageThumbnail(
-          block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
-          this.imageLoader!,
-          this.imageTheme!,
-          this.occurrenceCollapsedRef(message, imageIndex),
-        ))
-        imageIndex += 1
+    const marker = `${color.roleUser('❯')} `
+    const bubble = (child: Component): void => {
+      container.addChild(new UserBubbleComponent(child, marker, color.roleUserBg))
+    }
+    const hasOrderedRows = content.some(block => block.type === 'file' || (block.type !== 'text' && block.type !== 'image'))
+    if (!hasOrderedRows) {
+      bubble(new Text(textWithAttachmentMarkers(content), 0, 0))
+      let imageIndex = 0
+      for (const block of content) {
+        if (block.type === 'image') {
+          if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
+            container.addChild(new ImageThumbnail(
+              block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+              this.imageLoader,
+              this.imageTheme,
+              this.occurrenceCollapsedRef(message, imageIndex),
+            ))
+          }
+          imageIndex += 1
+        }
+      }
+      return container
+    }
+
+    let textBlocks: import('@deepseek-ai/dsh-llm').ContentBlock[] = []
+    const flushText = (): void => {
+      if (textBlocks.length > 0) {
+        bubble(new Text(textWithAttachmentMarkers(textBlocks), 0, 0))
+        textBlocks = []
       }
     }
+    let imageIndex = 0
+    for (const block of content) {
+      if (block.type === 'text') {
+        textBlocks.push(block)
+      } else if (block.type === 'image') {
+        textBlocks.push(block)
+        flushText()
+        if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
+          container.addChild(new ImageThumbnail(
+            block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+            this.imageLoader,
+            this.imageTheme,
+            this.occurrenceCollapsedRef(message, imageIndex),
+          ))
+        }
+        imageIndex += 1
+      } else if (block.type === 'file') {
+        flushText()
+        bubble(new FileAttachmentComponent(block.attachment, { fallbackColor: color.textDim }))
+      } else {
+        flushText()
+        bubble(new Text(color.textDim(finalizedBlockFallbackText(block)), 0, 0))
+      }
+    }
+    flushText()
     return container
   }
 
+  /**
+   * Render one transcript message as a pi-tui component — the HOST
+   * renderer (M7: extensions are consulted by buildMessage, which owns
+   * the plugin chain + identity; renderMessage itself never re-runs a
+   * renderer, so a throwing renderer is invoked exactly once per build
+   * and the host fallback is single-path).
+   */
   private renderMessage(message: TranscriptMessage, expanded: boolean, expandHint: ExpandHint, fullReveal: boolean, width: number): Component {
     if (message.kind === 'user') {
       // dsh-web parity: the user's own input is a floating BUBBLE (its
@@ -8670,7 +8716,7 @@ export class TuiApp {
       // blue. The ❯ leads the FIRST line; wrapped continuation lines keep
       // the background and indent under the marker, so multi-line input
       // stays aligned inside one block.
-      if (message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined) {
+      if (message.content !== undefined && message.content.some(block => block.type !== 'text')) {
         return this.renderUserBlocks(message.content, message)
       }
       return new UserBubbleComponent(
@@ -8689,7 +8735,7 @@ export class TuiApp {
       // re-renders it at the new width, so tables reflow instead of
       // re-wrapping a frozen render (the 5a76526 regression).
       const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
-      const body = message.content !== undefined && this.imageLoader !== undefined && this.imageTheme !== undefined
+      const body = message.content !== undefined && message.content.some(block => block.type !== 'text')
         ? this.renderBlockSequence(message.content, (text) =>
           new BulletedComponent(new Markdown(text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet), message)
         : new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
@@ -9424,10 +9470,11 @@ export class TuiApp {
                     this.imageTheme,
                   ))
                 } else {
-                  // Non-text/non-image blocks keep the legacy JSON form,
-                  // interleaved in order (round-5 finding 4).
+                  // Known process blocks keep their legacy JSON form;
+                  // file and unknown blocks use their bounded presentation,
+                  // interleaved in order.
                   flush()
-                  card.addChild(new Text(color.textDim(JSON.stringify(block, null, 2)), 0, 0))
+                  card.addChild(new Text(color.textDim(this.blockDisplayText(block)), 0, 0))
                 }
               }
               flush()
@@ -9567,10 +9614,10 @@ export class TuiApp {
               this.imageTheme,
             ))
           } else {
-            // Non-text/non-image blocks keep the legacy JSON form, in order
-            // (round-5 finding 4).
+            // Known process blocks keep their legacy JSON form; file and
+            // unknown blocks use their bounded presentation, in order.
             flush()
-            card.addChild(new Text(color.textDim(JSON.stringify(block, null, 2)), 0, 0))
+            card.addChild(new Text(color.textDim(this.blockDisplayText(block)), 0, 0))
           }
         }
         flush()
@@ -9585,15 +9632,14 @@ export class TuiApp {
     }
   }
 
-  /**
-   * Display form for a non-text block WITHOUT the image pipeline: image
-   * blocks project to a compact placeholder — never a JSON dump (the
-   * read_image envelope rule, review finding); everything else keeps the
-   * legacy pretty-JSON form.
-   */
+  /** Display form for one non-text result block when no rich renderer owns it. */
   private blockDisplayText(block: import('@deepseek-ai/dsh-llm').ContentBlock): string {
     if (block.type === 'image') return '[image]'
-    return JSON.stringify(block, null, 2)
+    if (block.type === 'file') return fileAttachmentSummary(block.attachment)
+    if (block.type === 'reasoning' || block.type === 'tool-call' || block.type === 'tool-result') {
+      return JSON.stringify(block, null, 2)
+    }
+    return finalizedBlockFallbackText(block)
   }
 
   /** Append the result's IMAGE blocks as thumbnails (any tool card that

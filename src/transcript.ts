@@ -20,6 +20,7 @@ import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expandAssistantStream, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
+import { finalizedBlockFallbackText, fileAttachmentSummary, textWithAttachmentMarkers, userBlocksVisibleNow } from './content-block-presentation.ts'
 import { displayFailure, displayFailureText } from './failure-presentation.ts'
 import type { IconSemantic } from './icons.ts'
 import { firstLine, latestLine, type JsonValue } from './present.ts'
@@ -48,13 +49,15 @@ export type TranscriptMessage =
   /**
    * A direct human prompt. `text` is the flat text (search/title/queue
    * recall); `content` carries the FULL ordered blocks when the message had
-   * images — the image pipeline renders them in order (plan §15).
+   * non-text content — attachment and generic presentation renders it in
+   * order (plan §15).
    */
   | { kind: 'user'; turn: number; text: string; content?: readonly ContentBlock[] }
   /**
    * One step's model output. `text` is the flat markdown; `content` is the
-   * settled message's full blocks when the step carried any (role-neutral
-   * `ImageBlock`s render rather than crash, plan §15.3).
+   * settled message's full blocks when the step carried any role-neutral
+   * non-text content (attachments and future blocks render rather than crash,
+   * plan §15.3).
    */
   | {
     kind: 'assistant'
@@ -370,36 +373,17 @@ function assistantBlocksHaveInterruptionEvidence(blocks: readonly ContentBlock[]
   return false
 }
 
-/** Flat text with image positions preserved: text blocks verbatim, image
- * blocks as an inline `🖼️ name` marker AT their position (the queue-preview
- * format; U+FE0F keeps the marker 2 cells wide in emoji fonts). A marker
- * boundary always carries a single separating space — the /image insertion
- * leaves NO space before the placeholder, so `what is this [image…]` must
- * not read as `what is this 🖼️ shot.png` — while a space the user already
- * typed is never doubled. The structured `content` blocks stay the canonical form
- * for thumbnail rendering; this projection feeds the flat-text consumers
- * (transcript search, loader-less fallback rendering, the user bubble's
- * inline marker) so a mixed message never reads as if the image was not
- * there, and an image-only message is not empty. Identical to
- * {@link textOf} for text-only content. */
-export function textWithImageMarkers(blocks: readonly ContentBlock[]): string {
-  let text = ''
-  // A marker boundary: the previous block was an image and the next text
-  // block needs a separator unless it brings its own whitespace.
-  let boundary = false
-  for (const block of blocks) {
-    if (block.type === 'text') {
-      if (boundary && text !== '' && !/\s$/.test(text) && !/^\s/.test(block.text)) text += ' '
-      boundary = false
-      text += block.text
-    } else if (block.type === 'image') {
-      if (text !== '' && !/\s$/.test(text)) text += ' '
-      text += `🖼️ ${block.attachment.name ?? 'image'}`
-      boundary = true
-    }
-  }
-  return text
-}
+/**
+ * Flat text with known attachment positions preserved. The structured
+ * `content` blocks remain canonical for rich rendering; this lightweight
+ * projection feeds transcript search and loader-less user rendering. Unknown
+ * finalized blocks stay in `content` so their explicit fallback can render
+ * without polluting ordinary text previews.
+ */
+export { textWithAttachmentMarkers }
+
+/** Whether a user message has human-visible finalized content. */
+export { userBlocksVisibleNow }
 
 /** Key identifying one step's model output (turn + step). */
 function stepKey(turn: number, step: number): string {
@@ -2453,19 +2437,20 @@ export class TranscriptFolder {
       }
       case 'user/message': {
         const blocks = event.data.content
-        // User messages keep an inline `🖼️ name` marker at every image's
-        // position in the FLAT text too (textWithImageMarkers): the search
-        // and loader-less rendering paths consume `text`, and a mixed
-        // message must never read as if the image was not there. The
-        // ordered `content` blocks stay the canonical form for thumbnails.
-        const text = textWithImageMarkers(blocks)
-        if (text === '' && !blocks.some(block => block.type === 'image')) break
-        // Only direct human prompts are user messages; plugin-injected
-        // context (system reminders, skill content) folds into a collapsible
-        // system entry.
+        // User messages keep known attachment markers at their original
+        // positions in the FLAT text; the ordered `content` blocks stay the
+        // canonical form for rich rendering. A finalized non-text block is
+        // human-visible content for a direct user prompt even when the
+        // lightweight projection is empty, so a future block cannot disappear.
+        const text = textWithAttachmentMarkers(blocks)
+        // Only direct human prompts use the generalized finalized-content
+        // predicate. Injected context keeps its text-only empty gate: a
+        // process block must not turn into an empty system row.
         if (event.data.source.kind === 'user') {
+          if (!userBlocksVisibleNow(blocks)) break
           this.appendItem({ kind: 'user', turn: this.currentTurn, text, content: blocks })
         } else {
+          if (text === '') break
           // Injected context: name the producer the way the Web row does
           // (contextProvenance), plus a notice form's one-line account. The
           // fold stores the icon SEMANTIC (never the concrete glyph), so a
@@ -2952,12 +2937,31 @@ export function childOwnEvents(events: readonly SessionEvent[]): readonly Sessio
   return cut === 0 ? events : events.slice(cut)
 }
 
-/** Render one session's log as a readable markdown transcript for `/export md`. */
-/** The markdown projection of content blocks (review finding 4): text
- * blocks verbatim, image blocks as a compact `🖼️` line (U+FE0F marker,
- * same convention as the transcript and queue summaries) with the durable
- * attachment id — the binary is NEVER embedded, and an image-only message
- * still renders a User/Assistant section. */
+/** Build a markdown fence longer than any backtick run in the payload. */
+function markdownCodeFence(payload: string): string {
+  let longestRun = 0
+  let run = 0
+  for (const character of payload) {
+    if (character === '`') run += 1
+    else {
+      longestRun = Math.max(longestRun, run)
+      run = 0
+    }
+  }
+  longestRun = Math.max(longestRun, run)
+  const fence = '`'.repeat(Math.max(3, longestRun + 1))
+  return `${fence}json\n${payload}\n${fence}`
+}
+
+/** Escape inline presentation text without changing ordinary metadata text. */
+function escapeMarkdownInline(text: string): string {
+  return text.replace(/[\\`*_{}\[\]()!<>]/g, '\\$&')
+}
+
+/** The markdown projection of finalized content blocks: rich attachment
+ * metadata remains readable, opaque ids are labeled as attachment identities,
+ * and unknown block payloads use the same bounded explicit fallback as the
+ * ordinary TUI. Attachment bytes are never embedded. */
 function markdownContent(blocks: readonly ContentBlock[]): string {
   const parts: string[] = []
   let buffer = ''
@@ -2974,12 +2978,28 @@ function markdownContent(blocks: readonly ContentBlock[]): string {
       flush()
       const attachment = block.attachment
       parts.push(`> 🖼️ ${attachment.name ?? 'image'} · ${attachment.width}×${attachment.height} · attachment \`${attachment.attachmentId}\``)
+    } else if (block.type === 'file') {
+      flush()
+      const attachment = block.attachment
+      parts.push(`> ${escapeMarkdownInline(fileAttachmentSummary(attachment))} · attachment \`${attachment.attachmentId}\``)
+    } else if (block.type === 'reasoning' || block.type === 'tool-call' || block.type === 'tool-result') {
+      // These known process blocks have their existing dedicated transcript
+      // semantics; they do not belong in the plain content projection.
+      continue
+    } else {
+      flush()
+      const fallback = finalizedBlockFallbackText(block)
+      const newline = fallback.indexOf('\n')
+      const heading = newline === -1 ? fallback : fallback.slice(0, newline)
+      const payload = newline === -1 ? '' : fallback.slice(newline + 1)
+      parts.push(`> ${escapeMarkdownInline(heading)}${payload === '' ? '' : `\n\n${markdownCodeFence(payload)}`}`)
     }
   }
   flush()
   return parts.join('\n\n')
 }
 
+/** Render one session's log as a readable markdown transcript for `/export md`. */
 export function renderTranscriptMarkdown(session: {
   header: SessionHeader
   snapshotEvents(): readonly SessionEvent[]

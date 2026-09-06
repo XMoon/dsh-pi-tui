@@ -6892,10 +6892,10 @@ export function apply(ctx: Context, config: Config): void {
               }
               // The swap COMMITTED: staged drafts are per-session UI state —
               // drop the unpinned ones now, exactly like /new and /fork (a
-              // historic attachment is never silently re-staged).
+              // historic non-text content is never silently re-staged).
               draftImages.clearUnpinned()
               if (outcome.hasNonTextContent) {
-                app.notify(`rewound to turn ${outcome.turn}; original attachments were not re-staged — reattach them before sending`, 'error')
+                app.notify(`rewound to turn ${outcome.turn}; original non-text content was not re-staged — review it before sending`, 'error')
               } else {
                 app.notify(`rewound to turn ${outcome.turn}`, 'info')
               }
