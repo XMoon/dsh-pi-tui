@@ -8923,6 +8923,7 @@ export class TuiApp {
     const singleLineHead = statsPart === '' || statsBudget === 0
       ? headWithoutStats
       : `${headWithoutStats}${truncateToWidth(statsPart, statsBudget, '…')}`
+    const expandedHead = message.name === 'edit' ? singleLineHead : head
     // LOCAL `!`/`!!` shell cards read the master expand switch (plan §5.3),
     // never the unbounded turn marker: collapsed by default so a long log
     // cannot fill the TUI, expanded only while the expand switch is on.
@@ -8931,7 +8932,7 @@ export class TuiApp {
       // Action headers and payloads are live width-aware components; every
       // other host card keeps its existing Text path and cache behavior.
       card.addChild(action === undefined
-        ? new Text(singleLineHead, 0, 0)
+        ? new Text(expandedHead, 0, 0)
         : new CompactTextPreview(head, 1, ''))
       // An explicitly expanded card renders diff bodies in full; the
       // default recent-turn view caps them (kimi parity). The flag is
@@ -9035,7 +9036,7 @@ export class TuiApp {
       }
       if (structuredEditDiff) resultPreview = ''
       const callHead = foldedCall === '' ? '' : foldedCall
-      const headWithPreview = `${singleLineHead}${callHead}${resultPreview}`
+      const headWithPreview = `${expandedHead}${callHead}${resultPreview}`
       if (callPreview?.kind === 'bash' && callPreview.command !== '') {
         // The command row owns the result preview's separate line (kimi
         // ShellExecution layout), so the head row carries no result text.

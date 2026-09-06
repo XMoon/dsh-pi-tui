@@ -242,7 +242,7 @@ export function summarizeDiffs(diffs: readonly FileDiff[]): DiffStats {
 export interface DiffViewOptions {
   /** Context rows around each change cluster (default 3). */
   contextLines?: number
-  /** Cap on rendered body rows; absent or negative renders everything. */
+  /** Cap on rendered body rows across all hunks; absent or negative renders everything. */
   maxLines?: number
   /** Hint text for the truncation footer (default 'click to expand'). */
   expandHint?: string
@@ -256,8 +256,9 @@ export interface DiffViewOptions {
  * hunk (kimi parity; counts in add/remove colors, path workspace-relative);
  * `stats-only` keeps only `+N -M`, and `none` omits hunk headers. Then the
  * LCS-aligned body with context clustering — unchanged runs between clusters elide to a
- * `… N unchanged lines …` separator, and `maxLines` caps the body at a
- * cluster boundary with a `… N more changes hidden (hint)` footer. A hunk
+ * `… N unchanged lines …` separator, and `maxLines` caps the body across all
+ * hunks at a cluster boundary with a `… N more changes hidden (hint)` footer.
+ * A hunk
  * with `oldText: null` (create) shows only new lines; an empty newText
  * (pure deletion) shows only old lines. The body renders a line-number
  * gutter ONLY when the hunk carries provable absolute anchors
@@ -273,45 +274,59 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
   const cap = options.maxLines !== undefined && options.maxLines >= 0
     ? options.maxLines
     : Number.POSITIVE_INFINITY
-  const out: string[] = []
-  for (const hunk of diffs) {
+  const headerMode = options.headerMode ?? 'full'
+  const hunkViews = diffs.map(hunk => {
     // The absolute hunk anchors are an OPTIONAL additive capability: only
     // a provable anchor renders the gutter — without one the body shows
     // no line numbers at all (never a fake 1..N gutter; plan: hide the
     // gutter, never guess it).
     const anchored = isAnchoredFileDiff(hunk)
     const diffLines = diffLinesForHunk(hunk)
-    const { clusters, changedCount, addedCount, removedCount } = buildDiffClusters(diffLines, contextLines)
+    return { hunk, anchored, diffLines, ...buildDiffClusters(diffLines, contextLines) }
+  })
+  const totalChanged = hunkViews.reduce((total, view) => total + view.changedCount, 0)
+  const out: string[] = []
+  let body = 0
+  let truncated = false
+  let shownChanges = 0
+  let lastElideIndent = ''
+  let sawHunk = false
 
-    if ((options.headerMode ?? 'full') !== 'none') {
+  outer: for (const { hunk, anchored, diffLines, clusters, addedCount, removedCount } of hunkViews) {
+    // Keep later hunk headers from defeating the global folded body budget.
+    // The first header remains visible even when maxLines is zero, matching
+    // the single-hunk behavior and preserving the card's identity.
+    if (body >= cap && sawHunk) {
+      truncated = true
+      break
+    }
+    const elideIndent = anchored ? '     ' : ''
+    lastElideIndent = elideIndent
+    sawHunk = true
+
+    if (headerMode !== 'none') {
       const stats: string[] = []
       if (addedCount > 0) stats.push(color.diffAdded(`+${addedCount}`))
       if (removedCount > 0) stats.push(color.diffRemoved(`-${removedCount}`))
-      const header = (options.headerMode ?? 'full') === 'full'
+      const header = headerMode === 'full'
         ? `${stats.join(' ')}${stats.length === 0 ? '' : ' '}${relativizeToCwd(hunk.path, cwd)}`
         : stats.join(' ')
       out.push(header)
     }
     if (clusters.length === 0) continue
 
-    // The elision/footer indent mirrors the gutter column when the gutter
-    // renders; without a gutter the body starts at column 0.
-    const elideIndent = anchored ? '     ' : ''
-    let body = 0
     let prevEnd = -1
-    let truncated = false
-    let shownChanges = 0
-    outer: for (const cluster of clusters) {
+    for (const cluster of clusters) {
       if (body >= cap) {
         truncated = true
-        break
+        break outer
       }
       if (prevEnd >= 0) {
         const gap = cluster.start - prevEnd - 1
         if (gap > 0) {
           if (body + 1 > cap) {
             truncated = true
-            break
+            break outer
           }
           out.push(color.diffMeta(`${elideIndent}… ${gap} unchanged line${gap > 1 ? 's' : ''} …`))
           body++
@@ -333,15 +348,15 @@ export function renderDiffView(diffs: readonly FileDiff[], cwd?: string, options
         prevEnd = i
       }
     }
-    if (truncated) {
-      const hidden = changedCount - shownChanges
-      const hint = options.expandHint ?? 'click to expand'
-      out.push(color.diffMeta(
-        hidden > 0
-          ? `${elideIndent}… ${hidden} more change${hidden > 1 ? 's' : ''} hidden (${hint})`
-          : `${elideIndent}… more diff lines hidden (${hint})`,
-      ))
-    }
+  }
+  if (truncated) {
+    const hidden = totalChanged - shownChanges
+    const hint = options.expandHint ?? 'click to expand'
+    out.push(color.diffMeta(
+      hidden > 0
+        ? `${lastElideIndent}… ${hidden} more change${hidden > 1 ? 's' : ''} hidden (${hint})`
+        : `${lastElideIndent}… more diff lines hidden (${hint})`,
+    ))
   }
   return out
 }
