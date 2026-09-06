@@ -212,6 +212,7 @@ function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<void>): Ag
     session,
     ctx: agentContext,
     options: { provider: 'p', model: 'm' },
+    status: 'idle',
     inbox: { nextTurn: [], nextStep: [] },
     whenIdle: async () => { await whenIdleGate?.() },
   } as unknown as Agent
@@ -396,6 +397,7 @@ interface RunnerProbe {
   capturedStreamingToolPreviews: readonly StreamingToolPreview[] | undefined
   capturedViewerUsage: unknown
   capturedViewerMode: unknown
+  capturedApproval: { toolName?: string; arguments?: string; danger?: boolean } | undefined
   scrollToBottomCount: number
   capturedModels: string[]
   capturedWelcomeModels: string[]
@@ -415,6 +417,7 @@ function installProbe(): RunnerProbe {
     capturedStreamingToolPreviews: undefined,
     capturedViewerUsage: undefined,
     capturedViewerMode: undefined,
+    capturedApproval: undefined,
     scrollToBottomCount: 0,
     capturedModels: [],
     capturedWelcomeModels: [],
@@ -428,6 +431,7 @@ function installProbe(): RunnerProbe {
   const originalSetTranscript = TuiApp.prototype.setTranscript
   const originalSetViewerFooter = TuiApp.prototype.setViewerFooter
   const originalSetViewerMode = TuiApp.prototype.setViewerMode
+  const originalShowApprovalPrompt = TuiApp.prototype.showApprovalPrompt
   const originalSetStatus = TuiApp.prototype.setStatus
   const originalSetWelcomeCard = TuiApp.prototype.setWelcomeCard
   const originalStart = TuiApp.prototype.start
@@ -462,6 +466,10 @@ function installProbe(): RunnerProbe {
     probe.capturedViewerMode = mode
     return originalSetViewerMode.call(this, mode)
   }
+  TuiApp.prototype.showApprovalPrompt = function (request) {
+    probe.capturedApproval = request
+    return Promise.resolve('cancelled')
+  }
   TuiApp.prototype.setStatus = function (status) {
     if (typeof status.model === 'string') probe.capturedModels.push(status.model)
     return originalSetStatus.call(this, status)
@@ -486,6 +494,7 @@ function installProbe(): RunnerProbe {
     TuiApp.prototype.setTranscript = originalSetTranscript
     TuiApp.prototype.setViewerFooter = originalSetViewerFooter
     TuiApp.prototype.setViewerMode = originalSetViewerMode
+    TuiApp.prototype.showApprovalPrompt = originalShowApprovalPrompt
     TuiApp.prototype.setStatus = originalSetStatus
     TuiApp.prototype.setWelcomeCard = originalSetWelcomeCard
     TuiApp.prototype.start = originalStart
@@ -663,11 +672,14 @@ test('a main Session opening cut never mixes A with B or loses B transient state
     header: { id: 'main-opening-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents('A answer'),
   })
-  let nextOpeningSeq = 6
+  let nextOpeningSeq = 7
   const sessionB: FakeSession = fakeSession({
     id: 'main-opening-b',
     header: { id: 'main-opening-b', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
-    events: sessionEvents('B history'),
+    events: [
+      ...sessionEvents('B history'),
+      modelEvent('model/selection', { provider: 'opening-provider', model: 'opening-model', reasoningEffort: 'high' }, 6),
+    ],
     append: (type, data) => ({ type, seq: nextOpeningSeq++, time: Date.now(), data }) as unknown as SessionEvent,
   })
   let releaseBResume!: () => void
@@ -709,6 +721,27 @@ test('a main Session opening cut never mixes A with B or loses B transient state
     return next
   }
   const bAgent = liveAgentOf(harness, sessionB.id)
+  emitDurable('model/selection', { provider: 'opening-provider', model: 'opening-model', reasoningEffort: 'high' })
+  emitDurable('request/header', {
+    header: { config: { provider: 'opening-provider', model: 'opening-model', reasoningEffort: 'high' } },
+  })
+  emitDurable('tool/call', {
+    turn: 1,
+    step: 0,
+    callId: 'main-opening-tool',
+    name: 'bash',
+    arguments: '{"command":"rm -rf /tmp/opening-test"}',
+  })
+  context.emit('approval/request', {
+    callId: 'main-opening-tool',
+    toolName: 'bash',
+    reason: 'opening approval',
+  } as never, undefined as never)
+  await settle()
+  assert.equal(probe.capturedApproval?.arguments, '{"command":"rm -rf /tmp/opening-test"}',
+    'runtime tool/call bookkeeping must run while presentation is fenced')
+  assert.equal(probe.capturedApproval?.danger, true,
+    'approval danger classification must retain the opening tool arguments')
   emitDurable('turn/start', { turn: 1 })
   emitDurable('step/start', { turn: 1, step: 0 })
   emitLiveStream(context, bAgent, { type: 'start', attemptId: 'main-opening-b', revision: 1, turn: 1, step: 0 })
@@ -726,6 +759,8 @@ test('a main Session opening cut never mixes A with B or loses B transient state
   await switchPromise
   await settle()
   await new Promise(resolve => setTimeout(resolve, 70))
+  assert.equal(probe.capturedModels.at(-1), 'p/m',
+    'opening model selection must be consumed by its matching request/header before the target commits')
   const openingMessages = probe.capturedMessages ?? []
   assert.ok(openingMessages.some(message => message.text === 'B opening prefix'),
     'B transient prefix must survive the commit-to-init opening gap')
@@ -743,7 +778,7 @@ test('a main Session opening cut never mixes A with B or loses B transient state
   })
   emitLiveStream(context, bAgent, {
     type: 'end', attemptId: 'main-opening-b', revision: 4, index: 2,
-    outcome: { kind: 'committed', eventType: 'assistant/message', seq: 9 },
+    outcome: { kind: 'committed', eventType: 'assistant/message', seq: 12 },
   })
   emitDurable('step/end', { turn: 1, step: 0 })
   emitDurable('turn/end', { turn: 1, reason: { kind: 'completed' } })
@@ -1438,12 +1473,11 @@ test('an inactive child cold-resume replays its opening prefix and running activ
   const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
   life.defer(() => childHandle.dispose())
   const childAgent = liveAgentOf(harness, child.id)
+  ;(childAgent as { status: 'idle' | 'running' }).status = 'running'
   const emitDurable = (type: string, data: unknown): void => {
     const next = child.append!(type, data) as SessionEvent
     context!.emit('session/event', child as never, next)
   }
-  emitDurable('turn/start', { turn: 1 })
-  emitDurable('step/start', { turn: 1, step: 0 })
   emitLiveStream(context, childAgent, { type: 'start', attemptId: 'viewer-opening-live', revision: 1, turn: 1, step: 0 })
   emitLiveStream(context, childAgent, {
     type: 'chunk', attemptId: 'viewer-opening-live', revision: 2, index: 0,
@@ -1454,7 +1488,7 @@ test('an inactive child cold-resume replays its opening prefix and running activ
   await vt.waitForRender()
   assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must mount after observation')
   assert.equal((probe.capturedViewerMode as { activity?: string } | undefined)?.activity, 'running',
-    'a buffered turn/start must make the first viewer footer activity running')
+    'the attached Agent runtime status must override stale catalog and durable history activity during viewer opening')
   assert.ok((probe.capturedMessages ?? []).some(message => message.text === 'child opening prefix'),
     'the exact child Agent baseline must replay after durable opening hydration')
 })

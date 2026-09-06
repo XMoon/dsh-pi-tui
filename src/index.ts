@@ -1826,7 +1826,11 @@ export function apply(ctx: Context, config: Config): void {
     // the Direct session lifecycle can resolve preset compositions.
     const backend = createDirectBackend(
       new DirectSubagentPort(ctx),
-      new DirectSessionReader(ctx, diag),
+      new DirectSessionReader(ctx, {
+        sessionOf: id => sessions.get(id),
+        agentOf: id => agents.get(id),
+        flushSession: async session => { await sessions.flush(session as never) },
+      }, diag),
       new DirectSessionWriter(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent as never : undefined),
       new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
       new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
@@ -3567,20 +3571,24 @@ export function apply(ctx: Context, config: Config): void {
       // duplicated seq from the snapshot.
       const currentChild = sessions.get(childId)
       const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)
-       const own = childOwnEvents(durableEvents)
-       childFolder.hydrate(own)
-       childStats.hydrate(own)
-       const header = currentChild?.header ?? observedHeader
-       // The live/cold child's session header carries its workspace (the child
-       // may have been born in another directory).
-       childCwd = typeof header?.cwd === 'string' ? header.cwd : ''
-       const childAgent = agents.get(childId)
-       let childActivity = activity
-       for (const event of own) {
-         if (event.type === 'turn/start') childActivity = 'running'
-         else if (event.type === 'turn/end') childActivity = 'inactive'
-       }
-       // A live child may already have emitted transient assistant frames before
+      const own = childOwnEvents(durableEvents)
+      childFolder.hydrate(own)
+      childStats.hydrate(own)
+      const header = currentChild?.header ?? observedHeader
+      // The live/cold child's session header carries its workspace (the child
+      // may have been born in another directory).
+      childCwd = typeof header?.cwd === 'string' ? header.cwd : ''
+      const childAgent = agents.get(childId)
+      let childActivity: 'running' | 'inactive' = childAgent === undefined
+        ? activity
+        : childAgent.status === 'running' ? 'running' : 'inactive'
+      if (childAgent === undefined) {
+        for (const event of own) {
+          if (event.type === 'turn/start') childActivity = 'running'
+          else if (event.type === 'turn/end') childActivity = 'inactive'
+        }
+      }
+      // A live child may already have emitted transient assistant frames before
       // the viewer existed. Replay only the exact Agent's active baseline after
       // durable hydration and before the child surface is mounted.
       if (childAgent !== undefined) {
@@ -7095,7 +7103,56 @@ export function apply(ctx: Context, config: Config): void {
       resumeFailure = undefined
     }
     ctx.on('session/event', (session, event) => {
+      const attachedSession = sessions.get(session.id)
+      if (attachedSession !== undefined && attachedSession !== session) return
+      // Opening journals fence presentation only. Runtime bookkeeping must
+      // continue to observe the target for selections, approvals, and cleanup.
       const mainOpening = openingSession
+      const mainEvent = mainOpening !== undefined
+        ? mainOpening.id === session.id
+        : session.id === liveAgent?.session.id
+      const runtimeAgent = mainEvent ? agents.get(SessionId(session.id)) as Agent | undefined : undefined
+      let settledViewChildId: SessionId | undefined
+      if (mainEvent) {
+        const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
+        if (selectionEvent.type === 'model/selection') {
+          if (runtimeAgent !== undefined) modelSelections.observeSelectionEvent(runtimeAgent, selectionEvent)
+        } else if (event.type === 'request/header' && runtimeAgent !== undefined) {
+          const data = event.data as unknown
+          const header = typeof data === 'object' && data !== null
+            ? (data as { header?: unknown }).header
+            : undefined
+          const raw = rawSelectionFromRequestHeader(header)
+          if (raw !== undefined) {
+            modelSelections.consumeSelection(runtimeAgent, raw.provider, raw.model, raw.reasoningEffort)
+          }
+        }
+        if (event.type === 'tool/call') {
+          callArgs.set(event.data.callId, typeof event.data.arguments === 'string'
+            ? event.data.arguments
+            : JSON.stringify(event.data.arguments))
+          if (typeof event.data.name === 'string' && event.data.name.startsWith('subagent')) {
+            refreshAgents()
+            let description = ''
+            try {
+              const parsed = JSON.parse(event.data.arguments)
+              if (typeof parsed === 'object' && parsed !== null && typeof (parsed as { description?: unknown }).description === 'string') {
+                description = (parsed as { description: string }).description
+              }
+            } catch {
+              // A non-JSON arguments payload carries no matchable description.
+            }
+            pendingSubagentCalls.push({ callId: event.data.callId, description })
+          }
+        } else if (event.type === 'tool/result') {
+          const callId = event.data.message.content[0]?.toolCallId
+          callArgs.delete(callId ?? ('' as ToolCallId))
+          const callIndex = pendingSubagentCalls.findIndex(call => call.callId === callId)
+          if (callIndex !== -1) pendingSubagentCalls.splice(callIndex, 1)
+          settledViewChildId = callId === undefined ? undefined : viewCallToChild.get(callId)
+          if (callId !== undefined) viewCallToChild.delete(callId)
+        }
+      }
        if (mainOpening !== undefined && session.id === mainOpening.id && (viewing === undefined || viewing.id !== session.id)) {
          mainOpening.events.push(event)
          return
@@ -7135,65 +7192,9 @@ export function apply(ctx: Context, config: Config): void {
       }
       if (session.id !== liveAgent.session.id) return
       applyOwnerStreamingToolPreviewEvent(mainStreamingToolPreviews, folder, event)
-      // Keep the Direct owner in sync with durable model intent and consume a
-      // pending choice only when the exact raw request header was recorded.
-      // The structural check keeps this next-version event compatible with
-      // older public dsh-session declarations.
-      const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
-      if (selectionEvent.type === 'model/selection') {
-        modelSelections.observeSelectionEvent(liveAgent, selectionEvent)
-      } else if (event.type === 'request/header') {
-        // Consume a pending choice only when the exact raw request header was
-        // recorded. The pure helper validates the structural shape, so a
-        // malformed header (or a malformed event data payload) can never
-        // throw inside the event firehose.
-        const data = event.data as unknown
-        const header = typeof data === 'object' && data !== null
-          ? (data as { header?: unknown }).header
-          : undefined
-        const raw = rawSelectionFromRequestHeader(header)
-        if (raw !== undefined) {
-          modelSelections.consumeSelection(liveAgent, raw.provider, raw.model, raw.reasoningEffort)
-        }
-      }
-      // Pair approval previews: remember each tool call's arguments by callId.
-      if (event.type === 'tool/call') {
-        callArgs.set(event.data.callId, typeof event.data.arguments === 'string'
-          ? event.data.arguments
-          : JSON.stringify(event.data.arguments))
-        // Continuable children never register jobs, and their lifecycle
-        // events are scoped by the delegating parent — an UNTAGGED
-        // listener (this runner) receives them all, so the tool's own
-        // call is a REDUNDANT badge-arming signal that stays as a
-        // defensive net (it also fires when the lifecycle events are
-        // suppressed upstream).
-        if (typeof event.data.name === 'string' && event.data.name.startsWith('subagent')) {
-          refreshAgents()
-          // Remember the pending delegation: the viewer matches one of these
-          // by description when the user opens a child transcript, so the
-          // child's tool/result can pop the viewer back automatically.
-          let description = ''
-          try {
-            const parsed = JSON.parse(event.data.arguments)
-            if (typeof parsed === 'object' && parsed !== null && typeof (parsed as { description?: unknown }).description === 'string') {
-              description = (parsed as { description: string }).description
-            }
-          } catch {
-            // A non-JSON arguments payload carries no matchable description.
-          }
-          pendingSubagentCalls.push({ callId: event.data.callId, description })
-        }
-      } else if (event.type === 'tool/result') {
-        const callId = event.data.message.content[0]?.toolCallId
-        callArgs.delete(callId ?? ('' as ToolCallId))
-        // The delegation settled: drop it from the pending list and remember
-        // whether the user is viewing the child this call spawned, so after
-        // the event lands in the main folder we can pop back to the main
-        // transcript (the result is visible there).
-        const callIndex = pendingSubagentCalls.findIndex(call => call.callId === callId)
-        if (callIndex !== -1) pendingSubagentCalls.splice(callIndex, 1)
-        const childId = callId === undefined ? undefined : viewCallToChild.get(callId)
-        if (childId !== undefined) viewCallToChild.delete(callId)
+
+      if (event.type === 'tool/result') {
+        const childId = settledViewChildId
         const popAfterApply = childId !== undefined && viewing !== undefined && viewing.id === childId
         if (popAfterApply) {
           // The event below lands in the main folder FIRST so the pop shows

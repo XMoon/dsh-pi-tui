@@ -78,14 +78,6 @@ export interface SessionPersistenceReadLike {
   open(sessionId: SessionId, mode: 'read'): Promise<SessionReadHandleLike>
 }
 
-/** The live-session store used to flush before an export read (structural
- * subset of the official `sessions` service — mirrors upstream
- * `flushLiveSessionLog`). */
-export interface SessionStoreFlushLike {
-  get(id: SessionId): unknown
-  flush(session: unknown): Promise<void>
-}
-
 /** The public session-query text filter used by the semantic search. */
 export interface SessionEventResultFilterLike {
   readonly kind: 'text'
@@ -118,6 +110,13 @@ export interface LiveAgentLike {
   readonly session: Session
   /** Agent scope context used by DSH's composedPreset() projection. */
   readonly ctx?: unknown
+}
+
+/** Narrow live-registry lookups supplied by the Direct composition root. */
+export interface DirectSessionLiveResolvers {
+  sessionOf(id: SessionId): unknown | undefined
+  agentOf(id: SessionId): unknown | undefined
+  flushSession?(session: unknown): Promise<void>
 }
 
 /** The diagnostics sink for isolated per-row projection failures. */
@@ -188,10 +187,11 @@ function serializeLogicalSessionLog(header: SessionHeader, events: readonly Sess
   return `${lines.join('\n')}\n`
 }
 
-/** The Direct backend's session reader: `ctx` services behind the semantic
- * `SessionReader` interface. */
+/** The Direct backend's session reader: Host query/persistence services plus
+ * injected live-registry capabilities behind the semantic `SessionReader` interface. */
 export class DirectSessionReader implements SessionReader {
   private readonly ctx: HostContextLike
+  private readonly liveResolvers: DirectSessionLiveResolvers | undefined
   private readonly diag: SessionReaderDiagLike | undefined
   /**
    * The most recent listing's complete `SessionHeader` values, keyed by
@@ -203,20 +203,19 @@ export class DirectSessionReader implements SessionReader {
    */
   private headerSnapshot = new Map<string, SessionHeader>()
 
-  constructor(ctx: HostContextLike, diag?: SessionReaderDiagLike) {
+  constructor(ctx: HostContextLike, liveResolvers?: DirectSessionLiveResolvers, diag?: SessionReaderDiagLike) {
     this.ctx = ctx
+    this.liveResolvers = liveResolvers
     this.diag = diag
   }
 
   private liveAgent(sessionId: string): LiveAgentLike | undefined {
-    const agents = this.ctx.get('agents') as { get(id: SessionId): unknown } | undefined
-    return agents?.get(SessionId(sessionId)) as LiveAgentLike | undefined
+    return this.liveResolvers?.agentOf(SessionId(sessionId)) as LiveAgentLike | undefined
   }
 
   /** Resolve the attached Session independently from the current TUI owner. */
   private liveSession(sessionId: string): Session | undefined {
-    const sessions = this.ctx.get('sessions') as { get(id: SessionId): unknown } | undefined
-    return sessions?.get(SessionId(sessionId)) as Session | undefined
+    return this.liveResolvers?.sessionOf(SessionId(sessionId)) as Session | undefined
   }
 
   /** Resolve the actual preset of a currently loaded agent, when DSH exposes
@@ -393,14 +392,13 @@ export class DirectSessionReader implements SessionReader {
     //      `open`'s decision; every other failure stays fail-loud.
     const id = SessionId(sessionId)
     const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceReadLike | undefined
-    const sessions = this.ctx.get('sessions') as SessionStoreFlushLike | undefined
     // The public read-handle seam is master-baseline vocabulary: a host
     // without it (an older DSH) is an explicit unavailable, never a crash.
     if (persistence === undefined || typeof persistence.open !== 'function') return { kind: 'unavailable' }
-    const live = sessions?.get(id)
-    if (live !== undefined) {
+    const live = this.liveSession(sessionId)
+    if (live !== undefined && this.liveResolvers?.flushSession !== undefined) {
       try {
-        await sessions!.flush(live)
+        await this.liveResolvers.flushSession(live)
       } catch (error) {
         return { kind: 'error', message: safeErrorMessage(error) }
       }
