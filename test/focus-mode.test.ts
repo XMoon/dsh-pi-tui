@@ -2099,6 +2099,21 @@ test('window summaries (turn-less entries) pass through the projection', () => {
 
 // ── expanded chronology (plan: steer rows return to their position) ─────
 
+/** Build the durable next-step insertion, claim, and admitted user message. */
+function claimedSteer(id: string, text: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 1, seq + 2),
+  ]
+}
+
 /** A turn with an initial user, thinking, a tool, a MID-TURN steer, and a
  * final answer: user → thinking → tool → user(steer) → assistant → end. */
 function steeredTurn(turn: number, baseSeq: number, startTime: number): SessionEvent[] {
@@ -2119,11 +2134,7 @@ function steeredTurn(turn: number, baseSeq: number, startTime: number): SessionE
         source: { kind: 'tool', callId: ToolCallId(`c-${turn}-1`) },
       },
     }, startTime + 4, baseSeq + 4),
-    eventAt('user/message', {
-      id: MessageId(`msg-s-${turn}`), role: 'user',
-      content: [{ type: 'text', text: `steer ${turn}` }],
-      source: { kind: 'user' },
-    }, startTime + 5, baseSeq + 5),
+    ...claimedSteer(`msg-s-${turn}`, `steer ${turn}`, startTime + 5, baseSeq + 5),
     eventAt('assistant/message', {
       turn, step: 1,
       message: {
@@ -2131,8 +2142,8 @@ function steeredTurn(turn: number, baseSeq: number, startTime: number): SessionE
         content: [{ type: 'text', text: `final answer ${turn}` }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
-    }, startTime + 6, baseSeq + 6),
-    eventAt('turn/end', { turn, reason: { kind: 'completed' } }, startTime + 6000, baseSeq + 7),
+    }, startTime + 8, baseSeq + 8),
+    eventAt('turn/end', { turn, reason: { kind: 'completed' } }, startTime + 6000, baseSeq + 9),
   ]
 }
 
@@ -2284,28 +2295,113 @@ test('expanded: user rows never carry the owner collapse mark; process rows alwa
   }
 })
 
-test('expanded: rows before the first user stay in place; a late steer stays chronological', () => {
+test('expanded: a claimed steer in a non-user turn stays after the Thought', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1001, 1),
+    ...claimedSteer('late', 'late steer', 1002, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 5),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 6),
+  ])
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  // This user is a durable next-step claim, not an opening prompt. The
+  // Thought owns the turn root and the steer stays in its process position.
+  assert.deepEqual(blockKinds(blocks), ['activity', 'thinking', 'user', 'assistant'],
+    'a claimed steer must remain after the Thought in a non-user turn')
+})
+
+test('metadata-free logs keep the first user as the initial-prompt fallback', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1001, 1),
     eventAt('user/message', {
-      id: MessageId('late'), role: 'user',
-      content: [{ type: 'text', text: 'late steer' }],
+      id: MessageId('legacy-initial'),
+      role: 'user',
+      content: [{ type: 'text', text: 'legacy initial' }],
       source: { kind: 'user' },
     }, 1002, 2),
     eventAt('assistant/message', {
       turn: 0, step: 1,
-      message: { id: MessageId('a'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      message: { id: MessageId('legacy-answer'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
     }, 1003, 3),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
   ])
+  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  assert.deepEqual(blockKinds(expanded), ['thinking', 'user', 'activity', 'assistant'])
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant'])
+})
+
+test('collapsed: a claimed steer in a non-user turn follows the Thought', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1001, 1),
+    ...claimedSteer('collapsed-late', 'late steer', 1002, 2),
+    eventAt('compaction/start', { compactionId: 'steer-only-compaction' }, 1005, 5),
+    eventAt('compaction/summary', {
+      compactionId: 'steer-only-compaction',
+      summary: [{ type: 'text', text: 'compacted context' }],
+      shadowedSeqs: [],
+      shadowedTokenCount: 3,
+    }, 1006, 6),
+    eventAt('compaction/end', { compactionId: 'steer-only-compaction' }, 1007, 7),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('collapsed-a'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1008, 8),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 9),
+  ])
+  const blocks = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(blocks), ['activity', 'user', 'compaction', 'assistant'],
+    'a non-user turn must put Thought, steer, compaction, and final in order when collapsed')
+})
+
+test('Focus keeps injected context and a claimed steer under the Thought root', () => {
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('injected-before-steer'),
+      role: 'user',
+      content: [{ type: 'text', text: 'system reminder' }],
+      source: { kind: 'plugin', plugin: 'agent-instructions' },
+    }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1002, 2),
+    ...claimedSteer('injected-steer', 'steer after inject', 1003, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('injected-answer'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1006, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1007, 7),
+  ]
+  const folder = new TranscriptFolder()
+  applyMixed(folder, events)
+  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  assert.deepEqual(blockKinds(expanded), ['activity', 'system', 'thinking', 'user', 'assistant'])
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['activity', 'user', 'assistant'])
+})
+
+test('a steer claimed before reasoning is still identified durably', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    ...claimedSteer('early-steer', 'early steer', 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1005, 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('early-answer'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1006, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1007, 7),
+  ])
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
-  // The row BEFORE the first user (thinking) stays in place, the first
-  // user stays above the Thought, and the Thought follows — the steer
-  // never gets lifted above the Thought (plan: initial-prompt boundary).
-  assert.deepEqual(blockKinds(blocks), ['thinking', 'user', 'activity', 'assistant'],
-    'pre-user rows and the first user precede the Thought; the steer stays chronological')
+  assert.deepEqual(blockKinds(blocks), ['activity', 'user', 'thinking', 'assistant'],
+    'durable next-step identity must not depend on a prior visible process row')
 })
 
 test('fold → expand → fold projection is reversible (same collapsed output)', () => {

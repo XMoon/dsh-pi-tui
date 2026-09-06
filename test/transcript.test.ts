@@ -131,6 +131,199 @@ test('folds a user message into a You message', () => {
   assert.equal(first.text, 'hello')
 })
 
+function claimedSteerEvents(id: string, text = 'steer'): SessionEvent[] {
+  const message = {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }
+  return [
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 1),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2),
+    rawEvent('user/message', message, 3),
+  ]
+}
+
+test('next-step claims mark the matching human user message as steer', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate(claimedSteerEvents('steer-a'))
+  const message = folder.messages()[0]
+  assert.ok(message !== undefined && message.kind === 'user')
+  assert.equal(message.steer, true)
+})
+
+test('replacement user messages consume stale next-step claims', () => {
+  const id = MessageId('replacement-steer')
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('agent/inbox/spliced', {
+      target: 'next-step', start: 0,
+      inserted: [{ id, role: 'user', content: [{ type: 'text', text: 'replacement' }], source: { kind: 'user' } }],
+    }, 1),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2),
+    surfaceEvent('user/message', {
+      id,
+      role: 'user',
+      content: [{ type: 'text', text: 'replacement' }],
+      source: { kind: 'user' },
+    }, 3, { op: 'replace', start: 0, end: 0 }),
+    rawEvent('user/message', {
+      id,
+      role: 'user',
+      content: [{ type: 'text', text: 'replacement' }],
+      source: { kind: 'user' },
+    }, 4),
+  ])
+  const messages = folder.messages().filter((message): message is Extract<TranscriptMessage, { kind: 'user' }> => message.kind === 'user')
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0]?.steer, undefined)
+})
+
+test('ordinary user messages do not carry steer metadata', () => {
+  const messages = foldTranscript([
+    rawEvent('user/message', {
+      id: MessageId('ordinary-user'),
+      role: 'user',
+      content: [{ type: 'text', text: 'ordinary' }],
+      source: { kind: 'user' },
+    }, 0),
+  ])
+  const message = messages[0]
+  assert.ok(message !== undefined && message.kind === 'user')
+  assert.equal(message.steer, undefined)
+})
+
+test('canceled next-step removals do not mark the matching user as steer', () => {
+  const message = {
+    id: MessageId('canceled-steer'),
+    role: 'user',
+    content: [{ type: 'text', text: 'canceled' }],
+    source: { kind: 'user' },
+  }
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 1),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' }, 2),
+    rawEvent('user/message', message, 3),
+  ])
+  const folded = folder.messages()[0]
+  assert.ok(folded !== undefined && folded.kind === 'user')
+  assert.equal(folded.steer, undefined)
+})
+
+test('reinserting a claimed id clears its stale steer claim', () => {
+  const message = {
+    id: MessageId('reinserted-steer'),
+    role: 'user',
+    content: [{ type: 'text', text: 'reinserted' }],
+    source: { kind: 'user' },
+  }
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 1),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 3),
+    rawEvent('user/message', message, 4),
+  ])
+  const folded = folder.messages()[0]
+  assert.ok(folded !== undefined && folded.kind === 'user')
+  assert.equal(folded.steer, undefined)
+})
+
+test('inbox splice positions and targets classify only claimed next-step ids', () => {
+  const first = {
+    id: MessageId('position-first'),
+    role: 'user',
+    content: [{ type: 'text', text: 'first' }],
+    source: { kind: 'user' },
+  }
+  const second = {
+    id: MessageId('position-second'),
+    role: 'user',
+    content: [{ type: 'text', text: 'second' }],
+    source: { kind: 'user' },
+  }
+  const replacement = {
+    id: MessageId('position-replacement'),
+    role: 'user',
+    content: [{ type: 'text', text: 'replacement' }],
+    source: { kind: 'user' },
+  }
+  const nextTurn = {
+    id: MessageId('next-turn-user'),
+    role: 'user',
+    content: [{ type: 'text', text: 'next turn' }],
+    source: { kind: 'user' },
+  }
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [nextTurn] }, 1),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [first, second] }, 2),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 1, inserted: [replacement] }, 3),
+    rawEvent('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, 4),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 1, removedCount: 1, inserted: [] }, 5),
+    rawEvent('user/message', nextTurn, 6),
+    rawEvent('user/message', replacement, 7),
+    rawEvent('user/message', replacement, 8),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 1, removedCount: 1, inserted: [] }, 9),
+    rawEvent('user/message', second, 10),
+    rawEvent('user/message', first, 11),
+  ])
+  const userMessages = folder.messages().filter((message): message is Extract<TranscriptMessage, { kind: 'user' }> => message.kind === 'user')
+  const replacementMessages = userMessages.filter(message => message.text === 'replacement')
+  assert.deepEqual(replacementMessages.map(message => message.steer), [true, undefined])
+  assert.equal(userMessages.find(message => message.text === 'next turn')?.steer, undefined)
+  assert.equal(userMessages.find(message => message.text === 'second')?.steer, true,
+    'the sibling left after the positioned claim remains in the next-step inbox')
+  assert.equal(userMessages.find(message => message.text === 'first')?.steer, undefined)
+})
+
+test('claimed ids are consumed by non-user and empty user messages', () => {
+  const pluginMessage = {
+    id: MessageId('claimed-plugin'),
+    role: 'user',
+    content: [{ type: 'text', text: 'plugin message' }],
+    source: { kind: 'plugin', plugin: 'test' },
+  }
+  const emptyMessage = {
+    id: MessageId('claimed-empty'),
+    role: 'user',
+    content: [],
+    source: { kind: 'user' },
+  }
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [pluginMessage] }, 1),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2),
+    rawEvent('user/message', pluginMessage, 3),
+    rawEvent('user/message', { ...pluginMessage, source: { kind: 'user' } }, 4),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [emptyMessage] }, 5),
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 6),
+    rawEvent('user/message', emptyMessage, 7),
+    rawEvent('user/message', { ...emptyMessage, content: [{ type: 'text', text: 'later' }] }, 8),
+  ])
+  const userMessages = folder.messages().filter((message): message is Extract<TranscriptMessage, { kind: 'user' }> => message.kind === 'user')
+  assert.equal(userMessages.find(message => message.text === 'plugin message')?.steer, undefined)
+  assert.equal(userMessages.find(message => message.text === 'later')?.steer, undefined)
+  assert.equal(folder.messages().some(message => message.kind === 'system' && message.text === 'plugin message'), true)
+})
+
+test('hydrate and incremental apply preserve the same steer identity', () => {
+  const events = claimedSteerEvents('steer-replay', 'replay steer')
+  const hydrated = new TranscriptFolder()
+  hydrated.hydrate(events)
+  const incremental = new TranscriptFolder()
+  for (const event of events) incremental.apply([event])
+  assert.deepEqual(incremental.messages(), hydrated.messages())
+})
+
 test('accumulates streaming text deltas into one assistant message', () => {
   const messages = foldLive([
     event('turn/start', { turn: 0 }, 0),
