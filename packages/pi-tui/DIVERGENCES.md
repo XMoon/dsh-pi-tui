@@ -3540,31 +3540,33 @@ Fullscreen host routing must register before the viewport listener so raw captur
 - Category: `HARD_HOST_API`
 - Risk: `HIGH`
 - Files: `src/components/editor.ts`
-- Last audited: `2026-09-03`
+- Last audited: `2026-09-06`
 - Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
 
 #### Why it exists
 
-The host TuiEditor subclass needs to drive explicit/context-gated completion and stale-dropdown cancellation through a supported protected seam rather than unsafe casts to private methods.
+The host TuiEditor subclass needs to drive explicit/context-gated completion, stale-dropdown cancellation, and context-specific SelectList layout through supported protected seams rather than unsafe casts to private methods or private autocomplete state.
 
 #### Changed surface
 
 - requestAutocomplete visibility private -> protected
 - cancelAutocomplete visibility private -> protected
+- getAutocompleteSelectListLayout protected layout decision hook
 
 #### Dependency map
 
 **Vendor internal**
-- Editor completion state, request/cancel methods, provider callbacks, and dropdown lifecycle are coupled.
-- Audit note: Visibility is the only local code change; behavior remains vendor-owned.
+- Editor completion state, request/cancel methods, provider callbacks, dropdown lifecycle, and SelectList construction are coupled.
+- Audit note: Visibility and the layout decision hook are the only local code changes; behavior remains vendor-owned.
 
 **Inheritance / structural**
-- src/tui-editor.ts subclass calls requestAutocomplete/cancelAutocomplete through protected access.
+- src/tui-editor.ts subclass calls requestAutocomplete/cancelAutocomplete/getAutocompleteSelectListLayout through protected access.
 - Audit note: This is the explicit structural audit target.
 
 **Host**
-- src/tui-editor.ts eight former cast sites for completion gating and cancellation
-- Audit note: The host no longer depends on a private implementation cast.
+- src/tui-editor.ts explicit/context-gated completion and file-completion layout selection
+- host active-screen repaint route for SelectedMarquee timer callbacks
+- Audit note: The host no longer depends on private implementation casts or private autocomplete state.
 
 **Public / extension**
 - Host editor adapter and subclass compatibility surface.
@@ -3573,14 +3575,17 @@ The host TuiEditor subclass needs to drive explicit/context-gated completion and
 **Behavioral coupling**
 - explicit completion uses the same request state
 - stale dropdown cancellation stays synchronized with Editor input
+- default slash-command layout remains unchanged
+- file contexts use a single full-path layout with selected-row marquee while other autocomplete contexts keep their existing layout
 - upstream signature changes fail at typecheck instead of silently at runtime
-- Audit note: A public wrapper or cast would change the supported structural contract.
+- Audit note: A public wrapper, private-state adapter, or inline host layout decision would change the supported structural contract.
 
 #### Guarding tests
 
 - packages/pi-tui/test/protected-autocomplete-compile.ts: compile-only host subclass contract
 - packages/pi-tui/test/editor.test.ts: no-provider protected seam
 - test/advanced-editor.test.ts and editor autocomplete integration
+- test/autocomplete-marquee-active-screen.test.ts: file marquee context and active-screen timer routing
 
 #### Upstream comparison
 
@@ -3591,12 +3596,12 @@ The host TuiEditor subclass needs to drive explicit/context-gated completion and
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Both the pinned baseline and the audited upstream reference keep both methods private; the host subclass cannot express its supported completion control without the visibility divergence.
+- Remaining semantic delta: The pinned baseline and audited upstream reference keep requestAutocomplete and cancelAutocomplete private. Neither upstream version exposes getAutocompleteSelectListLayout; the slash layout decision remains inline in createAutocompleteList, so the host needs an additive protected layout hook alongside the visibility divergence.
 
 #### Retirement conditions
 
-- Upstream must expose a protected or equivalent subclass-safe completion seam with compatible request/cancel lifecycle.
-- Run subclass typecheck and stale-dropdown/autocomplete tests before changing visibility.
+- Upstream must expose protected or equivalent subclass-safe completion request/cancel lifecycle and context-specific layout decision seams with compatible semantics.
+- Run subclass typecheck, stale-dropdown/autocomplete, and layout-hook tests before changing visibility or retiring this record.
 
 #### Replacement mapping
 
@@ -3609,7 +3614,7 @@ The host TuiEditor subclass needs to drive explicit/context-gated completion and
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed the subclass edge and kept the seam; audited upstream reference private visibility is not semantically equivalent.
+- Notes: Confirmed the subclass edge and kept the request/cancel and layout seams; audited upstream reference has private request/cancel methods and no layout hook (inline slash layout), so it is not semantically equivalent.
 
 ### X045 — Editor expanded-cursor mapping getExpandedCursor
 

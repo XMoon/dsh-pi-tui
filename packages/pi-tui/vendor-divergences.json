@@ -1563,32 +1563,32 @@
       "category": ["HARD_HOST_API"],
       "risk": "HIGH",
       "files": ["src/components/editor.ts"],
-      "why": "The host TuiEditor subclass needs to drive explicit/context-gated completion and stale-dropdown cancellation through a supported protected seam rather than unsafe casts to private methods.",
-      "changedSurface": ["requestAutocomplete visibility private -> protected", "cancelAutocomplete visibility private -> protected"],
+      "why": "The host TuiEditor subclass needs to drive explicit/context-gated completion, stale-dropdown cancellation, and context-specific SelectList layout through supported protected seams rather than unsafe casts to private methods or private autocomplete state.",
+      "changedSurface": ["requestAutocomplete visibility private -> protected", "cancelAutocomplete visibility private -> protected", "getAutocompleteSelectListLayout protected layout decision hook"],
       "dependencies": {
-        "vendorInternal": {"audited": true, "items": ["Editor completion state, request/cancel methods, provider callbacks, and dropdown lifecycle are coupled."], "notes": "Visibility is the only local code change; behavior remains vendor-owned."},
-        "inheritanceStructural": {"audited": true, "items": ["src/tui-editor.ts subclass calls requestAutocomplete/cancelAutocomplete through protected access."], "notes": "This is the explicit structural audit target."},
-        "host": {"audited": true, "items": ["src/tui-editor.ts eight former cast sites for completion gating and cancellation"], "notes": "The host no longer depends on a private implementation cast."},
+        "vendorInternal": {"audited": true, "items": ["Editor completion state, request/cancel methods, provider callbacks, dropdown lifecycle, and SelectList construction are coupled."], "notes": "Visibility and the layout decision hook are the only local code changes; behavior remains vendor-owned."},
+        "inheritanceStructural": {"audited": true, "items": ["src/tui-editor.ts subclass calls requestAutocomplete/cancelAutocomplete/getAutocompleteSelectListLayout through protected access."], "notes": "This is the explicit structural audit target."},
+        "host": {"audited": true, "items": ["src/tui-editor.ts explicit/context-gated completion and file-completion layout selection", "host active-screen repaint route for SelectedMarquee timer callbacks"], "notes": "The host no longer depends on private implementation casts or private autocomplete state."},
         "publicExtension": {"audited": true, "items": ["Host editor adapter and subclass compatibility surface."], "notes": "Protected is intentionally not a root public method for unrelated consumers."},
-        "behavioral": {"audited": true, "items": ["explicit completion uses the same request state", "stale dropdown cancellation stays synchronized with Editor input", "upstream signature changes fail at typecheck instead of silently at runtime"], "notes": "A public wrapper or cast would change the supported structural contract."}
+        "behavioral": {"audited": true, "items": ["explicit completion uses the same request state", "stale dropdown cancellation stays synchronized with Editor input", "default slash-command layout remains unchanged", "file contexts use a single full-path layout with selected-row marquee while other autocomplete contexts keep their existing layout", "upstream signature changes fail at typecheck instead of silently at runtime"], "notes": "A public wrapper, private-state adapter, or inline host layout decision would change the supported structural contract."}
       },
-      "tests": ["packages/pi-tui/test/protected-autocomplete-compile.ts: compile-only host subclass contract", "packages/pi-tui/test/editor.test.ts: no-provider protected seam", "test/advanced-editor.test.ts and editor autocomplete integration"],
+      "tests": ["packages/pi-tui/test/protected-autocomplete-compile.ts: compile-only host subclass contract", "packages/pi-tui/test/editor.test.ts: no-provider protected seam", "test/advanced-editor.test.ts and editor autocomplete integration", "test/autocomplete-marquee-active-screen.test.ts: file marquee context and active-screen timer routing"],
       "upstream": {
         "equivalence": "NO",
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/editor.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Both the pinned baseline and the audited upstream reference keep both methods private; the host subclass cannot express its supported completion control without the visibility divergence."
+        "semanticDelta": "The pinned baseline and audited upstream reference keep requestAutocomplete and cancelAutocomplete private. Neither upstream version exposes getAutocompleteSelectListLayout; the slash layout decision remains inline in createAutocompleteList, so the host needs an additive protected layout hook alongside the visibility divergence."
       },
       "retirement": {
-        "conditions": ["Upstream must expose a protected or equivalent subclass-safe completion seam with compatible request/cancel lifecycle.", "Run subclass typecheck and stale-dropdown/autocomplete tests before changing visibility."],
+        "conditions": ["Upstream must expose protected or equivalent subclass-safe completion request/cancel lifecycle and context-specific layout decision seams with compatible semantics.", "Run subclass typecheck, stale-dropdown/autocomplete, and layout-hook tests before changing visibility or retiring this record."],
         "replacementMapping": [],
         "evidence": []
       },
       "audit": {
-        "lastAuditedAt": "2026-09-03",
+        "lastAuditedAt": "2026-09-06",
         "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
-        "notes": "Confirmed the subclass edge and kept the seam; audited upstream reference private visibility is not semantically equivalent."
+        "notes": "Confirmed the subclass edge and kept the request/cancel and layout seams; audited upstream reference has private request/cancel methods and no layout hook (inline slash layout), so it is not semantically equivalent."
       }
     },
     "X045": {

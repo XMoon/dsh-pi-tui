@@ -2452,11 +2452,20 @@ export class Editor implements Component, Focusable {
 		return firstPrefixIndex;
 	}
 
+	/**
+	 * Select the layout for an autocomplete list. PROTECTED (dsh-pi-tui
+	 * divergence X044): host editor subclasses can provide a context-specific
+	 * layout without reaching private autocomplete state.
+	 */
+	protected getAutocompleteSelectListLayout(prefix: string): SelectListLayoutOptions | undefined {
+		return prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
+	}
+
 	private createAutocompleteList(
 		prefix: string,
 		items: Array<{ value: string; label: string; description?: string }>,
 	): SelectList {
-		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
+		const layout = this.getAutocompleteSelectListLayout(prefix);
 		return new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
 	}
 

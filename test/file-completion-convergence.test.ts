@@ -2,8 +2,8 @@
  * The file-completion convergence regression suite (the 2026-08-27 plan):
  * P1.1–P1.5, the §23 matrix, and the §24 headless A–E integration flows.
  * These tests pin the CONVERGED contract — file completion ONLY on `@...`
- * and `/image ...`, scoped `@` paths, shared fuzzy ranking, directory
- * continuation, fd/fdfind detection, stale-apply fencing, and the sessionless
+ * and attachment arguments (`/attach ...` + `/image ...`), scoped `@` paths,
+ * shared fuzzy ranking, directory continuation, fd/fdfind detection, stale-apply fencing, and the sessionless
  * scope walk. The engine modules are pure; the provider/port/app layers are
  * exercised through the real chain (TuiApp + VirtualTerminal + MentionProvider
  * + DirectHostFilePort).
@@ -196,7 +196,7 @@ test('P1.2 absolute: @/tmp/ searches the absolute scope', async (t) => {
   assert.ok(result.items.some(item => item.value.startsWith(`@${target}`)))
 })
 
-test('§23 matrix: /image shares the scoped forms (../, ~/, absolute, directory continuation)', async (t) => {
+test('§23 matrix: attachment commands share the scoped forms (../, ~/, absolute, directory continuation)', async (t) => {
   const life = testLifecycle(t)
   // ../../ fixture for /image: workspace = /root/alpha/beta/workspace;
   // ../../alpha targets /root/alpha/alpha/pics.
@@ -466,22 +466,33 @@ test('§23 matrix: Windows drive and UNC tokens keep their dialect (pure)', () =
   assert.equal(unc.winAbsolute, true)
 })
 
-test('Windows candidates rank and present basename labels independently of host path dialect', () => {
+test('candidates present one full display path independently of host path dialect', () => {
   assert.equal(scorePathCandidate({ path: 'C:\\Users\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
   assert.equal(scorePathCandidate({ path: 'C:\\Users\\deep\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
+  const rootFile = presentPathCandidate({ path: 'package.json', kind: 'file' }, { at: false, quoted: false })
+  assert.equal(rootFile.label, 'package.json')
+  assert.equal(rootFile.description, undefined)
+  const nestedFile = presentPathCandidate(
+    { path: 'src/file-completion/presentation.ts', kind: 'file' },
+    { at: false, quoted: false },
+  )
+  assert.equal(nestedFile.label, 'src/file-completion/presentation.ts')
+  assert.equal(nestedFile.description, undefined)
   const directory = presentPathCandidate(
     { path: 'C:\\Users\\Pictures', kind: 'directory' },
     { at: false, quoted: false, sep: '\\' },
   )
   assert.equal(directory.value, 'C:\\Users\\Pictures\\')
-  assert.equal(directory.label, 'Pictures/')
-  assert.equal(directory.description, 'C:\\Users\\Pictures')
+  assert.equal(directory.label, 'C:\\Users\\Pictures/')
+  assert.ok(directory.label.endsWith('/'))
+  assert.equal(directory.description, undefined)
   const mixed = presentPathCandidate(
     { path: 'C:/Users\\Pictures', kind: 'directory' },
     { at: true, quoted: false, sep: '\\' },
   )
   assert.equal(mixed.value, '@C:/Users\\Pictures\\')
-  assert.equal(mixed.label, 'Pictures/')
+  assert.equal(mixed.label, 'C:/Users\\Pictures/')
+  assert.equal(mixed.description, undefined)
 })
 
 test('the presentation layer quotes spaced values for /image and keeps @ quoting', () => {
