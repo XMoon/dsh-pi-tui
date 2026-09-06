@@ -438,10 +438,13 @@ function emptyAssistantBlockState(blockType: string): AssistantBlockState {
 function applyAssistantBlockChunk(blocks: Map<number, AssistantBlockState>, chunk: AssistantBlockChunk): void {
   switch (chunk.type) {
     case 'block-start':
-      blocks.set(chunk.index, emptyAssistantBlockState(chunk.blockType))
+      // The first block-start owns the index; duplicate starts must not erase
+      // deltas already accepted for that block.
+      if (!blocks.has(chunk.index)) blocks.set(chunk.index, emptyAssistantBlockState(chunk.blockType))
       break
     case 'text-delta': {
       const previous = blocks.get(chunk.index)
+      if (previous?.kind === 'complete') break
       blocks.set(chunk.index, {
         kind: 'text',
         text: previous?.kind === 'text' ? previous.text + chunk.text : chunk.text,
@@ -450,6 +453,7 @@ function applyAssistantBlockChunk(blocks: Map<number, AssistantBlockState>, chun
     }
     case 'reasoning-delta': {
       const previous = blocks.get(chunk.index)
+      if (previous?.kind === 'complete') break
       blocks.set(chunk.index, {
         kind: 'reasoning',
         text: previous?.kind === 'reasoning' ? previous.text + chunk.text : chunk.text,
@@ -458,6 +462,7 @@ function applyAssistantBlockChunk(blocks: Map<number, AssistantBlockState>, chun
     }
     case 'tool-call-delta': {
       const previous = blocks.get(chunk.index)
+      if (previous?.kind === 'complete') break
       const base = previous?.kind === 'tool-call'
         ? previous
         : { kind: 'tool-call' as const, id: '', name: '', arguments: '' }
@@ -470,7 +475,9 @@ function applyAssistantBlockChunk(blocks: Map<number, AssistantBlockState>, chun
       break
     }
     case 'block-end':
-      blocks.set(chunk.index, { kind: 'complete', block: chunk.block })
+      if (blocks.get(chunk.index)?.kind !== 'complete') {
+        blocks.set(chunk.index, { kind: 'complete', block: chunk.block })
+      }
       break
   }
 }
