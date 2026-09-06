@@ -1549,6 +1549,14 @@ export function apply(ctx: Context, config: Config): void {
   // its signal; per-action cancellation rides child controllers (the local
   // shell) or generation checks (menu latches).
   const lifecycleController = new AbortController()
+  // Register cancellation before entering the fire-and-forget startup root:
+  // loader/HMR disposal can happen before the full TUI cleanup effect exists.
+  // This disposer owns the runner lifetime signal and the diagnostics handle
+  // needed by a startup that exits before full cleanup is registered.
+  ctx.effect(() => () => {
+    lifecycleController.abort()
+    diag.dispose()
+  }, 'tui-runner lifecycle cancellation')
 
   // The guarded notification writer is hoisted to the RUNNER scope: both
   // the startup body and the terminal-total fatal catch (which lives
@@ -1562,6 +1570,7 @@ export function apply(ctx: Context, config: Config): void {
     // Loader siblings mount concurrently. Await the complete application before
     // creating an Agent so its scoped tools and adapters are not half-composed.
     await ctx.get('loader')?.await()
+    if (lifecycleController.signal.aborted) return
     const agents = ctx.get('agents')
     const defaultModel = ctx.get('agentDefaultModel')
     const sessions = ctx.get('sessions')
@@ -1921,6 +1930,10 @@ export function apply(ctx: Context, config: Config): void {
     })
     lifecycleController.signal.addEventListener('abort', () => startupStatus.clear(), { once: true })
     let handle: SessionHandle | undefined
+    // The cancellation branch below belongs only to the pre-publication
+    // lifecycle await. Once resume resolves, its creation-only signal no
+    // longer owns the returned handle (DSH contract).
+    let resumeResolved = false
     if (sessionId !== undefined) {
       // The explicit-resume path is the ONLY pre-mount wait worth
       // explaining: deferred / sessionless starts have nothing to resume.
@@ -1940,6 +1953,7 @@ export function apply(ctx: Context, config: Config): void {
         // installs an Agent-local selection and reconstructs the target
         // Session's durable model choice after resume.
         const fallback = defaultModel.currentSelection()
+        if (lifecycleController.signal.aborted) return
         handle = await backend.sessionLifecycle.resume({
           resumeSessionId: SessionId(sessionId),
           provider: fallback.provider,
@@ -1947,7 +1961,9 @@ export function apply(ctx: Context, config: Config): void {
           // The RESOLVED preset id from the preflight composition — the
           // adapter composes this EXACT id, never a re-resolved default.
           agentPreset: launchComposition.agentPreset,
+          signal: lifecycleController.signal,
         })
+        resumeResolved = true
         // Suspend the pre-mount status before ANY ordinary log output
         // (uniform rule): the status owns the current terminal line, and
         // a logger/diag write on a TTY shares the cursor — the status
@@ -1979,6 +1995,11 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
       } catch (error) {
+        if (lifecycleController.signal.aborted && !resumeResolved) {
+          startupStatus.clear()
+          diag.debug('startup resume cancelled', { session: sessionId })
+          return
+        }
         // Suspend the pre-mount status BEFORE the failure logs: the
         // status owns the current terminal line, and the logger/diag
         // writes below share the TTY cursor — without this clear the
@@ -2333,11 +2354,13 @@ export function apply(ctx: Context, config: Config): void {
         // values are only the dynamic fallback required by Agent resume; never
         // copy the old Session's selected ref into the target.
         const fallback = defaultModel.currentSelection()
+        if (lifecycleController.signal.aborted) return undefined
         const resumeOptions = {
           resumeSessionId: SessionId(sessionId),
           provider: fallback.provider,
           model: fallback.model,
           agentPreset: switchComposition.agentPreset,
+          signal: lifecycleController.signal,
         }
         const result = await transitionTo({
           target: { id: sessionId },
@@ -2747,6 +2770,12 @@ export function apply(ctx: Context, config: Config): void {
     })
     // Stable signal snapshot of the runner-owned lifecycle controller.
     const signal = lifecycleController.signal
+    // All command/fork/rewind lifecycle calls share this composition-root
+    // bridge so no child-creation path can bypass the runner lifetime.
+    const lifecycleAgents: TuiCommandRunner['agents'] = {
+      create: (options) => backend.sessionLifecycle.create({ ...options, signal }),
+      resume: (options) => backend.sessionLifecycle.resume({ ...options, signal }),
+    }
     // Abort handle for the currently running `!` shell command.
     let localShellController: AbortController | undefined
     // 0600 temp files holding FULL local-shell output (for truncated runs);
@@ -2877,6 +2906,13 @@ export function apply(ctx: Context, config: Config): void {
       },
       exit,
     })
+    // A pre-mount unload can happen during the initial resume/catalog awaits;
+    // never register a full effect on the already-disposed fiber or fall into
+    // the fatal startup path.
+    if (lifecycleController.signal.aborted) {
+      startupStatus.clear()
+      return
+    }
     // Stop the TUI when this fiber is disposed (a loader hot-reload unloads
     // the row; the reloaded row starts its own instance in the same process).
     ctx.effect(function* () {
@@ -4712,6 +4748,7 @@ export function apply(ctx: Context, config: Config): void {
     }
     // The TUI is about to mount: the pre-mount status line must be gone
     // before the first frame (no stale scrollback line after mount).
+    if (lifecycleController.signal.aborted) return
     startupStatus.clear()
     app = startProcessTui({
       onSubmit: (text) => dispatchUserInput(text),
@@ -6591,6 +6628,7 @@ export function apply(ctx: Context, config: Config): void {
             provider: creationSelection?.provider,
             model: creationSelection?.model,
             agentPreset: composition.agentPreset,
+            signal: lifecycleController.signal,
           }).then(created => {
             // A sessionless /model choice must seed the first Session's own
             // selection: the create options carry it, but the installed ref
@@ -6811,7 +6849,7 @@ export function apply(ctx: Context, config: Config): void {
           ? currentPreset()
           : sessionPresetOf(ctx, session),
         compose,
-        agents: backend.sessionLifecycle,
+        agents: lifecycleAgents,
         liveIdentity: () => ({ sessionId: liveAgent?.session.id, generation: sessionGeneration }),
         // The unified transaction: the old session is flushed BEFORE the
         // child is created (a stale rewind is detected before anything is
@@ -6905,10 +6943,7 @@ export function apply(ctx: Context, config: Config): void {
       get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
       // /new and /fork create through the session lifecycle port (semantic
       // requests — the Direct adapter resolves the preset composition).
-      agents: {
-        create: (options) => backend.sessionLifecycle.create(options),
-        resume: (options) => backend.sessionLifecycle.resume(options),
-      },
+      agents: lifecycleAgents,
 // M2: apply the persisted footer mode + layout (shared by /settings,
       // /reload and the startup path).
       applyFooterSettings,

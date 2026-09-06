@@ -48,6 +48,16 @@ The semantic catalog names these operations explicitly as
 `selectSessionModel`, so a future Remote adapter can map them without moving
 Agent, Session, or Context objects across the boundary.
 
+### Lifecycle creation cancellation (Stage B / pre-M2)
+
+`CreateSessionRequest` and `ResumeSessionRequest` may carry a client-local,
+creation-only `AbortSignal`. In Direct mode the session lifecycle adapter maps
+that signal to `ctx.agents.create` / `ctx.agents.resume`; the signal is valid
+only through persistence load, unpublished setup, and publication, and is
+never serialized. A future Remote adapter must map it to official
+connection/client operation cancellation rather than sending the `AbortSignal`
+over the wire. Stage B completes this contract and is not Remote backend work.
+
 ## Target
 
 A DSH-native client: the TUI keeps terminal/editor/overlays/keybindings/
