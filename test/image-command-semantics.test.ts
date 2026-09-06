@@ -67,8 +67,11 @@ test('a /skill <name> invocation with an image is agent input (bare /skill stays
   assert.equal(bare, false, 'no image attached → nothing to reject')
 })
 
-test('SESSIONLESS_COMMANDS includes image: /image never creates a session (review finding 1)', () => {
+test('attachment commands are local and sessionless', () => {
+  assert.ok(SESSIONLESS_COMMANDS.has('attach'), '/attach is sessionless')
   assert.ok(SESSIONLESS_COMMANDS.has('image'), '/image is sessionless')
+  assert.ok(LOCAL_COMMANDS.has('attach'), '/attach is local')
+  assert.ok(LOCAL_COMMANDS.has('image'), '/image is local')
 })
 
 test('normalizeSkillInvocation rewrites /skill <name> <args> to /<name> <args> (review finding 2)', () => {

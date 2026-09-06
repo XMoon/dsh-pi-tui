@@ -215,3 +215,16 @@ test('foldQueueRows shows image blocks in the queue row (review finding 5)', () 
   assert.equal(result.rows[0]!.text, 'analyze this 🖼️ shot.png', 'mixed row advertises its image')
   assert.equal(result.rows[1]!.text, '🖼️ shot.png', 'image-only row is never empty')
 })
+
+test('foldQueueRows shows generic file blocks in the queue row', () => {
+  const fileBlock = {
+    type: 'file',
+    attachment: { attachmentId: 'sha256:file', name: 'report.pdf', bytes: 12345 },
+  }
+  const result = foldQueueRows([{
+    id: 'file-only',
+    source: { kind: 'user' },
+    content: [fileBlock],
+  } as never], 'steer', new Set())
+  assert.equal(result.rows[0]!.text, '📄 report.pdf · 12.1 KiB')
+})

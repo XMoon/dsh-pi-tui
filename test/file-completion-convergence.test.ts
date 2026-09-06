@@ -309,7 +309,7 @@ test('P1.5: a stale prefix accept never deletes @-preceding text', (t) => {
   // `hello @ab`. Accepting the old item must leave the draft UNCHANGED.
   const applied = provider.applyCompletion(['hello @ab'], 0, 9, { value: '@abcdef-gh', label: 'abcdef-gh' }, '@abcdef')
   assert.deepEqual(applied.lines, ['hello @ab'], 'a stale accept must not delete text')
-  // The image-argument shape: the same fence protects the argument path.
+  // The path-argument shape: the same fence protects the argument path.
   const appliedArg = provider.applyCompletion(
     ['/image sub'],
     0,
@@ -342,15 +342,17 @@ test('P1.5 headless D: a quick Backspace over a mention leaves the draft intact'
   assert.equal(app.seatTextForTest(), '@ab', 'backspace edits the draft')
 })
 
-test('§23 matrix: the classifier gates @ and /image only', () => {
-  const set = new Set(['image'])
+test('§23 matrix: the classifier gates @ and attachment commands only', () => {
+  const set = new Set(['attach', 'image'])
   assert.equal(classifyFileCompletionContext('@foo', set).kind, 'mention')
   assert.equal(classifyFileCompletionContext('text @foo', set).kind, 'mention')
   assert.equal(classifyFileCompletionContext('看看@foo', set).kind, 'mention')
   assert.equal(classifyFileCompletionContext('email@foo', set).kind, 'none')
   assert.equal(classifyFileCompletionContext('pkg@1.0', set).kind, 'none')
-  assert.equal(classifyFileCompletionContext('/image foo', set).kind, 'image-argument')
-  assert.equal(classifyFileCompletionContext('/image    foo', set).kind, 'image-argument')
+  assert.equal(classifyFileCompletionContext('/image foo', set).kind, 'path-argument')
+  assert.equal(classifyFileCompletionContext('/image    foo', set).kind, 'path-argument')
+  assert.equal(classifyFileCompletionContext('/attach foo', set).kind, 'path-argument')
+  assert.equal(classifyFileCompletionContext('/attach    foo', set).kind, 'path-argument')
   assert.equal(classifyFileCompletionContext('/im foo', set).kind, 'none')
   assert.equal(classifyFileCompletionContext('/other foo', set).kind, 'none')
   assert.equal(classifyFileCompletionContext('ordinary text', set).kind, 'none')
@@ -629,7 +631,7 @@ test('review finding (verified): multi-space /image separator applies without du
     root,
     new DirectHostFilePort(() => undefined, null),
   )
-  // imageArgumentOf slices AFTER the first separator; completeImageArgument
+  // pathArgumentOf slices AFTER the first separator; completePathArgument
   // re-prefixes the value with the REMAINING separator whitespace. The
   // fork's apply consumes the first separator in beforePrefix, so the
   // total separator count is preserved — never duplicated.

@@ -6,8 +6,8 @@
  * - `mention` — an `@` token at a real token boundary (start of text, after
  *   a delimiter, or glued to CJK text — so emails `a@b.com` and `pkg@1.0.0`
  *   never qualify);
- * - `image-argument` — the argument of a command EXPLICITLY declared as
- *   file-argument (`/image`), never `getArgumentCompletions !== undefined`
+ * - `path-argument` — the argument of a command EXPLICITLY declared as
+ *   file-argument (`/attach`, `/image`), never `getArgumentCompletions !== undefined`
  *   (plan §4.2: file commands must be explicit).
  *
  * Everywhere else (`none`) ordinary text AND ordinary paths — `./foo`,
@@ -20,10 +20,10 @@ import type { FileCompletionContext } from './types.ts'
 
 /** The EXPLICIT file-argument command set (plan §4.2 — never derived from
  * `getArgumentCompletions !== undefined`): ONLY these command names make
- * their argument position a file-completion context. `image` today; a new
+ * their argument position a file-completion context. `attach` and `image` today; a new
  * path-argument command must be added here AND get the matching
  * getArgumentCompletions wiring. */
-export const FILE_ARGUMENT_COMMANDS: ReadonlySet<string> = new Set(['image'])
+export const FILE_ARGUMENT_COMMANDS: ReadonlySet<string> = new Set(['attach', 'image'])
 
 /** Token separators: `@` must sit at the start of the current token. */
 const PATH_DELIMITERS = new Set([' ', '\t', '\n', '\r', '"', "'", '='])
@@ -110,7 +110,7 @@ const SLASH_SEPARATOR = /[ \t]/
  *   a multi-space separator survives the fork's whole-range apply), or
  *   undefined when the position is not a declared file-argument position.
  */
-export function imageArgumentOf(
+export function pathArgumentOf(
   textBeforeCursor: string,
   pathArgumentCommands: ReadonlySet<string>,
 ): string | undefined {
@@ -135,10 +135,10 @@ export function imageArgumentOf(
 
 /**
  * Classify the file-completion context at the cursor (plan §4.1): exactly
- * one of `mention`, `image-argument`, or `none`.
+ * one of `mention`, `path-argument`, or `none`.
  * @param textBeforeCursor - the line content before the cursor.
  * @param pathArgumentCommands - the EXPLICIT file-argument command set
- *   (`/image` today; never derived from `getArgumentCompletions`).
+ *   (`/attach`, `/image`; never derived from `getArgumentCompletions`).
  */
 export function classifyFileCompletionContext(
   textBeforeCursor: string,
@@ -146,10 +146,10 @@ export function classifyFileCompletionContext(
 ): FileCompletionContext {
   // A declared command argument owns the whole command line. In particular,
   // `/image @foo` is still a Client-local image path, not a Host mention.
-  const argument = imageArgumentOf(textBeforeCursor, pathArgumentCommands)
+  const argument = pathArgumentOf(textBeforeCursor, pathArgumentCommands)
   if (argument !== undefined) {
     return {
-      kind: 'image-argument',
+      kind: 'path-argument',
       query: argument,
       range: { start: textBeforeCursor.length - argument.length, end: textBeforeCursor.length },
     }

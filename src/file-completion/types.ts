@@ -35,7 +35,7 @@ export interface TextRange {
 
 /**
  * The classified file-completion context at the cursor. File completion is
- * ALLOWED only in `mention` (`@...`) and `image-argument` (`/image ...`)
+ * ALLOWED only in `mention` (`@...`) and `path-argument` (`/attach ...`, `/image ...`)
  * contexts — `none` means ordinary text/paths, where neither the natural
  * trigger nor Tab may open a file dropdown (kimi parity, plan §2.1/§4).
  */
@@ -49,7 +49,7 @@ export type FileCompletionContext =
       range: TextRange
     }
   | {
-      kind: 'image-argument'
+      kind: 'path-argument'
       /** The raw argument text INCLUDING leftover separator whitespace:
        * `fi`, `   subdir/`. */
       query: string
