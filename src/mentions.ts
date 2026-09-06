@@ -11,13 +11,13 @@
  *
  * FILE-COMPLETION CONVERGENCE (the 2026-08-27 plan): the path query
  * parsing, ranking, quoting and presentation behind `@` mentions and
- * `/image` arguments are ONE shared engine in `src/file-completion/`
+ * `/attach` and `/image` arguments are ONE shared engine in `src/file-completion/`
  * (plan §5-§8). THIS module keeps the mention GRAMMAR (extractAtPrefix,
  * findFileMentions, the send-time rewriter) and the MentionProvider
  * adapter; the engine owns the path math and BOTH sources (the Host-file
- * port for `@`, LocalFileSource for `/image`) answer discovery through
+ * port for `@`, LocalFileSource for attachment commands) answer discovery through
  * it. The FILE-COMPLETION CONTEXT classifier (plan §4) is the ONE gate —
- * file completion opens ONLY on `@...` and `/image ...`.
+ * file completion opens ONLY on `@...`, `/attach ...`, and `/image ...`.
  * @module @xmoon76/dsh-pi-tui/mentions
  */
 
@@ -238,10 +238,10 @@ function sameMentionScope(left: MentionScope, right: MentionScope): boolean {
     : left.cwd === (right as { cwd: string }).cwd
 }
 
-/** Complete the argument text shared by the provider-level `/image`
- * path and the awaitable command compatibility hook. The caller chooses the
+/** Complete the argument text shared by the provider-level attachment
+ * commands and the awaitable command compatibility hook. The caller chooses the
  * filesystem source and cwd; no HostFilePort is involved. */
-async function completeImageArgumentText(
+async function completePathArgumentText(
   argument: string,
   cwd: string,
   source: LocalFileSource,
@@ -288,7 +288,7 @@ export class MentionProvider implements AutocompleteProvider {
   private readonly pathArgumentCommands: ReadonlySet<string>
   /** The live editor input mode (shell-editor-mode plan). */
   private readonly inputModeSource: () => EditorInputMode
-  /** The `/image` discovery source: Client-local (never HostFilePort). */
+  /** The `/attach` and `/image` discovery source: Client-local (never HostFilePort). */
   private readonly localSource: LocalFileSource
   /** Client-local cwd for `/image`; intentionally separate from the Host
    * session scope so a future remote attach cannot make image completion read
@@ -339,7 +339,7 @@ export class MentionProvider implements AutocompleteProvider {
     this.localCwdOf = typeof localCwd === 'function' ? localCwd : () => localCwd
     this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, null)
     this.pathArgumentCommands = FILE_ARGUMENT_COMMANDS
-    // `/image`'s discovery source: the CLIENT's own filesystem.
+    // `/attach` and `/image` discovery source: the CLIENT's own filesystem.
     // `localFdPath` is a test/API pin: UNDEFINED (the default) probes PATH
     // (fd then fdfind — plan §12), `null` FORCES the bounded local
     // fallback (deterministic tests), a string pins the finder.
@@ -449,7 +449,7 @@ export class MentionProvider implements AutocompleteProvider {
         await this.completeMention(requestScope, context.query, options.signal),
       )
     }
-    if (context.kind === 'image-argument') {
+    if (context.kind === 'path-argument') {
       return this.withRequestSnapshot(
         generation,
         requestScope,
@@ -458,7 +458,7 @@ export class MentionProvider implements AutocompleteProvider {
         lines,
         cursorLine,
         cursorCol,
-        await this.completeImageArgument(context.query, requestLocalCwd, options.signal),
+        await this.completePathArgument(context.query, requestLocalCwd, options.signal),
       )
     }
 
@@ -574,12 +574,12 @@ export class MentionProvider implements AutocompleteProvider {
    * UNQUOTED argument with embedded spaces cannot complete (the fork's
    * apply replaces the whole argument range, so a later word would clobber
    * the earlier ones). */
-  private async completeImageArgument(
+  private async completePathArgument(
     argument: string,
     localCwd: string,
     signal: AbortSignal,
   ): Promise<AutocompleteSuggestions | null> {
-    const items = await completeImageArgumentText(argument, localCwd, this.localSource, signal, true)
+    const items = await completePathArgumentText(argument, localCwd, this.localSource, signal, true)
     return items === null ? null : { prefix: argument, items }
   }
 
@@ -795,7 +795,7 @@ export class MentionProvider implements AutocompleteProvider {
     // NO separator character (neither space NOR tab — tab is a fork path
     // delimiter) is a slash command NAME — the Tab handler routes it to
     // command-name completion (its own branch, never the file gate). The
-    // classifier's `image-argument` (a tab-separated `/image\t` IS an
+    // classifier's `path-argument` (a tab-separated `/image\t` IS an
     // argument position) wins over the fast-fail.
     if (context.kind === 'none'
       && textBeforeCursor.trimStart().startsWith('/')
@@ -834,5 +834,5 @@ export async function suggestPathArgument(
   localFdPath: string | null | undefined = undefined,
 ): Promise<AutocompleteItem[] | null> {
   const source = new LocalFileSource(localFdPath)
-  return completeImageArgumentText(argumentText, cwd, source, new AbortController().signal, false)
+  return completePathArgumentText(argumentText, cwd, source, new AbortController().signal, false)
 }

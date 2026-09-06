@@ -50,8 +50,13 @@ import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
-import { consumeDraftImages, pruneUnreferencedDrafts } from './image/submit.ts'
+import {
+  consumeDraftAttachments,
+  pinDraftAttachments,
+  pruneUnreferencedDraftAttachments,
+} from './image/submit.ts'
 import { readImageFile } from './image/intake.ts'
+import { FileInputError, probeAttachment } from './attachment/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
 import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from './theme-menu.ts'
@@ -368,6 +373,8 @@ export interface TuiCommandRunner {
    * runner clears it on submit/session-switch/dispose, never on durable
    * attachments. */
   imageStore: import('./image/draft-store.ts').DraftImageStore
+  /** The per-TUI metadata-only generic file draft registry. */
+  readonly fileStore?: import('./attachment/file-draft.ts').DraftFileStore
   /** The shared clipboard WRITE policy (issue #7): tmux → platform helper
    * → OSC 52 best-effort. Used by /copy; the fullscreen drag selection
    * routes through the same policy via the app's copySelection option. */
@@ -1247,7 +1254,7 @@ export function registerTuiCommands(
       () => runner.liveAgent === undefined
         ? { kind: 'workspace', cwd: runner.sessionCwd() }
         : { kind: 'session', sessionId: runner.liveAgent.session.id },
-      // `/image` is Client-local. Direct mode uses the process cwd; a remote
+      // `/attach` and `/image` are Client-local. Direct mode uses the process cwd; a remote
       // adapter can keep this independent from the Host session scope.
       () => runner.cwd,
     )
@@ -1327,6 +1334,7 @@ export function registerTuiCommands(
     input?: { hint: string }
     handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>
     aliasHandlers?: Record<string, (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>>
+    aliasDescriptions?: Record<string, string>
   }): void => {
     commands.register({
       name: spec.name,
@@ -1338,7 +1346,7 @@ export function registerTuiCommands(
       const handler = spec.aliasHandlers?.[alias] ?? spec.handler
       commands.register({
         name: alias,
-        description: `${spec.description} (alias of /${spec.name})`,
+        description: spec.aliasDescriptions?.[alias] ?? `${spec.description} (alias of /${spec.name})`,
         ...(spec.input === undefined ? {} : { input: spec.input }),
         handler,
       })
@@ -2535,11 +2543,19 @@ export function registerTuiCommands(
    * authorization. A model-only skill is refused with an explicit error and
    * never injected.
    */
-  const loadSkill = async (agent: Agent, name: string, args = ''): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
+  const loadSkill = async (
+    agent: Agent,
+    name: string,
+    args = '',
+    signal: AbortSignal = runner.signal,
+  ): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
+    const skillSignal = signal === runner.signal ? runner.signal : AbortSignal.any([runner.signal, signal])
+    skillSignal.throwIfAborted()
     // The skill read goes through the catalog port (migration M1.8): the
     // Direct adapter resolves the session's live skill target internally —
     // the loaded definition is a detached DTO, never the registry object.
     const resolved = await runner.catalog.skills.resolveSkill(agent.session.id, name)
+    skillSignal.throwIfAborted()
     if (resolved.kind === 'unavailable') return { kind: 'error', text: 'skill service unavailable' }
     if (resolved.kind === 'unknown') return { kind: 'error', text: 'unknown skill "' + name + '"' }
     if (resolved.kind === 'malformed') return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
@@ -2561,10 +2577,11 @@ export function registerTuiCommands(
     // pinned across the WHOLE invocation — the async prepare, the steer
     // and the draft consumption — so a concurrent /image prune can never
     // delete images this invocation is still admitting (review finding 1).
-    const releasePin = runner.imageStore.pinReferenced(line)
+    const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
     try {
       userMessage = await runner.prepareDraftMessage(line)
+      skillSignal.throwIfAborted()
       // The session-transition write fence (review round 5): while a
       // transition is in flight the old agent may be woken again — a steer
       // in that window would target a session whose lock is about to be
@@ -2585,6 +2602,7 @@ export function registerTuiCommands(
       // path, this is the authoritative one).
       try {
         await runner.withSessionWriter(agent.session.id, async () => {
+          skillSignal.throwIfAborted()
           agent.steer(userMessage)
         })
       } catch (error) {
@@ -2600,7 +2618,7 @@ export function registerTuiCommands(
       // The invocation COMMITTED: consume the image drafts it referenced
       // (the prepared message holds the durable refs now; a concurrent
       // intake's newer draft survives — review finding).
-      consumeDraftImages(line, runner.imageStore)
+      consumeDraftAttachments(line, runner.imageStore, runner.fileStore)
     } finally {
       // The pin releases on EVERY exit — including a synchronous steer
       // throw (review finding: a leaked pin would block pruning and eat
@@ -2709,7 +2727,7 @@ export function registerTuiCommands(
           // the skill name, everything after it is args).
           handler: async (invocation) => {
             const agent = await requireAgent()
-            return loadSkill(agent, skill.name, invocation?.rawInput ?? '')
+            return loadSkill(agent, skill.name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal)
           },
         })
         skillDisposers.set(skill.name, dispose)
@@ -2760,7 +2778,7 @@ export function registerTuiCommands(
             description: `[skill: revalidating] ${name}`,
             handler: async (invocation) => {
               const agent = await requireAgent()
-              return loadSkill(agent, name, invocation?.rawInput ?? '')
+              return loadSkill(agent, name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal)
             },
           })
           skillDisposers.set(name, dispose)
@@ -2787,7 +2805,7 @@ export function registerTuiCommands(
       // invocation line is normalized to `/name args` so the host's pre-step
       // gesture (dsh-tool-skill) also recognizes it when visible.
       const [name, ...args] = splitSkillLine(invocation.rawInput)
-      if (name !== '') return loadSkill(liveAgent, name, args.join(' '))
+      if (name !== '') return loadSkill(liveAgent, name, args.join(' '), invocation.signal ?? runner.signal)
       // No argument: pick from the catalog — the same validated, policy-
       // filtered, sorted view the collector builds (the catalog port's
       // live read), so hostile or model-only entries never reach the
@@ -3095,6 +3113,7 @@ export function registerTuiCommands(
       // the current session and its drafts intact; in-flight submissions
       // keep their pinned drafts — review finding 2).
       runner.imageStore.clearUnpinned()
+      runner.fileStore?.clearUnpinned()
       return { kind: 'success', text: 'started a fresh session' }
     }),
   })
@@ -3454,80 +3473,114 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
-    name: 'image',
-    description: 'Attach an image file to the draft (tab completes the path; [image #N (W×H)] placeholder)',
-    input: { hint: '<path>' },
-    handler: (invocation) => {
-      // The /image command is a TUI-LOCAL UI action (plan M2): it stages
-      // the file into the draft store and inserts its placeholder into the
-      // editor — it NEVER submits, so no session is created (deferred
-      // start preserved) and no model call happens here.
-      const words = parseShellWords(invocation.rawInput)
-      if (words.length !== 1 || words[0] === '') {
-        return { kind: 'error', text: 'Usage: /image <path>' }
-      }
-      const raw = words[0]!
-      // The intake is ASYNC: capture the session identity at launch and
-      // discard the result if the user switched sessions meanwhile — a late
-      // intake must never stage an image into the NEW session's draft
-      // (round-5 finding 2).
-      const intakeGeneration = runner.sessionGeneration
-      const detach = (label: string, task: () => unknown): void => {
-        runDetached(label, task, {
-          diag: runner.diag,
-          sessionId: () => runner.liveAgent?.session.id,
-          notify: (message) => app.notify(message, 'error'),
-          recoverable: () => true,
-        })
-      }
-      detach('image intake', () => {
-        // An owned workflow: the intake outcome decides the notice and the
-        // draft insertion — runOwned (AGENTS.md), never a bare void. The
-        // limits are read INSIDE the task so a mid-run policy change is
-        // honored (round-2 finding 5); the intake itself is ASYNC
-        // (fs/promises) so a slow disk or NFS never blocks the TUI event
-        // loop (review finding 1).
-        runOwned('image intake', () => {
-          // Attach-time prune: a placeholder deleted (or Ctrl+C-cleared)
-          // since the last attach must not hold its bytes hostage until the
-          // store fills up (review finding 2).
-          pruneUnreferencedDrafts(app.getDraft(), runner.imageStore)
-          // The intake's pre-read cap is the SMALLEST of the attachment
-          // limit and the draft store's remaining RESIDENT budget — a file
-          // that could never be staged is refused before any read.
-          const intake = readImageFile(raw, runner.sessionCwd(), runner.imageLimits(), runner.imageStore.remainingBytes())
-          return intake.then((resolved) => {
-            if (runner.sessionGeneration !== intakeGeneration) {
-              app.notify('the session changed while reading the image — try again', 'error')
-              return undefined
-            }
-            // Re-prune AFTER the async read: the user may have deleted the
-            // placeholder or Ctrl+C-cleared the editor while the file was
-            // in flight — those drafts must not linger past the attach
-            // (review finding 2 follow-up).
-            pruneUnreferencedDrafts(app.getDraft(), runner.imageStore)
-            const draft = runner.imageStore.add({
-              bytes: resolved.bytes,
-              mediaType: resolved.mediaType,
-              width: resolved.width,
-              height: resolved.height,
-              source: { type: 'path', path: resolved.path },
-              name: resolved.name,
-            })
-            runner.insertIntoEditor(`${draft.placeholder} `)
-            app.notify(`attached ${draft.placeholder} — Enter to send`)
-            return undefined
-          })
-        }, {
-          diag: runner.diag,
-          sessionId: () => runner.liveAgent?.session.id,
-          onError: (error) => {
-            app.notify(safeErrorMessage(error), 'error')
-          },
-        })
+  const stageAttachmentCommand = (
+    invocation: CommandInvocation,
+    intent: 'attach' | 'image',
+  ): CommandResult => {
+    const words = parseShellWords(invocation.rawInput)
+    if (words.length !== 1 || words[0] === '') {
+      return { kind: 'error', text: `Usage: /${intent} <path>` }
+    }
+    const raw = words[0]!
+    const intakeGeneration = runner.sessionGeneration
+    // The command registry supplies the runner-owned lifecycle signal. The
+    // fallback keeps direct headless handler calls honest without weakening
+    // teardown cancellation in the real dispatch path.
+    const intakeSignal = invocation.signal === undefined || invocation.signal === runner.signal
+      ? runner.signal
+      : AbortSignal.any([runner.signal, invocation.signal])
+    const detach = (task: () => unknown): void => {
+      runDetached('attachment intake', task, {
+        diag: runner.diag,
+        sessionId: () => runner.liveAgent?.session.id,
+        notify: (message) => app.notify(message, 'error'),
+        recoverable: () => true,
       })
-      return { kind: 'success' }
+    }
+    detach(() => {
+      runOwned('attachment intake', async () => {
+        intakeSignal.throwIfAborted()
+        if (runner.sessionTransitionPending()) {
+          app.notify('a session transition is in progress — try again in a moment', 'error')
+          return
+        }
+        pruneUnreferencedDraftAttachments(app.getDraft(), runner.imageStore, runner.fileStore)
+        const stageImage = async (path: string): Promise<void> => {
+          intakeSignal.throwIfAborted()
+          const resolved = await readImageFile(path, runner.cwd, runner.imageLimits(), runner.imageStore.remainingBytes())
+          intakeSignal.throwIfAborted()
+          if (runner.sessionGeneration !== intakeGeneration) {
+            app.notify(`the session changed while reading the ${intent} — try again`, 'error')
+            return
+          }
+          if (runner.sessionTransitionPending()) {
+            app.notify(`a session transition is in progress while reading the ${intent} — try again`, 'error')
+            return
+          }
+          pruneUnreferencedDraftAttachments(app.getDraft(), runner.imageStore, runner.fileStore)
+          const draft = runner.imageStore.add({
+            bytes: resolved.bytes,
+            mediaType: resolved.mediaType,
+            width: resolved.width,
+            height: resolved.height,
+            source: { type: 'path', path: resolved.path },
+            name: resolved.name,
+          })
+          runner.insertIntoEditor(`${draft.placeholder} `)
+          app.notify(`attached ${draft.placeholder} — Enter to send`)
+        }
+
+        if (intent === 'image') {
+          await stageImage(raw)
+          return
+        }
+        const probe = await probeAttachment(raw, runner.cwd, intakeSignal)
+        intakeSignal.throwIfAborted()
+        if (runner.sessionGeneration !== intakeGeneration) {
+          app.notify('the session changed while reading the attachment — try again', 'error')
+          return
+        }
+        if (runner.sessionTransitionPending()) {
+          app.notify('a session transition is in progress while reading the attachment — try again', 'error')
+          return
+        }
+        if (probe.kind === 'image') {
+          await stageImage(probe.path)
+          return
+        }
+        pruneUnreferencedDraftAttachments(app.getDraft(), runner.imageStore, runner.fileStore)
+        const fileStore = runner.fileStore
+        if (fileStore === undefined) throw new FileInputError('File draft storage is unavailable.')
+        const draft = fileStore.add({
+          name: probe.name,
+          byteLength: probe.byteLength,
+          source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+        })
+        runner.insertIntoEditor(`${draft.placeholder} `)
+        app.notify(`attached ${draft.placeholder} — Enter to send`)
+      }, {
+        diag: runner.diag,
+        sessionId: () => runner.liveAgent?.session.id,
+        isCancellation: () => intakeSignal.aborted,
+        onError: (error) => {
+          app.notify(safeErrorMessage(error), 'error')
+        },
+      })
+    })
+    return { kind: 'success' }
+  }
+
+  registerTuiCommand({
+    name: 'attach',
+    aliases: ['image'],
+    description: 'Attach an image or file to the draft (tab completes the path)',
+    input: { hint: '<path>' },
+    handler: (invocation) => stageAttachmentCommand(invocation, 'attach'),
+    aliasHandlers: {
+      image: (invocation) => stageAttachmentCommand(invocation, 'image'),
+    },
+    aliasDescriptions: {
+      image: 'Attach an image to the draft (image-only compatibility command)',
     },
   })
 
@@ -3595,6 +3648,7 @@ export function registerTuiCommands(
       // §14; in-flight submissions keep their pinned drafts — review
       // finding 2).
       runner.imageStore.clearUnpinned()
+      runner.fileStore?.clearUnpinned()
       // A Direct create always yields the live agent (port contract);
       // Remote handles surface the session identity only.
       return { kind: 'success', text: `forked as ${result.next.session.id}` }

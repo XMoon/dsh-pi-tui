@@ -175,6 +175,16 @@ test('the installed /image completion answers natural typing with a menu', async
   assert.ok(!app.getDraft().includes('shot.png'), 'typing alone must not apply anything')
 })
 
+test('the installed /attach completion shares the local path chain', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = setup(life)
+  await vt.waitForRender()
+  vt.sendInput('/attach no')
+  const view = await waitForDropdownRow(vt, 'notes.txt', 'attach natural typing')
+  assert.ok(view.includes('notes.txt'), 'generic files are offered by /attach')
+  assert.ok(!app.getDraft().includes('notes.txt'), 'typing alone must not apply anything')
+})
+
 test('Tab on an empty /image argument lists the workspace through the real chain', async (t) => {
   const life = testLifecycle(t)
   const { vt, app } = setup(life)

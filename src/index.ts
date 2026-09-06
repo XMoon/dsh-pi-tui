@@ -147,7 +147,9 @@ import { terminalTitleOf } from './terminal-title.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from './history-persist.ts'
 import { FileHistorySearchSource } from './history-search.ts'
 import { safeErrorMessage } from './error-boundary.ts'
+import { fileAttachmentSummary } from './content-block-presentation.ts'
 import { DraftImageStore } from './image/draft-store.ts'
+import { DraftFileStore } from './attachment/file-draft.ts'
 import { ImageInputError } from './image/errors.ts'
 import { clipboardBackendOf, commandOnPath, createClipboardRunner, readClipboardImage, readClipboardText, type ClipboardEnvironment } from './image/clipboard.ts'
 import { openExternalUrl } from './open-url.ts'
@@ -159,7 +161,15 @@ import { iconStyleOf } from './icons.ts'
 import { checkImageLimits } from './image/intake.ts'
 import { ImageLoadError } from './image/errors.ts'
 import { ImageLoader } from './image/loader.ts'
-import { consumeDraftImages, draftHasImages, prepareUserMessage, pruneUnreferencedDrafts, type PrepareInputDeps } from './image/submit.ts'
+import {
+  consumeDraftAttachments,
+  draftHasAttachments,
+  draftHasImages,
+  pinDraftAttachments,
+  prepareUserMessage,
+  pruneUnreferencedDraftAttachments,
+  type PrepareInputDeps,
+} from './image/submit.ts'
 import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController, type ExitSessionLike } from './exit.ts'
@@ -268,7 +278,7 @@ const LOCAL_SHELL_TAIL_FLUSH_MS = 200
  * command silently starts creating sessions again.
  */
 export const SESSIONLESS_COMMANDS = new Set([
-  'exit', 'focus', 'footer', 'settings', 'help', 'image', 'login', 'logout', 'model', 'reload',
+  'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings',
   // `/statusline` is the approved alias of `/footer` (same configurator,
   // other-agent muscle memory) — it rides the same ownership sets, so it
@@ -289,7 +299,7 @@ export const SESSIONLESS_COMMANDS = new Set([
  * body — there is no command-execution wire for skills.
  */
 export const LOCAL_COMMANDS = new Set([
-  'copy', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'image', 'keybindings', 'kill', 'login', 'logout',
+  'copy', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'attach', 'image', 'keybindings', 'kill', 'login', 'logout',
   'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'yolo',
@@ -320,6 +330,17 @@ export function commandRejectsImages(
   isLocal: (name: string) => boolean,
 ): boolean {
   return parsed !== undefined && isLocal(parsed.name) && draftHasImages(text, store)
+}
+
+/** Whether a local command line carries any live attachment placeholder. */
+function commandRejectsAttachments(
+  parsed: { name: string } | undefined,
+  text: string,
+  imageStore: import('./image/types.ts').DraftImageStoreLike,
+  fileStore: import('./attachment/file-draft.ts').DraftFileStoreLike | undefined,
+  isLocal: (name: string) => boolean,
+): boolean {
+  return parsed !== undefined && isLocal(parsed.name) && draftHasAttachments(text, imageStore, fileStore)
 }
 
 /**
@@ -825,6 +846,7 @@ function queueTextOf(content: readonly import('@deepseek-ai/dsh-llm').ContentBlo
   for (const block of content) {
     if (block.type === 'text') parts.push(block.text)
     else if (block.type === 'image') parts.push(`🖼️ ${block.attachment.name ?? 'image'}`)
+    else if (block.type === 'file') parts.push(fileAttachmentSummary(block.attachment))
   }
   return parts.join(' ')
 }
@@ -2379,6 +2401,7 @@ export function apply(ctx: Context, config: Config): void {
         // submission can still restore its text with a live backing draft
         // (review finding: clear() would orphan the restored placeholders).
         draftImages.clearUnpinned()
+        draftFiles.clearUnpinned()
         return undefined
       } catch (error) {
         const message = safeErrorMessage(error)
@@ -2770,6 +2793,11 @@ export function apply(ctx: Context, config: Config): void {
     })
     // Stable signal snapshot of the runner-owned lifecycle controller.
     const signal = lifecycleController.signal
+    // Draft stores are Client-local UI state. Image bytes are bounded in
+    // memory; generic files retain metadata/fingerprints only and stream at
+    // submit time.
+    const draftImages = new DraftImageStore()
+    const draftFiles = new DraftFileStore()
     // All command/fork/rewind lifecycle calls share this composition-root
     // bridge so no child-creation path can bypass the runner lifetime.
     const lifecycleAgents: TuiCommandRunner['agents'] = {
@@ -2838,6 +2866,8 @@ export function apply(ctx: Context, config: Config): void {
       // (the TUI's physical owner.lock / lease / cooling stack is removed
       // legacy).
       lifecycleController.abort()
+      draftImages.clear()
+      draftFiles.clear()
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.
       catalogCoordinator?.dispose()
@@ -3723,6 +3753,7 @@ export function apply(ctx: Context, config: Config): void {
      * error); this sink only restores the editor and notifies the user.
      * (Cancellation never reaches here: runOwned routes it to onCancel.) */
     const failSubmission = (draft: string) => (error: unknown): void => {
+      if (lifecycleController.signal.aborted) return
       // Correctness side effect FIRST: restore the draft (the editor was
       // cleared before submit) — the error text is best-effort afterwards,
       // so a hostile value can never prevent the user's input from coming
@@ -3752,6 +3783,7 @@ export function apply(ctx: Context, config: Config): void {
      * first; never throws.
      */
     const restoreSubmissionDraft = (draft: string): void => {
+      if (lifecycleController.signal.aborted) return
       app.setEditorText(mergeDraft(app.getDraft(), draft))
     }
     // ── Local submit acknowledgement + latency timeline (submit-ack.ts /
@@ -3817,6 +3849,7 @@ export function apply(ctx: Context, config: Config): void {
      * Diagnostics are owned by runOwned.
      */
     const notifySubmissionFailure = (error: unknown): void => {
+      if (lifecycleController.signal.aborted) return
       // NOTE: the pending submit ack is settled by the CALLER with its own
       // gesture token (an untokenized settle here would let one
       // workflow's failure clear a newer gesture's row).
@@ -3841,6 +3874,8 @@ export function apply(ctx: Context, config: Config): void {
      * TUI supports runtime model switching — never a startup snapshot). */
     const submitDeps: PrepareInputDeps = {
       attachments: ctx.get('attachments') as PrepareInputDeps['attachments'],
+      get fileStore() { return draftFiles },
+      signal,
       llm: ctx.get('llm') as PrepareInputDeps['llm'],
       // Send-time `@`-file canonicalization through the Host-file port
       // (migration M1.10): the live session's workspace is the scope.
@@ -3900,7 +3935,8 @@ export function apply(ctx: Context, config: Config): void {
       // run → failure-restore-before-release → release), shared with the
       // integration tests — never hand-rolled per path.
       runOwned('submit', () => runReservedSubmit({
-        reserve: (t) => draftImages.pinReferenced(t),        run: async () => {
+        reserve: (t) => pinDraftAttachments(t, draftImages, draftFiles),
+        run: async () => {
           // The deferred-start gate (history-persist.ts): the history row
           // is written AFTER the session exists, with the FINAL session
           // id — the first prompt of a deferred start creates the session
@@ -3962,7 +3998,13 @@ export function apply(ctx: Context, config: Config): void {
           // without a synchronous handoff the referenced drafts would be
           // prunable for the whole command run. Acquire it HERE, transfer
           // it to the nested fallback, and release it on every other exit.
-          const fallbackPin = draftImages.pinReferenced(text)
+          const fallbackPin = pinDraftAttachments(text, draftImages, draftFiles)
+          // Command handlers are agent-facing only when they carry staged
+          // attachments. If the command fails before delivery, restore the
+          // cleared editor text while the handoff pin still protects drafts.
+          const restoreCommandAttachmentDraft = (): void => {
+            if (draftHasAttachments(text, draftImages, draftFiles)) restoreSubmissionDraft(text)
+          }
           // The session-transition write fence: the identity check above
           // can yield across a concurrent /new, /fork, rewind or
           // switch — once a transition is in flight, executing the command
@@ -4005,10 +4047,11 @@ export function apply(ctx: Context, config: Config): void {
               // A command the surface advertised (e.g. from the startup
               // probe) but the real session's catalog lacks: consume the
               // slash input with an explicit error — never a plain model
-              // message, never an automatic draft restore (the refreshed
-              // completions already revoked the claim, and a mechanical
-              // retry could ride the unadvertised fallback).
-              if (shouldConsumeAdvertisedMiss(execution, wasAdvertised)) {
+              // message. Attachment-bearing drafts are restored below; plain slash lines
+               // remain consumed (the refreshed completions already revoked the
+               // claim, and a mechanical retry could ride the unadvertised fallback).
+               if (shouldConsumeAdvertisedMiss(execution, wasAdvertised)) {
+                restoreCommandAttachmentDraft()
                 app.notify(`/${parsedAtSubmit?.name ?? '?'} is not available in the created session`, 'error')
                 settleLocalSubmitAck('submit consumed by an unadvertised command', { token: submitAckToken, terminal: true })
                 fallbackPin()
@@ -4061,7 +4104,7 @@ export function apply(ctx: Context, config: Config): void {
                           backend.sessionWriter.followup(agent.session.id, message)
                           // Consume ONLY the referenced drafts — a concurrent
                           // intake's newer image survives (round-5 finding 1).
-                          consumeDraftImages(text, draftImages)
+                          consumeDraftAttachments(text, draftImages, draftFiles)
                         })
                       } catch (error) {
                         if (error instanceof TransitionInProgressError) {
@@ -4101,12 +4144,17 @@ export function apply(ctx: Context, config: Config): void {
                     : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
                 }
               } else {
+                // A recognized command error committed no agent-facing
+                // message; restore any staged attachment draft before the
+                // handoff pin is released. A success consumed its refs.
+                if (execution.result.kind === 'error') restoreCommandAttachmentDraft()
                 // The command COMMITTED (no image fallback): release the
                 // handoff pin.
                 fallbackPin()
               }
             },
             onError: (error) => {
+              restoreCommandAttachmentDraft()
               fallbackPin()
               settleLocalSubmitAck('command execution failed', { token: submitAckToken, terminal: true })
               if (commandHealthRef !== undefined) extensionService?._recordRegistryError(commandHealthRef, error)
@@ -4156,7 +4204,7 @@ export function apply(ctx: Context, config: Config): void {
             backend.sessionWriter.followup(agent.session.id, message)
             // Consume ONLY the referenced drafts — a concurrent intake's
             // newer image survives (round-5 finding 1).
-            consumeDraftImages(text, draftImages)
+            consumeDraftAttachments(text, draftImages, draftFiles)
           })
         } catch (error) {
           if (error instanceof TransitionInProgressError) {
@@ -4298,9 +4346,9 @@ export function apply(ctx: Context, config: Config): void {
       // The payload verdict is computed ONCE here on the SERIALIZED wire
       // form and passed to steerAll (steer.ts never guesses shell/image
       // semantics): `!` / `!!` shell modes make a bare prefix a payload,
-      // image placeholders make an empty-text draft a payload, whitespace
+      // attachment placeholders make an empty-text draft a payload, whitespace
       // alone is not.
-      const draftHasPayload = text.trim() !== '' || draftHasImages(text, draftImages)
+      const draftHasPayload = text.trim() !== '' || draftHasAttachments(text, draftImages, draftFiles)
       // The empty-Ctrl+S gate: nothing to steer is a clean no-op BEFORE
       // any runOwned / ensureSession work — the deferred-start contract
       // (an empty Ctrl+S must never create the session). The decision is
@@ -4323,7 +4371,7 @@ export function apply(ctx: Context, config: Config): void {
       // The submit-flow core owns the ordering contract (shared with the
       // integration tests).
       runOwned('steer', () => runReservedSubmit({
-        reserve: (t) => draftImages.pinReferenced(t),
+        reserve: (t) => pinDraftAttachments(t, draftImages, draftFiles),
         run: async () => {
         // The deferred-start gate (history-persist.ts): the steered
         // draft's history row is written AFTER the session exists, with
@@ -4391,7 +4439,7 @@ export function apply(ctx: Context, config: Config): void {
         // per-reference, so a concurrent intake's newer draft survives
         // (round-5 finding 1).
         if (outcome === 'ok') {
-          consumeDraftImages(text, draftImages)
+          consumeDraftAttachments(text, draftImages, draftFiles)
           // The write landed; T1 was stamped BEFORE the dispatch call. The
           // ACK ROW keeps waiting for the authoritative event (plan D).
         }
@@ -4444,9 +4492,9 @@ export function apply(ctx: Context, config: Config): void {
     const makeSteerPersist = (text: string): ((sessionId: string | undefined) => void) => {
       const trimmed = text.trim()
       const historyTs = Date.now()
-      const historyHasImages = draftHasImages(text, draftImages)
+      const historyHasAttachments = draftHasAttachments(text, draftImages, draftFiles)
       return (sessionId: string | undefined): void => {
-        if (trimmed === '' || trimmed === lastHistoryContent || historyHasImages) return
+        if (trimmed === '' || trimmed === lastHistoryContent || historyHasAttachments) return
         const historyCwd = sessionCwd()
         const file = historyFilePath(dshHome(process.env), historyCwd)
         runDetached('input history write', () => {
@@ -4456,7 +4504,7 @@ export function apply(ctx: Context, config: Config): void {
             sessionId: historySessionIdFor('agent-facing', sessionId),
             ts: historyTs,
             lastContent: lastHistoryContent,
-            hasImages: historyHasImages,
+            hasAttachments: historyHasAttachments,
             file,
           })
           if (written) lastHistoryContent = trimmed
@@ -4479,15 +4527,15 @@ export function apply(ctx: Context, config: Config): void {
     const dispatchUserInput = (text: string, forceQueue = false): void => {
       // P0 (empty-submission semantics): an EMPTY serialized wire form is
       // a silent no-op — no history write, no session creation, no
-      // followup/steer, no image admission, no queue mutation. Judged on
+      // followup/steer, no attachment admission, no queue mutation. Judged on
       // the wire form ONCE here: the editor onSubmit path already
       // swallowed `''`, but plugin-extension submissions (submitDraft via
       // the semantic action) and any future caller must not bypass it.
       // A bare `!` / `!!` shell mode serializes to a non-empty wire form
-      // (handle below at the shell branches), and an image-bearing draft
+      // (handle below at the shell branches), and an attachment-bearing draft
       // is non-empty too (the placeholder markers are part of the text —
-      // draftHasImages).
-      if (text.trim() === '' && !draftHasImages(text, draftImages)) return
+      // draftHasAttachments).
+      if (text.trim() === '' && !draftHasAttachments(text, draftImages, draftFiles)) return
       // Plain `exit` quits (shell muscle memory): the exact trimmed word
       // intercepts BEFORE any session creation or submission, so typing
       // `exit` with a deferred start never births a session. `/exit` remains
@@ -4518,15 +4566,15 @@ export function apply(ctx: Context, config: Config): void {
       // Submission-time facts snapshotted BEFORE any async work: the
       // timestamp (the row must record the USER's submission time, not the
       // disk-write time — an agent-facing write lands after session
-      // creation) and the image check (a MULTIMODAL submission is NOT
+      // creation) and the attachment check (an attachment-bearing submission is NOT
       // persisted to the plain-text history: the placeholder dies with its
-      // draft on consumeDraftImages, so an ↑ recall would re-send the
-      // placeholder as ORDINARY TEXT — the images would silently vanish
+      // draft on consumeDraftAttachments, so an ↑ recall would re-send the
+      // placeholder as ORDINARY TEXT — the attachment would silently vanish
       // from the model input (review finding 3). A late check would miss
-      // the already-consumed images. Structured attachment history (text +
+      // the already-consumed attachment. Structured attachment history (text +
       // refs, recalled on recall) is a post-v1 extension.)
       const historyTs = Date.now()
-      const historyHasImages = draftHasImages(text, draftImages)
+      const historyHasAttachments = draftHasAttachments(text, draftImages, draftFiles)
       /**
        * Persist the submitted line under the given session identity. The
        * sessionId is a PARAMETER, resolved at the CALL SITE — the
@@ -4550,7 +4598,7 @@ export function apply(ctx: Context, config: Config): void {
             sessionId,
             ts: historyTs,
             lastContent: lastHistoryContent,
-            hasImages: historyHasImages,
+            hasAttachments: historyHasAttachments,
             file,
           })
           if (written) lastHistoryContent = trimmed
@@ -4628,13 +4676,13 @@ export function apply(ctx: Context, config: Config): void {
       // plain prompts AND per-skill slash lines, including `/skill <name>
       // [image #N ...]` (`skill` is local only as the bare picker; with
       // arguments it is a loadSkill agent prompt — review finding).
-      if (commandRejectsImages(parsed, text, draftImages, name => {
+      if (commandRejectsAttachments(parsed, text, draftImages, draftFiles, name => {
         if (name === 'skill' && (parsed?.rawInput.trim() ?? '') !== '') return false
         return LOCAL_COMMANDS.has(name)
           || (extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false)
       })) {
         app.setEditorText(mergeDraft(app.getDraft(), text))
-        app.notify('Images cannot be attached to a command.', 'error')
+        app.notify('Attachments cannot be included in a local command.', 'error')
         return
       }
       const isSessionless = parsed !== undefined && (
@@ -4759,7 +4807,7 @@ export function apply(ctx: Context, config: Config): void {
       // after its drafts were consumed — the placeholders would re-send as
       // plain text (the persisted JSONL history has the same guard; review
       // finding: the memory side was missing it).
-      shouldRememberInput: (text) => !draftHasImages(text, draftImages),
+      shouldRememberInput: (text) => !draftHasAttachments(text, draftImages, draftFiles),
       // Ctrl+V (plan M3): probe the clipboard ONCE per paste — an image
       // lands as a draft placeholder, plain text as an editor insert,
       // unsupported/empty silently (a text paste must never error).
@@ -4775,7 +4823,7 @@ export function apply(ctx: Context, config: Config): void {
             // Attach-time prune (review finding 2): placeholders deleted or
             // Ctrl+C-cleared since the last attach must not hold their
             // bytes until the store fills up.
-            pruneUnreferencedDrafts(app.getDraft(), draftImages)
+            pruneUnreferencedDraftAttachments(app.getDraft(), draftImages, draftFiles)
             const limits = ctx.get('attachments')?.imageLimits
             if (limits !== undefined) {
               checkImageLimits(
@@ -5195,7 +5243,7 @@ export function apply(ctx: Context, config: Config): void {
         // never re-uploads the bytes. The queue is spliced ONLY after the
         // drafts are staged (a failure keeps the queue intact).
         let recalledText = ''
-        const staged: number[] = []
+        const staged: { kind: 'image' | 'file'; id: number }[] = []
         try {
           const lines: string[] = []
           for (const message of queued) {
@@ -5213,7 +5261,16 @@ export function apply(ctx: Context, config: Config): void {
                   source: { type: 'recalled' },
                   recalledRef: attachment,
                 })
-                staged.push(draft.id)
+                staged.push({ kind: 'image', id: draft.id })
+                parts.push(draft.placeholder)
+              } else if (block.type === 'file') {
+                const attachment = block.attachment as import('./attachment/file-admission.ts').FileAttachmentRefLike
+                const draft = draftFiles.add({
+                  name: attachment.name,
+                  byteLength: attachment.bytes,
+                  source: { type: 'recalled', ref: attachment },
+                })
+                staged.push({ kind: 'file', id: draft.id })
                 parts.push(draft.placeholder)
               }
             }
@@ -5224,7 +5281,10 @@ export function apply(ctx: Context, config: Config): void {
           // The recalled drafts could not be staged (capacity): roll back
           // the drafts staged so far and keep the queue fully intact —
           // nothing removed, no capacity leaked (follow-up finding).
-          for (const id of staged) draftImages.remove(id)
+          for (const entry of staged) {
+            if (entry.kind === 'image') draftImages.remove(entry.id)
+            else draftFiles.remove(entry.id)
+          }
           app.notify(safeErrorMessage(error), 'error')
           return
         }
@@ -6807,10 +6867,6 @@ export function apply(ctx: Context, config: Config): void {
         })
       }
     }
-    // The per-TUI draft image registry (plan §5.2): staged clipboard/file
-    // bytes for the current run. Cleared on submit/session-switch/dispose —
-    // never touches durable attachments the harness already accepted.
-    const draftImages = new DraftImageStore()
     /**
      * The conversation rewind picker (the ONE entry shared by the idle
      * empty-editor double-Esc and `/rewind` — plan §22). Lists the completed
@@ -6894,6 +6950,7 @@ export function apply(ctx: Context, config: Config): void {
               // drop the unpinned ones now, exactly like /new and /fork (a
               // historic non-text content is never silently re-staged).
               draftImages.clearUnpinned()
+              draftFiles.clearUnpinned()
               if (outcome.hasNonTextContent) {
                 app.notify(`rewound to turn ${outcome.turn}; original non-text content was not re-staged — review it before sending`, 'error')
               } else {
@@ -6978,6 +7035,7 @@ export function apply(ctx: Context, config: Config): void {
       commandRegistry: ctx.get('commands') as import('./commands.ts').CommandRegistryLike | undefined,
       cwd,
       imageStore: draftImages,
+      fileStore: draftFiles,
       // Issue #7: /copy shares the fullscreen selection's clipboard policy.
       copyToClipboard: (text) => copyToClipboard(text, runCopyCommand, copyEnv),
       // The deployment image policy, re-read dynamically so a runtime

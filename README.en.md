@@ -236,7 +236,7 @@ Typing `@` opens workspace file search and completion:
 @"path with spaces/file.ts"
 ```
 
-`/image <path>` also completes files and directories; paths with spaces, quotes, or Windows separators preserve the input dialect, and directories can be expanded further.
+`/attach <path>` is the unified Client-local image/file intake; `/image <path>` keeps its image-only compatibility semantics. Both complete files and directories; paths with spaces, quotes, or Windows separators preserve the input dialect, and directories can be expanded further.
 
 Resolvable relative paths are canonicalized before submission.
 

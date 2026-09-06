@@ -72,6 +72,19 @@ its rewind notification wording is generalized, and rewind does not re-stage
 content. No attachment bytes/paths are resolved; migration remains
 M2 NOT STARTED with Direct as the production backend.
 
+### Unified attachment intake (Stage C2 / pre-M2)
+
+The TUI exposes `/attach <path>` as the canonical Client-local intake and
+keeps `/image <path>` as an image-only compatibility command. Generic files
+remain Client-local draft metadata until an agent-bound submission has
+resolved/created its Session; Direct then streams the exact local file into
+`ctx.attachments.saveFileStream()` and records only the resulting durable
+FileBlock. This does not start M2: no Session Controller file-upload receipt,
+Connection transport, or Remote upload state is implemented here.
+
+Locality is explicit: `/attach` and `/image` use the Client-local cwd, while
+`@` mentions remain Host/session-scoped.
+
 ## Target
 
 A DSH-native client: the TUI keeps terminal/editor/overlays/keybindings/

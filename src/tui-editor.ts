@@ -67,8 +67,8 @@ function routeEditorRenders(tui: TUI, route: ((force?: boolean) => void) | undef
  * three prompts (`❯ `, `! `, `!!`) are exactly this wide. */
 const PROMPT_WIDTH = 2
 
-/** Whether the cursor sits in a declared path-argument position (`/image
- * <arg>`): the classifier's `image-argument` kind, which the reopen gate
+/** Whether the cursor sits in a declared path-argument position (`/attach`/`/image
+ * <arg>`): the classifier's `path-argument` kind, which the reopen gate
  * consumes (plan §11 — ONE classifier, never a per-command hardcode). */
 function isFileArgumentContext(textBeforeCursor: string): boolean {
   return classifyFileCompletionContext(textBeforeCursor, FILE_ARGUMENT_COMMANDS).kind !== 'none'
@@ -308,7 +308,7 @@ export class TuiEditor extends Editor {
       const { line, col } = this.getCursor()
       const beforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
       const context = classifyFileCompletionContext(beforeCursor, FILE_ARGUMENT_COMMANDS)
-      if (context.kind === 'mention' || context.kind === 'image-argument') {
+      if (context.kind === 'mention' || context.kind === 'path-argument') {
         this.requestAutocomplete({ force: true, explicitTab: true })
         return
       }
