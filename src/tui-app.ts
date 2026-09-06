@@ -8617,9 +8617,11 @@ export class TuiApp {
       } else if (block.type === 'file') {
         flushText()
         container.addChild(new FileAttachmentComponent(block.attachment, { fallbackColor: color.textDim }))
-      } else if (block.type === 'reasoning' || block.type === 'tool-call' || block.type === 'tool-result') {
+      } else if (block.type === 'reasoning' || block.type === 'tool-call') {
         // These blocks belong to the existing thinking/tool surfaces, not the
-        // assistant's ordinary markdown body.
+        // assistant's ordinary markdown body. A finalized tool-result has no
+        // separate assistant surface, so it falls through to the explicit
+        // bounded fallback below.
         continue
       } else {
         flushText()

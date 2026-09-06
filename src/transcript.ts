@@ -2982,9 +2982,10 @@ function markdownContent(blocks: readonly ContentBlock[]): string {
       flush()
       const attachment = block.attachment
       parts.push(`> ${escapeMarkdownInline(fileAttachmentSummary(attachment))} · attachment \`${attachment.attachmentId}\``)
-    } else if (block.type === 'reasoning' || block.type === 'tool-call' || block.type === 'tool-result') {
+    } else if (block.type === 'reasoning' || block.type === 'tool-call') {
       // These known process blocks have their existing dedicated transcript
-      // semantics; they do not belong in the plain content projection.
+      // semantics; a finalized tool-result has no separate assistant surface,
+      // so it uses the explicit bounded fallback below.
       continue
     } else {
       flush()

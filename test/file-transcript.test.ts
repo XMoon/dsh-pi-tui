@@ -62,6 +62,14 @@ function typedGenericBlock(type: string, payload: string): ContentBlock {
   return { type, payload } as never
 }
 
+function assistantToolResultBlock(): ContentBlock {
+  return {
+    type: 'tool-result',
+    toolCallId: 'call-assistant-c1',
+    content: [{ type: 'text', text: 'assistant tool result' }],
+  } as never
+}
+
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -130,6 +138,37 @@ test('file-only and unknown finalized user blocks survive folding and search', (
   const hostileHeading = hostileTypeFallback.split('\n', 1)[0]!
   assert.ok(!hostileHeading.includes('\n'))
   assert.ok(hostileHeading.length <= 'Unknown block: '.length + 120)
+})
+
+test('assistant finalized tool-result content uses an explicit fallback everywhere', async () => {
+  const block = assistantToolResultBlock()
+  const event: SessionEvent = {
+    type: 'assistant/message',
+    seq: 1,
+    time: 1,
+    data: { turn: 0, step: 0, message: { content: [block] } },
+  } as never
+  const folder = new TranscriptFolder()
+  folder.apply([event])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined, 'the finalized assistant entry remains visible')
+  assert.equal(assistant?.text, '')
+  assert.deepEqual(assistant?.kind === 'assistant' ? assistant.content?.map(item => item.type) : [], ['tool-result'])
+
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript(folder.messages())
+  const view = await viewport(vt)
+  assert.ok(view.includes('Unknown block: tool-result'), `assistant tool-result fallback missing:\n${view}`)
+
+  const md = renderTranscriptMarkdown({
+    header: { id: 'session-c1-tool-result' as never, cwd: '/ws', version: 1, createdAt: 0 },
+    snapshotEvents: () => [event],
+  } as never)
+  assert.ok(md.includes('Unknown block: tool-result'))
+  assert.ok(md.includes('assistant tool result'))
 })
 
 test('rewind recognizes file-only turns and generalizes the warning label', () => {
