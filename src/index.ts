@@ -6593,12 +6593,18 @@ export function apply(ctx: Context, config: Config): void {
             // FAILED — a successfully settled save leaves the blank Session
             // observing the persisted default dynamically.
             const newestPending = activeDefaultIntent?.selection
-            if (newestPending !== undefined) {
-              modelSelections.selectForNextRequest(created.direct!.agent as Agent, newestPending)
-            } else if (creationIntent !== undefined && defaultIntentOutcome === 'failed') {
-              modelSelections.selectForNextRequest(created.direct!.agent as Agent, creationIntent)
+            try {
+               if (newestPending !== undefined) {
+                 modelSelections.selectForNextRequest(created.direct!.agent as Agent, newestPending)
+               } else if (creationIntent !== undefined && defaultIntentOutcome === 'failed') {
+                 modelSelections.selectForNextRequest(created.direct!.agent as Agent, creationIntent)
             }
-            return created
+            } catch (error) {
+               // A failed seed must not discard the already-created SessionHandle;
+               // publish it and let normal initialization keep the surface usable.
+               diag.warn('first session selection seed failed', { error: safeErrorMessage(error) })
+             }
+             return created
           })
         }
         let created: SessionHandle
