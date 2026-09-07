@@ -10,8 +10,9 @@
  *    the old session stays current and the user may retry
  * 4. COMMIT — a synchronous critical section (generation bump, live
  *    replacement)
- * 5. RETIRE — dispose the old handle; child surface/catalog work is
- *    best-effort and the committed child always stands
+ * 5. RETIRE — retire the old Direct owner (cancel → idle → drain
+ *    continuable descendants → final flush → dispose); child surface/catalog
+ *    work is best-effort and the committed child always stands
  * ```
  *
  * The DSH SessionWriteLease (kernel flock) is the ONLY cross-process writer
@@ -90,8 +91,9 @@ export async function runTransitionTo<T>(
   }
   // Phase 4 — COMMIT: a synchronous critical section, no awaits.
   host.commit(next)
-  // Phase 5 — RETIRE: dispose the old handle; the child surface/catalog
-  // work is best-effort.
+  // Phase 5 — RETIRE: retire the old Direct owner (the host adapter runs
+  // cancel → idle → drain descendants → final flush → dispose); the child
+  // surface/catalog work is best-effort.
   try {
     await host.retireOld(next)
   } catch (error) {

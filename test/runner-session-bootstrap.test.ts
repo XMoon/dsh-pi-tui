@@ -223,9 +223,13 @@ interface RunnerHarness {
   readonly createdSessions: FakeSession[]
   readonly commands: unknown
   readonly subagents?: unknown
+  /** Retirement-phase records (`cancel:<id>` / `idle:<id>` / `drain:<id>` /
+   * `flush:<id>` / `dispose:<id>`) in call order — the Direct
+   * owned-session retirement assertions. */
+  readonly retirementEvents: string[]
 }
 
-function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<void>): Agent {
+function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<void>, retirementEvents?: string[]): Agent {
   // A small structural Agent context is sufficient for the Direct setup
   // callbacks and lets the harness expose the public `ctx.agent` setup seam.
   const agentContext = {
@@ -233,13 +237,33 @@ function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<void>): Ag
     on: () => () => {},
     agent: undefined as Agent | undefined,
   }
+  // cancel is idempotent and BREAKS a pending whenIdle (the real Agent
+  // contract): a cancelled agent's whenIdle settles immediately, which is
+  // exactly what the exit pre-cancel relies on to unblock a transition
+  // stuck in its pre-commit quiesce.
+  let cancelled = false
+  let releaseIdle: (() => void) | undefined
   const agent = {
     session,
     ctx: agentContext,
     options: { provider: 'p', model: 'm' },
     status: 'idle',
     inbox: { nextTurn: [], nextStep: [] },
-    whenIdle: async () => { await whenIdleGate?.() },
+    whenIdle: async () => {
+      retirementEvents?.push(`idle:${session.id}`)
+      if (cancelled) return
+      await new Promise<void>(resolve => {
+        releaseIdle = resolve
+        const gate = whenIdleGate?.()
+        if (gate !== undefined) void gate.then(resolve, resolve)
+        else resolve()
+      })
+    },
+    cancel: () => {
+      retirementEvents?.push(`cancel:${session.id}`)
+      cancelled = true
+      releaseIdle?.()
+    },
   } as unknown as Agent
   agentContext.agent = agent
   return agent
@@ -252,13 +276,16 @@ function makeHarness(
   initialDefault: { provider: string; model: string; reasoningEffort?: string } = { provider: 'p', model: 'm' },
   saveDefault?: (next: { provider: string; model: string; reasoningEffort?: string }) => Promise<unknown>,
   createGate?: () => Promise<unknown>,
-  subagents?: unknown,
+  /** A subagents service, or a factory receiving the harness retirement
+   * events array (so a drain fake records into the SAME assertion log). */
+  subagents?: unknown | ((events: string[]) => unknown),
   whenIdleGate?: (sessionId: string) => Promise<void>,
   resumeGate?: (sessionId: string) => Promise<void>,
   resumeError?: Error,
 ): RunnerHarness {
   const persisted = new Map<string, FakeSession>()
   const live = new Map<string, Agent>()
+  const retirementEvents: string[] = []
   const createOptions: { provider?: string; model?: string }[] = []
   const createInheritedEventCounts: (number | undefined)[] = []
   const createSignals: (AbortSignal | undefined)[] = []
@@ -269,11 +296,12 @@ function makeHarness(
   }
 
   const makeHandle = (session: FakeSession): { agent: Agent; dispose: () => Promise<void> } => {
-    const agent = fakeAgent(session, whenIdleGate === undefined ? undefined : () => whenIdleGate(session.id))
+    const agent = fakeAgent(session, whenIdleGate === undefined ? undefined : () => whenIdleGate(session.id), retirementEvents)
     live.set(session.id, agent)
     return {
       agent,
       dispose: async () => {
+        retirementEvents.push(`dispose:${session.id}`)
         live.delete(session.id)
       },
     }
@@ -339,7 +367,9 @@ function makeHarness(
     get: (id: string) => live.get(id),
   }
   const sessions = {
-    flush: async () => {},
+    flush: async (session?: unknown) => {
+      retirementEvents.push(`flush:${(session as { id?: string } | undefined)?.id ?? '?'}`)
+    },
     get: (id: string) => live.get(id)?.session,
   }
   let defaultSelection = { ...initialDefault }
@@ -368,7 +398,10 @@ function makeHarness(
     execute: async () => ({ result: { kind: 'success' } }),
     handler: (name: string) => definitions.get(name)?.handler,
   }
-  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createInheritedEventCounts, createSignals, resumeSignals, createdSessions, commands, subagents }
+  const subagentsService = typeof subagents === 'function'
+    ? (subagents as (events: string[]) => unknown)(retirementEvents)
+    : subagents
+  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createInheritedEventCounts, createSignals, resumeSignals, createdSessions, commands, subagents: subagentsService, retirementEvents }
 }
 
 async function settle(): Promise<void> {
@@ -2523,4 +2556,589 @@ test('a fresh start with a FAILING preset resolution stays silent (no Preparing 
   // The TUI still mounts (degraded — the failure is a one-shot warn).
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must still create a TuiApp')
+})
+
+// --- Direct owned-session retirement (exit / HMR / transition) ---
+
+/** A subagents fake recording drainContinuableDescendants calls. */
+function retirementSubagents(events: string[]): { drainContinuableDescendants: (parents: readonly unknown[]) => Promise<void> } {
+  return {
+    drainContinuableDescendants: async (parents: readonly unknown[]) => {
+      const parent = parents[0] as { session: { id: string } } | undefined
+      events.push(`drain:${parent?.session.id ?? '?'}`)
+    },
+  }
+}
+
+test('fiber unload retires the Direct owned session: cancel → idle → drain → flush → dispose (HMR path)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-hmr-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-hmr-session',
+    header: { id: 'retire-hmr-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  // HMR unload: dispose the runner fiber directly (no interactive exit).
+  await fiber.dispose()
+  fiber = undefined
+  // The retirement order is the fixed Direct order; the drain of the
+  // continuable descendants happens BEFORE the parent handle dispose.
+  const events = harness.retirementEvents
+  const cancel = events.filter(event => event === 'cancel:retire-hmr-session')
+  const idle = events.filter(event => event === 'idle:retire-hmr-session')
+  const drain = events.filter(event => event === 'drain:retire-hmr-session')
+  const flush = events.filter(event => event === 'flush:retire-hmr-session')
+  const dispose = events.filter(event => event === 'dispose:retire-hmr-session')
+  assert.equal(cancel.length, 1, 'the owned agent must be cancelled exactly once')
+  assert.equal(drain.length, 1, 'drainContinuableDescendants must be called exactly once')
+  assert.equal(dispose.length, 1, 'the owned handle must be disposed exactly once')
+  assert.ok(events.indexOf('drain:retire-hmr-session') < events.indexOf('dispose:retire-hmr-session'),
+    'descendant drain must complete before the parent handle dispose')
+  assert.ok(events.indexOf('flush:retire-hmr-session') < events.indexOf('dispose:retire-hmr-session'),
+    'the final flush must complete before the parent handle dispose')
+  assert.ok(events.indexOf('cancel:retire-hmr-session') < events.indexOf('drain:retire-hmr-session'),
+    'cancel must precede the descendant drain')
+  assert.ok(idle.length >= 1, 'whenIdle must be awaited during retirement')
+  assert.ok(flush.length >= 1, 'the final flush must run during retirement')
+})
+
+test('deferred-start exit retires nothing and disposes the surface only', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-deferred-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  // Deferred start: no session, no agent, no handle.
+  const harness = makeHarness(home)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, {}, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  await fiber.dispose()
+  fiber = undefined
+  assert.deepEqual(harness.retirementEvents, [],
+    'a sessionless exit must not cancel/drain/flush/dispose anything')
+})
+
+test('a successful /new retires the OLD owner post-commit (cancel → idle → drain → flush → dispose)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-switch-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-switch-old',
+    header: { id: 'retire-switch-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  await newHandler()
+  await settle()
+  // The OLD owner was retired post-commit: cancel + drain + dispose exactly
+  // once each, and the drain happened before the old handle dispose.
+  const events = harness.retirementEvents
+  const oldCancel = events.filter(event => event === 'cancel:retire-switch-old')
+  const oldDrain = events.filter(event => event === 'drain:retire-switch-old')
+  const oldDispose = events.filter(event => event === 'dispose:retire-switch-old')
+  assert.equal(oldCancel.length, 1, 'the old agent must be cancelled exactly once post-commit')
+  assert.equal(oldDrain.length, 1, 'the old continuable descendants must be drained exactly once post-commit')
+  assert.equal(oldDispose.length, 1, 'the old handle must be disposed exactly once post-commit')
+  assert.ok(events.indexOf('drain:retire-switch-old') < events.indexOf('dispose:retire-switch-old'),
+    'the old descendant drain must precede the old handle dispose')
+  // The child stays current: the surface still owns the NEW session.
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, '/new must create a child session')
+  assert.notEqual(created.id, 'retire-switch-old')
+  // A later teardown retires the NEW owner exactly once (the old owner is
+  // not retired again — the memoized retirement is per-owner).
+  await fiber.dispose()
+  fiber = undefined
+  const newDispose = events.filter(event => event === `dispose:${created.id}`)
+  assert.equal(newDispose.length, 1, 'the new current owner must be retired on teardown')
+  assert.equal(oldDispose.length, 1, 'the old owner must never be retired twice')
+})
+
+test('a failed child create does NOT drain or dispose the current old owner', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-create-fail-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-create-fail-old',
+    header: { id: 'retire-create-fail-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // The child create throws: the transition must abort with ZERO old-owner
+  // side effects (no drain, no dispose — the old session stays current).
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, async () => { throw new Error('create failed') }, retirementSubagents)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  await newHandler()
+  await settle()
+  const events = harness.retirementEvents
+  assert.ok(!events.some(event => event === 'drain:retire-create-fail-old'),
+    'a failed child create must never drain the old owner descendants')
+  assert.ok(!events.some(event => event === 'dispose:retire-create-fail-old'),
+    'a failed child create must never dispose the old owner handle')
+  assert.equal(harness.createdSessions.length, 0, 'a failed create must not publish a child')
+  // The old session is still current: teardown retires it exactly once.
+  await fiber.dispose()
+  fiber = undefined
+  assert.equal(events.filter(event => event === 'dispose:retire-create-fail-old').length, 1,
+    'the still-current old owner must be retired on teardown')
+})
+
+test('exit during an in-flight transition does not deadlock and retires the current owner exactly once', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-during-switch-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-during-switch-old',
+    header: { id: 'retire-during-switch-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // The child create awaits the lifecycle signal: an exit during the
+  // transition aborts it (the unsafe late commit is prevented).
+  let createStarted!: () => void
+  const createStartedPromise = new Promise<void>(resolve => { createStarted = resolve })
+  const agents = harness.agents as {
+    create: (options: { sessionId: unknown; signal?: AbortSignal }) => Promise<never>
+  }
+  agents.create = async ({ signal }) => {
+    createStarted()
+    if (signal === undefined) throw new Error('test create did not receive a lifecycle signal')
+    if (signal.aborted) throw new Error('create cancelled')
+    return await new Promise<never>((_, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('create cancelled')), { once: true })
+    })
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await createStartedPromise
+  // Exit while the child create is still awaiting: the fiber disposer must
+  // not deadlock on the transition gate (the abort settles the create).
+  await fiber.dispose()
+  fiber = undefined
+  await transition
+  const events = harness.retirementEvents
+  const oldDispose = events.filter(event => event === 'dispose:retire-during-switch-old')
+  assert.equal(oldDispose.length, 1, 'the still-current old owner must be retired exactly once')
+  assert.equal(harness.createdSessions.length, 0, 'the aborted create must not publish a child')
+})
+
+test('an interactive exit retires the owned session through the appExit disposal', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-interactive-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-interactive-session',
+    header: { id: 'retire-interactive-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  let exitCalls = 0
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
+    exitCalls += 1
+    // The launcher's appExit disposes the application tree: the runner
+    // fiber disposer runs the Direct owned-session retirement.
+    void fiber?.dispose()
+  })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  // Interactive exit: submit the plain `exit` prompt (shell muscle memory).
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settle()
+  assert.equal(exitCalls, 1, 'the interactive exit must request appExit exactly once')
+  const events = harness.retirementEvents
+  assert.equal(events.filter(event => event === 'cancel:retire-interactive-session').length, 1,
+    'the interactive exit must cancel the owned agent')
+  assert.equal(events.filter(event => event === 'drain:retire-interactive-session').length, 1,
+    'the interactive exit must drain the continuable descendants')
+  assert.equal(events.filter(event => event === 'dispose:retire-interactive-session').length, 1,
+    'the interactive exit must dispose the owned handle')
+  assert.ok(events.indexOf('drain:retire-interactive-session') < events.indexOf('dispose:retire-interactive-session'),
+    'the descendant drain must precede the parent handle dispose on the interactive path too')
+})
+
+test('exit after a transition COMMITTED retires the NEW current owner, never the old twice', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-after-commit-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-after-commit-old',
+    header: { id: 'retire-after-commit-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // The child create is gated: the transition commits only after the gate
+  // releases, so the test can exit in the post-commit window.
+  let releaseCreate!: () => void
+  const createGate = new Promise<void>(resolve => { releaseCreate = resolve })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, () => createGate, retirementSubagents)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await settle()
+  // The child create completes and the transition commits.
+  releaseCreate()
+  await settle()
+  // Exit in the post-commit window: the retirement must target the NEW
+  // current owner (the old owner was already retired post-commit).
+  await fiber.dispose()
+  fiber = undefined
+  await transition
+  const events = harness.retirementEvents
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, '/new must create a child session')
+  const oldDisposes = events.filter(event => event === 'dispose:retire-after-commit-old')
+  const newDisposes = events.filter(event => event === `dispose:${created.id}`)
+  assert.equal(oldDisposes.length, 1, 'the old owner must be retired exactly once (post-commit)')
+  assert.equal(newDisposes.length, 1, 'the NEW current owner must be the shutdown target')
+  assert.ok(events.indexOf(`dispose:${created.id}`) > events.indexOf('dispose:retire-after-commit-old'),
+    'the new owner retirement must follow the old owner retirement')
+})
+
+test('exit during a transition stuck in pre-commit whenIdle: the pre-cancel unblocks it and the old owner is retired', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-whenidle-stuck-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-whenidle-stuck-old',
+    header: { id: 'retire-whenidle-stuck-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // The FIRST whenIdle (startup resume) settles; the SECOND (the /new
+  // pre-commit quiesce) hangs — the old agent is "busy" and its whenIdle
+  // does not observe the lifecycle signal, exactly like a real LLM turn.
+  let idleCalls = 0
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents, async () => {
+    idleCalls += 1
+    if (idleCalls >= 2) {
+      await new Promise<void>(() => {})
+    }
+  })
+  // The child create observes the lifecycle signal: the exit aborts it.
+  const agents = harness.agents as {
+    create: (options: { sessionId: unknown; signal?: AbortSignal }) => Promise<never>
+  }
+  agents.create = async ({ signal }) => {
+    if (signal === undefined) throw new Error('test create did not receive a lifecycle signal')
+    if (signal.aborted) throw new Error('create cancelled')
+    return await new Promise<never>((_, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('create cancelled')), { once: true })
+    })
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await settle()
+  assert.equal(idleCalls, 2, 'the /new pre-commit quiesce must be awaiting the stuck whenIdle')
+  // Exit while the transition is stuck in its pre-commit quiesce: the
+  // retirement pre-cancel must unblock the whenIdle (no deadlock), the
+  // aborted create must fail the transition, and the still-current old
+  // owner must be retired.
+  await fiber.dispose()
+  fiber = undefined
+  await transition
+  const events = harness.retirementEvents
+  assert.equal(events.filter(event => event === 'dispose:retire-whenidle-stuck-old').length, 1,
+    'the still-current old owner must be retired exactly once')
+  assert.ok(events.filter(event => event === 'cancel:retire-whenidle-stuck-old').length >= 1,
+    'the old owner must be cancelled (pre-cancel and/or the retirement cancel phase)')
+  assert.equal(harness.createdSessions.length, 0, 'the aborted create must not publish a child')
+})
+
+test('a pre-mount unload while the resume whenIdle is pending cancels the agent and retires the owner', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-premount-whenidle-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  const resumed: FakeSession = fakeSession({
+    id: 'premount-whenidle-session',
+    header: { id: 'premount-whenidle-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  // The resume whenIdle hangs (a busy agent): the pre-mount wait must be
+  // broken by the lifecycle abort, not left hanging forever.
+  let whenIdleStarted!: () => void
+  const whenIdleStartedPromise = new Promise<void>(resolve => { whenIdleStarted = resolve })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents, async () => {
+    whenIdleStarted()
+    await new Promise<void>(() => {})
+  })
+  context = new Context()
+  // Provide the same host services as mountRunner, but do NOT await the
+  // startup settle: the IIFE is stuck in the pre-mount whenIdle. The early
+  // lifecycle-cancellation effect is registered before the resume, so
+  // disposing the context aborts the signal.
+  context.provide('appExit', () => {})
+  context.provide(TUI_STARTUP_SERVICE, { sessionId: resumed.id, shippedPresetRoot: home })
+  context.provide('sessionPersistence', harness.persistence as never)
+  context.provide('sessionQuery', harness.sessionQuery as never)
+  context.provide('agents', harness.agents as never)
+  context.provide('sessions', harness.sessions as never)
+  context.provide('agentDefaultModel', harness.defaultModel as never)
+  context.provide('llm', harness.llm as never)
+  context.provide('commands', harness.commands as never)
+  context.provide('subagents', harness.subagents as never)
+  context.provide('loader', { await: async () => {} } as never)
+  const fiber = context.plugin((pluginCtx) => applyRunner(pluginCtx, { sessionId: resumed.id }))
+  await fiber
+  await whenIdleStartedPromise
+  await disposeContext(context)
+  context = undefined
+  await settle()
+  const events = harness.retirementEvents
+  assert.ok(events.some(event => event === 'cancel:premount-whenidle-session'),
+    'the abort must cancel the agent so the pre-mount whenIdle settles')
+  assert.equal(events.filter(event => event === 'dispose:premount-whenidle-session').length, 1,
+    'the just-created owner must be retired exactly once')
+  assert.equal(probe.apps.length, 0, 'the cancelled startup must not mount a TUI')
+})
+
+test('exit with TWO queued transitions: the second quiesce is abort-aware and the current owner is retired', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-two-queued-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-two-queued-old',
+    header: { id: 'retire-two-queued-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // The FIRST /new create is gated; the SECOND /new queues behind it. The
+  // second transition's quiesce targets the FIRST transition's committed
+  // child, whose whenIdle hangs (busy) — the exit must cancel it.
+  let releaseCreateA!: () => void
+  const createGateA = new Promise<void>(resolve => { releaseCreateA = resolve })
+  let createCalls = 0
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, async () => {
+    createCalls += 1
+    if (createCalls === 1) await createGateA
+  }, retirementSubagents, async (sessionId) => {
+    // The FIRST child (committed by the first /new) is busy: its whenIdle
+    // hangs in BOTH the first transition's post-commit child quiesce and
+    // the second transition's pre-commit quiesce.
+    if (sessionId !== 'retire-two-queued-old') {
+      await new Promise<void>(() => {})
+    }
+  })
+  // The SECOND create observes the lifecycle signal: the exit aborts it.
+  const agents = harness.agents as {
+    create: (options: { sessionId: unknown; signal?: AbortSignal }) => Promise<never>
+  }
+  const originalCreate = agents.create as (options: { sessionId: unknown; signal?: AbortSignal }) => Promise<never>
+  agents.create = async (options) => {
+    createCalls += 1
+    if (createCalls === 1) {
+      await createGateA
+      return originalCreate(options)
+    }
+    if (options.signal === undefined) throw new Error('test create did not receive a lifecycle signal')
+    if (options.signal.aborted) throw new Error('create cancelled')
+    return await new Promise<never>((_, reject) => {
+      options.signal!.addEventListener('abort', () => reject(new Error('create cancelled')), { once: true })
+    })
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const first = newHandler()
+  const second = newHandler()
+  await settle()
+  releaseCreateA()
+  await settle()
+  // Exit: the pre-cancel (and the abort-aware quiesce) must unblock the
+  // first transition's post-commit child quiesce AND the second
+  // transition's pre-commit quiesce, the aborted create must fail the
+  // second transition, and the current owner must be retired.
+  await fiber.dispose()
+  fiber = undefined
+  await first
+  await second
+  const events = harness.retirementEvents
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, 'the first /new must create a child')
+  assert.equal(events.filter(event => event === 'dispose:retire-two-queued-old').length, 1,
+    'the original owner must be retired exactly once (first transition post-commit)')
+  assert.equal(events.filter(event => event === `dispose:${created.id}`).length, 1,
+    'the still-current first child must be retired exactly once (teardown)')
+  assert.ok(events.filter(event => event === `cancel:${created.id}`).length >= 1,
+    'the first child must be cancelled (pre-cancel and/or the abort-aware quiesce)')
+})
+
+test('exit during the post-commit child quiesce skips surface init and retires the committed child', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-child-idle-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'exit-after-commit-old',
+    header: { id: 'exit-after-commit-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  let releaseCreate!: () => void
+  const createGate = new Promise<void>(resolve => { releaseCreate = resolve })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, () => createGate, retirementSubagents, async (sessionId) => {
+    // The committed child is busy: its post-commit quiesce hangs.
+    if (sessionId !== 'exit-after-commit-old') {
+      await new Promise<void>(() => {})
+    }
+  })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await settle()
+  releaseCreate()
+  await settle()
+  // The transition committed the child and is now stuck in the post-commit
+  // child quiesce. Exit: the abort-aware quiesce cancels the child, the
+  // surface init is skipped, and the committed child is retired.
+  await fiber.dispose()
+  fiber = undefined
+  await transition
+  const events = harness.retirementEvents
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, '/new must create a child session')
+  assert.equal(events.filter(event => event === 'dispose:exit-after-commit-old').length, 1,
+    'the old owner must be retired exactly once (post-commit)')
+  assert.equal(events.filter(event => event === `dispose:${created.id}`).length, 1,
+    'the committed child must be retired exactly once (teardown)')
+  assert.ok(events.filter(event => event === `cancel:${created.id}`).length >= 1,
+    'the committed child must be cancelled by the abort-aware quiesce')
 })
