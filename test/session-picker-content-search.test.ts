@@ -521,7 +521,7 @@ test('a whitespace-only filter never triggers a content search', async (t) => {
   )
 })
 
-test('a whitespace-padded filter sends the canonical query to the Host', async (t) => {
+test('a whitespace-padded filter sends the canonical query and still shows the hit (review P1)', async (t) => {
   const h = harness({
     rows: rows(),
     search: async (query) => ({ items: [{ sessionId: 'session-alpha', snippet: `needle in ${query}` }], hasMore: false }),
@@ -530,14 +530,18 @@ test('a whitespace-padded filter sends the canonical query to the Host', async (
   await h.runSessions('')
   await waitUntil(() => h.view().includes('alpha'))
   // Type a leading space, then the query: the Host search must receive
-  // the canonical (trimmed) query — never the raw padded text.
+  // the canonical (trimmed) query — never the raw padded text — and the
+  // hit must still display (the search projection does not re-filter by
+  // the raw input text).
   h.vt.sendInput(' ')
   h.vt.sendInput('needle')
   await waitUntil(() => h.searchCalls.length === 1)
   assert.equal(h.searchCalls[0]!.query, 'needle', 'the Host search must receive the canonical query')
+  await waitUntil(() => h.view().includes('needle in needle'))
+  assert.ok(h.view().includes('alpha'), 'the Host hit must be visible under the whitespace-padded input')
 })
 
-test('an over-long filter never surfaces a hit for the unsearched suffix', async (t) => {
+test('an over-long filter still surfaces the Host hit for the searched prefix (review P1)', async (t) => {
   const long = 'x'.repeat(600)
   const h = harness({
     rows: rows(),
@@ -548,13 +552,11 @@ test('an over-long filter never surfaces a hit for the unsearched suffix', async
   await waitUntil(() => h.view().includes('alpha'))
   h.vt.sendInput(long)
   await waitUntil(() => h.searchCalls.length === 1)
-  assert.equal(h.searchCalls[0]!.query.length, 500, 'the Host search must receive the bounded query')
-  // The row's text is bounded to the searched window, so the full
-  // 600-char filter cannot match it — no pseudo-match through text that
-  // was never searched.
-  await new Promise<void>(resolve => setTimeout(resolve, 400))
-  const view = h.view()
-  assert.ok(!view.includes('hit x'), 'an over-long filter must not surface a hit for the unsearched suffix')
+  assert.equal(h.searchCalls[0]!.query.length, 500, 'the Host search must receive the bounded canonical query')
+  // The canonical 500-char query was searched; the hit is in the union and
+  // the SelectList renders without a substring re-filter — the row shows.
+  await waitUntil(() => h.view().includes('hit x'))
+  assert.ok(h.view().includes('alpha'), 'the Host hit for the searched prefix must be visible')
 })
 
 test('a malicious provider error message never reaches the terminal raw', async (t) => {
@@ -635,7 +637,12 @@ test('clearing a query restores the previous browse category', async (t) => {
   assert.ok(h.view().includes('All directories'), 'clearing must restore the previous browse category')
 })
 
-test('a host hit is never faked into visibility when its snippet lacks the query (review P2)', async (t) => {
+test('a Host hit displays even when its snippet lacks the query literal (review P1)', async (t) => {
+  // DSH only guarantees the snippet is a plain-text excerpt around the
+  // match — never that it contains the caller's raw query string. The
+  // search projection's membership is the explicit union; the SelectList
+  // renders without a substring re-filter, so a Host-authoritative hit is
+  // never dropped.
   const h = harness({
     rows: rows(),
     search: async () => ({ items: [{ sessionId: 'session-alpha', snippet: 'found it' }], hasMore: false }),
@@ -643,9 +650,9 @@ test('a host hit is never faked into visibility when its snippet lacks the query
   t.after(() => h.app.stop())
   await h.runSearch('needle')
   await waitUntil(() => h.searchCalls.length === 1)
-  await new Promise<void>(resolve => setTimeout(resolve, 400))
+  await waitUntil(() => h.view().includes('found it'))
   const view = h.view()
-  assert.ok(!view.includes('found it'), 'a snippet without the query must not be faked into visibility')
+  assert.ok(view.includes('alpha'), 'the Host hit must be visible in the search projection')
   assert.ok(!view.includes('· needle'), 'the query must never be appended to the description')
 })
 
@@ -727,4 +734,54 @@ test('a malicious cwd never reaches the terminal through the search description'
   assert.ok(!raw.includes('\x1b]0;PWNED'), 'the raw terminal stream must never carry the injected cwd sequence')
   const view = h.view()
   assert.ok(!view.includes('\x1b'), 'the raw ESC must never reach the terminal')
+})
+
+test('content-only matches keep the Host page order (review P2)', async (t) => {
+  // session-a is NEWER (list order a, b), but the Host page returns
+  // [b, a] — the content-only rows must follow the Host page order, never
+  // the newest-first list order.
+  const h = harness({
+    rows: [
+      { id: 'session-a', createdAt: 300, cwd: '/ws' },
+      { id: 'session-b', createdAt: 200, cwd: '/ws' },
+    ],
+    search: async () => ({
+      items: [
+        { sessionId: 'session-b', snippet: 'needle b' },
+        { sessionId: 'session-a', snippet: 'needle a' },
+      ],
+      hasMore: false,
+    }),
+  })
+  t.after(() => h.app.stop())
+  await h.runSearch('needle')
+  await waitUntil(() => h.searchCalls.length === 1)
+  await waitUntil(() => h.view().includes('needle b'))
+  const lines = h.view().split('\n')
+  const bIndex = lines.findIndex(line => line.includes('needle b'))
+  const aIndex = lines.findIndex(line => line.includes('needle a'))
+  assert.ok(bIndex >= 0 && aIndex >= 0, 'both content-only hits must display')
+  assert.ok(bIndex < aIndex, 'the Host page order must be preserved (b before a)')
+})
+
+test('the search projection overlay keeps the full row budget (no bottom truncation)', async (t) => {
+  // The external search Input renders ABOVE the SelectList, outside its
+  // maxRows budget — the frame must reserve those rows or the compositor
+  // truncates the bottom (hint/border). Many distinct groups force the
+  // item window to fill the budget, which is what triggers the overflow
+  // (review round 6).
+  const many = Array.from({ length: 30 }, (_, i) => ({ id: `session-${i}`, createdAt: 1_000_000_000_000 + i, cwd: `/ws-${i}` }))
+  const h = harness({ rows: many, search: async () => ({ items: [], hasMore: false }) })
+  t.after(() => h.app.stop())
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('Current directory'))
+  h.vt.sendInput('session')
+  await h.vt.waitForRender()
+  await waitUntil(() => h.view().includes('Search results'))
+  const lines = h.view().split('\n')
+  const boxTop = lines.findIndex(line => line.includes('╭'))
+  const boxBottom = lines.findIndex(line => line.includes('╰'))
+  assert.ok(boxTop >= 0 && boxBottom > boxTop, 'the overlay frame must render')
+  assert.ok(lines.join('\n').includes('↑↓ navigate'), 'the hint must stay visible')
+  assert.ok(boxBottom < lines.length - 1, 'the bottom border must not be truncated')
 })

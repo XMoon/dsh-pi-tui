@@ -225,26 +225,22 @@ export function sessionPickerCategories(
  * returns a global top-20; scoping it afterwards would hide a real
  * current-workspace match ranked beyond the window), and never a fake query
  * append in the description (membership and presentation stay separate).
- * The SelectList's own substring filter remains a secondary layer over the
- * union items; the projection is the membership authority, so the rendered
- * items must carry every membership field in their searchable text (the
- * cwd joins the description — the SelectList never searches the group).
- * KNOWN completeness tradeoff (accepted by design, review round 4): a
- * query longer than the 240-code-point snippet cap cannot be matched by
- * the SelectList against the bounded snippet, so such a content hit stays
- * hidden — the alternative (faking the query into the description) was
- * rejected (review P2). Queries up to the cap surface normally.
- * The category is non-cyclable: Tab never leaves it while a query is
- * active, and browse mode skips it.
+ * The category is EXTERNALLY filtered (review P1): the SelectList renders
+ * without its internal substring filter, so the projection's items ARE the
+ * membership — a Host-authoritative hit is never dropped by a substring
+ * re-filter, regardless of snippet length or query normalization. The
+ * category is non-cyclable: Tab never leaves it while a query is active,
+ * and browse mode skips it.
  */
 export function sessionSearchCategory(options: {
   rows: readonly SessionPickerRow[]
   header: string
   /** The SEARCH item builder (the cwd joins the searchable description). */
   itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem
-  /** The LIVE filter text (read at activation time). */
+  /** The LIVE CANONICAL filter text (read at activation time) — the one
+   * semantic query that also drives the Host search. */
   queryOf: () => string
-  /** The merged Host content hits (live map). */
+  /** The merged Host content hits (live map, Host page order). */
   contentHitsById: ReadonlyMap<string, SessionContentHit>
   /** The enriched metadata (title/preset) for the local match — the raw
    * list rows carry neither until the projection batch lands. */
@@ -257,22 +253,37 @@ export function sessionSearchCategory(options: {
     label: 'Search results',
     header: `${header} · Search results`,
     cyclable: false,
+    // The externally-filtered mode (review P1): the SelectList renders
+    // WITHOUT its internal substring filter — this projection's items ARE
+    // the membership, and a Host-authoritative hit is never dropped by a
+    // substring re-filter.
+    externalFilter: true,
     items: () => {
       if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
       const mainRows = rows.filter(row => row.origin !== 'subagent')
       const query = queryOf()
-      const localMatchIds = new Set(
-        query.trim() === '' ? [] : mainRows.filter(row => {
-          const meta = metadataOf(row.id)
-          return sessionRowMatchesQuery({
-            ...row,
-            title: meta.title,
-            preset: meta.preset ?? row.preset,
-          }, query)
-        }).map(row => row.id),
-      )
-      const visible = mainRows.filter(row => localMatchIds.has(row.id) || contentHitsById.has(row.id))
-      return buildSessionTree(visible).map(entry => itemFor(entry.row, entry.depth))
+      // Flat merged search projection (review P2): local metadata matches
+      // keep the newest-first list order; content-only matches keep the
+      // Host page order (the map's insertion order); a row that is both is
+      // a local match with the snippet merged. No browse tree ordering.
+      const localMatches = query === '' ? [] : mainRows.filter(row => {
+        const meta = metadataOf(row.id)
+        return sessionRowMatchesQuery({
+          ...row,
+          title: meta.title,
+          preset: meta.preset ?? row.preset,
+        }, query)
+      })
+      const localIds = new Set(localMatches.map(row => row.id))
+      // Content-only matches keep the HOST PAGE order — iterate the hit
+      // map (its insertion order IS the Host page order), never the
+      // newest-first list order.
+      const rowById = new Map(mainRows.map(row => [row.id, row]))
+      const contentOnly = [...contentHitsById.keys()]
+        .filter(id => !localIds.has(id))
+        .map(id => rowById.get(id))
+        .filter((row): row is SessionPickerRow => row !== undefined)
+      return [...localMatches, ...contentOnly].map(row => itemFor(row, 0))
     },
   }
 }
@@ -2469,7 +2480,7 @@ export function registerTuiCommands(
       const searchSignal = AbortSignal.any([scanSignal, controller.signal])
       detach('session content search', async () => {
         try {
-          const page = await runner.sessionReader.search(sanitizeSessionSearchInput(query), searchSignal)
+          const page = await runner.sessionReader.search(query, searchSignal)
           if (stale() || controller.signal.aborted) return
           if (page === undefined) {
             // Capability unavailable/disabled (e.g. the default
@@ -2570,19 +2581,19 @@ export function registerTuiCommands(
         // match the new filter (plan §18), and an unavailable/failed new
         // search must not leave the old query's hits behind.
         onFilterChange: (query) => {
-          pendingContentQuery = query
+          // ONE canonical client query (review P1): trim (official
+          // semantics), then sanitize (NUL removal + 500-unit cap). The
+          // SAME canonical query drives the local metadata projection AND
+          // the Host search — the input box keeps the raw text the user
+          // typed, but membership never drifts from what was searched.
+          const canonical = sanitizeSessionSearchInput(query.trim())
+          pendingContentQuery = canonical
           cancelContentSearch()
           contentHitsById.clear()
           contentHasMore = false
           // A whitespace-only filter is an empty query: no Host request
           // (the official contract rejects empty queries — a whitespace
-          // filter must not surface as a search failure). Non-empty
-          // filters are canonicalized (trimmed) for the Host search — the
-          // official query semantics trim. The SelectList's own substring
-          // filter stays on the RAW text (a known accepted tradeoff of the
-          // no-fake design, review round 4/5): a whitespace-padded query
-          // may hide content hits whose snippets lack the padded text.
-          const canonical = query.trim()
+          // filter must not surface as a search failure).
           if (canonical === '') {
             // Back to the browse state (the category that was active
             // before the query started).
@@ -2691,7 +2702,7 @@ export function registerTuiCommands(
       // never loses a character to the 500-unit window (official
       // semantics: trim, then cap).
       if (pendingContentQuery.trim() !== '' && activeContentSearchTimer === undefined && activeContentSearch === undefined) {
-        scheduleContentSearch(pendingContentQuery.trim())
+        scheduleContentSearch(pendingContentQuery)
       }
 
       // Progressive combined projection batches: the first
