@@ -663,10 +663,12 @@ test('a late message for an older step never regresses the final-answer dedup', 
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 6),
   ])
   const activity = folder.turnActivity(0)!
-  // The final (step 1) must be dropped from the slot; the confirmed
-  // intermediate (step 0's authoritative text) shows instead — the late
-  // message must not regress lastAssistantStep and duplicate the final.
-  assert.equal(activity.message?.text, '第一步权威')
+  // The durable row is still updated, but the stale step cannot rewrite the
+  // already-confirmed Focus slot or regress the latest-step fence.
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), [
+    '第一步权威', '最终答案',
+  ])
+  assert.equal(activity.message?.text, '第一步')
 })
 
 test('a late assistant event after turn/end never changes the exact final answer', () => {
@@ -2164,7 +2166,7 @@ function steeredTurn(turn: number, baseSeq: number, startTime: number): SessionE
   ]
 }
 
-test('completed open opaque output remains the exact Assistant final in Focus', () => {
+test('completed open opaque output remains process evidence, not a final Assistant', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [eventAt('turn/start', { turn: 0 }, 1000, 0)])
   folder.applyLiveInput(liveChunk(0, 0, {
@@ -2177,12 +2179,36 @@ test('completed open opaque output remains the exact Assistant final in Focus', 
   assert.equal(assistant.text, '')
   assert.deepEqual(assistant.displayBlocks, [{ kind: 'open-opaque', blockType: 'future-final' }])
   const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
-  assert.deepEqual(blockKinds(collapsed), ['activity', 'assistant'])
+  assert.deepEqual(blockKinds(collapsed), ['activity'], 'pending process evidence is not a collapsed final')
+  const expanded = projectTools(folder.messages(), folder.turnActivities(), new Set([0]))
+  assert.deepEqual(blockKinds(expanded), ['activity', 'assistant'], 'expanded Focus still shows pending process evidence')
+})
+
+test('open opaque after semantic text is still not a completed final', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [eventAt('turn/start', { turn: 0 }, 1000, 0)])
+  folder.applyLiveInput(liveChunk(0, 0, {
+    type: 'text-delta', index: 0, text: 'semantic prefix',
+  }, 1001))
+  folder.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-start', index: 1, blockType: 'future-final',
+  } as never, 1002))
+  applyMixed(folder, [eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1003, 3)])
+
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, 'semantic prefix')
+  assert.deepEqual(assistant.displayBlocks, [
+    { kind: 'content', block: { type: 'text', text: 'semantic prefix' } },
+    { kind: 'open-opaque', blockType: 'future-final' },
+  ])
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['activity'], 'pending open opaque blocks final selection')
   const expanded = projectTools(folder.messages(), folder.turnActivities(), new Set([0]))
   assert.deepEqual(blockKinds(expanded), ['activity', 'assistant'])
 })
 
-test('durable open opaque attempt remains the exact Focus final in both modes', () => {
+test('durable open opaque attempt remains process evidence, not a final', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
@@ -2206,7 +2232,7 @@ test('durable open opaque attempt remains the exact Focus final in both modes', 
   assert.deepEqual(expandedAssistant.message.displayBlocks, [{ kind: 'open-opaque', blockType: 'future-attempt' }])
 })
 
-test('completed Focus chooses the latest open opaque Assistant over an earlier answer', () => {
+test('completed Focus does not fall back to an earlier answer when latest Assistant is open opaque', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
@@ -2222,11 +2248,8 @@ test('completed Focus chooses the latest open opaque Assistant over an earlier a
 
   const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
   const collapsedAssistants = collapsed.flatMap(block => block.kind === 'message' && block.message.kind === 'assistant' ? [block.message] : [])
-  assert.deepEqual(collapsedAssistants.map(message => message.text), ['   '])
-  assert.deepEqual(collapsedAssistants[0]?.displayBlocks, [
-    { kind: 'content', block: { type: 'text', text: '   ' } },
-    { kind: 'open-opaque', blockType: 'future-final' },
-  ])
+  assert.deepEqual(blockKinds(collapsed), ['activity'], 'latest pending Assistant blocks an earlier final but is not itself final')
+  assert.deepEqual(collapsedAssistants, [])
 
   const expanded = projectTools(folder.messages(), folder.turnActivities(), new Set([0]))
   const expandedAssistants = expanded.flatMap(block => block.kind === 'message' && block.message.kind === 'assistant' ? [block.message] : [])

@@ -140,10 +140,26 @@ export type TranscriptMessage =
   }
 
 const assistantPresentationRevisions = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
+const assistantStepIdentities = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
 
 /** Return the mutation revision of an Assistant's live indexed projection. */
 export function assistantPresentationRevision(message: TranscriptMessage): number {
   return message.kind === 'assistant' ? assistantPresentationRevisions.get(message) ?? 0 : 0
+}
+
+/** Return the internal step identity used to protect Focus final ownership. */
+export function assistantStepOf(message: TranscriptMessage): number | undefined {
+  return message.kind === 'assistant' ? assistantStepIdentities.get(message) : undefined
+}
+
+/** Read the private latest-step fence without exposing it on the public
+ * TurnActivity shape. Focus uses this only to select the structural owner. */
+export function assistantLatestStepOf(activity: TurnActivity): number | undefined {
+  return (activity as MutableTurnActivity).lastAssistantStep
+}
+
+function rememberAssistantStep(message: Extract<TranscriptMessage, { kind: 'assistant' }>, step: number): void {
+  assistantStepIdentities.set(message, step)
 }
 
 function bumpAssistantPresentationRevision(message: Extract<TranscriptMessage, { kind: 'assistant' }>): void {
@@ -2616,6 +2632,7 @@ export class TranscriptFolder {
     let entry = this.assistantEntries.get(key)
     if (entry === undefined) {
       entry = { kind: 'assistant', turn, text: '' }
+      rememberAssistantStep(entry, step)
       this.assistantEntries.set(key, entry)
       this.searchIndexByStepKey.set(`assistant:${key}`, this.appendItem(entry))
     }
@@ -2884,19 +2901,17 @@ export class TranscriptFolder {
         const key = stepKey(event.data.turn, event.data.step)
         const priorLast = activity.lastAssistantStep ?? -1
         const entry = this.assistantEntries.get(key)
-        // A replayed older message with no existing row must not be appended
-        // after a newer open presentation; otherwise it can become the
-        // exact-last assistant selected at turn end. Its accounting and
-        // settlement facts still fold below, independently of presentation.
-        const staleWithoutEntry = entry === undefined && event.data.step < priorLast
+        // A durable assistant/message is always a transcript surface fact.
+        // A stale step may not own Focus final selection, but it must remain
+        // available in the ordinary transcript and search projections.
         this.liveAssistantBlocks.delete(key)
         const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
         const text = textOf(messageBlocks)
-        if (!staleWithoutEntry) {
-          const wasVisible = entry !== undefined && this.isVisible(entry)
-          if (entry !== undefined) {
+        const wasVisible = entry !== undefined && this.isVisible(entry)
+        if (entry !== undefined) {
+          rememberAssistantStep(entry, event.data.step)
           entry.text = text
           // The durable message takes over the live/attempt entry: it is no
           // longer transient, so retry cleanup can never remove settled text.
@@ -2913,27 +2928,26 @@ export class TranscriptFolder {
           const searchIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
           if (searchIndex !== undefined) this.markSearchEntryDirty(searchIndex)
         } else {
-          // ALWAYS preserve the entry — an empty settled message with no
-          // preceding chunk (replay edge) must still own the exact-last
-          // assistant slot, so the final selection never falls back to an
-          // earlier answer (review finding).
-          const created: TranscriptMessage = {
+          // ALWAYS preserve the durable entry — including an empty message
+          // and an older step with no preceding chunk. Focus ownership is
+          // fenced separately below; it must never delete a real settlement.
+          const created: Extract<TranscriptMessage, { kind: 'assistant' }> = {
             kind: 'assistant',
             turn: event.data.turn,
             text,
             ...(messageBlocks.some(block => block.type !== 'text') ? { content: messageBlocks } : {}),
             ...(event.data.interrupted === true ? { interrupted: true as const } : {}),
           }
+          rememberAssistantStep(created, event.data.step)
           this.assistantEntries.set(key, created)
           // The created entry must register its search index too: a later
           // replay replacement or text delta mutates this entry in place
           // and must be able to refresh its searchable entry (review
           // finding — the streaming-created path already registers).
           this.searchIndexByStepKey.set(`assistant:${key}`, this.appendItem(created))
-          }
-          const settledEntry = this.assistantEntries.get(key)
-          if (settledEntry !== undefined) this.syncAssistantVisibility(event.data.turn, event.data.step, settledEntry, wasVisible, false)
         }
+        const settledEntry = this.assistantEntries.get(key)
+        if (settledEntry !== undefined) this.syncAssistantVisibility(event.data.turn, event.data.step, settledEntry, wasVisible, false)
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.
         // On a COLD replay no live reasoning deltas ever arrived — the
@@ -2953,61 +2967,59 @@ export class TranscriptFolder {
         // it is a replay artifact and must never resurrect a preview
         // (review finding).
         activity.settledSteps.add(event.data.step)
-        if (!staleWithoutEntry) {
+        const staleForFocus = event.data.step < priorLast
+        if (!staleForFocus) {
           // A message of a DIFFERENT step than the open candidate proves the
           // earlier step's output was intermediate: confirm it first (plan
           // §5.3 C — a later step's output confirms the earlier candidate).
-          if (event.data.step >= priorLast) {
           activity.lastAssistantVisible = event.data.interrupted === true || assistantBlocksVisibleNow(messageBlocks)
-        }
-        const prior = activity.messageCandidate
-        // Only a message for a NEWER step confirms the open candidate
-        // (plan §5.3 C); a message for an older step is stale and must
-        // never confirm a still-streaming candidate (review finding).
-        if (prior !== undefined && prior.step < event.data.step) {
-          this.confirmMessageCandidate(activity)
         }
         // Monotonic: a late event for an older step never regresses the
         // last assistant step — the final-answer dedup depends on it
         // (review finding).
         activity.lastAssistantStep = Math.max(priorLast, event.data.step)
-        const candidate = activity.messageCandidate
-        if (candidate !== undefined && candidate.step === event.data.step) {
-          // The authoritative text replaces the streaming tail — bounded
-          // to the tail cap, never a second full copy of the assistant
-          // output (plan §34 — the transcript entry owns the full text).
-          candidate.tail = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
-        } else if (activity.messageConfirmedStep === event.data.step) {
-          // The step's candidate was already confirmed (a tool/call
-          // followed the text) and it is still the LATEST confirmed: the
-          // authoritative message updates the confirmed text IN PLACE —
-          // never a stale streamed fragment, never a resurrected
-          // candidate (review finding). An EMPTY authoritative text
-          // clears the confirmed text (the slot shows nothing — the stale
-          // streamed fragment must not survive).
-          activity.messageConfirmed = text === ''
-            ? undefined
-            : text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
-        } else if (activity.confirmedSteps.has(event.data.step)) {
-          // A late message for an OLDER confirmed step: the slot already
-          // shows a newer intermediate — ignore it entirely.
-        } else if (event.data.step < priorLast) {
-          // A late message for an older step that was never a candidate:
-          // stale — ignore it entirely (review finding).
-        } else if (text !== '' && !activity.completed) {
-          // A settled message without a prior candidate (replay edge): the
-          // authoritative text IS the step's output — it becomes the
-          // candidate so a later continuation still confirms it as an
-          // intermediate message (the LATEST intermediate wins, plan §5.6).
-          // After turn/end the final was already resolved: a late message
-          // must never resurrect a candidate (review finding).
-          activity.messageCandidate = {
-            step: event.data.step,
-            tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP),
+        if (!staleForFocus) {
+          const prior = activity.messageCandidate
+          // Only a message for a NEWER step confirms the open candidate
+          // (plan §5.3 C); a message for an older step is stale and must
+          // never confirm a still-streaming candidate (review finding).
+          if (prior !== undefined && prior.step < event.data.step) {
+            this.confirmMessageCandidate(activity)
+          }
+          const candidate = activity.messageCandidate
+          if (candidate !== undefined && candidate.step === event.data.step) {
+            // The authoritative text replaces the streaming tail — bounded
+            // to the tail cap, never a second full copy of the assistant
+            // output (plan §34 — the transcript entry owns the full text).
+            candidate.tail = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
+          } else if (activity.messageConfirmedStep === event.data.step) {
+            // The step's candidate was already confirmed (a tool/call
+            // followed the text) and it is still the LATEST confirmed: the
+            // authoritative message updates the confirmed text IN PLACE —
+            // never a stale streamed fragment, never a resurrected
+            // candidate (review finding). An EMPTY authoritative text
+            // clears the confirmed text (the slot shows nothing — the stale
+            // streamed fragment must not survive).
+            activity.messageConfirmed = text === ''
+              ? undefined
+              : text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
+          } else if (activity.confirmedSteps.has(event.data.step)) {
+            // A late message for an OLDER confirmed step: the slot already
+            // shows a newer intermediate — ignore it entirely.
+          } else if (text !== '' && !activity.completed) {
+            // A settled message without a prior candidate (replay edge): the
+            // authoritative text IS the step's output — it becomes the
+            // candidate so a later continuation still confirms it as an
+            // intermediate message (the LATEST intermediate wins, plan §5.6).
+            // After turn/end the final was already resolved: a late message
+            // must never resurrect a candidate (review finding).
+            activity.messageCandidate = {
+              step: event.data.step,
+              tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP),
+            }
           }
         }
-          this.syncMessage(activity)
-        }
+        this.syncMessage(activity)
         this.usage.onAssistantMessage(event.data.turn, event.data.step, messageUsage)
         // Settled Assistant visibility was synchronized above without deleting its authoritative entry.
         this.syncUsage(activity)

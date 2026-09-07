@@ -26,7 +26,7 @@ import { color } from './theme.ts'
 import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import { toolTitle } from './present.ts'
-import { assistantEntryVisibleNow, type TurnActivity, type TranscriptMessage } from './transcript.ts'
+import { assistantBlocksVisibleNow, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
 import { displayFailureText } from './failure-presentation.ts'
 
 /** The max tool-type names the header stats show before the `+N` tail
@@ -473,15 +473,16 @@ export function projectFocus(
   return out
 }
 
-/** The EXACT last assistant message of a turn (by position — an empty or
- * image-only step still owns the final slot; there is NEVER a fallback to
- * an earlier assistant, review fix). */
-function lastAssistant(
+/** Find the Assistant entry that owns the structural latest step. A late
+ * durable message can append after newer process evidence, so physical array
+ * order is not a reliable final-answer identity. */
+function assistantForStep(
   group: readonly TranscriptMessage[],
+  step: number,
 ): Extract<TranscriptMessage, { kind: 'assistant' }> | undefined {
   for (let index = group.length - 1; index >= 0; index -= 1) {
     const member = group[index]
-    if (member?.kind === 'assistant') return member
+    if (member?.kind === 'assistant' && assistantStepOf(member) === step) return member
   }
   return undefined
 }
@@ -501,19 +502,21 @@ function initialPromptBoundary(group: readonly TranscriptMessage[]): number {
   return firstInitialUserIndex < 0 ? 0 : firstInitialUserIndex + 1
 }
 
-/** Whether one assistant message has visible Assistant content. Keep final
- * selection on the same block predicate as the transcript row projection;
- * an empty authoritative entry may remain internal without becoming a final
- * answer, while generic finalized blocks retain their Stage A identity. */
+/** Whether one Assistant entry has semantic/finalized content. Pending
+ * display-only open-opaque rows remain transcript evidence but cannot become a
+ * completed/max-token final; finalized generic blocks stay eligible. */
 function assistantRenderable(assistant: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
-  return assistantEntryVisibleNow(assistant)
+  if (assistant.displayBlocks?.some(block => block.kind === 'open-opaque') === true) return false
+  if (assistant.content !== undefined) return assistantBlocksVisibleNow(assistant.content)
+  return assistant.text.trim() !== ''
 }
 
 /** The turn's final assistant selection: only after the authoritative
  * turn/end, only for a reason the system presents output (completed /
- * max-tokens), and only when the EXACT last assistant renders rows. An
- * empty last step yields NO final — never an earlier assistant (review
- * fix). The max-tokens final carries the truncated marker (plan §13.8). */
+ * max-tokens), and only when the Assistant owning the structural latest step
+ * has semantic/finalized content. An empty or pending latest step yields NO
+ * final — never an earlier assistant (review fix). The max-tokens final carries
+ * the truncated marker (plan §13.8). */
 function finalAssistantSelection(
   activity: TurnActivity | undefined,
   group: readonly TranscriptMessage[],
@@ -523,10 +526,12 @@ function finalAssistantSelection(
   if (reason !== 'completed' && reason !== 'max-tokens') return undefined
   // The exact authoritative assistant may be retained internally but hidden
   // from the normal transcript projection; never fall back to an earlier row.
-  if (activity.lastAssistantVisible === false) return undefined
-  const last = lastAssistant(group)
-  // Interrupted prefixes are process evidence, never a completed/max-token
-  // final answer, even when a malformed log reports a successful reason.
+  const latestStep = assistantLatestStepOf(activity)
+  if (activity.lastAssistantVisible === false || latestStep === undefined) return undefined
+  const last = assistantForStep(group, latestStep)
+  // Interrupted prefixes and display-only pending rows are process evidence,
+  // never a completed/max-token final answer, even when a malformed log reports
+  // a successful reason.
   if (last === undefined || last.interrupted === true || !assistantRenderable(last)) return undefined
   return { message: last, truncated: reason === 'max-tokens' }
 }

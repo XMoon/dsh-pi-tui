@@ -160,7 +160,11 @@ in that worktree before using a profile.
   replace `next`'s newer DSH target/policy with `main`'s released one.
 * Do not modify the real-use `pi-tui` profile during development.
 * `compat:dsh:source` is a full distribution-boundary verification, not a
-  routine test after ordinary TUI changes.
+  routine test after ordinary TUI changes. Run it only when the DSH source or
+  distribution boundary changes (source pin, target metadata, distribution
+  infrastructure, source/npm discrepancy, or an unpublished DSH commit), or
+  when explicitly requested; skip it for TUI-only changes when DSH is
+  unchanged.
 
 Read `docs/local-development.md` before changing DSH mode, worktree/bootstrap
 behavior, or promoting `main`/`next`. Read `docs/dsh-compatibility.md` for
