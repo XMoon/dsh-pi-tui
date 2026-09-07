@@ -644,7 +644,7 @@ test('an empty candidate confirmed after a prior intermediate clears the slot', 
   assert.equal(activity.message, undefined, 'the empty intermediate must clear the slot, never leave the stale earlier preview')
 })
 
-test('a late message for an older step never regresses the final-answer dedup', () => {
+test('a late message for an older step updates its confirmed preview without regressing final ownership', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
@@ -663,12 +663,20 @@ test('a late message for an older step never regresses the final-answer dedup', 
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 6),
   ])
   const activity = folder.turnActivity(0)!
-  // The durable row is still updated, but the stale step cannot rewrite the
-  // already-confirmed Focus slot or regress the latest-step fence.
+  // The durable row is still updated, and the stale step may update the
+  // confirmed Focus preview it already owns, but it cannot regress the
+  // latest-step fence or final ownership.
   assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), [
     '第一步权威', '最终答案',
   ])
-  assert.equal(activity.message?.text, '第一步')
+  assert.equal(activity.message?.text, '第一步权威')
+  assert.equal((activity as { lastAssistantStep?: number }).lastAssistantStep, 1)
+  const projected = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const final = projected.find(block => block.kind === 'message' && block.message.kind === 'assistant')
+  assert.ok(final !== undefined && final.kind === 'message' && final.message.kind === 'assistant')
+  if (final !== undefined && final.kind === 'message' && final.message.kind === 'assistant') {
+    assert.equal(final.message.text, '最终答案')
+  }
 })
 
 test('a late assistant event after turn/end never changes the exact final answer', () => {
