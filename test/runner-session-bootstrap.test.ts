@@ -3142,3 +3142,46 @@ test('exit during the post-commit child quiesce skips surface init and retires t
   assert.ok(events.filter(event => event === `cancel:${created.id}`).length >= 1,
     'the committed child must be cancelled by the abort-aware quiesce')
 })
+
+test('a retirement flush failure warns the user on stderr (durability is not silently lost)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-warn-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-warn-session',
+    header: { id: 'retire-warn-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // The final retirement flush fails (disk full): the user must see a
+  // warning, not a silent clean exit.
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async () => {
+    throw new Error('disk full')
+  }
+  const stderrWrites: string[] = []
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: unknown) => {
+    stderrWrites.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  life.defer(() => { process.stderr.write = originalWrite })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  await fiber.dispose()
+  fiber = undefined
+  assert.ok(stderrWrites.some(write => write.includes('session flush failed during retirement') && write.includes('disk full')),
+    `the user must see the flush-failure warning on stderr: ${JSON.stringify(stderrWrites)}`)
+  assert.ok(stderrWrites.some(write => write.includes('the latest events may not be persisted')),
+    'the warning must state the durability consequence')
+})

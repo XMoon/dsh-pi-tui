@@ -1703,6 +1703,25 @@ export function apply(ctx: Context, config: Config): void {
               error: failure.error,
             })
           }
+          // A retirement failure is USER-VISIBLE, not just a diag line: the
+          // terminal is already restored (the surface teardown ran before
+          // the appExit disposal), so a failed final flush would otherwise
+          // look like a clean exit while the latest events may not be
+          // persisted. The warning is best-effort and never blocks the
+          // bounded shutdown.
+          if (report.failures.length > 0) {
+            const flushFailure = report.failures.find(failure => failure.phase === 'flush')
+            try {
+              if (flushFailure !== undefined) {
+                process.stderr.write(`\n${color.textDim('Warning:')} session flush failed during retirement (${flushFailure.error}) — the latest events may not be persisted\n`)
+              } else {
+                const phases = report.failures.map(failure => failure.phase).join(', ')
+                process.stderr.write(`\n${color.textDim('Warning:')} session retirement failed during ${phases}\n`)
+              }
+            } catch {
+              // A throwing stderr write must not break the retirement.
+            }
+          }
           diag.info('retire complete', { session: agent.session.id, failures: report.failures.length })
           return report
         }
