@@ -36,10 +36,12 @@ function fail(message) {
 }
 
 /** Build the fs-ext native binding in the target workspace when the
- * source-mode install skipped it. Master's pnpm-workspace allowBuilds does
- * not include fs-ext, so a fresh install has no flock addon and the JSONL
- * backend cannot boot (the official preset matrix and the ownership E2E
- * both need the real kernel-flock path). Idempotent: a present binding is
+ * isolated install skipped it (--ignore-scripts). Master's
+ * pnpm-workspace allowBuilds does not include fs-ext, and the alpha.2 npm
+ * family added fs-ext to dsh-session-persistence-jsonl, so a fresh install
+ * has no flock addon and the JSONL backend cannot boot (the official preset
+ * matrix and the ownership E2E both need the real kernel-flock path).
+ * Idempotent: a present binding is
  * left alone. pnpm keeps fs-ext inside its isolated store
  * under node_modules/.pnpm, so the package directory is located by
  * globbing, never by a hoisted top-level path. */
@@ -163,13 +165,16 @@ export async function prepareDshTestEnvironment({
     restoreDshInstall(prepared)
   }
   if (selected.kind === 'source-pack') {
-    // The source-mode install runs with --ignore-scripts, so fs-ext's
-    // node-gyp build never ran; the JSONL backend needs the real flock
-    // addon to boot (official preset matrix, ownership E2E).
-    await ensureFsExtBinding(target)
     const packageJson = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'))
     assertSourceResolution(target, selected, sourceInstallPackages(selected, packageJson))
   }
+  // The isolated install runs with --ignore-scripts, so fs-ext's node-gyp
+  // build never ran; the JSONL backend needs the real flock addon to boot
+  // (official preset matrix, ownership E2E). The alpha.2 npm family added
+  // fs-ext to dsh-session-persistence-jsonl, so this is required in npm
+  // mode too, not only for source packs. Idempotent: a present binding (or
+  // an install without fs-ext) is left alone.
+  await ensureFsExtBinding(target)
   return { distribution: selected, prepared, workspace: target }
 }
 

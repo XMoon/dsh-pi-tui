@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compatibility
+
+- **The `next` line now requires DeepSeek Harness `0.1.3-alpha.2` or later.**
+  The startup notice on an old runtime now gives the exact npm upgrade
+  command (`npm install -g @deepseek-ai/dsh@0.1.3-alpha.2`) instead of
+  referencing an unpublished master source baseline.
+
 ### Fixed
 
 - **Direct sessions are now fully retired on exit.** Exiting the TUI now

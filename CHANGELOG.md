@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+### 兼容性
+
+- **`next` 线要求 DeepSeek Harness `0.1.3-alpha.2` 或更高版本。** 旧 runtime
+  的启动提示现在给出精确的 npm 升级命令
+  （`npm install -g @deepseek-ai/dsh@0.1.3-alpha.2`），不再引用未发布的
+  master source baseline。
+
 ### 修复
 
 - **退出时完整回收 Direct 会话。** 退出 TUI 时,主 Agent、continuable

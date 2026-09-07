@@ -19,8 +19,9 @@ import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
 // with the rest of the bundle (src/dsh-version.ts is used by builtins and
 // the runner), the bundler would fold it into the shared chunk that ALSO
 // carries src/authorization.ts — whose `@deepseek-ai/dsh-authorization`
-// import cannot resolve below the pinned master floor, so the startup row
-// would fail at IMPORT time and the friendly gate below would never run.
+// import cannot resolve below the declared DSH compatibility floor, so the
+// startup row would fail at IMPORT time and the friendly gate below would
+// never run.
 // Keep the gate's own dsh-version parsing and semver comparison INLINE here
 // (same logic as src/dsh-version.ts; guarded by the same tests).
 
@@ -100,8 +101,9 @@ export const inject = ['cmdlineArgs']
  * it is shown as the fallback version label (`>= <since>`) when the
  * bundle's own version cannot be read, so the message stays truthful.
  *
- * This next line is Source Mode only: the pinned DSH master is assembled from
- * the tracked source checkout, not installed from the public npm registry.
+ * This next line targets the published npm release dsh-v0.1.3-alpha.2: the
+ * runtime is installed from the public npm registry, so the recovery guidance
+ * names the exact published upgrade target.
  */
 export interface HarnessCompatEntry {
   /** Inclusive lower bound of the incompatible range; absent = unbounded below. */
@@ -110,7 +112,7 @@ export interface HarnessCompatEntry {
   max?: string
   /** The bundle release line that first required this constraint. */
   since: string
-  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.3-alpha.1 or later`. */
+  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.3-alpha.2 or later`. */
   requires: string
   /** The target DSH version to install when the current runtime is too old. */
   upgradeDsh?: string
@@ -124,10 +126,11 @@ export interface HarnessCompatEntry {
 /** The compatibility table. */
 export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
   {
-    max: '0.1.3-alpha.1',
+    max: '0.1.3-alpha.2',
     since: '0.4.1',
-    requires: 'DeepSeek Harness 0.1.3-alpha.1 pinned master source baseline or later',
-    guidance: 'This next Source Mode build is validated only with the pinned DSH master source distribution; see docs/dsh-compatibility.md.',
+    requires: 'DeepSeek Harness 0.1.3-alpha.2 or later',
+    upgradeDsh: '0.1.3-alpha.2',
+    guidance: 'This next npm build is validated with the published DeepSeek Harness 0.1.3-alpha.2 distribution; see docs/dsh-compatibility.md.',
   },
 ]
 

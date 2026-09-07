@@ -110,6 +110,14 @@ export type TranscriptMessage =
      * `ASK_CANCELLED` / `ASK_ABORTED` for a cancelled question flow). */
     error?: { name: string; code: string }
     /**
+     * Nested PTC sub-dispatch cards only (alpha.2 `tool/code-dispatch`
+     * events): the outer `run_code` call identity and the immediate parent
+     * call identity, preserved from the durable event payload so replay and
+     * future grouping keep the parent/child topology.
+     */
+    rootCallId?: string
+    parentCallId?: string
+    /**
      * Workflow run cards only: the run's member rows, folded into the card
      * (Web WorkflowRunPanel parity) instead of standalone member cards.
      */
@@ -767,6 +775,8 @@ export function windowMessages(messages: readonly TranscriptMessage[], maxTurns:
 /**
  * Merge consecutive completed `read` tool cards into one card ("N files").
  * A single read stays untouched; groups break on any other kind or status.
+ * Nested PTC sub-dispatch cards (parentCallId/rootCallId set) are never
+ * merged: they belong to the outer run_code topology.
  * @param messages - the folded transcript.
  * @returns a new list with grouped read cards (same object references).
  */
@@ -775,7 +785,8 @@ export function groupConsecutiveReads(messages: readonly TranscriptMessage[]): T
   let group: Extract<TranscriptMessage, { kind: 'tool' }> | undefined
   let count = 0
   for (const message of messages) {
-    if (message.kind === 'tool' && message.name === 'read' && message.status === 'ok') {
+    if (message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
+      && message.parentCallId === undefined && message.rootCallId === undefined) {
       if (group !== undefined) {
         count += 1
         group.args = `${count} files`
@@ -870,6 +881,9 @@ export class TranscriptFolder {
   private readonly openThinkingByTurn = new Map<number, Set<Extract<TranscriptMessage, { kind: 'thinking' }>>>()
   /** Tool calls awaiting their result, keyed by callId with their running card. */
   private readonly pendingCalls = new Map<string, { name: string; args: string; turn: number; card: Extract<TranscriptMessage, { kind: 'tool' }>; index: number }>()
+  /** Nested PTC sub-dispatches awaiting their settle, keyed by subCallId
+   * (alpha.2 `tool/code-dispatch-start` → `tool/code-dispatch`). */
+  private readonly pendingSubCalls = new Map<string, { card: Extract<TranscriptMessage, { kind: 'tool' }>; index: number }>()
   /** Tool names by callId, for result pairing. */
   private readonly callNames = new Map<string, string>()
   /** Command names by commandId, from command/run events. */
@@ -1251,9 +1265,13 @@ export class TranscriptFolder {
     return first === undefined ? id : first
   }
 
-  /** Whether an item is groupable as a consecutive read (settled ok). */
+  /** Whether an item is groupable as a consecutive read (settled ok).
+   * Nested PTC sub-dispatch cards (parentCallId/rootCallId set) are NEVER
+   * groupable: they belong to the outer run_code topology and must not be
+   * merged into an ordinary read run. */
   private static groupable(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'tool' }> {
     return message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
+      && message.parentCallId === undefined && message.rootCallId === undefined
   }
 
   /** Build one merged read card without repeatedly concatenating its result. */
@@ -3152,6 +3170,83 @@ export class TranscriptFolder {
         if (!activity.completed && activeTool !== undefined && activeTool.callId === key) {
           activeTool.status = status
           activity.revision += 1
+        }
+        break
+      }
+      // Nested PTC sub-dispatch STARTING inside a run_code program (alpha.2
+      // log-only events; the outer curated result may not carry the nested
+      // output, so the TUI folds each sub-call into its own tool card).
+      // The events carry no turn: attribute the child card to the parent
+      // call's turn (the parent stays in pendingCalls until its tool/result
+      // lands), falling back to the current turn for fragments.
+      case 'tool/code-dispatch-start': {
+        const data = event.data as {
+          rootCallId: string
+          parentCallId: string
+          subCallId: string
+          name: string
+          arguments: unknown
+        }
+        const parent = this.pendingCalls.get(data.parentCallId)
+        const turn = parent?.turn ?? this.currentTurn
+        const card: TranscriptMessage = {
+          kind: 'tool',
+          turn,
+          name: data.name,
+          args: JSON.stringify(data.arguments),
+          result: '',
+          status: 'running',
+          rootCallId: data.rootCallId,
+          parentCallId: data.parentCallId,
+        }
+        this.appendItem(card)
+        this.pendingSubCalls.set(data.subCallId, {
+          card,
+          index: this.items.length - 1,
+        })
+        break
+      }
+      // One nested PTC sub-dispatch SETTLING: pair with the start by
+      // subCallId; the status comes from the durable isError flag (never
+      // invented from spilled/truncated content).
+      case 'tool/code-dispatch': {
+        const data = event.data as {
+          rootCallId: string
+          parentCallId: string
+          subCallId: string
+          name: string
+          arguments: unknown
+          isError: boolean
+          content: readonly ContentBlock[]
+        }
+        const pending = this.pendingSubCalls.get(data.subCallId)
+        const text = textOf(data.content ?? [])
+        const status = data.isError === true ? 'error' : 'ok'
+        if (pending !== undefined) {
+          const card = pending.card
+          card.status = status
+          card.result = text
+          card.resultBlocks = data.content
+          this.pendingSubCalls.delete(data.subCallId)
+          this.markSearchEntryDirty(pending.index)
+        } else {
+          // Orphan settle (a replay fragment without the start): fold a
+          // settled card rather than dropping the nested output. The turn
+          // still derives from the parent call when it is known (never the
+          // stale current turn), and the settle payload's args and
+          // parent/root identity are preserved.
+          const parent = this.pendingCalls.get(data.parentCallId)
+          this.appendItem({
+            kind: 'tool',
+            turn: parent?.turn ?? this.currentTurn,
+            name: data.name,
+            args: JSON.stringify(data.arguments),
+            result: text,
+            status,
+            resultBlocks: data.content,
+            rootCallId: data.rootCallId,
+            parentCallId: data.parentCallId,
+          })
         }
         break
       }

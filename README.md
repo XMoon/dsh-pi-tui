@@ -23,16 +23,21 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
-### Next / Source Mode（仅验证）
+### Next / npm 线（验证）
 
-当前 `next` 线跟踪尚未发布的 DSH master source baseline，不是可从 npm
-直接安装的普通用户渠道。使用隔离的 Source Mode 驱动验证固定 commit：
+当前 `next` 线以已发布的 npm 版本 `dsh-v0.1.3-alpha.2` 为兼容目标。使用
+隔离的 npm 驱动验证（安装 checkout 声明的精确 DSH 版本并跑完整
+build/test/package 路径）：
 
 ```sh
-pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
 ```
 
-不要把 `0.1.3-alpha.1` 写成 npm 安装建议；它来自固定源码 distribution。
+旧 runtime 的启动提示会给出精确的 npm 升级命令：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+```
 
 ### 环境要求
 
@@ -44,17 +49,14 @@ pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
 | TUI 包版本 | 对应 DSH 版本 | 说明 |
 |---|---|---|
 | `0.4.1`（已发布 `@latest`） | `>=0.1.2-rc.1` | 历史稳定版；按 0.1.2-rc.1 family 验证 |
-| 当前 `next` Source Mode（本 checkout；发布版本号仍为 `0.4.1`） | `>=0.1.3-alpha.1` | 固定 DSH master source baseline；仅通过 Source Mode 验证，不是 npm 安装线 |
-| `0.4.0-alpha.2`（已发布） | `>=0.1.2-alpha.4` | 上一条 0.4 预发布线；其发布版本按 alpha.4/alpha.5 family 验证 |
-| `0.4.0-alpha.1`（已发布） | `>=0.1.2-alpha.2` | 更早的 0.4 预发布线；接受 alpha.2/alpha.3 运行时 |
+| 当前 `next` npm 线（本 checkout；发布版本号仍为 `0.4.1`） | `>=0.1.3-alpha.2` | 已发布的 npm alpha.2 目标；按精确 0.1.3-alpha.2 family 验证 |
 | `0.3.x`（`@0.3`） | `0.1.1-rc.2` | 旧运行时兼容线 |
 
-不要把发布线与当前 Source Mode 线混装。已发布的 0.4.1 稳定线仍按
+不要把稳定线与 `next` 线混装。已发布的 0.4.1 稳定线仍按
 0.1.2-rc.1 family 使用；保留旧 DSH 时请使用下方的 0.3 兼容线。当前
-`next` checkout 的 peer floor 是固定的 `0.1.3-alpha.1` master source
-baseline，旧 runtime 会在正常的不兼容边界以非零状态失败。启动行的 Source
-Mode 提示是 best-effort，不是 Loader 启动顺序保证；固定 alpha 来自源码
-distribution，不应改写成 npm 安装命令。
+`next` checkout 的 peer floor 是 `>=0.1.3-alpha.2`，旧 runtime 会在正常的
+不兼容边界以非零状态失败。启动行的兼容提示是 best-effort，不是 Loader
+启动顺序保证；它建议的升级目标是已发布的 npm 版本。
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.1-rc.2
@@ -63,7 +65,7 @@ dsh --profile pi-tui
 ```
 
 已发布的 `0.4.1` 稳定线声明支持范围是 `>=0.1.2-rc.1`；本 checkout 的
-`next` Source Mode 线则声明 `>=0.1.3-alpha.1`。`npm install -g` 仅用于
+`next` npm 线则声明 `>=0.1.3-alpha.2`。`npm install -g` 仅用于
 安装已发布的 DSH；要将 dsh-pi-tui 安装进 DSH profile，必须使用
 `dsh plugin` 命令。
 
@@ -531,17 +533,25 @@ dsh --profile pi-tui-dev
 
 ## DSH 兼容性与验证
 
-以下内容仅介绍 Source Mode 和 CI 验证细节；普通用户无需使用 Source Mode 安装 TUI。
+以下内容仅介绍 DSH 兼容性与 CI 验证细节；普通用户无需了解即可安装 TUI。
 
-### Source Mode（仅验证）
+### npm 模式（当前 `next`）
 
-Source Mode 是 `next` CI 按跟踪策略选用的、并可用于本地兼容性检查的验证专用 distribution。它从 `test/compat/dsh-source.json` 的完整 commit SHA 构建官方 DSH tarball family，通过临时 pnpm overrides 安装，并在完成后清理临时状态。不要把 DSH 源码路径、`file:` 依赖或 workspace symlink 写入发布 package。
-
-已发布 DSH 线仍可使用 registry mode 兼容性验证：
+当前 `next` 线是 npm 模式：以本 checkout 的 `package.json` 声明、冻结
+lockfile 解析的已发布 `dsh-v0.1.3-alpha.2` family 为兼容目标。隔离的 npm
+驱动从公共 registry 安装该精确 family，并跑完整 build/test/package 路径：
 
 ```sh
 pnpm compat:dsh:npm
 ```
+
+### Source Mode（仅验证）
+
+Source Mode 是面向未发布 DSH checkout 的验证专用 distribution，用于本地
+兼容性检查与显式的 source 边界工作。它从 `test/compat/dsh-source.json` 的
+完整 commit SHA 构建官方 DSH tarball family，通过临时 pnpm overrides 安装，
+并在完成后清理临时状态。不要把 DSH 源码路径、`file:` 依赖或 workspace
+symlink 写入发布 package。
 
 安装包已经包含运行所需的 Pi TUI fork，不需要额外安装内部的 TUI package。
 

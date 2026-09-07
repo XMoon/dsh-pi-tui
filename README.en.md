@@ -24,18 +24,21 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
-### Next / Source Mode (validation only)
+### Next / npm line (validation)
 
-The current `next` line tracks an unpublished DSH master source baseline. It is
-not an ordinary npm installation channel. Use the isolated Source Mode driver
-to validate the pinned commit:
+The current `next` line targets the published npm release `dsh-v0.1.3-alpha.2`.
+Use the isolated npm driver (installs the exact DSH version declared by this
+checkout and exercises the full build/test/package path):
 
 ```sh
-pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
 ```
 
-Do not turn `0.1.3-alpha.1` into an npm install command; it comes from the pinned
-source distribution.
+The startup notice on an old runtime suggests the exact npm upgrade:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+```
 
 ### Requirements
 
@@ -47,18 +50,16 @@ source distribution.
 | TUI package line | Matching DSH line | Notes |
 |---|---|---|
 | `0.4.1` (published `@latest`) | `>=0.1.2-rc.1` | Historical stable; validated against the rc.1 family |
-| Current `next` Source Mode (this checkout; release version remains `0.4.1`) | `>=0.1.3-alpha.1` | Pinned DSH master source baseline; validation-only, not an npm installation line |
-| `0.4.0-alpha.2` (published) | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; its releases validated the alpha.4/alpha.5 family |
-| `0.4.0-alpha.1` (published) | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 runtime |
+| Current `next` npm line (this checkout; release version remains `0.4.1`) | `>=0.1.3-alpha.2` | Published npm alpha.2 target; validated against the exact 0.1.3-alpha.2 family |
 | `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
 
-Do not mix the published and Source Mode lines. The published 0.4.1 stable line
+Do not mix the stable and `next` lines. The published 0.4.1 stable line
 still uses the 0.1.2-rc.1 family; if you keep a legacy DSH runtime, use the 0.3
-compatibility line below. This `next` checkout declares the pinned
-`0.1.3-alpha.1` master source baseline, and older runtimes fail at the normal
-incompatible-runtime boundary. The startup row's Source Mode notice is
-best-effort rather than a Loader startup-order guarantee; the pinned alpha comes
-from a source distribution and must not be rewritten as an npm install command.
+compatibility line below. This `next` checkout declares the published
+`0.1.3-alpha.2` npm floor, and older runtimes fail at the normal
+incompatible-runtime boundary. The startup row's compatibility notice is
+best-effort rather than a Loader startup-order guarantee; the suggested upgrade
+target is a published npm version.
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.1-rc.2
@@ -67,7 +68,7 @@ dsh --profile pi-tui
 ```
 
 The published `0.4.1` stable line declares `>=0.1.2-rc.1`; this checkout's
-`next` Source Mode line declares `>=0.1.3-alpha.1`. `npm install -g` is only for
+`next` npm line declares `>=0.1.3-alpha.2`. `npm install -g` is only for
 installing a published DSH; to install dsh-pi-tui into a DSH profile, you must
 use the `dsh plugin` command.
 
@@ -553,17 +554,28 @@ dsh --profile pi-tui-dev
 
 ## DSH compatibility and validation
 
-This section contains Source Mode and CI validation details only; ordinary users do not need Source Mode to install the TUI.
+This section contains DSH compatibility and CI validation details only; ordinary users do not need them to install the TUI.
 
-### Source Mode (validation only)
+### npm mode (current `next`)
 
-Source Mode is the validation-only distribution selected by the tracked policy for `next` CI and available for local compatibility checks. It reads the full commit pin in `test/compat/dsh-source.json`, builds the official DSH tarball family, installs it through temporary pnpm overrides, and removes the temporary state afterward. Do not write DSH source paths, `file:` dependencies, or workspace symlinks into a published package.
-
-Registry-mode compatibility remains available for published DSH lines:
+The current `next` line is npm mode: it targets the published
+`dsh-v0.1.3-alpha.2` family declared by this checkout's `package.json` and
+resolved by its frozen lockfile. The isolated npm driver installs that exact
+family from the public registry and exercises the TUI build/test/package path:
 
 ```sh
 pnpm compat:dsh:npm
 ```
+
+### Source Mode (validation only)
+
+Source Mode is the validation-only distribution for an unpublished DSH
+checkout, available for local compatibility checks and explicit
+source-boundary work. It reads the full commit pin in
+`test/compat/dsh-source.json`, builds the official DSH tarball family, installs
+it through temporary pnpm overrides, and removes the temporary state afterward.
+Do not write DSH source paths, `file:` dependencies, or workspace symlinks into
+a published package.
 
 The published package already contains the Pi TUI fork required at runtime. No separate internal TUI package needs to be installed.
 
