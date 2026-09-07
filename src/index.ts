@@ -2255,13 +2255,14 @@ export function apply(ctx: Context, config: Config): void {
           // out and the new agent must be observed running before it can
           // ever notify.
           completionController.setLiveAgent(liveAgent.id)
-          // A fresh target inherits the surface's explicit choice (/new):
-          // the create options carried it, but the installed ref would
-          // otherwise fall back to the global default while the default
-          // save is still in flight (or after it failed). Record it
-          // durably so the first request and any later resume both see it.
-          // A caller-supplied selection is the source's current state; durable history in
-          // the inherited seed is historical and is compared rather than treated as a veto.
+          // A caller-supplied selection is the desired target state. For /new it is
+          // the explicit default intent; for /fork and /rewind it is the source's
+          // current selection after the inherited historical prefix. Record it durably
+          // so the first request and any later resume both see it.
+          // Durable history in an inherited seed is compared rather than treated as
+          // a veto.
+          // A matching selection does not append a duplicate event;
+          // a differing selection is recorded in the child-owned suffix.
           if (steps.inheritSelection !== undefined) {
             const target = directAgentOf(next) as Agent
             // The shared fold decides whether the target carries VALID
