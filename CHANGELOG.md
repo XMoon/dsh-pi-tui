@@ -17,6 +17,17 @@
   退出三个阶段。会话切换(/new、/fork、rewind、/sessions)提交后也会
   回收旧 owner 的 continuable 后代。
 
+### 新增
+
+- **`/search` 收敛进会话浏览器。** `/sessions`、`/resume` 与 `/search` 现在共用
+  同一个会话浏览器:内容搜索作为本地筛选之上的异步增强,命中片段直接显示在
+  对应会话行上;内容搜索不可用或失败时,本地元数据筛选照常工作,浏览器不会
+  关闭。
+- **会话内容搜索对齐 DSH 官方语义。** Direct 适配器改用
+  `sessionQuery.searchSessions()`(与 DSH master `ApiSessionList.search()`
+  一致:可见性授权、去重、游标翻页、20 条结果窗口),移除了旧的“最新 100 个
+  会话 + filterEvents”私有搜索规则——很早创建的会话中的匹配现在也能被找到。
+
 ## [0.4.1] - 2026-09-04
 
 ### 安装与版本对应

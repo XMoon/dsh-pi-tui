@@ -15,6 +15,7 @@
 
 import { normalize } from 'node:path'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
+import { stripTerminalSequences } from '@xmoon76/pi-tui'
 
 /**
  * Legacy exported window size: how many most-recent sessions the picker's
@@ -30,6 +31,9 @@ export const MAX_PICKER_SESSIONS = 200
 export const PROJECTION_FIRST_BATCH = 20
 /** Batch size for the remaining projection loads after the first batch. */
 export const PROJECTION_BATCH_SIZE = 50
+/** Content-search debounce (dsh-web parity): a filter must stay stable for
+ * this long before the Host content search runs. */
+export const CONTENT_SEARCH_DEBOUNCE_MS = 250
 
 /**
  * Session persistence refuses logs containing a format/event vocabulary this
@@ -48,6 +52,29 @@ export function isUnsupportedSessionFormatError(reason: unknown): boolean {
  * kimicode card's short id. */
 export function shortSessionId(id: string): string {
   return id.replace(/^session[-_]/i, '').slice(0, 8)
+}
+
+/** The official search-query cap in JavaScript UTF-16 code units (master
+ * `ApiSessionList.search()` parity). */
+export const SESSION_SEARCH_QUERY_MAX_CHARS = 500
+
+/**
+ * Sanitize a Client-side search input before it reaches the Host content
+ * search: drop NUL (officially illegal), cap at 500 UTF-16 code units, and
+ * never split a surrogate pair at the cut. The Direct adapter still does
+ * its own authoritative validation — this only avoids sending inputs the
+ * official contract rejects outright, keeping the Web UX.
+ */
+export function sanitizeSessionSearchInput(value: string): string {
+  const withoutNul = value.replace(/\0/g, '')
+  if (withoutNul.length <= SESSION_SEARCH_QUERY_MAX_CHARS) return withoutNul
+  const truncated = withoutNul.slice(0, SESSION_SEARCH_QUERY_MAX_CHARS)
+  const last = truncated.charCodeAt(SESSION_SEARCH_QUERY_MAX_CHARS - 1)
+  // A lone high surrogate at the cut is the first half of a pair — drop it
+  // so the remaining text is well-formed.
+  return last >= 0xD800 && last <= 0xDBFF
+    ? truncated.slice(0, SESSION_SEARCH_QUERY_MAX_CHARS - 1)
+    : truncated
 }
 
 /** kimicode-style workspace key: the last two path segments, or a placeholder. */
@@ -118,11 +145,41 @@ export interface SessionPickerItem {
   group: string
 }
 
+/** One content-search hit merged onto an already-listed picker row (the
+ * Host page's bounded snippet; the row identity always comes from the
+ * list, never from the search page). */
+export interface SessionContentHit {
+  /** Host-selected bounded plain-text excerpt. */
+  readonly snippet: string
+  /** The raw filter text at merge time. The Host search canonicalizes
+   * (trims) the query, so a whitespace-padded filter or a truncated
+   * snippet may not appear in the snippet — the row presentation appends
+   * this text so the local filter still surfaces the content-only hit. */
+  readonly matchText?: string
+}
+
+/** Strip terminal control characters from untrusted text before it enters
+ * the picker presentation. Complete ANSI/OSC/APC sequences are removed
+ * first (the fork's parser), then every remaining C0 control (including a
+ * lone ESC), DEL, and C1 control (U+0080–U+009F — CSI/OSC/APC in 8-bit
+ * form) is dropped: the picker writes descriptions straight to the
+ * terminal, and a terminal decoding UTF-8 interprets C1 code points as
+ * control sequences, not text. Host snippets may carry persisted control
+ * bytes (message/tool output) — a raw ESC/OSC would be interpreted, not
+ * displayed. */
+export function sanitizeTerminalText(value: string): string {
+  // eslint-disable-next-line no-control-regex -- the C0/C1 classes are the point
+  return stripTerminalSequences(value).replace(/[\u0000-\u001f\u007f-\u009f]/gu, '')
+}
+
 /** Assemble one session row for the picker, marking the current session.
  * @param indent - tree depth for the "All" category: rows hang under their
  *   parent with a `└─` prefix so subagent lineage reads at a glance.
+ * @param contentHit - optional Host content-search hit for this row: the
+ *   snippet joins the description so the local filter (which matches
+ *   descriptions) surfaces content-only hits.
  */
-export function sessionPickerItem(row: SessionPickerRow, currentId: string, indent = 0): SessionPickerItem {
+export function sessionPickerItem(row: SessionPickerRow, currentId: string, indent = 0, contentHit?: SessionContentHit): SessionPickerItem {
   const marker = row.id === currentId ? '● ' : ''
   const treePrefix = indent <= 0 ? '' : `${'  '.repeat(indent)}└─ `
   const meta: string[] = [shortSessionId(row.id), formatSessionAge(row.createdAt)]
@@ -130,6 +187,21 @@ export function sessionPickerItem(row: SessionPickerRow, currentId: string, inde
   if (row.parentSession !== undefined) meta.push('fork')
   if (row.preset !== undefined) meta.push(`preset:${row.preset}`)
   if (row.live) meta.push('live')
+  if (contentHit !== undefined) {
+    const snippet = sanitizeTerminalText(contentHit.snippet)
+    meta.push(`…${snippet}…`)
+    // The local filter matches the raw (untrimmed) filter text, while the
+    // Host search canonicalizes and caps it — append the BOUNDED raw
+    // filter when the snippet does not already carry it, so a
+    // whitespace-padded filter or a truncated snippet still surfaces the
+    // content-only hit, and an over-long filter can never pseudo-match
+    // through text that was never searched (the merge bounds it too; this
+    // is the presentation-boundary guarantee for any caller).
+    const matchText = sanitizeSessionSearchInput(contentHit.matchText ?? '')
+    if (matchText !== '' && !snippet.includes(matchText)) {
+      meta.push(sanitizeTerminalText(matchText))
+    }
+  }
   return {
     value: row.id,
     label: `${treePrefix}${marker}${row.title ?? shortSessionId(row.id)}`,
