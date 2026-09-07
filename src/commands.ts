@@ -426,9 +426,9 @@ export interface TuiCommandRunner {
   transitionTo<T>(steps: {
     /** The child's PRE-GENERATED session identity (MANDATORY). */
     target: { id: string; header?: { cwd?: string } }
-    /** An explicit model choice the fresh target must inherit: recorded
-     * durably on the created Agent so its first request never falls back
-     * to a stale global default (the /new seeding path). */
+    /** An explicit model selection the target must observe after creation.
+     * For /new this seeds an explicit default intent; for /fork and /rewind
+     * it preserves the source selection after the inherited historical prefix. */
     inheritSelection?: ModelSelection
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
