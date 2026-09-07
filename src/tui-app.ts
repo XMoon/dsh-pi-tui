@@ -1510,6 +1510,11 @@ export interface PickerCategory {
   header: string
   /** Rows for this category, rebuilt on every activation. */
   items: () => readonly PickerItem[]
+  /** Whether Tab cycles through this category (default true). A
+   * non-cyclable category (e.g. the Session Browser's search projection)
+   * is entered ONLY programmatically: Tab skips it in browse mode, and
+   * never leaves it while the search query is non-empty. */
+  cyclable?: boolean
 }
 
 /** Host-internal live state of the open categorized picker (Tab cycling). */
@@ -1633,6 +1638,9 @@ export interface PickerHandle {
   /** Categorized pickers only: switch to a category by id (re-running its
    * items factory). No-op on a plain picker. */
   setCategory?(id: string): void
+  /** Categorized pickers only: the ACTIVE category id (the caller tracks
+   * browse state across a programmatic category switch). */
+  getCategory?(): string
   /** The live search filter (the query the user sees/edits). */
   getFilter?(): string
   /** Set the live search filter programmatically (applies to the current
@@ -11447,7 +11455,14 @@ export class TuiApp {
       cycle: () => {
         // Carry the CURRENT search query into the rebuilt category.
         query = list?.getFilter() ?? query
-        currentIndex = (currentIndex + 1) % categories.length
+        // A non-cyclable category (the search projection) is entered only
+        // programmatically: Tab never leaves it while a query is active
+        // (the browse tabs must not wrap global search results), and the
+        // cycle skips it in browse mode.
+        if (categories[currentIndex]!.cyclable === false && query.trim() !== '') return
+        let next = (currentIndex + 1) % categories.length
+        while (next !== currentIndex && categories[next]!.cyclable === false) next = (next + 1) % categories.length
+        currentIndex = next
         state.index = currentIndex
         activate()
       },
@@ -11554,6 +11569,7 @@ export class TuiApp {
         state.index = index
         activate()
       },
+      getCategory: () => categories[currentIndex]!.id,
       getFilter: () => list?.getFilter() ?? '',
       setFilter: (filter) => {
         if (list === undefined) return

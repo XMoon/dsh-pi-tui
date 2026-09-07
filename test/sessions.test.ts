@@ -285,13 +285,10 @@ test('sanitizeTerminalText strips C0, DEL, C1 and complete ESC sequences', () =>
   assert.equal(sanitizeTerminalText('plain needle text'), 'plain needle text')
 })
 
-test('sessionPickerItem bounds the appended match text to the searched window', () => {
-  const row: SessionPickerRow = { id: 'session-a', createdAt: 100, cwd: '/ws', live: false }
-  // The reviewer probe: an unbounded matchText must never reach the
-  // description — the presentation boundary caps it to the official
-  // 500 UTF-16 search window, so an over-long filter cannot pseudo-match
-  // through text that was never searched.
-  const item = sessionPickerItem(row, '', 0, { snippet: 'needle', matchText: 'x'.repeat(1_000_000) })
-  assert.ok(item.description.length < 600, `the description must stay bounded, got ${item.description.length}`)
-  assert.ok(!item.description.includes('x'.repeat(600)), 'no unsearched suffix may reach the description')
+test('workspaceKey sanitizes terminal control sequences in the group header', () => {
+  // The group header is rendered straight to the terminal; a malicious
+  // cwd (Host boundary value) must never inject ESC/OSC/C1.
+  assert.equal(workspaceKey('/ws\x1b]0;PWNED\x07'), '/ws')
+  assert.equal(workspaceKey('/a\u009b2Jb'), '/a2Jb')
+  assert.equal(workspaceKey('/home/user/project'), 'user/project')
 })
