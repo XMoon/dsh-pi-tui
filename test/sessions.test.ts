@@ -14,12 +14,12 @@ import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import {
 
-
   MAX_PICKER_SESSIONS,
   findSessionMatch,
   formatSessionAge,
   headerToPickerRow,
   sameWorkspace,
+  sanitizeTerminalText,
   sessionPickerItem,
   shortSessionId,
   workspaceKey,
@@ -270,3 +270,28 @@ test('findSessionMatch resolves full ids, session- prefixes, and short ids', () 
   assert.equal(findSessionMatch(rows, 'nope'), undefined)
 })
 
+
+test('sanitizeTerminalText strips C0, DEL, C1 and complete ESC sequences', () => {
+  // C0: ESC + OSC payload + BEL → the whole sequence is removed by the
+  // fork parser; a lone ESC and other C0 controls are dropped.
+  assert.equal(sanitizeTerminalText('\x1b]0;PWNED\x07needle'), 'needle')
+  assert.equal(sanitizeTerminalText('a\x1bb'), 'ab')
+  assert.equal(sanitizeTerminalText('a\x00b\x7fc'), 'abc')
+  // C1: U+009B (CSI) and U+009D (OSC) in 8-bit form are controls to a
+  // UTF-8 terminal — they must never reach the picker description.
+  assert.equal(sanitizeTerminalText('a\u009b2Jb'), 'a2Jb')
+  assert.equal(sanitizeTerminalText('a\u009d0;PWNED\u0007b'), 'a0;PWNEDb')
+  // Visible text survives untouched.
+  assert.equal(sanitizeTerminalText('plain needle text'), 'plain needle text')
+})
+
+test('sessionPickerItem bounds the appended match text to the searched window', () => {
+  const row: SessionPickerRow = { id: 'session-a', createdAt: 100, cwd: '/ws', live: false }
+  // The reviewer probe: an unbounded matchText must never reach the
+  // description — the presentation boundary caps it to the official
+  // 500 UTF-16 search window, so an over-long filter cannot pseudo-match
+  // through text that was never searched.
+  const item = sessionPickerItem(row, '', 0, { snippet: 'needle', matchText: 'x'.repeat(1_000_000) })
+  assert.ok(item.description.length < 600, `the description must stay bounded, got ${item.description.length}`)
+  assert.ok(!item.description.includes('x'.repeat(600)), 'no unsearched suffix may reach the description')
+})

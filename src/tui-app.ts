@@ -1542,6 +1542,15 @@ export interface PickerOptions {
   showHint?: boolean
   /** Phase 4: abort the picker (closes it and fires onCancel). */
   signal?: AbortSignal
+  /**
+   * Called whenever the live search filter changes — typed edits AND
+   * programmatic `setFilter` — with the new query value. Not called when
+   * the query value is unchanged, and never after the picker closed. A
+   * pure Client/TUI capability: the caller (e.g. the Session Browser's
+   * debounced content search) observes the filter without touching the
+   * vendored SelectList.
+   */
+  onFilterChange?: (query: string) => void
   /** Optional category tabs: Tab cycles them while the picker is open. The
    * picker opens on `categories[0]`; the caller's `items` argument is only
    * the initial rows (the first category's factory wins on activation). */
@@ -11282,9 +11291,15 @@ export class TuiApp {
       list.onSelectionChange = () => marquee.reset()
     }
     // The marquee wraps the list in the filter adapter (search edits must
-    // restart the cycle even without a selection move — review P2); with
-    // no marquee the list mounts directly, exactly as before.
-    const mounted = marquee === undefined ? list : new MarqueeFilterAdapter(list, () => marquee.reset())
+    // restart the cycle even without a selection move — review P2); the
+    // adapter also reports typed filter changes to the caller's
+    // `onFilterChange` (the Session Browser's debounced content search).
+    // With no marquee the adapter still mounts: the filter-change report
+    // is a picker-wide capability, not a marquee side effect.
+    const mounted = new MarqueeFilterAdapter(list, () => {
+      marquee?.reset()
+      options.onFilterChange?.(list.getFilter())
+    })
     const configuredWidth = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width!)) : 64
     const configuredMaxHeight = Number.isFinite(options.maxHeight) ? Math.max(1, Math.floor(options.maxHeight!)) : 24
     const geometryOf = (): ResponsiveOverlayGeometry => {
@@ -11308,8 +11323,15 @@ export class TuiApp {
         onAbort = undefined
       }
     }
+    // A closed picker never reports filter changes (a late programmatic
+    // setFilter on the handle must not wake a dead picker's caller). Set
+    // BEFORE the abort handling: a pre-aborted signal closes the picker
+    // synchronously, and the returned handle must already be inert.
+    let closed = false
+    const markClosed = (): void => { closed = true }
     if (options.signal !== undefined) {
       onAbort = (): void => {
+        markClosed()
         handle.hide()
         onCancel()
       }
@@ -11324,12 +11346,14 @@ export class TuiApp {
       removeAbortListener()
       marquee?.dispose()
       handle.hide()
+      markClosed()
       onSelect(item.value)
     }
     list.onCancel = () => {
       removeAbortListener()
       marquee?.dispose()
       handle.hide()
+      markClosed()
       onCancel()
     }
     return {
@@ -11337,6 +11361,7 @@ export class TuiApp {
         removeAbortListener()
         marquee?.dispose()
         handle.hide()
+        markClosed()
       },
       setItems: (next) => {
         list.setItems(next.map(item => ({ ...item })))
@@ -11344,8 +11369,16 @@ export class TuiApp {
       },
       getFilter: () => list.getFilter(),
       setFilter: (filter) => {
+        const before = list.getFilter()
         list.setFilter(filter)
         this.requestRender()
+        // Programmatic filters report exactly like typed ones (same value
+        // → no callback; closed OR disposed picker → no callback — the
+        // app's final dispose hides overlays without the handle's close
+        // path, so the disposal fence is checked explicitly).
+        if (!closed && !this.disposed && list.getFilter() !== before) {
+          options.onFilterChange?.(list.getFilter())
+        }
       },
       _removeAbortListener: removeAbortListener,
     }
@@ -11394,11 +11427,15 @@ export class TuiApp {
     // The live search query, carried across category switches (the rebuilt
     // SelectList re-applies it via initialQuery).
     let query = ''
+    // A closed picker never reports filter changes (a late programmatic
+    // setFilter on the handle must not wake a dead picker's caller).
+    let closed = false
     let onAbort: (() => void) | undefined
     const state: CategorizedPickerState = {
       categories,
       index: 0,
       close: () => {
+        closed = true
         if (this.activeCategorizedPicker === state) this.activeCategorizedPicker = undefined
         if (onAbort !== undefined && options.signal !== undefined) {
           options.signal.removeEventListener('abort', onAbort)
@@ -11449,8 +11486,13 @@ export class TuiApp {
       overlay?.hide()
       list = next
       // Search edits inside a category must restart the marquee too (the
-      // vendored SelectList fires no selection change for query edits).
-      const mounted = marquee === undefined ? next : new MarqueeFilterAdapter(next, () => marquee.reset())
+      // vendored SelectList fires no selection change for query edits); the
+      // adapter also reports typed filter changes to the caller's
+      // `onFilterChange` (the Session Browser's debounced content search).
+      const mounted = new MarqueeFilterAdapter(next, () => {
+        marquee?.reset()
+        options.onFilterChange?.(next.getFilter())
+      })
       const configuredWidth = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width!)) : 64
       const configuredMaxHeight = Number.isFinite(options.maxHeight) ? Math.max(1, Math.floor(options.maxHeight!)) : 24
       const geometryOf = (): ResponsiveOverlayGeometry => {
@@ -11517,9 +11559,18 @@ export class TuiApp {
         if (list === undefined) return
         // The internal `query` mirrors the edit so a later category switch
         // carries the PROGRAMMATIC filter exactly like a typed one.
+        const before = list.getFilter()
         query = filter
         list.setFilter(filter)
         this.requestRender()
+        // Programmatic filters report exactly like typed ones (same value
+        // → no callback; closed OR disposed picker → no callback — the
+        // app's final dispose hides overlays without the state close path,
+        // so the disposal fence is checked explicitly, mirroring the plain
+        // picker).
+        if (!closed && !this.disposed && list.getFilter() !== before) {
+          options.onFilterChange?.(list.getFilter())
+        }
       },
       _removeAbortListener: () => {
         if (onAbort !== undefined && options.signal !== undefined) {

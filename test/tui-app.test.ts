@@ -2749,3 +2749,132 @@ test('applyPluginPalette records the live plugin-theme selection (the unload-fal
   assert.equal(app.activePluginTheme(), undefined)
   app.stop()
 })
+
+test('picker onFilterChange reports typed filter edits with the new query', async () => {
+  const { vt, app } = startApp()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    { enableSearch: true, onFilterChange: (query) => changes.push(query) },
+  )
+  await vt.waitForRender()
+  vt.sendInput('fo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['fo'], 'a typed edit must report the new filter value')
+  handle.close()
+})
+
+test('picker onFilterChange reports programmatic setFilter like a typed edit', async () => {
+  const { vt, app } = startApp()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    { enableSearch: true, onFilterChange: (query) => changes.push(query) },
+  )
+  await vt.waitForRender()
+  handle.setFilter?.('foo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'])
+  // The same value again must NOT repeat the callback.
+  handle.setFilter?.('foo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'], 'an unchanged filter must not re-report')
+  // Clearing reports the empty query.
+  handle.setFilter?.('')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo', ''], 'clearing the filter must report the empty query')
+  handle.close()
+})
+
+test('picker onFilterChange never fires after the picker closed', async () => {
+  const { vt, app } = startApp()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    { enableSearch: true, onFilterChange: (query) => changes.push(query) },
+  )
+  await vt.waitForRender()
+  handle.setFilter?.('foo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'])
+  handle.close()
+  handle.setFilter?.('bar')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'], 'a closed picker must not report filter changes')
+})
+
+test('categorized picker onFilterChange reports typed and programmatic edits', async () => {
+  const { vt, app } = startApp()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    {
+      enableSearch: true,
+      onFilterChange: (query) => changes.push(query),
+      categories: [
+        { id: 'one', label: 'One', header: 'one', items: () => [{ value: 'a', label: 'alpha', description: '', group: '' }] },
+        { id: 'two', label: 'Two', header: 'two', items: () => [{ value: 'b', label: 'beta', description: '', group: '' }] },
+      ],
+    },
+  )
+  await vt.waitForRender()
+  vt.sendInput('be')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['be'], 'a typed edit must report on a categorized picker')
+  handle.setFilter?.('al')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['be', 'al'], 'a programmatic edit must report on a categorized picker')
+  handle.close()
+})
+
+test('picker onFilterChange never fires after a pre-aborted signal', async () => {
+  const { vt, app } = startApp()
+  const controller = new AbortController()
+  controller.abort()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    { enableSearch: true, signal: controller.signal, onFilterChange: (query) => changes.push(query) },
+  )
+  await vt.waitForRender()
+  handle.setFilter?.('foo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, [], 'a pre-aborted picker must never report filter changes')
+})
+
+test('categorized picker onFilterChange never fires after the app is disposed', async () => {
+  const { vt, app } = startApp()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    {
+      enableSearch: true,
+      onFilterChange: (query) => changes.push(query),
+      categories: [
+        { id: 'one', label: 'One', header: 'one', items: () => [{ value: 'a', label: 'alpha', description: '', group: '' }] },
+      ],
+    },
+  )
+  await vt.waitForRender()
+  handle.setFilter?.('foo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'])
+  // The app's final dispose hides overlays WITHOUT the handle's close
+  // path — the disposal fence must still silence the callback.
+  app.dispose()
+  handle.setFilter?.('bar')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'], 'a disposed app must not report filter changes')
+})

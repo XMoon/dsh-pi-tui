@@ -6,6 +6,11 @@
  * closure shrinks. Every command reads the live runner state through the
  * {@link TuiCommandRunner} interface, whose accessors re-read the current
  * agent/settings on every access (sessions can swap the live agent).
+ *
+ * /sessions, /resume and /search share ONE Session Browser lifecycle
+ * (`openSessionPicker`): the picker is input-first, the listing is shared,
+ * and Host content search is a debounced async augmentation of the local
+ * metadata filter (plan: temp/20260907/dsh-pi-tui-search-sessions-direct-boundary-plan.md).
  * @module @xmoon76/dsh-pi-tui/commands
  */
 
@@ -68,13 +73,17 @@ import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { renderTranscriptMarkdown, textOf } from './transcript.ts'
 import {
+  CONTENT_SEARCH_DEBOUNCE_MS,
   PROJECTION_BATCH_SIZE,
   PROJECTION_FIRST_BATCH,
   buildSessionTree,
   findSessionMatch,
   sameWorkspace,
+  sanitizeSessionSearchInput,
+  sanitizeTerminalText,
   sessionLabelParts,
   sessionPickerItem,
+  type SessionContentHit,
   type SessionPickerItem,
   type SessionPickerRow,
 } from './sessions.ts'
@@ -2227,34 +2236,58 @@ export function registerTuiCommands(
     },
   })
 
-  // Shared /sessions + /resume body — input-first (the official /resume
-  // fix): the picker overlay opens IMMEDIATELY on a loading placeholder and
-  // owns the input (Esc, arrows, search) while the Host listing and the
-  // combined projection enrichment land in the background. The header
-  // parameter lets the resume alias present itself under its own name.
+  // Shared /sessions + /resume + /search body — input-first (the official
+  // /resume fix): the picker overlay opens IMMEDIATELY on a loading
+  // placeholder and owns the input (Esc, arrows, search) while the Host
+  // listing and the combined projection enrichment land in the background.
+  // The header option lets each entry present itself under its own name.
   /** Generation/staleness fence for the open picker load: a superseding
    * open bumps the generation and aborts the previous scan, and any late
    * settlement from a closed/superseded picker is dropped. */
   let sessionPickerGeneration = 0
   let activeSessionPickerScan: AbortController | undefined
-  const openSessionPicker = async (
-    invocation: { rawInput: string },
-    header: string,
+  /** The debounced content-search timer/controller shared across picker
+   * opens: a superseding open cancels the previous picker's pending or
+   * in-flight content search exactly like its scan. */
+  let activeContentSearchTimer: ReturnType<typeof setTimeout> | undefined
+  let activeContentSearch: AbortController | undefined
+
+  /** The narrow open options the three Session Browser entries really need
+   * (plan §8.2) — not a controller/framework abstraction. */
+  interface SessionPickerOpenOptions {
+    readonly header: 'sessions' | 'resume' | 'search'
     /** `/resume <arg>`: after the ONE shared listing lands, resolve the
      * argument as a direct id/prefix match — a unique match closes the
      * picker and switches; no match falls through to the filtered picker
      * (the argument stays as the live search query). */
-    directMatchQuery?: string,
+    readonly directMatchQuery?: string
+    /** `/search` only: the query is required — an empty argument is
+     * rejected BEFORE the overlay opens. */
+    readonly requireQuery?: boolean
+  }
+  const openSessionPicker = async (
+    invocation: { rawInput: string },
+    options: SessionPickerOpenOptions,
   ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
+    if (options.requireQuery === true && invocation.rawInput.trim() === '') {
+      return { kind: 'error', text: 'search needs a query' }
+    }
     // The current marker is the live session's id; before the first session
     // (deferred start) no row is marked current, and the picker can still
     // browse and switch to a persisted session without creating one.
     const currentId = runner.liveAgent?.session.id
     // A NEW picker open supersedes the previous one outright: bump the
-    // generation, cancel its scan, and take over as the active load.
+    // generation, cancel its scan AND its content search, and take over
+    // as the active load.
     sessionPickerGeneration += 1
     const generation = sessionPickerGeneration
     activeSessionPickerScan?.abort()
+    if (activeContentSearchTimer !== undefined) {
+      clearTimeout(activeContentSearchTimer)
+      activeContentSearchTimer = undefined
+    }
+    activeContentSearch?.abort()
+    activeContentSearch = undefined
     const controller = new AbortController()
     activeSessionPickerScan = controller
     const scanSignal = AbortSignal.any([signal, controller.signal])
@@ -2273,12 +2306,19 @@ export function registerTuiCommands(
     // the old code capped the rows themselves at MAX_PICKER_SESSIONS).
     const titlesById = new Map<string, string>()
     const presetsById = new Map<string, string>()
+    // Content-search enrichment (plan §10.2): Host hits merge onto
+    // already-listed rows — the list stays the row authority, the search
+    // page only adds snippets. Cleared per query; the unavailable notice
+    // fires at most once per picker lifecycle.
+    const contentHitsById = new Map<string, SessionContentHit>()
+    let contentHasMore = false
+    let contentSearchNoticeShown = false
     const itemFor = (row: SessionPickerRow, indent = 0): SessionPickerItem =>
       sessionPickerItem({
         ...row,
         title: titlesById.get(row.id),
         preset: presetsById.get(row.id) ?? row.preset,
-      }, runner.liveAgent?.session.id ?? '', indent)
+      }, runner.liveAgent?.session.id ?? '', indent, contentHitsById.get(row.id))
     // Category tabs (Tab cycles while the picker is open): the session
     // picker is a HUMAN surface, so subagent children never appear in
     // either scope — /tasks and the subagent viewer own that surface now
@@ -2297,7 +2337,7 @@ export function registerTuiCommands(
     // fails (the overlay is already open — an in-picker refusal beats a
     // dead loading frame; Esc still closes it).
     let statusRow = loadingItem
-    const categories = sessionPickerCategories(rows, runner.sessionCwd(), header, itemFor, () => statusRow)
+    const categories = sessionPickerCategories(rows, runner.sessionCwd(), options.header, itemFor, () => statusRow)
     /** The `/resume <arg>` outcome of the ONE shared listing, resolved by
      * the detached load task — the overlay stays interactive the whole
      * time, and the awaiting handler keeps the OLD synchronous semantics
@@ -2308,7 +2348,7 @@ export function registerTuiCommands(
       | { kind: 'refused'; text: string }
       | { kind: 'cancelled' }
     let settleListing: ((outcome: ListingOutcome) => void) | undefined
-    const listing = directMatchQuery === undefined
+    const listing = options.directMatchQuery === undefined
       ? undefined
       : new Promise<ListingOutcome>(resolve => { settleListing = resolve })
     /** Idempotent outcome settle — later calls are no-ops (the abort
@@ -2323,19 +2363,102 @@ export function registerTuiCommands(
       // overwrite it.
       controller.signal.addEventListener('abort', () => settleOnce({ kind: 'cancelled' }), { once: true })
     }
+    // Content-search lifecycle (plan §9): local metadata filtering is
+    // immediate; Host content search is a 250ms-debounced async
+    // augmentation that must never block keyboard input. The query is only
+    // recorded until the list baseline lands; clearing the filter drops the
+    // content enrichment; close/supersede/quit cancels everything.
+    let listLanded = false
+    let pendingContentQuery = ''
+    /** Run one Host content search for a settled non-empty query. */
+    const runContentSearch = (query: string): void => {
+      if (stale()) return
+      const controller = new AbortController()
+      activeContentSearch = controller
+      const searchSignal = AbortSignal.any([scanSignal, controller.signal])
+      detach('session content search', async () => {
+        try {
+          const page = await runner.sessionReader.search(sanitizeSessionSearchInput(query), searchSignal)
+          if (stale() || controller.signal.aborted) return
+          if (page === undefined) {
+            // Capability unavailable/disabled (e.g. the default
+            // `openAt: never` FTS policy): the picker stays open with its
+            // local metadata filtering; notice once per picker lifecycle.
+            if (!contentSearchNoticeShown) {
+              contentSearchNoticeShown = true
+              app.notify('content search unavailable', 'info')
+            }
+            return
+          }
+          // Merge (plan §10.2): only already-listed MAIN rows accept hits —
+          // the search page never creates rows, and subagent children stay
+          // out of the human Session Browser. The local filter then
+          // surfaces content-only hits through the snippet in the
+          // description.
+          contentHitsById.clear()
+          contentHasMore = page.hasMore
+          const knownIds = new Set(rows.filter(row => row.origin !== 'subagent').map(row => row.id))
+          for (const item of page.items) {
+            if (knownIds.has(item.sessionId)) {
+              // The raw filter travels with the hit, BOUNDED to the same
+              // sanitized window the Host actually searched: the Host
+              // canonicalizes (trims) and caps the query, so a
+              // whitespace-padded filter or a truncated snippet may not
+              // appear in the snippet — the row presentation appends this
+              // text so the local filter still surfaces the content-only
+              // hit, while an over-long filter can never pseudo-match
+              // through text that was never searched.
+              contentHitsById.set(item.sessionId, { snippet: item.snippet, matchText: sanitizeSessionSearchInput(pendingContentQuery) })
+            }
+          }
+          picker.refresh?.()
+          if (contentHasMore) app.notify('More content matches exist — refine the search.', 'info')
+        } catch (error) {
+          if (stale() || controller.signal.aborted) return
+          // Non-fatal: local rows stay and the picker stays open. The
+          // error text is a Host/provider boundary value — sanitize it
+          // before the notify writes it to the terminal (a raw ESC/OSC in
+          // an error message must never inject terminal sequences). The
+          // rethrow records the real diagnostic through runDetached.
+          app.notify(`session content search failed: ${sanitizeTerminalText(safeErrorMessage(error))}`, 'error')
+          throw error
+        }
+      })
+    }
+    /** Debounce a non-empty query: 250ms of stability before the Host
+     * content search runs (dsh-web parity). */
+    const scheduleContentSearch = (query: string): void => {
+      if (activeContentSearchTimer !== undefined) clearTimeout(activeContentSearchTimer)
+      activeContentSearchTimer = setTimeout(() => {
+        activeContentSearchTimer = undefined
+        runContentSearch(query)
+      }, CONTENT_SEARCH_DEBOUNCE_MS)
+    }
+    /** Cancel the pending debounce and any in-flight content search. */
+    const cancelContentSearch = (): void => {
+      if (activeContentSearchTimer !== undefined) {
+        clearTimeout(activeContentSearchTimer)
+        activeContentSearchTimer = undefined
+      }
+      activeContentSearch?.abort()
+      activeContentSearch = undefined
+    }
     const picker = app.openPicker(
       categories[0]!.items(),
       (id) => {
-        // Any close — including the loading row's Enter — ends the scan:
-        // the picker is gone, so late enrichment may not touch the UI.
+        // Any close — including the loading row's Enter — ends the scan
+        // and the content search: the picker is gone, so late enrichment
+        // may not touch the UI.
         if (id !== '' && id !== currentId) settleOnce({ kind: 'switched' })
         controller.abort()
+        cancelContentSearch()
         // Enter on the loading placeholder (value '') must never resume.
         if (id === '' || id === currentId) return
         switchSession(id)
       },
       () => {
         controller.abort()
+        cancelContentSearch()
       },
       {
         enableSearch: true,
@@ -2357,6 +2480,28 @@ export function registerTuiCommands(
         // The selected session's long title marquees; the lineage tree
         // connector and the `●` current marker stay fixed (plan §7.6/§7.7).
         marquee: { labelPartsOf: sessionLabelParts },
+        // The Session Browser's content-search hook: every filter change
+        // (typed or programmatic) feeds the 250ms debounce; before the
+        // list baseline lands the query is only recorded. ANY change drops
+        // the previous query's enrichment — stale snippets must never
+        // match the new filter (plan §18), and an unavailable/failed new
+        // search must not leave the old query's hits behind.
+        onFilterChange: (query) => {
+          pendingContentQuery = query
+          cancelContentSearch()
+          contentHitsById.clear()
+          contentHasMore = false
+          picker.refresh?.()
+          // A whitespace-only filter is an empty query: no Host request
+          // (the official contract rejects empty queries — a whitespace
+          // filter must not surface as a search failure). Non-empty
+          // filters are canonicalized (trimmed) for the Host search —
+          // the official query semantics trim, so the local filter and
+          // the Host query stay aligned.
+          const canonical = query.trim()
+          if (canonical === '') return
+          if (listLanded) scheduleContentSearch(canonical)
+        },
       },
     )
     // The listing + progressive enrichment run behind the open overlay.
@@ -2406,8 +2551,8 @@ export function registerTuiCommands(
       // CURRENT session surfaces the already-on notice; no match falls
       // through to the filtered picker with the argument preserved as the
       // live search query.
-      if (directMatchQuery !== undefined) {
-        const match = findSessionMatch(listed, directMatchQuery)
+      if (options.directMatchQuery !== undefined) {
+        const match = findSessionMatch(listed, options.directMatchQuery)
         if (match !== undefined) {
           if (match.id === currentId) {
             // Nothing to switch and nothing to browse: close the overlay —
@@ -2431,12 +2576,23 @@ export function registerTuiCommands(
       // placeholder for the real rows on the next refresh.
       rows.push(...listed)
       picker.refresh?.()
+      // The list baseline is in: content search may start now (plan §9.3).
+      listLanded = true
       // NOW the command argument becomes the live filter — real rows are
       // in, so it narrows sessions instead of hiding the status phase. A
       // query the USER typed during the load is never clobbered.
       const pendingQuery = invocation.rawInput.trim()
       if (pendingQuery !== '' && picker.getFilter?.() === '') {
         picker.setFilter?.(pendingQuery)
+      }
+      // A filter that was only recorded during the load (or just applied
+      // above) now enters the normal debounced content-search flow. The
+      // query is canonicalized (trimmed) exactly like the interactive
+      // path: trim BEFORE the client cap, so a whitespace-padded filter
+      // never loses a character to the 500-unit window (official
+      // semantics: trim, then cap).
+      if (pendingContentQuery.trim() !== '' && activeContentSearchTimer === undefined && activeContentSearch === undefined) {
+        scheduleContentSearch(pendingContentQuery.trim())
       }
 
       // Progressive combined projection batches: the first
@@ -2493,18 +2649,21 @@ export function registerTuiCommands(
     name: 'sessions',
     description: 'List, search, and switch persisted sessions',
     input: { hint: '[query]' },
-    handler: (invocation) => openSessionPicker(invocation, 'sessions'),
+    handler: (invocation) => openSessionPicker(invocation, { header: 'sessions' }),
     aliases: ['resume'],
     // /resume keeps its direct-resume fast path (exact id, a session-
     // prefixed prefix, or the short id prefix) — resolved against the ONE
     // input-first listing inside the shared picker lifecycle: the overlay
     // opens immediately, and a unique match switches as soon as `list()`
     // lands. No match leaves the filtered picker with the argument as the
-    // live search query. Never a second listing.
+    // live search query (content search included). Never a second listing.
     aliasHandlers: {
       resume: (invocation) => {
         const raw = invocation.rawInput.trim()
-        return openSessionPicker(invocation, 'resume', raw === '' ? undefined : raw)
+        return openSessionPicker(invocation, {
+          header: 'resume',
+          directMatchQuery: raw === '' ? undefined : raw,
+        })
       },
     },
   })
@@ -3394,30 +3553,11 @@ export function registerTuiCommands(
     name: 'search',
     description: 'Search persisted sessions for text and switch to a hit',
     input: { hint: '<query>' },
-    handler: async (invocation) => {
-      const currentId = runner.liveAgent?.session.id
-      const query = invocation.rawInput.trim()
-      if (query === '') return { kind: 'error', text: 'search needs a query' }
-      // The session READ port (migration M1.3): the bounded content scan
-      // lives in the Direct adapter, never here.
-      const hits = await runner.sessionReader.search(query)
-      if (hits === undefined) return { kind: 'error', text: 'session persistence unavailable' }
-      if (hits.length === 0) return { kind: 'success', text: `no persisted session contains "${query}"` }
-      const now = Date.now()
-      app.openPicker(
-        hits.map(hit => ({
-          value: hit.id,
-          label: hit.id.length > 26 ? `${hit.id.slice(0, 26)}…` : hit.id,
-          description: `${Math.max(0, Math.floor((now - hit.createdAt) / 60000))}m ago · …${hit.snippet}…`,
-        })),
-        (id) => {
-          if (id === currentId) return
-          switchSession(id)
-        },
-        () => {},
-      )
-      return { kind: 'success' }
-    },
+    // /search is a compatibility entry into the SAME Session Browser as
+    // /sessions and /resume (plan §8): the query is required (rejected
+    // before the overlay opens), then becomes the picker's live filter and
+    // feeds the debounced Host content search. There is no second picker.
+    handler: (invocation) => openSessionPicker(invocation, { header: 'search', requireQuery: true }),
   })
 
   // Shared by /title and its /rename alias. With an argument, pins the

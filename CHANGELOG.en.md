@@ -20,6 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   /sessions) also retire the old owner's continuable descendants after the
   commit.
 
+### Added
+
+- **`/search` converges into the Session Browser.** `/sessions`, `/resume`
+  and `/search` now share one session browser: content search augments the
+  local metadata filter asynchronously, and hit snippets render on the
+  matching session rows; when content search is unavailable or fails, local
+  metadata filtering keeps working and the browser stays open.
+- **Session content search aligns with official DSH semantics.** The Direct
+  adapter now uses `sessionQuery.searchSessions()` (matching DSH master
+  `ApiSessionList.search()`: visibility authorization, dedupe, cursor
+  pagination, 20-result window), removing the old “newest 100 sessions +
+  filterEvents” private rule — matches in old sessions are now found.
+
 ## [0.4.1] - 2026-09-04
 
 ### Installation and version pairing
