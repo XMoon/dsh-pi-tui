@@ -1205,6 +1205,16 @@ export function registerTuiCommands(
   // lacks must be consumed with an explicit error, never sent to the model.
   /** The advertised names of the currently installed completion list. */
   let claims = new Set<string>()
+  /**
+   * The detached human skill catalog for INLINE skill reference completion
+   * (the plain-text `/name` lexicon). A Client presentation cache: it owns
+   * no skill body, no registry, and is NOT an authorization — the Host
+   * pre-step decides invocation. Deliberately NOT part of the command
+   * `claims`: a skill reference is not a command advertisement (the
+   * per-skill command wrappers keep their own completion/claim path, so
+   * the command plane can retire them independently later).
+   */
+  let currentSkillReferences: readonly HumanSkillSummary[] = []
   /** Slash commands whose single argument is a path: the fork's
    * `getArgumentCompletions` extension point completes it against the
    * Client-local cwd (natural typing shows candidates, Tab accepts them).
@@ -1257,6 +1267,10 @@ export function registerTuiCommands(
       // `/attach` and `/image` are Client-local. Direct mode uses the process cwd; a remote
       // adapter can keep this independent from the Host session scope.
       () => runner.cwd,
+      // The inline skill reference lexicon rides the same install: the
+      // provider completes plain-text `/name` tokens from this detached
+      // list, never from the command registry.
+      currentSkillReferences,
     )
     claims = new Set(sorted.map(command => command.name))
   }
@@ -2753,6 +2767,12 @@ export function registerTuiCommands(
     const skillsFailed = snapshot.issues.some(issue => issue.provider === 'skills')
     withCommandCommit(() => {
       if (!skillsFailed) replaceSkillCommands(snapshot.skills, scopedNames)
+      // The inline skill lexicon follows the same success rule as the
+      // wrappers: a FAILED or incomplete skills observation never replaces
+      // the current lexicon (a target change already cleared it; a
+      // same-target refresh keeps the last-good list — the coordinator's
+      // mergePartial already retained it in `snapshot.skills`).
+      if (!skillsFailed) currentSkillReferences = snapshot.skills
       savedScopedCommands = snapshot.scopedCommands
       installCompletions(mergeGlobalAndSavedScoped())
     })
@@ -2771,6 +2791,9 @@ export function registerTuiCommands(
       for (const dispose of skillDisposers.values()) dispose()
       skillDisposers.clear()
       savedScopedCommands = []
+      // The inline skill lexicon clears with the target change: the new
+      // owner's suggestions must never come from the old owner's catalog.
+      currentSkillReferences = []
       for (const name of names) {
         try {
           const dispose = commands.register({
@@ -4071,6 +4094,7 @@ export function registerTuiCommands(
     // exist before a session, so the merge base is the current global view.
     withCommandCommit(() => {
       replaceSkillCommands(initial.skills!.skills, new Set())
+      currentSkillReferences = initial.skills!.skills
       savedScopedCommands = []
       installCompletions(mergeGlobalAndSavedScoped())
     })

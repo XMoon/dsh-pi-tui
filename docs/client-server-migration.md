@@ -85,6 +85,16 @@ Connection transport, or Remote upload state is implemented here.
 Locality is explicit: `/attach` and `/image` use the Client-local cwd, while
 `@` mentions remain Host/session-scoped.
 
+### Inline skill references (pre-M2 locality note)
+
+Inline skill references are Client-local input presentation backed by the
+existing skill catalog semantic port: the editor completes plain-text
+`/name` tokens from the detached `HumanSkillSummary[]` and inserts literal
+text only. Invocation is an ordinary user prompt; the Host `dsh-tool-skill`
+pre-step owns gesture resolution and body injection. A future Remote
+adapter must map the existing catalog to the official `skills.list` and must
+not add a `skill.invoke`-style TUI RPC — the input layer needs no rewrite.
+
 ### Open/opaque Assistant block presentation timing (Stage C3 / pre-M2)
 
 Stage C3 aligns the TUI's transient and durable-attempt presentation with

@@ -11091,6 +11091,10 @@ export class TuiApp {
    * @param localCwd - the Client-local base for `/image` completion. Keep it
    *   separate from the Host session cwd; a remote attach may have different
    *   local and Host filesystems. A function keeps the client base live.
+   * @param skillReferences - the detached human skill catalog for INLINE
+   *   skill reference completion (the plain-text `/name` lexicon). A
+   *   read-only Client presentation cache — never a command claim, never
+   *   an authorization; the Host pre-step owns invocation.
    */
   setCommandCompletions(
     commands: readonly SlashCommand[],
@@ -11106,6 +11110,7 @@ export class TuiApp {
     scope: import('./runtime/host-file-port.ts').HostFileScope
       | (() => import('./runtime/host-file-port.ts').HostFileScope) = { kind: 'workspace', cwd },
      localCwd: string | (() => string) = cwd,
+    skillReferences: readonly import('./skill-catalog.ts').HumanSkillSummary[] = [],
   ): void {
     const base = new MentionProvider(
       [...commands],
@@ -11115,6 +11120,7 @@ export class TuiApp {
       scope,
       undefined,
       localCwd,
+      skillReferences,
     )
     if (extensionSuggest === undefined) {
       this.editor.setAutocompleteProvider(base)

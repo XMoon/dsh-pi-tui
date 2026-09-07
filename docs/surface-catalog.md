@@ -79,6 +79,43 @@ follow-up read always observes the current ownership.
 | `src/surface-catalog.ts` | Frozen snapshot types; `readSurfaceCatalog(agent, signal, ctx)` — the LIVE collector (prefetch, first session, switches); scoped-override derivation; `isUserInvocable` filter; detached issues |
 | `src/skill-catalog.ts` | The single narrow seam to dsh services (plan appendix B): structural `SkillRegistryLike`/`AgentPresetsLike`, `readHumanSkillCatalog()` (snapshot-first, `list()` fallback, policy filter, freeze), `resolveColdSkillTarget()` (standing → rosterless global → degraded global + notice), `resolveLiveSkillTarget()` |
 | `src/skill-catalog-refresh.ts` | `CatalogRefreshCoordinator` (epoch + abort + latest-only commit; target-change transitions; same-target retention; standing degradation notices; dispose cancellation) and `CoalescingRefreshGate` |
+| `src/skill-reference-completion.ts` | The pure Client-local inline skill reference grammar: `extractInlineSkillPrefix()` (whitespace-boundary `/name` token classification, first-line command seat excluded) and `applyInlineSkillReference()` (replace `/query` with `/name `, one separator, cursor on it). No Context/Agent/Session/registry/Remote access |
+| `src/mentions.ts` | `MentionProvider` inline skill source: prompt-mode routing, fuzzy candidates from the detached `HumanSkillSummary[]`, query-part prefix (never `/`-prefixed), strict snapshot fence, catalog-guarded apply |
+| `src/tui-editor.ts` | The consumer-side natural trigger: the vendored editor rejects `/` as a trigger character, so the host editor re-triggers the provider on the pure classifier (same pattern as the `@`-mention trigger) |
+
+## Skill catalog consumers
+
+The human skill catalog feeds TWO independent consumers with different
+ownership:
+
+1. **Existing per-skill command wrappers** (`replaceSkillCommands` in
+   `src/commands.ts`)
+   - Direct compatibility surface: each human-invocable skill is a leading
+     slash command (`/eli5`, `/find-skills`, …) with its own completion
+     rows, claims and transition behavior.
+   - This PR does NOT migrate or retire them; they keep their own
+     completion/claim path.
+
+2. **Inline skill reference lexicon** (`currentSkillReferences` in
+   `src/commands.ts`, fed into `MentionProvider`)
+   - Client-local completion/presentation for plain-text `/name` tokens at
+     whitespace boundaries in the draft body.
+   - Consumes the SAME detached `HumanSkillSummary[]`; never loads a skill
+     body, never authorizes an invocation, and is NOT part of the command
+     `claims` — a skill reference is not a command advertisement.
+   - Submission stays an ordinary user prompt; the Host `agent/pre-step`
+     gesture is the invocation authority.
+
+Transition semantics for the inline lexicon (mirrors the wrapper rules):
+
+```text
+target-changing transition:
+  inline skill lexicon clears (no old-owner suggestions for the new owner)
+
+same-target refresh:
+  last-good inline lexicon may be retained until a successful replacement
+  (a failed/incomplete skills observation never replaces it)
+```
 
 ## Invariants (never break)
 

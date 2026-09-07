@@ -25,6 +25,7 @@ import { homedir } from 'node:os'
 import { isAbsolute, join, win32 } from 'node:path'
 import {
   CombinedAutocompleteProvider,
+  fuzzyFilter,
   type AutocompleteItem,
   type AutocompleteProvider,
   type AutocompleteSuggestions,
@@ -32,6 +33,8 @@ import {
 } from '@xmoon76/pi-tui'
 import { shellCompletionContext, suggestShellCompletion } from './shell-completion.ts'
 import { shellPrefixForMode, type EditorInputMode } from './editor-input-mode.ts'
+import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-reference-completion.ts'
+import type { HumanSkillSummary } from './skill-catalog.ts'
 import {
   classifyFileCompletionContext,
   extractAtPrefix,
@@ -294,6 +297,13 @@ export class MentionProvider implements AutocompleteProvider {
    * session scope so a future remote attach cannot make image completion read
    * the Host workspace. */
   private readonly localCwdOf: () => string
+  /** The detached human skill catalog for INLINE skill reference completion
+   * (the plain-text `/name` lexicon). A read-only Client presentation cache:
+   * it never loads a skill body, never authorizes an invocation, and is
+   * deliberately NOT part of the command `claims` — a skill reference is not
+   * a command advertisement (the per-skill command wrappers keep their own
+   * completion/claim path). */
+  private readonly skillReferences: readonly HumanSkillSummary[]
   /** The REQUEST SNAPSHOT (plan §9.2): the exact document lines + cursor
    * + mode + SCOPE of the most recent getSuggestions call that produced a
    * suggestion list. Strict file/extension results may apply ONLY when the
@@ -331,12 +341,14 @@ export class MentionProvider implements AutocompleteProvider {
     scope: MentionScope | (() => MentionScope) = { kind: 'workspace', cwd: workDir },
     localFdPath: string | null | undefined = undefined,
     localCwd: string | (() => string) = workDir,
+    skillReferences: readonly HumanSkillSummary[] = [],
   ) {
     this.workDir = workDir
     this.fileReferences = fileReferences ?? NO_HOST_REFERENCES
     this.inputModeSource = inputModeSource
     this.scopeOf = typeof scope === 'function' ? scope : () => scope
     this.localCwdOf = typeof localCwd === 'function' ? localCwd : () => localCwd
+    this.skillReferences = skillReferences
     this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, null)
     this.pathArgumentCommands = FILE_ARGUMENT_COMMANDS
     // `/attach` and `/image` discovery source: the CLIENT's own filesystem.
@@ -488,11 +500,33 @@ export class MentionProvider implements AutocompleteProvider {
     // 5. PROMPT MODE, ordinary position (plan §2.1): file completion is
     // CLOSED — `foo`, `./foo`, `../foo`, `/tmp/foo`, `hello foo` never
     // produce a file dropdown, natural or forced (a forced request is
-    // refused by shouldTriggerFileCompletion before it gets here). The ONE
-    // keeper: slash command NAME completion — a separate mechanism (plan
-    // §27) that never touches file paths.
+    // refused by shouldTriggerFileCompletion before it gets here). The
+    // keepers: the INLINE SKILL REFERENCE lexicon (the plain-text `/name`
+    // completion at whitespace token boundaries — a separate mechanism
+    // from the command plane, plan §5 Cut B) and the slash command NAME
+    // completion (plan §27) that never touches file paths.
+    const inline = extractInlineSkillPrefix(lines, cursorLine, cursorCol)
+    if (inline !== undefined) {
+      const items = this.suggestInlineSkills(inline.query)
+      if (items.length > 0) {
+        // The inline prefix is the QUERY part only — never `/`-prefixed:
+        // the vendored editor's confirm treats a `/`-prefixed prefix as a
+        // leading command and falls through to submit, while an inline
+        // accept must only insert the reference. The result binds the
+        // FULL request snapshot (strict fence), so a stale dropdown can
+        // never apply into a changed draft or a switched scope.
+        return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, { prefix: inline.query, items })
+      }
+      // No candidates: clear the snapshot (nothing to accept) — the same
+      // null-clears contract as the file path, so a later direct apply
+      // can never reuse an older request's dropdown.
+      return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, null)
+    }
+    // 6. PROMPT MODE leading command name (the FIRST logical line's
+    // command seat only — a later line's leading `/name` is an inline
+    // skill seat, never a command).
     if (options.force === true) return null
-    if (textBeforeCursor.trimStart().startsWith('/') && !textBeforeCursor.trimStart().includes(' ')) {
+    if (cursorLine === 0 && textBeforeCursor.trimStart().startsWith('/') && !textBeforeCursor.trimStart().includes(' ')) {
       try {
         const result = await this.getSlashCommandSuggestions(lines, cursorLine, cursorCol, options)
         return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, result, false)
@@ -501,6 +535,19 @@ export class MentionProvider implements AutocompleteProvider {
       }
     }
     return null
+  }
+
+  /** The inline skill candidates for one query: the detached human skill
+   * catalog filtered by the fork's fuzzy matcher (never a copied fuzzy
+   * algorithm), name/label/description presentation only. The command
+   * list is deliberately NOT mixed in — a skill reference is not a
+   * command advertisement. */
+  private suggestInlineSkills(query: string): AutocompleteItem[] {
+    return fuzzyFilter([...this.skillReferences], query, skill => skill.name).map(skill => ({
+      value: skill.name,
+      label: skill.name,
+      description: skill.description,
+    }))
   }
 
   /** The vendored slash-command provider currently expects `/name` at
@@ -760,6 +807,37 @@ export class MentionProvider implements AutocompleteProvider {
         lines: resultLines,
         cursorLine: applied.cursorLine,
         cursorCol: Math.max(0, applied.cursorCol - semantic.prefixLength),
+      }
+    }
+    // INLINE SKILL REFERENCE apply (the plain-text `/name` lexicon): the
+    // suggestion prefix is the QUERY part — never `/`-prefixed, so the
+    // vendored editor's confirm does NOT fall through to submit. This
+    // branch re-verifies the slash token position (the classifier), the
+    // catalog membership AND the request snapshot before replacing
+    // `/query` with `/name ` — only the current token is touched, the
+    // suffix survives, and the cursor lands on the separator position
+    // ready to keep typing. The snapshot must be the STRICT one this
+    // provider produced (inline or extension results): a null snapshot
+    // (cleared by a null result) or a non-strict legacy shell/command
+    // snapshot (a different document/mode) must never apply here — a
+    // catalog member at an inline seat without the strict snapshot is
+    // rejected outright (identity), never handed to the fork's
+    // argument-apply (which would mangle the reference).
+    const inline = extractInlineSkillPrefix(lines, cursorLine, cursorCol)
+    if (inline !== undefined && inline.query === prefix) {
+      const isSkill = this.skillReferences.some(skill => skill.name === item.value)
+      if (isSkill && this.requestSnapshot?.strict !== true) {
+        return { lines, cursorLine, cursorCol }
+      }
+      if (isSkill) {
+        const applied = applyInlineSkillReference(currentLine, inline.slashStart, cursorCol, item.value)
+        const newLines = [...lines]
+        newLines[cursorLine] = applied.line
+        return {
+          lines: newLines,
+          cursorLine,
+          cursorCol: applied.cursorCol,
+        }
       }
     }
     return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix)
