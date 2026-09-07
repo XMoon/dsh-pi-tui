@@ -8,8 +8,8 @@
   },
   "verification": {
     "auditedAt": "2026-09-07",
-    "branch": "feat/searchable-picker-host-migration-next",
-    "auditedSourceCommit": "5709dfc1a1f7b36abc314d8cfb87e68fd3226557",
+    "branch": "chore/retire-pi-divergences-x012-x019",
+    "auditedSourceCommit": "6a5857dd5c0b8ab1242a32fbcc428196eecf3e5e",
     "referenceSnapshots": {
       "upstream": {
         "repository": "earendil-works/pi",
@@ -26,7 +26,8 @@
       "Compared recorded Pi and Kimi reference snapshots for semantic comparison; issue and PR references are background only.",
       "Ran focused deletion experiments for X019, X030, X037, X038, X043, and X044; existing checks caught the first five, while X044 required a compile-only subclass fixture.",
       "Historical removed and absorbed records were retained as explicit records instead of disappearing from the manifest.",
-      "PR1 relocation audit: X001/X002/X041 moved to the Host SearchablePicker (src/searchable-picker.ts) with the vendored SelectList restored to the pinned baseline; X042 narrowed to the SettingsList seam. The audit was performed against the immutable local source snapshot recorded in verification.auditedSourceCommit."
+      "PR1 relocation audit: X001/X002/X041 moved to the Host SearchablePicker (src/searchable-picker.ts) with the vendored SelectList restored to the pinned baseline; X042 narrowed to the SettingsList seam. The audit was performed against the immutable local source snapshot recorded in verification.auditedSourceCommit.",
+      "PR2 retirement audit: X012's explicit fuzzy tie-break was removed in favor of the supported stable-sort runtime contract; X019's Text no-op dispose shim was removed while Loader-owned X007 timer cleanup remained direct and guarded."
     ]
   },
   "categoryDefinitions": {
@@ -50,8 +51,9 @@
     {"decision": "DELIBERATELY_KEPT", "records": ["X030"], "reason": "A host copy of decodePrintableKey would duplicate the implementation; the package exports map exposes only the root entry."},
     {"decision": "MOVED_TO_HOST", "records": ["X001", "X002", "X041"], "reason": "The DSH searchable picker behavior moved to the Host-owned src/searchable-picker.ts SearchablePicker (guarded by test/searchable-picker.test.ts); the vendored SelectList is restored to the pinned upstream baseline."},
     {"decision": "NOT_MOVABLE", "records": ["X042"], "reason": "The remaining X042 seam is SettingsList focus/row-budget propagation inside the vendored fork; the SelectList-side Input focus ownership moved to the Host SearchablePicker."},
-    {"decision": "NOT_MOVABLE", "records": ["X004A", "X004B", "X005", "X006", "X007", "X008", "X009", "X010", "X011", "X012", "X014", "X016", "X018", "X019", "X020", "X021", "X022", "X023", "X024", "X025", "X027", "X028", "X029", "X031", "X032", "X033", "X034", "X035", "X036", "X037", "X038", "X039", "X040", "X043", "X044", "X045", "X046", "X047"], "reason": "The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary."},
-    {"decision": "UPSTREAM_LEVER", "records": ["X005", "X006", "X007", "X008", "X012", "X014", "X016", "X021", "X033", "X035"], "reason": "Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence."}
+    {"decision": "NOT_MOVABLE", "records": ["X004A", "X004B", "X005", "X006", "X007", "X008", "X009", "X010", "X011", "X014", "X016", "X018", "X020", "X021", "X022", "X023", "X024", "X025", "X027", "X028", "X029", "X031", "X032", "X033", "X034", "X035", "X036", "X037", "X038", "X039", "X040", "X043", "X044", "X045", "X046", "X047"], "reason": "The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary."},
+    {"decision": "UPSTREAM_LEVER", "records": ["X005", "X006", "X007", "X008", "X014", "X016", "X021", "X033", "X035"], "reason": "Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence."},
+    {"decision": "SUPERSEDED", "records": ["X012", "X019"], "reason": "X012's explicit fuzzy tie-break is redundant under the supported stable-sort runtime contract; X019's Text no-op dispose shim is replaced by Loader-owned X007 cleanup without a base super call."}
   ],
   "removedLegacy": [
     {"surface": "inlineSlashTrigger and inline-slash helpers", "decision": "PRODUCT_DECISION", "reason": "The host uses explicit, context-gated Tab completion; the old opt-in inline dropdown is not part of DSH UX."},
@@ -306,12 +308,12 @@
       "status": "ACTIVE",
       "category": ["HARD_HOST_API", "PUBLIC_COMPONENT_CONTRACT"],
       "risk": "CRITICAL",
-      "files": ["src/tui.ts", "src/components/scroll-view.ts", "src/components/text.ts", "src/components/loader.ts", "src/components/box.ts", "src/components/settings-list.ts", "src/components/stack.ts"],
+      "files": ["src/tui.ts", "src/components/scroll-view.ts", "src/components/loader.ts", "src/components/box.ts", "src/components/settings-list.ts", "src/components/stack.ts"],
       "why": "The host owns timers, callbacks, child components, submenu slots, and overlay leases. A single optional Component.dispose contract releases each resource exactly once across removal, hide, replacement, and final surface teardown.",
       "changedSurface": ["optional Component.dispose and idempotent Container disposal", "Container/Box/Stack child ownership and removal", "ScrollView timer/callback cleanup", "Loader, SettingsList submenu, and opt-in overlay disposal"],
       "dependencies": {
         "vendorInternal": {"audited": true, "items": ["Container, Box, Stack, ScrollView, SettingsList, Text, and Loader each participate in the release graph."], "notes": "The patch is an ownership graph, not one helper."},
-        "inheritanceStructural": {"audited": true, "items": ["Loader extends Text and historically used Text.dispose as an inheritance shim (X019).", "ScrollView and Stack override container lifecycle methods."], "notes": "Override and super edges were checked before any retirement classification."},
+        "inheritanceStructural": {"audited": true, "items": ["Loader extends Text; the X019 Text.dispose shim was retired (PR2) and Loader.dispose owns the timer cleanup directly.", "ScrollView and Stack override container lifecycle methods."], "notes": "Override and super edges were checked before any retirement classification."},
         "host": {"audited": true, "items": ["src/tui-app.ts OverlayBroker.disposeAll and overlay leases", "editor seat, panels, timers, and fullscreen surface teardown", "test/pi-component-compat.test.ts public component compatibility"], "notes": "Host final teardown relies on exactly-once release."},
         "publicExtension": {"audited": true, "items": ["Stable/Advanced/Unstable extension mounts and public component leases", "component compatibility surface accepts optional dispose"], "notes": "Extension-owned remountable leases intentionally opt out of overlay disposeOnHide."},
         "behavioral": {"audited": true, "items": ["removed children are detached before disposal", "repeated dispose is a no-op", "disposeOnHide is opt-in so remountable overlays survive hide", "Stack clears its second layout representation"], "notes": "Type-compatible removal can leak timers or resurrect disposed children."}
@@ -473,11 +475,11 @@
     },
     "X012": {
       "title": "Deterministic fuzzy tie sort",
-      "status": "RETIREMENT_CANDIDATE",
+      "status": "SUPERSEDED",
       "category": ["BUGFIX_MISSING_UPSTREAM"],
       "risk": "LOW",
       "files": ["src/fuzzy.ts"],
-      "why": "The local comparator explicitly preserves input order for equal fuzzy scores. Supported Node engines guarantee stable Array.prototype.sort, so the explicit tie term may be redundant but must be checked as a semantic runtime assumption.",
+      "why": "The local comparator explicitly preserved input order for equal fuzzy scores. Supported Node engines guarantee stable Array.prototype.sort, so the explicit tie term was redundant and has been removed (PR2).",
       "changedSurface": ["fuzzyFilter result index tie-breaker"],
       "dependencies": {
         "vendorInternal": {"audited": true, "items": ["fuzzyFilter constructs result order and passes it directly to sort."], "notes": "No secondary randomization or map is involved."},
@@ -492,17 +494,17 @@
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/fuzzy.ts", "packages/tui/package.json"],
         "relevantIssues": [],
-        "semanticDelta": "With the package's supported Node engine, upstream score-only sort is stable and preserves the same input-order ties. The explicit index comparator is therefore runtime-equivalent, subject to the engine and input-order assumptions recorded here."
+        "semanticDelta": "With the package's supported Node engine, upstream score-only sort is stable and preserves the same input-order ties. The explicit index comparator was therefore runtime-equivalent and has been removed. Semantic equivalence relies on the supported runtime stable-sort guarantee; this is not evidence of a new upstream implementation."
       },
       "retirement": {
         "conditions": ["Confirm the project engine floor, comparator input order, and equal-score regression on every supported Node boundary.", "Run the deletion experiment: restore upstream fuzzy.ts, run vendor fuzzy tests, bundle tests, typecheck, and both vendor gates; keep the explicit comparator if any result changes."],
-        "replacementMapping": [],
-        "evidence": []
+        "replacementMapping": ["fuzzyFilter explicit index tie-break -> supported Node/ECMAScript stable-sort state -> packages/pi-tui/test/fuzzy.test.ts equal-score ordering test"],
+        "evidence": ["supported engine range is Node >=22.19 / >=24 (root and pi-tui package engines)", "fuzzy.ts restored byte-identical to pinned upstream b79e4cc (blob 73c10dcf4b134bfefba2978281b2a6f94352c5b8)", "existing equal-score regression remains green after deletion (packages/pi-tui/test/fuzzy.test.ts)", "fork typecheck/test/build, surface compat, divergence ledger, strict vendor diff, root build/typecheck/test:bundle green"]
       },
       "audit": {
-        "lastAuditedAt": "2026-09-03",
+        "lastAuditedAt": "2026-09-07",
         "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
-        "notes": "Candidate only. Current package.json declares the stable-sort-capable Node floor; source comparison confirmed upstream still uses score-only sort. The equal-score fixture now guards input-order preservation; behavior was not changed in this ledger task."
+        "notes": "Retired in PR2: the explicit index tie-break was removed and fuzzy.ts restored byte-identical to the pinned upstream. Equal-score input order is preserved by the supported ECMAScript stable-sort guarantee and remains guarded by the equal-score regression; this is not evidence of a new upstream implementation."
       }
     },
     "X013": {
@@ -711,11 +713,11 @@
     },
     "X019": {
       "title": "Text no-op dispose inheritance shim",
-      "status": "REDUNDANT_SHIM",
+      "status": "SUPERSEDED",
       "category": ["HARD_HOST_API", "PUBLIC_COMPONENT_CONTRACT"],
       "risk": "HIGH",
       "files": ["src/components/text.ts"],
-      "why": "Text.dispose is currently a no-op solely so Loader's dispose override and super.dispose call typecheck. The inheritance edge is real, but the base no-op can be removed by an atomic Loader cleanup.",
+      "why": "Text.dispose was a no-op solely so Loader's dispose override and super.dispose call typechecked. The inheritance edge was real, but the base no-op has been removed by an atomic Loader cleanup (PR2).",
       "changedSurface": ["Text.dispose(): void no-op", "Loader.dispose override calls stop and super.dispose"],
       "dependencies": {
         "vendorInternal": {"audited": true, "items": ["Loader extends Text and calls super.dispose in its current local implementation."], "notes": "This is an existing inheritance consumer, not unused code."},
@@ -726,21 +728,21 @@
       },
       "tests": ["packages/pi-tui/test/dispose-lifecycle.test.ts: Loader cleanup and idempotency", "packages/pi-tui/test/layout.test.ts and test/pi-component-compat.test.ts: component lifecycle contract"],
       "upstream": {
-        "equivalence": "NO",
+        "equivalence": "PARTIAL",
         "checkedAgainst": {"repo": "earendil-works/pi", "baselineRef": "b79e4cc834970cca69daebffab7df1da7d1e52c4", "referenceRef": "b8b873b9872db04a938fb4357b5e8e824ddc051c"},
         "relevantFiles": ["packages/tui/src/components/text.ts", "packages/tui/src/components/loader.ts"],
         "relevantIssues": [],
-        "semanticDelta": "Upstream has neither the local Component disposal contract nor the current Text/Loader shim. Restoring upstream wholesale would remove the broader X007 lifecycle behavior."
+        "semanticDelta": "Upstream Text has no dispose member, and the local Text now matches upstream byte-identically. Loader disposal remains intentionally local under X007: Loader.dispose owns the timer cleanup directly without a base super call."
       },
       "retirement": {
         "conditions": ["Apply one atomic change: remove Text.dispose and remove Loader's super.dispose call while retaining Loader.dispose and timer cleanup.", "Run lifecycle, Loader timer, layout, surface compatibility, and typecheck gates before changing status."],
-        "replacementMapping": ["Atomic replacement: Text.dispose no-op -> no base method; Loader.dispose remains the owning cleanup and calls stop directly without super.dispose."],
-        "evidence": ["Current source proves a live Loader -> Text.dispose -> super.dispose inheritance edge.", "Deletion experiment: temporarily removing Text.dispose made the package typecheck fail in loader.ts with TS4113/TS2339 because Loader's override and super.dispose call lost their base member; the existing lifecycle tests remained green."]
+        "replacementMapping": ["Text.dispose no-op + Loader super.dispose chain -> X007 Loader.dispose owner keeps timer-cleanup state directly -> packages/pi-tui/test/dispose-lifecycle.test.ts"],
+        "evidence": ["text.ts restored byte-identical to pinned upstream b79e4cc (blob 7a50e2721028d544f641ab5f66ef1b752ff6d1f7)", "Loader.dispose remains and calls stop() directly; no override keyword and no super.dispose() remain", "package typecheck green (no inheritance type errors after removing the base member)", "dispose-lifecycle tests green (Loader cleanup and idempotency)", "surface compatibility + divergence ledger + strict vendor diff + root build/typecheck/test:bundle green"]
       },
       "audit": {
-        "lastAuditedAt": "2026-09-03",
+        "lastAuditedAt": "2026-09-07",
         "scope": ["vendor-internal", "inheritance-structural", "host", "public-extension", "behavioral", "tests"],
-        "notes": "Classified as REDUNDANT_SHIM rather than unused. It remains active until the dedicated atomic cleanup is implemented and verified."
+        "notes": "Retired in PR2: Text.dispose was removed and text.ts restored byte-identical to the pinned upstream. Loader keeps the real X007 timer cleanup directly (dispose -> stop -> clearInterval) without override/super.dispose; the X019 base-class shim is gone while Loader disposal remains intentionally local under X007."
       }
     },
     "X020": {
