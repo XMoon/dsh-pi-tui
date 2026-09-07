@@ -318,6 +318,57 @@ pnpm dev:shell
 
 then continue with the ordinary development commands.
 
+### Running the source-built DSH interactively
+
+`dev:shell` only prepares the environment. Launching the source-mode TUI for
+interactive testing additionally needs the worktree's own built DSH CLI, a
+built TUI bundle, and an isolated profile that links that bundle. The
+machine-local `~/.local/bin/dsh-next` wrapper implements exactly this flow
+(local convenience, not part of this repository; it adds `-b/--build` and
+`-r/--relink` force flags); the equivalent recipe is:
+
+```bash
+export DSH_NEXT_ROOT=~/project/dsh-pi-tui   # the source-mode worktree (wrapper default)
+export DSH_HOME=~/.dsh-pi-tui-next          # isolated home; never the real ~/.dsh
+cd "$DSH_NEXT_ROOT"
+pnpm dev:bootstrap                           # idempotent; reuses the per-SHA source pack
+source ./.dsh-dev-env                        # source-mode env (pnpm verify-deps off)
+pnpm build                                   # fork + root bundle
+"$DSH_NEXT_ROOT/node_modules/.bin/dsh" plugin --profile pi-tui -- add 'link:.'
+cd -                                         # back to the caller workspace
+exec "$DSH_NEXT_ROOT/node_modules/.bin/dsh" --profile pi-tui "$@"
+```
+
+Notes:
+
+- The isolated `DSH_HOME` keeps the real `~/.dsh` and its `pi-tui` profile
+  untouched. The `pi-tui` profile inside the isolated home is a relative
+  `link:.` to the worktree root, so the `plugin -- add` must run from that
+  root; the wrapper re-checks the link by realpath and relinks when broken.
+- dsh treats the startup cwd as the workspace, so the final `exec` runs from
+  the caller's directory.
+- The wrapper only rebuilds when `dist/index.mjs` is missing; after changing
+  `packages/pi-tui/src` run `pnpm build` explicitly (the root bundle embeds
+  the fork dist).
+- The first bootstrap may build the source pack (long); later runs reuse the
+  per-SHA cache at `~/.cache/dsh-pi-tui/source-packs/<sha>/`.
+
+#### Authentication in the isolated home
+
+The launcher never copies auth state; a fresh isolated home has none.
+Interactive runs therefore need one of:
+
+- **User-configured auth (default):** the user configures the isolated home
+  themselves (provider keys, `settings.yaml`, credentials) before the agent
+  runs the launcher.
+- **Copy the two auth files (only with explicit user permission):** copy
+  `~/.dsh/.credentials.yaml` and `~/.dsh/settings.yaml` into `$DSH_HOME/`,
+  preserving the 0600 mode of `.credentials.yaml` (e.g. `install -m 600`).
+  By default only these two files are copied; session data (`sessions/`,
+  `storages/`, `user-history/`) is left fresh unless the user explicitly
+  asks to copy it too. After the copy the two homes' auth may drift
+  independently.
+
 ## Full Source compatibility
 
 ```bash
@@ -348,6 +399,10 @@ authoritative for routine PR compatibility.
 - Do not use a branch name or package version as a source-pack cache key.
 - Do not modify the real `pi-tui` profile while working on the development
   worktree. The `pi-tui-dev` profile may continue to link the main checkout.
+- The interactive source launcher must use an isolated DSH_HOME (e.g.
+  `~/.dsh-pi-tui-next`); never run the source-built CLI against the real
+  `~/.dsh`. Auth files may be copied from `~/.dsh` only with explicit user
+  permission.
 - The managed per-SHA Harness checkout must remain clean. Generated ignored
   build outputs are acceptable; tracked or untracked working-tree changes must
   be removed before a durable source-pack build.
