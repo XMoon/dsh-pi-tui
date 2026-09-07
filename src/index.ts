@@ -42,7 +42,7 @@ import type {} from '@deepseek-ai/dsh-tool-todo'
 import { resolvePresetRequest } from './runtime/session-preset.ts'
 import { recordedSessionPreset, sessionPresetOf } from './runtime/direct/session-preset-direct.ts'
 import { DirectModelSelectionOwner, type DefaultModelServiceLike } from './runtime/direct/model-selection-direct.ts'
-import { foldPendingModelSelection, rawSelectionFromRequestHeader } from './model-selection.ts'
+import { foldPendingModelSelection, rawSelectionFromRequestHeader, sameModelSelection } from './model-selection.ts'
 // Empty type imports carry the loader Context merge for the settlement await
 // and the cmdline Context merge for the appExit host value.
 import type {} from '@deepseek-ai/cordis-plugin-loader'
@@ -2260,8 +2260,8 @@ export function apply(ctx: Context, config: Config): void {
           // otherwise fall back to the global default while the default
           // save is still in flight (or after it failed). Record it
           // durably so the first request and any later resume both see it.
-          // A target with durable model history (a resumed Session) keeps
-          // its own reconstruction and is never touched.
+          // A caller-supplied selection is the source's current state; durable history in
+          // the inherited seed is historical and is compared rather than treated as a veto.
           if (steps.inheritSelection !== undefined) {
             const target = directAgentOf(next) as Agent
             // The shared fold decides whether the target carries VALID
@@ -2269,7 +2269,8 @@ export function apply(ctx: Context, config: Config): void {
             // header): malformed events are not durable history, and the
             // fold is null-safe, so a hostile log can never throw here.
             const folded = foldPendingModelSelection(target.session.snapshotEvents())
-            if (folded.lastUsed === undefined && folded.pending === undefined) {
+            const durableSelection = folded.pending ?? folded.lastUsed
+            if (!sameModelSelection(durableSelection, steps.inheritSelection)) {
               try {
                  modelSelections.selectForNextRequest(target, steps.inheritSelection)
                } catch (error) {
@@ -6899,6 +6900,7 @@ export function apply(ctx: Context, config: Config): void {
       // inside commitRewind).
       const sourceId = source.session.id
       const sourceGeneration = sessionGeneration
+      const sourceSelection = selected.current
       const commitHost: RewindCommitHost = {
         sessionCwd: () => sessionCwd(),
         sessionPreset: (session) => session.id === sourceId
@@ -6929,7 +6931,7 @@ export function apply(ctx: Context, config: Config): void {
             return transitionGate.run(() => operationBarrier.runTransition(() => commitRewind(commitHost, source, candidate, {
               sessionId: sourceId,
               generation: sourceGeneration,
-            })))
+            }, sourceSelection)))
           }, {
             diag,
             sessionId: () => sourceId,
