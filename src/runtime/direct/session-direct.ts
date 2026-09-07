@@ -24,7 +24,14 @@ import {
   type SessionProjectionReaderLike,
   type SessionReaderDiagLike,
 } from './session-projection-direct.ts'
-import type { ExportReadResult, SessionProjectionSummary, SessionSearchHit, SessionReader, SessionSummary } from '../session-reader-port.ts'
+import {
+  errorCodeOf,
+  normalizeSessionSearchQuery,
+  searchSessionContentPage,
+  type SessionSearchProviderLike,
+} from './session-search-direct.ts'
+import { cancellationError } from '../../detached.ts'
+import type { ExportReadResult, SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../session-reader-port.ts'
 
 /**
  * The narrow session-query surface the reader's listing and semantic search
@@ -53,14 +60,12 @@ export interface SessionQueryLike {
     [Symbol.dispose](): void
   }>
   /**
-   * Provider-independent semantic text filtering. The method is optional so
-   * deployments without the semantic search capability can report an explicit
-   * unavailable result; the reader never falls back to raw persistence search.
+   * Official cross-session full-text search (master `ApiSessionList.search`
+   * parity). The method is optional so deployments without the semantic
+   * search capability can report an explicit unavailable result; the reader
+   * never falls back to raw persistence search.
    */
-  filterEvents?: (
-    sessionId: SessionId,
-    filters: readonly SessionEventResultFilterLike[],
-  ) => Promise<readonly SessionEventSearchDocumentLike[]>
+  searchSessions?: SessionSearchProviderLike['searchSessions']
 }
 
 /** One read handle over the committed log (structural subset of the
@@ -76,22 +81,6 @@ export interface SessionReadHandleLike {
  * `@deepseek-ai/dsh-session-persistence`). */
 export interface SessionPersistenceReadLike {
   open(sessionId: SessionId, mode: 'read'): Promise<SessionReadHandleLike>
-}
-
-/** The public session-query text filter used by the semantic search. */
-export interface SessionEventResultFilterLike {
-  readonly kind: 'text'
-  readonly text: string
-}
-
-/** The semantic event document returned by `sessionQuery.filterEvents`. */
-export interface SessionEventSearchDocumentLike {
-  readonly sessionId: SessionId
-  readonly seq: number
-  readonly type: string
-  readonly time: number
-  readonly surface: 'current' | 'shadowed' | 'log-only'
-  readonly text: string
 }
 
 /** The minimal Host context surface the adapter needs (structural — never
@@ -121,23 +110,6 @@ export interface DirectSessionLiveResolvers {
 
 /** The diagnostics sink for isolated per-row projection failures. */
 export type SessionReaderDiag = SessionReaderDiagLike
-
-/** Make one semantic event document suitable for the existing search port. */
-function semanticSnippet(document: SessionEventSearchDocumentLike, query: string): string {
-  const text = document.text.replace(/\s+/g, ' ').trim()
-  const needle = query.replace(/\s+/g, ' ').trim().toLowerCase()
-  const index = text.toLowerCase().indexOf(needle)
-  if (index < 0) return text.slice(0, 120)
-  const start = Math.max(0, index - 40)
-  return text.slice(start, index + needle.length + 40).trim()
-}
-
-/** Read a typed query-service error without depending on its package surface. */
-function errorCodeOf(error: unknown): string | undefined {
-  if (typeof error !== 'object' || error === null) return undefined
-  const code = (error as { code?: unknown }).code
-  return typeof code === 'string' ? code : undefined
-}
 
 /** Read the optional activity projection without activating a cold Session.
  * Missing projection capability, seeded headers without an exact cut, and
@@ -323,50 +295,58 @@ export class DirectSessionReader implements SessionReader {
     }, signal)
   }
 
-  /** Search only the cwd-bearing semantic session roster; live cwd-less
-   * sessions remain list-visible but are outside the master search contract. */
-  async search(query: string): Promise<SessionSearchHit[] | undefined> {
-    const searchText = query.trim()
-    if (searchText === '') return []
-
+  /**
+   * Search only the cwd-bearing semantic session roster (master
+   * `ApiSessionList.search()` parity): the official `searchSessions` seam
+   * with user/assistant-message + current-surface filters, authorization
+   * against the visible corpus, dedupe, cursor fill, and the official
+   * 20-result window. `undefined` = the content-search capability is
+   * unavailable or explicitly disabled — never a raw-persistence scan and
+   * never a listing failure. Cancellation is honored through `listSessions`
+   * and every provider call.
+   */
+  async search(query: string, signal?: AbortSignal): Promise<SessionContentSearchPage | undefined> {
+    // Cancellation preflight comes FIRST: an aborted signal must reject
+    // with an abort-shaped error even when the capability is missing —
+    // `undefined` only ever means "capability unavailable", never "aborted".
+    signal?.throwIfAborted()
+    // Query validation comes BEFORE capability detection (plan §6.3, master
+    // `ApiSessionList.search()` parity): an invalid query is a caller error
+    // and rejects regardless of whether the capability exists.
+    const normalizedQuery = normalizeSessionSearchQuery(query)
     const sessionQuery = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
-    // `filterEvents` is the public, backend-independent semantic text seam
-    // (master contract): the reader NEVER scans raw persistence artifacts.
-    // An unmounted or explicitly disabled capability is an explicit
-    // unavailable, not a JSONL fallback.
-    if (sessionQuery?.filterEvents === undefined) return undefined
-    // `searchSessions` is intentionally disabled by the shipped SQLite FTS
-    // session-query provider (`openAt: never`). `filterEvents` remains the
-    // public semantic seam, so use it over the query engine's live-preferred
-    // corpus.
-    // Search follows the master visibility contract before applying the
-    // newest-100 work bound: only cwd-bearing persisted sessions participate.
-    // This prevents invisible cwd-less rows from consuming the search budget.
-    const records = [...await sessionQuery.listSessions()]
-      .filter(record => record.header.cwd !== undefined)
-      .sort((a, b) => b.header.createdAt - a.header.createdAt)
-      .slice(0, 100)
-    const hits: SessionSearchHit[] = []
-    for (const record of records) {
-      let documents: readonly SessionEventSearchDocumentLike[]
-      try {
-        documents = await sessionQuery.filterEvents(SessionId(record.header.id), [{ kind: 'text', text: searchText }])
-      } catch (error) {
-        // An explicitly disabled query capability is an explicit
-        // unavailable — never a raw-artifact scan.
-        if (errorCodeOf(error) === 'SESSION_QUERY_SEARCH_DISABLED') return undefined
-        throw error
-      }
-      const document = documents[0]
-      if (document === undefined) continue
-      hits.push({
-        id: String(record.header.id),
-        createdAt: record.header.createdAt,
-        snippet: semanticSnippet(document, searchText),
-      })
-      if (hits.length >= 20) break
+    // The official search seam is `searchSessions` (master parity). An
+    // unmounted engine or a provider without the capability is an explicit
+    // unavailable — never a JSONL scan and never a `filterEvents` fallback.
+    if (sessionQuery === undefined || sessionQuery.searchSessions === undefined) return undefined
+    try {
+      // Search follows the master visibility contract: only cwd-bearing
+      // persisted sessions participate (live cwd-less rows stay list-visible
+      // but are outside the search contract).
+      const records = await sessionQuery.listSessions(signal)
+      signal?.throwIfAborted()
+      const visibleIds = new Set(records
+        .filter(record => record.header.cwd !== undefined)
+        .map(record => String(record.header.id)))
+      if (visibleIds.size === 0) return { items: [], hasMore: false }
+      // The provider method is invoked AS A METHOD of the query service
+      // (never extracted as a bare function): the real engine's
+      // `searchSessions` is a class method that reads `this` (search
+      // enablement, serialized execution, generation state).
+      return await searchSessionContentPage({
+        searchSessions: (request, exec) => sessionQuery.searchSessions!(request, exec),
+      }, visibleIds, normalizedQuery, signal)
+    } catch (error) {
+      signal?.throwIfAborted()
+      // An explicitly disabled search capability is an explicit unavailable
+      // (the shipped SQLite FTS provider is `openAt: never` by default).
+      if (errorCodeOf(error) === 'SESSION_QUERY_SEARCH_DISABLED') return undefined
+      // A provider-side abort — from the listing OR the search provider —
+      // stays an abort (the UI treats it as a cancellation, never as a
+      // search failure).
+      if (errorCodeOf(error) === 'SESSION_QUERY_ABORTED') throw cancellationError('session search was aborted')
+      throw error
     }
-    return hits
   }
 
   measureContext(sessionId: string): number | undefined {

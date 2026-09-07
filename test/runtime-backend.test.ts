@@ -32,7 +32,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   }
   const sessionReader = {
     list: async () => [],
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
     readExportData: async () => ({ kind: 'none' as const }),
