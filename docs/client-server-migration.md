@@ -168,10 +168,18 @@ not copy private Direct state, and the TUI must never keep a second (private)
 persistence of session derived state (the retired
 `$DSH_HOME/cache/pi-tui-session-titles.json` title cache was exactly that).
 
-The Direct adapter may use the query engine's provider-independent
-`filterEvents` seam when the shipped SQLite full-text provider is disabled
-(`openAt: never`). If that semantic capability is absent or explicitly disabled,
-search is explicitly unavailable; it never falls back to raw persistence.
+Content search is the `SessionReader.search()` semantic port: the Direct
+adapter mirrors master `ApiSessionList.search()` business semantics over the
+official `sessionQuery.searchSessions()` seam (user/assistant message +
+current-surface filters, cwd visibility authorization, dedupe, cursor fill,
+the official 20-result window, and the provider-call work budget) — the retired
+TUI-owned "newest 100 sessions + `filterEvents` loop + first 20 hits" private
+rule is gone, so a match in an old session is found regardless of recency.
+`undefined` means the content-search capability is unavailable or explicitly
+disabled (the shipped SQLite FTS provider is `openAt: never` by default);
+it never falls back to raw persistence and never means listing is unavailable.
+A future Remote adapter maps the same port method onto the official
+`session.search` contract without touching `/sessions`, `/resume` or `/search`.
 No TUI semantic path uses `readRaw()` or scans physical persistence artifacts:
 `/export` reads the committed logical log through the persistence read handle,
 and the retired repair stack has no runtime owner.

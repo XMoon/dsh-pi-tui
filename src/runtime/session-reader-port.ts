@@ -31,11 +31,23 @@ export interface SessionSummary {
   live: boolean
 }
 
-/** One content-search hit (bounded snippet around the first match). */
-export interface SessionSearchHit {
-  id: string
-  createdAt: number
-  snippet: string
+/** One authorized content-search hit: the visible Session identity plus the
+ * Host-selected bounded plain-text excerpt. Session metadata (createdAt,
+ * cwd, …) is NOT duplicated here — `list()` is the authoritative metadata
+ * source and the picker merges hits onto already-listed rows. */
+export interface SessionContentSearchItem {
+  /** Authorized visible Session identity. */
+  readonly sessionId: string
+  /** Host-selected bounded plain-text excerpt. */
+  readonly snippet: string
+}
+
+/** One bounded page of authorized Session content-search hits. `hasMore`
+ * means the Host search found more matches than this page carries — the
+ * consumer shows a refine hint, it never auto-paginates. */
+export interface SessionContentSearchPage {
+  readonly items: readonly SessionContentSearchItem[]
+  readonly hasMore: boolean
 }
 
 /** The combined projection enrichment for one session row: the DSH `title`
@@ -88,11 +100,18 @@ export interface SessionReader {
    * and must honor signal cancellation; an aborted signal rejects the whole
    * batch. */
   projectionBatch(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, SessionProjectionSummary>>
-  /** Search semantic session content for a query (bounded: the newest 100
-   * cwd-bearing sessions, first 20 hits). The Direct adapter uses only the
-   * sessionQuery semantic filter capability; absent or explicitly disabled
-   * capability returns unavailable and never scans raw persistence. */
-  search(query: string): Promise<SessionSearchHit[] | undefined>
+  /**
+   * Search Host-owned visible Session message content.
+   *
+   * `undefined` means the content-search capability is unavailable or
+   * explicitly disabled in this deployment. It does NOT mean session
+   * persistence/listing is unavailable — the picker keeps its local
+   * metadata filtering either way.
+   *
+   * Implementations must honor caller cancellation: an aborted signal
+   * rejects with an abort-shaped error, never a normal empty result.
+   */
+  search(query: string, signal?: AbortSignal): Promise<SessionContentSearchPage | undefined>
   /** Best-effort context-pressure measurement for one session (the
    * /status context row). `undefined` = unmeasurable (service absent,
    * session unknown, or a measurement failure — never a crash). */

@@ -89,7 +89,7 @@ function stubRunner(
     agents: {} as never,
     sessionReader: {
       list: async () => [],
-      search: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
       readExportData: async () => ({ kind: 'none' }),
