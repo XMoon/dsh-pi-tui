@@ -3331,7 +3331,7 @@ test('a stale message keeps settlement accounting while skipping presentation', 
   assert.equal((activity as { lastAssistantStep?: number }).lastAssistantStep, 2)
 })
 
-test('stale empty, image, and unknown settlements keep accounting without rows', () => {
+test('stale empty, image, and unknown settlements keep accounting and durable facts', () => {
   const contents = [
     [],
     [{
@@ -3352,13 +3352,37 @@ test('stale empty, image, and unknown settlements keep accounting without rows',
     const activity = folder.turnActivity(0)
     assert.ok(activity !== undefined)
     assert.equal(activity.assistantMessages, 1)
-    assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), [''])
+    const assistants = folder.messages().filter(message => message.kind === 'assistant')
+    assert.equal(assistants.length, index === 0 ? 1 : 2)
+    if (index > 0) {
+      assert.deepEqual(assistants[1]?.content, content)
+    }
     assert.equal((activity as { lastAssistantStep?: number }).lastAssistantStep, 1)
     assert.equal(activity.message, undefined)
   }
 })
 
-test('late older assistant messages cannot append after a newer opaque step', () => {
+test('stale empty durable message remains available for later authoritative replacement', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('step/start', { turn: 0, step: 1 }, 2),
+  ])
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: 'future' } as never, 3))
+  folder.apply([assistantMessageWithBlocks(4, [], { step: 0 })])
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), [''])
+
+  folder.apply([assistantMessage(5, 'late empty replacement', { step: 0 })])
+  assert.deepEqual(
+    folder.messages().filter(message => message.kind === 'assistant').map(message => message.text),
+    ['', 'late empty replacement'],
+  )
+  assert.equal(folder.turnActivity(0)?.message, undefined)
+  assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+})
+
+test('late older durable assistant messages remain without retaking Focus ownership', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -3371,14 +3395,21 @@ test('late older assistant messages cannot append after a newer opaque step', ()
     }, 3),
     assistantMessage(4, 'late-old', { step: 0 }),
   ])
-  assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), [''])
+  const assistants = folder.messages().filter(message => message.kind === 'assistant')
+  assert.deepEqual(assistants.map(message => message.text), ['', 'late-old'])
   assert.equal(folder.turnActivity(0)?.message, undefined)
   assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
 
   folder.apply([event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5)])
-  const projected = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
-  assert.equal(projected.some(block => block.kind === 'message' && block.message.kind === 'assistant'), false,
-    'a stale older message must not become the exact-last completed answer')
+  const collapsed = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  assert.equal(collapsed.some(block => block.kind === 'message' && block.message.kind === 'assistant'), false,
+    'latest open opaque evidence is not a completed final and blocks stale fallback')
+  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  assert.deepEqual(
+    expanded.flatMap(block => block.kind === 'message' && block.message.kind === 'assistant' ? [block.message.text] : []),
+    ['', 'late-old'],
+    'expanded Focus retains both process evidence rows',
+  )
 })
 
 test('durable open opaque attempts are visible before close and retain interruption evidence', () => {
