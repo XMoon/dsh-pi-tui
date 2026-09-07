@@ -135,7 +135,7 @@ test('MOVED_TO_HOST requires a capability replacement mapping', () => {
 test('REDUNDANT_SHIM requires the atomic replacement and its evidence', () => {
   const manifest = fixture()
   const good = errorsFor(manifest)
-  assert.deepEqual(good, [], 'the real X019 inheritance edge has a complete atomic retirement record')
+  assert.deepEqual(good, [], 'the checked-in ledger (X019 SUPERSEDED) has a complete retirement record')
 
   // X019 is SUPERSEDED in the checked-in ledger; re-classify it as the
   // REDUNDANT_SHIM fixture so the gate rule stays covered.

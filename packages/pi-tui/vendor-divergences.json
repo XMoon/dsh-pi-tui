@@ -718,13 +718,13 @@
       "risk": "HIGH",
       "files": ["src/components/text.ts"],
       "why": "Text.dispose was a no-op solely so Loader's dispose override and super.dispose call typechecked. The inheritance edge was real, but the base no-op has been removed by an atomic Loader cleanup (PR2).",
-      "changedSurface": ["Text.dispose(): void no-op", "Loader.dispose override calls stop and super.dispose"],
+      "changedSurface": ["Text.dispose(): void no-op (pre-retirement, removed in PR2)", "Loader.dispose override called stop and super.dispose (pre-retirement, removed in PR2)"],
       "dependencies": {
-        "vendorInternal": {"audited": true, "items": ["Loader extends Text and calls super.dispose in its current local implementation."], "notes": "This is an existing inheritance consumer, not unused code."},
-        "inheritanceStructural": {"audited": true, "items": ["Loader -> Text.dispose -> super.dispose"], "notes": "The required structural audit sample is present."},
-        "host": {"audited": true, "items": ["X007 lifecycle consumers can dispose Loader through the Component contract."], "notes": "No direct host call to Text.dispose exists, but X007 owns the lifecycle edge."},
-        "publicExtension": {"audited": true, "items": ["Component.dispose is optional and public component consumers may dispose a Loader instance."], "notes": "Removing the shim must not remove Loader timer cleanup."},
-        "behavioral": {"audited": true, "items": ["Loader.stop timer cleanup must remain exactly once", "Text remains disposable only if a distinct owner requires it"], "notes": "The safe change is an atomic inheritance cleanup, not a REMOVED_UNUSED classification."}
+        "vendorInternal": {"audited": true, "items": ["Loader extended Text and called super.dispose in the pre-retirement local implementation."], "notes": "This was an existing inheritance consumer, not unused code."},
+        "inheritanceStructural": {"audited": true, "items": ["Loader -> Text.dispose -> super.dispose (pre-retirement edge, removed in PR2)"], "notes": "The required structural audit sample is present."},
+        "host": {"audited": true, "items": ["X007 lifecycle consumers can dispose Loader through the Component contract."], "notes": "No direct host call to Text.dispose exists; X007 owns the Loader disposal edge."},
+        "publicExtension": {"audited": true, "items": ["Component.dispose is optional and public component consumers may dispose a Loader instance."], "notes": "Removing the shim did not remove Loader timer cleanup."},
+        "behavioral": {"audited": true, "items": ["Loader.stop timer cleanup must remain exactly once", "Text no longer carries a dispose member (X019 retired in PR2)"], "notes": "The safe change is an atomic inheritance cleanup, not a REMOVED_UNUSED classification."}
       },
       "tests": ["packages/pi-tui/test/dispose-lifecycle.test.ts: Loader cleanup and idempotency", "packages/pi-tui/test/layout.test.ts and test/pi-component-compat.test.ts: component lifecycle contract"],
       "upstream": {
