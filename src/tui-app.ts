@@ -32,6 +32,7 @@ import {
   TuiAltScreen,
   TuiMainScreen,
   VStack,
+  Input,
   getKeybindings,
   isKeyRelease,
   isKeyRepeat,
@@ -654,6 +655,64 @@ class MarqueeFilterAdapter implements Component, Focusable {
 
   render(width: number): string[] {
     return this.list.render(width)
+  }
+}
+
+/**
+ * The externally-filtered search composite (review P1): the caller's items
+ * are the membership authority — the SelectList renders WITHOUT its
+ * internal substring filter (enableSearch: false), and a separate search
+ * Input feeds `onFilterChange` so the caller re-filters the rows. The
+ * composite routes navigation/confirm/cancel keys to the SelectList and
+ * every other key to the search Input (the vendored SelectList's own
+ * keybinding vocabulary). Zero fork divergence.
+ */
+class ExternalSearchList implements Component, Focusable {
+  private readonly input: Input
+  private readonly list: SelectList
+  private readonly onFilterChange: (query: string) => void
+  private _focused = false
+
+  constructor(input: Input, list: SelectList, onFilterChange: (query: string) => void) {
+    this.input = input
+    this.list = list
+    this.onFilterChange = onFilterChange
+  }
+
+  /** Focusable (X042): forward to the search Input so it emits the
+   * hardware CURSOR_MARKER (IME positioning). */
+  get focused(): boolean {
+    return this._focused
+  }
+
+  set focused(value: boolean) {
+    this._focused = value
+    this.input.focused = value
+  }
+
+  invalidate(): void {
+    this.input.invalidate()
+    this.list.invalidate()
+  }
+
+  handleInput(data: string): void {
+    const kb = getKeybindings()
+    if (kb.matches(data, 'tui.select.up')
+      || kb.matches(data, 'tui.select.down')
+      || kb.matches(data, 'tui.select.pageUp')
+      || kb.matches(data, 'tui.select.pageDown')
+      || kb.matches(data, 'tui.select.confirm')
+      || kb.matches(data, 'tui.select.cancel')) {
+      this.list.handleInput(data)
+      return
+    }
+    const before = this.input.getValue()
+    this.input.handleInput(data)
+    if (this.input.getValue() !== before) this.onFilterChange(this.input.getValue())
+  }
+
+  render(width: number): string[] {
+    return [...this.input.render(width), '', ...this.list.render(width)]
   }
 }
 
@@ -1515,6 +1574,15 @@ export interface PickerCategory {
    * is entered ONLY programmatically: Tab skips it in browse mode, and
    * never leaves it while the search query is non-empty. */
   cyclable?: boolean
+  /** When true, this category's rows are EXTERNALLY filtered by the
+   * caller: the SelectList renders WITHOUT its internal substring filter
+   * (enableSearch: false), and a separate search Input is shown whose
+   * changes feed `onFilterChange` — the caller re-filters the items. The
+   * caller's items are the membership authority; the SelectList only
+   * renders/cursors/selects. Used by the Session Browser's search
+   * projection (a Host-authoritative hit must never be dropped by a
+   * substring re-filter). */
+  externalFilter?: boolean
 }
 
 /** Host-internal live state of the open categorized picker (Tab cycling). */
@@ -11435,6 +11503,11 @@ export class TuiApp {
     // The live search query, carried across category switches (the rebuilt
     // SelectList re-applies it via initialQuery).
     let query = ''
+    // The externally-filtered mode state (review P1): the active category
+    // declares `externalFilter`, the separate search Input owns the query,
+    // and the SelectList never filters internally.
+    let externalMode = false
+    let searchInput: Input | undefined
     // A closed picker never reports filter changes (a late programmatic
     // setFilter on the handle must not wake a dead picker's caller).
     let closed = false
@@ -11453,8 +11526,9 @@ export class TuiApp {
         overlay?.hide()
       },
       cycle: () => {
-        // Carry the CURRENT search query into the rebuilt category.
-        query = list?.getFilter() ?? query
+        // Carry the CURRENT search query into the rebuilt category (the
+        // external search Input owns it in the externally-filtered mode).
+        query = externalMode ? searchInput?.getValue() ?? query : list?.getFilter() ?? query
         // A non-cyclable category (the search projection) is entered only
         // programmatically: Tab never leaves it while a query is active
         // (the browse tabs must not wrap global search results), and the
@@ -11474,27 +11548,33 @@ export class TuiApp {
       // continue mid-cycle (review round 3).
       marquee?.reset()
       const category = categories[currentIndex]!
+      // The externally-filtered mode (review P1): the caller's items are
+      // the membership authority — the SelectList renders WITHOUT its
+      // internal substring filter, and a separate search Input feeds
+      // `onFilterChange`. A Host-authoritative hit must never be dropped
+      // by a substring re-filter.
+      externalMode = category.externalFilter === true
       const next = new SelectList(
         category.items().map(item => ({ ...item })),
         10,
         selectListTheme,
         layout,
         {
-          enableSearch: options.enableSearch,
+          enableSearch: externalMode ? false : options.enableSearch,
           header: category.header,
           noMatchText: options.noMatchText,
           showHint: options.showHint,
-          initialQuery: query === '' ? options.initialQuery : query,
+          initialQuery: externalMode ? '' : (query === '' ? options.initialQuery : query),
         },
       )
       if (marquee !== undefined) next.onSelectionChange = () => marquee.reset()
       next.onSelect = (item) => {
-        query = next.getFilter()
+        query = externalMode ? searchInput?.getValue() ?? query : next.getFilter()
         state.close()
         onSelect(item.value)
       }
       next.onCancel = () => {
-        query = next.getFilter()
+        query = externalMode ? searchInput?.getValue() ?? query : next.getFilter()
         state.close()
         onCancel()
       }
@@ -11504,10 +11584,24 @@ export class TuiApp {
       // vendored SelectList fires no selection change for query edits); the
       // adapter also reports typed filter changes to the caller's
       // `onFilterChange` (the Session Browser's debounced content search).
-      const mounted = new MarqueeFilterAdapter(next, () => {
-        marquee?.reset()
-        options.onFilterChange?.(next.getFilter())
-      })
+      // In the externally-filtered mode the separate search Input reports
+      // instead, and the SelectList never filters internally.
+      let mounted: Component
+      if (externalMode) {
+        const input = new Input()
+        if (query !== '') input.setValue(query)
+        searchInput = input
+        mounted = new ExternalSearchList(input, next, (value) => {
+          marquee?.reset()
+          options.onFilterChange?.(value)
+        })
+      } else {
+        searchInput = undefined
+        mounted = new MarqueeFilterAdapter(next, () => {
+          marquee?.reset()
+          options.onFilterChange?.(next.getFilter())
+        })
+      }
       const configuredWidth = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width!)) : 64
       const configuredMaxHeight = Number.isFinite(options.maxHeight) ? Math.max(1, Math.floor(options.maxHeight!)) : 24
       const geometryOf = (): ResponsiveOverlayGeometry => {
@@ -11516,7 +11610,11 @@ export class TuiApp {
         return { width, maxHeight, key: `${width}:${maxHeight}` }
       }
       const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
-        next.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+        // The externally-filtered composite renders the search Input +
+        // blank ABOVE the SelectList, OUTSIDE its maxRows budget — reserve
+        // those 2 rows so the frame never overflows the terminal (review
+        // round 6: the normal mode's input lives INSIDE the SelectList).
+        next.setMaxRows(Math.max(1, geometry.maxHeight - (externalMode ? 4 : 2)))
       })
       overlay = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
     }
@@ -11563,15 +11661,28 @@ export class TuiApp {
       setCategory: (id) => {
         const index = categories.findIndex(category => category.id === id)
         if (index === -1) return
-        // Carry the CURRENT search query into the rebuilt category.
-        query = list?.getFilter() ?? query
+        // Carry the CURRENT search query into the rebuilt category (the
+        // external search Input owns it in the externally-filtered mode).
+        query = externalMode ? searchInput?.getValue() ?? query : list?.getFilter() ?? query
         currentIndex = index
         state.index = index
         activate()
       },
       getCategory: () => categories[currentIndex]!.id,
-      getFilter: () => list?.getFilter() ?? '',
+      getFilter: () => externalMode ? searchInput?.getValue() ?? '' : list?.getFilter() ?? '',
       setFilter: (filter) => {
+        if (externalMode) {
+          if (searchInput === undefined) return
+          const before = searchInput.getValue()
+          searchInput.setValue(filter)
+          this.requestRender()
+          // Programmatic filters report exactly like typed ones (same value
+          // → no callback; closed OR disposed picker → no callback).
+          if (!closed && !this.disposed && searchInput.getValue() !== before) {
+            options.onFilterChange?.(searchInput.getValue())
+          }
+          return
+        }
         if (list === undefined) return
         // The internal `query` mirrors the edit so a later category switch
         // carries the PROGRAMMATIC filter exactly like a typed one.
