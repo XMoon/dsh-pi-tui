@@ -155,6 +155,7 @@ import {
   RUNNING_PREVIEW_LINES,
   SETTLED_PREVIEW_VISUAL_ROWS,
 } from './local-shell-card.ts'
+import { formatBytes } from './bounded-output.ts'
 import type { RendererRegistry } from './renderer-registry.ts'
 import { OverlayBroker } from './overlay-broker.ts'
 import { EditorSeatMount } from './editor-seat.ts'
@@ -250,6 +251,12 @@ export interface StreamingToolPreview {
   readonly step: number
   readonly index: number
   readonly name?: string
+  /** Total UTF-8 bytes received through argumentsDelta. */
+  readonly argumentBytes: number
+  /** Early human identity extracted from bounded partial args. */
+  readonly summary?: string
+  /** Bounded partial args retained until summary is found or a known-name scan reaches the cap. */
+  readonly scanPrefix?: string
 }
 
 /** The indeterminate progress-bar frames shown while a compaction runs:
@@ -5680,14 +5687,33 @@ export class TuiApp {
       : undefined
   }
 
-  /** Render the live preparing rows with the current semantic tool icon and
-   * title mappings. The arguments stream is intentionally not retained or
-   * parsed; only the tool identity is shown. */
-  private streamingToolPreviewComponent(previews: readonly StreamingToolPreview[]): Component {
+  /** Render live Preparing rows with the formal tool identity, early summary
+   * and exact UTF-8 argument bytes. The bounded scan prefix never reaches the
+   * presentation layer. */
+  private streamingToolPreviewComponent(
+    previews: readonly StreamingToolPreview[],
+    width: number,
+  ): Component {
+    const safeWidth = Math.max(1, Math.floor(width))
     const lines = previews.map(preview => {
       const name = preview.name ?? ''
-      const prefix = iconPrefix(toolIconSemantic(name), this.iconStyle)
-      return color.textDim(`${prefix}Preparing ${toolTitle(name)}...`)
+      const head = `${iconPrefix(toolIconSemantic(name), this.iconStyle)}Preparing ${toolTitle(name)}`
+      const summary = preview.summary === undefined
+        ? ''
+        : relativizeToCwd(preview.summary, this.workspaceRoot).replace(/\r\n|\r|\n/g, ' ')
+      const tail = `... · ${formatBytes(preview.argumentBytes)}`
+      const tailShown = truncateToWidth(tail, Math.min(safeWidth, visibleWidth(tail)), '…')
+      let remaining = Math.max(0, safeWidth - visibleWidth(tailShown))
+      const headShown = remaining === 0
+        ? ''
+        : remaining >= visibleWidth(head)
+          ? head
+          : truncateToWidth(head, remaining, '…')
+      remaining = Math.max(0, remaining - visibleWidth(headShown))
+      const summaryShown = summary === '' || remaining < 2
+        ? ''
+        : truncateToWidth(` ${summary}`, remaining, '…')
+      return color.textDim(`${headShown}${summaryShown}${tailShown}`)
     })
     return new Text(lines.join('\n'), 0, 0)
   }
@@ -5800,7 +5826,7 @@ export class TuiApp {
         rendered = component.render(width)
       } else if (block.kind === 'streaming-tool-previews') {
         // Live-only preview block
-        component = this.streamingToolPreviewComponent(block.previews)
+        component = this.streamingToolPreviewComponent(block.previews, width)
         rendered = component.render(width)
       } else {
         // Persistent per-message components (stage J): unchanged messages
@@ -6000,7 +6026,7 @@ export class TuiApp {
         )
         rendered = component.render(width)
       } else if (block.kind === 'streaming-tool-previews') {
-        component = this.streamingToolPreviewComponent(block.previews)
+        component = this.streamingToolPreviewComponent(block.previews, width)
         rendered = component.render(width)
       } else {
         component = this.componentForMessage(block.message, boundary, width)

@@ -583,6 +583,12 @@ const SUMMARY_KEYS: Record<string, string[]> = {
   others: [],
 }
 
+/** Return the formal Tool card's preferred argument summary keys. Preparing
+ * extraction treats this order as the best available choice at extraction time. */
+export function toolSummaryKeys(name: string): readonly string[] {
+  return SUMMARY_KEYS[classifyTool(name)] ?? []
+}
+
 /** The first line of a text (the Web's ReasoningRow summary for settled rows). */
 export function firstLine(text: string): string {
   const newline = text.indexOf('\n')
@@ -630,11 +636,11 @@ function pickString(args: Record<string, unknown>, keys: readonly string[]): str
 
 /** The summary key preference for one row variant, falling back to the first
  * string arg value, then to the raw args text (Web deriveSummary). */
-function deriveSummary(variant: ToolVariant, argsRaw: string): string {
+function deriveSummary(name: string, argsRaw: string): string {
   const parsed = parseArgs(argsRaw)
   if (typeof parsed !== 'object' || parsed === null) return firstLine(argsRaw)
   const args = parsed as Record<string, unknown>
-  const picked = pickString(args, SUMMARY_KEYS[variant] ?? [])
+  const picked = pickString(args, toolSummaryKeys(name))
   if (picked !== undefined) return firstLine(picked)
   for (const value of Object.values(args)) {
     if (typeof value === 'string' && value !== '') return firstLine(value)
@@ -1091,7 +1097,7 @@ export function toolCardHeader(name: string, argsRaw: string, cwd?: string): Too
   // generic derivation (Web TodoRow parity: `todo_write` reads
   // `2/3 done` instead of a raw args dump).
   const toolSummary = summarizeToolArgs(name, argsRaw)
-  const base = argsRaw === '' ? '' : toolSummary ?? relativizeToCwd(deriveSummary(variant, argsRaw), cwd)
+  const base = argsRaw === '' ? '' : toolSummary ?? relativizeToCwd(deriveSummary(name, argsRaw), cwd)
   const summary = variant === 'others' && toolTitle === undefined
     ? base === '' ? '' : name + ' · ' + base
     : base

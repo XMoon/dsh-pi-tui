@@ -213,8 +213,8 @@ test('Focus collapsed Preparing uses the Tool slot and temporarily overrides the
   applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
   show(app, folder, [
-    { callId: 'p-edit', turn: 1, step: 0, index: 0, name: 'edit' },
-    { callId: 'p-bash', turn: 1, step: 0, index: 1, name: 'bash' },
+    { callId: 'p-edit', turn: 1, step: 0, index: 0, name: 'edit', argumentBytes: 0 },
+    { callId: 'p-bash', turn: 1, step: 0, index: 1, name: 'bash', argumentBytes: 0 },
   ])
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -224,7 +224,7 @@ test('Focus collapsed Preparing uses the Tool slot and temporarily overrides the
   assert.ok(!joined.includes('Tool:    Read src/transcript.ts'), `the formal Tool slot must be overridden:\n${joined}`)
   assert.ok(!joined.includes('Preparing Edit...'), `collapsed Focus must not append a standalone preview row:\n${joined}`)
 
-  show(app, folder, [{ callId: 'p-read', turn: 1, step: 0, index: 0, name: 'read' }])
+  show(app, folder, [{ callId: 'p-read', turn: 1, step: 0, index: 0, name: 'read', argumentBytes: 0 }])
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('Tool:    Preparing Read…'), `the live Tool-slot summary must refresh:\n${joined}`)
@@ -246,8 +246,8 @@ test('Focus expanded places Preparing rows after the process tail and before the
   applyMixed(folder, [...runningTurn(0), ...settleEvents(0)])
   app.setFocusMode(true)
   show(app, folder, [
-    { callId: 'p-bash', turn: 1, step: 0, index: 1, name: 'bash' },
-    { callId: 'p-edit', turn: 1, step: 0, index: 0, name: 'edit' },
+    { callId: 'p-bash', turn: 1, step: 0, index: 1, name: 'bash', argumentBytes: 0 },
+    { callId: 'p-edit', turn: 1, step: 0, index: 0, name: 'edit', argumentBytes: 0 },
   ])
   app.setFullscreen(true)
   await vt.waitForRender()
