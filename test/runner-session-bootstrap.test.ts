@@ -3185,3 +3185,48 @@ test('a retirement flush failure warns the user on stderr (durability is not sil
   assert.ok(stderrWrites.some(write => write.includes('the latest events may not be persisted')),
     'the warning must state the durability consequence')
 })
+
+test('a retirement descendant-drain failure warns with the failing phases (not the flush wording)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-warn-drain-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-warn-drain-session',
+    header: { id: 'retire-warn-drain-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  // The descendant drain fails: the warning must name the failing phases,
+  // NOT use the flush-specific durability wording.
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, (events: string[]) => ({
+    drainContinuableDescendants: async () => {
+      events.push('drain:retire-warn-drain-session')
+      throw new Error('drain exploded')
+    },
+  }))
+  const stderrWrites: string[] = []
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: unknown) => {
+    stderrWrites.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  life.defer(() => { process.stderr.write = originalWrite })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  await fiber.dispose()
+  fiber = undefined
+  assert.ok(stderrWrites.some(write => write.includes('session retirement failed during descendants')),
+    `the warning must name the failing phase: ${JSON.stringify(stderrWrites)}`)
+  assert.ok(!stderrWrites.some(write => write.includes('the latest events may not be persisted')),
+    'a non-flush failure must not claim a durability loss')
+})
