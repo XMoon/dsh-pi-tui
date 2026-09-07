@@ -13,9 +13,9 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `f455abd18dfeb5758d0d8b5cf77013562d1f89d6`
-- Branch audited: `feat/vendor-divergence-ledger-hardening`
-- Audit date: `2026-09-03`
+- Audited local source commit: `5709dfc1a1f7b36abc314d8cfb87e68fd3226557`
+- Branch audited: `feat/searchable-picker-host-migration-next`
+- Audit date: `2026-09-07`
 - Upstream reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
 - Kimi reference snapshot: `MoonshotAI/kimi-code@9e881528a89945a373002b0b229f91735e8f2c4f`
 - Snapshot policy: Reference snapshots and auditedSourceCommit are audit evidence, not continuous views of repository HEAD. Refresh them only during an explicit re-vendor, divergence re-audit, retirement evaluation, or upstream-equivalence review.
@@ -25,6 +25,7 @@
 - Compared recorded Pi and Kimi reference snapshots for semantic comparison; issue and PR references are background only.
 - Ran focused deletion experiments for X019, X030, X037, X038, X043, and X044; existing checks caught the first five, while X044 required a compile-only subclass fixture.
 - Historical removed and absorbed records were retained as explicit records instead of disappearing from the manifest.
+- PR1 relocation audit: X001/X002/X041 moved to the Host SearchablePicker (src/searchable-picker.ts) with the vendored SelectList restored to the pinned baseline; X042 narrowed to the SettingsList seam. The audit was performed against the immutable local source snapshot recorded in verification.auditedSourceCommit.
 
 ## Audit rules
 
@@ -59,7 +60,8 @@
 
 - `DROPPED`: `X013` — No known in-repo vendor, host, public, or behavioral consumer remains; external use of this private package behavior is unverified. The host busy indicator is WorkingIndicator.
 - `DELIBERATELY_KEPT`: `X030` — A host copy of decodePrintableKey would duplicate the implementation; the package exports map exposes only the root entry.
-- `DEFERRED_HOST_MIGRATION`: `X001`, `X002`, `X041`, `X042` — A host SearchablePicker could replace the extended list, but only after mapping search, grouping, dynamic rows, query state, focus, and row-budget semantics.
+- `MOVED_TO_HOST`: `X001`, `X002`, `X041` — The DSH searchable picker behavior moved to the Host-owned src/searchable-picker.ts SearchablePicker (guarded by test/searchable-picker.test.ts); the vendored SelectList is restored to the pinned upstream baseline.
+- `NOT_MOVABLE`: `X042` — The remaining X042 seam is SettingsList focus/row-budget propagation inside the vendored fork; the SelectList-side Input focus ownership moved to the Host SearchablePicker.
 - `NOT_MOVABLE`: `X004A`, `X004B`, `X005`, `X006`, `X007`, `X008`, `X009`, `X010`, `X011`, `X012`, `X014`, `X016`, `X018`, `X019`, `X020`, `X021`, `X022`, `X023`, `X024`, `X025`, `X027`, `X028`, `X029`, `X031`, `X032`, `X033`, `X034`, `X035`, `X036`, `X037`, `X038`, `X039`, `X040`, `X043`, `X044`, `X045`, `X046`, `X047` — The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary.
 - `UPSTREAM_LEVER`: `X005`, `X006`, `X007`, `X008`, `X012`, `X014`, `X016`, `X021`, `X033`, `X035` — Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence.
 
@@ -76,12 +78,12 @@
 ## Summary
 
 - Records: 48
-- Statuses: `ABSORBED_UPSTREAM`: 3, `ACTIVE`: 41, `REDUNDANT_SHIM`: 1, `REMOVED_UNUSED`: 2, `RETIREMENT_CANDIDATE`: 1
+- Statuses: `ABSORBED_UPSTREAM`: 3, `ACTIVE`: 38, `MOVED_TO_HOST`: 3, `REDUNDANT_SHIM`: 1, `REMOVED_UNUSED`: 2, `RETIREMENT_CANDIDATE`: 1
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
-| X001 | ACTIVE | HIGH | HARD_HOST_API, PUBLIC_COMPONENT_CONTRACT | NO |
-| X002 | ACTIVE | HIGH | HARD_HOST_API | NO |
+| X001 | MOVED_TO_HOST | HIGH | HARD_HOST_API, PUBLIC_COMPONENT_CONTRACT | NO |
+| X002 | MOVED_TO_HOST | HIGH | HARD_HOST_API | NO |
 | X003 | REMOVED_UNUSED | HIGH | BUGFIX_MISSING_UPSTREAM | YES |
 | X004A | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 | X004B | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
@@ -121,7 +123,7 @@
 | X038 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 | X039 | ACTIVE | MEDIUM | PERF_HOST_DEPENDENT | NO |
 | X040 | ACTIVE | HIGH | PUBLIC_COMPONENT_CONTRACT | NO |
-| X041 | ACTIVE | HIGH | HARD_HOST_API, PUBLIC_COMPONENT_CONTRACT | NO |
+| X041 | MOVED_TO_HOST | HIGH | HARD_HOST_API, PUBLIC_COMPONENT_CONTRACT | NO |
 | X042 | ACTIVE | HIGH | PUBLIC_COMPONENT_CONTRACT | NO |
 | X043 | ACTIVE | CRITICAL | HARD_HOST_API | NO |
 | X044 | ACTIVE | HIGH | HARD_HOST_API | NO |
@@ -133,11 +135,11 @@
 
 ### X001 — SelectList searchable/grouped picker
 
-- Status: `ACTIVE`
+- Status: `MOVED_TO_HOST`
 - Category: `HARD_HOST_API`, `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `HIGH`
 - Files: `src/components/select-list.ts`
-- Last audited: `2026-09-03`
+- Last audited: `2026-09-07`
 - Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
 
 #### Why it exists
@@ -161,10 +163,10 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 - Audit note: No subclass or super edge for the searchable semantics was found; Focusable forwarding is recorded separately under X042.
 
 **Host**
-- src/tui-app.ts openPicker and categorized picker rebuild
-- src/commands.ts session picker plus login/rewind SelectList callsites
+- src/tui-app.ts openPicker and categorized picker rebuild (now Host SearchablePicker)
+- src/commands.ts session picker via the TuiApp picker surface (PickerItem/PickerCategory; no direct SelectList import)
 - advanced ui.select picker adapter
-- Audit note: Collectively, the actual SelectList callers exercise query, grouping, dynamic rows, and row budgets: openPicker/session paths supply the extended dynamic behavior, while advanced ui.select supplies the public picker adapter without a mutable query/setItems handle. The model picker in src/model-menu.ts and footer/configurator.ts are host-owned SettingsList/Input flows, not X001 consumers. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics.
+- Audit note: The Host consumers exercise query, grouping, dynamic rows, and row budgets through TuiApp.openPicker/openCategorizedPicker, which now construct the Host SearchablePicker; the model picker in src/model-menu.ts and footer/configurator.ts are host-owned SettingsList/Input flows, not X001 consumers. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics.
 
 **Public / extension**
 - Advanced ui.select and picker adapter contracts expose the searchable picker behavior to host-owned integrations.
@@ -179,9 +181,9 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 
 #### Guarding tests
 
-- packages/pi-tui/test/select-list.test.ts: search, groups, paging, setFilter, and zero-match navigation
+- test/searchable-picker.test.ts: search, groups, paging, setFilter, and zero-match navigation
 - test/session-picker-loading.test.ts and picker integration coverage
-- test/session-categories.test.ts: categorized SelectList query carry
+- test/session-categories.test.ts: categorized picker query carry
 - test/sessions.test.ts: PickerHandle.setItems and initialQuery
 - test/advanced-broker.test.ts and test/advanced-cordis-lifecycle.test.ts: ui.select picker lifecycle
 
@@ -203,24 +205,29 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 
 #### Replacement mapping
 
-- None recorded.
+- SelectList search/group/page/row-budget behavior -> Host owner src/searchable-picker.ts SearchablePicker -> guarded by test/searchable-picker.test.ts
+- TuiApp openPicker/categorized picker -> Host SearchablePicker API -> existing PickerHandle remains the Host-facing adapter
+- advanced ui.select -> TuiApp.openPicker -> SearchablePicker -> advanced broker/lifecycle tests
 
 #### Retirement evidence
 
-- None recorded.
+- packages/pi-tui/src/components/select-list.ts restored byte-identical to pinned upstream b79e4cc (diff empty)
+- test/searchable-picker.test.ts green: search, groups, page keys, zero-match navigation, row budget
+- test/session-picker-loading.test.ts, test/session-categories.test.ts, test/sessions.test.ts, test/advanced-broker.test.ts, test/advanced-cordis-lifecycle.test.ts green
+- fork typecheck/test/build, surface compat, divergence ledger, strict vendor diff, root build/typecheck/test:bundle green
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed in the audited checkout that the heavy consumers are host picker stacks rather than the vendor Editor's upstream-compatible autocomplete SelectList construction. No deletion experiment was run.
+- Notes: Relocated to the Host-owned SearchablePicker (src/searchable-picker.ts) with the vendored SelectList restored to the pinned upstream baseline; the fork no longer carries this divergence.
 
 ### X002 — SelectList setItems selection/search preservation
 
-- Status: `ACTIVE`
+- Status: `MOVED_TO_HOST`
 - Category: `HARD_HOST_API`
 - Risk: `HIGH`
 - Files: `src/components/select-list.ts`
-- Last audited: `2026-09-03`
+- Last audited: `2026-09-07`
 - Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
 
 #### Why it exists
@@ -243,13 +250,13 @@ Open host pickers receive asynchronously enriched rows and must refresh without 
 - Audit note: No inheritance edge was found for setItems.
 
 **Host**
-- src/tui-app.ts session and categorized SelectList refreshes
+- src/tui-app.ts session and categorized SearchablePicker refreshes
 - src/commands.ts asynchronous session-title enrichment
 - Audit note: Host updates session/category rows while overlays remain mounted; the model picker is SettingsList-owned and is not counted as an X002 SelectList consumer.
 
 **Public / extension**
-- SelectList.setItems is a public component method exported by @xmoon76/pi-tui.
-- Audit note: The host PickerHandle dynamic-row API lives in src/tui-app.ts, not the extension AdvancedSelectOptions contract; the public package method remains observable independently.
+- SearchablePicker.setItems is the Host dynamic-row API (via the TuiApp PickerHandle); the restored vendored SelectList no longer exposes setItems.
+- Audit note: The host PickerHandle dynamic-row API lives in src/tui-app.ts, not the extension AdvancedSelectOptions contract.
 
 **Behavioral coupling**
 - selection-by-value survives row enrichment
@@ -259,10 +266,10 @@ Open host pickers receive asynchronously enriched rows and must refresh without 
 
 #### Guarding tests
 
-- packages/pi-tui/test/select-list.test.ts: setItems and selected-by-value/search preservation
+- test/searchable-picker.test.ts: setItems and selected-by-value/search preservation
 - test/session-picker-loading.test.ts: asynchronous title refresh/query preservation
 - test/sessions.test.ts: setItems with default selection
-- Missing host moved-selection refresh regression; current host tests do not exercise a non-default selected row during enrichment
+- test/searchable-picker.test.ts covers the moved-selection refresh regression (non-default selected row during enrichment)
 
 #### Upstream comparison
 
@@ -281,16 +288,20 @@ Open host pickers receive asynchronously enriched rows and must refresh without 
 
 #### Replacement mapping
 
-- None recorded.
+- SelectList.setItems query/selection preservation -> SearchablePicker.setItems -> test/searchable-picker.test.ts
+- session picker enrichment refresh -> TuiApp PickerHandle.setItems -> SearchablePicker.setItems -> test/session-picker-loading.test.ts and test/sessions.test.ts
 
 #### Retirement evidence
 
-- None recorded.
+- packages/pi-tui/src/components/select-list.ts restored byte-identical to pinned upstream b79e4cc (diff empty)
+- test/searchable-picker.test.ts green: setItems re-applies the canonical query and preserves a surviving selected value; removed-value fallback covered
+- dynamic session enrichment integration tests green
+- fork typecheck/test/build, surface compat, divergence ledger, strict vendor diff, root build/typecheck/test:bundle green
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed that host refreshes call setItems while the picker is mounted. Kept separate from X001 in the ledger because dynamic replacement is an independently breakable behavior.
+- Notes: Relocated to the Host-owned SearchablePicker.setItems; the moved-selection regression is now covered by test/searchable-picker.test.ts.
 
 ### X003 — Editor multi-line insert cursor
 
@@ -1005,7 +1016,7 @@ Input must render a clipped prompt at tiny widths instead of emitting an overwid
 - Audit note: The guard runs at the component boundary.
 
 **Inheritance / structural**
-- SelectList and SettingsList own Input instances and forward focus (X042).
+- SettingsList owns Input instances and forwards focus (X042); the Host SearchablePicker owns its search Input.
 - Audit note: Wrapper components inherit the narrow-width behavior through their child.
 
 **Host**
@@ -3233,14 +3244,14 @@ Prefilled query and draft inputs should place the cursor at the end by default, 
 
 **Vendor internal**
 - Input value, cursor clamp, search filter, and render cursor marker share setValue semantics.
-- Audit note: X041 calls this through SelectList filter synchronization.
+- Audit note: X041 calls this through SearchablePicker filter synchronization.
 
 **Inheritance / structural**
-- SelectList and SettingsList own Input children and forward focus.
+- SettingsList owns Input children and forwards focus; the Host SearchablePicker owns its search Input.
 - Audit note: Wrapper behavior depends on the child's cursor placement.
 
 **Host**
-- SelectList initialQuery/setFilter
+- SearchablePicker initialQuery/setFilter
 - src/history-panel.ts history query
 - src/task-panel.ts task query
 - src/question.ts question draft/prefill paths
@@ -3259,7 +3270,7 @@ Prefilled query and draft inputs should place the cursor at the end by default, 
 #### Guarding tests
 
 - packages/pi-tui/test/input.test.ts: X040 cursor semantics
-- packages/pi-tui/test/select-list.test.ts: initial query/filter continuation
+- test/searchable-picker.test.ts: initial query/filter continuation
 - Host setValue callsites in history-panel.ts, task-panel.ts, and question.ts were audited; no direct host cursor assertion exists
 
 #### Upstream comparison
@@ -3276,7 +3287,7 @@ Prefilled query and draft inputs should place the cursor at the end by default, 
 
 #### Retirement conditions
 
-- Provide an upstream setValue cursor contract with end-by-default prefills and explicit preserve semantics, then run Input, SelectList, question, and history tests.
+- Provide an upstream setValue cursor contract with end-by-default prefills and explicit preserve semantics, then run Input, SearchablePicker, question, and history tests.
 
 #### Replacement mapping
 
@@ -3293,11 +3304,11 @@ Prefilled query and draft inputs should place the cursor at the end by default, 
 
 ### X041 — SelectList canonical filter query
 
-- Status: `ACTIVE`
+- Status: `MOVED_TO_HOST`
 - Category: `HARD_HOST_API`, `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `HIGH`
 - Files: `src/components/select-list.ts`
-- Last audited: `2026-09-03`
+- Last audited: `2026-09-07`
 - Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
 
 #### Why it exists
@@ -3313,36 +3324,36 @@ filterQuery is the single source of truth for the rendered search box, getFilter
 #### Dependency map
 
 **Vendor internal**
-- SelectList search Input, filter application, item replacement, selection, and category rebuild share filterQuery.
+- SearchablePicker search Input, filter application, item replacement, selection, and category rebuild share filterQuery.
 - Audit note: The source-of-truth rule prevents mirrored search state.
 
 **Inheritance / structural**
-- MarqueeFilterAdapter wraps SelectList and reads getFilter through the public shape; it does not call setFilter.
+- MarqueeFilterAdapter wraps SearchablePicker and reads getFilter through the public shape; it does not call setFilter.
 - Audit note: The host PickerHandle getFilter/setFilter closures are separate structural adapters; no subclass override was found.
 
 **Host**
 - src/tui-app.ts categorized picker query handoff and category cycle
 - src/commands.ts session prefill and row enrichment
 - src/tui-app.ts PickerHandle getFilter/setFilter closures and MarqueeFilterAdapter getFilter read
-- Audit note: Host calls both programmatic and typed filter paths through distinct adapters; category navigation re-injects initialQuery after query clear and Tab.
+- Audit note: Host calls both programmatic and typed filter paths through distinct adapters; the categorized lifecycle consumes initialQuery once and category navigation preserves the live query (an empty query stays empty).
 
 **Public / extension**
-- SelectList.getFilter/setFilter are public component methods exported by @xmoon76/pi-tui.
+- SearchablePicker.getFilter/setFilter are Host component methods; the restored vendored SelectList keeps only the upstream setFilter.
 - Audit note: AdvancedSelectOptions does not expose these methods; the host PickerHandle adapter lives in src/tui-app.ts, so its public-host status is kept distinct from the package component contract.
 
 **Behavioral coupling**
 - programmatic filter is visible in the search box
 - next key refines rather than resets the programmatic query
 - setItems preserves the live query
-- categorized picker rebuild can re-inject the original initialQuery after the user clears it and presses Tab
+- initialQuery is consumed only when the categorized picker lifecycle is created; a cleared (empty) query is a valid live state and never falls back to the initial value
 - getFilter is truthful with search disabled
-- Audit note: X040 cursor placement is part of the visible continuation behavior. The clear-then-Tab initialQuery edge is recorded as a host follow-up rather than overstated as unconditional query preservation.
+- Audit note: X040 cursor placement is part of the visible continuation behavior. Typed input, programmatic setFilter, setItems refreshes, category cycle, setCategory, and external-search handoff all preserve the one live canonical query, including the empty-string state.
 
 #### Guarding tests
 
-- packages/pi-tui/test/select-list.test.ts: canonical filter state
+- test/searchable-picker.test.ts: canonical filter state
 - test/session-picker-loading.test.ts and picker category/filter integration
-- Missing categorized-picker clear-then-Tab initialQuery regression; decide whether re-injection is intended before retirement
+- test/session-categories.test.ts: initialQuery consumed-once, programmatic cross-category carry, and typed/cleared lifecycle regressions
 
 #### Upstream comparison
 
@@ -3362,24 +3373,30 @@ filterQuery is the single source of truth for the rendered search box, getFilter
 
 #### Replacement mapping
 
-- None recorded.
+- SelectList canonical filterQuery/getFilter/setFilter -> SearchablePicker canonical query state -> test/searchable-picker.test.ts
+- categorized picker query lifecycle -> TuiApp live `query` -> initialQuery consumed once at lifecycle creation -> test/session-categories.test.ts regressions
+- categorized/session-search query carry -> TuiApp categorized picker initialQuery handoff -> SearchablePicker canonical query -> test/session-categories.test.ts and test/session-picker-content-search.test.ts
 
 #### Retirement evidence
 
-- None recorded.
+- packages/pi-tui/src/components/select-list.ts restored byte-identical to pinned upstream b79e4cc (diff empty)
+- test/searchable-picker.test.ts green: programmatic/typed/setItems/initialQuery query paths share one canonical state; search-disabled programmatic filter covered
+- test/session-categories.test.ts green: initialQuery clears once and never resurrects on Tab; programmatic and typed queries survive category switches; cleared-empty survives
+- categorized/session-search integration tests green
+- fork typecheck/test/build, surface compat, divergence ledger, strict vendor diff, root build/typecheck/test:bundle green
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: KEEP NOW. This record prevents a future SearchableList migration from losing the query-state contract.
+- Notes: Relocated to the Host-owned SearchablePicker/TuiApp picker lifecycle. initialQuery is consumed only at lifecycle initialization; typed, programmatic, setItems, category and external-search paths preserve one live canonical query, including the empty-string state.
 
 ### X042 — Focusable propagation on Input-owning lists
 
 - Status: `ACTIVE`
 - Category: `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `HIGH`
-- Files: `src/components/select-list.ts`, `src/components/settings-list.ts`
-- Last audited: `2026-09-03`
+- Files: `src/components/settings-list.ts`
+- Last audited: `2026-09-07`
 - Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
 
 #### Why it exists
@@ -3388,22 +3405,21 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 #### Changed surface
 
-- SelectList Focusable getter/setter forwards to search Input
 - SettingsList Focusable propagation reaches search Input and conditionally forwards to an open submenu
 - row-budget forwarding for nested submenu lists
 
 #### Dependency map
 
 **Vendor internal**
-- SelectList search Input and SettingsList submenu/search lifecycle share focus and row-budget state.
-- Audit note: Propagation must be updated when submenu ownership changes.
+- SettingsList submenu/search lifecycle shares focus and row-budget state.
+- Audit note: The SelectList-side Input focus ownership moved to the Host SearchablePicker; the remaining vendor-owned seam is SettingsList.
 
 **Inheritance / structural**
-- SelectList and SettingsList implement Focusable; SettingsList forwards only when a submenu structurally exposes focused.
+- SettingsList implements Focusable; SettingsList forwards only when a submenu structurally exposes focused.
 - Audit note: The conditional optional-method edge is real; host ThemeSubmenu, Model/EffortSubmenu, and SubagentModelAllowlistSubmenu currently do not all implement Focusable.
 
 **Host**
-- src/tui-app.ts FocusForwardingFrame and picker/settings overlays
+- src/tui-app.ts FocusForwardingFrame and settings overlays
 - src/theme-menu.ts, src/model-menu.ts, and src/subagent-model-menu.ts submenu wrappers
 - Audit note: Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. The audit found a remaining IME/cursor gap for non-Focusable submenu wrappers.
 
@@ -3412,7 +3428,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 - Audit note: The public wrapper contract is used by host and extensions, but optional structural focus must be made explicit by each submenu owner.
 
 **Behavioral coupling**
-- focused top-level list emits cursor marker through its actual Input
+- focused top-level SettingsList emits cursor marker through its actual Input
 - IME candidate window follows top-level search focus
 - submenu receives focus only when it implements Focusable
 - selection/description tail remains within budget
@@ -3420,8 +3436,8 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 #### Guarding tests
 
-- packages/pi-tui/test/select-list.test.ts and settings-list.test.ts: focus/row-budget behavior
-- test/extension-focus-seat.test.ts: SurfaceSnapshot.focusedSeat state only (not SelectList/SettingsList or IME)
+- packages/pi-tui/test/settings-list.test.ts: focus/row-budget behavior
+- test/extension-focus-seat.test.ts: SurfaceSnapshot.focusedSeat state only (not SettingsList or IME)
 - Missing dedicated host submenu focus/IME integration regression for non-Focusable wrappers; add before retirement
 
 #### Upstream comparison
@@ -3442,16 +3458,20 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 #### Replacement mapping
 
-- None recorded.
+- SelectList-side Input focus ownership -> moved to Host SearchablePicker (src/searchable-picker.ts) -> test/searchable-picker.test.ts focus tests
+- remaining vendor-owned seam -> SettingsList focus/row-budget propagation -> packages/pi-tui/test/settings-list.test.ts
 
 #### Retirement evidence
 
-- None recorded.
+- SelectList-side focus forwarding removed from the fork; the restored select-list.ts matches the pinned upstream baseline (diff empty)
+- test/searchable-picker.test.ts focus tests green (focused flag reaches the search Input cursor marker)
+- packages/pi-tui/test/settings-list.test.ts focus/row-budget behavior green
+- fork typecheck/test/build, surface compat, divergence ledger, strict vendor diff, root build/typecheck/test:bundle green
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed list wrappers are actual Input-owning components. The vendor seam is active, while the current host's non-Focusable submenu wrappers leave a follow-up IME/cursor coverage gap; this record does not claim that gap is solved.
+- Notes: The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam.
 
 ### X043 — Deferred viewport input listener registration
 
