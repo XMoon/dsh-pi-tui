@@ -62,9 +62,8 @@ export class Loader extends Text {
 	}
 
 	/** Release the animation timer; containers call this on removal. (dsh-pi-tui divergence X007.) */
-	override dispose(): void {
+	dispose(): void {
 		this.stop();
-		super.dispose();
 	}
 
 	setIndicator(indicator?: LoaderIndicatorOptions): void {
