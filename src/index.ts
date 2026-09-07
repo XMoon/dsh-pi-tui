@@ -1587,6 +1587,19 @@ export function apply(ctx: Context, config: Config): void {
   // into the shell. The guarded writer swallows broken-stream async
   // errors; every use is additionally wrapped for synchronous throws.
   const notificationWriter = guardedStreamWriter(process.stdout)
+  // A process-wide guarded stderr writer for user-visible warnings: the
+  // error listener swallows async stream errors (EPIPE when the terminal
+  // closed — a plain try/catch around write() cannot see those), and every
+  // use is additionally wrapped for synchronous throws. A warning must
+  // never crash the host, even during shutdown.
+  const stderrWarningWriter = guardedStreamWriter(process.stderr)
+  const safeTerminalWarning = (message: string): void => {
+    try {
+      stderrWarningWriter.write(message)
+    } catch {
+      // A throwing stderr write must not break the retirement.
+    }
+  }
 
   // The Direct owner slots are hoisted to the RUNNER scope (outside the
   // startup IIFE) so the terminal-total fatal catch can see whether a
@@ -1711,15 +1724,11 @@ export function apply(ctx: Context, config: Config): void {
           // bounded shutdown.
           if (report.failures.length > 0) {
             const flushFailure = report.failures.find(failure => failure.phase === 'flush')
-            try {
-              if (flushFailure !== undefined) {
-                process.stderr.write(`\n${color.textDim('Warning:')} session flush failed during retirement (${flushFailure.error}) — the latest events may not be persisted\n`)
-              } else {
-                const phases = report.failures.map(failure => failure.phase).join(', ')
-                process.stderr.write(`\n${color.textDim('Warning:')} session retirement failed during ${phases}\n`)
-              }
-            } catch {
-              // A throwing stderr write must not break the retirement.
+            if (flushFailure !== undefined) {
+              safeTerminalWarning(`\n${color.textDim('Warning:')} session flush failed during retirement (${flushFailure.error}) — the latest events may not be persisted\n`)
+            } else {
+              const phases = report.failures.map(failure => failure.phase).join(', ')
+              safeTerminalWarning(`\n${color.textDim('Warning:')} session retirement failed during ${phases}\n`)
             }
           }
           diag.info('retire complete', { session: agent.session.id, failures: report.failures.length })
