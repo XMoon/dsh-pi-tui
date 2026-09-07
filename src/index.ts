@@ -5637,6 +5637,9 @@ export function apply(ctx: Context, config: Config): void {
         })
       },
     }, {
+      // Every first-party modal overlay mounts as a full-screen frame
+      // spanning the whole terminal (content top-anchored inside it).
+      fullscreenOverlays: true,
       // Ctrl+R input-history search: the runner owns the IO (the file-backed
       // source + the known-cwd identity map), the surface owns the panel
       // lifecycle (plan §27 — TuiApp never touches the filesystem).

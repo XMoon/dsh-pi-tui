@@ -523,6 +523,69 @@ class ResponsiveOverlayFrame extends FocusForwardingFrame {
   }
 }
 
+/**
+ * A root-owned FULL-SCREEN overlay frame (runner option
+ * `fullscreenOverlays`): the rounded border spans the whole terminal and
+ * the content is TOP-anchored — short content leaves blank bordered
+ * interior below it, so every first-party dialog reads as one full-bleed
+ * panel instead of a centered box over the transcript. The height is
+ * re-derived from the LIVE terminal on every render (resize-safe), and
+ * row-budget consumers (lists/panels that accept `setMaxRows`) are
+ * notified through `onRows` whenever the grant changes, mirroring the
+ * legacy {@link ResponsiveOverlayFrame} geometry callback. Width fills the
+ * overlay canvas — the mount site passes `width: '100%'`.
+ */
+class FullscreenOverlayFrame extends FocusForwardingFrame {
+  private readonly view: Component
+  private readonly rowsOf: () => number
+  private readonly onRows: ((rows: number) => void) | undefined
+  private lastRows = 0
+
+  constructor(child: Component, rowsOf: () => number, onRows?: (rows: number) => void) {
+    super(child, true)
+    this.view = child
+    this.rowsOf = rowsOf
+    this.onRows = onRows
+    this.syncGeometry()
+  }
+
+  /** Re-run the row callback when the terminal height changed (the host
+   * calls this on resize, same seam as ResponsiveOverlayFrame). */
+  syncGeometry(): number {
+    const rows = Math.max(2, Math.floor(this.rowsOf()))
+    if (rows !== this.lastRows) {
+      this.lastRows = rows
+      this.onRows?.(rows)
+    }
+    return rows
+  }
+
+  render(width: number): string[] {
+    const rows = this.syncGeometry()
+    const frameWidth = Math.max(1, Math.floor(width))
+    const inner = Math.max(1, frameWidth - 4)
+    const b = color.border
+    const out: string[] = [b(`╭${'─'.repeat(Math.max(0, frameWidth - 2))}╮`)]
+    // Top-anchored content rows: same shape as Frame (`│ line │`), each
+    // padded to the full frame width so the borders align.
+    for (const line of this.view.render(inner).map(line => truncateToWidth(line, inner, '…'))) {
+      const vis = visibleWidth(line)
+      out.push(`${b('│')} ${line}${' '.repeat(Math.max(0, inner - vis))} ${b('│')}`)
+    }
+    // Blank bordered rows fill the remaining terminal height so the bottom
+    // border hugs the last terminal row (never grows past it — the fork's
+    // maxHeight slice would cut it).
+    const empty = `${b('│')}${' '.repeat(Math.max(0, frameWidth - 2))}${b('│')}`
+    while (out.length < rows - 1) out.push(empty)
+    out.push(b(`╰${'─'.repeat(Math.max(0, frameWidth - 2))}╯`))
+    return out
+  }
+}
+
+/** The live-geometry seam of the overlay frames the host tracks for
+ * resize re-sync (ResponsiveOverlayFrame and FullscreenOverlayFrame). */
+type LiveOverlayFrame = FocusForwardingFrame & { syncGeometry(): void }
+
 /** The session head card: identity facts, wrapped to the available width so
  * nothing is truncated, framed with a box whose width matches the editor's
  * border below it (a fixed-width rule looked misaligned next to the frame). */
@@ -1792,7 +1855,7 @@ interface PendingApproval {
   resolve: (outcome: ApprovalOutcome) => void
   handle?: OverlayHandle
   /** The live geometry wrapper behind the current approval handle. */
-  responsiveFrame?: ResponsiveOverlayFrame
+  responsiveFrame?: LiveOverlayFrame
   onAbort?: () => void
   /** Settled once: an abort and a user decision must not double-resolve. */
   settled?: boolean
@@ -1957,6 +2020,19 @@ export interface TuiAppOptions {
    * to the `current` scope and hides the session tab.
    */
   historySearchSessionId?: () => string | undefined
+  /**
+   * Mount every first-party MODAL overlay (pickers, /settings, the task
+   * browser, the history panel, approvals, the keybinding editor, the
+   * footer configurator and the output viewer) as a FULL-SCREEN frame that
+   * spans the entire terminal: the rounded border hugs all four edges and
+   * the content is TOP-anchored, so short content leaves blank bordered
+   * interior below it instead of a centered box floating over the
+   * transcript. The transcript-search corner box and the editor-seat
+   * question flow are not overlays and are unaffected. Default false keeps
+   * the classic centered design-width dialogs (headless suites rely on
+   * it); the production runner enables this in `src/index.ts`.
+   */
+  fullscreenOverlays?: boolean
 }
 
 /**
@@ -2323,7 +2399,7 @@ export class TuiApp {
   /** The overlay handle of the history panel (hide() closes it). */
   private historyOverlay: OverlayHandle | undefined
   /** The responsive shell survives a resize and a fullscreen screen swap. */
-  private historyResponsiveFrame: ResponsiveOverlayFrame | undefined
+  private historyResponsiveFrame: LiveOverlayFrame | undefined
   /** Footer configurators own paste timers outside the generic overlay
    * disposal path; final surface disposal closes every still-open one. */
   private readonly footerConfiguratorClosers = new Set<() => void>()
@@ -2643,6 +2719,9 @@ export class TuiApp {
    * synchronous store observer never reads `main` + the child's facts
    * (the review's P2). */
   private mainWorkspaceBeforeViewer: WorkspaceStatus | undefined
+  /** Whether first-party modal overlays mount as full-screen frames
+   * (runner option {@link TuiAppOptions.fullscreenOverlays}). */
+  private readonly overlayFullscreen: boolean
 
   constructor(terminal: Terminal, events: TuiAppEvents, options: TuiAppOptions = {}) {
     // The external-editor capability is a BOUND pair: the external-editor
@@ -2686,6 +2765,7 @@ export class TuiApp {
     this.terminal = resizeAware
     this.events = events
     this.iconStyle = options.iconStyle ?? 'emoji'
+    this.overlayFullscreen = options.fullscreenOverlays === true
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
     // M0: the unified status projection store. The runner passes its own
@@ -5109,6 +5189,20 @@ export class TuiApp {
 
   /** Mount an existing history panel on the current physical screen. */
   private mountHistoryOverlay(panel: HistoryPanel): void {
+    if (this.overlayFullscreen) {
+      // Full-screen variant: the frame spans the whole terminal; the
+      // panel re-budgets its rows to the live grant (borders subtract 2).
+      const frame = new FullscreenOverlayFrame(panel, () => this.terminal.rows, rows => {
+        panel.setMaxRows(Math.max(1, rows - 2))
+      })
+      this.historyResponsiveFrame = frame
+      this.historyOverlay = this.showOverlayOnHost(
+        frame,
+        { width: '100%', maxHeight: '100%' },
+        { remountable: true },
+      )
+      return
+    }
     const geometryOf = (): ResponsiveOverlayGeometry => {
       const geometry = historyOverlayGeometry(this.terminal.columns, this.terminal.rows)
       return {
@@ -11380,15 +11474,29 @@ export class TuiApp {
     })
     const configuredWidth = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width!)) : 64
     const configuredMaxHeight = Number.isFinite(options.maxHeight) ? Math.max(1, Math.floor(options.maxHeight!)) : 24
-    const geometryOf = (): ResponsiveOverlayGeometry => {
-      const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
-      const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
-      return { width, maxHeight, key: `${width}:${maxHeight}` }
+    let frame: ResponsiveOverlayFrame | FullscreenOverlayFrame
+    if (this.overlayFullscreen) {
+      // Full-screen variant: the frame spans the whole terminal and the
+      // picker re-budgets its visible rows to the live grant.
+      frame = new FullscreenOverlayFrame(mounted, () => this.terminal.rows, rows => {
+        list.setMaxRows(Math.max(1, rows - 2))
+      })
+    } else {
+      const geometryOf = (): ResponsiveOverlayGeometry => {
+        const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+        const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+        return { width, maxHeight, key: `${width}:${maxHeight}` }
+      }
+      frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
+        list.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+      })
     }
-    const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
-      list.setMaxRows(Math.max(1, geometry.maxHeight - 2))
-    })
-    const handle = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
+    const handle = this.showOverlayOnHost(
+      frame,
+      this.overlayFullscreen
+        ? { width: '100%', maxHeight: '100%' }
+        : { width: configuredWidth, maxHeight: configuredMaxHeight },
+    )
     // Phase 4: an abort signal closes the picker and fires onCancel (the
     // imperative select broker's fiber-cancellation path). The listener
     // is removed on a normal select/cancel AND on the handle's close
@@ -11651,19 +11759,33 @@ export class TuiApp {
       }
       const configuredWidth = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width!)) : 64
       const configuredMaxHeight = Number.isFinite(options.maxHeight) ? Math.max(1, Math.floor(options.maxHeight!)) : 24
-      const geometryOf = (): ResponsiveOverlayGeometry => {
-        const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
-        const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
-        return { width, maxHeight, key: `${width}:${maxHeight}` }
+      let frame: ResponsiveOverlayFrame | FullscreenOverlayFrame
+      if (this.overlayFullscreen) {
+        // Full-screen variant: the frame spans the whole terminal and the
+        // picker re-budgets its visible rows to the live grant.
+        frame = new FullscreenOverlayFrame(mounted, () => this.terminal.rows, rows => {
+          next.setMaxRows(Math.max(1, rows - (externalMode ? 4 : 2)))
+        })
+      } else {
+        const geometryOf = (): ResponsiveOverlayGeometry => {
+          const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+          const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+          return { width, maxHeight, key: `${width}:${maxHeight}` }
+        }
+        frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
+          // The externally-filtered composite renders the search Input +
+          // blank ABOVE the picker, OUTSIDE its maxRows budget — reserve
+          // those 2 rows so the frame never overflows the terminal (review
+          // round 6: the normal mode's input lives INSIDE the picker).
+          next.setMaxRows(Math.max(1, geometry.maxHeight - (externalMode ? 4 : 2)))
+        })
       }
-      const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
-        // The externally-filtered composite renders the search Input +
-        // blank ABOVE the picker, OUTSIDE its maxRows budget — reserve
-        // those 2 rows so the frame never overflows the terminal (review
-        // round 6: the normal mode's input lives INSIDE the picker).
-        next.setMaxRows(Math.max(1, geometry.maxHeight - (externalMode ? 4 : 2)))
-      })
-      overlay = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
+      overlay = this.showOverlayOnHost(
+        frame,
+        this.overlayFullscreen
+          ? { width: '100%', maxHeight: '100%' }
+          : { width: configuredWidth, maxHeight: configuredMaxHeight },
+      )
     }
     // Phase 4 parity: an abort signal closes the CURRENT overlay and fires
     // onCancel. The listener lives once on the signal — category switches
@@ -11853,22 +11975,36 @@ export class TuiApp {
       const pixels = typeof value === 'number' ? value : Math.floor((dimension * parseFloat(value)) / 100)
       return Math.max(1, Math.min(pixels, avail))
     }
-    const geometryOf = (): ResponsiveOverlayGeometry => {
-      const marginInset = fullMode ? 2 : 0
-      const availWidth = Math.max(1, this.terminal.columns - marginInset)
-      const availHeight = Math.max(1, this.terminal.rows - marginInset)
-      const width = resolveSize(overlayWidth, this.terminal.columns, availWidth)
-      const maxHeight = resolveSize(overlayMaxHeight, this.terminal.rows, availHeight)
-      return { width, maxHeight, key: `${width}:${maxHeight}` }
+    let frame: ResponsiveOverlayFrame | FullscreenOverlayFrame
+    if (this.overlayFullscreen) {
+      // Full-screen variant: the frame spans the whole terminal (no
+      // margin) and the panel re-budgets its rows to the live grant.
+      frame = new FullscreenOverlayFrame(panel, () => this.terminal.rows, rows => {
+        panel.setMaxRows(Math.max(1, rows - 2))
+      })
+    } else {
+      const geometryOf = (): ResponsiveOverlayGeometry => {
+        const marginInset = fullMode ? 2 : 0
+        const availWidth = Math.max(1, this.terminal.columns - marginInset)
+        const availHeight = Math.max(1, this.terminal.rows - marginInset)
+        const width = resolveSize(overlayWidth, this.terminal.columns, availWidth)
+        const maxHeight = resolveSize(overlayMaxHeight, this.terminal.rows, availHeight)
+        return { width, maxHeight, key: `${width}:${maxHeight}` }
+      }
+      frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
+        panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+      })
     }
-    const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
-      panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
-    })
-    const handle = this.showOverlayOnHost(frame, {
-      width: overlayWidth,
-      maxHeight: overlayMaxHeight,
-      margin: fullMode ? 1 : undefined,
-    })
+    const handle = this.showOverlayOnHost(
+      frame,
+      this.overlayFullscreen
+        ? { width: '100%', maxHeight: '100%' }
+        : {
+            width: overlayWidth,
+            maxHeight: overlayMaxHeight,
+            margin: fullMode ? 1 : undefined,
+          },
+    )
     // One close path: hide the overlay AND stop the panel's 1s elapsed tick
     // (an unref'd interval must still be cleared — the panel is gone).
     // `close` is a `let` declared before the panel callbacks above reference
@@ -11948,15 +12084,29 @@ export class TuiApp {
     }, { enableSearch: true })
     const configuredWidth = 72
     const configuredMaxHeight = 28
-    const geometryOf = (): ResponsiveOverlayGeometry => {
-      const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
-      const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
-      return { width, maxHeight, key: `${width}:${maxHeight}` }
+    let frame: ResponsiveOverlayFrame | FullscreenOverlayFrame
+    if (this.overlayFullscreen) {
+      // Full-screen variant: the frame spans the whole terminal and the
+      // list re-budgets its rows to the live grant.
+      frame = new FullscreenOverlayFrame(settings, () => this.terminal.rows, rows => {
+        settings.setMaxRows(Math.max(1, rows - 2))
+      })
+    } else {
+      const geometryOf = (): ResponsiveOverlayGeometry => {
+        const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+        const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+        return { width, maxHeight, key: `${width}:${maxHeight}` }
+      }
+      frame = new ResponsiveOverlayFrame(settings, geometryOf, geometry => {
+        settings.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+      })
     }
-    const frame = new ResponsiveOverlayFrame(settings, geometryOf, geometry => {
-      settings.setMaxRows(Math.max(1, geometry.maxHeight - 2))
-    })
-    handle = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
+    handle = this.showOverlayOnHost(
+      frame,
+      this.overlayFullscreen
+        ? { width: '100%', maxHeight: '100%' }
+        : { width: configuredWidth, maxHeight: configuredMaxHeight },
+    )
     return () => handle?.hide()
   }
 
@@ -11997,10 +12147,10 @@ export class TuiApp {
       unregister()
       handle?.hide()
     }
-    handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
-      width: 88,
-      maxHeight: '100%',
-    })
+    handle = this.showOverlayOnHost(
+      this.overlayFullscreen ? new FullscreenOverlayFrame(panel, () => this.terminal.rows) : new FocusForwardingFrame(panel, true),
+      this.overlayFullscreen ? { width: '100%', maxHeight: '100%' } : { width: 88, maxHeight: '100%' },
+    )
     return close
   }
 
@@ -12069,21 +12219,26 @@ export class TuiApp {
         options.onCancel()
       },
     })
-    handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
-      width: 88,
-      // The overlay's hard cut must never exceed the terminal: the panel
-      // budgets its content to rows-2 (Frame borders add 2), so the
-      // maxHeight must be at least the panel's full render + borders —
-      // a fixed 30 would slice the bottom border on tall terminals (a
-      // 40-row terminal renders 30 content rows + 2 borders = 32 > 30).
-      // It must also track the LIVE height: a NUMBER is captured at open
-      // time and never changes — opening on a 10-row terminal and growing
-      // to 40 left the overlay clamped at 10, hard-cutting the editable
-      // body and the bottom border even though the panel had re-budgeted
-      // itself for the new size. '100%' is re-resolved against the
-      // CURRENT terminal height on every overlay frame.
-      maxHeight: '100%',
-    })
+    handle = this.showOverlayOnHost(
+      this.overlayFullscreen ? new FullscreenOverlayFrame(panel, () => this.terminal.rows) : new FocusForwardingFrame(panel, true),
+      this.overlayFullscreen
+        ? { width: '100%', maxHeight: '100%' }
+        : {
+            width: 88,
+            // The overlay's hard cut must never exceed the terminal: the panel
+            // budgets its content to rows-2 (Frame borders add 2), so the
+            // maxHeight must be at least the panel's full render + borders —
+            // a fixed 30 would slice the bottom border on tall terminals (a
+            // 40-row terminal renders 30 content rows + 2 borders = 32 > 30).
+            // It must also track the LIVE height: a NUMBER is captured at open
+            // time and never changes — opening on a 10-row terminal and growing
+            // to 40 left the overlay clamped at 10, hard-cutting the editable
+            // body and the bottom border even though the panel had re-budgeted
+            // itself for the new size. '100%' is re-resolved against the
+            // CURRENT terminal height on every overlay frame.
+            maxHeight: '100%',
+          },
+    )
     this.footerConfiguratorClosers.add(close)
     return close
   }
@@ -12126,7 +12281,9 @@ export class TuiApp {
         options.onStop?.()
       }
     }
-    const handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), { width: 88, maxHeight: 24 })
+    const handle = this.overlayFullscreen
+      ? this.showOverlayOnHost(new FullscreenOverlayFrame(panel, () => this.terminal.rows), { width: '100%', maxHeight: '100%' })
+      : this.showOverlayOnHost(new FocusForwardingFrame(panel, true), { width: 88, maxHeight: 24 })
     panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000)
     return close
   }
@@ -12361,14 +12518,20 @@ export class TuiApp {
       geometryOf,
       (request, geometry) => this.buildApprovalDialog(request, geometry),
     )
-    const frame = new ResponsiveOverlayFrame(surface, () => {
-      const geometry = geometryOf()
-      return {
-        width: geometry.width,
-        maxHeight: geometry.maxHeight,
-        key: `${geometry.width}:${geometry.maxHeight}:${geometry.contentWidth}`,
-      }
-    })
+    // The mount canvas is always the full terminal (100%); only the frame
+    // differs: the responsive frame centers the compact dialog, while the
+    // full-screen frame pads it so the rounded border spans the whole
+    // terminal with the dialog top-anchored.
+    const frame: ResponsiveOverlayFrame | FullscreenOverlayFrame = this.overlayFullscreen
+      ? new FullscreenOverlayFrame(surface, () => this.terminal.rows)
+      : new ResponsiveOverlayFrame(surface, () => {
+          const geometry = geometryOf()
+          return {
+            width: geometry.width,
+            maxHeight: geometry.maxHeight,
+            key: `${geometry.width}:${geometry.maxHeight}:${geometry.contentWidth}`,
+          }
+        })
     pending.responsiveFrame = frame
     pending.handle = this.showOverlayOnHost(frame, { width: '100%', maxHeight: '100%' })
   }
