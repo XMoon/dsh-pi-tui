@@ -155,6 +155,25 @@ test('a step without an assistant message contributes no timing (Web parity)', (
   assert.equal(stats.tokensPerSec, 0)
 })
 
+test('open opaque block starts do not create token, usage, or TTFT facts', () => {
+  const t = 1_700_000_000_000
+  const folder = new StatsFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 100),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-start', index: 0, blockType: 'future',
+  } as never, t + 500))
+  const stats = folder.snapshot()
+  assert.equal(stats.firstTokenMsAvg, 0, 'presentation-only open state is not TTFT')
+  assert.equal(stats.llmMs, 0, 'presentation-only open state is not LLM wall time')
+  assert.equal(stats.outputTokens, 0, 'presentation-only open state is not output usage')
+  assert.equal(stats.inputTokens, 0)
+  assert.equal(stats.cacheReadTokens, 0)
+  assert.equal(stats.cacheWriteTokens, 0)
+})
+
 test('first-token semantics match the Web isTokenDelta: reasoning deltas start the decode window', () => {
   const t = 1_700_000_000_000
   // Step 0: reasoning delta arrives first, text delta later. The decode
@@ -1045,6 +1064,7 @@ test('a retry accumulates attempts while settling logical-step timing once', () 
   assert.equal(stats.outputTokens, 14)
   assert.equal(stats.llmMs, 700, 'the retry reuses the original step start for wall time')
   assert.equal(stats.firstTokenMsAvg, 100, 'the first token of the logical step survives the failed attempt')
+  assert.equal(stats.tokensPerSec, Math.round((9 * 1000) / 700), 'throughput samples the final retry message, not the additive attempt total')
   const cold = computeStats(events.filter(item => (item.type as string) !== 'assistant/chunk'))
   assert.equal(cold.inputTokens, 300, 'cold replay keeps both attempt totals')
   assert.equal(cold.outputTokens, 14)
@@ -1112,6 +1132,203 @@ test('without llm/retry-started, a later same-step settlement replaces the slot'
   const stats = computeStats(events)
   assert.equal(stats.inputTokens, 200)
   assert.equal(stats.outputTokens, 9)
+})
+
+test('a late assistant/attempt replaces a settled message usage in both folds', () => {
+  const topLevelUsage = { inputTokens: 10, outputTokens: 100 }
+  const embeddedUsage = { inputTokens: 20, outputTokens: 200 }
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: { id: MessageId('m-settled-before-attempt'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: topLevelUsage,
+      stream: [],
+    }, 2),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'chunk', time: 3, chunk: { type: 'usage', usage: embeddedUsage } }],
+    }, 3),
+    event('step/end', { turn: 0, step: 0 }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+  ]
+  const transcript = new TranscriptFolder()
+  transcript.apply(events)
+  const activity = transcript.turnActivity(0)
+  assert.deepEqual(activity?.usage, { inputTokens: 20, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 })
+  assert.equal(activity?.totalTokens, 220)
+  assert.equal(activity?.assistantMessages, 1)
+  const stats = foldStats(events)
+  assert.equal(stats.inputTokens, 20)
+  assert.equal(stats.outputTokens, 200)
+  const cold = computeStats(events)
+  assert.equal(cold.inputTokens, 20)
+  assert.equal(cold.outputTokens, 200)
+})
+
+test('a usage-less late attempt preserves authoritative message usage in both folds', () => {
+  const usage = { inputTokens: 10, outputTokens: 100 }
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: { id: MessageId('m-authoritative-usage'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage,
+      stream: [],
+    }, 2),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3),
+    event('step/end', { turn: 0, step: 0 }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+  ]
+  const transcript = new TranscriptFolder()
+  transcript.apply(events)
+  assert.equal(transcript.turnActivity(0)?.usage?.inputTokens, 10)
+  assert.equal(transcript.turnActivity(0)?.usage?.outputTokens, 100)
+  const stats = foldStats(events)
+  assert.equal(stats.inputTokens, 10)
+  assert.equal(stats.outputTokens, 100)
+  const cold = computeStats(events)
+  assert.equal(cold.inputTokens, 10)
+  assert.equal(cold.outputTokens, 100)
+})
+
+test('a late assistant/attempt replacement updates recent throughput and TTFT', () => {
+  const t = 1_700_000_000_000
+  const usageA = { inputTokens: 10, outputTokens: 100 }
+  const usageB = { inputTokens: 20, outputTokens: 200 }
+  const events = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 100),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: { id: MessageId('m-performance-replacement'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: usageA,
+      stream: [],
+    }, 2, t + 110),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [
+        { type: 'chunk', time: t + 105, chunk: { type: 'text-delta', index: 0, text: 'late token' } },
+        { type: 'chunk', time: t + 106, chunk: { type: 'usage', usage: usageB } },
+      ],
+    }, 3, t + 120),
+    event('step/end', { turn: 0, step: 0 }, 4, t + 130),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5, t + 140),
+  ]
+  const oneShot = computeStats(events)
+  const incremental = foldStats(events)
+  for (const stats of [oneShot, incremental]) {
+    assert.equal(stats.inputTokens, 20)
+    assert.equal(stats.outputTokens, 200)
+    assert.equal(stats.firstTokenMsAvg, 5, 'late attempt first-token evidence fills the missing TTFT sample')
+    assert.equal(stats.tokensPerSec, 20_000, 'late authoritative usage replaces the throughput sample')
+  }
+})
+
+test('a first-token-only late attempt fills TTFT without changing usage throughput', () => {
+  const t = 1_700_000_000_000
+  const events = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 100),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: { id: MessageId('m-first-token-only'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 10, outputTokens: 100 },
+      stream: [],
+    }, 2, t + 110),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'chunk', time: t + 105, chunk: { type: 'text-delta', index: 0, text: 'late token' } }],
+    }, 3, t + 120),
+    event('step/end', { turn: 0, step: 0 }, 4, t + 130),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5, t + 140),
+  ]
+  const oneShot = computeStats(events)
+  const incremental = foldStats(events)
+  for (const stats of [oneShot, incremental]) {
+    assert.equal(stats.inputTokens, 10)
+    assert.equal(stats.outputTokens, 100)
+    assert.equal(stats.firstTokenMsAvg, 5)
+    assert.equal(stats.tokensPerSec, 10_000)
+  }
+  assert.deepEqual(incremental, oneShot)
+})
+
+test('a late assistant/attempt after step/end replaces the retained throughput sample', () => {
+  const t = 1_700_000_000_000
+  const events = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 100),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: { id: MessageId('m-post-step-performance'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 10, outputTokens: 100 },
+      stream: [],
+    }, 2, t + 110),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 120),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'chunk', time: t + 115, chunk: { type: 'usage', usage: { inputTokens: 20, outputTokens: 200 } } }],
+    }, 4, t + 130),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5, t + 140),
+  ]
+  const oneShot = computeStats(events)
+  const incremental = foldStats(events)
+  assert.equal(oneShot.tokensPerSec, 20_000)
+  assert.equal(incremental.tokensPerSec, 20_000)
+  assert.deepEqual(incremental, oneShot)
+})
+
+test('duplicate late attempts replace and can invalidate the throughput sample', () => {
+  const t = 1_700_000_000_000
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t + 100),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: { id: MessageId('m-duplicate-attempt-performance'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 10, outputTokens: 100 },
+      stream: [],
+    }, 2, t + 110),
+  ]
+  const replacement = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'chunk', time: t + 105, chunk: { type: 'usage', usage: { inputTokens: 20, outputTokens: 200 } } }],
+  }, 3, t + 120)
+  const invalidation = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'chunk', time: t + 106, chunk: { type: 'usage', usage: { inputTokens: 30, outputTokens: 0 } } }],
+  }, 4, t + 130)
+  const suffix = [
+    invalidation,
+    event('step/end', { turn: 0, step: 0 }, 5, t + 140),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6, t + 150),
+  ]
+  const oneShot = computeStats([...prefix, replacement, ...suffix])
+  const folder = new StatsFolder()
+  folder.apply(prefix)
+  folder.apply([replacement])
+  assert.equal(folder.snapshot().outputTokens, 200)
+  assert.equal(folder.snapshot().tokensPerSec, 20_000)
+  folder.apply(suffix)
+  assert.equal(folder.snapshot().inputTokens, 30)
+  assert.equal(folder.snapshot().outputTokens, 0)
+  assert.equal(folder.snapshot().tokensPerSec, 0)
+  assert.deepEqual(folder.snapshot(), oneShot)
 })
 
 test('a duplicate step/start never leaks the open step pending usage', () => {
@@ -1378,6 +1595,61 @@ test('recent TTFB averages the latest five first-token steps', () => {
   assert.deepEqual(folder.snapshot(), oneShot)
 })
 
+test('late attempt TTFT keeps its completion ordinal and recent-five membership', () => {
+  const t = 1_700_000_000_000
+  const log: SessionEvent[] = []
+  let seq = 0
+  const first = completedStep(0, 0, seq, t, { firstDeltaMs: undefined })
+  log.push(...first)
+  seq += first.length
+  for (let step = 1; step <= 4; step += 1) {
+    const events = completedStep(0, step, seq, t + step * 10_000, { firstDeltaMs: step * 100 })
+    log.push(...events)
+    seq += events.length
+  }
+  const folder = new StatsFolder()
+  applyMixed(folder, log)
+  const late = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'chunk', time: t + 50, chunk: { type: 'text-delta', index: 0, text: 'late first token' } }],
+  }, seq++, t + 50)
+  applyMixed(folder, [late])
+  const internals = folder as unknown as { recent: { ttft: Array<{ key: string; ordinal: number; ttftMs: number }> } }
+  const repaired = internals.recent.ttft.find(sample => sample.key === '0/0')
+  assert.ok(repaired !== undefined)
+  assert.equal(repaired.ordinal, 0, 'late evidence must retain the original completion ordinal')
+  assert.equal(repaired.ttftMs, 50)
+
+  const newest = completedStep(0, 5, seq, t + 50_000, { firstDeltaMs: 500 })
+  applyMixed(folder, newest)
+  // The late step 0 sample is now outside the latest-five window; an
+  // incorrectly appended late sample would evict step 1 instead and change
+  // this average.
+  assert.equal(folder.snapshot().firstTokenMsAvg, 300)
+})
+
+test('late attempt TTFT cannot resurrect a sample across A → B → A route epochs', () => {
+  const t = 1_700_000_000_000
+  const stepA0 = completedStep(0, 0, 0, t, { provider: 'a', model: 'm' })
+  const stepB = completedStep(0, 1, stepA0.length, t + 10_000, {
+    provider: 'b', model: 'm', firstDeltaMs: 100,
+  })
+  const stepA1 = completedStep(0, 2, stepA0.length + stepB.length, t + 20_000, {
+    provider: 'a', model: 'm', firstDeltaMs: 200,
+  })
+  const late = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'chunk', time: t + 30_000, chunk: { type: 'text-delta', index: 0, text: 'old route token' } }],
+  }, stepA0.length + stepB.length + stepA1.length, t + 30_000)
+  const folder = new StatsFolder()
+  applyMixed(folder, [...stepA0, ...stepB, ...stepA1, late])
+  // Only the second A lifecycle's 200ms sample belongs to the current
+  // performance window; the old A step remains an accounting fact only.
+  assert.equal(folder.snapshot().firstTokenMsAvg, 200)
+})
+
 test('a model/provider route change resets the recent performance window', () => {
   const t = 1_700_000_000_000
   const log: SessionEvent[] = []
@@ -1455,6 +1727,25 @@ test('a late usage replacement cannot resurrect a sample after a route reset', (
   applyMixed(folder, log)
   assert.equal(oneShot.tokensPerSec, 100, 'only route B\'s sample remains')
   assert.equal(oneShot.outputTokens, 10_099, 'the token ACCOUNTING still applies the authoritative replacement')
+  assert.deepEqual(folder.snapshot(), oneShot)
+})
+
+test('a late attempt cannot resurrect a sample across A → B → A route epochs', () => {
+  const t = 1_700_000_000_000
+  const stepA0 = completedStep(0, 0, 0, t, { provider: 'a', model: 'm', outputTokens: 100, wallMs: 1_000 })
+  const stepB = completedStep(0, 1, stepA0.length, t + 10_000, { provider: 'b', model: 'm', outputTokens: 100, wallMs: 1_000 })
+  const stepA1 = completedStep(0, 2, stepA0.length + stepB.length, t + 20_000, { provider: 'a', model: 'm', outputTokens: 100, wallMs: 1_000 })
+  const late = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'chunk', time: t + 30_000, chunk: { type: 'usage', usage: { inputTokens: 20, outputTokens: 9_999 } } }],
+  }, stepA0.length + stepB.length + stepA1.length, t + 30_000)
+  const log = [...stepA0, ...stepB, ...stepA1, late]
+  const oneShot = computeStats(log)
+  const folder = new StatsFolder()
+  applyMixed(folder, log)
+  assert.equal(oneShot.tokensPerSec, 100)
+  assert.equal(oneShot.outputTokens, 10_199)
   assert.deepEqual(folder.snapshot(), oneShot)
 })
 

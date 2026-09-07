@@ -2164,6 +2164,112 @@ function steeredTurn(turn: number, baseSeq: number, startTime: number): SessionE
   ]
 }
 
+test('completed open opaque output remains the exact Assistant final in Focus', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [eventAt('turn/start', { turn: 0 }, 1000, 0)])
+  folder.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-start', index: 0, blockType: 'future-final',
+  } as never, 1001))
+  applyMixed(folder, [eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1002, 2)])
+
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, '')
+  assert.deepEqual(assistant.displayBlocks, [{ kind: 'open-opaque', blockType: 'future-final' }])
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['activity', 'assistant'])
+  const expanded = projectTools(folder.messages(), folder.turnActivities(), new Set([0]))
+  assert.deepEqual(blockKinds(expanded), ['activity', 'assistant'])
+})
+
+test('durable open opaque attempt remains the exact Focus final in both modes', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
+    eventAt('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'chunk', time: 1002, chunk: { type: 'block-start', index: 0, blockType: 'future-attempt' } }],
+    }, 1002, 2),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1003, 3),
+  ])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.deepEqual(assistant.displayBlocks, [{ kind: 'open-opaque', blockType: 'future-attempt' }])
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  const expanded = projectTools(folder.messages(), folder.turnActivities(), new Set([0]))
+  assert.deepEqual(blockKinds(collapsed), ['activity'], 'interrupted attempt evidence stays hidden in collapsed Focus')
+  assert.deepEqual(blockKinds(expanded), ['activity', 'assistant'])
+  const expandedAssistant = expanded.at(-1)
+  assert.ok(expandedAssistant?.kind === 'message' && expandedAssistant.message.kind === 'assistant')
+  assert.deepEqual(expandedAssistant.message.displayBlocks, [{ kind: 'open-opaque', blockType: 'future-attempt' }])
+})
+
+test('completed Focus chooses the latest open opaque Assistant over an earlier answer', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 0 }, 1001, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'earlier answer' }, 1002))
+  applyMixed(folder, [eventAt('step/start', { turn: 0, step: 1 }, 1003, 3)])
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'text-delta', index: 0, text: '   ' }, 1004))
+  folder.applyLiveInput(liveChunk(0, 1, {
+    type: 'block-start', index: 1, blockType: 'future-final',
+  } as never, 1005))
+  applyMixed(folder, [eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 6)])
+
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  const collapsedAssistants = collapsed.flatMap(block => block.kind === 'message' && block.message.kind === 'assistant' ? [block.message] : [])
+  assert.deepEqual(collapsedAssistants.map(message => message.text), ['   '])
+  assert.deepEqual(collapsedAssistants[0]?.displayBlocks, [
+    { kind: 'content', block: { type: 'text', text: '   ' } },
+    { kind: 'open-opaque', blockType: 'future-final' },
+  ])
+
+  const expanded = projectTools(folder.messages(), folder.turnActivities(), new Set([0]))
+  const expandedAssistants = expanded.flatMap(block => block.kind === 'message' && block.message.kind === 'assistant' ? [block.message] : [])
+  assert.deepEqual(expandedAssistants.map(message => message.text), ['earlier answer', '   '])
+  assert.deepEqual(expandedAssistants[1]?.displayBlocks, [
+    { kind: 'content', block: { type: 'text', text: '   ' } },
+    { kind: 'open-opaque', blockType: 'future-final' },
+  ])
+})
+
+test('open opaque process rows preserve same-turn steer ordering in collapsed and expanded Focus', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('opaque-initial'), role: 'user',
+      content: [{ type: 'text', text: 'initial prompt' }],
+      source: { kind: 'user' },
+    }, 1001, 1),
+    eventAt('assistant/chunk', {
+      turn: 0, step: 0,
+      chunk: { type: 'reasoning-delta', index: 0, text: 'thinking before steer' },
+    }, 1002, 2),
+    ...claimedSteer('opaque-steer', 'same-turn steer', 1003, 3),
+  ])
+  folder.applyLiveInput(liveChunk(0, 1, {
+    type: 'block-start', index: 0, blockType: 'future',
+  } as never, 1005))
+
+  const expanded = projectTools(folder.messages(), folder.turnActivities(), new Set([0]))
+  assert.deepEqual(blockKinds(expanded), ['user', 'activity', 'thinking', 'user', 'assistant'])
+  const expandedAssistant = expanded.at(-1)
+  assert.ok(expandedAssistant?.kind === 'message' && expandedAssistant.message.kind === 'assistant')
+  assert.deepEqual(expandedAssistant.message.displayBlocks, [{ kind: 'open-opaque', blockType: 'future' }])
+  const expandedUsers = expanded.flatMap(block => block.kind === 'message' && block.message.kind === 'user' ? [block.message.text] : [])
+  assert.deepEqual(expandedUsers, ['initial prompt', 'same-turn steer'])
+
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'user', 'activity'])
+  assert.ok(!collapsed.some(block => block.kind === 'message' && block.message.kind === 'assistant'),
+    'collapsed Focus must retain its existing hidden process policy')
+})
+
 test('expanded: the initial user stays before the Thought; a mid-turn steer returns to its chronological position', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, steeredTurn(0, 0, 1000))

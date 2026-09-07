@@ -102,8 +102,9 @@ export const RECENT_PERFORMANCE_SAMPLE_LIMIT = 5
  * valid, letting the next-older retained candidate rejoin. Twice the
  * window covers the worst case of every derived sample being
  * invalidated; a duplicate older than the candidate buffer is a replay
- * artifact beyond the recent contract. TTFT needs no candidates — its
- * samples have no invalidation path. */
+ * artifact beyond the recent contract. TTFT has no candidate buffer because
+ * late evidence can only fill a previously missing sample, never invalidate
+ * an existing first-token sample. */
 const RECENT_PERFORMANCE_CANDIDATE_LIMIT = RECENT_PERFORMANCE_SAMPLE_LIMIT * 2
 
 /** Key identifying one step's model output (turn + step). */
@@ -295,8 +296,8 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
   const stats: SessionStats = { ...EMPTY }
   const perStep = new Map<string, StepTiming>()
   // Keep settled samples only until their turn closes, so a late duplicate
-  // assistant/message can replace its output-token sample without retaining
-  // timing state for the full session.
+  // assistant/message or assistant/attempt can replace its output-token sample
+  // without retaining timing state for the full session.
   const settledPerStep = new Map<string, StepTiming>()
   // Step boundaries are idempotent within the active turn; older boundaries
   // are stale once the timing fence advances.
@@ -337,13 +338,23 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
     if (kind === 'assistant/attempt') {
       const failed = event.data as { turn: number; step: number; stream?: readonly unknown[] }
       const stream = failed.stream ?? []
+      const key = stepKey(failed.turn, failed.step)
+      const attemptUsage = usageFromAssistantSettlement('attempt', undefined, stream)
+      const attemptFirstToken = firstTokenTimeFromAssistantStream(stream)
       const timing = settledTurn === failed.turn
-        ? perStep.get(stepKey(failed.turn, failed.step))
+        ? perStep.get(key) ?? settledPerStep.get(key)
         : undefined
-      if (timing !== undefined && timing.firstDelta === undefined) {
-        timing.firstDelta = firstTokenTimeFromAssistantStream(stream)
+      if (timing !== undefined) {
+        if (timing.firstDelta === undefined && attemptFirstToken !== undefined) {
+          timing.firstDelta = attemptFirstToken
+          if (timing.settled === true) replaceRecentTtft(key, timing, attemptFirstToken, recent)
+        }
+        if (timing.settled === true && attemptUsage !== undefined) {
+          timing.usage = attemptUsage
+          replaceRecentThroughput(key, timing, attemptUsage, recent)
+        }
       }
-      usage.onAssistantAttempt(failed.turn, failed.step, usageFromAssistantSettlement('attempt', undefined, stream))
+      usage.onAssistantAttempt(failed.turn, failed.step, attemptUsage)
       // Keep the open logical-step timing: a retry reuses this (turn, step)
       // and the eventual assistant/message must settle its wall/TTFT sample.
       continue
@@ -399,8 +410,8 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
         }
         usage.onStepEnd(event.data.turn, event.data.step)
         // The open timing entry is dropped at step/end, but retain its small
-        // settled sample until turn/end so a late authoritative message can
-        // replace output tokens without losing throughput parity.
+        // settled sample until turn/end so a late authoritative message or
+        // attempt can replace output tokens without losing throughput parity.
         const timing = currentTimingTurn ? perStep.get(key) : undefined
         if (timing?.settled === true) settledPerStep.set(key, timing)
         if (currentTimingTurn) perStep.delete(key)
@@ -505,10 +516,10 @@ function settleStep(
 }
 
 /** Replace the throughput sample of an already-settled step from a late
- * authoritative usage (assistant/message duplicate). The sample keeps its
- * original completion ordinal — it replaces, never appends; llmMs and
- * TTFB are never re-added; and a message belonging to a route the window
- * has moved past must not resurrect its sample into the current window.
+ * authoritative usage (assistant/message or assistant/attempt replay). The
+ * sample keeps its original completion ordinal — it replaces, never appends;
+ * llmMs and TTFB are never re-added; and an event belonging to a route the
+ * window has moved past must not resurrect its sample into the current window.
  * The EPOCH is the authoritative gate: A → B → A returns to an equal
  * route STRING while the window belongs to the second A lifecycle, so
  * only `timing.routeEpoch === recent.routeEpoch` admits the replacement.
@@ -535,6 +546,22 @@ function replaceRecentThroughput(
   recent.upsertThroughput(key, timing.completionOrdinal, wallMs, usage.outputTokens)
 }
 
+/** Fill the TTFT sample when a late attempt supplies the first token that the
+ * authoritative message did not embed. The sample keeps the settled step's
+ * ordinal and route lifecycle, just like a late usage replacement. */
+function replaceRecentTtft(
+  key: string,
+  timing: StepTiming,
+  firstDelta: number,
+  recent: RecentPerformanceWindow,
+): void {
+  if (timing.routeKey !== undefined && recent.routeKey !== undefined && timing.routeKey !== recent.routeKey) return
+  if (timing.routeEpoch !== undefined && timing.routeEpoch !== recent.routeEpoch) return
+  if (timing.completionOrdinal === undefined) return
+  if (timing.start === undefined) return
+  recent.upsertTtft(key, timing.completionOrdinal, Math.max(0, firstDelta - timing.start))
+}
+
 /** Token totals from one usage record (cache fields counted separately). */
 function addUsage(stats: SessionStats, usage: UsageLike): void {
   stats.inputTokens += usage.inputTokens
@@ -552,7 +579,7 @@ function addUsage(stats: SessionStats, usage: UsageLike): void {
 export class StatsFolder {
   private readonly stats: SessionStats = { ...EMPTY }
   private readonly perStep = new Map<string, StepTiming>()
-  // Retain only the current turn's settled samples for late message replay.
+  // Retain only the current turn's settled samples for late message/attempt replay.
   private readonly settledPerStep = new Map<string, StepTiming>()
   // Step boundaries are idempotent within the active turn; older boundaries
   // are stale once the timing fence advances.
@@ -694,16 +721,26 @@ export class StatsFolder {
     if (kind === 'assistant/attempt') {
       const data = event.data as { turn: number; step: number; stream?: readonly unknown[] }
       const stream = data.stream ?? []
+      const key = stepKey(data.turn, data.step)
+      const attemptUsage = usageFromAssistantSettlement('attempt', undefined, stream)
+      const attemptFirstToken = firstTokenTimeFromAssistantStream(stream)
       const timing = this.settledTurn === data.turn
-        ? this.perStep.get(stepKey(data.turn, data.step))
+        ? this.perStep.get(key) ?? this.settledPerStep.get(key)
         : undefined
-      if (timing !== undefined && timing.firstDelta === undefined) {
-        timing.firstDelta = firstTokenTimeFromAssistantStream(stream)
+      if (timing !== undefined) {
+        if (timing.firstDelta === undefined && attemptFirstToken !== undefined) {
+          timing.firstDelta = attemptFirstToken
+          if (timing.settled === true) replaceRecentTtft(key, timing, attemptFirstToken, this.recent)
+        }
+        if (timing.settled === true && attemptUsage !== undefined) {
+          timing.usage = attemptUsage
+          replaceRecentThroughput(key, timing, attemptUsage, this.recent)
+        }
       }
       // Keep timing open across the retry: assistant/attempt is evidence for
       // the failed attempt, not the logical step's final timing boundary.
       this.settleFailedAttempt(data.turn, data.step, true, false)
-      this.usage.onAssistantAttempt(data.turn, data.step, usageFromAssistantSettlement('attempt', undefined, stream))
+      this.usage.onAssistantAttempt(data.turn, data.step, attemptUsage)
       return
     }
     switch (event.type) {

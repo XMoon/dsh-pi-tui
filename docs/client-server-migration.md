@@ -85,6 +85,19 @@ Connection transport, or Remote upload state is implemented here.
 Locality is explicit: `/attach` and `/image` use the Client-local cwd, while
 `@` mentions remain Host/session-scoped.
 
+### Open/opaque Assistant block presentation timing (Stage C3 / pre-M2)
+
+Stage C3 aligns the TUI's transient and durable-attempt presentation with
+the pinned DSH client projection. A non-incremental/unknown block-start is
+visible immediately as an opaque null-payload presentation row, while
+text/reasoning/tool-call retain their existing lane-specific visibility.
+The first block-end remains authoritative and replaces the open
+presentation with the finalized ContentBlock. No synthetic ContentBlock is
+persisted or exposed through semantic text/search state.
+
+Stage C is complete after this change; M2 remains NOT STARTED and Direct
+remains the production backend.
+
 ## Target
 
 A DSH-native client: the TUI keeps terminal/editor/overlays/keybindings/

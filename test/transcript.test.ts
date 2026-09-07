@@ -6,12 +6,15 @@
  */
 
 import assert from 'node:assert/strict'
+import { performance } from 'node:perf_hooks'
 import test from 'node:test'
-import { BlockAssembler, ToolCallId, MessageId, type AssistantStreamRecord, type ContentBlock, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, expandAssistantStream, ToolCallId, MessageId, type AssistantStreamRecord, type ContentBlock, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
-import { foldTranscript, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
+import { foldTranscript, renderTranscriptMarkdown, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
+import { projectFocus } from '../src/focus-activity.ts'
+import { computeStats, StatsFolder } from '../src/stats.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
 import type { AssistantLiveChunk, AssistantLiveContentBlock, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 
@@ -2261,6 +2264,25 @@ test('settled Assistant rows follow block visibility while retaining empty autho
   assert.equal(interrupted[0]?.interrupted, true)
 })
 
+test('an empty durable attempt tombstones a live-only open opaque prefix for cold parity', () => {
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const attempt = event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3)
+  const end = event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 4)
+
+  const live = new TranscriptFolder()
+  live.apply(prefix)
+  live.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'future-open' } as never, 2))
+  live.apply([attempt, end])
+
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, attempt, end])
+  assert.deepEqual(live.messages(), cold.messages())
+  assert.equal(live.messages().some(message => message.kind === 'assistant'), false)
+})
+
 test('partial text attempt evidence has no undefined prefix and matches cold replay', () => {
   const prefix = [
     event('turn/start', { turn: 0 }, 0),
@@ -2392,6 +2414,368 @@ test('image-only assistant attempts preserve live/cold parity and interruption e
   assert.deepEqual(assistantImage.attachment, image.attachment)
 })
 
+test('durable hidden attempt state takes over a live opaque prefix', () => {
+  const hiddenStreams = [
+    [{ type: 'chunk' as const, time: 2, chunk: { type: 'block-end' as const, index: 0, block: { type: 'reasoning' as const, text: 'closed thought' } } }],
+    [{ type: 'chunk' as const, time: 2, chunk: { type: 'block-end' as const, index: 0, block: { type: 'text' as const, text: '' } } }],
+  ]
+  for (const stream of hiddenStreams) {
+    const prefix = [
+      event('turn/start', { turn: 0 }, 0),
+      event('step/start', { turn: 0, step: 0 }, 1),
+    ]
+    const attempt = event('assistant/attempt', { turn: 0, step: 0, stream }, 3)
+    const live = new TranscriptFolder()
+    live.apply(prefix)
+    live.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'future' }, 2))
+    live.apply([attempt])
+    const cold = new TranscriptFolder()
+    cold.hydrate([...prefix, attempt])
+    assert.deepEqual(live.messages(), cold.messages())
+    assert.equal(live.messages().some(message => message.kind === 'assistant'), false)
+  }
+})
+
+test('hidden durable takeover clears latest Focus visibility without regressing its step fence', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'older answer' }, 2))
+  folder.apply([event('step/start', { turn: 0, step: 1 }, 3)])
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: 'future' }, 4))
+  folder.apply([event('assistant/attempt', {
+    turn: 0,
+    step: 1,
+    stream: [{ type: 'chunk', time: 5, chunk: { type: 'block-end', index: 0, block: { type: 'text', text: '' } } }],
+  }, 5), event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6)])
+  const activity = folder.turnActivity(0)
+  assert.equal(activity?.lastAssistantVisible, false)
+  const internalActivity = (folder as unknown as { activityByTurn: Map<number, { lastAssistantStep?: number }> }).activityByTurn.get(0)
+  assert.equal(internalActivity?.lastAssistantStep, 1)
+  const projected = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  assert.equal(projected.some(block => block.kind === 'message' && block.message.kind === 'assistant'), false,
+    'hidden durable takeover must not fall back to the older Assistant in Focus')
+})
+
+test('hidden latest block state fences late older Assistant events in live and durable folds', () => {
+  const oldMessage = event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId('hidden-fence-old'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'old answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    usage: { inputTokens: 1, outputTokens: 1 },
+    stream: [],
+  }, 7)
+  const lateMessage = event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId('hidden-fence-late'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'late old answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    usage: { inputTokens: 1, outputTokens: 1 },
+    stream: [],
+  }, 8)
+  const assertFenced = (folder: TranscriptFolder): void => {
+    assert.equal(folder.turnActivity(0)?.lastAssistantVisible, false)
+    const internalActivity = (folder as unknown as { activityByTurn: Map<number, { lastAssistantStep?: number }> }).activityByTurn.get(0)
+    assert.equal(internalActivity?.lastAssistantStep, 1)
+    const projected = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+    assert.equal(projected.some(block => block.kind === 'message' && block.message.kind === 'assistant'), false)
+  }
+
+  const live = new TranscriptFolder()
+  live.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  live.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'old answer' }, 2))
+  live.apply([event('step/start', { turn: 0, step: 1 }, 3)])
+  live.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: 'text' }, 4))
+  live.apply([lateMessage, event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9)])
+  assertFenced(live)
+
+  const durable = new TranscriptFolder()
+  durable.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    oldMessage,
+    event('step/start', { turn: 0, step: 1 }, 3),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 1,
+      stream: [{ type: 'chunk', time: 4, chunk: { type: 'block-end', index: 0, block: { type: 'text', text: '' } } }],
+    }, 5),
+    lateMessage,
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
+  ])
+  assertFenced(durable)
+})
+
+test('assistant block transition matrix preserves raw live/cold parity', () => {
+  const cases = [
+    {
+      name: 'tool-call id and name replacement',
+      chunks: [
+        { type: 'chunk' as const, time: 2, chunk: { type: 'tool-call-delta', index: 0, id: ToolCallId('old-call'), name: 'bash', argumentsDelta: '{}' } },
+        { type: 'chunk' as const, time: 3, chunk: { type: 'tool-call-delta', index: 0, id: ToolCallId('new-call'), name: 'zsh', argumentsDelta: '' } },
+        { type: 'chunk' as const, time: 4, chunk: { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('new-call'), name: 'zsh', arguments: '{}' } } },
+      ],
+    },
+    {
+      name: 'opaque to empty known text',
+      chunks: [
+        { type: 'chunk' as const, time: 2, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never },
+        { type: 'chunk' as const, time: 3, chunk: { type: 'text-delta', index: 0, text: '' } },
+      ],
+    },
+    {
+      name: 'block-end before duplicate block-start',
+      chunks: [
+        { type: 'chunk' as const, time: 2, chunk: { type: 'block-end', index: 0, block: { type: 'text', text: 'authoritative first' } } },
+        { type: 'chunk' as const, time: 3, chunk: { type: 'block-start', index: 0, blockType: 'future-ignored' } as never },
+      ],
+    },
+  ]
+  for (const [caseIndex, scenario] of cases.entries()) {
+    const prefix = [
+      event('turn/start', { turn: 0 }, caseIndex * 10),
+      event('step/start', { turn: 0, step: 0 }, caseIndex * 10 + 1),
+    ]
+    const attempt = event('assistant/attempt', { turn: 0, step: 0, stream: scenario.chunks as AssistantStreamRecord[] }, caseIndex * 10 + 5)
+    const end = event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, caseIndex * 10 + 6)
+    const live = new TranscriptFolder()
+    live.apply(prefix)
+    for (const member of scenario.chunks) live.applyLiveInput(liveChunk(0, 0, member.chunk as never, member.time))
+    live.apply([attempt, end])
+    const cold = new TranscriptFolder()
+    cold.hydrate([...prefix, attempt, end])
+    assert.deepEqual(live.messages(), cold.messages(), `${scenario.name}: live/cold parity`)
+    if (scenario.name === 'tool-call id and name replacement') {
+      const assistant = cold.messages().find(message => message.kind === 'assistant')
+      assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+      assert.deepEqual(assistant.content, [{ type: 'tool-call', id: ToolCallId('new-call'), name: 'zsh', arguments: '{}' }])
+    }
+    if (scenario.name === 'opaque to empty known text') {
+      assert.equal(cold.messages().some(message => message.kind === 'assistant'), false)
+    }
+    if (scenario.name === 'block-end before duplicate block-start') {
+      const assistant = cold.messages().find(message => message.kind === 'assistant')
+      assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+      assert.equal(assistant.text, 'authoritative first')
+    }
+  }
+})
+
+test('large durable assistant streams do not rescan the accumulated projection per chunk', () => {
+  const blockCount = 5_000
+  const stream: AssistantStreamRecord[] = Array.from({ length: blockCount }, (_, index) => ({
+    type: 'chunk' as const,
+    time: index + 2,
+    chunk: { type: 'block-start' as const, index, blockType: 'future' } as never,
+  }))
+  const started = performance.now()
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/attempt', { turn: 0, step: 0, stream }, 2),
+  ])
+  const elapsed = performance.now() - started
+  assert.equal(folder.messages().length, 1)
+  assert.ok(elapsed < 1_000, `large durable stream took ${elapsed.toFixed(1)}ms`)
+})
+
+test('large live assistant streams update indexed display projection incrementally', () => {
+  const blockCount = 5_000
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  const started = performance.now()
+  for (let index = 0; index < blockCount; index += 1) {
+    folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index, blockType: 'future' }, index + 2))
+  }
+  const elapsed = performance.now() - started
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.displayBlocks?.length, blockCount)
+  assert.ok(elapsed < 1_000, `large live stream took ${elapsed.toFixed(1)}ms`)
+})
+
+test('durable attempt replay preserves reasoning/opaque first-lane order', () => {
+  const cases = [
+    {
+      name: 'reasoning then opaque',
+      expected: ['thinking', 'assistant'],
+      chunks: [
+        { type: 'block-start' as const, index: 0, blockType: 'reasoning' as const },
+        { type: 'reasoning-delta' as const, index: 0, text: 'thought first' },
+        { type: 'block-start' as const, index: 1, blockType: 'future' },
+      ],
+    },
+    {
+      name: 'opaque then reasoning',
+      expected: ['assistant', 'thinking'],
+      chunks: [
+        { type: 'block-start' as const, index: 0, blockType: 'future' },
+        { type: 'block-start' as const, index: 1, blockType: 'reasoning' as const },
+        { type: 'reasoning-delta' as const, index: 1, text: 'thought second' },
+      ],
+    },
+  ]
+  for (const [caseIndex, scenario] of cases.entries()) {
+    const stream = scenario.chunks.map((chunk, index) => ({
+      type: 'chunk' as const, time: index + 2, chunk: chunk as never,
+    }))
+    const prefix = [
+      event('turn/start', { turn: 0 }, caseIndex * 10),
+      event('step/start', { turn: 0, step: 0 }, caseIndex * 10 + 1),
+    ]
+    const attempt = event('assistant/attempt', { turn: 0, step: 0, stream }, caseIndex * 10 + 4)
+    const end = event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, caseIndex * 10 + 5)
+    const live = new TranscriptFolder()
+    live.apply(prefix)
+    for (const member of stream) live.applyLiveInput(liveChunk(0, 0, member.chunk as never, member.time))
+    live.apply([attempt, end])
+    const cold = new TranscriptFolder()
+    cold.hydrate([...prefix, attempt, end])
+
+    assert.deepEqual(live.messages(), cold.messages(), `${scenario.name}: live/cold transcript parity`)
+    assert.deepEqual(live.messages().slice(0, 2).map(message => message.kind), scenario.expected, `${scenario.name}: lane order`)
+  }
+})
+
+test('compact assistant stream records preserve first-lane parity across representations', () => {
+  const compactCases: Array<{
+    name: string
+    stream: readonly AssistantStreamRecord[]
+    expected: readonly string[]
+  }> = [
+    {
+      name: 'reasoning-chunks then raw opaque start',
+      stream: [
+        { type: 'reasoning-chunks', time0: 2, index: 7, dt: [], texts: ['packed thought'] },
+        { type: 'chunk', time: 3, chunk: { type: 'block-start', index: 11, blockType: 'future' } as never },
+      ],
+      expected: ['thinking', 'assistant'],
+    },
+    {
+      name: 'raw opaque start then reasoning-chunks',
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'block-start', index: 11, blockType: 'future' } as never },
+        { type: 'reasoning-chunks', time0: 3, index: 7, dt: [], texts: ['packed thought'] },
+      ],
+      expected: ['assistant', 'thinking'],
+    },
+    {
+      name: 'tool-call-chunks then reasoning and opaque',
+      stream: [
+        { type: 'tool-call-chunks', time0: 2, index: 4, dt: [], id: ToolCallId('compact-call'), name: 'bash', args: ['{"x":'] },
+        { type: 'reasoning-chunks', time0: 3, index: 7, dt: [], texts: ['packed thought'] },
+        { type: 'chunk', time: 4, chunk: { type: 'block-start', index: 11, blockType: 'future' } as never },
+      ],
+      expected: ['thinking', 'assistant'],
+    },
+    {
+      name: 'block-end reasoning then opaque',
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'block-end', index: 7, block: { type: 'reasoning', text: 'closed thought' } } },
+        { type: 'chunk', time: 3, chunk: { type: 'block-end', index: 11, block: { type: 'future', payload: 'closed opaque' } } as never },
+      ],
+      expected: ['thinking', 'assistant'],
+    },
+    {
+      name: 'reasoning replaced by opaque end before later reasoning',
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' as const } },
+        { type: 'reasoning-chunks', time0: 3, index: 0, dt: [], texts: ['stale thought'] },
+        { type: 'chunk', time: 4, chunk: { type: 'block-end', index: 0, block: { type: 'future', payload: 'opaque replacement' } } as never },
+        { type: 'reasoning-chunks', time0: 5, index: 1, dt: [], texts: ['later thought'] },
+      ],
+      expected: ['assistant', 'thinking'],
+    },
+    {
+      name: 'opaque start replaced by reasoning end before later text',
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never },
+        { type: 'chunk', time: 3, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'closed thought' } } },
+        { type: 'text-chunks', time0: 4, index: 3, dt: [], texts: ['later answer'] },
+      ],
+      expected: ['thinking', 'assistant'],
+    },
+    {
+      name: 'opaque partial text is replaced by reasoning before a later opaque row',
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never },
+        { type: 'text-chunks', time0: 3, index: 0, dt: [], texts: ['partial'] },
+        { type: 'chunk', time: 4, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'closed thought' } } },
+        { type: 'chunk', time: 5, chunk: { type: 'block-start', index: 7, blockType: 'future-later' } as never },
+      ],
+      expected: ['thinking', 'assistant'],
+    },
+    {
+      name: 'opaque empty text end freezes before duplicate opaque end',
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never },
+        { type: 'chunk', time: 3, chunk: { type: 'block-end', index: 0, block: { type: 'text', text: '' } } },
+        { type: 'chunk', time: 4, chunk: { type: 'block-end', index: 0, block: { type: 'future-duplicate', payload: 'ignored' } } as never },
+        { type: 'reasoning-chunks', time0: 5, index: 3, dt: [], texts: ['packed thought'] },
+        { type: 'text-chunks', time0: 6, index: 7, dt: [], texts: ['later answer'] },
+      ],
+      expected: ['thinking', 'assistant'],
+    },
+    {
+      name: 'opaque tool-call end freezes before duplicate opaque end',
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never },
+        { type: 'chunk', time: 3, chunk: { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('frozen-call'), name: 'bash', arguments: '{}' } } },
+        { type: 'chunk', time: 4, chunk: { type: 'block-end', index: 0, block: { type: 'future-duplicate', payload: 'ignored' } } as never },
+        { type: 'reasoning-chunks', time0: 5, index: 3, dt: [], texts: ['packed thought'] },
+        { type: 'text-chunks', time0: 6, index: 7, dt: [], texts: ['later answer'] },
+      ],
+      expected: ['thinking', 'assistant'],
+    },
+    {
+      name: 'duplicate sparse opaque then whitespace/text mix',
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'block-start', index: 9, blockType: 'future' } as never },
+        { type: 'chunk', time: 3, chunk: { type: 'block-start', index: 9, blockType: 'future-duplicate' } as never },
+        { type: 'text-chunks', time0: 4, index: 2, dt: [], texts: ['   '] },
+        { type: 'reasoning-chunks', time0: 5, index: 7, dt: [], texts: ['packed thought'] },
+      ],
+      expected: ['assistant', 'thinking'],
+    },
+  ]
+  for (const [caseIndex, scenario] of compactCases.entries()) {
+    const prefix = [
+      event('turn/start', { turn: 0 }, caseIndex * 10),
+      event('step/start', { turn: 0, step: 0 }, caseIndex * 10 + 1),
+    ]
+    const attempt = event('assistant/attempt', { turn: 0, step: 0, stream: [...scenario.stream] }, caseIndex * 10 + 4)
+    const end = event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, caseIndex * 10 + 5)
+    const live = new TranscriptFolder()
+    live.apply(prefix)
+    for (const member of expandAssistantStream(scenario.stream)) {
+      live.applyLiveInput(liveChunk(0, 0, member.chunk as never, member.time))
+    }
+    live.apply([attempt, end])
+    const cold = new TranscriptFolder()
+    cold.hydrate([...prefix, attempt, end])
+    assert.deepEqual(live.messages(), cold.messages(), `${scenario.name}: live/cold parity`)
+    assert.deepEqual(live.messages().slice(0, 2).map(message => message.kind), scenario.expected, `${scenario.name}: first-lane order`)
+  }
+})
+
 test('tool-call-only assistant attempts stay hidden until the closed boundary', () => {
   const callId = ToolCallId('call-delayed')
   const stream = [
@@ -2472,6 +2856,746 @@ test('a durable assistant/attempt with only block-end evidence reopens as interr
   assert.equal(interrupted[0]?.interrupted, true)
 })
 
+test('open opaque live starts are visible without semantic content', () => {
+  for (const blockType of ['future-test-block', 'file', 'image', 'tool-result']) {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      event('turn/start', { turn: 0 }, 0),
+      event('step/start', { turn: 0, step: 0 }, 1),
+    ])
+    folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType }, 2))
+    const assistant = folder.messages().find(message => message.kind === 'assistant')
+    assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+    assert.equal(assistant.text, '')
+    assert.equal(assistant.content, undefined)
+    assert.deepEqual(assistant.displayBlocks, [{ kind: 'open-opaque', blockType }])
+    assert.deepEqual(folder.search(blockType), [], 'pending blockType is display-only, never searchable')
+    assert.equal(folder.turnActivity(0)?.lastAssistantVisible, true)
+    assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 0)
+  }
+})
+
+test('open opaque display projection keeps sparse and duplicate indexes ordered', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 3, blockType: 'future-A' }, 2))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 3, blockType: 'future-B' }, 3))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 7, text: 'later' }, 4))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 1, text: 'first' }, 5))
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.deepEqual(assistant.displayBlocks, [
+    { kind: 'content', block: { type: 'text', text: 'first' } },
+    { kind: 'open-opaque', blockType: 'future-A' },
+    { kind: 'content', block: { type: 'text', text: 'later' } },
+  ])
+})
+
+test('open opaque advances the latest-step fence without creating a Focus candidate', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'old' }, 2))
+  folder.apply([event('step/start', { turn: 0, step: 1 }, 3)])
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: 'future' }, 4))
+  const beforeLate = folder.turnActivity(0)
+  assert.equal((beforeLate as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+  assert.equal(beforeLate?.lastAssistantVisible, true)
+  assert.deepEqual(beforeLate?.message, { text: 'old' })
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: '-late-old' }, 5))
+  const afterLate = folder.turnActivity(0)
+  assert.equal((afterLate as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+  assert.equal(afterLate?.lastAssistantVisible, true)
+  assert.deepEqual(afterLate?.message, { text: 'old' })
+  assert.doesNotMatch(afterLate?.message?.text ?? '', /Unknown block|future/)
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), ['old-late-old', ''])
+})
+
+test('stale live usage bypasses the presentation fence and matches stats', () => {
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('step/start', { turn: 0, step: 1 }, 2),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 1,
+      chunk: { type: 'block-start', index: 0, blockType: 'future' },
+    }, 3),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } },
+    }, 4),
+    event('step/end', { turn: 0, step: 0 }, 5),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6),
+  ]
+  const transcript = new TranscriptFolder()
+  const stats = new StatsFolder()
+  for (const item of events) {
+    if ((item.type as string) === 'assistant/chunk') {
+      const data = item.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      const input = liveChunk(data.turn, data.step, data.chunk, item.time)
+      transcript.applyLiveInput(input)
+      stats.applyLiveInput(input)
+    } else {
+      transcript.apply([item])
+      stats.apply([item])
+    }
+  }
+  assert.equal(transcript.turnActivity(0)?.totalTokens, 15)
+  assert.equal(stats.snapshot().inputTokens, 10)
+  assert.equal(stats.snapshot().outputTokens, 5)
+})
+
+test('stale durable attempt usage stays in parity with and without an older row', () => {
+  for (const withOlderRow of [false, true]) {
+    const events = [
+      event('turn/start', { turn: 0 }, 0),
+      event('step/start', { turn: 0, step: 0 }, 1),
+      ...(withOlderRow ? [event('assistant/chunk', {
+        turn: 0,
+        step: 0,
+        chunk: { type: 'text-delta', index: 0, text: 'older row' },
+      }, 2)] : []),
+      event('step/start', { turn: 0, step: 1 }, 3),
+      event('assistant/chunk', {
+        turn: 0,
+        step: 1,
+        chunk: { type: 'block-start', index: 0, blockType: 'future' },
+      }, 4),
+      event('assistant/attempt', {
+        turn: 0,
+        step: 0,
+        stream: [{ type: 'chunk', time: 1_700_000_000_005, chunk: { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } } }],
+      }, 5),
+      event('step/end', { turn: 0, step: 0 }, 6),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7),
+    ]
+    const transcript = new TranscriptFolder()
+    const stats = new StatsFolder()
+    for (const item of events) {
+      if ((item.type as string) === 'assistant/chunk') {
+        const data = item.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+        const input = liveChunk(data.turn, data.step, data.chunk, item.time)
+        transcript.applyLiveInput(input)
+        stats.applyLiveInput(input)
+      } else {
+        transcript.apply([item])
+        stats.apply([item])
+      }
+    }
+    const cold = computeStats(events.filter(item => (item.type as string) !== 'assistant/chunk'))
+    assert.equal(transcript.turnActivity(0)?.totalTokens, 15, `Focus usage missing (${withOlderRow ? 'with' : 'without'} older row)`)
+    assert.equal(stats.snapshot().inputTokens, 10)
+    assert.equal(stats.snapshot().outputTokens, 5)
+    assert.equal(cold.inputTokens, 10)
+    assert.equal(cold.outputTokens, 5)
+    if (withOlderRow) {
+      assert.ok(transcript.messages().some(message => message.kind === 'assistant' && message.text === 'older row'))
+    }
+  }
+})
+
+test('a stale reasoning block-start preserves closed Assistant and Thinking rows', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'old answer' }, 2))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 1, text: 'old thought' }, 3))
+  folder.applyLiveInput(liveAttemptEnd(0, 0, 'committed'))
+  folder.apply([event('step/start', { turn: 0, step: 1 }, 4)])
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: 'future' } as never, 5))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 2, blockType: 'reasoning' }, 6))
+
+  const assistants = folder.messages().filter(message => message.kind === 'assistant')
+  assert.deepEqual(assistants.map(message => message.text), ['old answer', ''])
+  assert.deepEqual(assistants[1]?.displayBlocks, [{ kind: 'open-opaque', blockType: 'future' }])
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['old thought'])
+  assert.equal(folder.turnActivity(0)?.think?.text, 'old thought')
+})
+
+test('an empty semantic block-end clears a same-step Focus candidate beside opaque output', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hello' }, 2))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 1, blockType: 'future' } as never, 3))
+  folder.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end', index: 0, block: { type: 'text', text: '' },
+  }, 4))
+
+  assert.equal(folder.turnActivity(0)?.message, undefined)
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, '')
+  assert.deepEqual(assistant.displayBlocks, [
+    { kind: 'content', block: { type: 'text', text: '' } },
+    { kind: 'open-opaque', blockType: 'future' },
+  ])
+})
+
+test('durable hidden opaque takeover clears a same-step live Focus candidate', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'hello' }, 2))
+  const stream: AssistantStreamRecord[] = [
+    { type: 'chunk', time: 3, chunk: { type: 'text-delta', index: 0, text: 'ignored live prefix' } },
+    { type: 'chunk', time: 4, chunk: { type: 'block-start', index: 1, blockType: 'future' } as never },
+    { type: 'chunk', time: 5, chunk: { type: 'block-end', index: 0, block: { type: 'text', text: '' } } },
+  ]
+  folder.apply([event('assistant/attempt', { turn: 0, step: 0, stream }, 6)])
+
+  assert.equal(folder.turnActivity(0)?.message, undefined)
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, '')
+  assert.deepEqual(assistant.displayBlocks, [
+    { kind: 'content', block: { type: 'text', text: '' } },
+    { kind: 'open-opaque', blockType: 'future' },
+  ])
+})
+
+test('whitespace text beside open opaque never creates a Focus Message candidate', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'real intermediate' }, 2))
+  folder.apply([event('step/start', { turn: 0, step: 1 }, 3)])
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'text-delta', index: 0, text: '   ' }, 4))
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 1, blockType: 'future' } as never, 5))
+  const activity = folder.turnActivity(0)
+  assert.deepEqual(activity?.message, { text: 'real intermediate' })
+  assert.equal((activity as { messageCandidate?: unknown } | undefined)?.messageCandidate, undefined)
+  const assistant = folder.messages().find(message => message.kind === 'assistant' && message.displayBlocks !== undefined)
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, '   ')
+  assert.deepEqual(assistant.displayBlocks, [
+    { kind: 'content', block: { type: 'text', text: '   ' } },
+    { kind: 'open-opaque', blockType: 'future' },
+  ])
+})
+
+test('whitespace open opaque output advances the fence and abandons without fallback', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('step/start', { turn: 0, step: 1 }, 2),
+  ])
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'text-delta', index: 0, text: '   ' }, 3))
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 1, blockType: 'future' } as never, 4))
+  assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'late-old' }, 5))
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), ['   '])
+
+  folder.applyLiveInput(liveAttemptEnd(0, 1, 'abandoned'))
+  assert.equal((folder.turnActivity(0) as { lastAssistantVisible?: boolean } | undefined)?.lastAssistantVisible, false)
+  folder.apply([event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6)])
+  const projected = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  assert.equal(projected.some(block => block.kind === 'message' && block.message.kind === 'assistant'), false,
+    'an abandoned whitespace/opaque step must not promote a stale text replay')
+})
+
+test('a late live surface for an older step cannot append without a prior entry', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('step/start', { turn: 0, step: 1 }, 2),
+  ])
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: 'future' } as never, 3))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'late-old' }, 4))
+  const assistants = folder.messages().filter(message => message.kind === 'assistant')
+  assert.deepEqual(assistants.map(message => message.text), [''])
+  assert.deepEqual(assistants[0]?.displayBlocks, [{ kind: 'open-opaque', blockType: 'future' }])
+  assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+  assert.equal(folder.turnActivity(0)?.message, undefined)
+})
+
+test('durable opaque latest-step fences reject late text from an older attempt', () => {
+  const folder = new TranscriptFolder()
+  const oldAttempt = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'text-chunks', time0: 2, index: 0, dt: [], texts: ['old'] }],
+  }, 2)
+  const opaqueAttempt = event('assistant/attempt', {
+    turn: 0,
+    step: 1,
+    stream: [{ type: 'chunk', time: 4, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never }],
+  }, 4)
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    oldAttempt,
+    event('step/start', { turn: 0, step: 1 }, 3),
+    opaqueAttempt,
+  ])
+  const beforeLate = folder.messages().filter(message => message.kind === 'assistant')
+  assert.deepEqual(beforeLate.map(message => message.text), ['old', ''])
+  assert.deepEqual(beforeLate[1]?.displayBlocks, [{ kind: 'open-opaque', blockType: 'future' }])
+  assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+  assert.equal(folder.turnActivity(0)?.message, undefined)
+
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: '-late-old' }, 5))
+  const afterLate = folder.messages().filter(message => message.kind === 'assistant')
+  assert.deepEqual(afterLate.map(message => message.text), ['old', ''])
+  assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+  assert.equal(folder.turnActivity(0)?.message, undefined)
+})
+
+test('stale durable reasoning remains diagnostic beside a newer live opaque fence', () => {
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('step/start', { turn: 0, step: 1 }, 2),
+  ]
+  const staleAttempt = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'chunk', time: 3, chunk: { type: 'reasoning-delta', index: 0, text: 'late diagnostic reasoning' } }],
+  }, 3)
+
+  const live = new TranscriptFolder()
+  live.apply(prefix)
+  live.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: 'future' } as never, 4))
+  live.apply([staleAttempt])
+
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, staleAttempt])
+  assert.deepEqual(
+    live.messages().filter(message => message.kind === 'thinking').map(message => message.text),
+    cold.messages().filter(message => message.kind === 'thinking').map(message => message.text),
+  )
+  assert.deepEqual(live.messages().filter(message => message.kind === 'thinking').map(message => message.text), [
+    'late diagnostic reasoning',
+  ])
+  assert.equal(live.turnActivity(0)?.think, undefined, 'stale diagnostic reasoning cannot retake the latest Focus preview')
+})
+
+test('late older reasoning cannot regress the latest Focus preview', () => {
+  const live = new TranscriptFolder()
+  live.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  live.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'old reasoning' }, 2))
+  live.apply([event('step/start', { turn: 0, step: 1 }, 3)])
+  live.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: 'future' } as never, 4))
+  live.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: ' late replay' }, 5))
+  assert.equal(live.turnActivity(0)?.think?.text, 'old reasoning')
+  assert.deepEqual(live.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['old reasoning late replay'])
+
+  const durable = new TranscriptFolder()
+  durable.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'chunk', time: 2, chunk: { type: 'reasoning-delta', index: 0, text: 'old reasoning' } }],
+    }, 2),
+    event('step/start', { turn: 0, step: 1 }, 3),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 1,
+      stream: [{ type: 'chunk', time: 4, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never }],
+    }, 4),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'chunk', time: 5, chunk: { type: 'reasoning-delta', index: 0, text: ' late replay' } }],
+    }, 5),
+  ])
+  assert.equal(durable.turnActivity(0)?.think?.text, 'old reasoning')
+  assert.deepEqual(durable.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['old reasoning'])
+
+  const durableEmpty = new TranscriptFolder()
+  durableEmpty.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'chunk', time: 2, chunk: { type: 'reasoning-delta', index: 0, text: 'old reasoning' } }],
+    }, 2),
+    event('step/start', { turn: 0, step: 1 }, 3),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 1,
+      stream: [{ type: 'chunk', time: 4, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never }],
+    }, 4),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 5),
+  ])
+  assert.equal(durableEmpty.turnActivity(0)?.think?.text, 'old reasoning')
+  assert.deepEqual(durableEmpty.messages().filter(message => message.kind === 'thinking').map(message => message.text), ['old reasoning'])
+})
+
+test('a late durable attempt for an older step cannot append without a prior entry', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('step/start', { turn: 0, step: 1 }, 2),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 1,
+      stream: [{ type: 'chunk', time: 3, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never }],
+    }, 3),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'text-chunks', time0: 4, index: 0, dt: [], texts: ['late-old'] }],
+    }, 4),
+  ])
+  const assistants = folder.messages().filter(message => message.kind === 'assistant')
+  assert.deepEqual(assistants.map(message => message.text), [''])
+  assert.deepEqual(assistants[0]?.displayBlocks, [{ kind: 'open-opaque', blockType: 'future' }])
+  assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+  assert.equal(folder.turnActivity(0)?.message, undefined)
+})
+
+test('an older accepted message restores its reasoning row without regressing Focus', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    assistantMessageWithBlocks(2, [
+      { type: 'reasoning', text: 'first reasoning' },
+      { type: 'text', text: 'first answer' },
+    ]),
+    event('step/start', { turn: 0, step: 1 }, 3),
+  ])
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: 'future' } as never, 4))
+  folder.apply([assistantMessageWithBlocks(5, [
+    { type: 'reasoning', text: 'late settled reasoning' },
+    { type: 'text', text: 'updated old answer' },
+  ], { step: 0 })])
+
+  const assistant = folder.messages().find(message => message.kind === 'assistant' && message.text === 'updated old answer')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'late settled reasoning', 'accepted durable content still owns its diagnostic row')
+  assert.equal(folder.turnActivity(0)?.think?.text, 'first reasoning', 'older reasoning cannot retake the latest Focus preview')
+  assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+})
+
+test('a stale message keeps settlement accounting while skipping presentation', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('step/start', { turn: 0, step: 1 }, 2),
+    event('step/start', { turn: 0, step: 2 }, 3),
+  ])
+  folder.applyLiveInput(liveChunk(0, 2, { type: 'block-start', index: 0, blockType: 'future' } as never, 4))
+  folder.apply([
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: { id: MessageId('stale-top'), role: 'assistant', content: [], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 10, outputTokens: 100, cacheReadTokens: 1, cacheWriteTokens: 2 },
+      stream: [],
+    }, 5),
+    event('assistant/message', {
+      turn: 0,
+      step: 1,
+      message: { id: MessageId('stale-stream'), role: 'assistant', content: [], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [{ type: 'chunk', time: 6, chunk: { type: 'usage', usage: { inputTokens: 20, outputTokens: 200 } } }],
+    }, 6),
+  ])
+
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), [''])
+  assert.deepEqual(activity.usage, { inputTokens: 30, outputTokens: 300, cacheReadTokens: 1, cacheWriteTokens: 2 })
+  assert.equal(activity.totalTokens, 333)
+  assert.equal(activity.assistantMessages, 2)
+  assert.deepEqual([...((activity as { settledSteps?: Set<number> }).settledSteps ?? [])], [0, 1])
+  assert.equal(activity.message, undefined)
+  assert.equal((activity as { lastAssistantStep?: number }).lastAssistantStep, 2)
+})
+
+test('stale empty, image, and unknown settlements keep accounting without rows', () => {
+  const contents = [
+    [],
+    [{
+      type: 'image' as const,
+      attachment: { attachmentId: 'stale-image', mediaType: 'image/png', bytes: 1 },
+    } as unknown as ContentBlock],
+    [{ type: 'future-settled', payload: 'opaque' } as unknown as ContentBlock],
+  ]
+  for (const [index, content] of contents.entries()) {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      event('turn/start', { turn: 0 }, 0),
+      event('step/start', { turn: 0, step: 0 }, 1),
+      event('step/start', { turn: 0, step: 1 }, 2),
+    ])
+    folder.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: `future-${index}` } as never, 3))
+    folder.apply([assistantMessageWithBlocks(4, content, { step: 0 })])
+    const activity = folder.turnActivity(0)
+    assert.ok(activity !== undefined)
+    assert.equal(activity.assistantMessages, 1)
+    assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), [''])
+    assert.equal((activity as { lastAssistantStep?: number }).lastAssistantStep, 1)
+    assert.equal(activity.message, undefined)
+  }
+})
+
+test('late older assistant messages cannot append after a newer opaque step', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('step/start', { turn: 0, step: 1 }, 2),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 1,
+      stream: [{ type: 'chunk', time: 3, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never }],
+    }, 3),
+    assistantMessage(4, 'late-old', { step: 0 }),
+  ])
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), [''])
+  assert.equal(folder.turnActivity(0)?.message, undefined)
+  assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+
+  folder.apply([event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5)])
+  const projected = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  assert.equal(projected.some(block => block.kind === 'message' && block.message.kind === 'assistant'), false,
+    'a stale older message must not become the exact-last completed answer')
+})
+
+test('durable open opaque attempts are visible before close and retain interruption evidence', () => {
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 1 }, 1),
+  ]
+  const attempt = event('assistant/attempt', {
+    turn: 0,
+    step: 1,
+    stream: [{ type: 'chunk', time: 2, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never }],
+  }, 3)
+  const end = event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 4)
+  const folder = new TranscriptFolder()
+  folder.apply(prefix)
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: 'future' }, 2))
+  const open = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(open !== undefined && open.kind === 'assistant')
+  assert.deepEqual(open.displayBlocks, [{ kind: 'open-opaque', blockType: 'future' }])
+  assert.equal(open.interrupted, undefined)
+  assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+  assert.equal(folder.turnActivity(0)?.lastAssistantVisible, true)
+  assert.equal(folder.turnActivity(0)?.message, undefined)
+
+  folder.apply([attempt])
+  const durableOpen = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(durableOpen !== undefined && durableOpen.kind === 'assistant')
+  assert.deepEqual(durableOpen.displayBlocks, [{ kind: 'open-opaque', blockType: 'future' }])
+  folder.apply([end])
+  const interrupted = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(interrupted !== undefined && interrupted.kind === 'assistant')
+  assert.equal(interrupted.interrupted, true)
+  assert.deepEqual(interrupted.displayBlocks, [{ kind: 'open-opaque', blockType: 'future' }])
+
+  const reopened = new TranscriptFolder()
+  reopened.hydrate([...prefix, attempt, end])
+  assert.deepEqual(reopened.messages(), folder.messages())
+  assert.equal((reopened.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+  assert.equal(reopened.turnActivity(0)?.lastAssistantVisible, true)
+})
+
+test('opaque block-end replaces the pending row with finalized content', () => {
+  const finalized = { type: 'future-test-block', payload: { value: 'done' } } as unknown as AssistantLiveContentBlock
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'future-test-block' }, 2))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-end', index: 0, block: finalized }, 3))
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.displayBlocks, undefined)
+  assert.deepEqual(assistant.content, [finalized])
+  assert.equal(assistant.text, '')
+})
+
+test('opaque finalization keeps empty text and tool-call lanes hidden', () => {
+  const emptyText = new TranscriptFolder()
+  emptyText.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'future' }, 1))
+  emptyText.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end', index: 0, block: { type: 'text', text: '' },
+  }, 2))
+  assert.equal(emptyText.messages().some(message => message.kind === 'assistant'), false)
+
+  const toolCall = new TranscriptFolder()
+  toolCall.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'future' }, 1))
+  toolCall.applyLiveInput(liveChunk(0, 0, {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'tool-call', id: ToolCallId('call-hidden'), name: 'bash', arguments: '{}' },
+  }, 2))
+  assert.equal(toolCall.messages().some(message => message.kind === 'assistant'), false)
+})
+
+test('abandoning the latest opaque step clears stale final visibility without fallback', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'intermediate' }, 2))
+  folder.apply([event('step/start', { turn: 0, step: 1 }, 3)])
+  folder.applyLiveInput(liveChunk(0, 1, { type: 'block-start', index: 0, blockType: 'future' } as never, 4))
+  folder.applyLiveInput(liveAttemptEnd(0, 1, 'abandoned'))
+  assert.equal((folder.turnActivity(0) as { lastAssistantVisible?: boolean } | undefined)?.lastAssistantVisible, false)
+  assert.equal((folder.turnActivity(0) as { lastAssistantStep?: number } | undefined)?.lastAssistantStep, 1)
+  assert.deepEqual(folder.messages().filter(message => message.kind === 'assistant').map(message => message.text), ['intermediate'])
+
+  folder.apply([event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5)])
+  const projected = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  assert.equal(projected.some(block => block.kind === 'message' && block.message.kind === 'assistant'), false,
+    'an abandoned latest step must not promote an earlier assistant as the final')
+})
+
+test('retry and abandoned live endings clear open opaque presentation', () => {
+  const abandoned = new TranscriptFolder()
+  abandoned.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  abandoned.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'future-A' }, 2))
+  abandoned.applyLiveInput(liveAttemptEnd(0, 0, 'abandoned'))
+  assert.equal(abandoned.messages().some(message => message.kind === 'assistant'), false)
+  const reopened = new TranscriptFolder()
+  reopened.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 2),
+  ])
+  assert.equal(reopened.messages().some(message => message.kind === 'assistant'), false,
+    'cold reopen without durable attempt evidence must not resurrect the abandoned row')
+
+  const retried = new TranscriptFolder()
+  retried.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  retried.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'future-A' }, 2))
+  retried.apply([rawEvent('llm/retry', {
+    retryId: 'retry-open', turn: 0, step: 0, provider: 'p', mode: 'normal',
+    policyKey: 'test', retry: 1, maxRetries: 2, delayMs: 0,
+    failure: { message: 'failed', code: 'TEST' },
+  }, 3)])
+  assert.equal(retried.messages().some(message => message.kind === 'assistant'), false)
+  retried.applyLiveInput({ kind: 'start', sessionId: 'test', attemptId: 'attempt-y', turn: 0, step: 0 })
+  retried.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'future-B' }, 4))
+  const assistant = retried.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.deepEqual(assistant.displayBlocks, [{ kind: 'open-opaque', blockType: 'future-B' }])
+})
+
+test('authoritative assistant messages clear open opaque display state', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'file' }, 2))
+  folder.apply([assistantMessage(3, 'final text')])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, 'final text')
+  assert.equal(assistant.displayBlocks, undefined)
+  assert.equal(assistant.content, undefined)
+})
+
+test('a durable attempt with open opaque state survives a committed attempt end', () => {
+  const folder = new TranscriptFolder()
+  const attempt = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'chunk', time: 2, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never }],
+  }, 3)
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    attempt,
+  ])
+  folder.applyLiveInput(liveAttemptEnd(0, 0, 'committed', 'attempt'))
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.deepEqual(assistant.displayBlocks, [{ kind: 'open-opaque', blockType: 'future' }])
+  assert.equal(assistant.interrupted, undefined)
+})
+
+test('late durable attempts cannot overwrite an authoritative assistant message', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    assistantMessage(2, 'FINAL'),
+    event('assistant/attempt', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'chunk', time: 3, chunk: { type: 'block-start', index: 0, blockType: 'future' } as never }],
+    }, 3),
+  ])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, 'FINAL')
+  assert.equal(assistant.displayBlocks, undefined)
+  assert.equal(assistant.interrupted, undefined)
+  assert.equal(folder.turnActivity(0)?.assistantMessages, 1)
+  assert.deepEqual(folder.turnActivity(0)?.message, { text: 'FINAL' })
+})
+
+test('authoritative FileBlock messages replace an open file display row', () => {
+  const file = {
+    type: 'file',
+    attachment: { attachmentId: 'att-final-file', name: 'final.txt', bytes: 12 },
+  } as unknown as ContentBlock
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'file' }, 2))
+  folder.apply([assistantMessageWithBlocks(3, [file])])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.displayBlocks, undefined)
+  assert.deepEqual(assistant.content, [file])
+  assert.equal(assistant.text, '')
+})
+
+test('an open opaque start does not create usage facts', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'future' }, 2))
+  assert.equal(folder.turnActivity(0)?.usage, undefined)
+  assert.equal(folder.turnActivity(0)?.totalTokens, undefined)
+})
+
 test('a durable assistant/attempt remains interruption evidence until turn end (live == reopen)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
@@ -2530,6 +3654,43 @@ test('an ABANDONED live end removes the transient text (no durable settlement ex
   assert.equal(activity?.think, undefined)
   assert.equal(activity?.usage, undefined)
   assert.equal(activity?.totalTokens, undefined)
+})
+
+test('durable retry replaces open opaque display state without inheriting it', () => {
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const attemptA = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'chunk', time: 2, chunk: { type: 'block-start', index: 0, blockType: 'future-A' } as never }],
+  }, 3)
+  const retry = rawEvent('llm/retry', {
+    retryId: 'retry-open-opaque', turn: 0, step: 0, provider: 'p', mode: 'normal',
+    policyKey: 'test', retry: 1, maxRetries: 2, delayMs: 0,
+    failure: { message: 'failed', code: 'TEST' },
+  }, 4)
+  const attemptB = event('assistant/attempt', {
+    turn: 0,
+    step: 0,
+    stream: [{ type: 'chunk', time: 5, chunk: { type: 'block-start', index: 0, blockType: 'future-B' } as never }],
+  }, 6)
+  const folder = new TranscriptFolder()
+  folder.apply([...prefix, attemptA])
+  const first = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(first !== undefined && first.kind === 'assistant')
+  assert.deepEqual(first.displayBlocks, [{ kind: 'open-opaque', blockType: 'future-A' }])
+  folder.apply([retry])
+  assert.equal(folder.messages().some(message => message.kind === 'assistant'), false)
+  folder.apply([attemptB])
+  const second = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(second !== undefined && second.kind === 'assistant')
+  assert.deepEqual(second.displayBlocks, [{ kind: 'open-opaque', blockType: 'future-B' }])
+
+  const cold = new TranscriptFolder()
+  cold.hydrate([...prefix, attemptA, retry, attemptB])
+  assert.deepEqual(cold.messages(), folder.messages())
 })
 
 test('a retry never concatenates: the durable message carries only the retry text', () => {
@@ -2626,6 +3787,23 @@ test('a committed MESSAGE settlement never removes text — the durable message 
   assert.equal(messages.length, 1)
   assert.ok(messages[0] !== undefined && messages[0].kind === 'assistant')
   assert.equal(messages[0].text, 'authoritative', 'the settled message text survives the end frame')
+})
+
+test('open opaque attempt state is excluded from markdown export', () => {
+  const finalized = { type: 'future-final', payload: { value: 'kept' } } as unknown as ContentBlock
+  const markdown = renderTranscriptMarkdown({
+    header: { id: 'session-export' as never, cwd: '/workspace' },
+    snapshotEvents: () => [
+      event('assistant/attempt', {
+        turn: 0,
+        step: 0,
+        stream: [{ type: 'chunk', time: 1, chunk: { type: 'block-start', index: 0, blockType: 'future-open' } as never }],
+      }, 1),
+      assistantMessageWithBlocks(2, [finalized]),
+    ],
+  } as never)
+  assert.doesNotMatch(markdown, /future-open|Unknown block: future-open/)
+  assert.match(markdown, /Unknown block: future-final/)
 })
 
 test('failed-attempt reasoning resets on retry and matches a cold replay', () => {

@@ -7,13 +7,15 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { MessageId } from '@deepseek-ai/dsh-llm'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
 import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../src/present.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { RendererRegistry } from '../src/renderer-registry.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
 import { iconFor } from '../src/icons.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent, type TranscriptViewportAnchor } from '../src/tui-app.ts'
@@ -1196,6 +1198,251 @@ test('the message component cache is pruned to the live transcript', () => {
   app.setTranscript([{ kind: 'user', turn: 100, text: 'fresh' }])
   assert.equal(cache.size, 1, 'entries from the previous window must be disposed')
   app.stop()
+})
+
+test('open opaque display changes invalidate the assistant cache and render in order', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    {
+      type: 'turn/start',
+      seq: 0,
+      time: 1_700_000_000_000,
+      data: { turn: 0 },
+    } as SessionEvent,
+    {
+      type: 'step/start',
+      seq: 1,
+      time: 1_700_000_000_001,
+      data: { turn: 0, step: 0 },
+    } as SessionEvent,
+  ])
+  const input = (chunk: AssistantLiveChunk, time: number) => folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time, chunk,
+  })
+  input({ type: 'text-delta', index: 0, text: 'before' }, 2)
+  const message = folder.messages()[0]
+  assert.ok(message !== undefined && message.kind === 'assistant')
+
+  const { vt, app } = startApp()
+  app.setTranscript([message])
+  await viewport(vt)
+  const cache = (app as unknown as { messageComponents: Map<object, { component: object }> }).messageComponents
+  const before = cache.get(message)?.component
+  assert.ok(before !== undefined)
+
+  input({ type: 'block-start', index: 1, blockType: 'future-test-block' }, 3)
+  const projected = folder.messages()[0]
+  assert.strictEqual(projected, message, 'live folding updates the cached message object in place')
+  assert.equal(message.text, 'before', 'semantic text must remain unchanged')
+  assert.equal(message.content, undefined, 'open opaque display must not become semantic content')
+  app.setTranscript([projected])
+  const after = cache.get(projected)?.component
+  assert.ok(after !== undefined)
+  assert.notStrictEqual(after, before, 'displayBlocks must be part of the component cache identity')
+
+  const pendingView = await viewport(vt)
+  const beforeIndex = pendingView.indexOf('before')
+  const pendingIndex = pendingView.indexOf('Unknown block: future-test-block')
+  assert.ok(beforeIndex >= 0 && pendingIndex > beforeIndex,
+    `ordered open projection missing:\n${pendingView}`)
+  assert.ok(pendingView.includes('\nnull'), `open opaque rows must use a null payload:\n${pendingView}`)
+
+  input({ type: 'block-start', index: 1, blockType: 'future-test-block' }, 4)
+  app.setTranscript([projected])
+  assert.strictEqual(cache.get(projected)?.component, after, 'duplicate block-start must not invalidate the unchanged display projection')
+
+  input({
+    type: 'block-end', index: 1,
+    block: { type: 'future-test-block', payload: { value: 'done' } },
+  } as never, 5)
+  app.setTranscript([projected])
+  const finalized = cache.get(projected)?.component
+  assert.ok(finalized !== undefined)
+  assert.notStrictEqual(finalized, after, 'authoritative block-end must replace the pending component')
+
+  input({
+    type: 'block-end', index: 1,
+    block: { type: 'future-test-block', payload: { value: 'duplicate' } },
+  } as never, 6)
+  input({ type: 'text-delta', index: 1, text: 'ignored after freeze' }, 7)
+  app.setTranscript([projected])
+  assert.strictEqual(cache.get(projected)?.component, finalized, 'frozen duplicates and deltas must not invalidate the unchanged projection')
+
+})
+
+test('empty same-lane deltas preserve component identity while first ownership remains effective', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    {
+      type: 'turn/start', seq: 0, time: 1_700_000_000_000,
+      data: { turn: 0 },
+    } as SessionEvent,
+    {
+      type: 'step/start', seq: 1, time: 1_700_000_000_001,
+      data: { turn: 0, step: 0 },
+    } as SessionEvent,
+  ])
+  const input = (chunk: AssistantLiveChunk, time: number) => folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time, chunk,
+  })
+  input({ type: 'text-delta', index: 0, text: 'stable' }, 2)
+  const { app } = startApp()
+  app.setTranscript(folder.messages())
+  const cache = (app as unknown as { messageComponents: Map<object, { component: object }> }).messageComponents
+  const firstAssistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(firstAssistant !== undefined && firstAssistant.kind === 'assistant')
+  const textComponent = cache.get(firstAssistant)?.component
+  assert.ok(textComponent !== undefined)
+
+  input({ type: 'text-delta', index: 0, text: '' }, 3)
+  app.setTranscript(folder.messages())
+  assert.strictEqual(cache.get(firstAssistant)?.component, textComponent, 'empty text delta must not churn an existing text lane')
+
+  input({ type: 'reasoning-delta', index: 1, text: 'thinking' }, 4)
+  app.setTranscript(folder.messages())
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  const thinkingComponent = cache.get(thinking)?.component
+  assert.ok(thinkingComponent !== undefined)
+  input({ type: 'reasoning-delta', index: 1, text: '' }, 5)
+  app.setTranscript(folder.messages())
+  assert.strictEqual(cache.get(thinking)?.component, thinkingComponent, 'empty reasoning delta must not churn an existing reasoning lane')
+
+  input({ type: 'tool-call-delta', index: 2, id: ToolCallId('empty-delta-call'), name: 'bash', argumentsDelta: '{}' }, 6)
+  app.setTranscript(folder.messages())
+  const assistantAfterTool = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistantAfterTool !== undefined && assistantAfterTool.kind === 'assistant')
+  const toolComponent = cache.get(assistantAfterTool)?.component
+  assert.ok(toolComponent !== undefined)
+  input({ type: 'tool-call-delta', index: 2, id: ToolCallId('renamed-delta-call'), name: 'bash', argumentsDelta: '' }, 7)
+  app.setTranscript(folder.messages())
+  assert.strictEqual(cache.get(assistantAfterTool)?.component, toolComponent,
+    'a changed tool-call id must not override the first owner of the indexed block')
+  input({ type: 'tool-call-delta', index: 2, id: ToolCallId('empty-delta-call'), name: 'zsh', argumentsDelta: '' }, 8)
+  app.setTranscript(folder.messages())
+  const renamedNameComponent = cache.get(assistantAfterTool)?.component
+  assert.ok(renamedNameComponent !== undefined)
+  assert.notStrictEqual(renamedNameComponent, toolComponent, 'a changed tool-call name must invalidate the component')
+  input({ type: 'tool-call-delta', index: 2, id: ToolCallId('empty-delta-call'), name: 'zsh', argumentsDelta: '' }, 9)
+  app.setTranscript(folder.messages())
+  assert.strictEqual(cache.get(assistantAfterTool)?.component, renamedNameComponent, 'an empty unchanged tool-call delta must not churn the component')
+
+  input({ type: 'block-start', index: 4, blockType: 'future-empty-transition' }, 10)
+  app.setTranscript(folder.messages())
+  const opaqueComponent = cache.get(assistantAfterTool)?.component
+  assert.ok(opaqueComponent !== undefined)
+  input({ type: 'text-delta', index: 4, text: '' }, 11)
+  app.setTranscript(folder.messages())
+  const emptyTransitionComponent = cache.get(assistantAfterTool)?.component
+  assert.ok(emptyTransitionComponent !== undefined)
+  assert.notStrictEqual(emptyTransitionComponent, opaqueComponent, 'opaque to empty known state must invalidate the component')
+  assert.equal(assistantAfterTool.displayBlocks?.some(block => block.kind === 'open-opaque') ?? false, false,
+    'opaque to empty known state must remove the display-only row')
+
+  input({ type: 'text-delta', index: 3, text: '' }, 12)
+  input({ type: 'block-start', index: 3, blockType: 'future-claimed' }, 9)
+  const claimed = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(claimed !== undefined && claimed.kind === 'assistant')
+  assert.equal(claimed.displayBlocks?.some(block => block.kind === 'open-opaque' && block.blockType === 'future-claimed') ?? false, false,
+    'an empty first delta still owns its index against a later block-start')
+})
+
+test('mixed assistant text and open opaque rows render in display order', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: 'beforeafter',
+    displayBlocks: [
+      { kind: 'content', block: { type: 'text', text: 'before' } },
+      { kind: 'open-opaque', blockType: 'future-test-block' },
+      { kind: 'content', block: { type: 'text', text: 'after' } },
+    ],
+  } as never])
+  const view = await viewport(vt)
+  const beforeIndex = view.indexOf('before')
+  const pendingIndex = view.indexOf('Unknown block: future-test-block')
+  const afterIndex = view.indexOf('after')
+  assert.ok(beforeIndex >= 0 && pendingIndex > beforeIndex && afterIndex > pendingIndex,
+    `mixed display order broken:\n${view}`)
+
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: 'beforeafter',
+    displayBlocks: [
+      { kind: 'content', block: { type: 'text', text: 'before' } },
+      { kind: 'content', block: { type: 'future-test-block', payload: { value: 'done' } } },
+      { kind: 'content', block: { type: 'text', text: 'after' } },
+    ],
+  } as never])
+  const finalizedView = await viewport(vt)
+  const finalizedBeforeIndex = finalizedView.indexOf('before')
+  const finalizedBlockIndex = finalizedView.indexOf('Unknown block: future-test-block')
+  const finalizedAfterIndex = finalizedView.indexOf('after')
+  assert.ok(finalizedBeforeIndex >= 0 && finalizedBlockIndex > finalizedBeforeIndex && finalizedAfterIndex > finalizedBlockIndex,
+    `finalized display order broken:\n${finalizedView}`)
+  assert.ok(finalizedView.includes('"value": "done"'), `finalized payload missing:\n${finalizedView}`)
+  assert.ok(!finalizedView.includes('\nnull'), `pending null row survived finalization:\n${finalizedView}`)
+})
+
+test('open opaque rows remain width-safe on a narrow viewport', async () => {
+  const { vt, app } = startApp(24, 12)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: '',
+    displayBlocks: [{ kind: 'open-opaque', blockType: 'future-test-block' }],
+  } as never])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Unknown block:'), `narrow pending row missing:\n${view}`)
+  assert.ok(view.includes('null'), `narrow pending null payload missing:\n${view}`)
+  for (const line of view.split('\n')) {
+    assert.ok(visibleWidth(stripTerminalSequences(line)) <= 24, `line exceeds narrow width: ${line}`)
+  }
+})
+
+test('open opaque assistant rows bypass semantic plugin renderers', async () => {
+  const registry = new RendererRegistry()
+  registry.registerMessageRenderer({
+    id: 'assistant-plugin',
+    render: () => ({ kind: 'text', spans: [{ text: 'PLUGIN' }] }),
+  }, 'test-owner')
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: '',
+    displayBlocks: [{ kind: 'open-opaque', blockType: 'future-test-block' }],
+  } as never])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Unknown block: future-test-block'), `host pending row missing:\n${view}`)
+  assert.ok(view.includes('\nnull'), `host pending payload missing:\n${view}`)
+  assert.ok(!view.includes('PLUGIN'), `semantic plugin renderer swallowed the pending row:\n${view}`)
+
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'settled' } as never])
+  const settledView = await viewport(vt)
+  assert.ok(settledView.includes('PLUGIN'), `semantic plugin renderer did not recover after finalization:\n${settledView}`)
+  assert.ok(!settledView.includes('Unknown block: future-test-block'),
+    `pending opaque fallback survived finalization:\n${settledView}`)
+  assert.ok(!settledView.includes('\nnull'), `pending null payload survived finalization:\n${settledView}`)
+})
+
+test('interrupted open opaque rows retain the stopped marker', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: '',
+    displayBlocks: [{ kind: 'open-opaque', blockType: 'future-test-block' }],
+    interrupted: true,
+  } as never])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Unknown block: future-test-block'), `interrupted pending row missing:\n${view}`)
+  assert.ok(view.includes('(interrupted)'), `interrupted marker missing:\n${view}`)
 })
 
 test('local card push/replace/clear prune the component cache too', () => {
