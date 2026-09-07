@@ -77,10 +77,13 @@ export function sanitizeSessionSearchInput(value: string): string {
     : truncated
 }
 
-/** kimicode-style workspace key: the last two path segments, or a placeholder. */
+/** kimicode-style workspace key: the last two path segments, or a placeholder.
+ * The cwd is a Host/persistence boundary value — the group header is
+ * rendered straight to the terminal, so the output is sanitized here (the
+ * single group-derivation point covers the browse AND search views). */
 export function workspaceKey(cwd: string | undefined): string {
   if (cwd === undefined || cwd === '') return '(no workspace)'
-  return cwd.split('/').slice(-2).join('/')
+  return sanitizeTerminalText(cwd.split('/').slice(-2).join('/'))
 }
 
 /** Whether two cwd values denote the same workspace: lexical path
@@ -114,6 +117,19 @@ export function formatSessionAge(createdAt: number, now: number = Date.now()): s
   const months = Math.floor(days / 30)
   if (months < 12) return `${months}mo`
   return `${Math.floor(months / 12)}y`
+}
+
+/** Whether a session row's METADATA matches a search query (id, title,
+ * cwd, preset — case-insensitive substring). This is the local half of the
+ * search projection's explicit membership: `localMatches ∪ hostContentHits`.
+ * It deliberately does NOT look at the content snippet — content membership
+ * comes from the Host page, never from re-scanning text here. */
+export function sessionRowMatchesQuery(row: SessionPickerRow, query: string): boolean {
+  const needle = query.toLowerCase()
+  return row.id.toLowerCase().includes(needle)
+    || (row.title ?? '').toLowerCase().includes(needle)
+    || (row.cwd ?? '').toLowerCase().includes(needle)
+    || (row.preset ?? '').toLowerCase().includes(needle)
 }
 
 /** One session as the picker renders it. */
@@ -151,11 +167,6 @@ export interface SessionPickerItem {
 export interface SessionContentHit {
   /** Host-selected bounded plain-text excerpt. */
   readonly snippet: string
-  /** The raw filter text at merge time. The Host search canonicalizes
-   * (trims) the query, so a whitespace-padded filter or a truncated
-   * snippet may not appear in the snippet — the row presentation appends
-   * this text so the local filter still surfaces the content-only hit. */
-  readonly matchText?: string
 }
 
 /** Strip terminal control characters from untrusted text before it enters
@@ -187,27 +198,35 @@ export function sessionPickerItem(row: SessionPickerRow, currentId: string, inde
   if (row.parentSession !== undefined) meta.push('fork')
   if (row.preset !== undefined) meta.push(`preset:${row.preset}`)
   if (row.live) meta.push('live')
-  if (contentHit !== undefined) {
-    const snippet = sanitizeTerminalText(contentHit.snippet)
-    meta.push(`…${snippet}…`)
-    // The local filter matches the raw (untrimmed) filter text, while the
-    // Host search canonicalizes and caps it — append the BOUNDED raw
-    // filter when the snippet does not already carry it, so a
-    // whitespace-padded filter or a truncated snippet still surfaces the
-    // content-only hit, and an over-long filter can never pseudo-match
-    // through text that was never searched (the merge bounds it too; this
-    // is the presentation-boundary guarantee for any caller).
-    const matchText = sanitizeSessionSearchInput(contentHit.matchText ?? '')
-    if (matchText !== '' && !snippet.includes(matchText)) {
-      meta.push(sanitizeTerminalText(matchText))
-    }
-  }
+  if (contentHit !== undefined) meta.push(`…${sanitizeTerminalText(contentHit.snippet)}…`)
   return {
     value: row.id,
     label: `${treePrefix}${marker}${row.title ?? shortSessionId(row.id)}`,
     description: meta.join(' · '),
     group: workspaceKey(row.cwd),
   }
+}
+
+/** Assemble one SEARCH-projection row: the browse presentation plus the
+ * workspace in the searchable description. The search projection's
+ * membership considers cwd, and the SelectList's substring filter searches
+ * value/label/description only (never the group header) — so the search
+ * view must carry the cwd in the description, or a cwd query would match
+ * the union yet stay invisible. */
+export function sessionSearchItem(
+  row: SessionPickerRow,
+  currentId: string,
+  indent = 0,
+  contentHit?: SessionContentHit,
+): SessionPickerItem {
+  const item = sessionPickerItem(row, currentId, indent, contentHit)
+  // The cwd is a Host/persistence boundary value — sanitize it before it
+  // enters the searchable description (a raw ESC/C1/newline in a workspace
+  // path must never reach the terminal).
+  if (row.cwd !== undefined && row.cwd !== '') {
+    item.description = `${item.description} · ${sanitizeTerminalText(row.cwd)}`
+  }
+  return item
 }
 
 /**

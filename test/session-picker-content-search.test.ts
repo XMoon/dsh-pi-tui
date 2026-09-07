@@ -73,6 +73,7 @@ function harness(options: {
   rows?: Row[]
   search?: (query: string, signal?: AbortSignal) => Promise<SessionContentSearchPage | undefined>
   list?: (id: string | undefined, signal?: AbortSignal) => Promise<Row[] | undefined>
+  projectionBatch?: () => Promise<Map<string, { title?: string; preset?: string }>>
 }): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
@@ -131,7 +132,7 @@ function harness(options: {
         searchCalls.push({ query, signal })
         return search(query, signal)
       },
-      projectionBatch: async () => new Map(),
+      projectionBatch: options.projectionBatch ?? (async () => new Map()),
       measureContext: () => undefined,
       readExportData: async () => ({ kind: 'none' }),
     } as never,
@@ -241,7 +242,7 @@ test('/search foo opens the SAME Session Browser and runs a debounced content se
   await h.runSearch('needle')
   await waitUntil(() => h.view().includes('alpha'))
   const view = h.view()
-  assert.ok(view.includes('search · Current directory'), `the unified browser must open under the search header:\n${view}`)
+  assert.ok(view.includes('search · Search results'), `a query must enter the global search projection:\n${view}`)
   assert.ok(!view.includes('beta'), 'the argument must act as the live filter')
   // The content search runs after the 250ms debounce, only after the list
   // baseline landed.
@@ -260,7 +261,7 @@ test('content search unavailable keeps the picker open with local filtering and 
   assert.equal(h.notices.filter(notice => notice.text === 'content search unavailable').length, 1)
   // The picker stays open and the local metadata filter still works.
   const view = h.view()
-  assert.ok(view.includes('search · Current directory'), 'the picker must stay open when content search is unavailable')
+  assert.ok(view.includes('search · Search results'), 'the picker must stay open when content search is unavailable')
   assert.ok(!view.includes('beta'), 'local metadata filtering must keep working')
   // A second query does not re-notice (once per picker lifecycle).
   h.vt.sendInput('beta')
@@ -306,7 +307,11 @@ test('unknown hit ids are ignored and subagent hits never enter the browser', as
   assert.ok(view.includes('alpha'), 'the known main-row hit must merge')
 })
 
-test('current-directory scope hides other-workspace hits; All directories shows them', async (t) => {
+test('search results are global: the browse scope never hides Host hits (review P1)', async (t) => {
+  // The Host returns a bounded GLOBAL top-20. If the top 20 all belong to
+  // /other and the real current-workspace match ranks 21st, the old
+  // Current-directory post-filter would hide it. The search projection
+  // must show Host hits from ANY workspace.
   const h = harness({
     rows: [
       { id: 'session-here', createdAt: 300, cwd: '/ws' },
@@ -324,14 +329,10 @@ test('current-directory scope hides other-workspace hits; All directories shows 
   await h.runSearch('needle')
   await waitUntil(() => h.searchCalls.length === 1)
   await waitUntil(() => h.view().includes('needle here'))
-  let view = h.view()
-  assert.ok(!view.includes('there'), 'the Current directory scope must not show the other-workspace hit')
-  // Tab to All directories: the other-workspace hit appears with its snippet.
-  h.vt.sendInput('\t')
-  await h.vt.waitForRender()
-  await waitUntil(() => h.view().includes('needle there'))
-  view = h.view()
-  assert.ok(view.includes('there'), 'All directories must show the other-workspace hit')
+  const view = h.view()
+  assert.ok(view.includes('Search results'), 'a query must enter the global search projection')
+  assert.ok(view.includes('there'), 'a Host hit from another workspace must be visible in the search view')
+  assert.ok(view.includes('here'), 'a Host hit from the current workspace must be visible too')
 })
 
 test('rapid query changes abort the superseded search and only the latest result refreshes', async (t) => {
@@ -399,7 +400,7 @@ test('a provider failure keeps the local rows and the picker open', async (t) =>
   await waitUntil(() => h.view().includes('alpha'))
   await waitUntil(() => h.notices.some(notice => notice.text === 'session content search failed: fts backend exploded'))
   const view = h.view()
-  assert.ok(view.includes('search · Current directory'), 'the picker must stay open after a provider failure')
+  assert.ok(view.includes('search · Search results'), 'the picker must stay open after a provider failure')
   assert.ok(view.includes('alpha'), 'local rows must survive a provider failure')
 })
 
@@ -434,7 +435,7 @@ test('/resume with no match keeps the picker and starts a content search', async
   await waitUntil(() => h.searchCalls.length === 1)
   assert.equal(h.searchCalls[0]!.query, 'needle')
   await waitUntil(() => h.view().includes('needle in needle'))
-  assert.ok(h.view().includes('resume · Current directory'), 'the unmatched /resume stays in the SAME picker')
+  assert.ok(h.view().includes('resume · Search results'), 'the unmatched /resume stays in the SAME picker, in the search projection')
 })
 
 test('/sessions foo applies the filter after the list lands and starts a content search', async (t) => {
@@ -448,7 +449,7 @@ test('/sessions foo applies the filter after the list lands and starts a content
   await waitUntil(() => h.searchCalls.length === 1)
   assert.equal(h.searchCalls[0]!.query, 'needle')
   const view = h.view()
-  assert.ok(view.includes('sessions · Current directory'), 'the /sessions header must stay')
+  assert.ok(view.includes('sessions · Search results'), 'a /sessions argument must enter the search projection')
   assert.ok(!view.includes('beta'), 'the argument must act as the live filter')
 })
 
@@ -520,26 +521,23 @@ test('a whitespace-only filter never triggers a content search', async (t) => {
   )
 })
 
-test('a whitespace-padded filter still surfaces content-only hits', async (t) => {
+test('a whitespace-padded filter sends the canonical query to the Host', async (t) => {
   const h = harness({
     rows: rows(),
-    search: async (query) => ({ items: [{ sessionId: 'session-alpha', snippet: 'needle found' }], hasMore: false }),
+    search: async (query) => ({ items: [{ sessionId: 'session-alpha', snippet: `needle in ${query}` }], hasMore: false }),
   })
   t.after(() => h.app.stop())
   await h.runSessions('')
   await waitUntil(() => h.view().includes('alpha'))
   // Type a leading space, then the query: the Host search must receive
-  // the canonical (trimmed) query, and the content-only hit must still
-  // surface under the whitespace-padded local filter.
+  // the canonical (trimmed) query — never the raw padded text.
   h.vt.sendInput(' ')
   h.vt.sendInput('needle')
   await waitUntil(() => h.searchCalls.length === 1)
   assert.equal(h.searchCalls[0]!.query, 'needle', 'the Host search must receive the canonical query')
-  await waitUntil(() => h.view().includes('needle found'))
-  assert.ok(h.view().includes('alpha'), 'the content-only hit must surface under the whitespace-padded filter')
 })
 
-test('an over-long filter never pseudo-matches through the appended text', async (t) => {
+test('an over-long filter never surfaces a hit for the unsearched suffix', async (t) => {
   const long = 'x'.repeat(600)
   const h = harness({
     rows: rows(),
@@ -551,11 +549,12 @@ test('an over-long filter never pseudo-matches through the appended text', async
   h.vt.sendInput(long)
   await waitUntil(() => h.searchCalls.length === 1)
   assert.equal(h.searchCalls[0]!.query.length, 500, 'the Host search must receive the bounded query')
-  // The appended text is bounded to the searched window, so the full
-  // 600-char filter cannot match the row — no pseudo-match.
+  // The row's text is bounded to the searched window, so the full
+  // 600-char filter cannot match it — no pseudo-match through text that
+  // was never searched.
   await new Promise<void>(resolve => setTimeout(resolve, 400))
   const view = h.view()
-  assert.ok(!view.includes('hit x'), 'an over-long filter must not pseudo-match through unbounded appended text')
+  assert.ok(!view.includes('hit x'), 'an over-long filter must not surface a hit for the unsearched suffix')
 })
 
 test('a malicious provider error message never reaches the terminal raw', async (t) => {
@@ -594,4 +593,138 @@ test('a pre-list whitespace-padded filter is canonicalized before the client cap
   await waitUntil(() => h.searchCalls.length === 1)
   assert.equal(h.searchCalls[0]!.query.length, 500, 'the Host must receive the full trimmed 500-char query')
   assert.ok(!h.searchCalls[0]!.query.startsWith(' '), 'the Host query must be canonical (no leading space)')
+})
+
+test('typing a query enters the search projection; clearing restores the browse state', async (t) => {
+  const h = harness({ rows: rows() })
+  t.after(() => h.app.stop())
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('alpha'))
+  assert.ok(h.view().includes('Current directory'), 'the picker opens in browse state')
+  h.vt.sendInput('alpha')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('Search results'), 'a query must enter the search projection')
+  // Clear the query: back to the browse state.
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('Current directory'), 'clearing the query must restore the browse state')
+})
+
+test('clearing a query restores the previous browse category', async (t) => {
+  const h = harness({ rows: rows() })
+  t.after(() => h.app.stop())
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('alpha'))
+  // Switch to All directories, then type a query.
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('All directories'))
+  h.vt.sendInput('alpha')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('Search results'))
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('All directories'), 'clearing must restore the previous browse category')
+})
+
+test('a host hit is never faked into visibility when its snippet lacks the query (review P2)', async (t) => {
+  const h = harness({
+    rows: rows(),
+    search: async () => ({ items: [{ sessionId: 'session-alpha', snippet: 'found it' }], hasMore: false }),
+  })
+  t.after(() => h.app.stop())
+  await h.runSearch('needle')
+  await waitUntil(() => h.searchCalls.length === 1)
+  await new Promise<void>(resolve => setTimeout(resolve, 400))
+  const view = h.view()
+  assert.ok(!view.includes('found it'), 'a snippet without the query must not be faked into visibility')
+  assert.ok(!view.includes('· needle'), 'the query must never be appended to the description')
+})
+
+test('Tab never leaves the search projection while a query is active', async (t) => {
+  const h = harness({ rows: rows() })
+  t.after(() => h.app.stop())
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('alpha'))
+  h.vt.sendInput('alpha')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('Search results'))
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  const view = h.view()
+  assert.ok(view.includes('Search results'), 'Tab must not leave the search projection while a query is active')
+  assert.ok(!view.includes('Current directory'), 'the browse tabs must not wrap global search results')
+  assert.ok(!view.includes('All directories'), 'the browse tabs must not wrap global search results')
+})
+
+test('enriched title and preset feed the local metadata search', async (t) => {
+  const h = harness({
+    rows: rows(),
+    projectionBatch: async () => new Map([['session-alpha', { title: 'the fixed title', preset: 'minimal' }]]),
+    search: async () => ({ items: [], hasMore: false }),
+  })
+  t.after(() => h.app.stop())
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('the fixed title'))
+  // The raw list rows carry no title/preset — the search projection must
+  // match through the enriched metadata (review round 4).
+  h.vt.sendInput('fixed')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('alpha'), 'a title match must enter the search projection')
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('\x7f')
+  h.vt.sendInput('minimal')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('alpha'), 'a preset match must enter the search projection')
+})
+
+test('a cwd query finds rows through the searchable description', async (t) => {
+  const h = harness({
+    rows: [
+      { id: 'session-aaa', createdAt: 300, cwd: '/ws' },
+      { id: 'session-bbb', createdAt: 200, cwd: '/other' },
+    ],
+    search: async () => ({ items: [], hasMore: false }),
+  })
+  t.after(() => h.app.stop())
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('aaa'))
+  // The cwd lives in the group header in the browse view; the search
+  // projection must carry it in the searchable description (the SelectList
+  // never searches the group — review round 4).
+  h.vt.sendInput('/other')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('bbb'), 'a cwd match must be visible in the search projection')
+  assert.ok(!h.view().includes('aaa'), 'non-matching rows must stay hidden')
+})
+
+test('a malicious cwd never reaches the terminal through the search description', async (t) => {
+  const h = harness({
+    rows: [{ id: 'session-evil', createdAt: 300, cwd: '/ws\x1b]0;PWNED\x07' }],
+    search: async () => ({ items: [], hasMore: false }),
+  })
+  t.after(() => h.app.stop())
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  // The sanitized cwd ('/ws') is searchable, so the row DISPLAYS in the
+  // search projection — its group header AND description must carry the
+  // sanitized cwd only (the injected OSC must never reach the terminal).
+  h.vt.sendInput('/ws')
+  await h.vt.waitForRender()
+  await waitUntil(() => h.view().includes('evil'))
+  const raw = h.rawWrites.join('')
+  assert.ok(!raw.includes('\x1b]0;PWNED'), 'the raw terminal stream must never carry the injected cwd sequence')
+  const view = h.view()
+  assert.ok(!view.includes('\x1b'), 'the raw ESC must never reach the terminal')
 })

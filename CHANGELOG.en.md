@@ -23,10 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`/search` converges into the Session Browser.** `/sessions`, `/resume`
-  and `/search` now share one session browser: content search augments the
-  local metadata filter asynchronously, and hit snippets render on the
-  matching session rows; when content search is unavailable or fails, local
-  metadata filtering keeps working and the browser stays open.
+  and `/search` now share one session browser: typing a query enters a global
+  search view (local metadata matches ∪ content matches) that is never
+  scoped by the workspace tabs, and hit snippets render on the matching
+  session rows; when content search is unavailable or fails, local metadata
+  filtering keeps working and the browser stays open.
 - **Session content search aligns with official DSH semantics.** The Direct
   adapter now uses `sessionQuery.searchSessions()` (matching DSH master
   `ApiSessionList.search()`: visibility authorization, dedupe, cursor

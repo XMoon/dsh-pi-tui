@@ -9,8 +9,12 @@
  *
  * /sessions, /resume and /search share ONE Session Browser lifecycle
  * (`openSessionPicker`): the picker is input-first, the listing is shared,
- * and Host content search is a debounced async augmentation of the local
- * metadata filter (plan: temp/20260907/dsh-pi-tui-search-sessions-direct-boundary-plan.md).
+ * and a non-empty query enters a GLOBAL search projection — local metadata
+ * matches UNION Host content hits, never scoped by the Current/All browse
+ * tabs (the Host page is a bounded global ranking; scoping it afterwards
+ * would hide real matches). Host content search is a debounced async
+ * augmentation; clearing the query restores the browse state (plan:
+ * temp/20260907/dsh-pi-tui-search-sessions-direct-boundary-plan.md).
  * @module @xmoon76/dsh-pi-tui/commands
  */
 
@@ -82,6 +86,8 @@ import {
   sanitizeSessionSearchInput,
   sanitizeTerminalText,
   sessionLabelParts,
+  sessionRowMatchesQuery,
+  sessionSearchItem,
   sessionPickerItem,
   type SessionContentHit,
   type SessionPickerItem,
@@ -209,6 +215,66 @@ export function sessionPickerCategories(
       },
     },
   ]
+}
+
+/**
+ * The Session Browser's SEARCH projection category (review P1/P2): with a
+ * non-empty query the picker enters a GLOBAL search view whose membership is
+ * the explicit union of local metadata matches and Host content hits —
+ * never a workspace-scoped post-filter of the bounded Host page (the Host
+ * returns a global top-20; scoping it afterwards would hide a real
+ * current-workspace match ranked beyond the window), and never a fake query
+ * append in the description (membership and presentation stay separate).
+ * The SelectList's own substring filter remains a secondary layer over the
+ * union items; the projection is the membership authority, so the rendered
+ * items must carry every membership field in their searchable text (the
+ * cwd joins the description — the SelectList never searches the group).
+ * KNOWN completeness tradeoff (accepted by design, review round 4): a
+ * query longer than the 240-code-point snippet cap cannot be matched by
+ * the SelectList against the bounded snippet, so such a content hit stays
+ * hidden — the alternative (faking the query into the description) was
+ * rejected (review P2). Queries up to the cap surface normally.
+ * The category is non-cyclable: Tab never leaves it while a query is
+ * active, and browse mode skips it.
+ */
+export function sessionSearchCategory(options: {
+  rows: readonly SessionPickerRow[]
+  header: string
+  /** The SEARCH item builder (the cwd joins the searchable description). */
+  itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem
+  /** The LIVE filter text (read at activation time). */
+  queryOf: () => string
+  /** The merged Host content hits (live map). */
+  contentHitsById: ReadonlyMap<string, SessionContentHit>
+  /** The enriched metadata (title/preset) for the local match — the raw
+   * list rows carry neither until the projection batch lands. */
+  metadataOf: (id: string) => { title?: string; preset?: string }
+  placeholder?: () => SessionPickerItem
+}): PickerCategory {
+  const { rows, header, itemFor, queryOf, contentHitsById, metadataOf, placeholder } = options
+  return {
+    id: 'search',
+    label: 'Search results',
+    header: `${header} · Search results`,
+    cyclable: false,
+    items: () => {
+      if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
+      const mainRows = rows.filter(row => row.origin !== 'subagent')
+      const query = queryOf()
+      const localMatchIds = new Set(
+        query.trim() === '' ? [] : mainRows.filter(row => {
+          const meta = metadataOf(row.id)
+          return sessionRowMatchesQuery({
+            ...row,
+            title: meta.title,
+            preset: meta.preset ?? row.preset,
+          }, query)
+        }).map(row => row.id),
+      )
+      const visible = mainRows.filter(row => localMatchIds.has(row.id) || contentHitsById.has(row.id))
+      return buildSessionTree(visible).map(entry => itemFor(entry.row, entry.depth))
+    },
+  }
 }
 
 /**
@@ -2337,7 +2403,28 @@ export function registerTuiCommands(
     // fails (the overlay is already open — an in-picker refusal beats a
     // dead loading frame; Esc still closes it).
     let statusRow = loadingItem
-    const categories = sessionPickerCategories(rows, runner.sessionCwd(), options.header, itemFor, () => statusRow)
+    const categories = [
+      ...sessionPickerCategories(rows, runner.sessionCwd(), options.header, itemFor, () => statusRow),
+      // The search projection (review P1/P2): with a non-empty query the
+      // picker switches to this GLOBAL view — local metadata matches UNION
+      // Host content hits, never scoped by the Current/All browse tabs.
+      sessionSearchCategory({
+        rows,
+        header: options.header,
+        // The search item builder: the cwd joins the searchable description
+        // (the SelectList never searches the group header), and the
+        // enriched title/preset are synthesized exactly like the browse rows.
+        itemFor: (row, indent = 0) => sessionSearchItem({
+          ...row,
+          title: titlesById.get(row.id),
+          preset: presetsById.get(row.id) ?? row.preset,
+        }, runner.liveAgent?.session.id ?? '', indent, contentHitsById.get(row.id)),
+        queryOf: () => pendingContentQuery,
+        contentHitsById,
+        metadataOf: id => ({ title: titlesById.get(id), preset: presetsById.get(id) }),
+        placeholder: () => statusRow,
+      }),
+    ]
     /** The `/resume <arg>` outcome of the ONE shared listing, resolved by
      * the detached load task — the overlay stays interactive the whole
      * time, and the awaiting handler keeps the OLD synchronous semantics
@@ -2363,13 +2450,17 @@ export function registerTuiCommands(
       // overwrite it.
       controller.signal.addEventListener('abort', () => settleOnce({ kind: 'cancelled' }), { once: true })
     }
-    // Content-search lifecycle (plan §9): local metadata filtering is
-    // immediate; Host content search is a 250ms-debounced async
-    // augmentation that must never block keyboard input. The query is only
-    // recorded until the list baseline lands; clearing the filter drops the
-    // content enrichment; close/supersede/quit cancels everything.
+    // Content-search lifecycle (plan §9 + review P1/P2): local metadata
+    // filtering is immediate; Host content search is a 250ms-debounced
+    // async augmentation that must never block keyboard input. The query is
+    // only recorded until the list baseline lands; clearing the filter drops
+    // the content enrichment; close/supersede/quit cancels everything. A
+    // non-empty query switches the picker into the GLOBAL search projection
+    // (scope is browse state — it never wraps the bounded Host results);
+    // clearing restores the browse category that was active before.
     let listLanded = false
     let pendingContentQuery = ''
+    let browseCategory = 'current'
     /** Run one Host content search for a settled non-empty query. */
     const runContentSearch = (query: string): void => {
       if (stale()) return
@@ -2390,25 +2481,17 @@ export function registerTuiCommands(
             }
             return
           }
-          // Merge (plan §10.2): only already-listed MAIN rows accept hits —
-          // the search page never creates rows, and subagent children stay
-          // out of the human Session Browser. The local filter then
-          // surfaces content-only hits through the snippet in the
-          // description.
+          // Merge (plan §10.2 + review P2): only already-listed MAIN rows
+          // accept hits — the search page never creates rows, and subagent
+          // children stay out of the human Session Browser. Membership is
+          // the explicit union in the search projection; the row carries
+          // ONLY the real Host snippet (never a fake query append).
           contentHitsById.clear()
           contentHasMore = page.hasMore
           const knownIds = new Set(rows.filter(row => row.origin !== 'subagent').map(row => row.id))
           for (const item of page.items) {
             if (knownIds.has(item.sessionId)) {
-              // The raw filter travels with the hit, BOUNDED to the same
-              // sanitized window the Host actually searched: the Host
-              // canonicalizes (trims) and caps the query, so a
-              // whitespace-padded filter or a truncated snippet may not
-              // appear in the snippet — the row presentation appends this
-              // text so the local filter still surfaces the content-only
-              // hit, while an over-long filter can never pseudo-match
-              // through text that was never searched.
-              contentHitsById.set(item.sessionId, { snippet: item.snippet, matchText: sanitizeSessionSearchInput(pendingContentQuery) })
+              contentHitsById.set(item.sessionId, { snippet: item.snippet })
             }
           }
           picker.refresh?.()
@@ -2491,15 +2574,31 @@ export function registerTuiCommands(
           cancelContentSearch()
           contentHitsById.clear()
           contentHasMore = false
-          picker.refresh?.()
           // A whitespace-only filter is an empty query: no Host request
           // (the official contract rejects empty queries — a whitespace
           // filter must not surface as a search failure). Non-empty
-          // filters are canonicalized (trimmed) for the Host search —
-          // the official query semantics trim, so the local filter and
-          // the Host query stay aligned.
+          // filters are canonicalized (trimmed) for the Host search — the
+          // official query semantics trim. The SelectList's own substring
+          // filter stays on the RAW text (a known accepted tradeoff of the
+          // no-fake design, review round 4/5): a whitespace-padded query
+          // may hide content hits whose snippets lack the padded text.
           const canonical = query.trim()
-          if (canonical === '') return
+          if (canonical === '') {
+            // Back to the browse state (the category that was active
+            // before the query started).
+            if (picker.getCategory?.() !== browseCategory) picker.setCategory?.(browseCategory)
+            return
+          }
+          // Enter the GLOBAL search projection: scope is browse state and
+          // never wraps the bounded Host results (review P1). The switch
+          // happens once per query; further typing re-runs the active
+          // factory through refresh.
+          if (picker.getCategory?.() !== 'search') {
+            browseCategory = picker.getCategory?.() ?? 'current'
+            picker.setCategory?.('search')
+          } else {
+            picker.refresh?.()
+          }
           if (listLanded) scheduleContentSearch(canonical)
         },
       },
