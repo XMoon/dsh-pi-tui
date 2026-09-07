@@ -6,8 +6,9 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { ProcessTerminal } from '@xmoon76/pi-tui'
 import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-subagent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, type Config } from '../src/index.ts'
 import { foldPendingModelSelection } from '../src/model-selection.ts'
 import { StatsFolder } from '../src/stats.ts'
@@ -148,10 +149,17 @@ function sessionEvents(text: string): SessionEvent[] {
 /** A FakeSession literal before the alpha.4 log accessors are attached. */
 interface FakeSessionInit {
   id: string
-  header: { id: string; cwd: string; createdAt: number; version: number }
+  header: {
+    id: string
+    cwd: string
+    createdAt: number
+    version: number
+    isSeeded?: boolean
+    parentSession?: string
+  }
   events: SessionEvent[]
   requestHeader?: () => unknown
-  append?: (type: string, data: unknown) => unknown
+  append?: (type: string, data: unknown, options?: { surfaceOp?: 'append' }) => unknown
 }
 
 /** The alpha.4 Session shape: the backing log is PRIVATE — production code
@@ -159,12 +167,19 @@ interface FakeSessionInit {
  * mask old `Session.events` API drift (compatibility-plan B4). */
 interface FakeSession {
   id: string
-  header: { id: string; cwd: string; createdAt: number; version: number }
+  header: {
+    id: string
+    cwd: string
+    createdAt: number
+    version: number
+    isSeeded?: boolean
+    parentSession?: string
+  }
   readonly seq: number
   eventAt(seq: number): SessionEvent | undefined
   snapshotEvents(): readonly SessionEvent[]
   requestHeader?(): unknown
-  append?(type: string, data: unknown): unknown
+  append?(type: string, data: unknown, options?: { surfaceOp?: 'append' }): unknown
 }
 
 /** Build the alpha.4 Session mock over a private backing log. */
@@ -180,8 +195,14 @@ function fakeSession(init: FakeSessionInit): FakeSession {
       const found = events.findLast(candidate => (candidate as unknown as { type?: unknown }).type === 'request/header')
       return (found as unknown as { data?: { header?: unknown } } | undefined)?.data?.header
     }),
-    append: init.append ?? ((type: string, data: unknown) => {
-      const appended = { type, seq: events.length, time: Date.now(), data } as unknown as SessionEvent
+    append: init.append ?? ((type: string, data: unknown, options?: { surfaceOp?: 'append' }) => {
+      const appended = {
+        type,
+        seq: events.length,
+        time: Date.now(),
+        data,
+        ...(options?.surfaceOp === undefined ? {} : { surfaceOp: options.surfaceOp }),
+      } as unknown as SessionEvent
       events.push(appended)
       return appended
     }),
@@ -1618,8 +1639,72 @@ test('an inactive child completion during observeSession is replayed by the view
   })
   const child: FakeSession = fakeSession({
     id: 'viewer-opening-child',
-    header: { id: 'viewer-opening-child', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
-    events: sessionEvents('child history'),
+    header: {
+      id: 'viewer-opening-child',
+      cwd: home,
+      createdAt: 1_700_000_000_001,
+      version: SESSION_FORMAT_VERSION,
+      isSeeded: true,
+      parentSession: parent.id,
+    },
+    events: [
+      event('turn/start', { turn: 1 }, 0),
+      event('step/start', { turn: 1, step: 1 }, 1),
+      event('user/message', {
+        id: MessageId('viewer-opening-parent-prompt'),
+        role: 'user',
+        content: [{ type: 'text', text: 'parent prompt hidden from child viewer' }],
+        source: { kind: 'user' },
+      }, 2, 'append'),
+      event('user/message', {
+        id: MessageId('viewer-opening-parent-notice'),
+        role: 'user',
+        content: [{ type: 'text', text: 'parent settlement notice hidden from child viewer' }],
+        source: {
+          kind: 'subagent-settled',
+          form: 'notice',
+          summary: 'parent settlement notice hidden from child viewer',
+          senderSessionId: SessionId('viewer-opening-child'),
+        },
+      }, 3, 'append'),
+      event('assistant/message', {
+        turn: 1,
+        step: 1,
+        message: {
+          id: MessageId('viewer-opening-parent-reply'),
+          role: 'assistant',
+          content: [{ type: 'text', text: 'parent reply hidden from child viewer' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        usage: { inputTokens: 9, outputTokens: 3 },
+        stream: [],
+      }, 4, 'append'),
+      event('step/end', { turn: 1, step: 1 }, 5),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6),
+      event('session/end-seed', { inherited: true }, 7),
+      event('turn/start', { turn: 2 }, 8),
+      event('step/start', { turn: 2, step: 1 }, 9),
+      event('user/message', {
+        id: MessageId('viewer-opening-first-prompt'),
+        role: 'user',
+        content: [{ type: 'text', text: 'child first prompt' }],
+        source: { kind: 'user' },
+      }, 10, 'append'),
+      event('assistant/message', {
+        turn: 2,
+        step: 1,
+        message: {
+          id: MessageId('viewer-opening-first-reply'),
+          role: 'assistant',
+          content: [{ type: 'text', text: 'child first reply' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        usage: { inputTokens: 9, outputTokens: 3 },
+        stream: [],
+      }, 11, 'append'),
+      event('step/end', { turn: 2, step: 1 }, 12),
+      event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 13),
+    ],
   })
   const subagents = {
     listDescendants: async () => [{
@@ -1663,26 +1748,33 @@ test('an inactive child completion during observeSession is replayed by the view
 
   const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
   const childAgent = liveAgentOf(harness, child.id)
-  const emitDurable = (type: string, data: unknown): void => {
-    const next = child.append!(type, data) as SessionEvent
+  const emitDurable = (type: string, data: unknown, surfaceOp?: 'append'): void => {
+    const next = child.append!(type, data, surfaceOp === undefined ? undefined : { surfaceOp }) as SessionEvent
     context!.emit('session/event', child as never, next)
   }
-  emitDurable('turn/start', { turn: 1 })
-  emitDurable('step/start', { turn: 1, step: 0 })
+  emitDurable('session/end-seed', {})
+  emitDurable('turn/start', { turn: 3 })
+  emitDurable('step/start', { turn: 3, step: 1 })
+  emitDurable('user/message', {
+    id: MessageId('viewer-opening-resumed-prompt'),
+    role: 'user',
+    content: [{ type: 'text', text: 'child resumed prompt' }],
+    source: { kind: 'user' },
+  }, 'append')
   emitDurable('assistant/message', {
-    turn: 1,
-    step: 0,
+    turn: 3,
+    step: 1,
     message: {
       id: MessageId('viewer-opening-completed'),
       role: 'assistant',
-      content: [{ type: 'text', text: 'child completed during opening' }],
+      content: [{ type: 'text', text: 'child resumed reply' }],
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     usage: { inputTokens: 9, outputTokens: 3 },
     stream: [],
-  })
-  emitDurable('step/end', { turn: 1, step: 0 })
-  emitDurable('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  }, 'append')
+  emitDurable('step/end', { turn: 3, step: 1 })
+  emitDurable('turn/end', { turn: 3, reason: { kind: 'completed' } })
   context.emit('agent/disposed', { agent: childAgent } as never)
   await childHandle.dispose()
 
@@ -1691,8 +1783,17 @@ test('an inactive child completion during observeSession is replayed by the view
   await vt.waitForRender()
   assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must mount after the cold observation returns')
   const messages = probe.capturedMessages ?? []
-  assert.equal(messages.filter(message => message.text === 'child completed during opening').length, 1,
+  const texts = messages.map(message => message.text ?? '')
+  assert.equal(texts.filter(text => text === 'child resumed reply').length, 1,
     'buffered child durable events must be hydrated exactly once after the stale observation cut')
+  for (const visible of ['child first prompt', 'child first reply', 'child resumed prompt', 'child resumed reply']) {
+    assert.ok(texts.includes(visible), `child history must include ${visible}: ${texts.join(' | ')}`)
+  }
+  for (const hidden of ['parent prompt hidden from child viewer', 'parent reply hidden from child viewer', 'parent settlement notice hidden from child viewer']) {
+    assert.ok(!texts.includes(hidden), `parent history must stay hidden: ${hidden}`)
+  }
+  assert.ok(texts.indexOf('child first prompt') < texts.indexOf('child resumed prompt'),
+    `child turns must remain in order: ${texts.join(' | ')}`)
 })
 
 test('an inactive child cold-resume replays its opening prefix and running activity', async (t) => {
