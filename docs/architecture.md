@@ -20,7 +20,7 @@ fields.
 |---|---|---|
 | Layout, rendering, input routing, overlays | `src/tui-app.ts` (`TuiApp`) | messages, messageComponents render cache, themeRevision, expandedOverride, search overlay, status/todo/dock/queue state, working indicator |
 | Transcript folding / projection | `src/transcript.ts` | incremental read grouping, assistant/thinking entries, pending calls |
-| Exit contract | `src/exit.ts` | flushWithTimeout (pure, tested) |
+| Exit contract | `src/exit.ts` | latch → surface cleanup → hint → appExit (pure, tested); Direct owned-session retirement in `src/runtime/direct/owned-session-retirement.ts` |
 | Detached tasks | `src/detached.ts` | runDetached rejection classification (pure, tested) |
 | Diagnostics | `src/diag.ts` | file/stderr sinks |
 | Model menu | `src/model-menu.ts` | per-open disposed latch + AbortController |
@@ -29,12 +29,14 @@ fields.
 
 ## Target controllers (extraction order, one responsibility per commit)
 
-1. **RunnerLifecycle** — start, cleanup (idempotent), lifecycle abort, exit
-   order (block input → flush with timeout → record → cleanup → exit),
-   detached-task accounting. Already has its primitives (`exit.ts`,
-   `detached.ts`, the runner's `cleanup()`); extraction = moving the runner
-   closure's lifecycle block into a class with an explicit dependency
-   interface (`{ diag, app, signal }`).
+1. **RunnerLifecycle** — start, surface cleanup (idempotent), lifecycle
+   abort, exit order (latch → surface cleanup → resume hint → appExit; the
+   Direct owned-session retirement runs inside the appExit disposal under
+   the DSH process-shutdown watchdog), detached-task accounting. Already
+   has its primitives (`exit.ts`, `detached.ts`, the runner's
+   `disposeSurface()` / `retireOwnedSession()`); extraction = moving the
+   runner closure's lifecycle block into a class with an explicit
+   dependency interface (`{ diag, app, signal }`).
 2. **SessionController** — create/resume/switch, `sessionGeneration` bump +
    per-session teardown (callArgs, search, expansion overrides),
    write-fence wiring, event subscription. Depends on

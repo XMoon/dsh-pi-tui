@@ -45,6 +45,16 @@
 | `CLIENT_LOCAL` | No Host coupling today; must stay that way | never |
 | `TEMPORARY_EXCEPTION` | Allowed by design, not migration debt | never (documented carve-outs) |
 
+The Direct owned-session retirement
+(`src/runtime/direct/owned-session-retirement.ts`) is a structural,
+callback-only helper: it imports no Host package and touches no `ctx`, so it
+adds ZERO baseline entries. The runner (`src/index.ts`, already the primary
+Direct coupling point) wires the live Agent / AgentHandle / sessions /
+subagents into it — the same Direct ownership escape the runner already
+owns. This is Direct ownership retirement, not a semantic-port or Remote
+capability (see `docs/client-server-migration.md` §Direct ownership
+retirement).
+
 ## Inventory (baseline, generated from the current tree)
 
 ### DIRECT_HOST_REQUIRED

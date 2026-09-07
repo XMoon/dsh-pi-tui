@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **退出时完整回收 Direct 会话。** 退出 TUI 时,主 Agent、continuable
+  subagent 与 Agent 作用域后台任务现在按固定顺序回收:取消主 Agent 并等待
+  静默 → 排空 continuable 后代 → 最终持久化 flush → 释放 AgentHandle。
+  此前退出后进程可能残留约 5 分钟(continuable subagent 仍存活);现在
+  退出在数秒内完成,且诊断日志能区分 surface 关闭、Host 回收与 launcher
+  退出三个阶段。会话切换(/new、/fork、rewind、/sessions)提交后也会
+  回收旧 owner 的 continuable 后代。
+
 ## [0.4.1] - 2026-09-04
 
 ### 安装与版本对应
