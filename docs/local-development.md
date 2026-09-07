@@ -441,6 +441,10 @@ These cost real debugging time once; record new ones here instead of relearning.
 - Master's `pnpm-workspace.yaml` `allowBuilds` does NOT include `fs-ext`, so
   every fresh source-mode install lacks the native flock addon and the JSONL
   backend crashes at boot (`Cannot find module .../fs-ext/build/Release/fs_ext.node`).
+  The alpha.2 npm family added `fs-ext` to `dsh-session-persistence-jsonl`,
+  so an isolated npm-mode install with `--ignore-scripts` hits the same
+  missing binding; the isolated drivers build it via `ensureFsExtBinding`
+  (idempotent) in both modes.
   After a source install, build it with node-gyp when the binding is missing.
   Prefer pnpm's bundled node-gyp at
   `<pnpm-dir>/dist/node_modules/node-gyp/bin/node-gyp.js`, executing it with

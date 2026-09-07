@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Verify the Source Mode/DSH runtime boundary with a real candidate tarball
- * and the last published 0.1.1 runtime. The candidate must fail on the
- * unsupported runtime. The startup row points to the pinned master source
- * distribution; it never suggests installing an unpublished npm alpha.
+ * Verify the npm/DSH runtime boundary with a real candidate tarball and a
+ * published below-floor runtime. The candidate must fail on the unsupported
+ * runtime. The startup row points to the published npm alpha.2 distribution
+ * and suggests the exact npm upgrade target.
  *
  * Usage: node scripts/dsh-runtime-boundary-smoke.mjs [path-to-candidate.tgz]
  *       pnpm smoke:boundary -- [path-to-candidate.tgz]
@@ -27,10 +27,10 @@ const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 
 // Only PUBLISHED versions can be installed by this smoke. The real
-// rejection case is 0.1.1-rc.2; the exact prerelease floor is covered by the
-// startup-gate unit tests because the pinned alpha is Source Mode only.
+// rejection case is 0.1.1-rc.2; the exact alpha.1 → alpha.2 floor is covered
+// by the startup-gate unit tests.
 const OLD_DSH_VERSION = '0.1.1-rc.2'
-const TARGET_DSH_VERSION = '0.1.3-alpha.1'
+const TARGET_DSH_VERSION = '0.1.3-alpha.2'
 const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
 const EXPECTED_BOUNDARY_IMPORT = /@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|session|session-persistence|settings)/iu
 
@@ -124,8 +124,8 @@ function installCandidate(invocation, tarball, harnessDir, env) {
   if (result.status !== 0) throw new Error(`candidate plugin install failed:\n${outputOf(result)}`)
 }
 
-// Mirrors src/startup.ts HARNESS_COMPAT: every runtime below the pinned
-// master source floor is rejected. The exact prerelease boundary is tested by
+// Mirrors src/startup.ts HARNESS_COMPAT: every runtime below the published
+// npm alpha.2 floor is rejected. The exact prerelease boundary is tested by
 // startup.test.ts because only the 0.1.1 line is installed by this smoke.
 function floorNoticeFor(oldVersion) {
   if (semver.lt(oldVersion, TARGET_DSH_VERSION)) {
@@ -136,23 +136,26 @@ function floorNoticeFor(oldVersion) {
 
 function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION) {
   if (status === 0) throw new Error(`0.4 candidate unexpectedly started on DSH ${oldVersion}`)
+  // Stale Source Mode wording is forbidden on EVERY outcome path — the
+  // friendly advisory AND the concurrent-loader raw import fallback — so a
+  // raw failure carrying old wording cannot slip through.
+  if (output.includes('pinned master source') || output.includes('pinned DSH master source distribution')) {
+    throw new Error(`boundary output must not keep Source Mode wording:\n${output}`)
+  }
   const notice = floorNoticeFor(oldVersion)
   if (notice === undefined) throw new Error(`no floor notice tier for DSH ${oldVersion}`)
   const friendly = output.includes(`running dsh ${oldVersion}`)
-    && output.includes(`DeepSeek Harness ${notice.requires} pinned master source baseline or later`)
+    && output.includes(`DeepSeek Harness ${notice.requires} or later`)
   if (friendly) {
     const required = [
       'dsh-pi-tui',
       `running dsh ${oldVersion}`,
-      `DeepSeek Harness ${notice.requires} pinned master source baseline or later`,
-      'pinned DSH master source distribution',
+      `DeepSeek Harness ${notice.requires} or later`,
+      `npm install -g @deepseek-ai/dsh@${TARGET_DSH_VERSION}`,
       'dsh --profile pi-tui',
     ]
     for (const text of required) {
       if (!output.includes(text)) throw new Error(`boundary output is missing ${JSON.stringify(text)}:\n${output}`)
-    }
-    if (output.includes(`@deepseek-ai/dsh@${TARGET_DSH_VERSION}`)) {
-      throw new Error(`boundary output must not suggest installing unpublished npm alpha ${TARGET_DSH_VERSION}:\n${output}`)
     }
     return
   }
@@ -179,8 +182,8 @@ function main() {
   const env = isolatedEnvironment(workDir, home, dshHome)
   try {
     // One published below-floor runtime rejects the candidate for real
-    // (0.1.1-rc.2). The previous alpha.1 floor was never published to npm,
-    // so its exact rejection is covered by the startup-gate unit tests.
+    // (0.1.1-rc.2). The exact alpha.1 → alpha.2 floor is covered by the
+    // startup-gate unit tests.
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
       name: 'dsh-runtime-boundary-harness',
       private: true,

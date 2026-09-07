@@ -808,21 +808,23 @@ function runPnpmInstall(harnessDir, env, distribution) {
     } catch (error) {
       fail('INFRA_INSTALL_FAILURE', error instanceof Error ? error.message : String(error))
     }
-    // The source-mode install runs with --ignore-scripts, so fs-ext's
-    // node-gyp build never ran; the JSONL backend needs the real flock
-    // addon to boot (official preset matrix boots dsh against this
-    // harness). Master's pnpm-workspace allowBuilds excludes fs-ext.
-    ensureFsExtBinding(harnessDir, env)
   }
+  // The isolated install runs with --ignore-scripts, so fs-ext's node-gyp
+  // build never ran; the JSONL backend needs the real flock addon to boot
+  // (official preset matrix boots dsh against this harness). The alpha.2
+  // npm family added fs-ext to dsh-session-persistence-jsonl, so this is
+  // required in npm mode too, not only for source packs. Idempotent: a
+  // present binding (or an install without fs-ext) is left alone.
+  ensureFsExtBinding(harnessDir, env)
   return prepared
 }
 
 /** Build the fs-ext native binding inside an installed harness when the
- * source-mode install skipped it. Idempotent: a present binding is left
- * alone. Fails the gate when the binding cannot be built (the backend
- * cannot boot without it). pnpm keeps fs-ext inside its isolated store
- * under node_modules/.pnpm, so the package directory is located by
- * globbing, never by a hoisted top-level path. */
+ * isolated install skipped it (--ignore-scripts). Idempotent: a present
+ * binding is left alone. Fails the gate when the binding cannot be built
+ * (the backend cannot boot without it). pnpm keeps fs-ext inside its
+ * isolated store under node_modules/.pnpm, so the package directory is
+ * located by globbing, never by a hoisted top-level path. */
 function ensureFsExtBinding(harnessDir, env = process.env) {
   const fsExtCandidates = globSync(join(harnessDir, 'node_modules', '.pnpm', 'fs-ext@*', 'node_modules', 'fs-ext'))
   if (fsExtCandidates.length === 0) return

@@ -9,16 +9,16 @@ boundary.
 |---|---|---|
 | `0.3.x` | `0.1.1-rc.2` | Supported legacy runtime line |
 | `0.4.1` (published) | `>=0.1.2-rc.1` | Historical stable; validated against the rc.1 DSH family |
-| `next` Source Mode (this checkout; release version remains `0.4.1`) | `>=0.1.3-alpha.1` | Pinned DSH master source baseline; validation-only, not an npm installation line |
+| `next` npm line (this checkout; release version remains `0.4.1`) | `>=0.1.3-alpha.2` | Published npm alpha.2 target; validated against the exact `0.1.3-alpha.2` npm family |
 | `0.4.0-alpha.2` | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; validated the alpha.4/alpha.5 DSH family |
 | `0.4.0-alpha.1` | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 DSH family |
 
 The published 0.4.1 line has no 0.1.1 runtime shim. An old Harness remains
 outside its supported peer window and must fail at the normal incompatible-
-runtime boundary. The current `next` checkout raises that floor to the pinned
-`0.1.3-alpha.1` master source baseline. Its startup notice is best-effort because
-Loader rows mount concurrently. The pinned alpha is not a registry release and
-must not be suggested as an npm installation.
+runtime boundary. The current `next` checkout raises that floor to the
+published npm `0.1.3-alpha.2` release. Its startup notice is best-effort because
+Loader rows mount concurrently. The floor is a registry release, so the notice
+suggests the exact npm upgrade target.
 
 For the current stable 0.4 line, install the validated Harness family and the
 stable TUI:
@@ -28,16 +28,20 @@ npm install -g @deepseek-ai/dsh@0.1.2-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 ```
 
-The current `next` checkout is Source Mode only. Use the isolated driver, which
-packs the exact source commit from `test/compat/dsh-source.json` and installs
-its temporary tarball family:
+The current `next` checkout is npm mode. Use the isolated npm driver, which
+installs the exact DSH version declared by the checkout's `package.json`
+(`0.1.3-alpha.2`) from the public registry and exercises the TUI build/test/
+package path:
 
 ```sh
-pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:npm
 ```
 
-Do not install `@deepseek-ai/dsh@0.1.3-alpha.1` from npm; that version is the
-expected version of the pinned source distribution.
+The startup notice on an old runtime suggests the exact published upgrade:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+```
 
 If the legacy DSH runtime must be kept, use the compatible 0.3 TUI line:
 
@@ -50,13 +54,12 @@ The published stable pair uses the concrete `0.1.2-rc.1` family and retains the
 historical lower-bound contract `>=0.1.2-rc.1`. A Harness on the alpha.2/alpha.3
 baseline uses `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, and alpha.4/alpha.5 uses
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.2` — the last published lines that accept them.
-The current Source Mode checkout is separate: its peer floor is
-`>=0.1.3-alpha.1`, and its exact source identity is verified before use.
+The current npm-mode checkout is separate: its peer floor is
+`>=0.1.3-alpha.2`, and its exact npm family is verified by the frozen lockfile.
 
 Note that `npm install -g @deepseek-ai/dsh` without an explicit version follows
 npm's `latest` dist-tag, which may be an older runtime line. Always name a
-published version explicitly; never use npm to install the unpublished pinned
-alpha.
+published version explicitly.
 
 ## Data compatibility
 
