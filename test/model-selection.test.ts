@@ -62,6 +62,14 @@ test('legacy sessions use their latest request header and global fallback remain
     { provider: 'p', model: 'm' },
     { provider: 'p', model: 'm', reasoningEffort: undefined },
   ), true)
+  assert.equal(sameModelSelection(
+    { provider: 'p', model: 'm', reasoningEffort: 'high' },
+    { provider: 'p', model: 'm', reasoningEffort: 'max' },
+  ), false, 'different reasoning efforts are different selections')
+  assert.equal(sameModelSelection(
+    { provider: 'p', model: 'm' },
+    { provider: 'p', model: 'm', reasoningEffort: 'max' },
+  ), false, 'absent and explicit reasoning efforts are different selections')
 })
 
 test('malformed selection events cannot poison a valid pending choice', () => {

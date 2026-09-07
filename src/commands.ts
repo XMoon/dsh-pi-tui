@@ -3623,8 +3623,10 @@ export function registerTuiCommands(
       const source = runner.liveAgent
       const seed = source === undefined ? undefined : forkSeed(source.session.snapshotEvents())
       if (seed === undefined || source === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
+      const sourceSelection = runner.selected.current
       // Shared child creation with rewind (plan §6.2): preset inheritance,
-      // live session cwd, provider/model inheritance, parentSession +
+      // live session cwd, base provider/model options plus effective selection,
+      // parentSession +
       // isSeeded/inheritedEventCount metadata — one chain, no drift between the two surfaces.
       // The child's id is PRE-GENERATED so the create publishes it under a
       // known identity (review round 6); the create runs inside the unified
@@ -3640,6 +3642,7 @@ export function registerTuiCommands(
       const sourcePreset = runner.currentPreset()
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd: childCwd } },
+        ...(sourceSelection === undefined ? {} : { inheritSelection: sourceSelection }),
         create: () => createForkedAgent(runner, source, seed, sessionId, sourcePreset),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
