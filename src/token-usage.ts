@@ -271,6 +271,9 @@ export class StepUsageAccumulator {
     const key = stepKey(turn, step)
     const entry = this.perStep.get(key)
     if (entry !== undefined) {
+      // A usage-less late failed-attempt record must not erase an
+      // authoritative assistant/message value already held for this step.
+      if (usage === undefined && entry.authoritative === true) return
       if (entry.usage !== undefined) this.subtractPending(turn, entry.usage)
       this.perStep.delete(key)
     }

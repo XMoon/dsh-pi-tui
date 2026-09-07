@@ -129,8 +129,8 @@ import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
-import { recentTurnThreshold, textWithAttachmentMarkers, type TranscriptMessage, type TurnActivity } from './transcript.ts'
-import { finalizedBlockFallbackText, fileAttachmentSummary } from './content-block-presentation.ts'
+import { assistantPresentationRevision, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, type TranscriptMessage, type TurnActivity } from './transcript.ts'
+import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
 import { WorkingIndicator, workingFramesFor } from './working.ts'
@@ -1965,6 +1965,12 @@ interface MessageComponentEntry {
    * from — an immutable array identity, so a settled image block landing
    * on a text-only component marks it stale (round-1 finding 2). */
   content?: unknown
+  /** The ordered Assistant display-only projection; its array identity plus
+   * presentation revision ensures live opaque rows invalidate the cache. */
+  displayBlocks?: unknown
+  /** Live indexed Assistant mutations can retain the projection array in
+   * place; this revision remains part of the cache identity. */
+  presentationRevision?: number
   /** Durable assistant interruption metadata; the marker is rendered outside
    * the assistant body so searchable/model-facing text stays unchanged. */
   interrupted?: boolean
@@ -8490,7 +8496,15 @@ export class TuiApp {
     width: number,
   ): MessageComponentEntry {
     const registry = this.renderers
-    const rendered = registry === undefined ? undefined : this.renderThroughExtensions(message, state.expanded)
+    // An open opaque Assistant item is a transient display contract, not part
+    // of the semantic renderer snapshot. Host rendering must own this frame so
+    // an extension renderer cannot hide the immediate pending row; once the
+    // block closes, the normal extension path resumes.
+    const hasOpenOpaque = message.kind === 'assistant'
+      && message.displayBlocks?.some(block => block.kind === 'open-opaque') === true
+    const rendered = registry === undefined || hasOpenOpaque
+      ? undefined
+      : this.renderThroughExtensions(message, state.expanded)
     // The width-baking flag is a HOST-build property: plugin components
     // never bake width (compiled views wrap at render time), so a resize
     // must not invalidate them — the renderer-cache contract (renderers
@@ -8528,6 +8542,8 @@ export class TuiApp {
       case 'system':
         entry.text = message.text
         entry.content = message.kind === 'user' || message.kind === 'assistant' ? message.content : undefined
+        entry.displayBlocks = message.kind === 'assistant' ? message.displayBlocks : undefined
+        entry.presentationRevision = message.kind === 'assistant' ? assistantPresentationRevision(message) : undefined
         entry.interrupted = message.kind === 'assistant' ? message.interrupted === true : undefined
         entry.running = message.kind === 'thinking' ? message.running : undefined
         entry.label = message.kind === 'system' ? message.label : undefined
@@ -8561,6 +8577,8 @@ export class TuiApp {
         return entry.text !== message.text || entry.content !== message.content
       case 'assistant':
         return entry.text !== message.text || entry.content !== message.content
+          || entry.displayBlocks !== message.displayBlocks
+          || entry.presentationRevision !== assistantPresentationRevision(message)
           || entry.interrupted !== (message.interrupted === true)
       case 'thinking':
         return entry.text !== message.text || entry.running !== message.running
@@ -8579,15 +8597,10 @@ export class TuiApp {
     }
   }
 
-  /**
-   * Render finalized message blocks IN ORDER (plan §15.2): text blocks fold
-   * into one text component per run, images use the existing thumbnail path
-   * when available (or their flat marker without a loader), files use their
-   * metadata-only row, and unknown blocks use the bounded explicit fallback.
-   * Reasoning and tool-call blocks retain their existing process ownership.
-   */
-  private renderBlockSequence(
-    content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[],
+  /** Render an ordered Assistant display projection. Open opaque items are
+   * independent dim rows; content items reuse the finalized block renderer. */
+  private renderAssistantDisplaySequence(
+    displayBlocks: readonly AssistantDisplayBlock[],
     makeText: (text: string) => Component,
     message: TranscriptMessage,
   ): Component {
@@ -8601,7 +8614,13 @@ export class TuiApp {
       }
     }
     let imageIndex = 0
-    for (const block of content) {
+    for (const displayBlock of displayBlocks) {
+      if (displayBlock.kind === 'open-opaque') {
+        flushText()
+        container.addChild(new Text(color.textDim(openOpaqueBlockFallbackText(displayBlock.blockType)), 0, 0))
+        continue
+      }
+      const block = displayBlock.block
       if (block.type === 'text') {
         textBlocks.push(block)
       } else if (block.type === 'image') {
@@ -8634,6 +8653,25 @@ export class TuiApp {
     }
     flushText()
     return container
+  }
+
+  /**
+   * Render finalized message blocks IN ORDER (plan §15.2): text blocks fold
+   * into one text component per run, images use the existing thumbnail path
+   * when available (or their flat marker without a loader), files use their
+   * metadata-only row, and unknown blocks use the bounded explicit fallback.
+   * Reasoning and tool-call blocks retain their existing process ownership.
+   */
+  private renderBlockSequence(
+    content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[],
+    makeText: (text: string) => Component,
+    message: TranscriptMessage,
+  ): Component {
+    return this.renderAssistantDisplaySequence(
+      content.map(block => ({ kind: 'content' as const, block })),
+      makeText,
+      message,
+    )
   }
 
   /**
@@ -8741,10 +8779,13 @@ export class TuiApp {
       // re-renders it at the new width, so tables reflow instead of
       // re-wrapping a frozen render (the 5a76526 regression).
       const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
-      const body = message.content !== undefined && message.content.some(block => block.type !== 'text')
-        ? this.renderBlockSequence(message.content, (text) =>
-          new BulletedComponent(new Markdown(text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet), message)
-        : new BulletedComponent(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
+      const makeAssistantText = (text: string): Component =>
+        new BulletedComponent(new Markdown(text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
+      const body = message.displayBlocks !== undefined
+        ? this.renderAssistantDisplaySequence(message.displayBlocks, makeAssistantText, message)
+        : message.content !== undefined && message.content.some(block => block.type !== 'text')
+          ? this.renderBlockSequence(message.content, makeAssistantText, message)
+          : makeAssistantText(message.text)
       if (!message.interrupted) return body
       const interrupted = new Container()
       interrupted.addChild(body)

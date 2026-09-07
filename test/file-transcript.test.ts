@@ -7,9 +7,11 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
 import {
   finalizedBlockFallbackText,
   fileAttachmentSummary,
+  openOpaqueBlockFallbackText,
   textWithAttachmentMarkers,
   userBlocksVisibleNow,
 } from '../src/content-block-presentation.ts'
@@ -138,6 +140,52 @@ test('file-only and unknown finalized user blocks survive folding and search', (
   const hostileHeading = hostileTypeFallback.split('\n', 1)[0]!
   assert.ok(!hostileHeading.includes('\n'))
   assert.ok(hostileHeading.length <= 'Unknown block: '.length + 120)
+  assert.equal(openOpaqueBlockFallbackText('future-test-block'), 'Unknown block: future-test-block\nnull')
+  const hostileOpen = openOpaqueBlockFallbackText(`future\n\u001b[2J${'x'.repeat(200)}`)
+  assert.ok(!hostileOpen.includes('\u001b'))
+  const hostileOpenHeading = hostileOpen.split('\n', 1)[0]!
+  assert.ok(hostileOpenHeading.length <= 'Unknown block: '.length + 120)
+  assert.ok(hostileOpen.endsWith('\nnull'))
+})
+
+test('open file and image blocks replace their pending rows with C1 renderers', async () => {
+  const folder = new TranscriptFolder()
+  const send = (chunk: AssistantLiveChunk, time: number): void => {
+    folder.applyLiveInput({
+      kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time, chunk,
+    })
+  }
+  send({ type: 'block-start', index: 0, blockType: 'file' }, 1)
+  const pendingFile = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(pendingFile !== undefined && pendingFile.kind === 'assistant')
+  assert.deepEqual(pendingFile.displayBlocks, [{ kind: 'open-opaque', blockType: 'file' }])
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript(folder.messages())
+  const pendingView = await viewport(vt)
+  assert.ok(pendingView.includes('Unknown block: file'), `pending file row missing:\n${pendingView}`)
+  const cache = (app as unknown as { messageComponents: Map<object, { component: object }> }).messageComponents
+  const pendingComponent = cache.get(pendingFile)?.component
+  assert.ok(pendingComponent !== undefined)
+  send({ type: 'block-end', index: 0, block: fileBlock() as never }, 2)
+  send({ type: 'block-start', index: 1, blockType: 'image' }, 3)
+  send({ type: 'block-end', index: 1, block: imageBlock() as never }, 4)
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.displayBlocks, undefined)
+  assert.deepEqual(assistant.content?.map(block => block.type), ['file', 'image'])
+
+  app.setTranscript(folder.messages())
+  const finalComponent = cache.get(assistant)?.component
+  assert.ok(finalComponent !== undefined)
+  assert.notStrictEqual(finalComponent, pendingComponent, 'block-end must replace the pending component')
+  const view = await viewport(vt)
+  assert.ok(view.includes('report.pdf'), `finalized file presentation missing:\n${view}`)
+  assert.ok(view.includes('shot.png'), `finalized image presentation missing:\n${view}`)
+  assert.ok(!view.includes('Unknown block: file'), `pending file fallback leaked after block-end:\n${view}`)
+  assert.ok(!view.includes('Unknown block: image'), `pending image fallback leaked after block-end:\n${view}`)
 })
 
 test('assistant finalized tool-result content uses an explicit fallback everywhere', async () => {

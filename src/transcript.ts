@@ -44,6 +44,14 @@ import type {} from '@deepseek-ai/dsh-tool-workflow/types'
 // Load the official retry event declarations.
 import type {} from '@deepseek-ai/dsh-llm-retry'
 
+/**
+ * Presentation-only Assistant blocks. An `open-opaque` item records that a
+ * block has started without inventing a finalized ContentBlock or payload.
+ */
+export type AssistantDisplayBlock =
+  | { readonly kind: 'content'; readonly block: ContentBlock }
+  | { readonly kind: 'open-opaque'; readonly blockType: string }
+
 /** One renderable message in the TUI transcript. */
 export type TranscriptMessage =
   /**
@@ -64,13 +72,16 @@ export type TranscriptMessage =
    * One step's model output. `text` is the flat markdown; `content` is the
    * settled message's full blocks when the step carried any role-neutral
    * non-text content (attachments and future blocks render rather than crash,
-   * plan §15.3).
+   * plan §15.3). `displayBlocks` is presentation-only evidence for an open
+   * opaque block and is never durable model content.
    */
   | {
     kind: 'assistant'
     turn: number
     text: string
     content?: readonly ContentBlock[]
+    /** Ordered presentation blocks while an opaque block is still open. */
+    displayBlocks?: readonly AssistantDisplayBlock[]
     /** Durable interruption evidence; presentation metadata, not body text. */
     interrupted?: true
   }
@@ -127,6 +138,17 @@ export type TranscriptMessage =
     /** Non-empty when compaction/end carried an error. */
     error?: string
   }
+
+const assistantPresentationRevisions = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
+
+/** Return the mutation revision of an Assistant's live indexed projection. */
+export function assistantPresentationRevision(message: TranscriptMessage): number {
+  return message.kind === 'assistant' ? assistantPresentationRevisions.get(message) ?? 0 : 0
+}
+
+function bumpAssistantPresentationRevision(message: Extract<TranscriptMessage, { kind: 'assistant' }>): void {
+  assistantPresentationRevisions.set(message, assistantPresentationRevision(message) + 1)
+}
 
 /** One member row of a workflow run card. */
 export interface WorkflowMemberView {
@@ -411,6 +433,31 @@ type AssistantBlockChunk =
   | { readonly type: 'tool-call-delta'; readonly index: number; readonly id: string; readonly name?: string; readonly argumentsDelta: string }
   | { readonly type: 'block-end'; readonly index: number; readonly block: AssistantLiveContentBlock | ContentBlock }
 
+interface AssistantStreamProjection {
+  states: Map<number, AssistantBlockState>
+  blocks: ContentBlock[]
+  displayBlocks: AssistantDisplayBlock[]
+  firstLane: 'thinking' | 'assistant' | undefined
+}
+
+/**
+ * The live arrays are intentionally retained and updated in place: streaming
+ * projection must not copy the complete pending row for every indexed chunk.
+ * TranscriptFolder already mutates its message objects in place; the separate
+ * presentation revision is the cache identity for this live-only optimization.
+ * Durable stream projections remain fresh arrays.
+ */
+interface LiveAssistantProjection {
+  states: Map<number, AssistantBlockState>
+  blockIndexes: number[]
+  blocks: ContentBlock[]
+  displayIndexes: number[]
+  displayBlocks: AssistantDisplayBlock[]
+  assistantVisibleCount: number
+  thinkingVisibleCount: number
+  openOpaqueCount: number
+}
+
 /** Start one typed partial block without pretending it is a finalized block. */
 function emptyAssistantBlockState(blockType: string): AssistantBlockState {
   switch (blockType) {
@@ -427,50 +474,57 @@ function emptyAssistantBlockState(blockType: string): AssistantBlockState {
  * state at a time; its first block-end replaces the partial state
  * authoritatively and then freezes the completed block.
  */
-function applyAssistantBlockChunk(blocks: Map<number, AssistantBlockState>, chunk: AssistantBlockChunk): void {
+function applyAssistantBlockChunk(blocks: Map<number, AssistantBlockState>, chunk: AssistantBlockChunk): boolean {
   switch (chunk.type) {
     case 'block-start':
       // The first block-start owns the index; duplicate starts must not erase
       // deltas already accepted for that block.
-      if (!blocks.has(chunk.index)) blocks.set(chunk.index, emptyAssistantBlockState(chunk.blockType))
-      break
+      if (blocks.has(chunk.index)) return false
+      blocks.set(chunk.index, emptyAssistantBlockState(chunk.blockType))
+      return true
     case 'text-delta': {
       const previous = blocks.get(chunk.index)
-      if (previous?.kind === 'complete') break
+      if (previous?.kind === 'complete') return false
+      if (previous?.kind === 'text' && chunk.text === '') return false
       blocks.set(chunk.index, {
         kind: 'text',
         text: previous?.kind === 'text' ? previous.text + chunk.text : chunk.text,
       })
-      break
+      return true
     }
     case 'reasoning-delta': {
       const previous = blocks.get(chunk.index)
-      if (previous?.kind === 'complete') break
+      if (previous?.kind === 'complete') return false
+      if (previous?.kind === 'reasoning' && chunk.text === '') return false
       blocks.set(chunk.index, {
         kind: 'reasoning',
         text: previous?.kind === 'reasoning' ? previous.text + chunk.text : chunk.text,
       })
-      break
+      return true
     }
     case 'tool-call-delta': {
       const previous = blocks.get(chunk.index)
-      if (previous?.kind === 'complete') break
+      if (previous?.kind === 'complete') return false
       const base = previous?.kind === 'tool-call'
         ? previous
         : { kind: 'tool-call' as const, id: '', name: '', arguments: '' }
+      const id = base.id || chunk.id
+      const name = chunk.name ?? base.name
+      const args = base.arguments + chunk.argumentsDelta
+      if (previous?.kind === 'tool-call'
+        && previous.id === id && previous.name === name && previous.arguments === args) return false
       blocks.set(chunk.index, {
         kind: 'tool-call',
-        id: base.id || chunk.id,
-        name: chunk.name ?? base.name,
-        arguments: base.arguments + chunk.argumentsDelta,
+        id,
+        name,
+        arguments: args,
       })
-      break
+      return true
     }
     case 'block-end':
-      if (blocks.get(chunk.index)?.kind !== 'complete') {
-        blocks.set(chunk.index, { kind: 'complete', block: chunk.block })
-      }
-      break
+      if (blocks.get(chunk.index)?.kind === 'complete') return false
+      blocks.set(chunk.index, { kind: 'complete', block: chunk.block })
+      return true
   }
 }
 
@@ -501,6 +555,115 @@ function assistantContentFromBlocks(blocks: Map<number, AssistantBlockState>): C
     .sort(([left], [right]) => left - right)
     .map(([, state]) => assistantContentFromBlockState(state))
     .filter((block): block is ContentBlock => block !== undefined)
+}
+
+/** Project one block state for rendering without promoting open opaque state to content. */
+function assistantDisplayBlockFromState(state: AssistantBlockState): AssistantDisplayBlock | undefined {
+  switch (state.kind) {
+    case 'text': return { kind: 'content', block: { type: 'text', text: state.text } }
+    case 'reasoning': return { kind: 'content', block: { type: 'reasoning', text: state.text } }
+    case 'tool-call':
+      return state.id === ''
+        ? undefined
+        : { kind: 'content', block: { type: 'tool-call', id: ToolCallId(state.id), name: state.name, arguments: state.arguments } }
+    case 'complete': return { kind: 'content', block: authoritativeContentBlock(state.block) }
+    case 'opaque': return { kind: 'open-opaque', blockType: state.blockType }
+  }
+}
+
+/** Project all indexed states in upstream numeric order for Assistant display. */
+function assistantDisplayBlocksFromStates(blocks: Map<number, AssistantBlockState>): AssistantDisplayBlock[] {
+  return [...blocks.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, state]) => assistantDisplayBlockFromState(state))
+    .filter((block): block is AssistantDisplayBlock => block !== undefined)
+}
+
+interface AssistantBlockProjection {
+  content: ContentBlock | undefined
+  display: AssistantDisplayBlock | undefined
+  assistantVisible: boolean
+  thinkingVisible: boolean
+  opaque: boolean
+}
+
+function assistantBlockProjection(state: AssistantBlockState): AssistantBlockProjection {
+  const content = assistantContentFromBlockState(state)
+  const display = assistantDisplayBlockFromState(state)
+  return {
+    content,
+    display,
+    assistantVisible: state.kind === 'opaque'
+      || (content !== undefined && assistantBlocksVisibleNow([content])),
+    thinkingVisible: content !== undefined && content.type === 'reasoning' && content.text !== '',
+    opaque: state.kind === 'opaque',
+  }
+}
+
+function lowerBound(values: readonly number[], value: number): number {
+  let low = 0
+  let high = values.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (values[middle]! < value) low = middle + 1
+    else high = middle
+  }
+  return low
+}
+
+/** Replace one indexed projection without rescanning the other indexes. */
+function updateIndexedProjection<T>(
+  indexes: number[],
+  values: T[],
+  index: number,
+  value: T | undefined,
+): void {
+  const position = lowerBound(indexes, index)
+  const ownsIndex = position < indexes.length && indexes[position] === index
+  if (value === undefined) {
+    if (!ownsIndex) return
+    indexes.splice(position, 1)
+    values.splice(position, 1)
+    return
+  }
+  if (ownsIndex) {
+    values[position] = value
+    return
+  }
+  indexes.splice(position, 0, index)
+  values.splice(position, 0, value)
+}
+
+/** Whether a display projection contains user-visible Assistant output. */
+function assistantDisplayBlocksVisibleNow(blocks: readonly AssistantDisplayBlock[]): boolean {
+  for (const block of blocks) {
+    if (block.kind === 'open-opaque') return true
+    if (assistantBlocksVisibleNow([block.block])) return true
+  }
+  return false
+}
+
+/** Whether a display projection retains evidence at a closed attempt boundary. */
+function assistantDisplayBlocksHaveInterruptionEvidence(blocks: readonly AssistantDisplayBlock[]): boolean {
+  for (const block of blocks) {
+    if (block.kind === 'open-opaque') return true
+    if (assistantBlocksHaveInterruptionEvidence([block.block])) return true
+  }
+  return false
+}
+
+/** Use the semantic or display-only projection for entry visibility. */
+export function assistantEntryVisibleNow(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
+  return entry.displayBlocks === undefined
+    ? assistantBlocksVisibleNow(assistantEntryBlocks(entry))
+    : assistantDisplayBlocksVisibleNow(entry.displayBlocks)
+}
+
+/** Use the semantic or display-only projection for attempt evidence. */
+function assistantEntryHasInterruptionEvidence(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
+  return entry.displayBlocks === undefined
+    ? assistantBlocksHaveInterruptionEvidence(assistantEntryBlocks(entry))
+    : assistantDisplayBlocksHaveInterruptionEvidence(entry.displayBlocks)
 }
 
 /**
@@ -664,7 +827,7 @@ export class TranscriptFolder {
   /** In-flight live block state keyed by logical step. This is required for
    * authoritative block-end replacement: deltas may be partial, while a
    * completed block replaces the entire indexed state without duplication. */
-  private readonly liveAssistantBlocks = new Map<string, Map<number, AssistantBlockState>>()
+  private readonly liveAssistantBlocks = new Map<string, LiveAssistantProjection>()
   /** Assistant entries created by the LIVE stream path and not yet taken
    * over by a durable settlement. Attempt evidence remains transient until
    * retry or turn end; abandoned attempts have no durable surface and are
@@ -836,6 +999,7 @@ export class TranscriptFolder {
 
   /** Restore one authoritative reasoning body into the bounded Focus preview. */
   private restoreThinkingPreview(activity: MutableTurnActivity, step: number, text: string): void {
+    if (step < (activity.lastAssistantStep ?? step)) return
     activity.thinkingStep = step
     activity.thinkingTail = text.slice(-TranscriptFolder.THINKING_TAIL_CAP)
     const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
@@ -845,6 +1009,7 @@ export class TranscriptFolder {
 
   /** Clear the Focus reasoning preview owned by one authoritative step. */
   private clearThinkingPreview(activity: MutableTurnActivity, step: number): void {
+    if (step < (activity.lastAssistantStep ?? step)) return
     if (activity.thinkingStep !== step) return
     activity.thinkingStep = undefined
     if (activity.thinkingTail === '' && activity.think === undefined) return
@@ -860,7 +1025,7 @@ export class TranscriptFolder {
     // After turn/end the Think slot was settled: a late reasoning delta
     // (replay artifact) must not mutate it (review finding). The thinking
     // transcript entry still accumulates the delta.
-    if (activity.completed) return
+    if (activity.completed || step < (activity.lastAssistantStep ?? step)) return
     activity.thinkingStep = step
     activity.thinkingTail = (activity.thinkingTail + delta).slice(-TranscriptFolder.THINKING_TAIL_CAP)
     const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
@@ -1177,7 +1342,7 @@ export class TranscriptFolder {
     if (item.kind === 'assistant') {
       if (this.hiddenAssistantEntries.has(item)) return false
       if (item.interrupted === true) return true
-      return assistantBlocksVisibleNow(assistantEntryBlocks(item))
+      return assistantEntryVisibleNow(item)
     }
     if (item.kind === 'thinking') return !this.hiddenThinkingEntries.has(item)
     return true
@@ -1533,7 +1698,16 @@ export class TranscriptFolder {
         // the failed one's. Reopen parity: the durable log restores the
         // step's reasoning from its LATEST source.
         const key = stepKey(input.turn, input.step)
-        this.liveAssistantBlocks.set(key, new Map())
+        this.liveAssistantBlocks.set(key, {
+          states: new Map(),
+          blockIndexes: [],
+          blocks: [],
+          displayIndexes: [],
+          displayBlocks: [],
+          assistantVisibleCount: 0,
+          thinkingVisibleCount: 0,
+          openOpaqueCount: 0,
+        })
         const thinking = this.thinkingEntries.get(key)
         if (thinking !== undefined && thinking.running === false) {
           thinking.text = ''
@@ -1577,27 +1751,34 @@ export class TranscriptFolder {
   /** Tombstone one transient assistant entry at a retry boundary. The
    * first-token timing and usage live in their separate folds and are not
    * touched here; only the presentation state is reset. */
-  private hideTransientAssistantEntry(turn: number, step: number): void {
+  private hideTransientAssistantEntry(turn: number, step: number): boolean {
     const key = stepKey(turn, step)
     const entry = this.assistantEntries.get(key)
-    if (entry === undefined || !this.transientAssistantEntries.has(entry)) return
+    if (entry === undefined || !this.transientAssistantEntries.has(entry)) return false
+    const activity = this.activityByTurn.get(turn)
+    const clearLatestVisibility = activity !== undefined
+      && activity.lastAssistantStep === step
+      && activity.lastAssistantVisible === true
+    if (clearLatestVisibility) activity.lastAssistantVisible = false
     const wasVisible = this.isVisible(entry)
     this.assistantEntries.delete(key)
     entry.text = ''
     entry.content = undefined
+    entry.displayBlocks = undefined
     entry.interrupted = undefined
     this.transientAssistantEntries.delete(entry)
     this.attemptAssistantEntries.delete(entry)
     this.hiddenAssistantEntries.add(entry)
     this.markStreamingEntryDirty(`assistant:${key}`)
     this.syncAssistantVisibility(turn, step, entry, wasVisible, false)
+    return clearLatestVisibility
   }
 
   /** A failed live attempt has no durable evidence and is therefore
    * tombstoned. A committed `assistant/attempt` is restored separately and
    * remains available as interruption evidence until retry/turn end. */
   private settleFailedAttempt(turn: number, step: number, abandoned = false, discardUsage = true): void {
-    if (abandoned) this.hideTransientAssistantEntry(turn, step)
+    const visibilityReset = abandoned ? this.hideTransientAssistantEntry(turn, step) : false
     if (abandoned) {
       // Tombstone abandoned reasoning too: the raw item remains index-stable
       // while every visible/search/grouped projection skips it.
@@ -1608,13 +1789,15 @@ export class TranscriptFolder {
     if (activity === undefined) return
     if (abandoned) this.clearThinkingPreview(activity, step)
     if (abandoned) {
+      let changed = visibilityReset
       const candidate = activity.messageCandidate
       if (candidate !== undefined && candidate.step === step
         && !activity.settledSteps.has(step) && !activity.confirmedSteps.has(step)) {
         activity.messageCandidate = undefined
         this.syncMessage(activity)
-        activity.revision += 1
+        changed = true
       }
+      if (changed) activity.revision += 1
     }
     this.syncUsage(activity)
   }
@@ -1654,16 +1837,31 @@ export class TranscriptFolder {
     }
     const existing = this.assistantEntries.get(key)
     if (existing !== undefined && this.attemptAssistantEntries.has(existing)) return
-    const blocks = this.liveBlocksFor(turn, step)
+    const reasoningFrame = chunk.type === 'reasoning-delta'
+      || (chunk.type === 'block-start' && chunk.blockType === 'reasoning')
+      || (chunk.type === 'block-end' && chunk.block.type === 'reasoning')
+    // Usage facts deliberately bypass the presentation-only stale fence so
+    // Focus accounting remains aligned with the independent stats fold.
+    if (chunk.type !== 'usage'
+      && existing === undefined && step < (activity.lastAssistantStep ?? -1) && !reasoningFrame) return
+    // An existing older row may still receive an interleaved late chunk; keep
+    // that semantic transcript evidence current. The no-entry fence above
+    // prevents replay from resurrecting a removed surface, while candidate and
+    // latest-step bookkeeping below keep Focus ownership on the newer step.
+    const projection = this.liveAssistantProjectionFor(turn, step)
     switch (chunk.type) {
       case 'block-start':
       case 'text-delta':
       case 'reasoning-delta':
       case 'tool-call-delta':
-      case 'block-end':
-        applyAssistantBlockChunk(blocks, chunk)
-        this.syncLiveAssistantPresentation(turn, step)
+      case 'block-end': {
+        const previous = projection.states.get(chunk.index)
+        if (applyAssistantBlockChunk(projection.states, chunk)) {
+          this.updateLiveAssistantProjection(projection, chunk.index, previous)
+          this.syncLiveAssistantPresentation(turn, step)
+        }
         break
+      }
       case 'usage':
         // Focus aggregation: per-turn token facts (the shared
         // accumulator — the footer and Focus can never drift).
@@ -1675,15 +1873,43 @@ export class TranscriptFolder {
     }
   }
 
-  /** Return the current live block state in stable upstream index order. */
-  private liveBlocksFor(turn: number, step: number): Map<number, AssistantBlockState> {
+  /** Return the mutable live projection for one logical step. */
+  private liveAssistantProjectionFor(turn: number, step: number): LiveAssistantProjection {
     const key = stepKey(turn, step)
-    let blocks = this.liveAssistantBlocks.get(key)
-    if (blocks === undefined) {
-      blocks = new Map()
-      this.liveAssistantBlocks.set(key, blocks)
+    let projection = this.liveAssistantBlocks.get(key)
+    if (projection === undefined) {
+      projection = {
+        states: new Map(),
+        blockIndexes: [],
+        blocks: [],
+        displayIndexes: [],
+        displayBlocks: [],
+        assistantVisibleCount: 0,
+        thinkingVisibleCount: 0,
+        openOpaqueCount: 0,
+      }
+      this.liveAssistantBlocks.set(key, projection)
     }
-    return blocks
+    return projection
+  }
+
+  /** Update only the indexed projection affected by one accepted chunk. */
+  private updateLiveAssistantProjection(
+    projection: LiveAssistantProjection,
+    index: number,
+    previous: AssistantBlockState | undefined,
+  ): void {
+    const previousProjection = previous === undefined ? undefined : assistantBlockProjection(previous)
+    const current = projection.states.get(index)
+    const currentProjection = current === undefined ? undefined : assistantBlockProjection(current)
+    if (previousProjection?.assistantVisible === true) projection.assistantVisibleCount -= 1
+    if (previousProjection?.thinkingVisible === true) projection.thinkingVisibleCount -= 1
+    if (previousProjection?.opaque === true) projection.openOpaqueCount -= 1
+    if (currentProjection?.assistantVisible === true) projection.assistantVisibleCount += 1
+    if (currentProjection?.thinkingVisible === true) projection.thinkingVisibleCount += 1
+    if (currentProjection?.opaque === true) projection.openOpaqueCount += 1
+    updateIndexedProjection(projection.blockIndexes, projection.blocks, index, currentProjection?.content)
+    updateIndexedProjection(projection.displayIndexes, projection.displayBlocks, index, currentProjection?.display)
   }
 
   /** Replace the Focus message candidate with authoritative assembled text. */
@@ -1703,16 +1929,37 @@ export class TranscriptFolder {
   /** Project the current live block map without duplicating block-end text. */
   private syncLiveAssistantPresentation(turn: number, step: number): void {
     const key = stepKey(turn, step)
-    const blocks = assistantContentFromBlocks(this.liveBlocksFor(turn, step))
+    const projection = this.liveAssistantProjectionFor(turn, step)
+    const { blocks, displayBlocks } = projection
+    const hasOpenOpaque = projection.openOpaqueCount > 0
+    const displayProjection = hasOpenOpaque ? displayBlocks : undefined
     const text = textOf(blocks)
     const activity = this.activityFor(turn)
-    const visibleNow = assistantBlocksVisibleNow(blocks)
-    if (step >= (activity.lastAssistantStep ?? -1)) activity.lastAssistantVisible = visibleNow
+    const visibleNow = projection.assistantVisibleCount > 0
+    const priorLastAssistantStep = activity.lastAssistantStep ?? -1
+    const priorLastAssistantVisible = activity.lastAssistantVisible
+    if (step >= priorLastAssistantStep) {
+      activity.lastAssistantVisible = visibleNow
+      // Any accepted indexed block state owns the latest-step fence, even
+      // when its current projection is hidden (empty text/reasoning/tool-call).
+      // This is structural state only; it never creates a Focus candidate.
+      if (projection.states.size > 0) activity.lastAssistantStep = Math.max(priorLastAssistantStep, step)
+    }
+    if (activity.lastAssistantStep !== priorLastAssistantStep
+      || activity.lastAssistantVisible !== priorLastAssistantVisible) {
+      activity.revision += 1
+    }
     const entry = this.assistantEntries.get(key)
     const wasVisible = entry !== undefined && this.isVisible(entry)
+    const staleStep = step < priorLastAssistantStep
     if (!visibleNow) {
-      if (entry !== undefined && this.transientAssistantEntries.has(entry)) this.hideTransientAssistantEntry(turn, step)
-      this.replaceMessageCandidate(activity, step, '')
+      // A late reasoning frame may reopen an empty block map after a committed
+      // step was closed. Preserve that step's existing transcript rows; only
+      // the diagnostic Thinking text below may be refreshed.
+      if (!staleStep) {
+        if (entry !== undefined && this.transientAssistantEntries.has(entry)) this.hideTransientAssistantEntry(turn, step)
+        this.replaceMessageCandidate(activity, step, '')
+      }
     } else {
       const target = entry ?? this.assistantEntry(turn, step)
       this.transientAssistantEntries.add(target)
@@ -1720,20 +1967,43 @@ export class TranscriptFolder {
       this.hiddenAssistantEntries.delete(target)
       target.text = text
       target.content = blocks.some(block => block.type !== 'text') ? blocks : undefined
+      target.displayBlocks = displayProjection
       target.interrupted = undefined
+      bumpAssistantPresentationRevision(target)
       this.markStreamingEntryDirty(`assistant:${key}`)
-      this.replaceMessageCandidate(activity, step, text)
+      if (text.trim() !== '') {
+        this.replaceMessageCandidate(activity, step, text)
+      } else if (!hasOpenOpaque) {
+        this.replaceMessageCandidate(activity, step, '')
+      } else {
+        // A new opaque step confirms an older real-text candidate, but never
+        // creates a candidate from the pending fallback itself. If this same
+        // step's semantic text was replaced by an empty block, clear its old
+        // candidate instead of leaving stale Focus text behind.
+        const candidate = activity.messageCandidate
+        if (candidate !== undefined && candidate.step === step) {
+          this.replaceMessageCandidate(activity, step, '')
+        } else if (candidate !== undefined && candidate.step < step) {
+          this.confirmMessageCandidate(activity)
+          this.syncMessage(activity)
+          activity.revision += 1
+        }
+      }
       this.syncAssistantVisibility(turn, step, target, wasVisible, false)
     }
 
-    const reasoning = blocks
-      .filter((block): block is Extract<ContentBlock, { type: 'reasoning' }> => block.type === 'reasoning')
-      .map(block => block.text)
-      .join('')
+    const reasoning = projection.thinkingVisibleCount === 0
+      ? ''
+      : blocks
+        .filter((block): block is Extract<ContentBlock, { type: 'reasoning' }> => block.type === 'reasoning')
+        .map(block => block.text)
+        .join('')
     const thinkingKey = `thinking:${key}`
     if (reasoning === '') {
-      this.hideThinkingEntry(turn, step)
-      this.clearThinkingPreview(this.activityFor(turn), step)
+      if (!staleStep) {
+        this.hideThinkingEntry(turn, step)
+        this.clearThinkingPreview(this.activityFor(turn), step)
+      }
       return
     }
     const thinking = this.thinkingEntry(turn, step)
@@ -1744,44 +2014,79 @@ export class TranscriptFolder {
     this.restoreThinkingPreview(this.activityFor(turn), step, reasoning)
   }
 
-  /** Reconstruct the authoritative assistant blocks from one compact stream.
-   * The durable path intentionally uses the same indexed state accumulator as
-   * live input, so partial attempt evidence and block-end replacement cannot
-   * drift between live and cold replay. */
-  private assistantBlocksFromStream(stream: readonly unknown[]): ContentBlock[] {
-    const blocks = new Map<number, AssistantBlockState>()
-    for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
-      const chunk = member.chunk
-      switch (chunk.type) {
-        case 'block-start':
-        case 'text-delta':
-        case 'reasoning-delta':
-        case 'tool-call-delta':
-        case 'block-end':
-          applyAssistantBlockChunk(blocks, chunk)
-          break
-        case 'usage':
-        case 'finish':
-          break
+  /** Fold one durable assistant stream once for both presentation order and
+   * restored content. The indexed state is updated in O(1) per accepted chunk;
+   * only the final projections sort the retained indexes. */
+  private assistantStreamProjection(stream: readonly unknown[]): AssistantStreamProjection {
+    const states = new Map<number, AssistantBlockState>()
+    const rowOrder: Array<'thinking' | 'assistant'> = []
+    let assistantVisibleCount = 0
+    let thinkingVisibleCount = 0
+    let assistantPresent = false
+    let thinkingPresent = false
+
+    const adjustVisibility = (state: AssistantBlockState, amount: number): void => {
+      const projection = assistantBlockProjection(state)
+      if (projection.assistantVisible) assistantVisibleCount += amount
+      if (projection.thinkingVisible) thinkingVisibleCount += amount
+    }
+
+    for (const { chunk } of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
+      if (chunk.type === 'usage' || chunk.type === 'finish') continue
+      const previous = states.get(chunk.index)
+      if (!applyAssistantBlockChunk(states, chunk)) continue
+      if (previous !== undefined) adjustVisibility(previous, -1)
+      const current = states.get(chunk.index)
+      if (current !== undefined) adjustVisibility(current, 1)
+
+      const visibleNow = assistantVisibleCount > 0
+      const nextThinking = thinkingVisibleCount > 0
+      // Match live step-level materialization: a hidden aggregate lane is
+      // removed, and a later recreation is appended after surviving rows.
+      if (visibleNow !== assistantPresent) {
+        if (visibleNow) rowOrder.push('assistant')
+        else {
+          const index = rowOrder.indexOf('assistant')
+          if (index >= 0) rowOrder.splice(index, 1)
+        }
+        assistantPresent = visibleNow
+      }
+      if (nextThinking !== thinkingPresent) {
+        if (nextThinking) rowOrder.push('thinking')
+        else {
+          const index = rowOrder.indexOf('thinking')
+          if (index >= 0) rowOrder.splice(index, 1)
+        }
+        thinkingPresent = nextThinking
       }
     }
-    return assistantContentFromBlocks(blocks)
+
+    return {
+      states,
+      blocks: assistantContentFromBlocks(states),
+      displayBlocks: assistantDisplayBlocksFromStates(states),
+      firstLane: rowOrder[0],
+    }
   }
 
-  /** Restore a SETTLED thinking entry from a durable embedded stream
-   * (Session v2 cold replay — `assistant/message.stream` /
-   * `assistant/attempt.stream`). The canonical DSH decoder expands every
-   * compact representation, and block-end remains authoritative. */
-  private restoreThinkingFromStream(turn: number, step: number, stream: readonly unknown[]): void {
-    const text = this.assistantBlocksFromStream(stream)
+  private restoreThinkingFromProjection(turn: number, step: number, projection: AssistantStreamProjection): void {
+    const activity = this.activityByTurn.get(turn)
+    const staleStep = activity !== undefined && step < (activity.lastAssistantStep ?? step)
+    const key = stepKey(turn, step)
+    // A late replay may supply the first diagnostic row for an older step, but
+    // it must not replace reasoning already restored from that step's earlier
+    // authoritative attempt.
+    if (staleStep && this.thinkingEntries.has(key)) return
+    const text = projection.blocks
       .filter((block): block is Extract<ContentBlock, { type: 'reasoning' }> => block.type === 'reasoning')
       .map(block => block.text)
       .join('')
-    const key = stepKey(turn, step)
     if (text === '') {
-      this.hideThinkingEntry(turn, step)
-      const activity = this.activityByTurn.get(turn)
-      if (activity !== undefined) this.clearThinkingPreview(activity, step)
+      if (!staleStep) {
+        this.hideThinkingEntry(turn, step)
+        const activity = this.activityByTurn.get(turn)
+        if (activity !== undefined) this.clearThinkingPreview(activity, step)
+      }
       return
     }
     const entry = this.thinkingEntry(turn, step)
@@ -1795,22 +2100,51 @@ export class TranscriptFolder {
   /** Restore assistant interruption evidence from a durable attempt. Text and
    * finalized non-text blocks are retained; reasoning remains in the Think
    * entry. Tool-call-only content is retained as hidden evidence until the
-   * closed boundary. The attempt entry is still transient so `llm/retry` can
-   * reset it. */
-  private restoreAssistantAttempt(turn: number, step: number, stream: readonly unknown[]): void {
-    const blocks = this.assistantBlocksFromStream(stream)
-    const visibleNow = assistantBlocksVisibleNow(blocks)
-    const hasEvidence = assistantBlocksHaveInterruptionEvidence(blocks)
+   * closed boundary. An open opaque block keeps display-only evidence while
+   * the attempt is live. The attempt entry is still transient so `llm/retry`
+   * can reset it. */
+  private restoreAssistantAttempt(turn: number, step: number, projection: AssistantStreamProjection): void {
+    const { states, blocks, displayBlocks } = projection
+    const hasOpenOpaque = displayBlocks.some(block => block.kind === 'open-opaque')
+    const displayProjection = hasOpenOpaque ? displayBlocks : undefined
+    const visibleNow = displayProjection === undefined
+      ? assistantBlocksVisibleNow(blocks)
+      : assistantDisplayBlocksVisibleNow(displayProjection)
+    const hasEvidence = displayProjection === undefined
+      ? assistantBlocksHaveInterruptionEvidence(blocks)
+      : assistantDisplayBlocksHaveInterruptionEvidence(displayProjection)
+    // An explicitly decoded block state is authoritative even when it has no
+    // visible Assistant row (reasoning/tool-call/empty text). Only an entirely
+    // empty stream may preserve a live prefix as attempt evidence.
+    const hasAuthoritativeBlockState = states.size > 0
     const text = textOf(blocks)
     const key = stepKey(turn, step)
+    const activity = this.activityFor(turn)
     const existing = this.assistantEntries.get(key)
+    if (existing === undefined && step < (activity.lastAssistantStep ?? -1)) return
+    if (hasAuthoritativeBlockState && step >= (activity.lastAssistantStep ?? -1)) {
+      // Durable attempt evidence owns the same structural stale-event fence
+      // as live opaque presentation. Hidden authoritative state clears the
+      // latest-visible bit while preserving the monotonic step fence.
+      activity.lastAssistantVisible = visibleNow
+      // Hidden authoritative state is still the latest structural output and
+      // must fence late older steps without creating a Message candidate.
+      activity.lastAssistantStep = Math.max(activity.lastAssistantStep ?? -1, step)
+    }
+    if (hasAuthoritativeBlockState && text.trim() === '' && activity.messageCandidate?.step === step) {
+      // A hidden authoritative state replaces semantic text for this step; do
+      // not leave the earlier live candidate visible in Focus.
+      this.replaceMessageCandidate(activity, step, '')
+    }
     const wasVisible = existing !== undefined && this.isVisible(existing)
-    if (!visibleNow && !hasEvidence) {
+    if (!visibleNow && !hasEvidence && !hasAuthoritativeBlockState) {
       // A live prefix may be the only evidence when the compact settlement
-      // carries no visible blocks. Keep that prefix as attempt evidence
-      // instead of promoting it to a normal settled message.
+      // carries no block state. Keep that prefix as attempt evidence instead
+      // of promoting it to a normal settled message.
       if (existing !== undefined && this.transientAssistantEntries.has(existing)) {
-        this.attemptAssistantEntries.add(existing)
+        const hasOpenOpaque = existing.displayBlocks?.some(block => block.kind === 'open-opaque') === true
+        if (hasOpenOpaque) this.hideTransientAssistantEntry(turn, step)
+        else this.attemptAssistantEntries.add(existing)
       }
       return
     }
@@ -1820,6 +2154,7 @@ export class TranscriptFolder {
     this.attemptAssistantEntries.add(entry)
     entry.text = text
     entry.content = blocks.some(block => block.type !== 'text') ? blocks : undefined
+    entry.displayBlocks = displayProjection
     entry.interrupted = undefined
     this.markStreamingEntryDirty(`assistant:${key}`)
     this.syncAssistantVisibility(turn, step, entry, wasVisible, false)
@@ -1833,7 +2168,7 @@ export class TranscriptFolder {
       if (item.turn !== turn || !this.attemptAssistantEntries.has(item)) continue
       const itemStep = Number(key.slice(key.indexOf('/') + 1))
       if (step !== undefined && itemStep !== step) continue
-      if (!assistantBlocksHaveInterruptionEvidence(assistantEntryBlocks(item))) continue
+      if (!assistantEntryHasInterruptionEvidence(item)) continue
       if (this.hiddenAssistantEntries.has(item)) continue
       const wasVisible = this.isVisible(item)
       item.interrupted = true
@@ -2407,17 +2742,27 @@ export class TranscriptFolder {
     // turn closes. Usage is folded independently from the stream.
     if (kind === 'assistant/attempt') {
       const data = event.data as { turn: number; step: number; stream?: readonly unknown[] }
-      if (this.activityByTurn.get(data.turn)?.completed === true) return
+      const existingActivity = this.activityByTurn.get(data.turn)
+      if (existingActivity?.completed === true) return
+      // An authoritative assistant/message owns this step permanently; a
+      // later attempt replay must not turn the settled row back into a
+      // transient/open presentation. Its usage is still folded independently
+      // below so Focus and Stats keep the same late-fact policy.
+      const alreadySettled = existingActivity?.settledSteps.has(data.step) === true
       const stream = data.stream ?? []
       this.liveAssistantBlocks.delete(stepKey(data.turn, data.step))
-      this.restoreAssistantAttempt(data.turn, data.step, stream)
+      const projection = alreadySettled ? undefined : this.assistantStreamProjection(stream)
+      // The durable embedded stream is COMPLETE and authoritative for
+      // reasoning; restore the first lane before the other one so cold replay
+      // preserves the live Thinking → Assistant / Assistant → Thinking order.
+      if (projection?.firstLane === 'thinking') this.restoreThinkingFromProjection(data.turn, data.step, projection)
+      if (projection !== undefined) this.restoreAssistantAttempt(data.turn, data.step, projection)
       this.usage.onAssistantAttempt(data.turn, data.step, usageFromAssistantSettlement('attempt', undefined, stream))
       const activity = this.activityFor(data.turn)
       const key = stepKey(data.turn, data.step)
-      // The durable embedded stream is COMPLETE and authoritative for
-      // reasoning; overwrite any live partial so cold replay matches the
-      // settled attempt. A later retry resets this evidence at llm/retry.
-      this.restoreThinkingFromStream(data.turn, data.step, stream)
+      if (projection !== undefined && projection.firstLane !== 'thinking') {
+        this.restoreThinkingFromProjection(data.turn, data.step, projection)
+      }
       this.syncUsage(activity)
       const thinking = this.thinkingEntries.get(key)
       if (thinking !== undefined && thinking.running) this.closeThinking(thinking)
@@ -2537,19 +2882,27 @@ export class TranscriptFolder {
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
         const key = stepKey(event.data.turn, event.data.step)
+        const priorLast = activity.lastAssistantStep ?? -1
+        const entry = this.assistantEntries.get(key)
+        // A replayed older message with no existing row must not be appended
+        // after a newer open presentation; otherwise it can become the
+        // exact-last assistant selected at turn end. Its accounting and
+        // settlement facts still fold below, independently of presentation.
+        const staleWithoutEntry = entry === undefined && event.data.step < priorLast
         this.liveAssistantBlocks.delete(key)
         const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
         const text = textOf(messageBlocks)
-        const entry = this.assistantEntries.get(key)
-        const wasVisible = entry !== undefined && this.isVisible(entry)
-        if (entry !== undefined) {
+        if (!staleWithoutEntry) {
+          const wasVisible = entry !== undefined && this.isVisible(entry)
+          if (entry !== undefined) {
           entry.text = text
           // The durable message takes over the live/attempt entry: it is no
           // longer transient, so retry cleanup can never remove settled text.
           this.transientAssistantEntries.delete(entry)
           this.attemptAssistantEntries.delete(entry)
+          entry.displayBlocks = undefined
           entry.interrupted = event.data.interrupted === true ? true : undefined
           // The settled full blocks replace any earlier attempt evidence;
           // text-only messages must also clear stale non-text content.
@@ -2577,9 +2930,10 @@ export class TranscriptFolder {
           // and must be able to refresh its searchable entry (review
           // finding — the streaming-created path already registers).
           this.searchIndexByStepKey.set(`assistant:${key}`, this.appendItem(created))
+          }
+          const settledEntry = this.assistantEntries.get(key)
+          if (settledEntry !== undefined) this.syncAssistantVisibility(event.data.turn, event.data.step, settledEntry, wasVisible, false)
         }
-        const settledEntry = this.assistantEntries.get(key)
-        if (settledEntry !== undefined) this.syncAssistantVisibility(event.data.turn, event.data.step, settledEntry, wasVisible, false)
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.
         // On a COLD replay no live reasoning deltas ever arrived — the
@@ -2599,11 +2953,11 @@ export class TranscriptFolder {
         // it is a replay artifact and must never resurrect a preview
         // (review finding).
         activity.settledSteps.add(event.data.step)
-        // A message of a DIFFERENT step than the open candidate proves the
-        // earlier step's output was intermediate: confirm it first (plan
-        // §5.3 C — a later step's output confirms the earlier candidate).
-        const priorLast = activity.lastAssistantStep ?? -1
-        if (event.data.step >= priorLast) {
+        if (!staleWithoutEntry) {
+          // A message of a DIFFERENT step than the open candidate proves the
+          // earlier step's output was intermediate: confirm it first (plan
+          // §5.3 C — a later step's output confirms the earlier candidate).
+          if (event.data.step >= priorLast) {
           activity.lastAssistantVisible = event.data.interrupted === true || assistantBlocksVisibleNow(messageBlocks)
         }
         const prior = activity.messageCandidate
@@ -2652,7 +3006,8 @@ export class TranscriptFolder {
             tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP),
           }
         }
-        this.syncMessage(activity)
+          this.syncMessage(activity)
+        }
         this.usage.onAssistantMessage(event.data.turn, event.data.step, messageUsage)
         // Settled Assistant visibility was synchronized above without deleting its authoritative entry.
         this.syncUsage(activity)

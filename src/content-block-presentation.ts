@@ -54,14 +54,18 @@ export function textWithAttachmentMarkers(blocks: readonly ContentBlock[]): stri
   return text
 }
 
-/** Read and bound the type tag for the explicit unknown-block heading. */
-function blockType(block: unknown): string {
-  if (typeof block !== 'object' || block === null) return 'unknown'
-  const type = (block as { readonly type?: unknown }).type
+/** Sanitize and bound a provider-supplied block type for a heading. */
+function safeBlockTypeLabel(type: unknown): string {
   if (typeof type !== 'string') return 'unknown'
   const safeType = type.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
   if (safeType === '') return 'unknown'
   return safeType.length <= 120 ? safeType : `${safeType.slice(0, 119)}…`
+}
+
+/** Read and bound the type tag for the explicit unknown-block heading. */
+function blockType(block: unknown): string {
+  if (typeof block !== 'object' || block === null) return 'unknown'
+  return safeBlockTypeLabel((block as { readonly type?: unknown }).type)
 }
 
 /** Serialize one finalized block and keep its payload bounded. */
@@ -78,6 +82,11 @@ function boundedSerializedBlock(block: unknown): string {
  */
 export function finalizedBlockFallbackText(block: unknown): string {
   return `Unknown block: ${blockType(block)}\n${boundedSerializedBlock(block)}`
+}
+
+/** Render an open opaque block without inventing an unfinished payload. */
+export function openOpaqueBlockFallbackText(blockType: string): string {
+  return `Unknown block: ${safeBlockTypeLabel(blockType)}\nnull`
 }
 
 /** Whether a user message contains content the transcript should retain. */

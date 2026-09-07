@@ -26,7 +26,7 @@ import { color } from './theme.ts'
 import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import { toolTitle } from './present.ts'
-import { assistantBlocksVisibleNow, type TurnActivity, type TranscriptMessage } from './transcript.ts'
+import { assistantEntryVisibleNow, type TurnActivity, type TranscriptMessage } from './transcript.ts'
 import { displayFailureText } from './failure-presentation.ts'
 
 /** The max tool-type names the header stats show before the `+N` tail
@@ -506,7 +506,7 @@ function initialPromptBoundary(group: readonly TranscriptMessage[]): number {
  * an empty authoritative entry may remain internal without becoming a final
  * answer, while generic finalized blocks retain their Stage A identity. */
 function assistantRenderable(assistant: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
-  return assistantBlocksVisibleNow(assistant.content ?? [{ type: 'text', text: assistant.text }])
+  return assistantEntryVisibleNow(assistant)
 }
 
 /** The turn's final assistant selection: only after the authoritative
