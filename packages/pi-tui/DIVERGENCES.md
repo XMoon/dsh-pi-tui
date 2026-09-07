@@ -13,8 +13,8 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `5709dfc1a1f7b36abc314d8cfb87e68fd3226557`
-- Branch audited: `feat/searchable-picker-host-migration-next`
+- Audited local source commit: `6a5857dd5c0b8ab1242a32fbcc428196eecf3e5e`
+- Branch audited: `chore/retire-pi-divergences-x012-x019`
 - Audit date: `2026-09-07`
 - Upstream reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
 - Kimi reference snapshot: `MoonshotAI/kimi-code@9e881528a89945a373002b0b229f91735e8f2c4f`
@@ -26,6 +26,7 @@
 - Ran focused deletion experiments for X019, X030, X037, X038, X043, and X044; existing checks caught the first five, while X044 required a compile-only subclass fixture.
 - Historical removed and absorbed records were retained as explicit records instead of disappearing from the manifest.
 - PR1 relocation audit: X001/X002/X041 moved to the Host SearchablePicker (src/searchable-picker.ts) with the vendored SelectList restored to the pinned baseline; X042 narrowed to the SettingsList seam. The audit was performed against the immutable local source snapshot recorded in verification.auditedSourceCommit.
+- PR2 retirement audit: X012's explicit fuzzy tie-break was removed in favor of the supported stable-sort runtime contract; X019's Text no-op dispose shim was removed while Loader-owned X007 timer cleanup remained direct and guarded.
 
 ## Audit rules
 
@@ -62,8 +63,9 @@
 - `DELIBERATELY_KEPT`: `X030` — A host copy of decodePrintableKey would duplicate the implementation; the package exports map exposes only the root entry.
 - `MOVED_TO_HOST`: `X001`, `X002`, `X041` — The DSH searchable picker behavior moved to the Host-owned src/searchable-picker.ts SearchablePicker (guarded by test/searchable-picker.test.ts); the vendored SelectList is restored to the pinned upstream baseline.
 - `NOT_MOVABLE`: `X042` — The remaining X042 seam is SettingsList focus/row-budget propagation inside the vendored fork; the SelectList-side Input focus ownership moved to the Host SearchablePicker.
-- `NOT_MOVABLE`: `X004A`, `X004B`, `X005`, `X006`, `X007`, `X008`, `X009`, `X010`, `X011`, `X012`, `X014`, `X016`, `X018`, `X019`, `X020`, `X021`, `X022`, `X023`, `X024`, `X025`, `X027`, `X028`, `X029`, `X031`, `X032`, `X033`, `X034`, `X035`, `X036`, `X037`, `X038`, `X039`, `X040`, `X043`, `X044`, `X045`, `X046`, `X047` — The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary.
-- `UPSTREAM_LEVER`: `X005`, `X006`, `X007`, `X008`, `X012`, `X014`, `X016`, `X021`, `X033`, `X035` — Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence.
+- `NOT_MOVABLE`: `X004A`, `X004B`, `X005`, `X006`, `X007`, `X008`, `X009`, `X010`, `X011`, `X014`, `X016`, `X018`, `X020`, `X021`, `X022`, `X023`, `X024`, `X025`, `X027`, `X028`, `X029`, `X031`, `X032`, `X033`, `X034`, `X035`, `X036`, `X037`, `X038`, `X039`, `X040`, `X043`, `X044`, `X045`, `X046`, `X047` — The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary.
+- `UPSTREAM_LEVER`: `X005`, `X006`, `X007`, `X008`, `X014`, `X016`, `X021`, `X033`, `X035` — Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence.
+- `SUPERSEDED`: `X012`, `X019` — X012's explicit fuzzy tie-break is redundant under the supported stable-sort runtime contract; X019's Text no-op dispose shim is replaced by Loader-owned X007 cleanup without a base super call.
 
 ## Removed or superseded legacy surfaces
 
@@ -78,7 +80,7 @@
 ## Summary
 
 - Records: 48
-- Statuses: `ABSORBED_UPSTREAM`: 3, `ACTIVE`: 38, `MOVED_TO_HOST`: 3, `REDUNDANT_SHIM`: 1, `REMOVED_UNUSED`: 2, `RETIREMENT_CANDIDATE`: 1
+- Statuses: `ABSORBED_UPSTREAM`: 3, `ACTIVE`: 38, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -94,14 +96,14 @@
 | X009 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X010 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X011 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
-| X012 | RETIREMENT_CANDIDATE | LOW | BUGFIX_MISSING_UPSTREAM | YES |
+| X012 | SUPERSEDED | LOW | BUGFIX_MISSING_UPSTREAM | YES |
 | X013 | REMOVED_UNUSED | MEDIUM | BUGFIX_MISSING_UPSTREAM | YES |
 | X014 | ACTIVE | MEDIUM | PERF_HOST_DEPENDENT | NO |
 | X015 | ABSORBED_UPSTREAM | LOW | BUGFIX_MISSING_UPSTREAM | YES |
 | X016 | ACTIVE | CRITICAL | BUGFIX_MISSING_UPSTREAM | NO |
 | X017 | ABSORBED_UPSTREAM | LOW | LOCAL_UX | YES |
 | X018 | ACTIVE | HIGH | HARD_HOST_API | NO |
-| X019 | REDUNDANT_SHIM | HIGH | HARD_HOST_API, PUBLIC_COMPONENT_CONTRACT | NO |
+| X019 | SUPERSEDED | HIGH | HARD_HOST_API, PUBLIC_COMPONENT_CONTRACT | PARTIAL |
 | X020 | ACTIVE | HIGH | HARD_HOST_API | NO |
 | X021 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | PARTIAL |
 | X022 | ACTIVE | HIGH | HARD_HOST_API | NO |
@@ -682,7 +684,7 @@ Forward word navigation should cross leading punctuation at the next word-like s
 - Status: `ACTIVE`
 - Category: `HARD_HOST_API`, `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `CRITICAL`
-- Files: `src/tui.ts`, `src/components/scroll-view.ts`, `src/components/text.ts`, `src/components/loader.ts`, `src/components/box.ts`, `src/components/settings-list.ts`, `src/components/stack.ts`
+- Files: `src/tui.ts`, `src/components/scroll-view.ts`, `src/components/loader.ts`, `src/components/box.ts`, `src/components/settings-list.ts`, `src/components/stack.ts`
 - Last audited: `2026-09-03`
 - Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
 
@@ -704,7 +706,7 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - Audit note: The patch is an ownership graph, not one helper.
 
 **Inheritance / structural**
-- Loader extends Text and historically used Text.dispose as an inheritance shim (X019).
+- Loader extends Text; the X019 Text.dispose shim was retired (PR2) and Loader.dispose owns the timer cleanup directly.
 - ScrollView and Stack override container lifecycle methods.
 - Audit note: Override and super edges were checked before any retirement classification.
 
@@ -1066,16 +1068,16 @@ Input must render a clipped prompt at tiny widths instead of emitting an overwid
 
 ### X012 — Deterministic fuzzy tie sort
 
-- Status: `RETIREMENT_CANDIDATE`
+- Status: `SUPERSEDED`
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Risk: `LOW`
 - Files: `src/fuzzy.ts`
-- Last audited: `2026-09-03`
+- Last audited: `2026-09-07`
 - Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
 
 #### Why it exists
 
-The local comparator explicitly preserves input order for equal fuzzy scores. Supported Node engines guarantee stable Array.prototype.sort, so the explicit tie term may be redundant but must be checked as a semantic runtime assumption.
+The local comparator explicitly preserved input order for equal fuzzy scores. Supported Node engines guarantee stable Array.prototype.sort, so the explicit tie term was redundant and has been removed (PR2).
 
 #### Changed surface
 
@@ -1118,7 +1120,7 @@ The local comparator explicitly preserves input order for equal fuzzy scores. Su
 - packages/tui/package.json
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: With the package's supported Node engine, upstream score-only sort is stable and preserves the same input-order ties. The explicit index comparator is therefore runtime-equivalent, subject to the engine and input-order assumptions recorded here.
+- Remaining semantic delta: With the package's supported Node engine, upstream score-only sort is stable and preserves the same input-order ties. The explicit index comparator was therefore runtime-equivalent and has been removed. Semantic equivalence relies on the supported runtime stable-sort guarantee; this is not evidence of a new upstream implementation.
 
 #### Retirement conditions
 
@@ -1127,16 +1129,19 @@ The local comparator explicitly preserves input order for equal fuzzy scores. Su
 
 #### Replacement mapping
 
-- None recorded.
+- fuzzyFilter explicit index tie-break -> supported Node/ECMAScript stable-sort state -> packages/pi-tui/test/fuzzy.test.ts equal-score ordering test
 
 #### Retirement evidence
 
-- None recorded.
+- supported engine range is Node >=22.19 / >=24 (root and pi-tui package engines)
+- fuzzy.ts restored byte-identical to pinned upstream b79e4cc (blob 73c10dcf4b134bfefba2978281b2a6f94352c5b8)
+- existing equal-score regression remains green after deletion (packages/pi-tui/test/fuzzy.test.ts)
+- fork typecheck/test/build, surface compat, divergence ledger, strict vendor diff, root build/typecheck/test:bundle green
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Candidate only. Current package.json declares the stable-sort-capable Node floor; source comparison confirmed upstream still uses score-only sort. The equal-score fixture now guards input-order preservation; behavior was not changed in this ledger task.
+- Notes: Retired in PR2: the explicit index tie-break was removed and fuzzy.ts restored byte-identical to the pinned upstream. Equal-score input order is preserved by the supported ECMAScript stable-sort guarantee and remains guarded by the equal-score regression; this is not evidence of a new upstream implementation.
 
 ### X013 — setIndicator never revives a stopped loader
 
@@ -1593,16 +1598,16 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 
 ### X019 — Text no-op dispose inheritance shim
 
-- Status: `REDUNDANT_SHIM`
+- Status: `SUPERSEDED`
 - Category: `HARD_HOST_API`, `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `HIGH`
 - Files: `src/components/text.ts`
-- Last audited: `2026-09-03`
+- Last audited: `2026-09-07`
 - Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
 
 #### Why it exists
 
-Text.dispose is currently a no-op solely so Loader's dispose override and super.dispose call typecheck. The inheritance edge is real, but the base no-op can be removed by an atomic Loader cleanup.
+Text.dispose was a no-op solely so Loader's dispose override and super.dispose call typechecked. The inheritance edge was real, but the base no-op has been removed by an atomic Loader cleanup (PR2).
 
 #### Changed surface
 
@@ -1640,14 +1645,14 @@ Text.dispose is currently a no-op solely so Loader's dispose override and super.
 #### Upstream comparison
 
 - Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
-- Semantic equivalence: `NO`
+- Semantic equivalence: `PARTIAL`
 - Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
 - Relevant upstream files:
 - packages/tui/src/components/text.ts
 - packages/tui/src/components/loader.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream has neither the local Component disposal contract nor the current Text/Loader shim. Restoring upstream wholesale would remove the broader X007 lifecycle behavior.
+- Remaining semantic delta: Upstream Text has no dispose member, and the local Text now matches upstream byte-identically. Loader disposal remains intentionally local under X007: Loader.dispose owns the timer cleanup directly without a base super call.
 
 #### Retirement conditions
 
@@ -1656,17 +1661,20 @@ Text.dispose is currently a no-op solely so Loader's dispose override and super.
 
 #### Replacement mapping
 
-- Atomic replacement: Text.dispose no-op -> no base method; Loader.dispose remains the owning cleanup and calls stop directly without super.dispose.
+- Text.dispose no-op + Loader super.dispose chain -> X007 Loader.dispose owner keeps timer-cleanup state directly -> packages/pi-tui/test/dispose-lifecycle.test.ts
 
 #### Retirement evidence
 
-- Current source proves a live Loader -> Text.dispose -> super.dispose inheritance edge.
-- Deletion experiment: temporarily removing Text.dispose made the package typecheck fail in loader.ts with TS4113/TS2339 because Loader's override and super.dispose call lost their base member; the existing lifecycle tests remained green.
+- text.ts restored byte-identical to pinned upstream b79e4cc (blob 7a50e2721028d544f641ab5f66ef1b752ff6d1f7)
+- Loader.dispose remains and calls stop() directly; no override keyword and no super.dispose() remain
+- package typecheck green (no inheritance type errors after removing the base member)
+- dispose-lifecycle tests green (Loader cleanup and idempotency)
+- surface compatibility + divergence ledger + strict vendor diff + root build/typecheck/test:bundle green
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Classified as REDUNDANT_SHIM rather than unused. It remains active until the dedicated atomic cleanup is implemented and verified.
+- Notes: Retired in PR2: Text.dispose was removed and text.ts restored byte-identical to the pinned upstream. Loader keeps the real X007 timer cleanup directly (dispose -> stop -> clearInterval) without override/super.dispose; the X019 base-class shim is gone while Loader disposal remains intentionally local under X007.
 
 ### X020 — Editor clearHistory
 

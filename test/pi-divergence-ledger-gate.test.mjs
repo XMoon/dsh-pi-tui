@@ -137,6 +137,9 @@ test('REDUNDANT_SHIM requires the atomic replacement and its evidence', () => {
   const good = errorsFor(manifest)
   assert.deepEqual(good, [], 'the real X019 inheritance edge has a complete atomic retirement record')
 
+  // X019 is SUPERSEDED in the checked-in ledger; re-classify it as the
+  // REDUNDANT_SHIM fixture so the gate rule stays covered.
+  manifest.divergences.X019.status = 'REDUNDANT_SHIM'
   manifest.divergences.X019.retirement.replacementMapping = ['remove the base method']
   const missingAtomic = errorsFor(manifest)
   assertHasError(missingAtomic, 'REDUNDANT_SHIM mapping must state the atomic replacement')
