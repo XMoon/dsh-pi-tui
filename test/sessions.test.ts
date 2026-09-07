@@ -19,6 +19,7 @@ import {
   formatSessionAge,
   headerToPickerRow,
   sameWorkspace,
+  sanitizeSessionSearchInput,
   sanitizeTerminalText,
   sessionPickerItem,
   shortSessionId,
@@ -291,4 +292,17 @@ test('workspaceKey sanitizes terminal control sequences in the group header', ()
   assert.equal(workspaceKey('/ws\x1b]0;PWNED\x07'), '/ws')
   assert.equal(workspaceKey('/a\u009b2Jb'), '/a2Jb')
   assert.equal(workspaceKey('/home/user/project'), 'user/project')
+})
+
+test('sanitizeSessionSearchInput canonicalizes remove-NUL → trim → cap-500', () => {
+  // The ONE canonical client query: NUL removal BEFORE trim, so NUL
+  // adjacent to padding whitespace can never leave a padded canonical
+  // behind (the Host trims again as a no-op — local and Host never drift).
+  assert.equal(sanitizeSessionSearchInput('\0 needle \0'), 'needle')
+  assert.equal(sanitizeSessionSearchInput('  needle  '), 'needle')
+  assert.equal(sanitizeSessionSearchInput('needle'), 'needle')
+  // Cap at 500 UTF-16 units AFTER trim, without splitting a surrogate pair.
+  assert.equal(sanitizeSessionSearchInput(' ' + 'x'.repeat(500)).length, 500)
+  assert.equal(sanitizeSessionSearchInput('x'.repeat(500) + '\u{1F600}').length, 500)
+  assert.equal(sanitizeSessionSearchInput('x'.repeat(500) + '\u{1F600}').endsWith('x'), true)
 })

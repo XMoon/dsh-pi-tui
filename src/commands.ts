@@ -2581,12 +2581,17 @@ export function registerTuiCommands(
         // match the new filter (plan §18), and an unavailable/failed new
         // search must not leave the old query's hits behind.
         onFilterChange: (query) => {
-          // ONE canonical client query (review P1): trim (official
-          // semantics), then sanitize (NUL removal + 500-unit cap). The
-          // SAME canonical query drives the local metadata projection AND
-          // the Host search — the input box keeps the raw text the user
-          // typed, but membership never drifts from what was searched.
-          const canonical = sanitizeSessionSearchInput(query.trim())
+          // ONE canonical client query (review P1): remove NUL → trim →
+          // cap 500 UTF-16 units. The SAME canonical drives the local
+          // metadata projection AND the Host search (whose authoritative
+          // validation is then a no-op) — the input box keeps the raw
+          // text the user typed, but membership never drifts from what
+          // was searched.
+          const canonical = sanitizeSessionSearchInput(query)
+          // The canonical is the semantic identity: a raw edit that does
+          // not change it (e.g. padding whitespace or NULs around the
+          // same term) must not abort/restart the identical Host search.
+          if (canonical === pendingContentQuery) return
           pendingContentQuery = canonical
           cancelContentSearch()
           contentHitsById.clear()
@@ -2701,7 +2706,7 @@ export function registerTuiCommands(
       // path: trim BEFORE the client cap, so a whitespace-padded filter
       // never loses a character to the 500-unit window (official
       // semantics: trim, then cap).
-      if (pendingContentQuery.trim() !== '' && activeContentSearchTimer === undefined && activeContentSearch === undefined) {
+      if (pendingContentQuery !== '' && activeContentSearchTimer === undefined && activeContentSearch === undefined) {
         scheduleContentSearch(pendingContentQuery)
       }
 
