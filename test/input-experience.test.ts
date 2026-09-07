@@ -639,3 +639,117 @@ test('slash-command autocomplete paints the fresh list on the keystroke frame', 
   assert.ok(!view.includes('reload'), `stale list still painted after /res:\n${view}`)
   app.stop()
 })
+
+// ── inline skill reference completion (the 2026-09-07 next plan §8.3) ─────
+
+/** The detached human skill catalog for the inline integration tests. */
+const INLINE_SKILLS = [
+  { name: 'eli5', description: 'Explain like I am five' },
+  { name: 'html-maker', description: 'Make HTML' },
+  { name: 'diagnosing-skills', description: 'Diagnose skills' },
+]
+
+/** Start an app with the inline skill catalog installed. */
+function startInlineApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[] } {
+  const started = startApp()
+  started.app.setCommandCompletions(
+    [{ name: 'help', description: 'Help' }, { name: 'settings', description: 'Panel' }],
+    '/ws',
+    null,
+    undefined,
+    undefined,
+    undefined,
+    INLINE_SKILLS,
+  )
+  return started
+}
+
+test('Case A: accepting an inline skill inserts the reference and does NOT submit', async () => {
+  const { vt, app, submitted } = startInlineApp()
+  vt.sendInput('请用 /el')
+  await vt.waitForRender()
+  vt.sendInput('\r') // accept the highlighted eli5
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '请用 /eli5 ', 'the accept must insert the reference with a separator')
+  assert.deepEqual(submitted, [], 'an inline accept must never submit the draft')
+  app.stop()
+})
+
+test('Case B: one draft accepts THREE inline skills and submits the full original line once', async () => {
+  const { vt, app, submitted } = startInlineApp()
+  // 1. 你知道 /el → eli5
+  vt.sendInput('你知道 /el')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '你知道 /eli5 ', 'first reference must insert')
+  assert.deepEqual(submitted, [], 'no submit after the first accept')
+  // 2. 可以利用 /ht → html-maker
+  vt.sendInput('可以利用 /ht')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '你知道 /eli5 可以利用 /html-maker ', 'second reference must insert')
+  assert.deepEqual(submitted, [], 'no submit after the second accept')
+  // 3. 进行 /diag → diagnosing-skills
+  vt.sendInput('进行 /diag')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '你知道 /eli5 可以利用 /html-maker 进行 /diagnosing-skills ', 'third reference must insert')
+  assert.deepEqual(submitted, [], 'no submit after the third accept')
+  // The final real submit carries the complete original line ONCE.
+  vt.sendInput('吗!!')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['你知道 /eli5 可以利用 /html-maker 进行 /diagnosing-skills 吗!!'],
+    'the final submit must be one ordinary prompt with every literal /name token')
+  app.stop()
+})
+
+test('Case C: leading slash-command Enter still submits (inline prefix workaround untouched)', async () => {
+  const { vt, app, submitted } = startInlineApp()
+  vt.sendInput('/he')
+  await vt.waitForRender()
+  vt.sendInput('\r') // accept the highlighted help command
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['/help'], 'a leading command accept must still submit')
+  app.stop()
+})
+
+test('Case D: the inline dropdown never leaks ordinary commands', async () => {
+  const { vt, app } = startInlineApp()
+  vt.sendInput('请执行 /set')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('settings'), `the inline dropdown must not list commands:\n${view}`)
+  assert.ok(view.includes('请执行 /set'), `the draft must stay intact:\n${view}`)
+  app.stop()
+})
+
+test('reinstalling the completion provider cancels the open inline dropdown', async () => {
+  const { vt, app, submitted } = startInlineApp()
+  vt.sendInput('请用 /el')
+  await vt.waitForRender()
+  // The catalog owner changed: the provider is reinstalled (the editor
+  // cancels the open dropdown — setAutocompleteProvider → cancelAutocomplete).
+  app.setCommandCompletions([{ name: 'help', description: 'Help' }], '/ws', null, undefined, undefined, undefined, [])
+  await vt.waitForRender()
+  vt.sendInput('\r') // the cancelled dropdown must not accept: Enter submits the draft
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['请用 /el'], 'a reinstalled provider must cancel the old dropdown')
+  app.stop()
+})
+
+test('a bracketed paste ending in an inline skill token opens the dropdown (review finding)', async () => {
+  const { vt, app } = startInlineApp()
+  // The paste lands the draft; the post-paste state must trigger the
+  // provider like ordinary typing (the raw paste event carries ESC, which
+  // the per-keystroke trigger gate must not swallow).
+  vt.sendInput('\x1b[200~请用 /el\x1b[201~')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('eli5'), `the pasted inline token must open the dropdown:\n${view}`)
+  assert.ok(view.includes('请用 /el'), `the pasted draft must be intact:\n${view}`)
+  app.stop()
+})

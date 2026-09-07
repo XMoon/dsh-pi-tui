@@ -27,6 +27,7 @@ import { SelectedMarquee } from './marquee.ts'
 import { color } from './theme.ts'
 import { classifyFileCompletionContext, FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input-mode.ts'
+import { extractInlineSkillPrefix } from './skill-reference-completion.ts'
 
 /** Host render-routing options for the host editor. */
 export interface TuiEditorOptions {
@@ -402,13 +403,17 @@ export class TuiEditor extends Editor {
       // complete paste segments — recursion per segment would overflow
       // the stack. The autocomplete reopen runs AFTER the normalized
       // pastes and the residual input landed, so a pasted `@dir/` reopens
-      // like ordinary input.
+      // like ordinary input. The inline skill check runs on the POST-PASTE
+      // document state (never the raw paste event, which carries ESC and
+      // would trip the per-keystroke gate below).
       this.processPasteChunks(data)
+      this.requestInlineSkillCompletionIfSeated()
       this.reopenAutocompleteAfterInput()
       return
     }
     if (data !== '') super.handleInput(data)
     this.triggerNonstandardMentionCompletion(data)
+    this.triggerInlineSkillCompletion(data)
     this.reopenAutocompleteAfterInput()
   }
 
@@ -438,6 +443,37 @@ export class TuiEditor extends Editor {
     const quotedMention = context.query.startsWith('@"')
     const nonstandardBoundary = beforeAt !== undefined && beforeAt !== ' ' && beforeAt !== '\t'
     if (!quotedMention && !nonstandardBoundary) return
+    this.requestAutocomplete({ force: false, explicitTab: false })
+  }
+
+  /** Trigger the provider for an INLINE SKILL REFERENCE position (a
+   * `/name` token at a whitespace boundary in prompt mode). The vendored
+   * editor's generic symbol gate REJECTS `/` as a trigger character
+   * (slash commands own the line-start seat —
+   * `setAutocompleteTriggerCharacters` filters it), so the host editor
+   * re-triggers on the pure classifier — the same consumer-side pattern
+   * as {@link triggerNonstandardMentionCompletion}. The provider itself
+   * decides the candidates; this seam only opens the dropdown. */
+  private triggerInlineSkillCompletion(data: string): void {
+    const printable = decodePrintableKey(data) ?? (data.length === 1 && data.charCodeAt(0) >= 32 ? data : undefined)
+    // Escape sequences are navigation/control keys, not text, even though
+    // their bytes include printable characters (same rule as the mention
+    // trigger).
+    if (printable === undefined && data.includes('\x1b')) return
+    if (printable === undefined && ![...data].some(character => character.charCodeAt(0) >= 32)) return
+    this.requestInlineSkillCompletionIfSeated()
+  }
+
+  /** The shared post-input check: when the cursor now sits in an inline
+   * skill seat (and the dropdown is closed), open the provider. Used by
+   * the per-keystroke trigger AND the bracketed-paste path — the paste
+   * path must judge the POST-PASTE document state, never the raw paste
+   * event (which carries ESC and would trip the per-keystroke gate). */
+  private requestInlineSkillCompletionIfSeated(): void {
+    if (this.isShowingAutocomplete()) return
+    if (this.inputMode !== 'prompt') return
+    const { line, col } = this.getCursor()
+    if (extractInlineSkillPrefix(this.getLines(), line, col) === undefined) return
     this.requestAutocomplete({ force: false, explicitTab: false })
   }
 
