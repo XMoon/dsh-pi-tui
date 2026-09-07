@@ -338,6 +338,120 @@ test('the search query is carried across category switches', async () => {
   handle.close()
 })
 
+/** Two categories for the canonical-query lifecycle regressions (X041):
+ * the first filters by 'z' (alpha/zulu), the second by 'z' (zed/alex), so
+ * every assertion distinguishes the live query from the raw rows. */
+function queryLifecycleCategories(): PickerCategory[] {
+  return [
+    {
+      id: 'main',
+      label: 'Main',
+      header: 'sessions · Main',
+      items: () => [
+        { value: 'session-root', label: 'alpha', description: '', group: 'w' },
+        { value: 'session-z', label: 'zulu', description: '', group: 'w' },
+      ],
+    },
+    {
+      id: 'sub',
+      label: 'Subagents',
+      header: 'sessions · Subagents',
+      items: () => [
+        { value: 'session-child', label: '  └─ zed', description: '', group: 'w' },
+        { value: 'session-other', label: '  └─ alex', description: '', group: 'w' },
+      ],
+    },
+  ]
+}
+
+test('initialQuery is consumed once: a cleared query never resurrects on Tab', async () => {
+  const { vt, app } = startApp()
+  const categories = queryLifecycleCategories()
+  const handle = app.openPicker(categories[0]!.items(), () => {}, () => {}, {
+    enableSearch: true,
+    header: 'sessions',
+    categories,
+    initialQuery: 'z',
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.equal(handle.getFilter?.(), 'z', 'initialQuery must prefill the live canonical query')
+  assert.ok(view.includes('zulu'), `the initial filter must match:\n${view}`)
+  assert.ok(!view.includes('alpha'), `a non-matching row must stay hidden:\n${view}`)
+
+  // The user clears the box through the real input path.
+  vt.sendInput('\x7f')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(handle.getFilter?.(), '', 'a cleared query is a valid live state')
+  assert.ok(view.includes('alpha') && view.includes('zulu'), `both rows must be visible after clearing:\n${view}`)
+
+  // Tab must NOT resurrect the initial query in the rebuilt category.
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(handle.getFilter?.(), '', 'the cleared query must survive the category switch')
+  assert.ok(view.includes('zed') && view.includes('alex'), `the second category must stay unfiltered:\n${view}`)
+  handle.close()
+})
+
+test('a programmatic setFilter survives category switches', async () => {
+  const { vt, app } = startApp()
+  const categories = queryLifecycleCategories()
+  const handle = app.openPicker(categories[0]!.items(), () => {}, () => {}, {
+    enableSearch: true,
+    header: 'sessions',
+    categories,
+  })
+  await vt.waitForRender()
+  handle.setFilter?.('z')
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.equal(handle.getFilter?.(), 'z')
+  assert.ok(view.includes('zulu'), `the programmatic filter must apply:\n${view}`)
+  assert.ok(!view.includes('alpha'), `a non-matching row must stay hidden:\n${view}`)
+
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(handle.getFilter?.(), 'z', 'the programmatic query must survive the category switch')
+  assert.ok(view.includes('zed'), `the programmatic query must filter the new category:\n${view}`)
+  assert.ok(!view.includes('alex'), `a non-matching row must stay hidden:\n${view}`)
+  handle.close()
+})
+
+test('typed, programmatic and cleared queries share one live canonical query', async () => {
+  const { vt, app } = startApp()
+  const categories = queryLifecycleCategories()
+  const handle = app.openPicker(categories[0]!.items(), () => {}, () => {}, {
+    enableSearch: true,
+    header: 'sessions',
+    categories,
+  })
+  await vt.waitForRender()
+  // Typed query carries into the next category.
+  vt.sendInput('z')
+  await vt.waitForRender()
+  assert.equal(handle.getFilter?.(), 'z', 'the typed query must be canonical')
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.equal(handle.getFilter?.(), 'z', 'the typed query must survive the switch')
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('zed'), `the carried query must filter the new category:\n${view}`)
+  assert.ok(!view.includes('alex'), `a non-matching row must stay hidden:\n${view}`)
+
+  // Clearing is a valid live state and survives the switch back.
+  vt.sendInput('\x7f')
+  await vt.waitForRender()
+  assert.equal(handle.getFilter?.(), '', 'a cleared query is a valid canonical state')
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.equal(handle.getFilter?.(), '', 'the cleared query must survive the switch back')
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('alpha') && view.includes('zulu'), `the first category must be unfiltered again:\n${view}`)
+  handle.close()
+})
+
 test('headerToPickerRow + sessionPickerItem feed the Main category without subagent rows', () => {
   const headers: SessionHeader[] = [
     { version: SESSION_FORMAT_VERSION, isSeeded: false, id: SessionId('session-root-1'), createdAt: 5, cwd: '/w' },
@@ -504,4 +618,236 @@ test('typing a search query restarts the marquee even when the SAME row survives
     `a search edit must restart the marquee from the fresh anchor:\n${after}`)
   handle.close()
   app.stop()
+})
+
+test('an externally-filtered first category syncs a non-empty initialQuery with the caller', async () => {
+  const { vt, app } = startApp()
+  const filterChanges: string[] = []
+  let callerQuery = ''
+  const categories: PickerCategory[] = [
+    {
+      id: 'search',
+      label: 'Search',
+      header: 'sessions · Search',
+      // The externally-filtered mode: the caller is the membership
+      // authority — its items factory reads ITS OWN live query state (the
+      // same shape as sessionSearchCategory's queryOf), never the picker's
+      // internal filter.
+      externalFilter: true,
+      cyclable: false,
+      items: () => callerQuery === ''
+        ? [{ value: 'session-a', label: 'alpha', description: '', group: 'w' }]
+        : [
+            { value: 'session-a', label: 'alpha', description: '', group: 'w' },
+            { value: 'session-z', label: 'zulu', description: '', group: 'w' },
+          ].filter(row => row.label.includes(callerQuery)),
+    },
+  ]
+  const handle = app.openPicker(categories[0]!.items(), () => {}, () => {}, {
+    enableSearch: true,
+    header: 'sessions',
+    categories,
+    initialQuery: 'z',
+    onFilterChange: (query) => {
+      filterChanges.push(query)
+      callerQuery = query
+      // The caller is the membership authority: re-run the active
+      // category's items factory with the synced query.
+      handle.refresh?.()
+    },
+  })
+  await vt.waitForRender()
+  // The seeded initial query reaches the caller exactly once, so the
+  // external Input and the caller's membership never drift apart (X041).
+  assert.deepEqual(filterChanges, ['z'], 'the initial query must be reported once')
+  assert.equal(handle.getFilter?.(), 'z', 'the external Input must show the seeded query')
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('zulu'), `membership must reflect the initial query:\n${view}`)
+  assert.ok(!view.includes('alpha'), `a non-matching row must stay hidden:\n${view}`)
+  handle.close()
+})
+
+test('an immediate synchronous setFilter wins over the seeded initialQuery', async () => {
+  const { vt, app } = startApp()
+  const filterChanges: string[] = []
+  let callerQuery = ''
+  const categories: PickerCategory[] = [
+    {
+      id: 'search',
+      label: 'Search',
+      header: 'sessions · Search',
+      externalFilter: true,
+      cyclable: false,
+      items: () => callerQuery === ''
+        ? [{ value: 'session-a', label: 'alpha', description: '', group: 'w' }]
+        : [
+            { value: 'session-a', label: 'alpha', description: '', group: 'w' },
+            { value: 'session-y', label: 'yankee', description: '', group: 'w' },
+            { value: 'session-z', label: 'zulu', description: '', group: 'w' },
+          ].filter(row => row.label.includes(callerQuery)),
+    },
+  ]
+  const handle = app.openPicker(categories[0]!.items(), () => {}, () => {}, {
+    enableSearch: true,
+    header: 'sessions',
+    categories,
+    initialQuery: 'z',
+    onFilterChange: (query) => {
+      filterChanges.push(query)
+      callerQuery = query
+      handle.refresh?.()
+    },
+  })
+  // The caller overrides the seed IMMEDIATELY — in the same turn, before
+  // the deferred seed notification can drain (X041 external sync race:
+  // the stale seed must never override the newer value the caller just
+  // reported through setFilter).
+  handle.setFilter?.('y')
+  await vt.waitForRender()
+  assert.deepEqual(filterChanges, ['y'], 'the newer value must win; the stale seed must never be reported')
+  assert.equal(handle.getFilter?.(), 'y', 'the external Input must show the overriding value')
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('yankee'), `membership must reflect the overriding query:\n${view}`)
+  assert.ok(!view.includes('zulu'), `the stale seed must not revert membership:\n${view}`)
+  handle.close()
+})
+
+test('a programmatic setFilter with an unchanged value is not reported', async () => {
+  const { vt, app } = startApp()
+  const filterChanges: string[] = []
+  let callerQuery = ''
+  const categories: PickerCategory[] = [
+    {
+      id: 'search',
+      label: 'Search',
+      header: 'sessions · Search',
+      externalFilter: true,
+      cyclable: false,
+      items: () => callerQuery === ''
+        ? [{ value: 'session-a', label: 'alpha', description: '', group: 'w' }]
+        : [
+            { value: 'session-a', label: 'alpha', description: '', group: 'w' },
+            { value: 'session-z', label: 'zulu', description: '', group: 'w' },
+          ].filter(row => row.label.includes(callerQuery)),
+    },
+  ]
+  const handle = app.openPicker(categories[0]!.items(), () => {}, () => {}, {
+    enableSearch: true,
+    header: 'sessions',
+    categories,
+    onFilterChange: (query) => {
+      filterChanges.push(query)
+      callerQuery = query
+      handle.refresh?.()
+    },
+  })
+  await vt.waitForRender()
+  // No initialQuery: the external Input opens empty. Setting the SAME
+  // (empty) value must not fire onFilterChange (PickerHandle contract:
+  // programmatic filters report exactly like typed ones).
+  handle.setFilter?.('')
+  await vt.waitForRender()
+  assert.deepEqual(filterChanges, [], 'an unchanged empty programmatic filter must not be reported')
+  assert.equal(handle.getFilter?.(), '', 'the external Input must stay empty')
+  handle.close()
+})
+
+test('a synchronous category switch drops the stale seed of the inactive external category', async () => {
+  const { vt, app } = startApp()
+  const filterChanges: string[] = []
+  let callerQuery = ''
+  const categories: PickerCategory[] = [
+    {
+      id: 'search',
+      label: 'Search',
+      header: 'sessions · Search',
+      externalFilter: true,
+      cyclable: false,
+      items: () => [{ value: 'session-a', label: 'alpha', description: '', group: 'w' }],
+    },
+    {
+      id: 'browse',
+      label: 'Main',
+      header: 'sessions · Main',
+      items: () => [
+        { value: 'session-a', label: 'alpha', description: '', group: 'w' },
+        { value: 'session-z', label: 'zulu', description: '', group: 'w' },
+      ],
+    },
+  ]
+  const handle = app.openPicker(categories[0]!.items(), () => {}, () => {}, {
+    enableSearch: true,
+    header: 'sessions',
+    categories,
+    initialQuery: 'z',
+    onFilterChange: (query) => {
+      filterChanges.push(query)
+      callerQuery = query
+      handle.refresh?.()
+    },
+  })
+  // Switch to the INTERNAL browse category in the same turn — before the
+  // external seed microtask drains. The seed belongs to the now-inactive
+  // external category: it must be dropped (the internal category filters
+  // itself), never reported from a dead view.
+  handle.setCategory?.('browse')
+  await vt.waitForRender()
+  assert.deepEqual(filterChanges, [], 'the inactive category seed must never be reported')
+  const view = vt.getViewport().join('\n')
+  // The internal category applies the query itself (initialQuery 'z').
+  assert.ok(view.includes('zulu'), `the internal filter must apply on the switched category:\n${view}`)
+  assert.ok(!view.includes('alpha'), `a non-matching row must stay hidden:\n${view}`)
+  handle.close()
+})
+
+test('a synchronous switch to a later external category reports the seed from the live category', async () => {
+  const { vt, app } = startApp()
+  const filterChanges: string[] = []
+  let callerQuery = ''
+  const categories: PickerCategory[] = [
+    {
+      id: 'search-a',
+      label: 'Search A',
+      header: 'sessions · Search A',
+      externalFilter: true,
+      cyclable: false,
+      items: () => [{ value: 'session-a', label: 'alpha', description: '', group: 'w' }],
+    },
+    {
+      id: 'search-b',
+      label: 'Search B',
+      header: 'sessions · Search B',
+      externalFilter: true,
+      cyclable: false,
+      items: () => callerQuery === ''
+        ? [{ value: 'session-a', label: 'alpha', description: '', group: 'w' }]
+        : [
+            { value: 'session-a', label: 'alpha', description: '', group: 'w' },
+            { value: 'session-z', label: 'zulu', description: '', group: 'w' },
+          ].filter(row => row.label.includes(callerQuery)),
+    },
+  ]
+  const handle = app.openPicker(categories[0]!.items(), () => {}, () => {}, {
+    enableSearch: true,
+    header: 'sessions',
+    categories,
+    initialQuery: 'z',
+    onFilterChange: (query) => {
+      filterChanges.push(query)
+      callerQuery = query
+      handle.refresh?.()
+    },
+  })
+  // Switch to the SECOND external category in the same turn: the first
+  // category's seed microtask must die on the active-input identity
+  // fence, and the second category's own seed must report the query once
+  // through the live path.
+  handle.setCategory?.('search-b')
+  await vt.waitForRender()
+  assert.deepEqual(filterChanges, ['z'], 'the seed must be reported exactly once, from the live category')
+  assert.equal(handle.getFilter?.(), 'z', 'the live external Input must show the seed')
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('zulu'), `membership must reflect the reported query:\n${view}`)
+  assert.ok(!view.includes('alpha'), `a non-matching row must stay hidden:\n${view}`)
+  handle.close()
 })

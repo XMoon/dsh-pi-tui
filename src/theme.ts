@@ -13,9 +13,9 @@ import { dirname, join } from 'node:path'
 import type {
   EditorTheme,
   MarkdownTheme,
-  SelectListTheme,
   SettingsListTheme,
 } from '@xmoon76/pi-tui'
+import type { SearchablePickerTheme } from './searchable-picker.ts'
 
 /** Semantic palette tokens, mirroring pi's ColorPalette vocabulary. */
 export interface ColorPalette {
@@ -331,8 +331,10 @@ export const color = {
   textDimItalic: (text: string) => chalk.italic.hex(currentPalette.textDim)(text),
 }
 
-/** SelectList palette from the semantic tokens. */
-export const selectListTheme: SelectListTheme = {
+/** SearchablePicker palette from the semantic tokens (a structural
+ * superset of the upstream SelectListTheme, so it still satisfies the
+ * Editor's autocomplete theme slot). */
+export const selectListTheme: SearchablePickerTheme = {
   selectedPrefix: (text: string) => color.primary(text),
   selectedText: (text: string) => chalk.bold(text),
   description: (text: string) => color.textDim(text),

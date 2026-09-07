@@ -102,9 +102,10 @@ test('strict mode rejects a stale active entry but ignores historical records', 
   const tarball = makeMatchingUpstreamTarball(root)
   const result = runGate({ ...env, PI_UPSTREAM_TARBALL: tarball, PI_UPSTREAM_REPO: join(root, 'no-such-repo') })
   assert.equal(result.status, 0, 'default mode reports stale entries as warnings')
-  assert.ok(result.stdout.includes('STALE ledger: X001'), 'active X001 must be reported stale')
+  assert.ok(result.stdout.includes('STALE ledger: X004A'), 'active X004A must be reported stale')
   assert.ok(!result.stdout.includes('STALE ledger: X003'), 'removed X003 must not be treated as an active source entry')
   assert.ok(!result.stdout.includes('STALE ledger: X015'), 'absorbed X015 must not be treated as an active source entry')
+  assert.ok(!result.stdout.includes('STALE ledger: X001'), 'moved-to-host X001 must not be treated as an active source entry')
 
   const strict = spawnSync(process.execPath, [GATE, '--strict'], {
     cwd: ROOT,

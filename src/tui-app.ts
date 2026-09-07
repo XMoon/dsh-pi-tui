@@ -26,7 +26,6 @@ import {
   Markdown,
   ProcessTerminal,
   ScrollView,
-  SelectList,
   SettingsList,
   Text,
   TuiAltScreen,
@@ -45,13 +44,16 @@ import {
   isFocusable,
   type OverlayHandle,
   type OverlayOptions,
-  type SelectListTruncatePrimaryContext,
   type SettingItem,
   type SlashCommand,
   type Terminal,
   type TuiInputListenerResult,
   type KeyId,
 } from '@xmoon76/pi-tui'
+import {
+  SearchablePicker,
+  type SearchablePickerTruncatePrimaryContext,
+} from './searchable-picker.ts'
 import { claimProcessTuiSlot, releaseProcessTuiSlot } from './process-tui-slot.ts'
 import { ImageThumbnail } from './components/media/image-thumbnail.ts'
 import { FileAttachmentComponent } from './components/media/file-attachment.ts'
@@ -429,7 +431,7 @@ class QuestionFrame extends Frame implements Focusable {
  * A Frame that forwards the focused flag to its child (fork X042 / the
  * IME cursor-marker contract): the fork sets `focused` only on the
  * component it focuses directly — a plain Frame SWALLOWS the flag, so an
- * Input-owning child behind it (HistoryPanel, SelectList's search box,
+ * Input-owning child behind it (HistoryPanel, the picker's search box,
  * SettingsList, TaskBrowserPanel) never emits the hardware CURSOR_MARKER
  * and the IME candidate window misplaces itself. Forwarding is a no-op
  * for non-Focusable children (plain dialogs).
@@ -606,28 +608,29 @@ class Spacer implements Component {
 }
 
 /**
- * A paper-thin Component adapter over a picker's SelectList (review P2):
- * the vendored SelectList only fires onSelectionChange for ↑↓/PageUp/
- * PageDown — typing into the search box re-filters WITHOUT a selection
- * change, so a long selected label would keep marqueeing mid-cycle inside
- * the new filter instead of restarting from a fresh anchor. The adapter
- * intercepts handleInput, detects a search-query change (the vendored
- * getFilter() is the truth — a query edit is the ONLY input that moves
- * it), and resets the marquee. Zero fork divergence: the SelectList
- * itself is untouched, this wraps it on the consumer side.
+ * A paper-thin Component adapter over a picker's SearchablePicker (review
+ * P2): the picker only fires onSelectionChange for ↑↓/PageUp/PageDown —
+ * typing into the search box re-filters WITHOUT a selection change, so a
+ * long selected label would keep marqueeing mid-cycle inside the new
+ * filter instead of restarting from a fresh anchor. The adapter intercepts
+ * handleInput, detects a search-query change (the picker's getFilter() is
+ * the truth — a query edit is the ONLY input that moves it), and resets
+ * the marquee. The Host picker itself is untouched; this wraps it on the
+ * consumer side.
  */
 class MarqueeFilterAdapter implements Component, Focusable {
-  private readonly list: SelectList
+  private readonly list: SearchablePicker
   private readonly onFilterChange: () => void
   private _focused = false
 
-  constructor(list: SelectList, onFilterChange: () => void) {
+  constructor(list: SearchablePicker, onFilterChange: () => void) {
     this.list = list
     this.onFilterChange = onFilterChange
   }
 
-  /** Focusable (X042): forward to the wrapped SelectList so its search
-   * Input emits the hardware CURSOR_MARKER (IME positioning). */
+  /** Focusable (moved from fork divergence X042): forward to the wrapped
+   * picker so its search Input emits the hardware CURSOR_MARKER (IME
+   * positioning). */
   get focused(): boolean {
     return this._focused
   }
@@ -660,27 +663,26 @@ class MarqueeFilterAdapter implements Component, Focusable {
 
 /**
  * The externally-filtered search composite (review P1): the caller's items
- * are the membership authority — the SelectList renders WITHOUT its
- * internal substring filter (enableSearch: false), and a separate search
- * Input feeds `onFilterChange` so the caller re-filters the rows. The
- * composite routes navigation/confirm/cancel keys to the SelectList and
- * every other key to the search Input (the vendored SelectList's own
- * keybinding vocabulary). Zero fork divergence.
+ * are the membership authority — the picker renders WITHOUT its internal
+ * substring filter (enableSearch: false), and a separate search Input
+ * feeds `onFilterChange` so the caller re-filters the rows. The composite
+ * routes navigation/confirm/cancel keys to the picker and every other key
+ * to the search Input (the picker's keybinding vocabulary).
  */
 class ExternalSearchList implements Component, Focusable {
   private readonly input: Input
-  private readonly list: SelectList
+  private readonly list: SearchablePicker
   private readonly onFilterChange: (query: string) => void
   private _focused = false
 
-  constructor(input: Input, list: SelectList, onFilterChange: (query: string) => void) {
+  constructor(input: Input, list: SearchablePicker, onFilterChange: (query: string) => void) {
     this.input = input
     this.list = list
     this.onFilterChange = onFilterChange
   }
 
-  /** Focusable (X042): forward to the search Input so it emits the
-   * hardware CURSOR_MARKER (IME positioning). */
+  /** Focusable (moved from fork divergence X042): forward to the search
+   * Input so it emits the hardware CURSOR_MARKER (IME positioning). */
   get focused(): boolean {
     return this._focused
   }
@@ -1575,10 +1577,10 @@ export interface PickerCategory {
    * never leaves it while the search query is non-empty. */
   cyclable?: boolean
   /** When true, this category's rows are EXTERNALLY filtered by the
-   * caller: the SelectList renders WITHOUT its internal substring filter
+   * caller: the picker renders WITHOUT its internal substring filter
    * (enableSearch: false), and a separate search Input is shown whose
    * changes feed `onFilterChange` — the caller re-filters the items. The
-   * caller's items are the membership authority; the SelectList only
+   * caller's items are the membership authority; the picker only
    * renders/cursors/selects. Used by the Session Browser's search
    * projection (a Host-authoritative hit must never be dropped by a
    * substring re-filter). */
@@ -1621,7 +1623,7 @@ export interface PickerOptions {
    * the query value is unchanged, and never after the picker closed. A
    * pure Client/TUI capability: the caller (e.g. the Session Browser's
    * debounced content search) observes the filter without touching the
-   * vendored SelectList.
+   * picker component.
    */
   onFilterChange?: (query: string) => void
   /** Optional category tabs: Tab cycles them while the picker is open. The
@@ -11308,7 +11310,7 @@ export class TuiApp {
   }
 
   /**
-   * Open a single-choice picker overlay (SelectList). Selecting calls
+   * Open a single-choice picker overlay (SearchablePicker). Selecting calls
    * `onSelect` with the item value and closes; Esc calls `onCancel`.
    * @param items - choice rows.
    * @param onSelect - confirmed choice.
@@ -11336,7 +11338,7 @@ export class TuiApp {
       now: options.marquee.now,
     })
     const layout = marquee === undefined ? {} : {
-      truncatePrimary: (ctx: SelectListTruncatePrimaryContext) => {
+      truncatePrimary: (ctx: SearchablePickerTruncatePrimaryContext) => {
         if (!ctx.isSelected) return truncateToWidth(ctx.text, ctx.maxWidth, '')
         const parts = options.marquee!.labelPartsOf?.(ctx.text) ?? { prefix: '', title: ctx.text }
         const prefixWidth = visibleWidth(parts.prefix)
@@ -11349,7 +11351,7 @@ export class TuiApp {
         return parts.prefix + window
       },
     }
-    const list = new SelectList(
+    const list = new SearchablePicker(
       items.map(item => ({ ...item })),
       10,
       selectListTheme,
@@ -11465,9 +11467,9 @@ export class TuiApp {
    * cycles the tabs (each category re-runs its `items` factory and re-titles
    * the picker with its own header; the live search query is carried across
    * the switch). All close paths (select, cancel, handle.close, signal
-   * abort) clear the Tab-cycling state. Consumer-side only — the fork
-   * SelectList stays pristine (the header is baked into the constructor, so
-   * a category switch rebuilds the overlay rather than mutating it).
+   * abort) clear the Tab-cycling state. Consumer-side only — the Host
+   * SearchablePicker keeps its header baked into the constructor, so a
+   * category switch rebuilds the overlay rather than mutating it.
    */
   private openCategorizedPicker(
     items: readonly PickerItem[],
@@ -11478,16 +11480,16 @@ export class TuiApp {
     const categories = options.categories
     let currentIndex = 0
     let overlay: OverlayHandle | undefined
-    let list: SelectList | undefined
+    let list: SearchablePicker | undefined
     // Selected-row label marquee (plan §7): ONE driver for the whole
-    // categorized picker (a category switch rebuilds the SelectList, the
+    // categorized picker (a category switch rebuilds the picker, the
     // marquee survives — the fresh list re-anchors it), disposed on close.
     const marquee = options.marquee === undefined ? undefined : new SelectedMarquee({
       requestRender: () => this.requestRender(),
       now: options.marquee.now,
     })
     const layout = marquee === undefined ? {} : {
-      truncatePrimary: (ctx: SelectListTruncatePrimaryContext) => {
+      truncatePrimary: (ctx: SearchablePickerTruncatePrimaryContext) => {
         if (!ctx.isSelected) return truncateToWidth(ctx.text, ctx.maxWidth, '')
         const parts = options.marquee!.labelPartsOf?.(ctx.text) ?? { prefix: '', title: ctx.text }
         const prefixWidth = visibleWidth(parts.prefix)
@@ -11501,16 +11503,35 @@ export class TuiApp {
       },
     }
     // The live search query, carried across category switches (the rebuilt
-    // SelectList re-applies it via initialQuery).
-    let query = ''
+    // picker re-applies it via initialQuery). `initialQuery` is CONSUMED
+    // ONLY here, at lifecycle creation: from this point every change
+    // (typed input, programmatic setFilter, setItems refresh, category
+    // cycle, setCategory) reads and writes this one live query, so a
+    // cleared query (an empty string) is a valid canonical state and never
+    // falls back to the initial value (X041).
+    let query = options.initialQuery ?? ''
     // The externally-filtered mode state (review P1): the active category
     // declares `externalFilter`, the separate search Input owns the query,
-    // and the SelectList never filters internally.
+    // and the picker never filters internally.
     let externalMode = false
     let searchInput: Input | undefined
     // A closed picker never reports filter changes (a late programmatic
     // setFilter on the handle must not wake a dead picker's caller).
     let closed = false
+    // ONE filter-notification state for the whole categorized picker: the
+    // initial seed, typed edits, and programmatic setFilter (internal and
+    // external) all report through it, so a value is never notified twice
+    // and a stale seed can never override a newer report (the X041
+    // canonical-query contract). `undefined` means "nothing reported yet",
+    // so the first report of any value (including an empty string) passes.
+    let lastNotifiedFilter: string | undefined
+    const notifyFilterChange = (value: string): void => {
+      if (closed || this.disposed) return
+      if (value === lastNotifiedFilter) return
+      lastNotifiedFilter = value
+      marquee?.reset()
+      options.onFilterChange?.(value)
+    }
     let onAbort: (() => void) | undefined
     const state: CategorizedPickerState = {
       categories,
@@ -11549,12 +11570,12 @@ export class TuiApp {
       marquee?.reset()
       const category = categories[currentIndex]!
       // The externally-filtered mode (review P1): the caller's items are
-      // the membership authority — the SelectList renders WITHOUT its
+      // the membership authority — the picker renders WITHOUT its
       // internal substring filter, and a separate search Input feeds
       // `onFilterChange`. A Host-authoritative hit must never be dropped
       // by a substring re-filter.
       externalMode = category.externalFilter === true
-      const next = new SelectList(
+      const next = new SearchablePicker(
         category.items().map(item => ({ ...item })),
         10,
         selectListTheme,
@@ -11564,7 +11585,11 @@ export class TuiApp {
           header: category.header,
           noMatchText: options.noMatchText,
           showHint: options.showHint,
-          initialQuery: externalMode ? '' : (query === '' ? options.initialQuery : query),
+          // The LIVE query only: initialQuery was consumed once at
+          // lifecycle creation and must never resurrect after a clear
+          // (X041). In the externally-filtered mode the separate Host
+          // Input owns the query, so the internal search stays off.
+          initialQuery: externalMode ? '' : query,
         },
       )
       if (marquee !== undefined) next.onSelectionChange = () => marquee.reset()
@@ -11581,25 +11606,47 @@ export class TuiApp {
       overlay?.hide()
       list = next
       // Search edits inside a category must restart the marquee too (the
-      // vendored SelectList fires no selection change for query edits); the
-      // adapter also reports typed filter changes to the caller's
-      // `onFilterChange` (the Session Browser's debounced content search).
-      // In the externally-filtered mode the separate search Input reports
-      // instead, and the SelectList never filters internally.
+      // picker fires no selection change for query edits); the adapter
+      // also reports typed filter changes to the caller's `onFilterChange`
+      // (the Session Browser's debounced content search). In the
+      // externally-filtered mode the separate search Input reports
+      // instead, and the picker never filters internally.
       let mounted: Component
       if (externalMode) {
         const input = new Input()
-        if (query !== '') input.setValue(query)
+        if (query !== '') {
+          const seeded = query
+          // The input ALWAYS shows the live query (a harvested/known
+          // query must not vanish from the rebuilt category); only the
+          // NOTIFICATION is conditional — a query the caller has never
+          // seen (the initialQuery seed, or a query harvested from a
+          // category whose filter never notified the caller) must reach
+          // it through onFilterChange, because the Input would otherwise
+          // display it while category.items() computed membership without
+          // it. The notification is deferred so the caller may use the
+          // picker handle, and doubly fenced at drain time: reported only
+          // while THIS input is still the ACTIVE external input AND still
+          // holds the seeded value — a synchronous setCategory/setFilter
+          // after open replaces the active input or its value, so a stale
+          // seed can never override the newer state.
+          input.setValue(seeded)
+          if (seeded !== lastNotifiedFilter) {
+            queueMicrotask(() => {
+              if (closed || this.disposed) return
+              if (searchInput !== input) return
+              if (input.getValue() !== seeded) return
+              notifyFilterChange(seeded)
+            })
+          }
+        }
         searchInput = input
         mounted = new ExternalSearchList(input, next, (value) => {
-          marquee?.reset()
-          options.onFilterChange?.(value)
+          notifyFilterChange(value)
         })
       } else {
         searchInput = undefined
         mounted = new MarqueeFilterAdapter(next, () => {
-          marquee?.reset()
-          options.onFilterChange?.(next.getFilter())
+          notifyFilterChange(next.getFilter())
         })
       }
       const configuredWidth = Number.isFinite(options.width) ? Math.max(1, Math.floor(options.width!)) : 64
@@ -11611,9 +11658,9 @@ export class TuiApp {
       }
       const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
         // The externally-filtered composite renders the search Input +
-        // blank ABOVE the SelectList, OUTSIDE its maxRows budget — reserve
+        // blank ABOVE the picker, OUTSIDE its maxRows budget — reserve
         // those 2 rows so the frame never overflows the terminal (review
-        // round 6: the normal mode's input lives INSIDE the SelectList).
+        // round 6: the normal mode's input lives INSIDE the picker).
         next.setMaxRows(Math.max(1, geometry.maxHeight - (externalMode ? 4 : 2)))
       })
       overlay = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
@@ -11676,10 +11723,11 @@ export class TuiApp {
           const before = searchInput.getValue()
           searchInput.setValue(filter)
           this.requestRender()
-          // Programmatic filters report exactly like typed ones (same value
-          // → no callback; closed OR disposed picker → no callback).
-          if (!closed && !this.disposed && searchInput.getValue() !== before) {
-            options.onFilterChange?.(searchInput.getValue())
+          // Programmatic filters report exactly like typed ones (same
+          // value → no callback; closed OR disposed picker → no callback)
+          // through the single notification state.
+          if (searchInput.getValue() !== before) {
+            notifyFilterChange(searchInput.getValue())
           }
           return
         }
@@ -11695,8 +11743,8 @@ export class TuiApp {
         // app's final dispose hides overlays without the state close path,
         // so the disposal fence is checked explicitly, mirroring the plain
         // picker).
-        if (!closed && !this.disposed && list.getFilter() !== before) {
-          options.onFilterChange?.(list.getFilter())
+        if (list.getFilter() !== before) {
+          notifyFilterChange(list.getFilter())
         }
       },
       _removeAbortListener: () => {
