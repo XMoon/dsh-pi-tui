@@ -1611,30 +1611,30 @@ Text.dispose was a no-op solely so Loader's dispose override and super.dispose c
 
 #### Changed surface
 
-- Text.dispose(): void no-op
-- Loader.dispose override calls stop and super.dispose
+- Text.dispose(): void no-op (pre-retirement, removed in PR2)
+- Loader.dispose override called stop and super.dispose (pre-retirement, removed in PR2)
 
 #### Dependency map
 
 **Vendor internal**
-- Loader extends Text and calls super.dispose in its current local implementation.
-- Audit note: This is an existing inheritance consumer, not unused code.
+- Loader extended Text and called super.dispose in the pre-retirement local implementation.
+- Audit note: This was an existing inheritance consumer, not unused code.
 
 **Inheritance / structural**
-- Loader -> Text.dispose -> super.dispose
+- Loader -> Text.dispose -> super.dispose (pre-retirement edge, removed in PR2)
 - Audit note: The required structural audit sample is present.
 
 **Host**
 - X007 lifecycle consumers can dispose Loader through the Component contract.
-- Audit note: No direct host call to Text.dispose exists, but X007 owns the lifecycle edge.
+- Audit note: No direct host call to Text.dispose exists; X007 owns the Loader disposal edge.
 
 **Public / extension**
 - Component.dispose is optional and public component consumers may dispose a Loader instance.
-- Audit note: Removing the shim must not remove Loader timer cleanup.
+- Audit note: Removing the shim did not remove Loader timer cleanup.
 
 **Behavioral coupling**
 - Loader.stop timer cleanup must remain exactly once
-- Text remains disposable only if a distinct owner requires it
+- Text no longer carries a dispose member (X019 retired in PR2)
 - Audit note: The safe change is an atomic inheritance cleanup, not a REMOVED_UNUSED classification.
 
 #### Guarding tests

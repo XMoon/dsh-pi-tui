@@ -1,10 +1,11 @@
 import assert from "node:assert";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { Box } from "../src/components/box.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
-import { Container } from "../src/tui.ts";
+import { Container, type TUI } from "../src/tui.ts";
 import { SettingsList } from "../src/components/settings-list.ts";
 import { Text } from "../src/components/text.ts";
+import { Loader } from "../src/components/loader.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -335,10 +336,32 @@ describe("Component dispose lifecycle completeness (X007)", () => {
 		assert.equal(followUp.disposeCount, 0, "the follow-up submenu stays mounted");
 	});
 
-	it("Text.dispose() stays a harmless no-op inside disposed containers", () => {
+	it("a Text child inside a container is cleared without throwing", () => {
 		const box = new Box(1, 1);
 		box.addChild(new Text("hello", 1, 0));
 		box.clear(); // must not throw
 		assert.ok(true);
+	});
+
+	it("Loader.dispose clears the animation timer and repeated dispose stays safe", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		try {
+			let renders = 0;
+			const ui = { requestRender: () => { renders += 1; } } as unknown as TUI;
+			const loader = new Loader(ui, (s) => s, (s) => s, "Loading...", { frames: ["⠋", "⠙"], intervalMs: 10 });
+
+			const rendersAfterStart = renders;
+			mock.timers.tick(100);
+			assert.ok(renders > rendersAfterStart, "the animation timer drives renders while alive");
+
+			loader.dispose();
+			const rendersAfterDispose = renders;
+			mock.timers.tick(1000);
+			assert.equal(renders, rendersAfterDispose, "dispose must clear the animation timer");
+
+			loader.dispose(); // repeated dispose stays safe
+		} finally {
+			mock.timers.reset();
+		}
 	});
 });
