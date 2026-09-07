@@ -969,6 +969,7 @@ function applyStreamingToolPreviewInput(
       step: input.step,
       index: chunk.index,
       name: chunk.name,
+      argumentsDelta: chunk.argumentsDelta,
     })
     return
   }

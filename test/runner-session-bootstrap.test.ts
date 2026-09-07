@@ -1939,15 +1939,21 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
     const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
     tui.handleTerminalInput(data)
   }
+  const parentArguments = '{"path":"parent.ts"}'
+  const childArguments = '{"command":"child"}'
 
   // The main session owns the first preview before the viewer opens.
   context.emit('session/event', parent as never, event('turn/start', { turn: 1 }, 10))
   const parentAgent = liveAgentOf(harness, parent.id)
   emitLiveStream(context, parentAgent, liveStart('p1', 1, 0))
-  emitLiveStream(context, parentAgent, liveChunkFrame('p1', 0, { type: 'tool-call-delta', index: 0, id: '', name: 'edit', argumentsDelta: '{' }))
+  emitLiveStream(context, parentAgent, liveChunkFrame('p1', 0, {
+    type: 'tool-call-delta', index: 0, id: '', name: 'edit', argumentsDelta: parentArguments,
+  }))
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
-  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => preview.callId), [''])
+  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => [
+    preview.callId, preview.name, preview.argumentBytes, preview.summary,
+  ]), [['', 'edit', Buffer.byteLength(parentArguments, 'utf8'), 'parent.ts']])
 
   // The child Agent is already live, but its viewer has not mounted yet. Its
   // active prefix must remain available for the later exact-Agent replay.
@@ -1959,7 +1965,9 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
   })
   emitLiveStream(context, childAgent, {
     type: 'chunk', attemptId: 'c1', revision: 3, index: 1,
-    time: 1_700_000_000_101, chunk: { type: 'tool-call-delta', index: 1, id: 'child-call', name: 'bash', argumentsDelta: '{' },
+    time: 1_700_000_000_101, chunk: {
+      type: 'tool-call-delta', index: 1, id: 'child-call', name: 'bash', argumentsDelta: childArguments,
+    },
   })
 
   // /tasks opens the real runner browser, and Enter mounts the child viewer.
@@ -1974,7 +1982,9 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
   assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must be mounted')
   assert.ok(probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'late child answer'),
     'a late child viewer must replay the exact Agent baseline after durable hydration')
-  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => [preview.callId, preview.name]), [['child-call', 'bash']])
+  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => [
+    preview.callId, preview.name, preview.argumentBytes, preview.summary,
+  ]), [['child-call', 'bash', Buffer.byteLength(childArguments, 'utf8'), 'child']])
 
   // The same continuable child can roll from Activation A to a new Agent B
   // without closing the viewer. A's delayed frame must stay fenced while B's
@@ -2062,9 +2072,11 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
   input('\x1b')
   await settle()
   await vt.waitForRender()
-  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => [preview.callId, preview.name]), [
-    ['parent-call-a', 'write'],
-    ['parent-call-b', 'read'],
+  assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => [
+    preview.callId, preview.name, preview.argumentBytes, preview.summary,
+  ]), [
+    ['parent-call-a', 'write', Buffer.byteLength(parentArguments + '}', 'utf8'), 'parent.ts'],
+    ['parent-call-b', 'read', Buffer.byteLength('{', 'utf8'), undefined],
   ])
 
   // A parent call that materializes while the child remains visible must be
