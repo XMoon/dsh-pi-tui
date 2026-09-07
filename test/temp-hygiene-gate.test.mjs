@@ -10,9 +10,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { ALLOWED_DIRECT_USAGE, collectTestFiles, scanSource, scanTree } from '../scripts/temp-hygiene-gate.mjs'
+
+const TEST_ROOT = dirname(fileURLToPath(import.meta.url))
 
 test('a plain test file calling mkdtempSync directly is a violation', () => {
   const violations = scanSource(
@@ -89,4 +92,15 @@ test('collectTestFiles only picks up source files', async (t) => {
   writeFileSync(join(root, 'nested', 'c.test.js'), '')
   const files = collectTestFiles(root).map((file) => file.slice(root.length + 1)).sort()
   assert.deepEqual(files, ['a.test.ts', 'b.test.mjs', join('nested', 'c.test.js')])
+})
+
+test('repository test tree satisfies temp hygiene', () => {
+  const violations = scanTree(TEST_ROOT)
+  assert.deepEqual(
+    violations,
+    [],
+    `root test files must create fixture dirs through testLifecycle(t).tempDir(prefix): ${violations
+      .map((v) => `${v.file}:${v.line} (${v.api})`)
+      .join(', ')}`,
+  )
 })
