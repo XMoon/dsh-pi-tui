@@ -59,16 +59,18 @@ export function shortSessionId(id: string): string {
 export const SESSION_SEARCH_QUERY_MAX_CHARS = 500
 
 /**
- * Sanitize a Client-side search input before it reaches the Host content
- * search: drop NUL (officially illegal), cap at 500 UTF-16 code units, and
- * never split a surrogate pair at the cut. The Direct adapter still does
- * its own authoritative validation — this only avoids sending inputs the
- * official contract rejects outright, keeping the Web UX.
+ * The ONE canonical Client-side search query (review): remove NUL
+ * (officially illegal) → trim → cap at 500 UTF-16 code units without
+ * splitting a surrogate pair. This exact value drives BOTH the local
+ * metadata projection and the Host search — the Direct adapter's
+ * authoritative validation (trim → non-empty → ≤500 → no NUL) is then a
+ * no-op, so the local and Host queries can never drift (e.g. NUL adjacent
+ * to padding whitespace must not leave a padded canonical behind).
  */
 export function sanitizeSessionSearchInput(value: string): string {
-  const withoutNul = value.replace(/\0/g, '')
-  if (withoutNul.length <= SESSION_SEARCH_QUERY_MAX_CHARS) return withoutNul
-  const truncated = withoutNul.slice(0, SESSION_SEARCH_QUERY_MAX_CHARS)
+  const trimmed = value.replace(/\0/g, '').trim()
+  if (trimmed.length <= SESSION_SEARCH_QUERY_MAX_CHARS) return trimmed
+  const truncated = trimmed.slice(0, SESSION_SEARCH_QUERY_MAX_CHARS)
   const last = truncated.charCodeAt(SESSION_SEARCH_QUERY_MAX_CHARS - 1)
   // A lone high surrogate at the cut is the first half of a pair — drop it
   // so the remaining text is well-formed.

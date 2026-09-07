@@ -785,3 +785,21 @@ test('the search projection overlay keeps the full row budget (no bottom truncat
   assert.ok(lines.join('\n').includes('↑↓ navigate'), 'the hint must stay visible')
   assert.ok(boxBottom < lines.length - 1, 'the bottom border must not be truncated')
 })
+
+test('a raw edit that does not change the canonical query does not restart the search', async (t) => {
+  const h = harness({
+    rows: rows(),
+    search: async () => ({ items: [{ sessionId: 'session-alpha', snippet: 'needle found' }], hasMore: false }),
+  })
+  t.after(() => h.app.stop())
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('alpha'))
+  h.vt.sendInput('needle')
+  await waitUntil(() => h.searchCalls.length === 1)
+  // Padding whitespace around the same term: the canonical is unchanged,
+  // so the identical Host search must NOT be aborted/restarted.
+  h.vt.sendInput(' ')
+  await h.vt.waitForRender()
+  await new Promise<void>(resolve => setTimeout(resolve, 400))
+  assert.equal(h.searchCalls.length, 1, 'an unchanged canonical query must not restart the Host search')
+})
