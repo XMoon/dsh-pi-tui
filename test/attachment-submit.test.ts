@@ -1,8 +1,8 @@
 import { strict as assert } from 'node:assert'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { DraftFileStore } from '../src/attachment/file-draft.ts'
 import type { FileAttachmentStoreLike } from '../src/attachment/file-admission.ts'
 import { FileInputError, probeAttachment } from '../src/attachment/intake.ts'
@@ -30,44 +30,41 @@ function deps(attachments: AttachmentsLike | undefined): PrepareInputDeps {
   }
 }
 
-test('file-only preparation streams a generic draft and skips image capability', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-file-submit-'))
-  try {
-    const path = join(root, 'report.pdf')
-    const bytes = Buffer.from('%PDF-1.7\nreport')
-    await writeFile(path, bytes)
-    const probe = await probeAttachment(path, root)
-    assert.equal(probe.kind, 'file')
-    if (probe.kind !== 'file') return
-    const files = new DraftFileStore()
-    const draft = files.add({
-      name: probe.name,
-      byteLength: probe.byteLength,
-      source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
-    })
-    let saved = 0
-    const attachments = {
-      imageLimits,
-      async saveImages() { throw new Error('file-only input must not save images') },
-      async saveFileStream({ data }: Parameters<FileAttachmentStoreLike['saveFileStream']>[0]) {
-        saved += 1
-        const chunks: Uint8Array[] = []
-        for await (const chunk of data) chunks.push(chunk)
-        return { attachmentId: 'sha256:file', name: draft.name, bytes: Buffer.concat(chunks.map(chunk => Buffer.from(chunk))).byteLength }
-      },
-    } as unknown as AttachmentsLike
-    assert.equal(draftHasAttachments(draft.placeholder, new DraftImageStore(), files), true)
-    const message = await prepareUserMessage(draft.placeholder, new DraftImageStore(), {
-      ...deps(attachments),
-      fileStore: files,
-      llm: { async resolveModelInfo() { throw new Error('file-only input must not probe image capability') } } as LlmLike,
-    })
-    assert.deepEqual(message.content.map(block => block.type), ['file'])
-    assert.equal(saved, 1)
-    assert.equal((message.content[0] as { attachment: { bytes: number } }).attachment.bytes, bytes.byteLength)
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
+test('file-only preparation streams a generic draft and skips image capability', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-file-submit-')
+  const path = join(root, 'report.pdf')
+  const bytes = Buffer.from('%PDF-1.7\nreport')
+  await writeFile(path, bytes)
+  const probe = await probeAttachment(path, root)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const files = new DraftFileStore()
+  const draft = files.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
+  let saved = 0
+  const attachments = {
+    imageLimits,
+    async saveImages() { throw new Error('file-only input must not save images') },
+    async saveFileStream({ data }: Parameters<FileAttachmentStoreLike['saveFileStream']>[0]) {
+      saved += 1
+      const chunks: Uint8Array[] = []
+      for await (const chunk of data) chunks.push(chunk)
+      return { attachmentId: 'sha256:file', name: draft.name, bytes: Buffer.concat(chunks.map(chunk => Buffer.from(chunk))).byteLength }
+    },
+  } as unknown as AttachmentsLike
+  assert.equal(draftHasAttachments(draft.placeholder, new DraftImageStore(), files), true)
+  const message = await prepareUserMessage(draft.placeholder, new DraftImageStore(), {
+    ...deps(attachments),
+    fileStore: files,
+    llm: { async resolveModelInfo() { throw new Error('file-only input must not probe image capability') } } as LlmLike,
+  })
+  assert.deepEqual(message.content.map(block => block.type), ['file'])
+  assert.equal(saved, 1)
+  assert.equal((message.content[0] as { attachment: { bytes: number } }).attachment.bytes, bytes.byteLength)
 })
 
 test('mixed preparation preserves text/file/image order and recalled files are not re-saved', async () => {
