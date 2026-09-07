@@ -147,9 +147,19 @@ When entering a development worktree:
 pnpm dev:doctor
 ```
 
-Use `pnpm dev:bootstrap` only when the environment is not ready. Keep each
-worktree's `node_modules` and `dist` independent; never symlink them, and build
-in that worktree before using a profile.
+Use `pnpm dev:bootstrap` only when the environment is not ready. On a
+source-mode worktree (a worktree whose tracked `test/compat/dsh-mode.json`
+selects `source` — `next` is not always source-mode), a plain `pnpm install`
+before bootstrap leaves the DSH workspace state incorrect (`workspace DSH
+incorrect` / `local state missing`); run `pnpm dev:doctor` first and let
+`pnpm dev:bootstrap` perform the dependency install itself, then re-run
+`pnpm dev:doctor` until it reports `READY`. A plain `pnpm install` after
+bootstrap re-resolves `@deepseek-ai/*` to registry versions and breaks the
+source-mode workspace again; use `pnpm dev:shell` (or
+`source ./.dsh-dev-env`) for commands that need the source environment, and
+re-run `pnpm dev:bootstrap` after any real install. Keep each worktree's
+`node_modules` and `dist` independent; never symlink them, and build in that
+worktree before using a profile.
 
 * `main` is the released npm-backed compatibility line; `next` is the
   forward-integration line and may use its tracked Source Mode.
