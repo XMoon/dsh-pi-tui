@@ -2978,7 +2978,17 @@ export class TranscriptFolder {
         // last assistant step — the final-answer dedup depends on it
         // (review finding).
         activity.lastAssistantStep = Math.max(priorLast, event.data.step)
-        if (!staleForFocus) {
+        if (staleForFocus) {
+          // A stale durable settlement cannot reclaim candidate or final
+          // ownership. It may still update the confirmed slot when that exact
+          // step already owns the displayed intermediate message: the
+          // authoritative text must replace the streamed preview in place.
+          if (activity.messageConfirmedStep === event.data.step) {
+            activity.messageConfirmed = text === ''
+              ? undefined
+              : text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
+          }
+        } else {
           const prior = activity.messageCandidate
           // Only a message for a NEWER step confirms the open candidate
           // (plan §5.3 C); a message for an older step is stale and must
