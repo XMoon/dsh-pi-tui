@@ -280,12 +280,12 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
     block.statements.some(statement =>
       ts.isVariableStatement(statement)
       && statement.declarationList.declarations.some(declaration =>
-        ts.isIdentifier(declaration.name) && declaration.name.text === 'cleanup'))
+        ts.isIdentifier(declaration.name) && declaration.name.text === 'disposeSurface'))
   const lifecycleRoot = candidates.find(statement => {
     const arrow = arrowOf(statement)
     return arrow !== undefined && ts.isBlock(arrow.body) && hasCleanup(arrow.body)
   })
-  assert.ok(lifecycleRoot !== undefined, 'the startup lifecycle root IIFE (the void expression whose arrow declares cleanup) must exist')
+  assert.ok(lifecycleRoot !== undefined, 'the startup lifecycle root IIFE (the void expression whose arrow declares disposeSurface) must exist')
   const arrow = arrowOf(lifecycleRoot)!
   const runnerBlock = arrow.body
   assert.ok(ts.isBlock(runnerBlock), 'the lifecycle root body must be a block')
@@ -320,17 +320,17 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
     }
   }
 
-  // The cleanup function declaration (runner-scope).
+  // The disposeSurface function declaration (runner-scope).
   const cleanupDecl = runnerBlock.statements.find(statement =>
     ts.isVariableStatement(statement)
     && ts.isIdentifier(statement.declarationList.declarations[0]!.name)
-    && statement.declarationList.declarations[0]!.name.text === 'cleanup'
+    && statement.declarationList.declarations[0]!.name.text === 'disposeSurface'
   ) as ts.VariableStatement | undefined
-  assert.ok(cleanupDecl !== undefined, 'cleanup must exist in the runner scope')
+  assert.ok(cleanupDecl !== undefined, 'disposeSurface must exist in the runner scope')
   const cleanupInitializer = cleanupDecl.declarationList.declarations[0]!.initializer
-  assert.ok(cleanupInitializer !== undefined && ts.isArrowFunction(cleanupInitializer), 'cleanup must be an arrow function')
+  assert.ok(cleanupInitializer !== undefined && ts.isArrowFunction(cleanupInitializer), 'disposeSurface must be an arrow function')
   const cleanupBody = cleanupInitializer.body
-  assert.ok(ts.isBlock(cleanupBody), 'cleanup body must be a block')
+  assert.ok(ts.isBlock(cleanupBody), 'disposeSurface body must be a block')
   const cleanupLine = sourceFile.getLineAndCharacterOfPosition(cleanupDecl.getStart()).line + 1
 
   // Collect the identifiers referenced in the cleanup body (excluding its
@@ -464,12 +464,12 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
     block.statements.some(statement =>
       ts.isVariableStatement(statement)
       && statement.declarationList.declarations.some(declaration =>
-        ts.isIdentifier(declaration.name) && declaration.name.text === 'cleanup'))
+        ts.isIdentifier(declaration.name) && declaration.name.text === 'disposeSurface'))
   const lifecycleRoot = candidates.find(statement => {
     const arrow = arrowOf(statement)
     return arrow !== undefined && ts.isBlock(arrow.body) && hasCleanup(arrow.body)
   })
-  assert.ok(lifecycleRoot !== undefined, 'the startup lifecycle root IIFE (the void expression whose arrow declares cleanup) must exist')
+  assert.ok(lifecycleRoot !== undefined, 'the startup lifecycle root IIFE (the void expression whose arrow declares disposeSurface) must exist')
   const runnerBlock = arrowOf(lifecycleRoot)!.body as ts.Block
 
   /** Collect every bound name of a binding pattern. */

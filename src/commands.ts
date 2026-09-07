@@ -363,9 +363,10 @@ export interface TuiCommandRunner {
    * (migration M1.11) — a runner assembly dependency, not a Host
    * capability. */
   readonly commandRegistry: CommandRegistryLike | undefined
-  /** The ONE exit orchestration (flush with a hard timeout, cleanup, warn,
-   * resume hint, process exit) — shared by Ctrl+C/Ctrl+D, /exit and /quit.
-   * Command handlers must NEVER stop the app, flush or exit themselves. */
+  /** The ONE exit orchestration (latch → surface cleanup → resume hint →
+   * appExit; the Direct owned-session retirement runs inside the appExit
+   * disposal) — shared by Ctrl+C/Ctrl+D, /exit and /quit. Command handlers
+   * must NEVER stop the app, flush or exit themselves. */
   requestExit(): void
   cwd: string
   /** The per-TUI draft image registry (image pipeline, plan M1). Shared by
@@ -1368,10 +1369,11 @@ export function registerTuiCommands(
   }
 
   // Shared by /exit and its /quit alias. The exit orchestration lives in
-  // the runner (createExitController): flush with a hard timeout, idempotent
-  // cleanup, warning, resume hint, process exit. Handlers never stop the app
-  // or flush themselves — that kept /exit diverging from Ctrl+C/Ctrl+D (no
-  // timeout, no catch, no warning) and could hang a stopped UI forever.
+  // the runner (createExitController): latch once, idempotent surface
+  // cleanup, resume hint, appExit (the Direct owned-session retirement runs
+  // inside the appExit disposal). Handlers never stop the app or flush
+  // themselves — that kept /exit diverging from Ctrl+C/Ctrl+D and could
+  // hang a stopped UI forever.
   const exitHandler = (): { kind: 'success' } => {
     runner.requestExit()
     return { kind: 'success' }

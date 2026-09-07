@@ -172,7 +172,8 @@ import {
 } from './image/submit.ts'
 import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
-import { createExitController, type ExitSessionLike } from './exit.ts'
+import { createExitController } from './exit.ts'
+import { retireDirectOwnedSession, type RetirementReport } from './runtime/direct/owned-session-retirement.ts'
 import { mergeDraft, refuseByTransitionFence, steerAll, steerHasPayload, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import {
   resolveSubagentSettleTarget,
@@ -1067,10 +1068,6 @@ const DANGER_PATTERNS: readonly RegExp[] = [
   /\bcurl\b[^\n|]*\|\s*(ba)?sh\b/,
 ]
 
-/** Hard cap for the /exit session flush: a hung provider must not trap the
- * user; after this the TUI exits and warns that the tail may be lost. */
-const EXIT_FLUSH_TIMEOUT_MS = 10_000
-
 /**
  * Whether a shell command matches a destructive pattern. `rm` is treated
  * specially: any spelling of recursive + force flags (`rm -rf`, `rm -r -f`,
@@ -1574,11 +1571,13 @@ export function apply(ctx: Context, config: Config): void {
   const lifecycleController = new AbortController()
   // Register cancellation before entering the fire-and-forget startup root:
   // loader/HMR disposal can happen before the full TUI cleanup effect exists.
-  // This disposer owns the runner lifetime signal and the diagnostics handle
-  // needed by a startup that exits before full cleanup is registered.
+  // This disposer owns the runner lifetime signal ONLY — diag stays open so
+  // the Direct owned-session retirement (which runs in the fiber disposer,
+  // in PARALLEL with this disposer under Cordis unload) can record its
+  // diagnostics; diag is closed by retireOwnedSession / the pre-mount abort
+  // path / the fatal catch (all idempotent).
   ctx.effect(() => () => {
     lifecycleController.abort()
-    diag.dispose()
   }, 'tui-runner lifecycle cancellation')
 
   // The guarded notification writer is hoisted to the RUNNER scope: both
@@ -1589,16 +1588,175 @@ export function apply(ctx: Context, config: Config): void {
   // errors; every use is additionally wrapped for synchronous throws.
   const notificationWriter = guardedStreamWriter(process.stdout)
 
+  // The Direct owner slots are hoisted to the RUNNER scope (outside the
+  // startup IIFE) so the terminal-total fatal catch can see whether a
+  // Direct owner exists; the memoized retirement coordinator itself stays
+  // inside the IIFE (it needs the transition gate / barrier / sessions)
+  // and is exposed to the fatal catch through a ref assigned once the
+  // coordinator is defined. The fatal catch treats an unassigned slot as
+  // "no owner".
+  let liveAgent: Agent | undefined
+  let liveHandle: AgentHandle | undefined
+  let retireOwnedSessionRef: (() => Promise<RetirementReport>) | undefined
+
   void (async () => { // allowlist: startup lifecycle root — see AGENTS.md
     // Loader siblings mount concurrently. Await the complete application before
     // creating an Agent so its scoped tools and adapters are not half-composed.
     await ctx.get('loader')?.await()
-    if (lifecycleController.signal.aborted) return
+    if (lifecycleController.signal.aborted) {
+      // Pre-mount unload before any Agent existed: nothing to retire; close
+      // the diagnostics handle (the early cancellation disposer no longer
+      // owns it — see the effect registration above).
+      diag.dispose()
+      return
+    }
     const agents = ctx.get('agents')
     const defaultModel = ctx.get('agentDefaultModel')
     const sessions = ctx.get('sessions')
     // Early process shutdown can dispose the tree while settlement is pending.
-    if (agents === undefined || defaultModel === undefined || sessions === undefined) return
+    if (agents === undefined || defaultModel === undefined || sessions === undefined) {
+      diag.dispose()
+      return
+    }
+    // The transition gate / operation barrier are declared BEFORE the
+    // first Agent can exist so the retirement coordinator below (and the
+    // fatal catch through retireOwnedSessionRef) is installed before any
+    // owner is created: a startup failure after the resume must join the
+    // SAME memoized retirement, never a second direct teardown that could
+    // race the DSH agent-loop owner disposer.
+    const transitionGate = new SessionTransitionGate()
+    const operationBarrier = new SessionOperationBarrier()
+    // The memoized Direct owned-session retirement: ONE teardown promise
+    // shared by every teardown path (the interactive exit via the appExit
+    // disposal, the fiber disposer / HMR unload, the pre-mount abort path
+    // and the fatal startup catch) — never four copies of the same
+    // teardown. It serializes against an in-flight session transition
+    // through the transition gate + operation barrier, then retires the
+    // CURRENT Direct owner in the fixed order cancel → idle → descendants →
+    // flush → dispose (see src/runtime/direct/owned-session-retirement.ts).
+    // diag stays open until the retirement diagnostics are recorded. The
+    // fatal catch reaches this coordinator through retireOwnedSessionRef.
+    let retirementPromise: Promise<RetirementReport> | undefined
+    const retireOwnedSession = (): Promise<RetirementReport> => {
+      if (retirementPromise !== undefined) return retirementPromise
+      retirementPromise = (async (): Promise<RetirementReport> => {
+        // If a session transition is queued or in flight, its pre-commit
+        // `whenIdle()` does not observe the lifecycle signal: cancel the
+        // CURRENT owner's work so the transition settles instead of waiting
+        // for the LLM (the appExit watchdog would otherwise force-exit
+        // without an ordered retirement). Keyed on `pending` (queued OR
+        // running), not `busy`: a queued-but-not-started transition is about
+        // to quiesce the old agent, and the pre-cancel must fire before the
+        // task starts. This pre-cancel is a DELIBERATE extra cancel on the
+        // transition path only: `agent.cancel` is idempotent (re-cancelling
+        // an already cancelled agent is a no-op), so the retirement's own
+        // cancel phase — the single cancel on the ordinary (no-transition)
+        // path — may run again on the same owner without changing the
+        // outcome. The tests assert the ordinary path cancels exactly once
+        // and the transition path cancels at least once.
+        if (transitionGate?.pending === true) {
+          liveAgent?.cancel({ kind: 'user' })
+        }
+        // The CURRENT Direct owner is read INSIDE the gate task, not at
+        // call time: an exit that lands while a session transition is
+        // committing must retire the NEW current owner (the old owner's
+        // retirement already ran inside the transition's post-commit
+        // phase), while an aborted transition leaves the old owner current
+        // and retires it. A deferred start never created an owner: nothing
+        // to retire, the surface teardown is complete.
+        const retire = async (): Promise<RetirementReport> => {
+          const agent = liveAgent
+          const handle = liveHandle
+          if (agent === undefined || handle === undefined) {
+            return { failures: [] }
+          }
+          diag.info('retire start', { session: agent.session.id })
+          const report = await retireDirectOwnedSession({
+            cancel: () => {
+              diag.info('retire cancel', { session: agent.session.id })
+              agent.cancel({ kind: 'user' })
+            },
+            whenIdle: async () => {
+              diag.info('retire idle', { session: agent.session.id })
+              await agent.whenIdle()
+            },
+            drainDescendants: async () => {
+              diag.info('retire descendants', { session: agent.session.id })
+              const subagents = ctx.get('subagents') as {
+                drainContinuableDescendants?(parents: readonly unknown[]): Promise<void>
+              } | undefined
+              await subagents?.drainContinuableDescendants?.([agent])
+            },
+            flush: async () => {
+              diag.info('retire flush', { session: agent.session.id })
+              await sessions.flush(agent.session)
+            },
+            disposeOwner: async () => {
+              diag.info('retire dispose', { session: agent.session.id })
+              await handle.dispose()
+            },
+          })
+          for (const failure of report.failures) {
+            diag.error('retire phase failed', {
+              session: agent.session.id,
+              phase: failure.phase,
+              error: failure.error,
+            })
+          }
+          diag.info('retire complete', { session: agent.session.id, failures: report.failures.length })
+          return report
+        }
+        try {
+          // Serialize against an in-flight session transition: the gate
+          // queue is FIFO, so this no-op task waits for a running
+          // transition to settle (the surface teardown above already
+          // aborted its create/resume via the lifecycle controller). The
+          // barrier freezes TUI writers for the retirement's write
+          // boundary. The gate/barrier are constructed BEFORE any owner can
+          // exist (see the hoisted declarations), so an owner always has a
+          // serialization path.
+          return await transitionGate.run(() => operationBarrier.runTransition(retire))
+        } catch (error) {
+          // Defensive: a reentrant gate/barrier means a transition is STILL
+          // active — retiring now would race it. Record the failure and SKIP
+          // the retirement (the process is exiting; the appExit watchdog
+          // bounds it). The normal teardown paths never reach here: they
+          // queue through the FIFO gate, and retireOwnedSession is never
+          // called from inside a transition context.
+          diag.error('retire barrier failed', { error: safeErrorMessage(error) })
+          return { failures: [{ phase: 'cancel', error: `retirement skipped: ${safeErrorMessage(error)}` }] }
+        } finally {
+          diag.dispose()
+        }
+      })()
+      return retirementPromise
+    }
+    retireOwnedSessionRef = retireOwnedSession
+    // Await an agent's quiescence, cancelling it if the runner lifecycle
+    // aborts first. A transition's pre-commit whenIdle and the pre-mount
+    // wait do NOT observe the lifecycle signal — without the cancel a busy
+    // agent would keep the await hanging past the appExit watchdog and the
+    // ordered retirement would never run.
+    const whenIdleOrAbort = async (agent: Agent, signal: AbortSignal): Promise<boolean> => {
+      if (signal.aborted) {
+        agent.cancel({ kind: 'user' })
+        await agent.whenIdle()
+        return true
+      }
+      let aborted = false
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = (): void => {
+          aborted = true
+          agent.cancel({ kind: 'user' })
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+        agent.whenIdle().then(
+          () => { signal.removeEventListener('abort', onAbort); resolve() },
+          (error) => { signal.removeEventListener('abort', onAbort); reject(error) },
+        )
+      })
+      return aborted
+    }
 
     // Persisted TUI preferences: register the namespace FIRST — before any
     // agent compose/resume — so the Focus runtime state is restored before
@@ -1743,7 +1901,6 @@ export function apply(ctx: Context, config: Config): void {
     // The live Agent is declared before the TUI-facing facade so every read
     // after a transition follows the current Session rather than a startup
     // snapshot. It remains undefined for deferred-start surfaces.
-    let liveAgent: Agent | undefined
     const modelSelections = new DirectModelSelectionOwner(
       defaultModel as unknown as DefaultModelServiceLike,
     )
@@ -1976,7 +2133,12 @@ export function apply(ctx: Context, config: Config): void {
         // installs an Agent-local selection and reconstructs the target
         // Session's durable model choice after resume.
         const fallback = defaultModel.currentSelection()
-        if (lifecycleController.signal.aborted) return
+        if (lifecycleController.signal.aborted) {
+          // No owner exists yet and the full fiber disposer is not
+          // registered: close the diagnostics handle (idempotent).
+          diag.dispose()
+          return
+        }
         handle = await backend.sessionLifecycle.resume({
           resumeSessionId: SessionId(sessionId),
           provider: fallback.provider,
@@ -2021,6 +2183,9 @@ export function apply(ctx: Context, config: Config): void {
         if (lifecycleController.signal.aborted && !resumeResolved) {
           startupStatus.clear()
           diag.debug('startup resume cancelled', { session: sessionId })
+          // No owner was published and the full fiber disposer is not
+          // registered: close the diagnostics handle (idempotent).
+          diag.dispose()
           return
         }
         // Suspend the pre-mount status BEFORE the failure logs: the
@@ -2046,7 +2211,7 @@ export function apply(ctx: Context, config: Config): void {
       // session at all — zero agent, zero log, zero persistence — and the
       // first user message creates it (see ensureSession below).
     }
-    let liveHandle = handle?.direct?.ownerHandle as AgentHandle | undefined
+    liveHandle = handle?.direct?.ownerHandle as AgentHandle | undefined
     liveAgent = handle?.direct?.agent as Agent | undefined
     // The completion-notification controller follows the live identity:
     // a resumed idle session must never notify (no observed running).
@@ -2058,7 +2223,15 @@ export function apply(ctx: Context, config: Config): void {
       // and STAYS until the barrier completes (the catalog prefetch can
       // take seconds; a cleared line would read as a hang again).
       startupStatus.show('Preparing conversation…')
-      await liveAgent.whenIdle()
+      // The pre-mount whenIdle does NOT observe the lifecycle signal, and
+      // the full surface disposer is not registered yet (the pre-mount
+      // abort path below has not been reached) — an early HMR/app disposal
+      // would otherwise leave this await hanging forever and the
+      // just-created owner would never be retired. Cancel the agent on
+      // abort so whenIdle settles, then the pre-mount abort path below
+      // retires the owner.
+      const resumedAgent = liveAgent
+      await whenIdleOrAbort(resumedAgent, lifecycleController.signal)
     }
     // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
     // a resumed agent prefetches its effective catalog (a live read emits no
@@ -2162,7 +2335,7 @@ export function apply(ctx: Context, config: Config): void {
     /** The ONE writer for the live session: every path that changes which
      * session owns the surface — /new, /fork, rewind, `/sessions` switch,
      * the first-session creation — runs its WHOLE workflow (prepare/create
-     * → flush → dispose old → assign new → generation bump) inside
+     * → flush → COMMIT (assign new + generation bump) → retire old) inside
      * {@link transitionGate}. Without the gate a transition can interleave
      * with another: a fork child could be created (and its seed published
      * to persistence) before a stale check sees the surface already moved —
@@ -2173,12 +2346,9 @@ export function apply(ctx: Context, config: Config): void {
      * `createForkedAgent` (the create itself is inside the exclusive
      * section), so a stale rewind never creates a child at all.
      * @see SessionTransitionGate */
-    const transitionGate = new SessionTransitionGate()
-    // The writer/transition barrier: transitions freeze TUI writers and
-    // wait for in-flight ones to drain; writers run inside runWriter so a
-    // transition started later can never interleave with a write already
-    // awaiting a provider/IO (convergence plan phase 3).
-    const operationBarrier = new SessionOperationBarrier()
+    // (The transition gate and operation barrier are constructed BEFORE the
+    // first Agent can exist — see the hoisted declarations above — so the
+    // retirement coordinator is fully wired before any owner is created.)
 
     /**
      * The ONE session-transition transaction, shared by /new, /fork,
@@ -2205,9 +2375,11 @@ export function apply(ctx: Context, config: Config): void {
      *      durable rollback);
      *   4. COMMIT — a synchronous critical section (generation bump, live
      *      handle/agent replacement) with no awaits between its steps;
-     *   5. RETIRE — old-handle dispose (now idle: no abort closures), child
-     *      whenIdle, surface rebuild, catalog refresh — failures WARN ONLY,
-     *      the committed child always stands.
+     *   5. RETIRE — retire the old Direct owner in the fixed order
+     *      (cancel → idle → drain continuable descendants → final flush →
+     *      dispose — see src/runtime/direct/owned-session-retirement.ts),
+     *      then child whenIdle, surface rebuild, catalog refresh —
+     *      failures WARN ONLY, the committed child always stands.
      *
      * Must be called inside {@link transitionGate} (via
      * `withSessionTransition` or the rewind commit's own gate wrapper).
@@ -2225,6 +2397,7 @@ export function apply(ctx: Context, config: Config): void {
         const opening = { id: steps.target.id, events: [] as SessionEvent[] }
         openingSession = opening
       const oldHandle = liveHandle
+      const oldAgent = liveAgent
       return runTransitionTo<T>({
         quiesceOld: async () => {
           if (liveAgent === undefined) return
@@ -2232,8 +2405,12 @@ export function apply(ctx: Context, config: Config): void {
           // produce turn events, so the final flush below is truly final.
           // (A /new or /fork while the agent is busy now WAITS for the
           // current activity instead of aborting it — the deliberate
-          // product semantics, see docs/concurrency.md.)
-          await liveAgent.whenIdle()
+          // product semantics, see docs/concurrency.md.) The wait is
+          // abort-aware: an exit during the quiesce cancels the CURRENT
+          // agent (which may be a NEW owner committed by an earlier queued
+          // transition), so the transition settles instead of hanging past
+          // the appExit watchdog.
+          await whenIdleOrAbort(liveAgent, lifecycleController.signal)
           // Final flush before the switch. The DSH SessionWriteLease
           // (kernel flock) is the only cross-process writer authority, so
           // no TUI-side lock bookkeeping is needed around the flush.
@@ -2288,23 +2465,50 @@ export function apply(ctx: Context, config: Config): void {
         },
         retireOld: async (next) => {
           const retired: string[] = []
-          // 1. Dispose the OLD handle FIRST: whenIdle only idles the agent
-          // machine — session-scoped async writers (e.g. the title
-          // generator awaiting a provider) are aborted only by
-          // session/disposed, which the dispose fires.
-          if (oldHandle !== undefined) {
-            try {
-              await oldHandle.dispose()
-            } catch (error) {
+          // 1. Retire the OLD Direct owner in the fixed order
+          //    cancel → idle → descendants → final flush → dispose (the
+          //    same order as the official DSH ACP session close). The
+          //    pre-commit quiesce already idled + flushed; this post-commit
+          //    pass covers the window where the old agent was re-woken by a
+          //    Host-side continuation, drains its continuable descendants
+          //    (the core of the exit-retirement fix), establishes the final
+          //    durability boundary, and releases the old handle. Every
+          //    phase failure is contained — the committed child always
+          //    stands.
+          if (oldHandle !== undefined && oldAgent !== undefined) {
+            const report = await retireDirectOwnedSession({
+              cancel: () => oldAgent.cancel({ kind: 'user' }),
+              whenIdle: () => oldAgent.whenIdle(),
+              drainDescendants: async () => {
+                const subagents = ctx.get('subagents') as {
+                  drainContinuableDescendants?(parents: readonly unknown[]): Promise<void>
+                } | undefined
+                await subagents?.drainContinuableDescendants?.([oldAgent])
+              },
+              flush: async () => { await sessions.flush(oldAgent.session) },
+              disposeOwner: () => oldHandle.dispose(),
+            })
+            for (const failure of report.failures) {
               // A failed dispose means the old session may still have
               // writers; the child stays current and the failure is
               // recorded (the DSH SessionWriteLease still guards the
               // session cross-process).
-              retired.push(`old handle dispose: ${safeErrorMessage(error)}`)
+              retired.push(`old ${failure.phase}: ${failure.error}`)
             }
           }
           try {
-            await (directAgentOf(next) as Agent).whenIdle()
+            // The child quiesce is abort-aware too: an exit during this
+            // post-commit phase (with further transitions queued) must
+            // cancel the NEW owner instead of hanging past the watchdog.
+            // When the lifecycle aborted, the surface is already disposed
+            // and the retirement takes over: skip the surface
+            // initialization below (it would repaint into the disposed
+            // app) and let the committed child stand.
+            const aborted = await whenIdleOrAbort(directAgentOf(next) as Agent, lifecycleController.signal)
+            if (aborted) {
+              retired.push('child quiesce aborted by lifecycle')
+              return
+            }
           } catch (error) {
             retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
           }
@@ -2841,10 +3045,13 @@ export function apply(ctx: Context, config: Config): void {
     // command item). Hoisted with the whole-footer slots for the same TDZ
     // guards; cleanup disposes it so no child/timer survives a remount.
     let footerDynamicItemRuntime: FooterDynamicItemRuntime | undefined
-    // Idempotent teardown: abort lifecycle loads, stop the TUI, close diag.
-    // Shared by /exit, the effect cleanup, and the startup-failure path.
+    // Idempotent CLIENT-SURFACE teardown: abort lifecycle loads, stop the
+    // TUI. Shared by /exit, the effect cleanup, and the startup-failure
+    // path. The Direct owned-session retirement is a SEPARATE step
+    // (retireOwnedSession below) that runs after the surface stops — diag
+    // stays open until the retirement diagnostics are recorded.
     let cleanedUp = false
-    const cleanup = (): void => {
+    const disposeSurface = (): void => {
       if (cleanedUp) return
       cleanedUp = true
       // Fence the completion-notification controller: after teardown a
@@ -2918,20 +3125,21 @@ export function apply(ctx: Context, config: Config): void {
       // makes a stale detach a no-op (P1).
       extensionService?.detachSurface(extensionHost?.surfaceId)
       extensionHost = undefined
-      diag.dispose()
+      // NOTE: diag.dispose() is NOT here — the Direct owned-session
+      // retirement (retireOwnedSession) records its diagnostics first and
+      // closes diag last (see below).
     }
     // The ONE exit orchestration, shared by every exit entry (the exit keys,
-    // /exit, /quit): flush with a hard timeout → record → idempotent cleanup
-    // → warn on a failed/timed-out flush → resume hint → process exit. A
-    // later request while one is in flight is a no-op (createExitController
-    // latches), so a command plus a key can never double-flush or double-exit.
+    // /exit, /quit): latch once → dispose/restore the Client surface →
+    // resume-hint policy → request appExit. A later request while one is
+    // in flight is a no-op (createExitController latches), so a command
+    // plus a key can never double-cleanup or double-exit. The Direct
+    // owned-session retirement is NOT awaited here: it runs inside the
+    // application-tree disposal that appExit starts, under the DSH
+    // process-shutdown watchdog (see docs/concurrency.md).
     const { requestExit } = createExitController({
-      session: () => liveAgent?.session as ExitSessionLike | undefined,
-      flush: (session) => sessions.flush(session as Parameters<typeof sessions.flush>[0]),
-      timeoutMs: EXIT_FLUSH_TIMEOUT_MS,
       diag,
-      cleanup,
-      warn: (message) => process.stderr.write(`\n${color.textDim('Warning:')} ${message}\n`),
+      cleanup: disposeSurface,
       hint: (message) => process.stdout.write(`\n${message}\n`),
       resumeHint: () => {
         const resume = resumeCommand(runningProfile(), liveAgent?.session.id ?? '')
@@ -2944,13 +3152,40 @@ export function apply(ctx: Context, config: Config): void {
     // the fatal startup path.
     if (lifecycleController.signal.aborted) {
       startupStatus.clear()
+      // A pre-mount unload AFTER the resume succeeded: the fiber disposer
+      // below was never registered, so retire the Direct owner here before
+      // returning (the transition gate / barrier / retirement helper are
+      // all defined by this point — the resume that produced the live
+      // agent ran after them). Without a live owner there is nothing to
+      // retire; close the diagnostics handle either way (idempotent).
+      if (liveAgent !== undefined && liveHandle !== undefined) {
+        await retireOwnedSession()
+      } else {
+        diag.dispose()
+      }
       return
     }
     // Stop the TUI when this fiber is disposed (a loader hot-reload unloads
     // the row; the reloaded row starts its own instance in the same process).
+    // The disposer is ASYNC: the fiber unload awaits it (Cordis contract), so
+    // an HMR unload retires the Direct owned session exactly like an
+    // interactive exit — surface cleanup first, then the Host retirement.
+    // A throwing surface step must NEVER skip the retirement: the surface
+    // teardown is protected, the error is recorded (diag is still open —
+    // retireOwnedSession closes it last), and the retirement promise is
+    // always returned.
     ctx.effect(function* () {
       yield () => {
-        cleanup()
+        try {
+          disposeSurface()
+        } catch (error) {
+          try {
+            diag.error('surface dispose failed', { error: safeErrorMessage(error) })
+          } catch {
+            // No lower sink.
+          }
+        }
+        return retireOwnedSession()
       }
     })
 
@@ -4863,8 +5098,9 @@ export function apply(ctx: Context, config: Config): void {
       },
       onExit: () => {
         // Keyboard exit requests route through the SAME exit orchestration as
-        // /exit and /quit (createExitController above): flush with a hard
-        // timeout, idempotent cleanup, warning, resume hint, process exit.
+        // /exit and /quit (createExitController above): latch once, dispose
+        // the Client surface, resume hint, process exit — the Direct
+        // owned-session retirement runs inside the appExit disposal.
         requestExit()
       },
       onCancel: () => {
@@ -6745,7 +6981,13 @@ export function apply(ctx: Context, config: Config): void {
         // so failures are recorded, never a fallback (the same
         // retire-warn-only semantics as every other transition).
         try {
-          await liveAgent.whenIdle()
+          const aborted = await whenIdleOrAbort(liveAgent, lifecycleController.signal)
+          if (aborted) {
+            // The lifecycle aborted during the first-session quiesce: the
+            // surface is disposed and the retirement takes over — skip the
+            // surface initialization below.
+            return
+          }
         } catch (error) {
           diag.warn('first session whenIdle failed', { error: safeErrorMessage(error) })
         }
@@ -7586,7 +7828,7 @@ export function apply(ctx: Context, config: Config): void {
         })),
       }
     })
-  })().catch((error: unknown) => {
+  })().catch(async (error: unknown) => {
     // Terminal-total final catch of the startup lifecycle root: error
     // observation, logging, abort, dispose and exit are each individually
     // protected, so a hostile rejection or a throwing dependency can never
@@ -7621,10 +7863,50 @@ export function apply(ctx: Context, config: Config): void {
     } catch {
       // The abort must not block dispose/exit.
     }
+    // A startup failure AFTER the Direct owner was created (the resume
+    // succeeded, then a later initialization threw) must still retire the
+    // owned session — the SAME memoized teardown the fiber disposer uses.
+    // The wait is BOUNDED: a busy LLM could hang the retirement's whenIdle,
+    // and the fatal exit must never wait unboundedly in front of appExit
+    // (the same constraint as the interactive exit). When the fiber
+    // disposer is registered, the appExit disposal below joins the same
+    // memoized promise under the DSH process-shutdown watchdog; when it is
+    // NOT registered (a pre-mount failure), this bounded wait is the only
+    // window the retirement gets before the process exits — the bound is
+    // generous because the retirement is cancel-first and a healthy
+    // teardown settles in milliseconds. diag is closed by the
+    // retirement's own finalizer (or by the no-owner branch below).
     try {
-      diag.dispose()
+      if (liveAgent !== undefined && liveHandle !== undefined) {
+        const retirement = retireOwnedSessionRef?.()
+        if (retirement !== undefined) {
+          let timer: NodeJS.Timeout | undefined
+          try {
+            await Promise.race([
+              retirement,
+              new Promise<void>(resolve => { timer = setTimeout(resolve, 2000) }),
+            ])
+          } finally {
+            if (timer !== undefined) clearTimeout(timer)
+          }
+        } else {
+          // Defensive only: the coordinator is defined BEFORE any owner can
+          // exist (see the hoisted declaration), so an owner without a
+          // coordinator is unreachable. Close diag and exit.
+          diag.dispose()
+        }
+      } else {
+        diag.dispose()
+      }
     } catch {
-      // The dispose must not block the process exit.
+      // TDZ (startup failed before the live-owner declarations ran — no
+      // owner existed then either) or a synchronous retirement failure:
+      // never block the fatal exit.
+      try {
+        diag.dispose()
+      } catch {
+        // The dispose must not block the process exit.
+      }
     }
     try {
       exit(1)

@@ -110,3 +110,31 @@ test('a transition in flight is visible to concurrent submissions (write fence)'
   await pending
   assert.equal(gate.busy, false, 'the fence lifts once the transition settles')
 })
+
+// ── exit retirement: pending covers the queued-but-not-started window ──────
+
+test('pending reports a QUEUED transition before it starts (the exit pre-cancel window)', async () => {
+  const gate = new SessionTransitionGate()
+  const block = deferred<void>()
+  // Immediately after run() returns, the task is QUEUED but not started:
+  // busy is false, pending is true — the exact window the exit pre-cancel
+  // must cover (a transition about to quiesce the old agent, whose
+  // whenIdle does not observe the lifecycle signal).
+  const first = gate.run(async () => { await block.promise })
+  assert.equal(gate.busy, false, 'the queued transition has not started yet')
+  assert.equal(gate.pending, true, 'the queued transition is pending before it starts')
+  await settle()
+  assert.equal(gate.busy, true, 'the running transition is busy')
+  assert.equal(gate.pending, true, 'the running transition is pending')
+  // A second transition queues behind the first: busy stays true (the
+  // first still runs) and pending stays true.
+  const second = gate.run(async () => {})
+  await settle()
+  assert.equal(gate.busy, true, 'the first transition still runs')
+  assert.equal(gate.pending, true, 'the queued transition keeps pending true')
+  block.resolve()
+  await first
+  await second
+  assert.equal(gate.busy, false, 'no transition runs after both settle')
+  assert.equal(gate.pending, false, 'no transition is queued after both settle')
+})
