@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Direct sessions are now fully retired on exit.** Exiting the TUI now
+  retires the main Agent, its continuable subagents and Agent-scoped
+  background jobs in a fixed order: cancel the main Agent and await
+  quiescence → drain continuable descendants → final persistence flush →
+  release the AgentHandle. Previously the process could linger for ~5
+  minutes after exit while a continuable subagent stayed alive; exit now
+  completes within seconds, and the diagnostics distinguish surface close,
+  Host retirement and launcher exit. Session switches (/new, /fork, rewind,
+  /sessions) also retire the old owner's continuable descendants after the
+  commit.
+
 ## [0.4.1] - 2026-09-04
 
 ### Installation and version pairing

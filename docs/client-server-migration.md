@@ -48,6 +48,21 @@ The semantic catalog names these operations explicitly as
 `selectSessionModel`, so a future Remote adapter can map them without moving
 Agent, Session, or Context objects across the boundary.
 
+### Direct ownership retirement (pre-M2)
+
+The current Direct backend owns the in-process top-level Agent and must
+quiesce/drain/dispose it during runner teardown (interactive exit, HMR
+unload, and post-commit session transitions). The retirement is a
+**Direct-only ownership escape** (`src/runtime/direct/owned-session-retirement.ts`,
+structural callbacks only — no semantic-port change, no new Host coupling)
+retained until M8 and is NOT a Remote session-close semantic. A future
+Remote client closes its client-side observation/connection state through
+official DSH client contracts; this fix does not invent a host
+session-destroy RPC, does not add `close()`/`dispose()`/`drainSubagents()`
+to the `SessionLifecycle` port, and does not expose
+`drainContinuableDescendants` as a cross-backend capability. M2 remains
+NOT STARTED and Direct remains the production backend.
+
 ### Lifecycle creation cancellation (Stage B / pre-M2)
 
 `CreateSessionRequest` and `ResumeSessionRequest` may carry a client-local,

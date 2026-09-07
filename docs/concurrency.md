@@ -122,7 +122,9 @@ is the whole point:
    session stays current and the user may retry.
 4. COMMIT — a synchronous critical section (generation bump, live
    handle/agent replacement) with no awaits between its steps.
-5. RETIRE — dispose the old handle; child surface/catalog work is
+5. RETIRE — retire the old Direct owner (cancel → idle → drain
+   continuable descendants → final flush → dispose — see the Direct
+   top-level Agent retirement section); child surface/catalog work is
    best-effort and the committed child always stands.
 
 A rejected `create`/`resume` is handled WITHOUT any publication-phase
@@ -169,6 +171,65 @@ refused (`TransitionInProgressError`).
   source identity captured when the picker opened must still own the
   surface, or the selection is rejected as `stale` (a stale selection
   never creates a child).
+
+## Direct top-level Agent retirement
+
+The Direct backend runs the TUI and the Host in one process and the TUI
+itself creates the top-level Agent, so closing the TUI surface must also
+retire that Direct ownership. This is a **Direct-only ownership escape**
+(`src/runtime/direct/owned-session-retirement.ts`), NOT a semantic port and
+NOT a future Remote `session.close` RPC — a future Remote client closes its
+client-side observation/connection state through official DSH client
+contracts and never destroys the Host Agent.
+
+The retirement order is fixed (mirroring the official DSH ACP session
+close):
+
+```text
+cancel → idle → descendants → flush → dispose
+```
+
+- `cancel` — `agent.cancel({ kind: 'user' })` stops new main-Agent work.
+- `idle` — `agent.whenIdle()` awaits the main Agent's quiescence.
+- `descendants` — `subagents.drainContinuableDescendants([agent])` closes
+  continuable admission below the exact parent, stops visible descendant
+  Activations, and releases their `AgentHandle`s child-first. This is the
+  piece that previously let a continuable subagent keep the process alive
+  for minutes after the TUI exited.
+- `flush` — the FINAL `sessions.flush` runs AFTER the descendant drain, so
+  the durability boundary includes every descendant settlement.
+- `dispose` — `AgentHandle.dispose()` releases the persistence writer and
+  stops Agent-scoped background jobs (the TUI never enumerates/kills jobs
+  itself — DSH jobs lifecycle is bound to the Agent scope).
+
+Every phase is individually contained: a failure is recorded and the next
+phase still runs, so one failure can never re-create a handle leak (a
+skipped dispose would pin the old session lease).
+
+Where it runs:
+
+- **Interactive exit** (`/exit`, Ctrl+C/D, plain `exit`): the exit
+  controller only latches, disposes the Client surface, prints the resume
+  hint and requests `appExit`. The retirement runs inside the
+  application-tree disposal that `appExit` starts, under the DSH
+  process-shutdown watchdog — the TUI never awaits a potentially long Host
+  teardown in front of `appExit`.
+- **HMR / runner fiber unload**: the fiber disposer is async (Cordis
+  unloads await it) and runs the SAME memoized retirement — one teardown
+  promise shared by every teardown path, never four copies.
+- **Successful session transition** (`/new`, `/fork`, rewind, `/sessions`
+  switch): the pre-commit quiesce (whenIdle + flush) is preserved; AFTER
+  the commit the old owner is retired with the same fixed order, so the old
+  Agent's continuable descendants are drained and its final flush lands
+  after the drain. A failed child create never drains or disposes the old
+  owner — the old session stays current (the transaction semantics are
+  unchanged).
+
+The process-local transition gate / operation barrier coordinate only the
+TUI's Client writers; they do not take over Host ownership. The retirement
+serializes against an in-flight transition through the same gate + barrier
+(a FIFO no-op task waits for a running transition to settle — the lifecycle
+abort already cancelled its create/resume), then retires the CURRENT owner.
 
 ## The submit path is guard-free (the decision)
 

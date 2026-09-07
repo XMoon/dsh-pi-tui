@@ -62,10 +62,11 @@ guarantee.
 ## Lifecycle roots are equally total
 
 Startup and exit (`src/index.ts` root catch, `src/exit.ts`) protect every
-step individually (session read, diag, cleanup, warn, hint, exit), so no
-throw can skip teardown or leak a rejection. `flushWithTimeout` returns a
-deterministic `failed` outcome for any hostile rejection (never a misreported
-`timed-out`), and the disabled-timeout path always settles.
+step individually (diag, cleanup, hint, exit), so no throw can skip
+teardown or leak a rejection. The Direct owned-session retirement
+(`src/runtime/direct/owned-session-retirement.ts`) is equally total: every
+phase failure is recorded and the remaining phases still run, so a hostile
+rejection can never skip the final flush or the handle dispose.
 
 ## Where the contract is wired in
 
