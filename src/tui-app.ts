@@ -61,6 +61,7 @@ import {
   detectThemeFromBackground,
   detectThemeFromColorFgBg,
   editorTheme,
+  hexPaint,
   HOST_MARKDOWN_OPTIONS,
   markdownTheme,
   selectListTheme,
@@ -524,9 +525,49 @@ class ResponsiveOverlayFrame extends FocusForwardingFrame {
   }
 }
 
+/** The final whale mascot: 6 rows, round back, big head, thin tail stalk,
+ * small tail fin. The belly stays open — the waterline carries the lower
+ * outline. Pure ASCII; colour is applied at render time. */
+const WELCOME_WHALE = [
+  '        .  .',
+  '         :',
+  "      _.-' `-._             \\/",
+  "    .'         `-.         /",
+  '   |   O          `------._/',
+  ' ~^~^~^~^~^~^~^~^~^~^~^~^~',
+] as const
+
+/** Brand ramp for the whale rows: cyan → blue → indigo. Fixed (not a
+ * semantic token): custom themes do not override the logo gradient. */
+const WELCOME_WHALE_COLORS = [
+  '#56D4DD',
+  '#50BCD4',
+  '#49A3CB',
+  '#438BC2',
+  '#3D73BA',
+  '#3042A8',
+] as const
+
+/** Cells between the whale block and the facts column in side-by-side. */
+const WELCOME_WHALE_GAP = 4
+
+/** Layout breakpoints: >= 72 side-by-side, 40..71 stacked, < 40 compact. */
+const WELCOME_SIDE_BY_SIDE_MIN_WIDTH = 72
+const WELCOME_STACKED_MIN_WIDTH = 40
+
+/** The widest whale row (visible width, ANSI-free). */
+const WELCOME_WHALE_WIDTH = Math.max(...WELCOME_WHALE.map(line => visibleWidth(line)))
+
+/** Facts column alignment: every label padded to this column. */
+const WELCOME_FACT_LABEL_WIDTH = 9
+
 /** The session head card: identity facts, wrapped to the available width so
- * nothing is truncated, framed with a box whose width matches the editor's
- * border below it (a fixed-width rule looked misaligned next to the frame). */
+ * nothing is truncated. Three responsive layouts keep the whale mascot
+ * readable without ever truncating facts:
+ * - width >= 72: whale left, facts right (side-by-side)
+ * - 40 <= width < 72: whale centered above the facts (stacked)
+ * - width < 40: compact text rows, no full whale
+ */
 class WelcomeCard implements Component {
   private facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string } | undefined
   private idle = false
@@ -555,48 +596,95 @@ class WelcomeCard implements Component {
   }
 
   render(width: number): string[] {
-    const facts = this.facts
-    const b = color.border
-    const inner = Math.max(1, width - 4)
-    const renderRow = (line: string): string[] => wrapTextWithAnsi(line, inner).map(wrapped => {
-      const vis = visibleWidth(wrapped)
-      return `${b('│')} ${wrapped}${' '.repeat(Math.max(0, inner - vis))} ${b('│')}`
-    })
-    if (this.idle) {
-      if (this.lastWidth === width && this.cached.length > 0) return this.cached
-      this.lastWidth = width
-      this.cached = [
-        b(`╭${'─'.repeat(Math.max(0, width - 2))}╮`),
-        ...renderRow(color.textMuted('🐋  dsh-pi-tui — type a message to start a session')),
-        b(`╰${'─'.repeat(Math.max(0, width - 2))}╯`),
-      ]
-      return this.cached
-    }
-    if (facts === undefined) return []
     if (this.lastWidth === width && this.cached.length > 0) return this.cached
     this.lastWidth = width
-    // Three columns: the session identity (full id — never truncated), the
-    // model/preset, and the workspace. Each row wraps instead of ellipsizing,
-    // so the box keeps the important facts readable. The card is session
-    // chrome, so it reads muted — never as bright as user/assistant content.
-    const line1 = `🐋  session ${color.textMuted(facts.sessionId)}`
-    const line2 = [
-      color.textMuted(facts.model),
-      facts.preset === undefined ? '' : `preset ${color.textMuted(facts.preset)}`,
-    ].filter(part => part !== '').join(' · ')
-    const line3 = [
-      color.textMuted(facts.cwd),
-      color.textMuted(`v${facts.version}`),
-    ].filter(part => part !== '').join(' · ')
-    // Wrap each line to the box's inner width so long identities read in
-    // full instead of ending in an ellipsis; the box spans the same width
-    // as the editor border below it.
-    this.cached = [
-      b(`╭${'─'.repeat(Math.max(0, width - 2))}╮`),
-      ...[line1, line2, line3].flatMap(renderRow),
-      b(`╰${'─'.repeat(Math.max(0, width - 2))}╯`),
-    ]
+    this.cached = this.buildRows(width)
     return this.cached
+  }
+
+  private buildRows(width: number): string[] {
+    if (this.idle) {
+      const lines = width < WELCOME_STACKED_MIN_WIDTH
+        ? [color.textMuted('🐋 dsh-pi-tui'), color.textMuted('type a message to start a session')]
+        : [color.textMuted('dsh-pi-tui'), color.textMuted('type a message to start a session')]
+      return this.layout(width, lines)
+    }
+    if (this.facts === undefined) return []
+    const lines = width < WELCOME_STACKED_MIN_WIDTH ? this.compactFactLines() : this.factLines()
+    return this.layout(width, lines)
+  }
+
+  /** The three responsive layouts; the whale is never wrapped or cropped. */
+  private layout(width: number, lines: string[]): string[] {
+    if (width >= WELCOME_SIDE_BY_SIDE_MIN_WIDTH) return this.renderSideBySide(width, lines)
+    if (width >= WELCOME_STACKED_MIN_WIDTH) return this.renderStacked(width, lines)
+    return this.renderCompact(width, lines)
+  }
+
+  /** Whale left, facts right; extra wrapped fact rows continue below the
+   * 6 whale rows. */
+  private renderSideBySide(width: number, lines: string[]): string[] {
+    const whale = this.renderWhaleLines()
+    const factsStart = WELCOME_WHALE_WIDTH + WELCOME_WHALE_GAP
+    const factsWidth = Math.max(1, width - factsStart)
+    const facts = lines.flatMap(line => wrapTextWithAnsi(line, factsWidth))
+    const rows: string[] = []
+    const total = Math.max(whale.length, facts.length)
+    for (let index = 0; index < total; index += 1) {
+      const left = index < whale.length ? whale[index]! : ''
+      const right = index < facts.length ? facts[index]! : ''
+      rows.push(`${left}${' '.repeat(Math.max(0, factsStart - visibleWidth(left)))}${right}`)
+    }
+    return rows
+  }
+
+  /** Whale centered above the facts, one blank row between. */
+  private renderStacked(width: number, lines: string[]): string[] {
+    const whale = this.renderWhaleLines()
+    const left = Math.max(0, Math.floor((width - WELCOME_WHALE_WIDTH) / 2))
+    const rows = whale.map(line => `${' '.repeat(left)}${line}`)
+    rows.push('')
+    for (const line of lines) {
+      rows.push(...wrapTextWithAnsi(line, width))
+    }
+    return rows
+  }
+
+  /** Compact text rows; the full whale is not shown. */
+  private renderCompact(width: number, lines: string[]): string[] {
+    return lines.flatMap(line => wrapTextWithAnsi(line, width))
+  }
+
+  /** The whale rows painted with the fixed brand gradient. */
+  private renderWhaleLines(): string[] {
+    return WELCOME_WHALE.map((line, index) => hexPaint(WELCOME_WHALE_COLORS[index]!, line))
+  }
+
+  /** Session facts in the wide/stacked column layout. */
+  private factLines(): string[] {
+    const facts = this.facts!
+    const label = (text: string): string => `${text}${' '.repeat(Math.max(0, WELCOME_FACT_LABEL_WIDTH - text.length))}`
+    return [
+      color.textMuted(`dsh-pi-tui  v${facts.version}`),
+      `${label('model')}${color.textMuted(facts.model)}`,
+      ...(facts.preset === undefined ? [] : [`${label('preset')}${color.textMuted(facts.preset)}`]),
+      `${label('cwd')}${color.textMuted(facts.cwd)}`,
+      `${label('session')}${color.textMuted(facts.sessionId)}`,
+    ]
+  }
+
+  /** Session facts in the compact layout (whale emoji replaces the ASCII). */
+  private compactFactLines(): string[] {
+    const facts = this.facts!
+    return [
+      color.textMuted(`🐋 dsh-pi-tui v${facts.version}`),
+      [
+        color.textMuted(facts.model),
+        facts.preset === undefined ? '' : `preset ${color.textMuted(facts.preset)}`,
+      ].filter(part => part !== '').join(' · '),
+      color.textMuted(facts.cwd),
+      `session ${color.textMuted(facts.sessionId)}`,
+    ]
   }
 }
 
@@ -7259,8 +7347,9 @@ export class TuiApp {
 
   /**
    * Set the session head rendered above the transcript: the session identity,
-   * model, version, preset, and cwd, wrapped to the terminal width with a
-   * full-width rule beneath. Replaces any previous head.
+   * model, version, preset, and cwd, wrapped to the terminal width in the
+   * responsive whale layout (side-by-side / stacked / compact). Replaces any
+   * previous head.
    * @param facts - directory, session id, model, version, and the optional agent preset to display.
    */
   setWelcomeCard(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
@@ -12354,8 +12443,8 @@ export class TuiApp {
   private repaintAllSurfaces(): void {
     // The welcome card keeps its OWN render cache (keyed on width): unlike
     // the Text-based surfaces, clearing the messages view never invalidates
-    // it, so a theme switch would leave its ANSI-baked borders/text in the
-    // OLD palette. Drop the cache here.
+    // it, so a theme switch would leave its ANSI-baked text in the OLD
+    // palette. Drop the cache here.
     this.welcomeCard.invalidate()
     this.rebuildMessages()
     // Extension outlets re-render with the live palette (theme revision).

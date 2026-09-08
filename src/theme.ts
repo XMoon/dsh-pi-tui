@@ -291,6 +291,11 @@ export function themeOptOut(): boolean {
 const chalk = new Chalk({ level: 3 })
 const hex = (token: string): InstanceType<typeof Chalk> => chalk.hex(currentPalette[token as keyof ColorPalette] ?? currentPalette.text)
 
+/** Paint text with an explicit hex colour. Brand assets (the welcome whale
+ * gradient) use a fixed ramp that is NOT a semantic token: it must not
+ * follow the active palette, and custom themes do not override it. */
+export const hexPaint = (hexValue: string, text: string): string => chalk.hex(hexValue)(text)
+
 /** Style helpers by token name. The strong/dim/italic helpers accept an
  * optional TONE OVERRIDE (the footer layout's semantic tone override):
  * the override replaces the token, the style stays. */

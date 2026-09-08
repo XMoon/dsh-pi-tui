@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Welcome card visual refresh.** The session-head card now shows an original round-backed whale ASCII mascot with three responsive layouts: side-by-side (whale left, facts right) at 72+ columns, stacked (whale centered above the facts) at 40–71 columns, and a compact text layout (🐋 title) below 40 columns. The whale keeps a fixed cyan → blue → indigo brand gradient that does not follow theme switches; facts still render in full (long values wrap, never truncate); the idle invitation, the `setWelcomeCard()` contract, and fullscreen scroll/anchor/click mapping are unchanged.
+
 ## [0.4.3-alpha.2] - 2026-09-08
 
 ### Installation and version pairing
