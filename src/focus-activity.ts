@@ -257,7 +257,12 @@ export function focusCollapsedBody(
     lines.push(previewLine('Tool:', preparingDisplay, width))
   } else if (activity.tool !== undefined && toolDisplay !== undefined) {
     const prefix = activity.tool.status === 'ok' ? '✓ ' : activity.tool.status === 'error' ? '✗ ' : ''
-    lines.push(previewLine('Tool:', `${prefix}${toolDisplay}`, width))
+    const active = activity.tool.activeSubCalls
+    if (active !== undefined && active.length > 0) {
+      lines.push(toolLineWithActive(prefix, toolDisplay, activity.tool.name, active, width))
+    } else {
+      lines.push(previewLine('Tool:', `${prefix}${toolDisplay}`, width))
+    }
   }
   if (activity.message !== undefined) {
     lines.push(...previewTailLines('Message:', activity.message.text, width, FOCUS_MESSAGE_MAX_ROWS))
@@ -268,6 +273,42 @@ export function focusCollapsedBody(
   }
   return lines
 }
+
+/** The compact active-sub-call summary: one running child → `Bash running`;
+ * several of the same type → `Bash ×2 running`; mixed types → the first
+ * type (durable dispatch order) plus the remaining running count
+ * (`Bash +1 running`). Titles go through the existing tool-title mapping. */
+function activeSubCallSuffix(active: readonly { name: string; count: number }[]): string {
+  if (active.length === 1) {
+    const { name, count } = active[0]!
+    return `${toolTitle(name)}${count > 1 ? ` ×${count}` : ''} running`
+  }
+  const first = active[0]!
+  const rest = active.slice(1).reduce((sum, entry) => sum + entry.count, 0)
+  return `${toolTitle(first.name)} +${rest} running`
+}
+
+/** The Tool line with the active-sub-call suffix, using the width-degradation
+ * ladder: full root display + suffix → root title + suffix → root title
+ * alone (the active child is never silently truncated away by a long root
+ * description). */
+function toolLineWithActive(
+  prefix: string,
+  toolDisplay: string,
+  rootName: string,
+  active: readonly { name: string; count: number }[],
+  width: number,
+): string {
+  const suffix = activeSubCallSuffix(active)
+  const lead = `Tool:${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth('Tool:')))}`
+  const bodyBudget = width - visibleWidth(lead)
+  const full = `${prefix}${toolDisplay} · ${suffix}`
+  if (bodyBudget > 0 && visibleWidth(full) <= bodyBudget) return previewLine('Tool:', full, width)
+  const degraded = `${prefix}${toolTitle(rootName)} · ${suffix}`
+  if (bodyBudget > 0 && visibleWidth(degraded) <= bodyBudget) return previewLine('Tool:', degraded, width)
+  return previewLine('Tool:', `${prefix}${toolTitle(rootName)}`, width)
+}
+
 
 /**
  * The live Thought disclosure. render() re-reads `now()` on EVERY frame, so

@@ -518,6 +518,142 @@ test('nested PTC bash dispatch attaches to the run_code card subCalls tree', () 
   assert.equal(bash.result, 'file.txt')
   assert.equal(bash.args, JSON.stringify({ cmd: 'ls' }))
   assert.equal(bash.subCallId, 'code-1:code:1')
+  assert.equal(bash.parentCallId, 'code-1')
+  assert.equal(bash.rootCallId, 'code-1')
+})
+
+test('nested PTC dispatch supports recursive grandchild topology', () => {
+  // run_code → child A → child B: the grandchild attaches to child A's
+  // subCalls tree, and every level keeps its own call identity plus the
+  // full parent chain.
+  const messages = foldTranscript([
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'make' },
+    }, 1),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1:code:1'),
+      subCallId: ToolCallId('code-1:code:1:code:1'),
+      name: 'read',
+      arguments: { file: 'nested.ts' },
+    }, 2),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1:code:1:code:1'),
+      subCallId: ToolCallId('code-1:code:1:code:1'),
+      name: 'read',
+      arguments: { file: 'nested.ts' },
+      isError: false,
+      content: [{ type: 'text', text: 'nested content' }],
+    }, 3),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'make' },
+      isError: false,
+      content: [{ type: 'text', text: 'built' }],
+    }, 4),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('msg-1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        source: { kind: 'tool', callId: ToolCallId('code-1') },
+      },
+    }, 5),
+  ])
+  assert.deepEqual(kinds(messages), ['tool'])
+  const code = messages[0]
+  assert.ok(code !== undefined && code.kind === 'tool')
+  const bash = code.subCalls?.[0]
+  assert.ok(bash !== undefined)
+  assert.equal(bash.name, 'bash')
+  assert.equal(bash.subCallId, 'code-1:code:1')
+  assert.equal(bash.parentCallId, 'code-1')
+  assert.equal(bash.rootCallId, 'code-1')
+  const read = bash.subCalls?.[0]
+  assert.ok(read !== undefined, 'the grandchild must attach to child A, not the root')
+  assert.equal(read.name, 'read')
+  assert.equal(read.subCallId, 'code-1:code:1:code:1')
+  assert.equal(read.parentCallId, 'code-1:code:1')
+  assert.equal(read.rootCallId, 'code-1')
+  assert.equal(read.status, 'ok')
+  assert.equal(read.result, 'nested content')
+})
+
+test('nested PTC siblings keep their durable dispatch order', () => {
+  const messages = foldTranscript([
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'read',
+      arguments: { file: 'a.ts' },
+    }, 1),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:2'),
+      name: 'bash',
+      arguments: { cmd: 'ls' },
+    }, 2),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:3'),
+      name: 'edit',
+      arguments: { file: 'b.ts' },
+    }, 3),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'read',
+      arguments: { file: 'a.ts' },
+      isError: false,
+      content: [{ type: 'text', text: 'a' }],
+    }, 4),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:2'),
+      name: 'bash',
+      arguments: { cmd: 'ls' },
+      isError: false,
+      content: [{ type: 'text', text: 'b' }],
+    }, 5),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:3'),
+      name: 'edit',
+      arguments: { file: 'b.ts' },
+      isError: false,
+      content: [{ type: 'text', text: 'c' }],
+    }, 6),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('msg-1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        source: { kind: 'tool', callId: ToolCallId('code-1') },
+      },
+    }, 7),
+  ])
+  const code = messages[0]
+  assert.ok(code !== undefined && code.kind === 'tool')
+  const names = code.subCalls?.map(child => child.name)
+  assert.deepEqual(names, ['read', 'bash', 'edit'], 'siblings keep the durable dispatch/start order')
+  const results = code.subCalls?.map(child => child.result)
+  assert.deepEqual(results, ['a', 'b', 'c'], 'each settle updates its own child in place')
 })
 
 test('nested PTC dispatch with an error outcome keeps the durable error status', () => {
@@ -719,10 +855,11 @@ test('a nested PTC read child never joins the top-level read grouping', () => {
   assert.ok(group.result.includes('aaa') && group.result.includes('bbb'))
 })
 
-test('an orphan nested dispatch creates no surface node', () => {
+test('an orphan nested dispatch creates no surface node and connects when the parent appears', () => {
   // A start/settle without a known parent (an incomplete replay fragment)
   // must not fabricate a top-level card: sub-calls never join the surface
-  // flow.
+  // flow. The facts are parked privately and connected when the parent
+  // run_code call arrives.
   const orphanStart = foldTranscript([
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
@@ -745,6 +882,69 @@ test('an orphan nested dispatch creates no surface node', () => {
     }, 0),
   ])
   assert.deepEqual(kinds(orphanSettle), [])
+
+  // The parked start connects once the parent run_code call arrives.
+  const connected = foldTranscript([
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'ls' },
+    }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('msg-2'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        source: { kind: 'tool', callId: ToolCallId('code-1') },
+      },
+    }, 2),
+  ])
+  assert.deepEqual(kinds(connected), ['tool'])
+  const code = connected[0]
+  assert.ok(code !== undefined && code.kind === 'tool')
+  assert.equal(code.name, 'run_code')
+  const bash = code.subCalls?.[0]
+  assert.ok(bash !== undefined, 'the parked orphan start must connect to the parent')
+  assert.equal(bash.name, 'bash')
+  assert.equal(bash.status, 'running')
+
+  // A parked settle applies when its start arrives after it.
+  const settled = foldTranscript([
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'ls' },
+      isError: false,
+      content: [{ type: 'text', text: 'file.txt' }],
+    }, 0),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'ls' },
+    }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 2),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('msg-3'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        source: { kind: 'tool', callId: ToolCallId('code-1') },
+      },
+    }, 3),
+  ])
+  const settledCode = settled[0]
+  assert.ok(settledCode !== undefined && settledCode.kind === 'tool')
+  const settledBash = settledCode.subCalls?.[0]
+  assert.ok(settledBash !== undefined)
+  assert.equal(settledBash.status, 'ok', 'the parked settle must apply to the connected child')
+  assert.equal(settledBash.result, 'file.txt')
 })
 
 test('an outer run_code error result keeps the error status', () => {

@@ -879,3 +879,34 @@ test('transcriptSearchText is the single corpus source (tool = name args result)
   assert.equal(transcriptSearchText(running), 'bash {"command":"echo hi"} ')
   assert.ok(transcriptSearchText(running).toLowerCase().includes('echo hi'))
 })
+
+test('transcriptSearchText recursively includes PTC sub-call descendants', () => {
+  // A PTC root card's corpus must include its nested sub-calls so `/search`
+  // still finds nested output and locates the root Code card.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'code-1', 'run_code', { code: 'print(1)' }, 0),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'run tests' },
+    }, 2),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'run tests' },
+      isError: false,
+      content: [{ type: 'text', text: '128 passed' }],
+    }, 3),
+  ])
+  const root = folder.messages()[0]!
+  const corpus = transcriptSearchText(root)
+  assert.ok(corpus.includes('run_code'), 'the root name stays in the corpus')
+  assert.ok(corpus.includes('bash'), 'the nested child name is searchable')
+  assert.ok(corpus.includes('128 passed'), 'the nested child result is searchable')
+})

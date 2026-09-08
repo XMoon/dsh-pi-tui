@@ -9239,12 +9239,12 @@ export class TuiApp {
       card.addChild(new Text(rows.join('\n'), 0, 0))
     }
     // PTC nested sub-calls (alpha.2 tool/code-dispatch events): recursively
-    // attached to the parent card, never top-level surface items. Folded
-    // cards show one indented header row per child; expanded cards show the
-    // child header plus its result body, recursively.
+    // attached to the parent card, never top-level surface items. The child
+    // tree is ALWAYS visible under the parent — the root Code disclosure
+    // only controls the run_code program/details, never the sub-calls.
     if (message.subCalls !== undefined && message.subCalls.length > 0) {
       for (const child of message.subCalls) {
-        this.renderSubCall(card, child, width, 2, expanded)
+        this.renderSubCall(card, child, width, 2)
       }
     }
     return card
@@ -9253,13 +9253,12 @@ export class TuiApp {
   /** One PTC nested sub-call row group inside its parent tool card. The
    * child reuses the ordinary tool-card header semantics (toolCardHeader +
    * status pill + icon) and its raw result text; deeper nesting indents
-   * further. */
+   * further. Child content is independent of the root disclosure state. */
   private renderSubCall(
     card: Container,
     child: Extract<TranscriptMessage, { kind: 'tool' }>,
     width: number,
     indent: number,
-    expanded: boolean,
   ): void {
     const header = toolCardHeader(child.name, child.args, this.workspaceRoot)
     const pill = child.status === 'ok'
@@ -9271,16 +9270,14 @@ export class TuiApp {
     const head = color.textDim(`${icon}${header.title}${header.summary === '' ? '' : ` ${header.summary}`}`)
     const pad = ' '.repeat(indent)
     card.addChild(new Text(truncateToWidth(`${pad}${head} ${pill}`, width, '…'), 0, 0))
-    if (expanded) {
-      if (child.result !== '') {
-        for (const line of child.result.split('\n')) {
-          card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
-        }
+    if (child.result !== '') {
+      for (const line of child.result.split('\n')) {
+        card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
       }
-      if (child.subCalls !== undefined) {
-        for (const grand of child.subCalls) {
-          this.renderSubCall(card, grand, width, indent + 2, expanded)
-        }
+    }
+    if (child.subCalls !== undefined) {
+      for (const grand of child.subCalls) {
+        this.renderSubCall(card, grand, width, indent + 2)
       }
     }
   }
