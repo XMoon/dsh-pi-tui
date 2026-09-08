@@ -9345,9 +9345,10 @@ export class TuiApp {
     let rows = 1
     const header = toolCardHeader(child.name, child.args, this.workspaceRoot)
     // The DISPLAY status: the durable lifecycle status plus the alpha.2
-    // terminal contract (a valid non-spill [exit code: N] / signal marker
-    // renders a bash/pwsh child failed even when the tool call settled
-    // normally).
+    // terminal contract (a trailing [exit code: N] / [killed by signal:
+    // ...] marker renders a bash/pwsh child failed even when the tool call
+    // settled normally; a preceding truncation notice does not affect the
+    // official parseExitStatus).
     const displayStatus = subCallDisplayStatus(child)
     const pill = displayStatus === 'ok'
       ? color.success('[ok]')

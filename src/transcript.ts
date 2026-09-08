@@ -429,9 +429,11 @@ export function textOf(blocks: readonly ContentBlock[]): string {
  * parsing). A nonzero exit or a signal is a terminal failure even when the
  * tool call itself settled with `isError: false`; a missing marker is
  * NOT a failure — the status is never invented from text. */
-/** The PTC sub-call tree depth cap (upstream alpha.2 Web MAX_DEPTH): every
- * recursive consumer stops below this depth so a corrupted/replayed input
- * can never overflow the stack. */
+/** The PTC sub-call tree depth cap (upstream alpha.2 Web MAX_DEPTH): the
+ * ingestion gate in {@link attachSubCall} rejects any edge that would push
+ * a sub-call past this depth (root = depth 1, so at most 255 child levels),
+ * and the recursive consumers keep a defensive guard at the same bound — a
+ * corrupted/replayed input can never overflow the stack. */
 export const PTC_MAX_DEPTH = 256
 
 export function terminalFailureFromResult(result: string): boolean {
@@ -443,9 +445,11 @@ export function terminalFailureFromResult(result: string): boolean {
 
 /** The DISPLAY status of one PTC sub-call: the durable lifecycle status
  * (`isError` only) PLUS the alpha.2 terminal contract for bash/pwsh — a
- * valid (non-spill) `[exit code: N]` / `[killed by signal: ...]` tail
- * marker renders the child failed even when the tool call settled
- * normally. Spilled/generic content never invents a status. */
+ * trailing `[exit code: N]` / `[killed by signal: ...]` marker (parsed by
+ * the official `parseExitStatus`; a preceding truncation notice does not
+ * affect it) renders the child failed even when the tool call settled
+ * normally. Spilled/generic content without a marker never invents a
+ * status. */
 export function subCallDisplayStatus(child: {
   name: string
   status: 'ok' | 'error' | 'running'
@@ -953,6 +957,10 @@ export class TranscriptFolder {
   /** Every mounted PTC sub-call card by subCallId, for parent lookup of
    * deeper nesting (a sub-call's parent may itself be a sub-call). */
   private readonly subCallIndex = new Map<string, TranscriptToolMessage>()
+  /** The depth of every mounted PTC sub-call (root = 1): the ingestion-side
+   * topology gate keeps the tree within {@link PTC_MAX_DEPTH} so the
+   * recursive consumers only need a defensive fallback. */
+  private readonly subCallDepth = new Map<string, number>()
   /** PTC sub-call events whose parent is not yet mounted (an incomplete
    * replay fragment): start/settle facts are parked here and connected
    * when the parent appears — never promoted to top-level surface rows. */
@@ -1090,10 +1098,15 @@ export class TranscriptFolder {
   }
 
   /** Attach one PTC sub-call to its real parent card (never the top-level
-   * surface flow), then connect any parked orphans waiting for it. A
-   * duplicate subCallId with a conflicting identity is impossible on a
-   * valid alpha.2 durable stream — fail fast instead of silently keeping
-   * one. */
+   * surface flow), then connect any parked orphans waiting for it and apply
+   * a parked settle for the same subCallId (a settle may arrive before its
+   * start when the parent is already mounted). This method is the topology
+   * gate for the whole sub-call tree: every edge is validated here (root
+   * collision, ancestry, depth cap), so the mounted tree always satisfies
+   * the alpha.2 cap and a corrupted/replayed input can never overflow the
+   * stack during ingestion. A duplicate subCallId with a conflicting
+   * identity is impossible on a valid alpha.2 durable stream — fail fast
+   * instead of silently keeping one. */
   private attachSubCall(
     parent: TranscriptToolMessage,
     parentId: string,
@@ -1121,6 +1134,37 @@ export class TranscriptFolder {
       }
       return
     }
+    // A parked start for the same subCallId (its parent was unknown when it
+    // arrived) must agree with this one — a conflict is impossible on a
+    // valid alpha.2 stream and fails fast.
+    const parked = this.orphanSubCalls.get(data.subCallId)
+    if (parked?.start !== undefined
+      && (parked.start.rootCallId !== data.rootCallId
+        || parked.start.parentCallId !== data.parentCallId
+        || parked.start.name !== data.name
+        || JSON.stringify(parked.start.arguments) !== JSON.stringify(data.arguments))) {
+      throw new Error(`conflicting PTC sub-call start identity for ${data.subCallId}: parked root=${parked.start.rootCallId} parent=${parked.start.parentCallId} name=${parked.start.name}, duplicate root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}`)
+    }
+    // Topology gate: a sub-call must never collide with its root callId
+    // (the root is not in subCallIndex, so this malformed edge would
+    // otherwise be accepted), repeat a subCallId already on its parent
+    // chain, or exceed the alpha.2 depth cap (root = depth 1, so at most
+    // 255 child levels).
+    if (data.subCallId === data.rootCallId) {
+      throw new Error(`PTC sub-call ${data.subCallId} collides with its root callId`)
+    }
+    let ancestor: TranscriptToolMessage | undefined = parent
+    while (ancestor !== undefined && ancestor.subCallId !== undefined) {
+      if (ancestor.subCallId === data.subCallId) {
+        throw new Error(`PTC sub-call ${data.subCallId} repeats an ancestor subCallId`)
+      }
+      ancestor = ancestor.parentCallId === undefined ? undefined : this.subCallIndex.get(ancestor.parentCallId)
+    }
+    const parentDepth = parent.subCallId === undefined ? 1 : this.subCallDepth.get(parent.subCallId)!
+    const depth = parentDepth + 1
+    if (depth > PTC_MAX_DEPTH) {
+      throw new Error(`PTC sub-call ${data.subCallId} exceeds the depth cap ${PTC_MAX_DEPTH}: parent ${parentId} is at depth ${parentDepth}`)
+    }
     const child: TranscriptToolMessage = {
       kind: 'tool',
       turn: parent.turn,
@@ -1136,19 +1180,31 @@ export class TranscriptFolder {
     parent.subCalls.push(child)
     this.pendingSubCalls.set(data.subCallId, child)
     this.subCallIndex.set(data.subCallId, child)
+    this.subCallDepth.set(data.subCallId, depth)
     this.attachPendingOrphans(child, data.subCallId)
+    this.consumeParkedSettle(data.subCallId)
     this.refreshActiveSubCallsFor(child)
   }
 
-  /** Connect parked PTC orphans whose parent just became available. */
+  /** Connect parked PTC orphans whose parent just became available. The
+   * orphan entry itself (including a parked settle) is consumed inside
+   * {@link attachSubCall} — one attach semantics for every path. */
   private attachPendingOrphans(parent: TranscriptToolMessage, parentId: string): void {
     for (const [id, orphan] of [...this.orphanSubCalls]) {
       if (orphan.start !== undefined && orphan.start.parentCallId === parentId) {
-        this.orphanSubCalls.delete(id)
         this.attachSubCall(parent, parentId, { ...orphan.start, subCallId: id })
-        if (orphan.settle !== undefined) this.settleSubCall(id, orphan.settle)
       }
     }
+  }
+
+  /** Apply a parked settle for a just-attached sub-call (a settle may
+   * arrive before its start when the parent is already mounted) and drop
+   * the consumed orphan entry. */
+  private consumeParkedSettle(subCallId: string): void {
+    const parked = this.orphanSubCalls.get(subCallId)
+    if (parked === undefined) return
+    this.orphanSubCalls.delete(subCallId)
+    if (parked.settle !== undefined) this.settleSubCall(subCallId, parked.settle)
   }
 
   /** Settle one PTC sub-call by subCallId; a settle without a mounted child

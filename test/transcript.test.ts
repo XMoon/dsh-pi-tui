@@ -12,7 +12,7 @@ import { BlockAssembler, expandAssistantStream, ToolCallId, MessageId, type Assi
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
-import { foldTranscript, groupConsecutiveReads, renderTranscriptMarkdown, subCallDisplayStatus, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
+import { foldTranscript, groupConsecutiveReads, PTC_MAX_DEPTH, renderTranscriptMarkdown, subCallDisplayStatus, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
 import { projectFocus } from '../src/focus-activity.ts'
 import { computeStats, StatsFolder } from '../src/stats.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
@@ -1074,6 +1074,45 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
   assert.equal(settledBash.result, 'file.txt')
 })
 
+test('a settle parked before its start applies when the parent is already mounted', () => {
+  // root → settle → start: the start finds the parent mounted and attaches
+  // directly, so the parked settle must be consumed by the SAME attach —
+  // never left behind with the child stuck running.
+  const messages = foldTranscript([
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'ls', description: 'List files' },
+      isError: false,
+      content: [{ type: 'text', text: 'file.txt' }],
+    }, 1),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'ls', description: 'List files' },
+    }, 2),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('msg-1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        source: { kind: 'tool', callId: ToolCallId('code-1') },
+      },
+    }, 3),
+  ])
+  const code = messages[0]
+  assert.ok(code !== undefined && code.kind === 'tool')
+  const bash = code.subCalls?.[0]
+  assert.ok(bash !== undefined)
+  assert.equal(bash.status, 'ok', 'the parked settle must apply when the start attaches to the mounted parent')
+  assert.equal(bash.result, 'file.txt')
+})
+
 test('an outer run_code error result keeps the error status', () => {
   const messages = foldTranscript([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
@@ -1210,6 +1249,54 @@ test('a conflicting PTC sub-call identity fails fast', () => {
     isError: false,
     content: [{ type: 'text', text: 'x' }],
   }, 4)]), /conflicting PTC sub-call settle identity/u)
+})
+
+test('a PTC sub-call colliding with its root callId fails fast at ingestion', () => {
+  // The root call is NOT in subCallIndex, so a sub-call whose subCallId
+  // equals the root callId would otherwise be accepted as a fresh child —
+  // the topology gate must reject it.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 1),
+  ])
+  assert.throws(() => folder.apply([event('tool/code-dispatch-start', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId('code-1'),
+    subCallId: ToolCallId('code-1'),
+    name: 'bash',
+    arguments: { command: 'ls', description: 'List files' },
+  }, 2)]), /collides with its root callId/u)
+})
+
+test('a PTC sub-call chain beyond the depth cap fails fast at ingestion', () => {
+  // The cap is enforced while BUILDING the tree (attachSubCall), not only
+  // by the recursive consumers: a corrupted replay that parks a deep chain
+  // must throw at the first edge past the cap instead of overflowing the
+  // stack during ingestion. Root = depth 1, so 255 child levels are the
+  // maximum; the 256th child level (depth 257) is rejected.
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 1),
+  ]
+  for (let i = 1; i < PTC_MAX_DEPTH; i++) {
+    events.push(event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: i === 1 ? ToolCallId('code-1') : ToolCallId(`code-1:code:${i - 1}`),
+      subCallId: ToolCallId(`code-1:code:${i}`),
+      name: 'bash',
+      arguments: { command: 'ls', description: 'List files' },
+    }, 1 + i))
+  }
+  folder.apply(events)
+  assert.throws(() => folder.apply([event('tool/code-dispatch-start', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId(`code-1:code:${PTC_MAX_DEPTH - 1}`),
+    subCallId: ToolCallId(`code-1:code:${PTC_MAX_DEPTH}`),
+    name: 'bash',
+    arguments: { command: 'ls', description: 'List files' },
+  }, 1 + PTC_MAX_DEPTH)]), /exceeds the depth cap/u)
 })
 
 test('turn/end error renders a failure line', () => {
