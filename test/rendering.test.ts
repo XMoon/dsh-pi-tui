@@ -20,7 +20,7 @@ import { color, currentPalette, darkColors, lightColors, setTheme } from '../src
 import { iconFor } from '../src/icons.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent, type TranscriptViewportAnchor } from '../src/tui-app.ts'
 import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
-import { TranscriptFolder, type TurnActivity } from '../src/transcript.ts'
+import { TranscriptFolder, type TranscriptMessage, type TurnActivity } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
 import { Text, visibleWidth, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -1485,6 +1485,66 @@ test('tool card headers show the design title and the args summary', async () =>
   const view = await viewport(vt)
   assert.ok(view.includes('Bash ls -la [ok]'), `design title missing:\n${view}`)
   assert.ok(!view.includes('command=ls -la'), `raw key-arg format leaked:\n${view}`)
+})
+
+/** One run_code card with two nested sub-calls (a failed bash + an ok read). */
+function ptcCodeCard(): Extract<TranscriptMessage, { kind: 'tool' }> {
+  return {
+    kind: 'tool', turn: 0, name: 'run_code',
+    args: '{"code":"print(1)","description":"Inspect project and run tests"}',
+    result: 'program output', status: 'ok',
+    subCalls: [
+      {
+        kind: 'tool', turn: 0, name: 'bash', args: '{"command":"npm test","description":"Run focused test suite"}',
+        result: '1 failed\n[exit code: 2]', status: 'error',
+        subCallId: 'code-1:code:1', parentCallId: 'code-1', rootCallId: 'code-1',
+      },
+      {
+        kind: 'tool', turn: 0, name: 'read', args: '{"file":"a.ts","description":"Read source"}',
+        result: 'file content', status: 'ok',
+        subCallId: 'code-1:code:2', parentCallId: 'code-1', rootCallId: 'code-1',
+      },
+    ],
+  }
+}
+
+test('PTC sub-call rows stay visible under a collapsed Code card; bodies default collapsed', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([ptcCodeCard()])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Code'), `root Code card missing:\n${view}`)
+  assert.ok(view.includes('Bash'), `child header must stay visible under a collapsed Code card:\n${view}`)
+  assert.ok(view.includes('Read'), `child header must stay visible under a collapsed Code card:\n${view}`)
+  assert.ok(!view.includes('1 failed'), `child body must be collapsed by default:\n${view}`)
+  assert.ok(!view.includes('file content'), `child body must be collapsed by default:\n${view}`)
+})
+
+test('a click on a PTC sub-call header expands only that child body', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript([ptcCodeCard()])
+  await vt.waitForRender()
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = view.split('\n')
+  const bashIdx = lines.findIndex(line => strip(line).includes('Bash'))
+  assert.ok(bashIdx >= 0, `bash child row missing:\n${view}`)
+  clickCell(vt, 10, bashIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('1 failed'), `clicked child body must expand:\n${view}`)
+  assert.ok(view.includes('[exit code: 2]'), `the exit marker stays in the expanded body:\n${view}`)
+  assert.ok(!view.includes('file content'), `the other child stays collapsed:\n${view}`)
+})
+
+test('the root Code disclosure does not force child bodies open', async () => {
+  const { vt, app } = startApp()
+  app.setToolOutputExpanded(true)
+  app.setTranscript([ptcCodeCard()])
+  const view = await viewport(vt)
+  assert.ok(view.includes('program output'), `expanded root shows its own body:\n${view}`)
+  assert.ok(view.includes('Bash'), `child headers stay visible:\n${view}`)
+  assert.ok(!view.includes('1 failed'), `child bodies stay collapsed regardless of the root disclosure:\n${view}`)
 })
 
 test('footer preset hides the stats line in compact mode', async () => {

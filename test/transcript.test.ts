@@ -444,7 +444,7 @@ test('pairs tool calls with their results and caps long summaries', () => {
 
 test('run_code root call folds into a stable Code card', () => {
   const messages = foldTranscript([
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
     event('tool/result', {
       turn: 0,
       step: 0,
@@ -470,20 +470,20 @@ test('run_code root call folds into a stable Code card', () => {
 
 test('nested PTC bash dispatch attaches to the run_code card subCalls tree', () => {
   const events = [
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'ls' },
+      arguments: { command: 'ls', description: 'List files' },
     }, 1),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'ls' },
+      arguments: { command: 'ls', description: 'List files' },
       isError: false,
       content: [{ type: 'text', text: 'file.txt' }],
     }, 2),
@@ -516,7 +516,7 @@ test('nested PTC bash dispatch attaches to the run_code card subCalls tree', () 
   assert.equal(bash.name, 'bash')
   assert.equal(bash.status, 'ok')
   assert.equal(bash.result, 'file.txt')
-  assert.equal(bash.args, JSON.stringify({ cmd: 'ls' }))
+  assert.equal(bash.args, JSON.stringify({ command: 'ls', description: 'List files' }))
   assert.equal(bash.subCallId, 'code-1:code:1')
   assert.equal(bash.parentCallId, 'code-1')
   assert.equal(bash.rootCallId, 'code-1')
@@ -527,13 +527,13 @@ test('nested PTC dispatch supports recursive grandchild topology', () => {
   // subCalls tree, and every level keeps its own call identity plus the
   // full parent chain.
   const messages = foldTranscript([
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'make' },
+      arguments: { command: 'make', description: 'Build project' },
     }, 1),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
@@ -544,7 +544,7 @@ test('nested PTC dispatch supports recursive grandchild topology', () => {
     }, 2),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
-      parentCallId: ToolCallId('code-1:code:1:code:1'),
+      parentCallId: ToolCallId('code-1:code:1'),
       subCallId: ToolCallId('code-1:code:1:code:1'),
       name: 'read',
       arguments: { file: 'nested.ts' },
@@ -556,7 +556,7 @@ test('nested PTC dispatch supports recursive grandchild topology', () => {
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'make' },
+      arguments: { command: 'make', description: 'Build project' },
       isError: false,
       content: [{ type: 'text', text: 'built' }],
     }, 4),
@@ -590,7 +590,7 @@ test('nested PTC dispatch supports recursive grandchild topology', () => {
 
 test('nested PTC siblings keep their durable dispatch order', () => {
   const messages = foldTranscript([
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
@@ -603,7 +603,7 @@ test('nested PTC siblings keep their durable dispatch order', () => {
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:2'),
       name: 'bash',
-      arguments: { cmd: 'ls' },
+      arguments: { command: 'ls', description: 'List files' },
     }, 2),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
@@ -626,7 +626,7 @@ test('nested PTC siblings keep their durable dispatch order', () => {
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:2'),
       name: 'bash',
-      arguments: { cmd: 'ls' },
+      arguments: { command: 'ls', description: 'List files' },
       isError: false,
       content: [{ type: 'text', text: 'b' }],
     }, 5),
@@ -658,20 +658,20 @@ test('nested PTC siblings keep their durable dispatch order', () => {
 
 test('nested PTC dispatch with an error outcome keeps the durable error status', () => {
   const messages = foldTranscript([
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'boom' },
+      arguments: { command: 'boom', description: 'Trigger failure' },
     }, 1),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'boom' },
+      arguments: { command: 'boom', description: 'Trigger failure' },
       isError: true,
       content: [{ type: 'text', text: 'command failed: boom' }],
     }, 2),
@@ -703,20 +703,20 @@ test('nested spilled/generic dispatch content stays readable without a fabricate
   // TUI must not invent an exit status — the isError flag is the only status
   // source, and the spill body stays readable.
   const messages = foldTranscript([
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'make' },
+      arguments: { command: 'make', description: 'Build project' },
     }, 1),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'make' },
+      arguments: { command: 'make', description: 'Build project' },
       isError: false,
       content: [{ type: 'text', text: 'output spilled to /tmp/run-1.log (truncated)' }],
     }, 2),
@@ -744,25 +744,26 @@ test('nested spilled/generic dispatch content stays readable without a fabricate
 })
 
 test('nested dispatch with an explicit exit marker keeps the marker in the body', () => {
-  // The plan requires: nested shell result with explicit exit marker →
-  // status/body parsed as the existing TUI contract expects. The status
-  // comes from the durable isError flag; the marker text stays in the body.
+  // The alpha.2 terminal contract: a bash command with a nonzero exit is a
+  // NORMAL settled tool call (isError: false) whose result tail carries
+  // `[exit code: N]`; the child must be marked failed from the marker, and
+  // the marker text stays in the body.
   const messages = foldTranscript([
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'false' },
+      arguments: { command: 'false', description: 'Fail on purpose' },
     }, 1),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'false' },
-      isError: true,
+      arguments: { command: 'false', description: 'Fail on purpose' },
+      isError: false,
       content: [{ type: 'text', text: 'foo\n[exit code: 2]' }],
     }, 2),
     event('tool/result', {
@@ -784,8 +785,91 @@ test('nested dispatch with an explicit exit marker keeps the marker in the body'
   assert.ok(code !== undefined && code.kind === 'tool')
   const bash = code.subCalls?.[0]
   assert.ok(bash !== undefined)
-  assert.equal(bash.status, 'error')
+  assert.equal(bash.status, 'error', 'a nonzero [exit code: N] marker marks the child failed even with isError: false')
   assert.equal(bash.result, 'foo\n[exit code: 2]', 'the explicit exit marker stays in the body')
+})
+
+test('nested dispatch with a signal marker is marked failed', () => {
+  const messages = foldTranscript([
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'sleep 100', description: 'Sleep' },
+    }, 1),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'sleep 100', description: 'Sleep' },
+      isError: false,
+      content: [{ type: 'text', text: 'killed\n[killed by signal: SIGTERM]' }],
+    }, 2),
+    event('tool/result', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('msg-1'),
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: ToolCallId('code-1'),
+          content: [{ type: 'text', text: 'program output' }],
+        }],
+        source: { kind: 'tool', callId: ToolCallId('code-1') },
+      },
+    }, 3),
+  ])
+  const code = messages[0]
+  assert.ok(code !== undefined && code.kind === 'tool')
+  const bash = code.subCalls?.[0]
+  assert.ok(bash !== undefined)
+  assert.equal(bash.status, 'error', 'a [killed by signal: ...] marker marks the child failed')
+  assert.equal(bash.result, 'killed\n[killed by signal: SIGTERM]')
+})
+
+test('nested dispatch with an exit code 0 marker stays ok', () => {
+  const messages = foldTranscript([
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'true', description: 'Succeed' },
+    }, 1),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'true', description: 'Succeed' },
+      isError: false,
+      content: [{ type: 'text', text: 'done\n[exit code: 0]' }],
+    }, 2),
+    event('tool/result', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('msg-1'),
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: ToolCallId('code-1'),
+          content: [{ type: 'text', text: 'program output' }],
+        }],
+        source: { kind: 'tool', callId: ToolCallId('code-1') },
+      },
+    }, 3),
+  ])
+  const code = messages[0]
+  assert.ok(code !== undefined && code.kind === 'tool')
+  const bash = code.subCalls?.[0]
+  assert.ok(bash !== undefined)
+  assert.equal(bash.status, 'ok', 'an explicit [exit code: 0] marker is not a failure')
 })
 
 test('a nested PTC read child never joins the top-level read grouping', () => {
@@ -795,7 +879,7 @@ test('a nested PTC read child never joins the top-level read grouping', () => {
   // merge with each other.
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 1),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
@@ -866,7 +950,7 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'ls' },
+      arguments: { command: 'ls', description: 'List files' },
     }, 0),
   ])
   assert.deepEqual(kinds(orphanStart), [])
@@ -876,7 +960,7 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'ls' },
+      arguments: { command: 'ls', description: 'List files' },
       isError: false,
       content: [{ type: 'text', text: 'file.txt' }],
     }, 0),
@@ -890,9 +974,9 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'ls' },
+      arguments: { command: 'ls', description: 'List files' },
     }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 1),
     event('tool/result', {
       turn: 0, step: 0,
       message: {
@@ -918,7 +1002,7 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'ls' },
+      arguments: { command: 'ls', description: 'List files' },
       isError: false,
       content: [{ type: 'text', text: 'file.txt' }],
     }, 0),
@@ -927,9 +1011,9 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'ls' },
+      arguments: { command: 'ls', description: 'List files' },
     }, 1),
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 2),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 2),
     event('tool/result', {
       turn: 0, step: 0,
       message: {
@@ -949,7 +1033,7 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
 
 test('an outer run_code error result keeps the error status', () => {
   const messages = foldTranscript([
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
     event('tool/result', {
       turn: 0,
       step: 0,
@@ -975,20 +1059,20 @@ test('an outer run_code error result keeps the error status', () => {
 
 test('PTC event replay folds to the same topology and presentation', () => {
   const events = [
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'ls' },
+      arguments: { command: 'ls', description: 'List files' },
     }, 1),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
-      arguments: { cmd: 'ls' },
+      arguments: { command: 'ls', description: 'List files' },
       isError: false,
       content: [{ type: 'text', text: 'file.txt' }],
     }, 2),
@@ -1010,6 +1094,79 @@ test('PTC event replay folds to the same topology and presentation', () => {
   const first = foldTranscript(events)
   const second = foldTranscript(events)
   assert.deepEqual(second, first, 'replaying the same persisted events must reproduce the same cards')
+})
+
+test('PTC dispatch start/settle bump the root subtree revision (render-cache invalidation)', () => {
+  // The subCalls array reference never changes on in-place child mutation,
+  // so the render cache must key on the root's subtree revision instead.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 1),
+  ])
+  const before = folder.messages()[0]!
+  assert.ok(before.kind === 'tool')
+  const revBefore = before.subtreeRevision ?? 0
+  folder.apply([event('tool/code-dispatch-start', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId('code-1'),
+    subCallId: ToolCallId('code-1:code:1'),
+    name: 'bash',
+    arguments: { command: 'ls', description: 'List files' },
+  }, 2)])
+  const afterStart = folder.messages()[0]!
+  assert.ok(afterStart.kind === 'tool')
+  assert.ok((afterStart.subtreeRevision ?? 0) > revBefore, 'dispatch-start must bump the subtree revision')
+  // messages() returns the SAME live object; snapshot before the settle
+  // mutates it again.
+  const revAfterStart = afterStart.subtreeRevision ?? 0
+  folder.apply([event('tool/code-dispatch', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId('code-1'),
+    subCallId: ToolCallId('code-1:code:1'),
+    name: 'bash',
+    arguments: { command: 'ls', description: 'List files' },
+    isError: false,
+    content: [{ type: 'text', text: 'file.txt' }],
+  }, 3)])
+  const afterSettle = folder.messages()[0]!
+  assert.ok(afterSettle.kind === 'tool')
+  assert.ok((afterSettle.subtreeRevision ?? 0) > revAfterStart, 'dispatch-settle must bump the subtree revision')
+})
+
+test('a conflicting PTC sub-call identity fails fast', () => {
+  // A duplicate start with a different parent/root/name is impossible on a
+  // valid alpha.2 durable stream — it must throw, never silently keep one.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 1),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'ls', description: 'List files' },
+    }, 2),
+  ])
+  assert.throws(() => folder.apply([event('tool/code-dispatch-start', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId('code-1'),
+    subCallId: ToolCallId('code-1:code:1'),
+    name: 'read',
+    arguments: { file: 'x' },
+  }, 3)]), /conflicting PTC sub-call identity/u)
+  // A settle whose durable identity disagrees with the mounted child also
+  // fails fast.
+  assert.throws(() => folder.apply([event('tool/code-dispatch', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId('code-1'),
+    subCallId: ToolCallId('code-1:code:1'),
+    name: 'read',
+    arguments: { file: 'x' },
+    isError: false,
+    content: [{ type: 'text', text: 'x' }],
+  }, 4)]), /conflicting PTC sub-call settle identity/u)
 })
 
 test('turn/end error renders a failure line', () => {

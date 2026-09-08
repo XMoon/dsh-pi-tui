@@ -910,3 +910,33 @@ test('transcriptSearchText recursively includes PTC sub-call descendants', () =>
   assert.ok(corpus.includes('bash'), 'the nested child name is searchable')
   assert.ok(corpus.includes('128 passed'), 'the nested child result is searchable')
 })
+
+test('PTC child settle marks the root search entry dirty immediately', () => {
+  // The incremental search index must see nested child content as soon as
+  // the child settles — not only after the outer run_code result lands.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'code-1', 'run_code', { code: 'print(1)', description: 'Inspect project and run tests' }, 0),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'run tests', description: 'Run tests' },
+    }, 2),
+  ])
+  assert.equal(folder.search('128 passed').length, 0, 'nothing to find before the child settles')
+  folder.apply([event('tool/code-dispatch', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId('code-1'),
+    subCallId: ToolCallId('code-1:code:1'),
+    name: 'bash',
+    arguments: { command: 'run tests', description: 'Run tests' },
+    isError: false,
+    content: [{ type: 'text', text: '128 passed' }],
+  }, 3)])
+  const matches = folder.search('128 passed')
+  assert.equal(matches.length, 1, 'the settled child content must be searchable immediately')
+  assert.equal(matches[0]!.id, 0, 'the match locates the root Code card')
+})

@@ -276,8 +276,9 @@ export function focusCollapsedBody(
 
 /** The compact active-sub-call summary: one running child → `Bash running`;
  * several of the same type → `Bash ×2 running`; mixed types → the first
- * type (durable dispatch order) plus the remaining running count
- * (`Bash +1 running`). Titles go through the existing tool-title mapping. */
+ * type (durable dispatch order) with its own count plus the remaining
+ * running count (`Bash ×2 +1 running`). Titles go through the existing
+ * tool-title mapping. */
 function activeSubCallSuffix(active: readonly { name: string; count: number }[]): string {
   if (active.length === 1) {
     const { name, count } = active[0]!
@@ -285,7 +286,8 @@ function activeSubCallSuffix(active: readonly { name: string; count: number }[])
   }
   const first = active[0]!
   const rest = active.slice(1).reduce((sum, entry) => sum + entry.count, 0)
-  return `${toolTitle(first.name)} +${rest} running`
+  const firstCount = first.count > 1 ? ` ×${first.count}` : ''
+  return `${toolTitle(first.name)}${firstCount} +${rest} running`
 }
 
 /** The Tool line with the active-sub-call suffix, using the width-degradation

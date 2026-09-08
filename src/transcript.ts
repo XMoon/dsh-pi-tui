@@ -189,6 +189,11 @@ export interface TranscriptToolMessage {
    * payload so replay and tree rebuilds keep the full parent chain. */
   parentCallId?: string
   rootCallId?: string
+  /** PTC subtree mutation revision: bumped on every sub-call start/settle
+   * under this card. The render cache compares it so live PTC updates
+   * (in-place child mutations) invalidate the component even though the
+   * `subCalls` array reference never changes. */
+  subtreeRevision?: number
   /**
    * Workflow run cards only: the run's member rows, folded into the card
    * (Web WorkflowRunPanel parity) instead of standalone member cards.
@@ -415,6 +420,19 @@ export function textOf(blocks: readonly ContentBlock[]): string {
     .filter(block => block.type === 'text')
     .map(block => block.text)
     .join('')
+}
+
+/** Parse the alpha.2 terminal result tail marker: `[exit code: N]` (N≠0)
+ * or `[killed by signal: ...]` — the durable terminal failure evidence a
+ * bash/pwsh call carries even when the tool call itself settled with
+ * `isError: false` (a nonzero command exit is a normal settled outcome).
+ * A missing marker (spill notice, generic output) is NOT a failure: the
+ * status is never invented from text. */
+export function terminalFailureFromResult(result: string): boolean {
+  const last = result.trimEnd().split('\n').pop()?.trim() ?? ''
+  const exit = /^\[exit code: (-?\d+)\]$/.exec(last)
+  if (exit !== null) return Number(exit[1]) !== 0
+  return /^\[killed by signal: .+\]$/.test(last)
 }
 
 /** Reconstruct the logical blocks used by any Assistant entry. */
@@ -919,7 +937,7 @@ export class TranscriptFolder {
    * when the parent appears — never promoted to top-level surface rows. */
   private readonly orphanSubCalls = new Map<string, {
     start?: { rootCallId: string; parentCallId: string; name: string; arguments: unknown }
-    settle?: { isError: boolean; content: readonly ContentBlock[] }
+    settle?: { rootCallId: string; parentCallId: string; name: string; isError: boolean; content: readonly ContentBlock[] }
   }>()
   /** Tool names by callId, for result pairing. */
   private readonly callNames = new Map<string, string>()
@@ -1051,11 +1069,23 @@ export class TranscriptFolder {
   }
 
   /** Attach one PTC sub-call to its real parent card (never the top-level
-   * surface flow), then connect any parked orphans waiting for it. */
+   * surface flow), then connect any parked orphans waiting for it. A
+   * duplicate subCallId with a conflicting identity is impossible on a
+   * valid alpha.2 durable stream — fail fast instead of silently keeping
+   * one. */
   private attachSubCall(
     parent: TranscriptToolMessage,
     data: { rootCallId: string; parentCallId: string; subCallId: string; name: string; arguments: unknown },
   ): void {
+    const existing = this.subCallIndex.get(data.subCallId)
+    if (existing !== undefined) {
+      if (existing.rootCallId !== data.rootCallId
+        || existing.parentCallId !== data.parentCallId
+        || existing.name !== data.name) {
+        throw new Error(`conflicting PTC sub-call identity for ${data.subCallId}: start root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}, mounted root=${existing.rootCallId} parent=${existing.parentCallId} name=${existing.name}`)
+      }
+      return
+    }
     const child: TranscriptToolMessage = {
       kind: 'tool',
       turn: parent.turn,
@@ -1087,12 +1117,35 @@ export class TranscriptFolder {
   }
 
   /** Settle one PTC sub-call by subCallId; a settle without a mounted child
-   * is parked and applied when its start/parent appears. */
-  private settleSubCall(subCallId: string, data: { isError: boolean; content: readonly ContentBlock[] }): void {
+   * is parked and applied when its start/parent appears. The lifecycle
+   * status comes from the durable `isError` flag PLUS the alpha.2 terminal
+   * contract for bash/pwsh: a nonzero `[exit code: N]` or
+   * `[killed by signal: ...]` tail marker marks the child failed even when
+   * the tool call itself settled normally. Spilled/generic content without
+   * a marker never invents a status. The settle's durable identity
+   * (root/parent/name) is cross-checked against the mounted child — a
+   * mismatch is impossible on a valid alpha.2 stream and fails fast. */
+  private settleSubCall(subCallId: string, data: {
+    rootCallId: string
+    parentCallId: string
+    name: string
+    isError: boolean
+    content: readonly ContentBlock[]
+  }): void {
     const child = this.pendingSubCalls.get(subCallId)
     if (child !== undefined) {
-      child.status = data.isError === true ? 'error' : 'ok'
-      child.result = textOf(data.content ?? [])
+      if (child.rootCallId !== data.rootCallId
+        || child.parentCallId !== data.parentCallId
+        || child.name !== data.name) {
+        throw new Error(`conflicting PTC sub-call settle identity for ${subCallId}: settle root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}, mounted root=${child.rootCallId} parent=${child.parentCallId} name=${child.name}`)
+      }
+      const text = textOf(data.content ?? [])
+      child.status = data.isError === true
+        ? 'error'
+        : (child.name === 'bash' || child.name === 'pwsh') && terminalFailureFromResult(text)
+          ? 'error'
+          : 'ok'
+      child.result = text
       child.resultBlocks = data.content
       this.pendingSubCalls.delete(subCallId)
       this.refreshActiveSubCallsFor(child)
@@ -1104,13 +1157,18 @@ export class TranscriptFolder {
   }
 
   /** Recompute the Focus active-descendant projection for the root card of
-   * one PTC sub-call, and bump the owning activity's revision so the Focus
-   * render cache refreshes. Tool stats are NEVER touched. */
+   * one PTC sub-call, bump the root's subtree revision (render-cache
+   * invalidation for the in-place child mutations) and mark the root's
+   * search entry dirty (the recursive corpus changed). Tool stats are
+   * NEVER touched. */
   private refreshActiveSubCallsFor(child: TranscriptToolMessage): void {
     const root = child.rootCallId === undefined
       ? undefined
       : this.pendingCalls.get(child.rootCallId)?.card ?? this.subCallIndex.get(child.rootCallId)
     if (root === undefined) return
+    root.subtreeRevision = (root.subtreeRevision ?? 0) + 1
+    const rootEntry = child.rootCallId === undefined ? undefined : this.pendingCalls.get(child.rootCallId)
+    if (rootEntry !== undefined) this.markSearchEntryDirty(rootEntry.index)
     const activity = this.activityFor(root.turn)
     if (activity.tool === undefined) return
     const counts = new Map<string, number>()
@@ -3323,8 +3381,14 @@ export class TranscriptFolder {
           const orphan = this.orphanSubCalls.get(data.subCallId)
           if (orphan === undefined) this.orphanSubCalls.set(data.subCallId, { start: data })
           else if (orphan.start === undefined) orphan.start = data
-          // A conflicting duplicate start (different parent/root/name) is
-          // impossible on a valid alpha.2 durable stream; keep the first.
+          else if (orphan.start.rootCallId !== data.rootCallId
+            || orphan.start.parentCallId !== data.parentCallId
+            || orphan.start.name !== data.name) {
+            // A conflicting duplicate start is impossible on a valid
+            // alpha.2 durable stream — fail fast instead of silently
+            // keeping one.
+            throw new Error(`conflicting PTC sub-call start identity for ${data.subCallId}: first root=${orphan.start.rootCallId} parent=${orphan.start.parentCallId} name=${orphan.start.name}, duplicate root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}`)
+          }
         }
         break
       }
@@ -3334,11 +3398,20 @@ export class TranscriptFolder {
       // parked and applied when its start/parent appears.
       case 'tool/code-dispatch': {
         const data = event.data as {
+          rootCallId: string
+          parentCallId: string
           subCallId: string
+          name: string
           isError: boolean
           content: readonly ContentBlock[]
         }
-        this.settleSubCall(data.subCallId, { isError: data.isError, content: data.content })
+        this.settleSubCall(data.subCallId, {
+          rootCallId: data.rootCallId,
+          parentCallId: data.parentCallId,
+          name: data.name,
+          isError: data.isError,
+          content: data.content,
+        })
         break
       }
       case 'turn/end': {
