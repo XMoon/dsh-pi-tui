@@ -1,7 +1,7 @@
 /**
  * Session performance statistics folded from the event log, mirroring pi's
  * footer usage line: turns/steps, LLM wall time, recent first-token
- * latency, recent effective output throughput, cache hit rate, and token
+ * latency, recent observable decode throughput, cache hit rate, and token
  * totals. Pure and deterministic for headless tests.
  *
  * Accounting follows the Web's sessionStats/tokenUsage projections:
@@ -17,12 +17,13 @@
  * - the STATUS performance metrics (firstTokenMsAvg / tokensPerSec) are
  *   RECENT-window figures over the last {@link RECENT_PERFORMANCE_SAMPLE_LIMIT}
  *   valid completed steps, not session-lifetime averages. A throughput
- *   sample is Σ output / Σ FULL LLM wall (step/start → assistant/message),
- *   so CPA burst tool-call delivery (hundreds of tokens delivered within
- *   milliseconds after a multi-second request) counts as
- *   `400 tokens / 10s whole request = 40 tok/s` instead of ratcheting a
- *   lifetime "observable decode window" rate into the hundreds. A route
- *   (provider + model) change clears both recent windows;
+ *   sample is Σ output / Σ (first token → assistant/message) over the
+ *   latest 5 completed steps whose FINAL successful attempt exposes token
+ *   deltas at at least two distinct timestamps — the denominator aligns
+ *   with the DSH Web's decode throughput (first token → final assistant
+ *   message), and the extra `lastToken > firstToken` gate skips provider
+ *   burst delivery, whose real decode duration is unobservable from the
+ *   client. A route (provider + model) change clears both recent windows;
  * - `llmMs` remains the session LIFETIME LLM wall — kept for debug,
  *   /stats and session analysis, no longer shown in the default footer;
  * - billed input = uncached + cache-read + cache-write (the Web's
@@ -36,6 +37,7 @@ import {
   formatTokens,
   isAssistantTokenDelta,
   StepUsageAccumulator,
+  tokenTimeRangeFromAssistantStream,
   usageFromAssistantSettlement,
   type UsageLike,
 } from './token-usage.ts'
@@ -55,9 +57,11 @@ export interface SessionStats {
    * window (the last {@link RECENT_PERFORMANCE_SAMPLE_LIMIT} completed
    * first-token steps), ms. */
   firstTokenMsAvg: number
-  /** Recent effective output throughput: Σ outputTokens / Σ full LLM wall
-   * over the RECENT window (the last {@link RECENT_PERFORMANCE_SAMPLE_LIMIT}
-   * valid completed steps), tok/s. */
+  /** Recent observable decode throughput: Σ outputTokens / Σ (first token
+   * → assistant/message) over the RECENT window (the last
+   * {@link RECENT_PERFORMANCE_SAMPLE_LIMIT} valid completed steps whose
+   * final successful attempt delivered token deltas at two distinct
+   * timestamps), tok/s. */
   tokensPerSec: number
   /** Cache-read share of billed input tokens, 0–100. */
   cacheHitPct: number
@@ -124,7 +128,14 @@ function turnOfStepKey(key: string): number {
  * the footer and the Focus per-turn projection can never drift. */
 interface StepTiming {
   start?: number
+  /** The logical step's first token (TTFT), kept across retries. */
   firstDelta?: number
+  /** The CURRENT/FINAL attempt's decode observability: the first and last
+   * token-bearing delta timestamps. Cleared at `assistant/attempt` and
+   * `llm/retry-started` so a failed attempt's token range never leaks into
+   * the final throughput sample; `last > first` is the observability gate. */
+  decodeFirstDelta?: number
+  decodeLastDelta?: number
   completed?: number
   usage?: UsageLike
   /** One step may have at most one timing settlement. */
@@ -142,13 +153,16 @@ interface StepTiming {
   routeEpoch?: number
 }
 
-/** One recent effective-throughput sample: the step's FULL LLM wall
- * (step/start → assistant/message) against its authoritative output
- * tokens — never a burst-delivery "observable decode window". */
+/** One recent observable-decode-throughput sample: the final successful
+ * attempt's decode span (first token → assistant/message) against its
+ * authoritative output tokens. Only steps whose final attempt delivered
+ * token deltas at two distinct timestamps (`last > first`) are sampled —
+ * a provider burst with a single-timestamp delivery is unobservable and
+ * skipped. */
 interface RecentThroughputSample {
   key: string
   ordinal: number
-  wallMs: number
+  decodeMs: number
   outputTokens: number
 }
 
@@ -210,9 +224,9 @@ class RecentPerformanceWindow {
     upsertSample(this.ttft, { key, ordinal, ttftMs }, RECENT_PERFORMANCE_SAMPLE_LIMIT)
   }
 
-  /** Upsert the step's effective-throughput sample. */
-  upsertThroughput(key: string, ordinal: number, wallMs: number, outputTokens: number): void {
-    upsertSample(this.throughput, { key, ordinal, wallMs, outputTokens }, RECENT_PERFORMANCE_CANDIDATE_LIMIT)
+  /** Upsert the step's observable-decode-throughput sample. */
+  upsertThroughput(key: string, ordinal: number, decodeMs: number, outputTokens: number): void {
+    upsertSample(this.throughput, { key, ordinal, decodeMs, outputTokens }, RECENT_PERFORMANCE_CANDIDATE_LIMIT)
   }
 
   /** Drop the step's throughput sample (an authoritative replacement that
@@ -230,9 +244,9 @@ class RecentPerformanceWindow {
       ? ttft.reduce((sum, sample) => sum + sample.ttftMs, 0) / ttft.length
       : 0
     const throughput = latestSamples(this.throughput)
-    const wallMs = throughput.reduce((sum, sample) => sum + sample.wallMs, 0)
+    const decodeMs = throughput.reduce((sum, sample) => sum + sample.decodeMs, 0)
     const outputTokens = throughput.reduce((sum, sample) => sum + sample.outputTokens, 0)
-    const tokensPerSec = wallMs > 0 ? Math.round((outputTokens * 1000) / wallMs) : 0
+    const tokensPerSec = decodeMs > 0 ? Math.round((outputTokens * 1000) / decodeMs) : 0
     return { firstTokenMsAvg, tokensPerSec }
   }
 }
@@ -326,9 +340,20 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
     const kind = event.type as string
     // `llm/retry-started` closes the failed attempt's replacement slot while
     // preserving its committed usage; the next attempt reuses the same step.
+    // It also starts a FRESH decode observability: the failed attempt's token
+    // range must not leak into the final throughput sample (the logical
+    // TTFT first token survives).
     if (kind === 'llm/retry-started') {
       const retry = event.data as { turn: number; step: number }
       usage.onRetryStarted(retry.turn, retry.step)
+      const key = stepKey(retry.turn, retry.step)
+      const timing = settledTurn === retry.turn
+        ? perStep.get(key) ?? settledPerStep.get(key)
+        : undefined
+      if (timing !== undefined && timing.settled !== true) {
+        timing.decodeFirstDelta = undefined
+        timing.decodeLastDelta = undefined
+      }
       continue
     }
     // `assistant/attempt` (Session v2, typed STRUCTURALLY): the attempt
@@ -348,6 +373,12 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
         if (timing.firstDelta === undefined && attemptFirstToken !== undefined) {
           timing.firstDelta = attemptFirstToken
           if (timing.settled === true) replaceRecentTtft(key, timing, attemptFirstToken, recent)
+        }
+        // A failed attempt's token range must not become the final
+        // throughput's decode span: clear it (TTFT keeps its first token).
+        if (timing.settled !== true) {
+          timing.decodeFirstDelta = undefined
+          timing.decodeLastDelta = undefined
         }
         if (timing.settled === true && attemptUsage !== undefined) {
           timing.usage = attemptUsage
@@ -421,12 +452,20 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
         enterSettledTurn(event.data.turn)
         const key = stepKey(event.data.turn, event.data.step)
         const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
-        const messageFirstToken = firstTokenTimeFromAssistantStream(event.data.stream)
+        const tokenRange = tokenTimeRangeFromAssistantStream(event.data.stream)
         const timing = settledTurn === event.data.turn
           ? perStep.get(key) ?? settledPerStep.get(key)
           : undefined
-        if (timing !== undefined && timing.firstDelta === undefined) timing.firstDelta = messageFirstToken
         if (timing !== undefined) {
+          // TTFT: the durable stream fills a missing logical first token.
+          if (timing.firstDelta === undefined && tokenRange !== undefined) timing.firstDelta = tokenRange.first
+          // Throughput: the final successful message's embedded stream is
+          // its authoritative token evidence — it fills/corrects the decode
+          // range. A stream WITHOUT token deltas never clears live evidence.
+          if (tokenRange !== undefined) {
+            timing.decodeFirstDelta = tokenRange.first
+            timing.decodeLastDelta = tokenRange.last
+          }
           // The message time is the step's LLM wall end and its usage is the
           // authoritative one; the whole step settles HERE (projection
           // semantics) — step/end only counts turns/steps and the usage.
@@ -437,9 +476,20 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
             if (messageUsage !== undefined) timing.usage = messageUsage
             settleStep(stats, key, timing, recent, routeKeyOf(event.data.message))
             timing.settled = true
-          } else if (messageUsage !== undefined) {
-            timing.usage = messageUsage
-            replaceRecentThroughput(key, timing, messageUsage, recent)
+          } else if (messageUsage !== undefined || tokenRange !== undefined) {
+            // A late duplicate reconciles the sample against the
+            // authoritative stream evidence: with new usage it swaps the
+            // numerator; without usage the RETAINED usage still re-checks
+            // the (possibly invalidated) decode range — a burst duplicate
+            // must remove the stale sample, never keep reporting it.
+            if (messageUsage !== undefined) timing.usage = messageUsage
+            if (timing.usage !== undefined) {
+              replaceRecentThroughput(key, timing, timing.usage, recent)
+            } else {
+              // No usage ever committed: the stream cannot create a sample,
+              // but it can invalidate a previously valid one.
+              recent.removeThroughput(key)
+            }
           }
         }
         usage.onAssistantMessage(event.data.turn, event.data.step, messageUsage)
@@ -475,9 +525,9 @@ function applyDerivedPerformance(stats: SessionStats, recent: RecentPerformanceW
 
 /** Settle one step's TIMING at its assistant/message boundary: the
  * lifetime LLM wall, its completion ordinal, the route observation, and
- * the recent TTFB / effective-throughput samples. A step with no message
- * (cancelled/failed) never reaches here. Usage is NOT settled here;
- * step/end adds it once. */
+ * the recent TTFB / observable-decode-throughput samples. A step with no
+ * message (cancelled/failed) never reaches here. Usage is NOT settled
+ * here; step/end adds it once. */
 function settleStep(
   stats: SessionStats,
   key: string,
@@ -503,14 +553,23 @@ function settleStep(
     recent.upsertTtft(key, ordinal, Math.max(0, first - start))
   }
   const usage = timing.usage
-  if (usage !== undefined && start !== undefined) {
-    // Effective throughput: Σ output / Σ FULL LLM wall. The sample
-    // conditions (valid usage, a wall to divide by) need no multi-delta
-    // streaming — a burst-delivered tool-call step samples on its whole
-    // request wall (plan §2.2).
-    const wallMs = Math.max(0, completed - start)
-    if (usage.outputTokens > 0 && wallMs > 0) {
-      recent.upsertThroughput(key, ordinal, wallMs, usage.outputTokens)
+  const decodeFirst = timing.decodeFirstDelta
+  const decodeLast = timing.decodeLastDelta
+  if (
+    usage !== undefined
+    && usage.outputTokens > 0
+    && decodeFirst !== undefined
+    && decodeLast !== undefined
+    && decodeLast > decodeFirst
+  ) {
+    // Observable decode throughput: Σ output / Σ (first token →
+    // assistant/message) over the final successful attempt. The
+    // `last > first` gate is the ONLY admission condition — a burst
+    // delivered at a single timestamp is unobservable and skipped (no
+    // thresholds, clamps, or full-wall fallback).
+    const decodeMs = Math.max(0, completed - decodeFirst)
+    if (decodeMs > 0) {
+      recent.upsertThroughput(key, ordinal, decodeMs, usage.outputTokens)
     }
   }
 }
@@ -523,9 +582,11 @@ function settleStep(
  * The EPOCH is the authoritative gate: A → B → A returns to an equal
  * route STRING while the window belongs to the second A lifecycle, so
  * only `timing.routeEpoch === recent.routeEpoch` admits the replacement.
- * A replacement that turns the sample INVALID (outputTokens corrected to
- * 0) removes it: the superseded tokens must not keep feeding the recent
- * rate. */
+ * The decode span is the settlement-time final-attempt range: a late usage
+ * only swaps the NUMERATOR (or removes the sample when it invalidates it —
+ * outputTokens corrected to 0 must not keep feeding the recent rate). A
+ * step that was never observable at settlement (no `last > first` range)
+ * can never become valid through late usage — burst evidence stays out. */
 function replaceRecentThroughput(
   key: string,
   timing: StepTiming,
@@ -535,15 +596,23 @@ function replaceRecentThroughput(
   if (timing.routeKey !== undefined && recent.routeKey !== undefined && timing.routeKey !== recent.routeKey) return
   if (timing.routeEpoch !== undefined && timing.routeEpoch !== recent.routeEpoch) return
   if (timing.completionOrdinal === undefined) return
-  const start = timing.start
+  const first = timing.decodeFirstDelta
+  const last = timing.decodeLastDelta
   const completed = timing.completed
-  if (start === undefined || completed === undefined) return
-  const wallMs = Math.max(0, completed - start)
-  if (usage.outputTokens <= 0 || wallMs <= 0) {
+  if (first === undefined || last === undefined || last <= first || completed === undefined) {
+    // The step's final-attempt decode range is not observable — either it
+    // never was (a burst, no sample exists: no-op) or a late authoritative
+    // stream just invalidated a previously valid range (the stale sample
+    // must leave the window). Never keep reporting a superseded rate.
     recent.removeThroughput(key)
     return
   }
-  recent.upsertThroughput(key, timing.completionOrdinal, wallMs, usage.outputTokens)
+  const decodeMs = Math.max(0, completed - first)
+  if (usage.outputTokens <= 0 || decodeMs <= 0) {
+    recent.removeThroughput(key)
+    return
+  }
+  recent.upsertThroughput(key, timing.completionOrdinal, decodeMs, usage.outputTokens)
 }
 
 /** Fill the TTFT sample when a late attempt supplies the first token that the
@@ -653,8 +722,8 @@ export class StatsFolder {
 
   /** Fold one live assistant chunk (Session v2 transient plane) into the
    * per-step timing: streaming usage (provisional — the durable
-   * `assistant/message` replaces it at settle) and the first-token TTFT
-   * stamp. */
+   * `assistant/message` replaces it at settle), the first-token TTFT
+   * stamp, and the current attempt's decode observability range. */
   private applyAssistantChunk(turn: number, step: number, time: number, chunk: AssistantLiveChunk): void {
     // After turn/end a late live chunk is a replay artifact: it must not
     // mutate the per-step timing/usage — the same completed-turn gate as
@@ -674,8 +743,13 @@ export class StatsFolder {
       const timing = this.settledTurn === turn
         ? this.perStep.get(stepKey(turn, step))
         : undefined
-      if (timing !== undefined && timing.settled !== true && timing.firstDelta === undefined) {
-        timing.firstDelta = time
+      if (timing !== undefined && timing.settled !== true) {
+        if (timing.firstDelta === undefined) timing.firstDelta = time
+        // The current attempt's decode range: first token stamps the start,
+        // every token refreshes the last. `last > first` at settlement is
+        // the observability gate; non-token chunks never touch it.
+        if (timing.decodeFirstDelta === undefined) timing.decodeFirstDelta = time
+        timing.decodeLastDelta = time
       }
     }
   }
@@ -710,9 +784,20 @@ export class StatsFolder {
     const kind = event.type as string
     // `llm/retry-started` closes the failed attempt's replacement slot while
     // preserving its committed usage; the retried attempt reuses the step.
+    // It also starts a FRESH decode observability: the failed attempt's token
+    // range must not leak into the final throughput sample (the logical
+    // TTFT first token survives).
     if (kind === 'llm/retry-started') {
       const data = event.data as { turn: number; step: number }
       this.usage.onRetryStarted(data.turn, data.step)
+      const key = stepKey(data.turn, data.step)
+      const timing = this.settledTurn === data.turn
+        ? this.perStep.get(key) ?? this.settledPerStep.get(key)
+        : undefined
+      if (timing !== undefined && timing.settled !== true) {
+        timing.decodeFirstDelta = undefined
+        timing.decodeLastDelta = undefined
+      }
       return
     }
     // `assistant/attempt` is a durable failed-attempt settlement. It has no
@@ -731,6 +816,12 @@ export class StatsFolder {
         if (timing.firstDelta === undefined && attemptFirstToken !== undefined) {
           timing.firstDelta = attemptFirstToken
           if (timing.settled === true) replaceRecentTtft(key, timing, attemptFirstToken, this.recent)
+        }
+        // A failed attempt's token range must not become the final
+        // throughput's decode span: clear it (TTFT keeps its first token).
+        if (timing.settled !== true) {
+          timing.decodeFirstDelta = undefined
+          timing.decodeLastDelta = undefined
         }
         if (timing.settled === true && attemptUsage !== undefined) {
           timing.usage = attemptUsage
@@ -805,12 +896,20 @@ export class StatsFolder {
         this.enterSettledTurn(event.data.turn)
         const key = stepKey(event.data.turn, event.data.step)
         const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
-        const messageFirstToken = firstTokenTimeFromAssistantStream(event.data.stream)
+        const tokenRange = tokenTimeRangeFromAssistantStream(event.data.stream)
         const timing = this.settledTurn === event.data.turn
           ? this.perStep.get(key) ?? this.settledPerStep.get(key)
           : undefined
-        if (timing !== undefined && timing.firstDelta === undefined) timing.firstDelta = messageFirstToken
         if (timing !== undefined) {
+          // TTFT: the durable stream fills a missing logical first token.
+          if (timing.firstDelta === undefined && tokenRange !== undefined) timing.firstDelta = tokenRange.first
+          // Throughput: the final successful message's embedded stream is
+          // its authoritative token evidence — it fills/corrects the decode
+          // range. A stream WITHOUT token deltas never clears live evidence.
+          if (tokenRange !== undefined) {
+            timing.decodeFirstDelta = tokenRange.first
+            timing.decodeLastDelta = tokenRange.last
+          }
           // Keep timing and performance sampling idempotent if a
           // malformed/replayed log carries the same authoritative message
           // more than once. The shared usage accumulator still applies
@@ -820,9 +919,20 @@ export class StatsFolder {
             if (messageUsage !== undefined) timing.usage = messageUsage
             settleStep(this.stats, key, timing, this.recent, routeKeyOf(event.data.message))
             timing.settled = true
-          } else if (messageUsage !== undefined) {
-            timing.usage = messageUsage
-            replaceRecentThroughput(key, timing, messageUsage, this.recent)
+          } else if (messageUsage !== undefined || tokenRange !== undefined) {
+            // A late duplicate reconciles the sample against the
+            // authoritative stream evidence: with new usage it swaps the
+            // numerator; without usage the RETAINED usage still re-checks
+            // the (possibly invalidated) decode range — a burst duplicate
+            // must remove the stale sample, never keep reporting it.
+            if (messageUsage !== undefined) timing.usage = messageUsage
+            if (timing.usage !== undefined) {
+              replaceRecentThroughput(key, timing, timing.usage, this.recent)
+            } else {
+              // No usage ever committed: the stream cannot create a sample,
+              // but it can invalidate a previously valid one.
+              this.recent.removeThroughput(key)
+            }
           }
         }
         this.usage.onAssistantMessage(event.data.turn, event.data.step, messageUsage)

@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
+import { MessageId, type AssistantStreamRecord, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { computeStats, formatStats, StatsFolder, type SessionStats } from '../src/stats.ts'
@@ -196,9 +196,11 @@ test('first-token semantics match the Web isTokenDelta: reasoning deltas start t
       stream: [],
     }, 3, t + 5_000),
     event('step/end', { turn: 0, step: 0 }, 4, t + 6_000),
-    // Step 1: tool-call delta only, then usage — also a token delta start.
+    // Step 1: two tool-call deltas at distinct timestamps — also a token
+    // delta start, and observable enough to join the throughput window.
     event('step/start', { turn: 1, step: 0 }, 5, t + 7_000),
     event('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'tool-call-delta', index: 0, id: 'tc-1' as ToolCallId, name: 'bash', argumentsDelta: '{"command"' } }, 6, t + 7_100),
+    event('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'tool-call-delta', index: 0, id: 'tc-1' as ToolCallId, name: 'bash', argumentsDelta: '"ls"}' } }, 7, t + 7_200),
     event('assistant/message', {
       turn: 1, step: 0,
       message: {
@@ -209,13 +211,15 @@ test('first-token semantics match the Web isTokenDelta: reasoning deltas start t
       },
       usage: { inputTokens: 10, outputTokens: 50, cacheReadTokens: 0 },
       stream: [],
-    }, 7, t + 7_600),
-    event('step/end', { turn: 1, step: 0 }, 8, t + 8_000),
+    }, 8, t + 7_600),
+    event('step/end', { turn: 1, step: 0 }, 9, t + 8_000),
   ]
   const stats = foldStats(log)
-  // Step 0: 450 tokens / 5000 ms full wall = 90 tok/s. Step 1: 50 / 600 ms.
-  // The effective throughput pools BOTH steps: 500 tokens / 5600 ms.
-  assert.equal(stats.tokensPerSec, Math.round((500 * 1000) / 5_600), `effective throughput uses the full LLM wall:\n${JSON.stringify(stats)}`)
+  // Step 0: 450 tokens over the observable decode span (first reasoning
+  // token → message: 5000 − 500 = 4500 ms). Step 1: 50 tokens over
+  // 7600 − 7100 = 500 ms. The pooled decode throughput:
+  // 500 tokens / 5000 ms.
+  assert.equal(stats.tokensPerSec, Math.round((500 * 1000) / 5_000), `observable decode throughput pools both steps:\n${JSON.stringify(stats)}`)
   // TTFT averages both steps: 500 ms (step 0: start → first reasoning
   // delta) and 100 ms (step 1: start → first tool-call delta).
   assert.equal(stats.firstTokenMsAvg, 300)
@@ -468,7 +472,10 @@ test('StatsFolder keeps the recent throughput window bounded', () => {
     folder.apply([
       event('step/start', { turn: 0, step }, step * 10, t + step * 1_000),
     ])
+    // Two token deltas at distinct timestamps make each step an observable
+    // decode sample (first → message = 500 − 100 = 400 ms).
     folder.applyLiveInput(liveChunk(0, step, { type: 'text-delta', index: 0, text: 'answer' }, t + step * 1_000 + 100))
+    folder.applyLiveInput(liveChunk(0, step, { type: 'text-delta', index: 0, text: ' answer' }, t + step * 1_000 + 200))
     folder.apply([
       event('assistant/message', {
         turn: 0,
@@ -488,7 +495,7 @@ test('StatsFolder keeps the recent throughput window bounded', () => {
   const internals = folder as unknown as { recent: { throughput: unknown[]; ttft: unknown[] } }
   assert.equal(internals.recent.throughput.length, 10, 'throughput keeps only the bounded candidate buffer (2x the window)')
   assert.equal(internals.recent.ttft.length, 5, 'a long session must not retain every TTFT sample')
-  assert.equal(folder.snapshot().tokensPerSec, 200, 'derive still pools the latest FIVE valid samples')
+  assert.equal(folder.snapshot().tokensPerSec, 250, 'derive still pools the latest FIVE valid samples (5 × 100 tok / 5 × 400 ms)')
   assert.equal(folder.snapshot().outputTokens, 1_200)
 })
 
@@ -513,19 +520,24 @@ test('duplicate assistant messages settle timing only once', () => {
       step: 0,
       chunk: { type: 'text-delta', index: 0, text: 'answer' },
     }, 1, t + 100),
-    message(2, t + 1_000),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: ' answer' },
+    }, 2, t + 200),
+    message(3, t + 1_100),
     // A duplicate authoritative event is anomalous, but must not turn one
     // model step into two timing/throughput samples.
-    message(3, t + 2_000, 200),
-    event('step/end', { turn: 0, step: 0 }, 4, t + 2_100),
+    message(4, t + 2_100, 200),
+    event('step/end', { turn: 0, step: 0 }, 5, t + 2_200),
   ]
   const oneShot = foldStats(log)
   const folder = new StatsFolder()
   applyMixed(folder, log)
-  assert.equal(oneShot.llmMs, 1_000)
+  assert.equal(oneShot.llmMs, 1_100)
   assert.equal(oneShot.firstTokenMsAvg, 100)
   // The duplicate replaced the sample in place: 200 tokens over the SAME
-  // 1000 ms wall (one sample, never two).
+  // 1000 ms decode span (first token → message; one sample, never two).
   assert.equal(oneShot.tokensPerSec, 200)
   assert.equal(oneShot.outputTokens, 200)
   assert.deepEqual(folder.snapshot(), oneShot)
@@ -600,10 +612,11 @@ test('settled timing ignores a late token delta before a duplicate message', () 
   applyMixed(folder, log)
   assert.equal(oneShot.llmMs, 100)
   assert.equal(oneShot.firstTokenMsAvg, 0)
-  // The burst-delivered step (no token delta before settle) samples on its
-  // FULL 100 ms wall, and the late replacement swaps the sample in place:
-  // 200 tokens over the same wall → 2000 tok/s, never a second sample.
-  assert.equal(oneShot.tokensPerSec, 2_000)
+  // The step settled with NO token evidence before the message: it is a
+  // burst with no observable decode span, so no throughput sample exists —
+  // and the late delta / duplicate message cannot create one (the late
+  // delta is a replay artifact, the duplicate only swaps usage).
+  assert.equal(oneShot.tokensPerSec, 0)
   assert.equal(oneShot.outputTokens, 200)
   assert.deepEqual(folder.snapshot(), oneShot)
 })
@@ -630,19 +643,25 @@ test('older duplicate messages cannot mutate timing after a higher turn starts',
       step: 0,
       chunk: { type: 'text-delta', index: 0, text: 'answer' },
     }, 2, t + 100),
-    message(3, t + 200, 100),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: ' answer' },
+    }, 3, t + 150),
+    message(4, t + 200, 100),
     // No step/end yet: this settled timing is still in perStep when the
     // next turn opens, which is the stale-entry replay shape.
-    event('turn/start', { turn: 1 }, 4, t + 300),
-    message(5, t + 400, 200),
+    event('turn/start', { turn: 1 }, 5, t + 300),
+    message(6, t + 400, 200),
   ]
   const oneShot = foldStats(log)
   const folder = new StatsFolder()
   applyMixed(folder, log)
   // The late duplicate is stale for both folds: the original sample and
-  // output-token total remain authoritative.
+  // output-token total remain authoritative. 100 tokens over the 100 ms
+  // decode span (first token → message) = 1000 tok/s.
   assert.equal(oneShot.llmMs, 200)
-  assert.equal(oneShot.tokensPerSec, 500)
+  assert.equal(oneShot.tokensPerSec, 1_000)
   assert.equal(oneShot.outputTokens, 100)
   assert.deepEqual(folder.snapshot(), oneShot)
 })
@@ -705,27 +724,32 @@ test('duplicate step/start preserves settled timing and a duplicate end is idemp
       step: 0,
       chunk: { type: 'text-delta', index: 0, text: 'answer' },
     }, 2, t + 10),
-    message(3, t + 100, 100),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: ' answer' },
+    }, 3, t + 20),
+    message(4, t + 110, 100),
     // A duplicate start before the first end must preserve the settled timing
     // object rather than resetting its start/settled state.
-    event('step/start', { turn: 0, step: 0 }, 4, t + 150),
-    message(5, t + 200, 200),
-    event('step/end', { turn: 0, step: 0 }, 6, t + 210),
+    event('step/start', { turn: 0, step: 0 }, 5, t + 150),
+    message(6, t + 210, 200),
+    event('step/end', { turn: 0, step: 0 }, 7, t + 220),
     // The same replay can repeat both boundaries after the first end.
-    event('step/start', { turn: 0, step: 0 }, 7, t + 220),
-    message(8, t + 300, 300),
-    event('step/end', { turn: 0, step: 0 }, 9, t + 310),
-    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 10, t + 320),
+    event('step/start', { turn: 0, step: 0 }, 8, t + 230),
+    message(9, t + 310, 300),
+    event('step/end', { turn: 0, step: 0 }, 10, t + 320),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 11, t + 330),
   ]
   const oneShot = foldStats(log)
   const folder = new StatsFolder()
   applyMixed(folder, log)
   assert.equal(oneShot.turns, 1)
   assert.equal(oneShot.steps, 1)
-  assert.equal(oneShot.llmMs, 100)
+  assert.equal(oneShot.llmMs, 110)
   assert.equal(oneShot.firstTokenMsAvg, 10)
   // The replacement settled the same step in place: 300 tokens over the
-  // SAME 100 ms wall — one sample, never two.
+  // SAME 100 ms decode span (first token → message) — one sample, never two.
   assert.equal(oneShot.tokensPerSec, 3_000)
   assert.equal(oneShot.outputTokens, 300)
   assert.deepEqual(folder.snapshot(), oneShot)
@@ -771,11 +795,16 @@ test('late assistant usage after step/end replaces the sampled throughput token 
       step: 0,
       chunk: { type: 'text-delta', index: 0, text: 'answer' },
     }, 1, t + 100),
-    assistantMessage(2, t + 1_000, 100),
-    event('step/end', { turn: 0, step: 0 }, 3, t + 1_100),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: ' answer' },
+    }, 2, t + 200),
+    assistantMessage(3, t + 1_100, 100),
+    event('step/end', { turn: 0, step: 0 }, 4, t + 1_200),
   ]
-  const late = assistantMessage(4, t + 2_000, 200)
-  const suffix = [late, event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5, t + 2_100)]
+  const late = assistantMessage(5, t + 2_000, 200)
+  const suffix = [late, event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6, t + 2_100)]
   const oneShot = foldStats([...prefix, ...suffix])
   const folder = new StatsFolder()
   applyMixed(folder, prefix)
@@ -854,12 +883,14 @@ test('usage is counted once per step despite chunk and message both carrying it'
   assert.equal(stats.cacheHitPct, 10)
 })
 
-test('tok/s samples every completed step with valid usage on its FULL LLM wall', () => {
+test('tok/s samples only completed steps with observable decode delivery', () => {
   const t = 1_700_000_000_000
-  // Step 0: burst delivery — a single late tool-call delta, usage, and a
-  // completed message. The effective throughput divides by the WHOLE
-  // request wall (10 s), never the 1 ms observable delta window.
-  // Step 1: streaming text with usage — also sampled on its full wall.
+  // Step 0: burst tool-call — a SINGLE token-bearing delta, usage, and a
+  // completed message. `first == last`, so the decode span is
+  // unobservable: the step must NOT enter the throughput window even
+  // though it has valid usage.
+  // Step 1: normal streaming — two token deltas at distinct timestamps,
+  // usage, and a completed message: the only observable sample.
   // Step 2: a step that never completed (no assistant/message) — no sample.
   const log = [
     event('step/start', { turn: 0, step: 0 }, 0, t),
@@ -879,7 +910,7 @@ test('tok/s samples every completed step with valid usage on its FULL LLM wall',
     event('step/end', { turn: 0, step: 0 }, 4, t + 11_000),
     event('step/start', { turn: 0, step: 1 }, 5, t + 12_000),
     event('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } }, 6, t + 12_100),
-    event('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } }, 7, t + 12_200),
+    event('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } }, 7, t + 12_300),
     event('assistant/message', {
       turn: 0, step: 1,
       message: {
@@ -888,20 +919,396 @@ test('tok/s samples every completed step with valid usage on its FULL LLM wall',
         content: [{ type: 'text', text: 'ab' }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
-      usage: { inputTokens: 10, outputTokens: 500, cacheReadTokens: 0 },
+      usage: { inputTokens: 10, outputTokens: 200, cacheReadTokens: 0 },
       stream: [],
-    }, 8, t + 13_000),
+    }, 8, t + 13_100),
     event('step/end', { turn: 0, step: 1 }, 9, t + 14_000),
     event('step/start', { turn: 0, step: 2 }, 10, t + 15_000),
     event('assistant/chunk', { turn: 0, step: 2, chunk: { type: 'text-delta', index: 0, text: 'x' } }, 11, t + 15_100),
     event('step/end', { turn: 0, step: 2 }, 12, t + 16_000),
   ]
   const stats = foldStats(log)
-  // Pooled recent window: (400 + 500) tokens / (10.001 s + 1 s) full wall
-  // — the burst step contributes ~40 tok/s, not 400 000.
-  assert.equal(stats.tokensPerSec, Math.round((900 * 1000) / 11_001))
+  // Only step 1 is observable: 200 tokens over its 1000 ms decode span
+  // (first token → message) — the burst step never enters the window.
+  assert.equal(stats.tokensPerSec, 200)
   // Total output includes the burst step's authoritative tokens.
-  assert.equal(stats.outputTokens, 900)
+  assert.equal(stats.outputTokens, 600)
+})
+
+test('normal streaming samples first token → assistant/message, not the full wall', () => {
+  const t = 1_700_000_000_000
+  const stats = foldStats([
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'a' } }, 1, t + 100),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'b' } }, 2, t + 300),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('m-decode-a'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ab' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 10, outputTokens: 200 },
+      stream: [],
+    }, 3, t + 1_100),
+    event('step/end', { turn: 0, step: 0 }, 4, t + 1_200),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5, t + 1_300),
+  ])
+  // decodeMs = 1100 − 100 = 1000 ms → 200 tok/s. The TTFT + request
+  // overhead (the first 100 ms) and the settlement tail are NOT in the
+  // denominator — 200 / 1100 ms would be 181 tok/s.
+  assert.equal(stats.tokensPerSec, 200)
+  assert.equal(stats.firstTokenMsAvg, 100)
+})
+
+test('a single-delta burst step is skipped and never displaces valid samples', () => {
+  const t = 1_700_000_000_000
+  const burst = [
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'burst' } }, 1, t + 2_000),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('m-burst-single'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'burst' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 10, outputTokens: 30 },
+      stream: [],
+    }, 2, t + 2_075),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 2_100),
+  ]
+  const alone = foldStats(burst)
+  assert.equal(alone.tokensPerSec, 0, 'a single-delta burst has no observable decode span')
+  assert.equal(alone.outputTokens, 30, 'the burst tokens still count in the accounting')
+
+  // With valid samples already in the window, the burst must not overwrite,
+  // occupy a slot, or change the pooled value.
+  const valid = completedStep(0, 1, 4, t + 10_000, { outputTokens: 100, wallMs: 1_000 })
+  const log = [...valid, ...burst]
+  const stats = foldStats(log)
+  assert.equal(stats.tokensPerSec, 100, 'the burst step leaves the valid sample untouched')
+})
+
+test('multiple deltas at one timestamp are skipped (adapter batch flush)', () => {
+  const t = 1_700_000_000_000
+  // Compact stream: three texts all stamped at time0 (dt: [0, 0]) — the
+  // client cannot observe a decode span, so no throughput sample.
+  const cold = computeStats([
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('m-same-stamp'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'abc' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 10, outputTokens: 30 },
+      stream: [
+        { type: 'text-chunks' as const, time0: t + 1_000, index: 0, dt: [0, 0], texts: ['a', 'b', 'c'] },
+      ],
+    }, 2, t + 1_075),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 1_100),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4, t + 1_200),
+  ])
+  assert.equal(cold.tokensPerSec, 0, 'first == last: no observable decode span')
+  assert.equal(cold.firstTokenMsAvg, 1_000, 'TTFT still uses the first token')
+
+  // The live path with two chunks at the SAME timestamp behaves identically.
+  const live = new StatsFolder()
+  live.apply([
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t),
+  ])
+  live.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'a' }, t + 1_000))
+  live.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'b' }, t + 1_000))
+  live.apply([
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('m-same-stamp-live'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ab' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 10, outputTokens: 30 },
+      stream: [],
+    }, 2, t + 1_075),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 1_100),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4, t + 1_200),
+  ])
+  assert.equal(live.snapshot().tokensPerSec, 0, 'live same-timestamp deltas are equally unobservable')
+})
+
+test('tool execution wait does not affect tok/s', () => {
+  const t = 1_700_000_000_000
+  // Two IDENTICAL model steps (same LLM stream timing and usage) separated
+  // by a SHORT tool gap vs a LONG one. The tool wait sits between
+  // step/end and the next step/start — outside the decode denominator.
+  const modelStep = (step: number, startTime: number, seq: number): SessionEvent[] => [
+    event('step/start', { turn: 0, step }, seq, startTime),
+    event('assistant/chunk', { turn: 0, step, chunk: { type: 'text-delta', index: 0, text: 'a' } }, seq + 1, startTime + 100),
+    event('assistant/chunk', { turn: 0, step, chunk: { type: 'text-delta', index: 0, text: 'b' } }, seq + 2, startTime + 300),
+    event('assistant/message', {
+      turn: 0, step,
+      message: {
+        id: MessageId(`m-tool-${step}`),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ab' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 10, outputTokens: 200 },
+      stream: [],
+    }, seq + 3, startTime + 1_100),
+    event('step/end', { turn: 0, step }, seq + 4, startTime + 1_200),
+  ]
+  const shortGap = [
+    ...modelStep(0, t, 0),
+    ...modelStep(1, t + 1_300, 5),
+  ]
+  const longGap = [
+    ...modelStep(0, t, 0),
+    ...modelStep(1, t + 20_000, 5),
+  ]
+  assert.equal(foldStats(shortGap).tokensPerSec, 200)
+  assert.equal(foldStats(longGap).tokensPerSec, 200, 'the tool wait never enters the decode denominator')
+})
+
+test('route reset: a burst on the new route shows 0, never the old route value', () => {
+  const t = 1_700_000_000_000
+  const log: SessionEvent[] = []
+  let seq = 0
+  // Route A establishes a valid sample.
+  const stepA = completedStep(0, 0, seq, t, { provider: 'a', model: 'm', outputTokens: 100, wallMs: 1_000 })
+  log.push(...stepA)
+  seq += stepA.length
+  // Route B's FIRST step is a burst (single delta): the window cleared
+  // A's samples, and the burst is unobservable → 0 tok/s, not A's value.
+  const burstB = [
+    event('step/start', { turn: 0, step: 1 }, seq++, t + 10_000),
+    event('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'tool-call-delta', index: 0, id: 'tc-b' as ToolCallId, name: 'bash', argumentsDelta: '{}' } }, seq++, t + 10_100),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('m-burst-b'),
+        role: 'assistant',
+        content: [{ type: 'tool-call', id: 'tc-b' as ToolCallId, name: 'bash', arguments: '{}' }],
+        source: { kind: 'model', provider: 'b', model: 'm' },
+      },
+      usage: { inputTokens: 10, outputTokens: 50 },
+      stream: [],
+    }, seq++, t + 10_200),
+    event('step/end', { turn: 0, step: 1 }, seq++, t + 10_300),
+  ]
+  log.push(...burstB)
+  const afterBurst = foldStats(log)
+  assert.equal(afterBurst.tokensPerSec, 0, 'route B has no valid sample yet — A\'s value must not linger')
+  // B's next VALID streaming step establishes B's own rate.
+  const stepB = completedStep(0, 2, seq, t + 20_000, { provider: 'b', model: 'm', outputTokens: 200, wallMs: 1_000 })
+  log.push(...stepB)
+  const afterValid = foldStats(log)
+  assert.equal(afterValid.tokensPerSec, 200, 'B\'s observable step builds the new window')
+})
+
+test('late authoritative usage cannot make a burst step valid', () => {
+  const t = 1_700_000_000_000
+  const message = (seq: number, time: number, outputTokens: number): SessionEvent => event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId(`m-burst-late-${seq}`),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'burst' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    usage: { inputTokens: 10, outputTokens },
+    stream: [],
+  }, seq, time)
+  const log = [
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    // A single token-bearing delta: first == last, unobservable.
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'burst' } }, 1, t + 100),
+    message(2, t + 1_100, 30),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 1_200),
+    // The late authoritative duplicate reports a much larger output.
+    message(4, t + 2_000, 300),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5, t + 2_100),
+  ]
+  const oneShot = foldStats(log)
+  const folder = new StatsFolder()
+  applyMixed(folder, log)
+  assert.equal(oneShot.tokensPerSec, 0, 'no token count can create a sample without an observable decode span')
+  assert.equal(oneShot.outputTokens, 300, 'the accounting still applies the authoritative replacement')
+  assert.deepEqual(folder.snapshot(), oneShot)
+})
+
+test('a late burst duplicate message removes the previously valid sample', () => {
+  const t = 1_700_000_000_000
+  const message = (seq: number, time: number, stream: AssistantStreamRecord[]): SessionEvent => event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId(`m-valid-then-burst-${seq}`),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    usage: { inputTokens: 10, outputTokens: 100 },
+    stream,
+  }, seq, time)
+  const log = [
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    // The first message settles with an OBSERVABLE decode span: 100 tokens
+    // over 1100 − 100 = 1000 ms → a 100 tok/s sample.
+    message(1, t + 1_100, [
+      { type: 'chunk', time: t + 100, chunk: { type: 'text-delta', index: 0, text: 'a' } },
+      { type: 'chunk', time: t + 200, chunk: { type: 'text-delta', index: 0, text: 'b' } },
+    ]),
+    event('step/end', { turn: 0, step: 0 }, 2, t + 1_200),
+    // The late authoritative duplicate's stream is a BURST (all tokens at
+    // one timestamp): the authoritative evidence invalidates the range, so
+    // the stale sample must leave the window — never keep reporting a
+    // superseded rate.
+    message(3, t + 2_000, [
+      { type: 'text-chunks' as const, time0: t + 100, index: 0, dt: [0], texts: ['a', 'b'] },
+    ]),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4, t + 2_100),
+  ]
+  const oneShot = foldStats(log)
+  const cold = computeStats(log)
+  const folder = new StatsFolder()
+  applyMixed(folder, log)
+  assert.equal(oneShot.tokensPerSec, 0, 'the late burst evidence removes the stale sample')
+  assert.equal(oneShot.outputTokens, 100, 'the accounting still applies the authoritative replacement')
+  assert.equal(cold.tokensPerSec, 0, 'the cold fold removes the stale sample identically')
+  assert.deepEqual(cold, oneShot, 'computeStats and StatsFolder must not diverge')
+  assert.deepEqual(folder.snapshot(), oneShot)
+})
+
+test('a late burst duplicate message WITHOUT usage still removes the stale sample', () => {
+  const t = 1_700_000_000_000
+  const message = (seq: number, time: number, usage: { inputTokens: number; outputTokens: number } | undefined, stream: AssistantStreamRecord[]): SessionEvent => event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId(`m-valid-then-burst-nousage-${seq}`),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    ...(usage === undefined ? {} : { usage }),
+    stream,
+  }, seq, time)
+  const log = [
+    event('step/start', { turn: 0, step: 0 }, 0, t),
+    // The first message settles with an OBSERVABLE decode span and usage:
+    // 100 tokens over 1100 − 100 = 1000 ms → a 100 tok/s sample.
+    message(1, t + 1_100, { inputTokens: 10, outputTokens: 100 }, [
+      { type: 'chunk', time: t + 100, chunk: { type: 'text-delta', index: 0, text: 'a' } },
+      { type: 'chunk', time: t + 200, chunk: { type: 'text-delta', index: 0, text: 'b' } },
+    ]),
+    event('step/end', { turn: 0, step: 0 }, 2, t + 1_200),
+    // The late duplicate carries a BURST stream (all tokens at one
+    // timestamp) and NO usage: the authoritative token evidence still
+    // invalidates the range, so the stale sample must leave the window.
+    message(3, t + 2_000, undefined, [
+      { type: 'text-chunks' as const, time0: t + 100, index: 0, dt: [0], texts: ['a', 'b'] },
+    ]),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4, t + 2_100),
+  ]
+  const oneShot = foldStats(log)
+  const cold = computeStats(log)
+  const folder = new StatsFolder()
+  applyMixed(folder, log)
+  assert.equal(oneShot.tokensPerSec, 0, 'the usage-less burst duplicate still removes the stale sample')
+  assert.equal(oneShot.outputTokens, 100, 'the retained usage stays authoritative')
+  assert.equal(cold.tokensPerSec, 0, 'the cold fold removes the stale sample identically')
+  assert.deepEqual(cold, oneShot, 'computeStats and StatsFolder must not diverge')
+  assert.deepEqual(folder.snapshot(), oneShot)
+})
+
+test('retry: a burst final success after a streamed failed attempt has no throughput sample', () => {
+  const t = 1_700_000_000_000
+  const events = [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t),
+    // The FAILED attempt streams two token deltas at distinct timestamps.
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'failed' } }, 2, t + 100),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: ' attempt' } }, 3, t + 200),
+    event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 4, t + 300),
+    event('llm/retry-started', { retryId: 'retry-burst' as RetryId, turn: 0, step: 0, retry: 1 }, 5, t + 500),
+    // The SUCCESSFUL attempt delivers a SINGLE token-bearing delta (burst).
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'ok' } }, 6, t + 5_000),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('m-retry-burst'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 10, outputTokens: 200 },
+      stream: [],
+    }, 7, t + 6_000),
+    event('step/end', { turn: 0, step: 0 }, 8, t + 6_100),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9, t + 6_200),
+  ]
+  const stats = foldStats(events)
+  // TTFT keeps the failed attempt's first token (100 ms)...
+  assert.equal(stats.firstTokenMsAvg, 100)
+  // ...but the failed attempt's token range was cleared at attempt/retry,
+  // and the final burst has first == last: no throughput sample.
+  assert.equal(stats.tokensPerSec, 0)
+  assert.equal(stats.outputTokens, 200)
+})
+
+test('cold compact-stream fold and live transient fold agree on valid and burst steps', () => {
+  const t = 1_700_000_000_000
+  const boundary = (stream: AssistantStreamRecord[]): SessionEvent[] => [
+    event('turn/start', { turn: 0 }, 0, t),
+    event('step/start', { turn: 0, step: 0 }, 1, t),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('m-parity'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ab' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 10, outputTokens: 200 },
+      stream,
+    }, 2, t + 1_100),
+    event('step/end', { turn: 0, step: 0 }, 3, t + 1_200),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4, t + 1_300),
+  ]
+  // VALID: two deltas at distinct timestamps (compact v2 text-chunks).
+  const validStream = [
+    { type: 'text-chunks' as const, time0: t + 100, index: 0, dt: [200], texts: ['a', 'b'] },
+  ]
+  const coldValid = computeStats(boundary(validStream))
+  const liveValid = new StatsFolder()
+  liveValid.apply(boundary([]).slice(0, 2))
+  liveValid.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'a' }, t + 100))
+  liveValid.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'b' }, t + 300))
+  liveValid.apply(boundary([]).slice(2))
+  assert.equal(coldValid.firstTokenMsAvg, 100, 'cold TTFT')
+  assert.equal(liveValid.snapshot().firstTokenMsAvg, 100, 'live TTFT')
+  assert.equal(coldValid.tokensPerSec, 200, 'cold decode rate (200 tok / 1000 ms)')
+  assert.equal(liveValid.snapshot().tokensPerSec, 200, 'live decode rate')
+
+  // BURST: all texts at one timestamp (dt: [0]) — both folds skip it.
+  const burstStream = [
+    { type: 'text-chunks' as const, time0: t + 100, index: 0, dt: [0], texts: ['a', 'b'] },
+  ]
+  const coldBurst = computeStats(boundary(burstStream))
+  const liveBurst = new StatsFolder()
+  liveBurst.apply(boundary([]).slice(0, 2))
+  liveBurst.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'a' }, t + 100))
+  liveBurst.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'b' }, t + 100))
+  liveBurst.apply(boundary([]).slice(2))
+  assert.equal(coldBurst.tokensPerSec, 0, 'cold burst is unobservable')
+  assert.equal(liveBurst.snapshot().tokensPerSec, 0, 'live burst is unobservable')
+  assert.equal(coldBurst.firstTokenMsAvg, 100, 'TTFT still uses the first token')
+  assert.equal(liveBurst.snapshot().firstTokenMsAvg, 100)
 })
 
 test('turn/start advances the accumulator: a delayed prior-turn usage fact is stale', () => {
@@ -1028,13 +1435,16 @@ test('a retry accumulates attempts while settling logical-step timing once', () 
   const events = [
     event('turn/start', { turn: 0 }, 0, t),
     event('step/start', { turn: 0, step: 0 }, 1, t + 100),
+    // The FAILED attempt streams two token deltas at distinct timestamps:
+    // without the attempt/retry decode reset they would look observable.
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'failed' } }, 2, t + 200),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } } }, 3, t + 220),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: ' attempt' } }, 3, t + 250),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } } }, 4, t + 220),
     event('assistant/attempt', {
       turn: 0,
       step: 0,
       stream: [{ type: 'chunk', time: t + 300, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } } }],
-    }, 4, t + 300),
+    }, 5, t + 300),
     event('llm/retry', {
       retryId: 'retry-1' as RetryId,
       turn: 0,
@@ -1046,25 +1456,31 @@ test('a retry accumulates attempts while settling logical-step timing once', () 
       maxRetries: 2,
       delayMs: 0,
       failure: { message: 'failed', code: 'TEST' },
-    }, 5, t + 400),
-    event('llm/retry-started', { retryId: 'retry-1' as RetryId, turn: 0, step: 0, retry: 1 }, 6, t + 500),
+    }, 6, t + 400),
+    event('llm/retry-started', { retryId: 'retry-1' as RetryId, turn: 0, step: 0, retry: 1 }, 7, t + 500),
     // retry on the SAME step streams a fresh cumulative usage fact
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 200, outputTokens: 9 } } }, 7, t + 600),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'usage', usage: { inputTokens: 200, outputTokens: 9 } } }, 8, t + 600),
+    // The SUCCESSFUL attempt's decode span starts at its own first token.
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'ok' } }, 9, t + 650),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '!' } }, 10, t + 700),
     event('assistant/message', {
       turn: 0, step: 0,
       message: { id: MessageId('m-retry'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
       usage: { inputTokens: 200, outputTokens: 9 },
       stream: [],
-    }, 8, t + 800),
-    event('step/end', { turn: 0, step: 0 }, 9, t + 900),
-    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 10, t + 1_000),
+    }, 11, t + 800),
+    event('step/end', { turn: 0, step: 0 }, 12, t + 900),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 13, t + 1_000),
   ]
   const stats = foldStats(events)
   assert.equal(stats.inputTokens, 300, 'the failed attempt and retry usage are both billed')
   assert.equal(stats.outputTokens, 14)
   assert.equal(stats.llmMs, 700, 'the retry reuses the original step start for wall time')
   assert.equal(stats.firstTokenMsAvg, 100, 'the first token of the logical step survives the failed attempt')
-  assert.equal(stats.tokensPerSec, Math.round((9 * 1000) / 700), 'throughput samples the final retry message, not the additive attempt total')
+  // Throughput uses ONLY the successful attempt's decode span: 9 tokens
+  // over 800 − 650 = 150 ms — never the failed attempt's tokens or the
+  // step/start → message wall.
+  assert.equal(stats.tokensPerSec, Math.round((9 * 1000) / 150), 'throughput samples the final retry attempt, not the additive attempt total')
   const cold = computeStats(events.filter(item => (item.type as string) !== 'assistant/chunk'))
   assert.equal(cold.inputTokens, 300, 'cold replay keeps both attempt totals')
   assert.equal(cold.outputTokens, 14)
@@ -1209,7 +1625,10 @@ test('a late assistant/attempt replacement updates recent throughput and TTFT', 
       step: 0,
       message: { id: MessageId('m-performance-replacement'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
       usage: usageA,
-      stream: [],
+      stream: [
+        { type: 'chunk', time: t + 105, chunk: { type: 'text-delta', index: 0, text: 'answer' } },
+        { type: 'chunk', time: t + 106, chunk: { type: 'text-delta', index: 0, text: ' answer' } },
+      ],
     }, 2, t + 110),
     event('assistant/attempt', {
       turn: 0,
@@ -1227,12 +1646,14 @@ test('a late assistant/attempt replacement updates recent throughput and TTFT', 
   for (const stats of [oneShot, incremental]) {
     assert.equal(stats.inputTokens, 20)
     assert.equal(stats.outputTokens, 200)
-    assert.equal(stats.firstTokenMsAvg, 5, 'late attempt first-token evidence fills the missing TTFT sample')
-    assert.equal(stats.tokensPerSec, 20_000, 'late authoritative usage replaces the throughput sample')
+    assert.equal(stats.firstTokenMsAvg, 5, 'the message stream supplies the TTFT sample')
+    // The late attempt's usage swaps ONLY the numerator: 200 tokens over
+    // the SAME 5 ms decode span (first token → message) = 40 000 tok/s.
+    assert.equal(stats.tokensPerSec, 40_000, 'late authoritative usage replaces the throughput sample numerator')
   }
 })
 
-test('a first-token-only late attempt fills TTFT without changing usage throughput', () => {
+test('a first-token-only late attempt fills TTFT but cannot create a throughput sample', () => {
   const t = 1_700_000_000_000
   const events = [
     event('turn/start', { turn: 0 }, 0, t),
@@ -1257,8 +1678,11 @@ test('a first-token-only late attempt fills TTFT without changing usage throughp
   for (const stats of [oneShot, incremental]) {
     assert.equal(stats.inputTokens, 10)
     assert.equal(stats.outputTokens, 100)
-    assert.equal(stats.firstTokenMsAvg, 5)
-    assert.equal(stats.tokensPerSec, 10_000)
+    assert.equal(stats.firstTokenMsAvg, 5, 'late attempt first-token evidence fills the missing TTFT sample')
+    // The step settled with NO token evidence (burst): the late attempt's
+    // single token fills TTFT but cannot create a decode span — a burst
+    // final response stays out of the throughput window.
+    assert.equal(stats.tokensPerSec, 0)
   }
   assert.deepEqual(incremental, oneShot)
 })
@@ -1273,7 +1697,10 @@ test('a late assistant/attempt after step/end replaces the retained throughput s
       step: 0,
       message: { id: MessageId('m-post-step-performance'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
       usage: { inputTokens: 10, outputTokens: 100 },
-      stream: [],
+      stream: [
+        { type: 'chunk', time: t + 105, chunk: { type: 'text-delta', index: 0, text: 'answer' } },
+        { type: 'chunk', time: t + 106, chunk: { type: 'text-delta', index: 0, text: ' answer' } },
+      ],
     }, 2, t + 110),
     event('step/end', { turn: 0, step: 0 }, 3, t + 120),
     event('assistant/attempt', {
@@ -1285,8 +1712,9 @@ test('a late assistant/attempt after step/end replaces the retained throughput s
   ]
   const oneShot = computeStats(events)
   const incremental = foldStats(events)
-  assert.equal(oneShot.tokensPerSec, 20_000)
-  assert.equal(incremental.tokensPerSec, 20_000)
+  // 200 tokens over the retained 5 ms decode span = 40 000 tok/s.
+  assert.equal(oneShot.tokensPerSec, 40_000)
+  assert.equal(incremental.tokensPerSec, 40_000)
   assert.deepEqual(incremental, oneShot)
 })
 
@@ -1300,7 +1728,10 @@ test('duplicate late attempts replace and can invalidate the throughput sample',
       step: 0,
       message: { id: MessageId('m-duplicate-attempt-performance'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
       usage: { inputTokens: 10, outputTokens: 100 },
-      stream: [],
+      stream: [
+        { type: 'chunk', time: t + 105, chunk: { type: 'text-delta', index: 0, text: 'answer' } },
+        { type: 'chunk', time: t + 106, chunk: { type: 'text-delta', index: 0, text: ' answer' } },
+      ],
     }, 2, t + 110),
   ]
   const replacement = event('assistant/attempt', {
@@ -1323,7 +1754,8 @@ test('duplicate late attempts replace and can invalidate the throughput sample',
   folder.apply(prefix)
   folder.apply([replacement])
   assert.equal(folder.snapshot().outputTokens, 200)
-  assert.equal(folder.snapshot().tokensPerSec, 20_000)
+  // 200 tokens over the retained 5 ms decode span = 40 000 tok/s.
+  assert.equal(folder.snapshot().tokensPerSec, 40_000)
   folder.apply(suffix)
   assert.equal(folder.snapshot().inputTokens, 30)
   assert.equal(folder.snapshot().outputTokens, 0)
@@ -1461,9 +1893,15 @@ test('llmMs spans step/start to assistant/message, not to step/end', () => {
   assert.equal(stats.llmMs, 2_000)
 })
 
-// ── Recent performance contract (recent-5 effective throughput / TTFB) ───
+// ── Recent performance contract (recent-5 observable decode throughput / TTFB) ───
 
-/** One completed step with a model-source identity and usage. */
+/** One completed step with a model-source identity and usage. Every step
+ * carries TWO token-bearing deltas at distinct timestamps so it is an
+ * OBSERVABLE decode sample: the first at `firstDeltaMs` (or
+ * `wallMs - decodeMs` when unspecified) and the second 100 ms later. The
+ * decode span defaults to the full wall (`decodeMs = wallMs`), keeping the
+ * pooled-rate math of the window tests on the wall scale. `tokenDeltas:
+ * false` emits no deltas (a burst step / missing TTFT evidence). */
 function completedStep(
   turn: number,
   step: number,
@@ -1475,21 +1913,30 @@ function completedStep(
     outputTokens?: number
     wallMs?: number
     firstDeltaMs?: number
+    decodeMs?: number
+    tokenDeltas?: boolean
   } = {},
 ): SessionEvent[] {
   const wallMs = options.wallMs ?? 1_000
-  const firstDeltaMs = options.firstDeltaMs
+  const decodeMs = options.decodeMs ?? wallMs
+  const firstDeltaMs = options.firstDeltaMs ?? wallMs - decodeMs
   const events: SessionEvent[] = [
     event('step/start', { turn, step }, startSeq, startTime),
   ]
   let seq = startSeq
-  if (firstDeltaMs !== undefined) {
+  if (options.tokenDeltas !== false) {
     seq += 1
     events.push(event('assistant/chunk', {
       turn,
       step,
       chunk: { type: 'text-delta', index: 0, text: 'answer' },
     }, seq, startTime + firstDeltaMs))
+    seq += 1
+    events.push(event('assistant/chunk', {
+      turn,
+      step,
+      chunk: { type: 'text-delta', index: 0, text: ' answer' },
+    }, seq, startTime + firstDeltaMs + 100))
   }
   seq += 1
   events.push(event('assistant/message', {
@@ -1509,10 +1956,10 @@ function completedStep(
   return events
 }
 
-test('recent-5 throughput pools the latest five steps and evicts the first (Σoutput / Σwall)', () => {
+test('recent-5 throughput pools the latest five steps and evicts the first (Σoutput / ΣdecodeMs)', () => {
   const t = 1_700_000_000_000
   // Six 1-token-per-second steps: the 6th completes → the 1st leaves the
-  // window; TPS = Σ(step2..step6 output) / Σ(step2..step6 wall).
+  // window; TPS = Σ(step2..step6 output) / Σ(step2..step6 decodeMs).
   const log: SessionEvent[] = []
   let seq = 0
   for (let step = 0; step < 6; step += 1) {
@@ -1534,14 +1981,18 @@ test('recent-5 throughput pools the latest five steps and evicts the first (Σou
   }
 })
 
-test('an early burst never ratchets the session TPS (recent window, not lifetime)', () => {
+test('burst steps never occupy a recent-5 valid sample slot', () => {
   const t = 1_700_000_000_000
-  // Twenty burst tool-call steps (400 tokens over a 2 s request each),
-  // then one long reasoning step (500 tokens over 25 s). The lifetime
-  // decode-window ratchet would spike then "fall back"; the recent-5
-  // effective rate simply describes the last five requests.
+  // Five valid streaming steps establish a stable rate, then several burst
+  // tool-call steps (a SINGLE token-bearing delta each — unobservable)
+  // must not displace them: the window pools the latest 5 VALID samples.
   const log: SessionEvent[] = []
   let seq = 0
+  for (let step = 0; step < 5; step += 1) {
+    const events = completedStep(0, step, seq, t + step * 10_000, { outputTokens: 100, wallMs: 1_000 })
+    log.push(...events)
+    seq += events.length
+  }
   const burst = (step: number, startTime: number): SessionEvent[] => [
     event('step/start', { turn: 0, step }, seq++, startTime),
     event('assistant/chunk', {
@@ -1563,15 +2014,15 @@ test('an early burst never ratchets the session TPS (recent window, not lifetime
     }, seq++, startTime + 2_000),
     event('step/end', { turn: 0, step }, seq++, startTime + 2_100),
   ]
-  for (let step = 0; step < 20; step += 1) log.push(...burst(step, t + step * 5_000))
+  for (let step = 5; step < 8; step += 1) log.push(...burst(step, t + step * 5_000))
   const afterBurst = foldStats(log)
-  assert.equal(afterBurst.tokensPerSec, 200, 'burst steps sample on their full request wall (400/2s)')
-  const longStep = completedStep(0, 20, seq, t + 100_000, { outputTokens: 500, wallMs: 25_000, firstDeltaMs: 1_000 })
-  log.push(...longStep)
-  const afterLong = foldStats(log)
-  // The long step is 1 of 5 window samples: 4×400 tokens/2s + 500/25s →
-  // pooled (2100 tokens / 33 s) — no lifetime ratchet, no crash back.
-  assert.equal(afterLong.tokensPerSec, Math.round((2_100 * 1000) / 33_000))
+  assert.equal(afterBurst.tokensPerSec, 100, 'burst steps do not enter the window: the five valid samples still pool 5 × 100 tok / 5 s')
+  // A new VALID step evicts the OLDEST valid sample (not a burst): the
+  // rolling value updates normally.
+  const newest = completedStep(0, 8, seq, t + 50_000, { outputTokens: 200, wallMs: 1_000 })
+  log.push(...newest)
+  const afterNew = foldStats(log)
+  assert.equal(afterNew.tokensPerSec, Math.round((4 * 100 + 200) * 1000 / 5_000), 'the newest valid step evicts the oldest valid one')
 })
 
 test('recent TTFB averages the latest five first-token steps', () => {
@@ -1599,7 +2050,7 @@ test('late attempt TTFT keeps its completion ordinal and recent-five membership'
   const t = 1_700_000_000_000
   const log: SessionEvent[] = []
   let seq = 0
-  const first = completedStep(0, 0, seq, t, { firstDeltaMs: undefined })
+  const first = completedStep(0, 0, seq, t, { tokenDeltas: false })
   log.push(...first)
   seq += first.length
   for (let step = 1; step <= 4; step += 1) {
@@ -1662,13 +2113,15 @@ test('a model/provider route change resets the recent performance window', () =>
     seq += events.length
   }
   const switchEvents = completedStep(0, 5, seq, t + 50_000, {
-    provider: 'b', model: 'fast', outputTokens: 100, wallMs: 1_000, firstDeltaMs: 100,
+    provider: 'b', model: 'fast', outputTokens: 100, wallMs: 1_100, firstDeltaMs: 100,
   })
   log.push(...switchEvents)
   const oneShot = foldStats(log)
   const folder = new StatsFolder()
   applyMixed(folder, log.slice(0, log.length - switchEvents.length))
-  assert.equal(folder.snapshot().tokensPerSec, 200, 'before the switch the window is route A')
+  // Route A: 5 × 1000 tokens over 5 × 1000 ms decode spans (first token
+  // at 4000 → message at 5000) = 1000 tok/s.
+  assert.equal(folder.snapshot().tokensPerSec, 1_000, 'before the switch the window is route A')
   assert.equal(folder.snapshot().firstTokenMsAvg, 4_000)
   applyMixed(folder, switchEvents)
   // After B's first completed response the window holds ONLY B's sample.
@@ -1676,7 +2129,7 @@ test('a model/provider route change resets the recent performance window', () =>
   assert.equal(folder.snapshot().tokensPerSec, 100)
   assert.equal(folder.snapshot().firstTokenMsAvg, 100)
   // The lifetime LLM wall and the usage totals keep accumulating.
-  assert.equal(folder.snapshot().llmMs, 5 * 5_000 + 1_000)
+  assert.equal(folder.snapshot().llmMs, 5 * 5_000 + 1_100)
   assert.equal(folder.snapshot().outputTokens, 5_100)
 })
 
@@ -1687,7 +2140,7 @@ test('route keys are delimiter-safe (provider/model containing "/" never collide
   // undetected — the window would pool both steps (1100 tokens / 6 s ≈
   // 183 tok/s, TTFB mean 2050). The tuple-encoded key must reset.
   const stepA = completedStep(0, 0, 0, t, { provider: 'a/b', model: 'c', outputTokens: 1_000, wallMs: 5_000, firstDeltaMs: 4_000 })
-  const stepB = completedStep(0, 1, stepA.length, t + 10_000, { provider: 'a', model: 'b/c', outputTokens: 100, wallMs: 1_000, firstDeltaMs: 100 })
+  const stepB = completedStep(0, 1, stepA.length, t + 10_000, { provider: 'a', model: 'b/c', outputTokens: 100, wallMs: 1_100, firstDeltaMs: 100 })
   const log = [...stepA, ...stepB]
   const oneShot = foldStats(log)
   const folder = new StatsFolder()
@@ -1741,7 +2194,7 @@ test('a late attempt cannot resurrect a sample across A → B → A route epochs
     stream: [{ type: 'chunk', time: t + 30_000, chunk: { type: 'usage', usage: { inputTokens: 20, outputTokens: 9_999 } } }],
   }, stepA0.length + stepB.length + stepA1.length, t + 30_000)
   const log = [...stepA0, ...stepB, ...stepA1, late]
-  const oneShot = computeStats(log)
+  const oneShot = foldStats(log)
   const folder = new StatsFolder()
   applyMixed(folder, log)
   assert.equal(oneShot.tokensPerSec, 100)
@@ -1754,9 +2207,21 @@ test('a usage-less step that becomes valid via a late authoritative message join
   const log: SessionEvent[] = []
   let seq = 0
   for (let step = 0; step < 2; step += 1) {
-    // Steps 0-1 settle WITHOUT usage (no sample yet).
+    // Steps 0-1 settle WITHOUT usage (no sample yet), but with an
+    // OBSERVABLE decode span (two token deltas at distinct timestamps) so
+    // a late authoritative usage can still create their samples.
     const events: SessionEvent[] = [
       event('step/start', { turn: 0, step }, seq++, t + step * 10_000),
+      event('assistant/chunk', {
+        turn: 0,
+        step,
+        chunk: { type: 'text-delta', index: 0, text: 'answer' },
+      }, seq++, t + step * 10_000 + 100),
+      event('assistant/chunk', {
+        turn: 0,
+        step,
+        chunk: { type: 'text-delta', index: 0, text: ' answer' },
+      }, seq++, t + step * 10_000 + 200),
       event('assistant/message', {
         turn: 0,
         step,
@@ -1767,8 +2232,8 @@ test('a usage-less step that becomes valid via a late authoritative message join
           source: { kind: 'model', provider: 'p', model: 'm' },
         },
         stream: [],
-      }, seq++, t + step * 10_000 + 1_000),
-      event('step/end', { turn: 0, step }, seq++, t + step * 10_000 + 1_100),
+      }, seq++, t + step * 10_000 + 1_100),
+      event('step/end', { turn: 0, step }, seq++, t + step * 10_000 + 1_200),
     ]
     log.push(...events)
   }
@@ -1798,8 +2263,9 @@ test('a usage-less step that becomes valid via a late authoritative message join
   assert.equal(folder.snapshot().tokensPerSec, 300)
   folder.apply([late])
   assert.deepEqual(folder.snapshot(), oneShot)
-  // Samples: step1 (900 tokens over 1 s wall, ordinal 1) + step2 →
-  // pooled 1200 tokens / 2 s = 600 tok/s — the old step joined mid-window.
+  // Samples: step1 (900 tokens over its 1000 ms decode span, ordinal 1) +
+  // step2 (300 tokens over 1000 ms) → pooled 1200 tokens / 2 s = 600
+  // tok/s — the old step joined mid-window at its original ordinal.
   assert.equal(oneShot.tokensPerSec, 600)
 })
 
@@ -1815,8 +2281,8 @@ test('a burst route keeps token totals identical to the pre-recent accounting', 
   const stats = foldStats(log)
   const folder = new StatsFolder()
   applyMixed(folder, log)
-  // Effective throughput may exceed 1 tok/ms on burst routes — that is the
-  // honest full-wall rate; nothing clamps it (plan §2.2: no TPS clamps).
+  // Observable decode throughput may exceed 1 tok/ms on fast routes —
+  // nothing clamps it (plan §11: no TPS clamps).
   assert.equal(stats.tokensPerSec, 4_000)
   // Usage accounting is untouched by the performance window.
   assert.equal(stats.outputTokens, 3_200)
@@ -1873,12 +2339,17 @@ test('an authoritative duplicate that invalidates the sample REMOVES it (no stal
       step: 0,
       chunk: { type: 'text-delta', index: 0, text: 'answer' },
     }, 1, t + 100),
-    message(2, t + 1_000, 100),
-    event('step/end', { turn: 0, step: 0 }, 3, t + 1_100),
+    event('assistant/chunk', {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: ' answer' },
+    }, 2, t + 200),
+    message(3, t + 1_100, 100),
+    event('step/end', { turn: 0, step: 0 }, 4, t + 1_200),
   ]
   // The authoritative duplicate corrects outputTokens to 0: the step's
   // sample is no longer valid and must not keep feeding the recent rate.
-  const invalidating = message(4, t + 2_000, 0)
+  const invalidating = message(5, t + 2_000, 0)
   const log = [...prefix, invalidating]
   const oneShot = foldStats(log)
   const folder = new StatsFolder()
@@ -1888,17 +2359,17 @@ test('an authoritative duplicate that invalidates the sample REMOVES it (no stal
   assert.deepEqual(folder.snapshot(), oneShot)
   assert.equal(folder.snapshot().tokensPerSec, 0, 'the invalidated sample leaves the window')
   // Timing facts survive the correction untouched.
-  assert.equal(folder.snapshot().llmMs, 1_000)
+  assert.equal(folder.snapshot().llmMs, 1_100)
   assert.equal(folder.snapshot().firstTokenMsAvg, 100)
   // The usage accounting applied the authoritative replacement.
   assert.equal(folder.snapshot().outputTokens, 0)
 
   // The stale-denominator repro: a SECOND valid step after the
-  // invalidation must pool over its own wall only. Keeping A's wall
-  // (the lifetime-style subtract-only variant → 300 tokens / 2 s = 150)
-  // or keeping A's sample whole (the unremoved variant → 400 tokens /
-  // 2 s = 200) both miss; the correct removal yields 300 tok/s.
-  const stepB = completedStep(0, 1, 5, t + 10_000, { outputTokens: 300, wallMs: 1_000 })
+  // invalidation must pool over its own decode span only. Keeping A's
+  // decode span (the lifetime-style subtract-only variant → 300 tokens /
+  // 2 s = 150) or keeping A's sample whole (the unremoved variant → 400
+  // tokens / 2 s = 200) both miss; the correct removal yields 300 tok/s.
+  const stepB = completedStep(0, 1, 6, t + 10_000, { outputTokens: 300, wallMs: 1_000 })
   const withB = [...prefix, invalidating, ...stepB]
   const oneShotWithB = foldStats(withB)
   const folderB = new StatsFolder()

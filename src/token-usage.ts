@@ -83,14 +83,34 @@ export function isAssistantTokenDelta(chunk: {
   }
 }
 
-/** Return the first token timestamp embedded in a compact assistant stream.
- * Older compatible event records may omit the optional stream. */
-export function firstTokenTimeFromAssistantStream(stream: readonly unknown[] | undefined): number | undefined {
+/** The first and last token timestamps embedded in a compact assistant
+ * stream (text / reasoning / tool-call deltas — the Web's isTokenDelta).
+ * `block-start/end`, `usage`, and `finish` are not tokens. */
+export interface AssistantTokenTimeRange {
+  first: number
+  last: number
+}
+
+/** Return the first and last token timestamps embedded in a compact
+ * assistant stream, in one pass. Undefined when the stream is missing or
+ * carries no token-bearing delta. Older compatible event records may omit
+ * the optional stream. */
+export function tokenTimeRangeFromAssistantStream(stream: readonly unknown[] | undefined): AssistantTokenTimeRange | undefined {
   if (stream === undefined) return undefined
+  let first: number | undefined
+  let last: number | undefined
   for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
-    if (isAssistantTokenDelta(member.chunk)) return member.time
+    if (isAssistantTokenDelta(member.chunk)) {
+      if (first === undefined) first = member.time
+      last = member.time
+    }
   }
-  return undefined
+  return first === undefined || last === undefined ? undefined : { first, last }
+}
+
+/** Return the first token timestamp embedded in a compact assistant stream. */
+export function firstTokenTimeFromAssistantStream(stream: readonly unknown[] | undefined): number | undefined {
+  return tokenTimeRangeFromAssistantStream(stream)?.first
 }
 
 /** Return the latest provider usage embedded in a compact assistant stream. */
