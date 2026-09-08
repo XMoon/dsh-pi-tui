@@ -2172,16 +2172,16 @@ test('theme switch repaints the welcome card: whale gradient stays, facts follow
   const darkWhale = vt.getCellFgRgb(whaleRow, whaleCol)
   assert.ok(darkWhale !== undefined && ramp.includes(darkWhale), `whale must paint a brand ramp color, got ${darkWhale}:\n${lines.join('\n')}`)
   // The facts title is the welcome card's own row (the header also reads
-  // "dsh-pi-tui", so match the versioned title).
-  const titleRow = lines.findIndex(line => line.includes('dsh-pi-tui  v'))
+  // "dsh-pi-tui", so exclude the 🐋 header row).
+  const titleRow = lines.findIndex(line => line.includes('dsh-pi-tui') && !line.includes('🐋'))
   assert.ok(titleRow >= 0, `facts title missing:\n${lines.join('\n')}`)
   const titleCol = lines[titleRow]!.indexOf('dsh-pi-tui')
-  assert.equal(vt.getCellFgRgb(titleRow, titleCol), 0x6b6b6b, 'dark facts must be #6B6B6B')
+  assert.equal(vt.getCellFgRgb(titleRow, titleCol), 0xf5f5f5, 'dark title must be #F5F5F5 (textStrong)')
   app.applyTheme('light')
   await vt.waitForRender()
   // Facts follow the live palette; the whale gradient stays fixed (the
   // width cache must not freeze the old ANSI).
-  assert.equal(vt.getCellFgRgb(titleRow, titleCol), 0x5f5f5f, 'light facts must be #5F5F5F')
+  assert.equal(vt.getCellFgRgb(titleRow, titleCol), 0x1a1a1a, 'light title must be #1A1A1A (textStrong)')
   assert.equal(vt.getCellFgRgb(whaleRow, whaleCol), darkWhale, 'whale gradient must survive the theme switch')
   app.stop()
 })
@@ -2205,8 +2205,8 @@ test('welcome card stacks the whale above the facts at medium width', async () =
     assert.ok(visibleWidth(line) <= 60, `whale row wrapped:\n${view}`)
   }
   // Facts come after the whale block (one blank row between). The header
-  // also reads "dsh-pi-tui", so match the versioned welcome title.
-  const factsRow = lines.findIndex(line => line.includes('dsh-pi-tui  v'))
+  // also reads "dsh-pi-tui", so exclude the 🐋 header row.
+  const factsRow = lines.findIndex(line => line.includes('dsh-pi-tui') && !line.includes('🐋'))
   assert.ok(factsRow > whaleRow, `facts must follow the whale:\n${view}`)
   assert.ok(view.includes('session-1'), `session id missing:\n${view}`)
   assert.ok(view.includes('code'), `preset missing:\n${view}`)
