@@ -40,8 +40,10 @@ import type {
 import type {} from '@deepseek-ai/dsh-commands'
 // Load the official subagent event declarations.
 import type {} from '@deepseek-ai/dsh-subagent'
-// Load the official workflow event declarations.
-import type {} from '@deepseek-ai/dsh-tool-workflow/types'
+// The official workflow durable event payloads. The branded run/session
+// identities are derived from them (indexed access on the direct dependency
+// — no new dependency surface, plan §4.1).
+import type { ToolWorkflowAgentStartData, ToolWorkflowRunStartData } from '@deepseek-ai/dsh-tool-workflow/types'
 // Load the official retry event declarations.
 import type {} from '@deepseek-ai/dsh-llm-retry'
 
@@ -96,6 +98,7 @@ export type TranscriptMessage =
    */
   | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; icon?: IconSemantic }
   | TranscriptToolMessage
+  | TranscriptWorkflowMessage
   /** Older-than-window turns collapsed into one line (windowing). */
   | { kind: 'summary'; text: string }
   /**
@@ -147,14 +150,67 @@ function bumpAssistantPresentationRevision(message: Extract<TranscriptMessage, {
   assistantPresentationRevisions.set(message, assistantPresentationRevision(message) + 1)
 }
 
+/** The official branded workflow run identity (agent-start/run-end
+ * `runId`), derived from the direct dependency's event payload. */
+export type WorkflowRunId = ToolWorkflowRunStartData['runId']
+
+/** The official branded child-session identity (agent-start `childId`),
+ * derived from the direct dependency's event payload. */
+export type WorkflowChildSessionId = ToolWorkflowAgentStartData['childId']
+
+/** The run status vocabulary of one Workflow run or member (plan §2.2).
+ * `interrupted` is a presentation projection of a MISSING terminal fact plus
+ * a closed owner location — it is never a durable stop reason. */
+export type WorkflowRunStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+
 /** One member row of a workflow run card. */
 export interface WorkflowMemberView {
+  /** The member's durable sequence within its run (agent-start `seq`). */
+  seq: number
   /** The member agent's label. */
   label: string
-  /** The run phase the member ran under, when the event carried one. */
-  phase?: string
+  /** The run phase the member ran under: `null` when the event carried no
+   * phase, `''` when it carried an explicit empty phase — the two stay
+   * distinct identities (plan §4.2). */
+  phase: string | null
+  /** The member's child session identity (agent-start `childId`), kept for
+   * PR2 child-session navigation. */
+  childId: WorkflowChildSessionId
   /** The member's settled state (running until agent-end). */
-  status: 'ok' | 'error' | 'running'
+  status: WorkflowRunStatus
+}
+
+/** The collision-free phase identity key: `null` (absent) and `''` (explicit
+ * empty) must never share a group (plan §4.2 — the renderer must stop using
+ * `member.phase ?? ''` as the grouping key). */
+export function workflowPhaseKey(phase: string | null): string {
+  return phase === null ? 'missing' : `value:${phase.length}:${phase}`
+}
+
+/** Strict member-outcome mapping (plan §6.3): exhaustive so a new official
+ * union variant fails typecheck instead of collapsing into a generic error. */
+function workflowMemberStatus(outcome: 'completed' | 'failed' | 'cancelled'): WorkflowRunStatus {
+  switch (outcome) {
+    case 'completed': return 'completed'
+    case 'failed': return 'failed'
+    case 'cancelled': return 'cancelled'
+  }
+}
+
+/** Strict run stop-reason mapping (plan §6.4): `error` becomes the
+ * Transcript `failed` vocabulary (Web alpha2 parity) — never stored as
+ * `error`. Exhaustive like the member mapping. */
+function workflowRunStatus(stopReason: 'completed' | 'cancelled' | 'error'): WorkflowRunStatus {
+  switch (stopReason) {
+    case 'completed': return 'completed'
+    case 'cancelled': return 'cancelled'
+    case 'error': return 'failed'
+  }
 }
 
 /**
@@ -195,11 +251,25 @@ export interface TranscriptToolMessage {
    * (in-place child mutations) invalidate the component even though the
    * `subCalls` array reference never changes. */
   subtreeRevision?: number
-  /**
-   * Workflow run cards only: the run's member rows, folded into the card
-   * (Web WorkflowRunPanel parity) instead of standalone member cards.
-   */
-  members?: WorkflowMemberView[]
+}
+
+/**
+ * One workflow run card — a durable lifecycle record, NOT a model
+ * tool/call (it never enters the Focus Tool slot or the tool count). The
+ * run and its members keep the full alpha.2 status vocabulary; `seq`,
+ * `childId` and the exact phase identity are preserved for PR2 navigation
+ * and disclosure (plan §4).
+ */
+export interface TranscriptWorkflowMessage {
+  kind: 'workflow'
+  turn: number
+  /** The durable run identity (the official branded WorkflowRunId). */
+  runId: WorkflowRunId
+  /** The run's display name (run-start `name`). */
+  name: string
+  status: WorkflowRunStatus
+  /** The run's member rows in durable `agent-start` arrival order. */
+  members: WorkflowMemberView[]
 }
 
 /** Stable identity of one raw transcript item within ONE TranscriptFolder
@@ -234,6 +304,13 @@ export function transcriptSearchText(message: TranscriptMessage, depth = 0): str
     const own = `${message.name} ${message.args} ${message.result}`
     if (message.subCalls === undefined || message.subCalls.length === 0 || depth >= PTC_MAX_DEPTH) return own
     return `${own} ${message.subCalls.map(child => transcriptSearchText(child, depth + 1)).join(' ')}`
+  }
+  if (message.kind === 'workflow') {
+    // The run's stable search identity: the kind, the run name, and the
+    // current status (the terminal reason's presentation equivalent — plan
+    // §7.3). Members are deliberately not indexed (PR1 keeps the legacy
+    // tool-card search surface; member/session search is PR2).
+    return `workflow ${message.name} ${message.status}`
   }
   return message.text ?? ''
 }
@@ -912,6 +989,29 @@ interface NextStepInboxIdentity {
   insertionTurn: number | undefined
 }
 
+/** The owner location captured at run-start: the authoritative open
+ * lifecycle state at fold time (plan §5.2) — never a look-back guess over
+ * nearby events. */
+type WorkflowOwner =
+  | { kind: 'step'; turn: number; step: number }
+  | { kind: 'turn'; turn: number }
+  | { kind: 'session' }
+
+/** Per-run fold bookkeeping for the ACTIVE Workflow lifecycle. The
+ * TranscriptWorkflowMessage itself is the durable model; this state only
+ * serves the fold (owner matching, interruption projection, search dirty
+ * marking). Deliberately Workflow-only — no generic lifecycle base class
+ * (plan §6). */
+interface WorkflowFoldState {
+  message: TranscriptWorkflowMessage
+  /** The raw item index (search dirty marking). */
+  index: number
+  /** The owner location captured at run-start. */
+  owner: WorkflowOwner
+  /** Whether the owner location has closed (step/end or turn/end). */
+  ownerClosed: boolean
+}
+
 export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
   /** Durable next-step identities awaiting a claim or replacement. */
@@ -972,10 +1072,11 @@ export class TranscriptFolder {
   private readonly callNames = new Map<string, string>()
   /** Command names by commandId, from command/run events. */
   private readonly commandNames = new Map<string, string>()
-  /** Workflow run cards by runId, for member/run settlement. */
-  private readonly workflowRuns = new Map<string, Extract<TranscriptMessage, { kind: 'tool' }>>()
-  /** Workflow member rows by `${runId}/${seq}`, for agent-end settlement. */
-  private readonly workflowMembers = new Map<string, WorkflowMemberView>()
+  /** Active Workflow runs by runId, for member/run settlement and the
+   * owner-close interruption projection. */
+  private readonly workflowRuns = new Map<string, WorkflowFoldState>()
+  /** The currently open step (owner capture for run-start). */
+  private openStep: { turn: number; step: number } | undefined
   /** Compaction lifecycle: compactionId → items index (start/summary/end). */
   private readonly compacting = new Map<string, number>()
   /** The turn most recently opened by turn/start. */
@@ -1018,8 +1119,6 @@ export class TranscriptFolder {
    * stepKey(turn, step) — an un-namespaced map would let one kind's deltas
    * land on the other kind's searchable entry. */
   private readonly searchIndexByStepKey = new Map<string, number>()
-  /** Workflow run card indices by runId (run-end fills the result text). */
-  private readonly workflowRunIndex = new Map<string, number>()
   // Test-only counters exposed by searchDiagnosticsForTest().
   private searchRefreshCount = 0
   /** Test-only: the number of dirty entries scanned by lazy normalization
@@ -1497,6 +1596,36 @@ export class TranscriptFolder {
     if (entry === undefined) return
     this.dirtySearchEntries.add(index)
     this.searchRevisionCounter += 1
+  }
+
+  /** Project `interrupted` on every active Workflow run whose owner location
+   * just closed and which has no terminal fact yet (plan §5.3). A turn/end
+   * closes BOTH turn-owned and step-owned runs of that turn — upstream
+   * `locationClosed(step)` is `step closed OR owning turn closed`. */
+  private closeWorkflowOwner(closed: WorkflowOwner): void {
+    for (const state of this.workflowRuns.values()) {
+      if (state.ownerClosed) continue
+      const owner = state.owner
+      const matches = owner.kind === 'step'
+        ? (closed.kind === 'step' && closed.turn === owner.turn && closed.step === owner.step)
+          || (closed.kind === 'turn' && closed.turn === owner.turn)
+        : owner.kind === 'turn' && closed.kind === 'turn' && closed.turn === owner.turn
+      if (matches) this.projectWorkflowInterrupted(state)
+    }
+  }
+
+  /** The owner-close projection: `interrupted` is a presentation/model
+   * projection of a MISSING terminal fact plus a closed owner — never a
+   * durable stop reason (plan §6.4). Members without an agent-end follow the
+   * run; settled members keep their durable outcome. */
+  private projectWorkflowInterrupted(state: WorkflowFoldState): void {
+    state.ownerClosed = true
+    state.message.status = 'interrupted'
+    state.message.members = state.message.members.map(member =>
+      member.status === 'running' ? { ...member, status: 'interrupted' } : member,
+    )
+    // The run status became searchable: mark the entry dirty (lazy).
+    this.markSearchEntryDirty(state.index)
   }
 
   /** Mark a raw-item range dirty (the DEFENSIVE reflow path — O(run), rare;
@@ -3093,6 +3222,10 @@ export class TranscriptFolder {
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
         this.usage.onStepStart(event.data.turn, event.data.step)
+        // Owner lifecycle: the step is now open (plan §5.1). Guarded by the
+        // same replay fence as the usage accounting — a late step/start
+        // after turn/end must not reopen the step for owner capture.
+        this.openStep = { turn: event.data.turn, step: event.data.step }
         const candidate = activity.messageCandidate
         if (candidate !== undefined && candidate.step < event.data.step) {
           this.confirmMessageCandidate(activity)
@@ -3116,6 +3249,13 @@ export class TranscriptFolder {
         this.markAttemptEvidenceInterrupted(event.data.turn, event.data.step)
         this.usage.onStepEnd(event.data.turn, event.data.step)
         this.syncUsage(activity)
+        // Owner lifecycle: the step closed — clear the matching open step
+        // and project interrupted for step-owned Workflow runs without a
+        // terminal fact (plan §5.1/§5.3).
+        if (this.openStep?.turn === event.data.turn && this.openStep.step === event.data.step) {
+          this.openStep = undefined
+        }
+        this.closeWorkflowOwner({ kind: 'step', turn: event.data.turn, step: event.data.step })
         break
       }
       case 'turn/start': {
@@ -3525,8 +3665,18 @@ export class TranscriptFolder {
         // synthetic cards or re-settle the activity (review finding).
         const endTurn = event.data.turn
         if (this.openTurn === endTurn) this.openTurn = undefined
+        // Owner lifecycle: the turn closed — a still-open step of this turn
+        // must not leak into the next turn-less/session-level segment (plan
+        // §5.1/§14.2). Cleared BEFORE the replay fence: a replayed turn/end
+        // must still not leave a stale openStep behind.
+        if (this.openStep?.turn === endTurn) this.openStep = undefined
         const endActivity = this.activityFor(endTurn)
         if (endActivity.completed) break
+        // Owner lifecycle: the turn closed — project interrupted on every
+        // turn-owned AND step-owned Workflow run of this turn without a
+        // terminal fact (plan §5.3 — upstream `locationClosed(step)` is
+        // `step closed OR owning turn closed`).
+        this.closeWorkflowOwner({ kind: 'turn', turn: endTurn })
         // Every still-open thinking entry of THIS turn stops streaming when
         // the turn closes (interrupted steps never see their
         // assistant/message). Settled entries were removed when their
@@ -3585,60 +3735,77 @@ export class TranscriptFolder {
         break
       }
       case 'tool-workflow/run-start': {
-        const card: Extract<TranscriptMessage, { kind: 'tool' }> = {
-          kind: 'tool',
+        // Owner capture: the authoritative open lifecycle state at fold
+        // time — the open step wins, then the open turn, else the session
+        // (plan §5.2). Never a look-back guess over nearby events.
+        const owner: WorkflowOwner = this.openStep !== undefined
+          ? { kind: 'step', turn: this.openStep.turn, step: this.openStep.step }
+          : this.openTurn !== undefined
+            ? { kind: 'turn', turn: this.openTurn }
+            : { kind: 'session' }
+        const message: TranscriptWorkflowMessage = {
+          kind: 'workflow',
           turn: this.currentTurn,
-          name: 'workflow',
-          args: event.data.name,
-          result: '',
+          runId: event.data.runId,
+          name: event.data.name,
           status: 'running',
           members: [],
         }
-        this.workflowRuns.set(event.data.runId, card)
-        this.workflowRunIndex.set(event.data.runId, this.appendItem(card))
+        const index = this.appendItem(message)
+        this.workflowRuns.set(event.data.runId, { message, index, owner, ownerClosed: false })
         // Focus aggregation: a workflow run is a durable lifecycle event,
         // NOT a model tool/call — it never touches the Tool slot or the
         // tool count (plan §17).
         break
       }
       case 'tool-workflow/agent-start': {
-        const { runId, seq, label, phase } = event.data
-        const run = this.workflowRuns.get(runId)
+        const { runId, seq, label, phase, childId } = event.data
+        const state = this.workflowRuns.get(runId)
+        if (state === undefined) break
         // The member folds INTO the run card (Web WorkflowRunPanel parity):
-        // phase grouping happens at render time over the arrival-ordered rows.
+        // phase grouping happens at render time over the arrival-ordered
+        // rows. A member starting after its owner closed is interrupted
+        // from birth (plan §6.2 — the projection comes from the current
+        // fold facts, no invented recovery flow).
         const member: WorkflowMemberView = {
+          seq,
           label,
-          ...phase === undefined ? {} : { phase },
-          status: 'running',
+          phase: phase === undefined ? null : phase,
+          childId,
+          status: state.ownerClosed ? 'interrupted' : 'running',
         }
-        this.workflowMembers.set(`${runId}/${seq}`, member)
-        run?.members?.push(member)
+        // Replace the members array reference so the render cache observes
+        // the live append (plan §6.2 — never rely on in-place push).
+        state.message.members = [...state.message.members, member]
         break
       }
       case 'tool-workflow/agent-end': {
-        const member = this.workflowMembers.get(`${event.data.runId}/${event.data.seq}`)
-        const outcome = event.data.outcome
-        if (member !== undefined) {
-          member.status = outcome === 'completed' ? 'ok' : 'error'
-        }
+        const { runId, seq, outcome } = event.data
+        const state = this.workflowRuns.get(runId)
+        if (state === undefined) break
+        // Only the started member with the matching runId + seq settles
+        // (plan §6.3 — never infer a member outcome from run-end).
+        const target = state.message.members.find(member => member.seq === seq)
+        if (target === undefined) break
+        const status = workflowMemberStatus(outcome)
+        // Replace the settled member AND the members array reference so the
+        // render cache observes the live update (plan §6.2).
+        state.message.members = state.message.members.map(member =>
+          member === target ? { ...member, status } : member,
+        )
         break
       }
       case 'tool-workflow/run-end': {
-        const card = this.workflowRuns.get(event.data.runId)
-        if (card !== undefined) {
-          card.status = event.data.stopReason === 'completed' ? 'ok' : 'error'
-          card.result = `stop: ${event.data.stopReason}`
-          // The run result became searchable: mark the entry dirty (lazy).
-          const index = this.workflowRunIndex.get(event.data.runId)
-          if (index !== undefined) this.markSearchEntryDirty(index)
+        const state = this.workflowRuns.get(event.data.runId)
+        if (state !== undefined) {
+          state.message.status = workflowRunStatus(event.data.stopReason)
+          // The run status became searchable: mark the entry dirty (lazy).
+          this.markSearchEntryDirty(state.index)
         }
-        // The run's bookkeeping is done: drop the run card and every member
-        // card keyed under it so long sessions do not accumulate stale maps.
+        // The run's bookkeeping is done: drop the fold state so long
+        // sessions do not accumulate stale maps. The
+        // TranscriptWorkflowMessage itself stays in the transcript items.
         this.workflowRuns.delete(event.data.runId)
-        this.workflowRunIndex.delete(event.data.runId)
-        for (const memberKey of this.workflowMembers.keys()) {
-          if (memberKey.startsWith(`${event.data.runId}/`)) this.workflowMembers.delete(memberKey)
-        }
         break
       }
       case 'llm/retry': {
@@ -3815,6 +3982,14 @@ export function renderTranscriptMarkdown(session: {
       : [`- agent preset: ${session.header.agentPreset}`],
     '',
   ]
+  // Workflow runs: the durable lifecycle events fold into one readable block
+  // per run, flushed at run-end (or at export end for a run without one —
+  // plan §7.4: no rich format, the new semantic kind must not regress the
+  // export).
+  const workflowRuns = new Map<string, {
+    name: string
+    members: Map<number, { label: string; phase?: string; outcome?: string }>
+  }>()
   // Alpha.4 Session shape: the event log arrives as a snapshot read, never a
   // live array — the markdown export is a full-log fold by definition.
   for (const event of session.snapshotEvents()) {
@@ -3868,9 +4043,61 @@ export function renderTranscriptMarkdown(session: {
         lines.push(`> /${event.data.name}${event.data.args === '' ? '' : ` ${event.data.args}`}\n`)
         break
       }
+      case 'tool-workflow/run-start': {
+        workflowRuns.set(event.data.runId, { name: event.data.name, members: new Map() })
+        break
+      }
+      case 'tool-workflow/agent-start': {
+        const run = workflowRuns.get(event.data.runId)
+        if (run !== undefined) {
+          run.members.set(event.data.seq, {
+            label: event.data.label,
+            ...(event.data.phase === undefined ? {} : { phase: event.data.phase }),
+          })
+        }
+        break
+      }
+      case 'tool-workflow/agent-end': {
+        const run = workflowRuns.get(event.data.runId)
+        const member = run?.members.get(event.data.seq)
+        if (member !== undefined) member.outcome = event.data.outcome
+        break
+      }
+      case 'tool-workflow/run-end': {
+        const run = workflowRuns.get(event.data.runId)
+        if (run !== undefined) {
+          lines.push(workflowMarkdownBlock(run.name, run.members, event.data.stopReason))
+          workflowRuns.delete(event.data.runId)
+        }
+        break
+      }
       default:
         break
     }
   }
+  // A run without a terminal event still exports its current state (the
+  // export is a full-log fold — never drop the record).
+  for (const run of workflowRuns.values()) {
+    lines.push(workflowMarkdownBlock(run.name, run.members, undefined))
+  }
   return lines.join('\n')
+}
+
+/** One readable Workflow export block (plan §7.4): the run line with its
+ * terminal status, then the member rows in arrival order. `error` renders as
+ * the Transcript `failed` vocabulary; a missing terminal fact renders
+ * `running`. */
+function workflowMarkdownBlock(
+  name: string,
+  members: Map<number, { label: string; phase?: string; outcome?: string }>,
+  stopReason: 'completed' | 'cancelled' | 'error' | undefined,
+): string {
+  const status = stopReason === undefined ? 'running' : stopReason === 'error' ? 'failed' : stopReason
+  const memberLines = [...members.values()].map(member => {
+    const identity = member.phase === undefined || member.phase === ''
+      ? member.label
+      : `${member.phase} / ${member.label}`
+    return `  ${identity} — ${member.outcome ?? 'running'}`
+  })
+  return [`Workflow: ${name} — ${status}`, ...memberLines].join('\n')
 }

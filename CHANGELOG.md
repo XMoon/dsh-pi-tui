@@ -9,6 +9,12 @@
 
 ### 新增
 
+- **Workflow 生命周期/模型对齐 DSH alpha.2。** Workflow 从普通工具卡中拆出独立
+  semantic model：run/member 状态完整保留 `running/completed/failed/cancelled/
+  interrupted`（不再折叠成 ok/error），成员保留 `seq`/`childId` 与精确 phase
+  身份（缺失 phase 与显式空 phase 不再合并）；所属 step/turn 关闭而缺少终态
+  事件的 run 投影为 `interrupted`（冷回放与 live append 一致）；搜索按 run
+  名称/状态命中，`/export md` 保留 Workflow 记录。
 - **Welcome Card 视觉重构。** 首屏欢迎卡引入原创圆润鲸鱼 ASCII mascot(5 种变体,每次启动随机一个),按终端宽度使用三档响应式布局:72 列以上鲸鱼与 session facts 左右并排,24～71 列鲸鱼居中、facts 在下,24 列以下切换为紧凑文本布局(🐋 标题)。鲸鱼保留 cyan → blue 品牌渐变,不随主题切换改色;facts 继续完整显示(长值 wrap、不截断),idle 邀请、`setWelcomeCard()` 契约、fullscreen 滚动/锚点/点击映射均保持不变。
 
 ## [0.4.3-alpha.2] - 2026-09-08

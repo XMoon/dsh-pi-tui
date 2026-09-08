@@ -1064,6 +1064,32 @@ test('workflow/subagent lifecycle events never touch the Tool slot or the count 
   assert.equal(activity.tool, undefined)
 })
 
+test('workflow rows stay out of the collapsed Focus and visible when expanded (plan §7.2)', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('u0'), role: 'user',
+      content: [{ type: 'text', text: 'run the audit' }],
+      source: { kind: 'user' },
+    }, 1001, 1),
+    eventAt('tool-workflow/run-start', { runId: 'r1', name: 'audit' }, 1002, 2),
+    eventAt('tool-workflow/agent-start', { runId: 'r1', seq: 0, label: 'checker', childId: 'session-x' }, 1003, 3),
+  ])
+  const collapsed = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  assert.equal(
+    collapsed.filter(block => block.kind === 'message' && block.message.kind === 'workflow').length,
+    0,
+    'a collapsed Focus must not show the workflow process row',
+  )
+  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const workflowBlocks = expanded.filter(block => block.kind === 'message' && block.message.kind === 'workflow')
+  assert.equal(workflowBlocks.length, 1, 'an expanded Focus must keep the workflow row')
+  const block = workflowBlocks[0]
+  assert.ok(block !== undefined && block.kind === 'message' && block.message.kind === 'workflow')
+  assert.equal(block.message.name, 'audit')
+})
+
 // ── Per-turn token usage (plan §12/§13/§45) ────────────────────────────
 
 /** One step with a usage chunk + assistant/message + step/end. */

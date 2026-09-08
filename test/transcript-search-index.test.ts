@@ -141,6 +141,7 @@ function compactionEvent(type: 'compaction/start' | 'compaction/summary' | 'comp
 function cardText(message: TranscriptMessage | undefined): string {
   if (message === undefined) return ''
   if (message.kind === 'tool') return `${message.name} ${message.args} ${message.result}`
+  if (message.kind === 'workflow') return `workflow ${message.name} ${message.status}`
   return message.text ?? ''
 }
 
@@ -153,7 +154,9 @@ function legacySearchForTest(folder: TranscriptFolder, query: string): Transcrip
   const needle = query.trim().toLowerCase()
   if (needle === '') return []
   return folder.messages().filter(message => {
-    const text = message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}` : message.text
+    const text = message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}`
+      : message.kind === 'workflow' ? `workflow ${message.name} ${message.status}`
+        : message.text
     return text.toLowerCase().includes(needle)
   })
 }
@@ -611,10 +614,23 @@ test('command/done and workflow cards are searchable exactly like legacy', () =>
     rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 4),
     turnEnd(5, 0),
   ])
-  assertCorpusParity(folder, ['theme set to dark', '/theme', 'audit', 'stop: completed'])
-  const workflow = folder.search('stop: completed')
+  assertCorpusParity(folder, ['theme set to dark', '/theme', 'audit', 'completed'])
+  const workflow = folder.search('audit')
   assert.equal(workflow.length, 1)
-  assert.equal(folder.resolveSearchMatch(workflow[0]!)?.kind, 'tool')
+  assert.equal(folder.resolveSearchMatch(workflow[0]!)?.kind, 'workflow')
+})
+
+test('workflow search text follows the live run status (plan §8.12)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+  ])
+  assertCorpusParity(folder, ['workflow', 'audit', 'running'])
+  assert.equal(folder.search('completed').length, 0, 'a running run must not match the terminal status')
+  folder.apply([rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 2)])
+  assertCorpusParity(folder, ['workflow', 'audit', 'completed'])
+  assert.equal(folder.search('running').length, 0, 'the settled run must not keep the start-time status in the corpus')
 })
 
 test('a settled assistant message created WITHOUT chunks stays searchable after replacement', () => {
