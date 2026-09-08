@@ -47,24 +47,24 @@ test('release-notes accepts stable v tags and next-v prerelease tags', (t) => {
   assert.match(readFileSync(next.output, 'utf8'), /English migration note\./)
 })
 
-test('current 0.4.1 release body carries the DSH/TUI install pairing', () => {
-  // The PUBLISHED stable 0.4.1 line documents its rc.1 target while the
-  // peer floor stays rc.1; the release body must carry the copy-paste
-  // install commands. (This test validates the live repository state, so it
-  // follows the current package.json version — the historical prerelease
-  // pairings are pinned by the fixture-based tests below.)
+test('current 0.4.3-alpha.2 release body carries the DSH/TUI install pairing', () => {
+  // The NEXT prerelease line documents its published 0.1.3-alpha.2 target
+  // while the peer floor stays >=0.1.3-alpha.2; the release body must carry
+  // the copy-paste install commands. (This test validates the live repository
+  // state, so it follows the current package.json version — the historical
+  // prerelease pairings are pinned by the fixture-based tests below.)
   const output = join(tmpdir(), `dsh-pi-tui-release-notes-${process.pid}.md`)
   try {
     const result = spawnSync(
       process.execPath,
-      [join(repo, 'scripts/release-notes.mjs'), 'v0.4.1', output],
+      [join(repo, 'scripts/release-notes.mjs'), 'next-v0.4.3-alpha.2', output],
       { cwd: repo, encoding: 'utf8' },
     )
     assert.equal(result.status, 0, result.stderr)
     const body = readFileSync(output, 'utf8')
     for (const command of [
-      '@deepseek-ai/dsh@0.1.2-rc.1',
-      '@xmoon76/dsh-pi-tui@0.4.1',
+      '@deepseek-ai/dsh@0.1.3-alpha.2',
+      '@xmoon76/dsh-pi-tui@0.4.3-alpha.2',
       '@xmoon76/dsh-pi-tui@0.3',
     ]) {
       assert.ok(body.includes(command), `release body is missing ${command}`)
@@ -109,6 +109,14 @@ test('0.4.1 stable guidance pins the published rc.1 DSH family', (t) => {
   const guidance = '\n- @deepseek-ai/dsh@0.1.2-rc.1\n- @xmoon76/dsh-pi-tui@0.4.1\n- @xmoon76/dsh-pi-tui@0.3'
   const stable = createFixture(life, { version: '0.4.1', guidance })
   const result = run(stable, 'v0.4.1')
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('0.4.3-alpha.2 prerelease guidance pins the published 0.1.3-alpha.2 family', (t) => {
+  const life = testLifecycle(t)
+  const guidance = '\n- @deepseek-ai/dsh@0.1.3-alpha.2\n- @xmoon76/dsh-pi-tui@0.4.3-alpha.2\n- @xmoon76/dsh-pi-tui@0.3'
+  const next = createFixture(life, { version: '0.4.3-alpha.2', guidance })
+  const result = run(next, 'next-v0.4.3-alpha.2')
   assert.equal(result.status, 0, result.stderr)
 })
 

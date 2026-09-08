@@ -49,7 +49,7 @@ npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
 | TUI 包版本 | 对应 DSH 版本 | 说明 |
 |---|---|---|
 | `0.4.1`（已发布 `@latest`） | `>=0.1.2-rc.1` | 历史稳定版；按 0.1.2-rc.1 family 验证 |
-| 当前 `next` npm 线（本 checkout；发布版本号仍为 `0.4.1`） | `>=0.1.3-alpha.2` | 已发布的 npm alpha.2 目标；按精确 0.1.3-alpha.2 family 验证 |
+| 当前 `next` npm 线（本 checkout；版本 `0.4.3-alpha.2`） | `>=0.1.3-alpha.2` | 已发布的 npm alpha.2 目标；按精确 0.1.3-alpha.2 family 验证 |
 | `0.3.x`（`@0.3`） | `0.1.1-rc.2` | 旧运行时兼容线 |
 
 不要把稳定线与 `next` 线混装。已发布的 0.4.1 稳定线仍按

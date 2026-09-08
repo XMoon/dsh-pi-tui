@@ -7,12 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Compatibility
+## [0.4.3-alpha.2] - 2026-09-08
 
-- **The `next` line now requires DeepSeek Harness `0.1.3-alpha.2` or later.**
-  The startup notice on an old runtime now gives the exact npm upgrade
-  command (`npm install -g @deepseek-ai/dsh@0.1.3-alpha.2`) instead of
-  referencing an unpublished master source baseline.
+### Installation and version pairing
+
+For this prerelease line, install the matching DSH first and then add the TUI
+bundle into a profile:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.3-alpha.2
+dsh --profile pi-tui
+```
+
+Users who must keep an older DSH should pin the matching TUI:
+`0.1.1-rc.2` → `@xmoon76/dsh-pi-tui@0.3`; `0.1.2-alpha.2`/`alpha.3` →
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.1`; `0.1.2-alpha.4`/`alpha.5` →
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.2`; `0.1.2-rc.1` →
+`@xmoon76/dsh-pi-tui@0.4.1`. The complete version matrix and update/remove
+commands are in the README's “Install into a DSH profile” section.
+
+### Added
+
+- **PTC / `run_code` nested tool tree.** Sub-calls dispatched inside a
+  `run_code` program now render as a recursive sub-call tree under the root
+  Code card: a full identity chain (`subCallId`/`parentCallId`/`rootCallId`)
+  supports grandchild topology, and orphan start/settle facts are parked
+  privately and connected when their parent appears — never promoted to
+  top-level surface rows. The tree is aligned with Focus, display and search:
+  in collapsed Focus, `run_code` stays the formal Tool slot with a compact
+  active-child hint (e.g. `Bash running` / `Bash ×2 running` /
+  `Bash +1 running`, with a width-degradation ladder); the `/search` corpus
+  recursively includes sub-call descendants (matches locate the root Code
+  card); markdown export keeps nested output.
+- **Session presentation aligns with DSH v2 semantics.** The Direct adapter
+  ingests official `agent/assistant-stream` live frames (completed-turn
+  fences, revision-gap resynchronization); Transcript/Focus/Stats fold the
+  transient plane; cold replay restores thinking from assistant/message
+  blocks; the old durable assistant/chunk private path is gone.
+- **`/search` converges into the Session Browser.** `/sessions`, `/resume`
+  and `/search` now share one session browser: typing a query enters a global
+  search view (local metadata matches ∪ content matches) that is never
+  scoped by the workspace tabs, and hit snippets render on the matching
+  session rows; when content search is unavailable or fails, local metadata
+  filtering keeps working and the browser stays open.
+- **Session content search aligns with official DSH semantics.** The Direct
+  adapter now uses `sessionQuery.searchSessions()` (matching DSH master
+  `ApiSessionList.search()`: visibility authorization, dedupe, cursor
+  pagination, 20-result window), removing the old “newest 100 sessions +
+  filterEvents” private rule — matches in old sessions are now found.
+- **Unified attachment intake.** `@` mentions, `/image` arguments and pasted
+  content share one attachment intake pipeline: a bounded signature probe
+  separates images from generic files, generic files keep their metadata and
+  stream at submit time, and placeholder/draft submission behavior is
+  unified.
+- **Inline `/skill` references complete in drafts.** A `/name` token at a
+  whitespace boundary in a prompt-mode draft completes against the detached
+  human skill catalog; accepting inserts the literal reference without
+  submitting, and the final ordinary prompt lets the Host `dsh-tool-skill`
+  pre-step inject every recognized skill.
+
+### Improved
+
+- **Streaming tool preparation UX.** Preparing cards migrate more reliably
+  around block completion: delayed names keep a bounded prefix, empty call
+  ids migrate to the authoritative block-end id, and parallel previews keep
+  independent bytes and summaries.
+- **Content-block presentation.** Open opaque assistant blocks render
+  immediately (no longer waiting for the stream to end), pending finals are
+  fenced, stale confirmed assistant previews refresh, and the continuable
+  subagent viewer keeps its viewing history.
 
 ### Fixed
 
@@ -46,20 +110,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Host retirement and launcher exit. Session switches (/new, /fork, rewind,
   /sessions) also retire the old owner's continuable descendants after the
   commit.
+- **Presentation details.** Diff presentation aligns with official DSH
+  semantics (folded multi-hunk diffs stay bounded; edit headers and result
+  parity are preserved); `@` file completion keeps full paths and fixes
+  marquee routing and host cleanup; model selection survives fork and
+  rewind; steers after a Focus thought are kept for non-user turns and
+  opening steers are distinguished from mid-turn input; assistant
+  tool-result presentation survives the presentation pipeline.
+- **Session open/switch robustness.** Opening or switching sessions (/new,
+  /resume, fork, rewind, /sessions) no longer drops state: the previous
+  session stays visible and usable until the new one is ready, a failed
+  initial bootstrap no longer strands the surface (retry still opens), the
+  old Agent keeps write authority until the new session takes over, and
+  late-arriving assistant stream fragments are reassembled per official
+  semantics without half-built or orphan blocks.
 
-### Added
+### Compatibility
 
-- **`/search` converges into the Session Browser.** `/sessions`, `/resume`
-  and `/search` now share one session browser: typing a query enters a global
-  search view (local metadata matches ∪ content matches) that is never
-  scoped by the workspace tabs, and hit snippets render on the matching
-  session rows; when content search is unavailable or fails, local metadata
-  filtering keeps working and the browser stays open.
-- **Session content search aligns with official DSH semantics.** The Direct
-  adapter now uses `sessionQuery.searchSessions()` (matching DSH master
-  `ApiSessionList.search()`: visibility authorization, dedupe, cursor
-  pagination, 20-result window), removing the old “newest 100 sessions +
-  filterEvents” private rule — matches in old sessions are now found.
+- **The `next` line now requires DeepSeek Harness `0.1.3-alpha.2` or later.**
+  The startup notice on an old runtime now gives the exact npm upgrade
+  command (`npm install -g @deepseek-ai/dsh@0.1.3-alpha.2`) instead of
+  referencing an unpublished master source baseline.
+- **This release is validated against the exact npm `0.1.3-alpha.2` family.**
+  The peer floor is `>=0.1.3-alpha.2`, dev/test dependencies and the frozen
+  lockfile resolve to that exact family, and compatibility/preset/boundary
+  smokes run against that family from the registry.
+
+> **Known limitation:** The production default backend remains Direct; remote
+> attach is not supported.
 
 ## [0.4.1] - 2026-09-04
 
@@ -798,7 +876,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.3-alpha.2...HEAD
+[0.4.3-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...next-v0.4.3-alpha.2
 [0.4.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...v0.4.0
 [0.4.0-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...next-v0.4.0-alpha.2

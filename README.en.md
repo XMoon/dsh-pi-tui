@@ -50,7 +50,7 @@ npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
 | TUI package line | Matching DSH line | Notes |
 |---|---|---|
 | `0.4.1` (published `@latest`) | `>=0.1.2-rc.1` | Historical stable; validated against the rc.1 family |
-| Current `next` npm line (this checkout; release version remains `0.4.1`) | `>=0.1.3-alpha.2` | Published npm alpha.2 target; validated against the exact 0.1.3-alpha.2 family |
+| Current `next` npm line (this checkout; version `0.4.3-alpha.2`) | `>=0.1.3-alpha.2` | Published npm alpha.2 target; validated against the exact 0.1.3-alpha.2 family |
 | `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
 
 Do not mix the stable and `next` lines. The published 0.4.1 stable line

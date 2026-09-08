@@ -9,7 +9,7 @@ boundary.
 |---|---|---|
 | `0.3.x` | `0.1.1-rc.2` | Supported legacy runtime line |
 | `0.4.1` (published) | `>=0.1.2-rc.1` | Historical stable; validated against the rc.1 DSH family |
-| `next` npm line (this checkout; release version remains `0.4.1`) | `>=0.1.3-alpha.2` | Published npm alpha.2 target; validated against the exact `0.1.3-alpha.2` npm family |
+| `0.4.3-alpha.2` (next npm line; this checkout) | `>=0.1.3-alpha.2` | Published npm alpha.2 target; validated against the exact `0.1.3-alpha.2` npm family |
 | `0.4.0-alpha.2` | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; validated the alpha.4/alpha.5 DSH family |
 | `0.4.0-alpha.1` | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 DSH family |
 
