@@ -132,7 +132,7 @@ import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
-import { assistantPresentationRevision, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, type TranscriptMessage, type TurnActivity } from './transcript.ts'
+import { assistantPresentationRevision, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type TranscriptMessage, type TurnActivity } from './transcript.ts'
 import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
@@ -265,6 +265,10 @@ export interface StreamingToolPreview {
 /** The indeterminate progress-bar frames shown while a compaction runs:
  * width 12 / block 3, the same visual weight as the footer context bar. */
 const COMPACTION_PROGRESS_FRAMES = indeterminateProgressFrames()
+
+/** The bounded preview rows a PTC sub-call body shows in regular mode while
+ * the root Code card stays collapsed (full content is one Ctrl+O away). */
+const SUB_CALL_PREVIEW_LINES = 3
 /** The compact todo panel cap: at most this many rows before the panel
  * gains a DISTINCT full state. With ≤ this many items the compact and
  * full lists are visually identical, so the state machine skips the
@@ -6760,6 +6764,13 @@ export class TuiApp {
     // The attachment collapse toggles are session-scoped too: a switched-in
     // session's attachments start expanded (the click state must never leak).
     this.collapsedOccurrences.clear()
+    // The PTC sub-call disclosure state and its render-time hit map are
+    // session-scoped too: a switched-in session must never inherit the old
+    // session's subCallId expansions, and the old message objects must not
+    // be retained by the hit map.
+    this.subCallExpanded.clear()
+    this.subCallHitsByMessage.clear()
+    this.subCallExpandedRevision += 1
     // The per-message render cache is session-scoped too: old messages are
     // unreachable after a switch, so drop their cached components — with
     // disposal so thumbnail loader subscriptions never leak (round-2
@@ -8629,7 +8640,12 @@ export class TuiApp {
    * contract, plan §23).
    */
   private bakesFoldedWidth(message: TranscriptMessage, expanded: boolean): boolean {
-    if (expanded) return message.kind === 'tool' && message.name === 'edit'
+    if (expanded) {
+      // An expanded Edit bakes its diff; an expanded PTC root bakes its
+      // sub-call rows (truncateToWidth at build time) — both must rebuild
+      // on a resize.
+      return message.kind === 'tool' && (message.name === 'edit' || (message.subCalls?.length ?? 0) > 0)
+    }
     return message.kind === 'system' || message.kind === 'compaction'
       || (message.kind === 'tool' && !isCompactActionTool(message.name, message.args))
   }
@@ -8664,6 +8680,12 @@ export class TuiApp {
     // must not invalidate them — the renderer-cache contract (renderers
     // never run for unchanged content) survives resizes.
     const hostBuilt = rendered === undefined
+    if (!hostBuilt) {
+      // An extension renderer owns the whole card: the host sub-call tree
+      // is not rendered, so its render-time hit map must not survive (a
+      // ghost click target could toggle an invisible child).
+      this.subCallHitsByMessage.delete(message)
+    }
     return {
       // The EFFECTIVE expansion (the surface-adaptive rule) drives the
       // renderer: fullscreen secondaries default compact (per-card
@@ -8746,7 +8768,7 @@ export class TuiApp {
           || entry.result !== message.result || entry.meta !== message.meta || entry.members !== message.members
           || entry.subCalls !== message.subCalls
           || entry.subtreeRevision !== message.subtreeRevision
-          || entry.subCallExpandedRev !== this.subCallExpandedRevision
+          || ((message.subCalls?.length ?? 0) > 0 && entry.subCallExpandedRev !== this.subCallExpandedRevision)
           || entry.error !== message.error || entry.resultBlocks !== message.resultBlocks
       case 'summary':
         return false
@@ -9292,7 +9314,7 @@ export class TuiApp {
       let row = 0
       let total = 0
       for (const child of message.subCalls) {
-        const rows = this.renderSubCall(card, child, width, 2, hits, row)
+        const rows = this.renderSubCall(card, child, width, 2, hits, row, expanded)
         row += rows
         total += rows
       }
@@ -9315,28 +9337,64 @@ export class TuiApp {
     indent: number,
     hits: Array<{ top: number; height: number; subCallId: string }>,
     row: number,
+    rootExpanded: boolean,
   ): number {
     let rows = 1
     const header = toolCardHeader(child.name, child.args, this.workspaceRoot)
-    const pill = child.status === 'ok'
+    // The DISPLAY status: the durable lifecycle status plus the alpha.2
+    // terminal contract (a valid non-spill [exit code: N] / signal marker
+    // renders a bash/pwsh child failed even when the tool call settled
+    // normally).
+    const displayStatus = subCallDisplayStatus(child)
+    const pill = displayStatus === 'ok'
       ? color.success('[ok]')
-      : child.status === 'error'
+      : displayStatus === 'error'
         ? color.error('[error]')
         : color.textDim('[running]')
+    // Per-child disclosure: fullscreen is mouse-owned (click the header
+    // row); regular mode follows the root disclosure (Ctrl+O) with a
+    // bounded preview while the root stays collapsed.
+    const bodyExpanded = this.fullscreen === undefined
+      ? rootExpanded
+      : this.subCallExpanded.has(child.subCallId ?? '')
+    const disclosure = bodyExpanded ? '▼' : '▶'
     const icon = iconPrefix(toolIconSemantic(child.name), this.iconStyle)
-    const head = color.textDim(`${icon}${header.title}${header.summary === '' ? '' : ` ${header.summary}`}`)
+    const head = color.textDim(`${disclosure} ${icon}${header.title}${header.summary === '' ? '' : ` ${header.summary}`}`)
     const pad = ' '.repeat(indent)
     card.addChild(new Text(truncateToWidth(`${pad}${head} ${pill}`, width, '…'), 0, 0))
     hits.push({ top: row, height: 1, subCallId: child.subCallId ?? '' })
-    if (this.subCallExpanded.has(child.subCallId ?? '') && child.result !== '') {
-      for (const line of child.result.split('\n')) {
+    if (bodyExpanded) {
+      // bash/pwsh: the executed command row — the header summary prefers
+      // the description, so the real command must never be lost.
+      const command = this.terminalCommand(child.name, child.args)
+      if (command !== '') {
+        card.addChild(new Text(truncateToWidth(`${pad}  ${this.shellPrompt(child.name)}${color.textDim(command)}`, width, '…'), 0, 0))
+        rows += 1
+      }
+      if (child.result !== '') {
+        for (const line of child.result.split('\n')) {
+          card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
+          rows += 1
+        }
+      }
+    } else if (this.fullscreen === undefined && child.result !== '') {
+      // Regular mode, root collapsed: a bounded preview so long nested
+      // output never floods the transcript; the full body is one Ctrl+O
+      // away.
+      const lines = child.result.split('\n')
+      const shown = lines.slice(0, SUB_CALL_PREVIEW_LINES)
+      for (const line of shown) {
         card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
+        rows += 1
+      }
+      if (lines.length > SUB_CALL_PREVIEW_LINES) {
+        card.addChild(new Text(truncateToWidth(`${pad}  ${color.textMuted(`… ${lines.length - SUB_CALL_PREVIEW_LINES} more lines`)}`, width, '…'), 0, 0))
         rows += 1
       }
     }
     if (child.subCalls !== undefined) {
       for (const grand of child.subCalls) {
-        rows += this.renderSubCall(card, grand, width, indent + 2, hits, row + rows)
+        rows += this.renderSubCall(card, grand, width, indent + 2, hits, row + rows, rootExpanded)
       }
     }
     return rows

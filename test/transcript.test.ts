@@ -12,7 +12,7 @@ import { BlockAssembler, expandAssistantStream, ToolCallId, MessageId, type Assi
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
-import { foldTranscript, groupConsecutiveReads, renderTranscriptMarkdown, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
+import { foldTranscript, groupConsecutiveReads, renderTranscriptMarkdown, subCallDisplayStatus, TranscriptFolder, windowMessages, type TranscriptMessage } from '../src/transcript.ts'
 import { projectFocus } from '../src/focus-activity.ts'
 import { computeStats, StatsFolder } from '../src/stats.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
@@ -540,14 +540,14 @@ test('nested PTC dispatch supports recursive grandchild topology', () => {
       parentCallId: ToolCallId('code-1:code:1'),
       subCallId: ToolCallId('code-1:code:1:code:1'),
       name: 'read',
-      arguments: { file: 'nested.ts' },
+      arguments: { file_path: 'nested.ts', offset: 0, limit: 200 },
     }, 2),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1:code:1'),
       subCallId: ToolCallId('code-1:code:1:code:1'),
       name: 'read',
-      arguments: { file: 'nested.ts' },
+      arguments: { file_path: 'nested.ts', offset: 0, limit: 200 },
       isError: false,
       content: [{ type: 'text', text: 'nested content' }],
     }, 3),
@@ -596,7 +596,7 @@ test('nested PTC siblings keep their durable dispatch order', () => {
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'read',
-      arguments: { file: 'a.ts' },
+      arguments: { file_path: 'a.ts', offset: 0, limit: 200 },
     }, 1),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
@@ -610,14 +610,14 @@ test('nested PTC siblings keep their durable dispatch order', () => {
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:3'),
       name: 'edit',
-      arguments: { file: 'b.ts' },
+      arguments: { file_path: 'b.ts', offset: 0, limit: 200 },
     }, 3),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'read',
-      arguments: { file: 'a.ts' },
+      arguments: { file_path: 'a.ts', offset: 0, limit: 200 },
       isError: false,
       content: [{ type: 'text', text: 'a' }],
     }, 4),
@@ -635,7 +635,7 @@ test('nested PTC siblings keep their durable dispatch order', () => {
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:3'),
       name: 'edit',
-      arguments: { file: 'b.ts' },
+      arguments: { file_path: 'b.ts', offset: 0, limit: 200 },
       isError: false,
       content: [{ type: 'text', text: 'c' }],
     }, 6),
@@ -696,6 +696,46 @@ test('nested PTC dispatch with an error outcome keeps the durable error status',
   assert.ok(bash !== undefined)
   assert.equal(bash.status, 'error', 'the durable isError flag decides the child status')
   assert.equal(bash.result, 'command failed: boom')
+})
+
+test('a real alpha.2 spilled result never infers a terminal failure', () => {
+  // The official spill format carries the truncation notice AND the exit
+  // marker; the presenter contract routes spilled output through the
+  // generic fallback — no exit-status inference.
+  const messages = foldTranscript([
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'make', description: 'Build project' },
+    }, 1),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'make', description: 'Build project' },
+      isError: false,
+      content: [{ type: 'text', text: '...\n[output truncated; full output: /tmp/run-1.log]\n[exit code: 2]' }],
+    }, 2),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('msg-1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        source: { kind: 'tool', callId: ToolCallId('code-1') },
+      },
+    }, 3),
+  ])
+  const code = messages[0]
+  assert.ok(code !== undefined && code.kind === 'tool')
+  const bash = code.subCalls?.[0]
+  assert.ok(bash !== undefined)
+  assert.equal(bash.status, 'ok')
+  assert.equal(subCallDisplayStatus(bash), 'ok', 'spilled output goes through the generic fallback, never inferred as failed')
+  assert.ok(bash.result.includes('[output truncated; full output: /tmp/run-1.log]'), 'the spill notice stays in the body')
 })
 
 test('nested spilled/generic dispatch content stays readable without a fabricated status', () => {
@@ -785,7 +825,8 @@ test('nested dispatch with an explicit exit marker keeps the marker in the body'
   assert.ok(code !== undefined && code.kind === 'tool')
   const bash = code.subCalls?.[0]
   assert.ok(bash !== undefined)
-  assert.equal(bash.status, 'error', 'a nonzero [exit code: N] marker marks the child failed even with isError: false')
+  assert.equal(bash.status, 'ok', 'the durable lifecycle status stays ok (isError: false)')
+  assert.equal(subCallDisplayStatus(bash), 'error', 'the display status parses the nonzero [exit code: N] marker')
   assert.equal(bash.result, 'foo\n[exit code: 2]', 'the explicit exit marker stays in the body')
 })
 
@@ -827,7 +868,8 @@ test('nested dispatch with a signal marker is marked failed', () => {
   assert.ok(code !== undefined && code.kind === 'tool')
   const bash = code.subCalls?.[0]
   assert.ok(bash !== undefined)
-  assert.equal(bash.status, 'error', 'a [killed by signal: ...] marker marks the child failed')
+  assert.equal(bash.status, 'ok', 'the durable lifecycle status stays ok')
+  assert.equal(subCallDisplayStatus(bash), 'error', 'the display status parses the signal marker')
   assert.equal(bash.result, 'killed\n[killed by signal: SIGTERM]')
 })
 
@@ -870,6 +912,7 @@ test('nested dispatch with an exit code 0 marker stays ok', () => {
   const bash = code.subCalls?.[0]
   assert.ok(bash !== undefined)
   assert.equal(bash.status, 'ok', 'an explicit [exit code: 0] marker is not a failure')
+  assert.equal(subCallDisplayStatus(bash), 'ok')
 })
 
 test('a nested PTC read child never joins the top-level read grouping', () => {
@@ -885,14 +928,14 @@ test('a nested PTC read child never joins the top-level read grouping', () => {
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'read',
-      arguments: { file: 'nested.ts' },
+      arguments: { file_path: 'nested.ts', offset: 0, limit: 200 },
     }, 2),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'read',
-      arguments: { file: 'nested.ts' },
+      arguments: { file_path: 'nested.ts', offset: 0, limit: 200 },
       isError: false,
       content: [{ type: 'text', text: 'nested content' }],
     }, 3),
@@ -1154,7 +1197,7 @@ test('a conflicting PTC sub-call identity fails fast', () => {
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId('code-1:code:1'),
     name: 'read',
-    arguments: { file: 'x' },
+    arguments: { file_path: 'x', offset: 0, limit: 200 },
   }, 3)]), /conflicting PTC sub-call identity/u)
   // A settle whose durable identity disagrees with the mounted child also
   // fails fast.
@@ -1163,7 +1206,7 @@ test('a conflicting PTC sub-call identity fails fast', () => {
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId('code-1:code:1'),
     name: 'read',
-    arguments: { file: 'x' },
+    arguments: { file_path: 'x', offset: 0, limit: 200 },
     isError: false,
     content: [{ type: 'text', text: 'x' }],
   }, 4)]), /conflicting PTC sub-call settle identity/u)

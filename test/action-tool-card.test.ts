@@ -135,9 +135,11 @@ test('compact action presentations are payload-first and receipt-safe', () => {
     title: 'Terminal', summary: 'pty-3',
   })
   // PTC mode alignment (plan §5.5): the outer run_code call renders as the
-  // Code card family, never a generic Tool call row.
-  assert.deepEqual(toolCardHeader('run_code', JSON.stringify({ code: 'print(1)' })), {
-    title: 'Code', summary: 'print(1)',
+  // Code card family, never a generic Tool call row. The real alpha.2
+  // schema requires code + description, and the summary prefers the
+  // description.
+  assert.deepEqual(toolCardHeader('run_code', JSON.stringify({ code: 'print(1)', description: 'Inspect project and run tests' })), {
+    title: 'Code', summary: 'Inspect project and run tests',
   })
   assert.equal(focusToolDisplay({ name: 'send_message', args: JSON.stringify({ target: 'reviewer', message: 'Inspect the card.' }) }), 'Send message reviewer · Inspect the card.')
   assert.equal(focusToolDisplay({ name: 'terminal_send', args: JSON.stringify({ sessionId: 'pty-3', text: 'make test' }) }), 'Terminal pty-3 · make test')

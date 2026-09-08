@@ -426,13 +426,31 @@ export function textOf(blocks: readonly ContentBlock[]): string {
  * or `[killed by signal: ...]` — the durable terminal failure evidence a
  * bash/pwsh call carries even when the tool call itself settled with
  * `isError: false` (a nonzero command exit is a normal settled outcome).
- * A missing marker (spill notice, generic output) is NOT a failure: the
- * status is never invented from text. */
+ * A spilled/truncated result (`[output truncated; full output: …]`) goes
+ * through the generic fallback: no exit-status inference (alpha.2
+ * presenter contract). A missing marker (spill notice, generic output) is
+ * NOT a failure: the status is never invented from text. */
 export function terminalFailureFromResult(result: string): boolean {
+  if (/\[output truncated; full output: [^\]]+\]/.test(result)) return false
   const last = result.trimEnd().split('\n').pop()?.trim() ?? ''
   const exit = /^\[exit code: (-?\d+)\]$/.exec(last)
   if (exit !== null) return Number(exit[1]) !== 0
   return /^\[killed by signal: .+\]$/.test(last)
+}
+
+/** The DISPLAY status of one PTC sub-call: the durable lifecycle status
+ * (`isError` only) PLUS the alpha.2 terminal contract for bash/pwsh — a
+ * valid (non-spill) `[exit code: N]` / `[killed by signal: ...]` tail
+ * marker renders the child failed even when the tool call settled
+ * normally. Spilled/generic content never invents a status. */
+export function subCallDisplayStatus(child: {
+  name: string
+  status: 'ok' | 'error' | 'running'
+  result: string
+}): 'ok' | 'error' | 'running' {
+  if (child.status !== 'ok') return child.status
+  if ((child.name === 'bash' || child.name === 'pwsh') && terminalFailureFromResult(child.result)) return 'error'
+  return 'ok'
 }
 
 /** Reconstruct the logical blocks used by any Assistant entry. */
@@ -937,7 +955,7 @@ export class TranscriptFolder {
    * when the parent appears — never promoted to top-level surface rows. */
   private readonly orphanSubCalls = new Map<string, {
     start?: { rootCallId: string; parentCallId: string; name: string; arguments: unknown }
-    settle?: { rootCallId: string; parentCallId: string; name: string; isError: boolean; content: readonly ContentBlock[] }
+    settle?: { rootCallId: string; parentCallId: string; name: string; arguments: unknown; isError: boolean; content: readonly ContentBlock[] }
   }>()
   /** Tool names by callId, for result pairing. */
   private readonly callNames = new Map<string, string>()
@@ -1075,8 +1093,18 @@ export class TranscriptFolder {
    * one. */
   private attachSubCall(
     parent: TranscriptToolMessage,
+    parentId: string,
     data: { rootCallId: string; parentCallId: string; subCallId: string; name: string; arguments: unknown },
   ): void {
+    // Cross-root coherence: a sub-call's parent must belong to the same
+    // root the event claims (a run_code parent has no rootCallId — its own
+    // callId IS the root).
+    if (parent.rootCallId !== undefined && parent.rootCallId !== data.rootCallId) {
+      throw new Error(`cross-root PTC sub-call ${data.subCallId}: parent ${parentId} belongs to root ${parent.rootCallId}, event claims root ${data.rootCallId}`)
+    }
+    if (parent.rootCallId === undefined && data.rootCallId !== parentId) {
+      throw new Error(`cross-root PTC sub-call ${data.subCallId}: parent ${parentId} is the root call, event claims root ${data.rootCallId}`)
+    }
     const existing = this.subCallIndex.get(data.subCallId)
     if (existing !== undefined) {
       if (existing.rootCallId !== data.rootCallId
@@ -1110,7 +1138,7 @@ export class TranscriptFolder {
     for (const [id, orphan] of [...this.orphanSubCalls]) {
       if (orphan.start !== undefined && orphan.start.parentCallId === parentId) {
         this.orphanSubCalls.delete(id)
-        this.attachSubCall(parent, { ...orphan.start, subCallId: id })
+        this.attachSubCall(parent, parentId, { ...orphan.start, subCallId: id })
         if (orphan.settle !== undefined) this.settleSubCall(id, orphan.settle)
       }
     }
@@ -1118,17 +1146,18 @@ export class TranscriptFolder {
 
   /** Settle one PTC sub-call by subCallId; a settle without a mounted child
    * is parked and applied when its start/parent appears. The lifecycle
-   * status comes from the durable `isError` flag PLUS the alpha.2 terminal
-   * contract for bash/pwsh: a nonzero `[exit code: N]` or
-   * `[killed by signal: ...]` tail marker marks the child failed even when
-   * the tool call itself settled normally. Spilled/generic content without
-   * a marker never invents a status. The settle's durable identity
-   * (root/parent/name) is cross-checked against the mounted child — a
-   * mismatch is impossible on a valid alpha.2 stream and fails fast. */
+   * status is the durable `isError` flag ONLY — the alpha.2 terminal
+   * contract (a nonzero `[exit code: N]` / `[killed by signal: ...]` tail
+   * marker) is a PRESENTATION concern applied by
+   * {@link subCallDisplayStatus} at render time, never baked into the
+   * durable card. The settle's durable identity (root/parent/name/
+   * arguments) is cross-checked against the mounted child — a mismatch is
+   * impossible on a valid alpha.2 stream and fails fast. */
   private settleSubCall(subCallId: string, data: {
     rootCallId: string
     parentCallId: string
     name: string
+    arguments: unknown
     isError: boolean
     content: readonly ContentBlock[]
   }): void {
@@ -1136,15 +1165,12 @@ export class TranscriptFolder {
     if (child !== undefined) {
       if (child.rootCallId !== data.rootCallId
         || child.parentCallId !== data.parentCallId
-        || child.name !== data.name) {
+        || child.name !== data.name
+        || child.args !== JSON.stringify(data.arguments)) {
         throw new Error(`conflicting PTC sub-call settle identity for ${subCallId}: settle root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}, mounted root=${child.rootCallId} parent=${child.parentCallId} name=${child.name}`)
       }
       const text = textOf(data.content ?? [])
-      child.status = data.isError === true
-        ? 'error'
-        : (child.name === 'bash' || child.name === 'pwsh') && terminalFailureFromResult(text)
-          ? 'error'
-          : 'ok'
+      child.status = data.isError === true ? 'error' : 'ok'
       child.result = text
       child.resultBlocks = data.content
       this.pendingSubCalls.delete(subCallId)
@@ -3376,7 +3402,7 @@ export class TranscriptFolder {
         const parent = this.pendingCalls.get(data.parentCallId)?.card
           ?? this.subCallIndex.get(data.parentCallId)
         if (parent !== undefined) {
-          this.attachSubCall(parent, data)
+          this.attachSubCall(parent, data.parentCallId, data)
         } else {
           const orphan = this.orphanSubCalls.get(data.subCallId)
           if (orphan === undefined) this.orphanSubCalls.set(data.subCallId, { start: data })
@@ -3402,6 +3428,7 @@ export class TranscriptFolder {
           parentCallId: string
           subCallId: string
           name: string
+          arguments: unknown
           isError: boolean
           content: readonly ContentBlock[]
         }
@@ -3409,6 +3436,7 @@ export class TranscriptFolder {
           rootCallId: data.rootCallId,
           parentCallId: data.parentCallId,
           name: data.name,
+          arguments: data.arguments,
           isError: data.isError,
           content: data.content,
         })
@@ -3745,16 +3773,16 @@ export function renderTranscriptMarkdown(session: {
       // keeps the sub-call args and rendered content (simple indented
       // form — no new export format).
       case 'tool/code-dispatch-start': {
-        const data = event.data as { name: string; arguments: unknown }
+        const data = event.data as { name: string; subCallId: string; arguments: unknown }
         const args = typeof data.arguments === 'string' ? data.arguments : JSON.stringify(data.arguments)
-        lines.push(`### Nested tool ${data.name}\n\n\`\`\`json\n${args}\n\`\`\`\n`)
+        lines.push(`### Nested tool ${data.name} [${data.subCallId}]\n\n\`\`\`json\n${args}\n\`\`\`\n`)
         break
       }
       case 'tool/code-dispatch': {
-        const data = event.data as { isError: boolean; content: readonly ContentBlock[] }
+        const data = event.data as { subCallId: string; isError: boolean; content: readonly ContentBlock[] }
         const text = markdownContent(data.content ?? [])
         if (text !== '') {
-          lines.push(`<details><summary>${data.isError === true ? 'nested error' : 'nested result'}</summary>\n\n${text}\n\n</details>\n`)
+          lines.push(`<details><summary>${data.isError === true ? 'nested error' : 'nested result'} [${data.subCallId}]</summary>\n\n${text}\n\n</details>\n`)
         }
         break
       }
