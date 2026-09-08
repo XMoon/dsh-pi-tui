@@ -174,8 +174,8 @@ export function formatTokenUsageCompact(input: number, output: number, cacheRead
 }
 
 /** Performance, full form: `TTFB 2.6s · 51 tok/s` — the RECENT average
- * time-to-first-token and the RECENT effective throughput. The lifetime
- * `LLM` wall is no longer a footer fact (it still accumulates in
+ * time-to-first-token and the RECENT observable decode throughput. The
+ * lifetime `LLM` wall is no longer a footer fact (it still accumulates in
  * SessionStats.llmMs for /stats and session analysis). */
 export function formatPerformanceFull(firstTokenMs: number, tokensPerSec: number): string {
   return `${formatPerformanceLatency(firstTokenMs)} · ${formatPerformanceSpeed(tokensPerSec)}`
@@ -188,8 +188,8 @@ export function formatPerformanceCompact(firstTokenMs: number, tokensPerSec: num
   return `${formatPerformanceLatencyCompact(firstTokenMs)} ${formatPerformanceSpeedCompact(tokensPerSec)}`
 }
 
-/** Performance, speed-only form: `51 tok/s` — the recent effective
- * throughput. */
+/** Performance, speed-only form: `51 tok/s` — the recent observable
+ * decode throughput. */
 export function formatPerformanceSpeed(tokensPerSec: number): string {
   return `${tokensPerSec} tok/s`
 }

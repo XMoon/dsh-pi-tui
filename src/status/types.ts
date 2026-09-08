@@ -130,8 +130,9 @@ export interface UsageStatus {
    * contract; the SEMANTICS are: `llmMs` = the session LIFETIME LLM wall
    * (kept for /stats and analysis, not shown in the default footer),
    * `firstTokenMs` = the RECENT (last 5) average time-to-first-token,
-   * `tokensPerSec` = the RECENT (last 5) effective output throughput
-   * (Σ output / Σ full LLM wall). */
+   * `tokensPerSec` = the RECENT (last 5) observable decode throughput
+   * (Σ output / Σ (first token → assistant/message) over steps whose final
+   * attempt delivered token deltas at two distinct timestamps). */
   readonly performance: {
     readonly llmMs: number
     readonly firstTokenMs: number
