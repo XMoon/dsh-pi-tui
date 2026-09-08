@@ -1496,11 +1496,11 @@ function ptcCodeCard(): Extract<TranscriptMessage, { kind: 'tool' }> {
     subCalls: [
       {
         kind: 'tool', turn: 0, name: 'bash', args: '{"command":"npm test","description":"Run focused test suite"}',
-        result: '1 failed\n[exit code: 2]', status: 'error',
+        result: '1 failed\n2 failed\n3 failed\n4 failed\n[exit code: 2]', status: 'ok',
         subCallId: 'code-1:code:1', parentCallId: 'code-1', rootCallId: 'code-1',
       },
       {
-        kind: 'tool', turn: 0, name: 'read', args: '{"file":"a.ts","description":"Read source"}',
+        kind: 'tool', turn: 0, name: 'read', args: '{"file_path":"a.ts","offset":0,"limit":200,"description":"Read source"}',
         result: 'file content', status: 'ok',
         subCallId: 'code-1:code:2', parentCallId: 'code-1', rootCallId: 'code-1',
       },
@@ -1508,15 +1508,19 @@ function ptcCodeCard(): Extract<TranscriptMessage, { kind: 'tool' }> {
   }
 }
 
-test('PTC sub-call rows stay visible under a collapsed Code card; bodies default collapsed', async () => {
+test('PTC sub-call rows stay visible under a collapsed Code card with a bounded preview', async () => {
   const { vt, app } = startApp()
   app.setTranscript([ptcCodeCard()])
   const view = await viewport(vt)
   assert.ok(view.includes('Code'), `root Code card missing:\n${view}`)
   assert.ok(view.includes('Bash'), `child header must stay visible under a collapsed Code card:\n${view}`)
   assert.ok(view.includes('Read'), `child header must stay visible under a collapsed Code card:\n${view}`)
-  assert.ok(!view.includes('1 failed'), `child body must be collapsed by default:\n${view}`)
-  assert.ok(!view.includes('file content'), `child body must be collapsed by default:\n${view}`)
+  // Regular mode: the child body shows a BOUNDED preview (never the full
+  // long output) while the root stays collapsed.
+  assert.ok(view.includes('1 failed'), `the bounded preview shows the first rows:\n${view}`)
+  assert.ok(!view.includes('4 failed'), `the preview must not dump the full body:\n${view}`)
+  assert.ok(view.includes('more lines'), `the preview marks the truncation:\n${view}`)
+  assert.ok(view.includes('▶'), `the child header carries a disclosure affordance:\n${view}`)
 })
 
 test('a click on a PTC sub-call header expands only that child body', async () => {
@@ -1532,19 +1536,23 @@ test('a click on a PTC sub-call header expands only that child body', async () =
   clickCell(vt, 10, bashIdx)
   await vt.waitForRender()
   view = await viewport(vt)
-  assert.ok(view.includes('1 failed'), `clicked child body must expand:\n${view}`)
+  assert.ok(view.includes('4 failed'), `clicked child body must expand fully:\n${view}`)
   assert.ok(view.includes('[exit code: 2]'), `the exit marker stays in the expanded body:\n${view}`)
+  assert.ok(view.includes('▼'), `the expanded child shows the open affordance:\n${view}`)
   assert.ok(!view.includes('file content'), `the other child stays collapsed:\n${view}`)
 })
 
-test('the root Code disclosure does not force child bodies open', async () => {
+test('regular mode: the root disclosure reveals the full child bodies and the bash command', async () => {
   const { vt, app } = startApp()
   app.setToolOutputExpanded(true)
   app.setTranscript([ptcCodeCard()])
   const view = await viewport(vt)
   assert.ok(view.includes('program output'), `expanded root shows its own body:\n${view}`)
   assert.ok(view.includes('Bash'), `child headers stay visible:\n${view}`)
-  assert.ok(!view.includes('1 failed'), `child bodies stay collapsed regardless of the root disclosure:\n${view}`)
+  // Regular mode has no per-child click: Ctrl+O on the root reveals the
+  // full child bodies (the keyboard-owned disclosure path).
+  assert.ok(view.includes('4 failed'), `the full child body is reachable via the root disclosure:\n${view}`)
+  assert.ok(view.includes('$ npm test'), `the executed bash command is never lost:\n${view}`)
 })
 
 test('footer preset hides the stats line in compact mode', async () => {
