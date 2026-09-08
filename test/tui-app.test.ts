@@ -1375,6 +1375,10 @@ test('the pre-session welcome invites the first message and clears on facts', as
 })
 
 test('the idle welcome adapts to stacked and compact widths', async () => {
+  // One unique marker per whale variant; any of them proves the whale is
+  // rendered (the variant is picked randomly once per process).
+  const whaleMarkers = [".--'---._", '.------._', '.-------.', ".---'--.", '/ /~~~~~~']
+  const hasWhale = (text: string): boolean => whaleMarkers.some(marker => text.includes(marker))
   // Stacked (60): the whale stays, the invitation reads without the emoji.
   const stackedVt = new VirtualTerminal(60, 24)
   const stackedApp = new TuiApp(stackedVt, { onSubmit: () => {}, onExit: () => {} })
@@ -1384,14 +1388,14 @@ test('the idle welcome adapts to stacked and compact widths', async () => {
   await stackedVt.waitForRender()
   let view = stackedVt.getViewport().join('\n')
   assert.ok(view.includes('type a message to start a session'), `stacked idle invitation missing:\n${view}`)
-  assert.ok(view.includes("_.-' `-._"), `stacked idle whale missing:\n${view}`)
+  assert.ok(hasWhale(view), `stacked idle whale missing:\n${view}`)
   assert.ok(!view.includes('🐋 dsh-pi-tui'), `stacked idle must not use the compact emoji title:\n${view}`)
   // Dispose releases the process-global TuiApp slot before the next app.
   stackedApp.dispose()
-  // Compact (32): the whale is replaced by the emoji title; the invitation
+  // Compact (23): the whale is replaced by the emoji title; the invitation
   // wraps, so join the stripped rows with a space (the wrap boundary is a
   // word boundary) before matching.
-  const compactVt = new VirtualTerminal(32, 24)
+  const compactVt = new VirtualTerminal(23, 24)
   const compactApp = new TuiApp(compactVt, { onSubmit: () => {}, onExit: () => {} })
   compactApp.start()
   startedApps.add(compactApp)
@@ -1399,12 +1403,12 @@ test('the idle welcome adapts to stacked and compact widths', async () => {
   await compactVt.waitForRender()
   view = compactVt.getViewport().join('\n')
   const joined = view.split('\n')
-    .map(line => line.replace(/\x1b\[[0-9;]*m/g, '').trimEnd())
+    .map(line => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/[│╭╮╰╯]/g, '').trimEnd())
     .join(' ')
     .replace(/\s+/g, ' ')
   assert.ok(joined.includes('🐋 dsh-pi-tui'), `compact idle emoji title missing:\n${view}`)
   assert.ok(joined.includes('type a message to start a session'), `compact idle invitation missing:\n${view}`)
-  assert.ok(!view.includes("_.-' `-._"), `compact idle must not show the full whale:\n${view}`)
+  assert.ok(!hasWhale(joined), `compact idle must not show the full whale:\n${view}`)
   compactApp.dispose()
 })
 
