@@ -1241,8 +1241,21 @@ export class TranscriptFolder {
       return
     }
     const orphan = this.orphanSubCalls.get(subCallId)
-    if (orphan !== undefined) orphan.settle = data
-    else this.orphanSubCalls.set(subCallId, { settle: data })
+    if (orphan !== undefined) {
+      // A second parked settle with a conflicting durable identity is
+      // impossible on a valid alpha.2 stream — fail fast instead of
+      // silently overwriting the first (last-write-wins).
+      if (orphan.settle !== undefined
+        && (orphan.settle.rootCallId !== data.rootCallId
+          || orphan.settle.parentCallId !== data.parentCallId
+          || orphan.settle.name !== data.name
+          || JSON.stringify(orphan.settle.arguments) !== JSON.stringify(data.arguments))) {
+        throw new Error(`conflicting PTC sub-call settle identity for ${subCallId}: first settle root=${orphan.settle.rootCallId} parent=${orphan.settle.parentCallId} name=${orphan.settle.name}, duplicate root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}`)
+      }
+      orphan.settle = data
+    } else {
+      this.orphanSubCalls.set(subCallId, { settle: data })
+    }
   }
 
   /** Recompute the Focus active-descendant projection for the root card of
