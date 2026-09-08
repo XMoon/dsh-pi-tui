@@ -525,38 +525,71 @@ class ResponsiveOverlayFrame extends FocusForwardingFrame {
   }
 }
 
-/** The final whale mascot: 6 rows, round back, big head, thin tail stalk,
- * small tail fin. The belly stays open — the waterline carries the lower
- * outline. Pure ASCII; colour is applied at render time. */
-const WELCOME_WHALE = [
-  '        .  .',
-  '         :',
-  "      _.-' `-._             \\/",
-  "    .'         `-.         /",
-  '   |   O          `------._/',
-  ' ~^~^~^~^~^~^~^~^~^~^~^~^~',
+/** The whale mascot variants: five original designs; one is picked once
+ * per process (see WelcomeCard.whaleVariant). */
+const WELCOME_WHALES = [
+  [
+    '        o',
+    '      O',
+    '     :',
+    "  .--'---._      \\_/",
+    " (  o      `-----//",
+    ' ~~~\\_)~~~~~~~~~~~~',
+  ],
+  [
+    '       z Z',
+    "   .------._     \\_/",
+    "  (  -      `----//",
+    " ~~`~~\\_)~~~~~~~~~~",
+  ],
+  [
+    '                   *',
+    " \\_/      .-------.",
+    "  \\\\____.'     o  _>",
+    "   `-----------\\_)",
+  ],
+  [
+    '       <3',
+    '       :',
+    "   .---'--.",
+    " ( o      `.__  \\_/",
+    "   `---\\_)-----`-//",
+  ],
+  [
+    '          \\   /',
+    '           \\_/',
+    '           | |',
+    ' ~~~~~~~~~/ /~~~~~~',
+    "         '       o",
+    '               o',
+  ],
 ] as const
 
-/** Brand ramp for the whale rows: cyan → blue → indigo. Fixed (not a
- * semantic token): custom themes do not override the logo gradient. */
+/** Brand ramp for the whale rows: cyan → blue. Fixed (not a semantic
+ * token): custom themes do not override the logo gradient. */
 const WELCOME_WHALE_COLORS = [
-  '#56D4DD',
-  '#50BCD4',
-  '#49A3CB',
-  '#438BC2',
-  '#3D73BA',
-  '#3042A8',
+  '#63C7D1',
+  '#5DBBD4',
+  '#56AFD7',
+  '#50A3D9',
+  '#4996DA',
+  '#4389D8',
 ] as const
 
 /** Cells between the whale block and the facts column in side-by-side. */
 const WELCOME_WHALE_GAP = 4
 
-/** Layout breakpoints: >= 72 side-by-side, 40..71 stacked, < 40 compact. */
+/** Layout breakpoints: >= 72 side-by-side, 24..71 stacked, < 24 compact. */
 const WELCOME_SIDE_BY_SIDE_MIN_WIDTH = 72
-const WELCOME_STACKED_MIN_WIDTH = 40
 
-/** The widest whale row (visible width, ANSI-free). */
-const WELCOME_WHALE_WIDTH = Math.max(...WELCOME_WHALE.map(line => visibleWidth(line)))
+/** The widest whale row across all variants (visible width, ANSI-free).
+ * All variants share this layout width so the position stays consistent
+ * across picks. */
+const WELCOME_WHALE_WIDTH = Math.max(...WELCOME_WHALES.flat().map(line => visibleWidth(line)))
+
+/** Stacked minimum: the whale fills the inner width (widest variant + the
+ * 4 box cells). Below this the compact text layout takes over. */
+const WELCOME_STACKED_MIN_WIDTH = WELCOME_WHALE_WIDTH + 4
 
 /** Facts column alignment: every label padded to this column. */
 const WELCOME_FACT_LABEL_WIDTH = 9
@@ -565,14 +598,18 @@ const WELCOME_FACT_LABEL_WIDTH = 9
  * nothing is truncated. Three responsive layouts keep the whale mascot
  * readable without ever truncating facts:
  * - width >= 72: whale left, facts right (side-by-side)
- * - 40 <= width < 72: whale centered above the facts (stacked)
- * - width < 40: compact text rows, no full whale
+ * - 24 <= width < 72: whale centered above the facts (stacked)
+ * - width < 24: compact text rows, no full whale
  */
 class WelcomeCard implements Component {
   private facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string } | undefined
   private idle = false
   private lastWidth = -1
   private cached: string[] = []
+  /** The picked whale variant index; -1 until the first render. Picked
+   * once per process — resize and facts changes keep it, only a restart
+   * re-picks. */
+  private whaleVariant = -1
 
   /** Replace the facts; the next render rebuilds the card. */
   setFacts(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
@@ -597,32 +634,57 @@ class WelcomeCard implements Component {
 
   render(width: number): string[] {
     if (this.lastWidth === width && this.cached.length > 0) return this.cached
+    if (this.whaleVariant < 0) {
+      // First render of this process: pick the variant for the whole
+      // session. Resize and facts changes keep it; only a restart re-picks.
+      this.whaleVariant = Math.floor(Math.random() * WELCOME_WHALES.length)
+    }
     this.lastWidth = width
-    this.cached = this.buildRows(width)
+    const inner = Math.max(1, width - 4)
+    const rows = this.buildRows(inner, width)
+    // No facts and not idle: nothing to frame (an empty box would shift
+    // fullscreen row mapping by two rows).
+    this.cached = rows.length === 0 ? [] : this.frame(rows, width)
     return this.cached
   }
 
-  private buildRows(width: number): string[] {
+  /** Wrap the layout rows in the original full-width box. */
+  private frame(rows: string[], width: number): string[] {
+    const b = color.border
+    const inner = Math.max(1, width - 4)
+    return [
+      b(`╭${'─'.repeat(Math.max(0, width - 2))}╮`),
+      ...rows.map(row => {
+        const vis = visibleWidth(row)
+        return `${b('│')} ${row}${' '.repeat(Math.max(0, inner - vis))} ${b('│')}`
+      }),
+      b(`╰${'─'.repeat(Math.max(0, width - 2))}╯`),
+    ]
+  }
+
+  private buildRows(layoutWidth: number, width: number): string[] {
     if (this.idle) {
       const lines = width < WELCOME_STACKED_MIN_WIDTH
         ? [color.textMuted('🐋 dsh-pi-tui'), color.textMuted('type a message to start a session')]
         : [color.textMuted('dsh-pi-tui'), color.textMuted('type a message to start a session')]
-      return this.layout(width, lines)
+      return this.layout(layoutWidth, width, lines)
     }
     if (this.facts === undefined) return []
     const lines = width < WELCOME_STACKED_MIN_WIDTH ? this.compactFactLines() : this.factLines()
-    return this.layout(width, lines)
+    return this.layout(layoutWidth, width, lines)
   }
 
-  /** The three responsive layouts; the whale is never wrapped or cropped. */
-  private layout(width: number, lines: string[]): string[] {
-    if (width >= WELCOME_SIDE_BY_SIDE_MIN_WIDTH) return this.renderSideBySide(width, lines)
-    if (width >= WELCOME_STACKED_MIN_WIDTH) return this.renderStacked(width, lines)
-    return this.renderCompact(width, lines)
+  /** The three responsive layouts; the whale is never wrapped or cropped.
+   * Breakpoints key on the TERMINAL width; layout math uses the inner
+   * (boxed) width. */
+  private layout(layoutWidth: number, width: number, lines: string[]): string[] {
+    if (width >= WELCOME_SIDE_BY_SIDE_MIN_WIDTH) return this.renderSideBySide(layoutWidth, lines)
+    if (width >= WELCOME_STACKED_MIN_WIDTH) return this.renderStacked(layoutWidth, lines)
+    return this.renderCompact(layoutWidth, lines)
   }
 
   /** Whale left, facts right; extra wrapped fact rows continue below the
-   * 6 whale rows. */
+   * whale rows. */
   private renderSideBySide(width: number, lines: string[]): string[] {
     const whale = this.renderWhaleLines()
     const factsStart = WELCOME_WHALE_WIDTH + WELCOME_WHALE_GAP
@@ -638,7 +700,9 @@ class WelcomeCard implements Component {
     return rows
   }
 
-  /** Whale centered above the facts, one blank row between. */
+  /** Whale centered above the facts, one blank row between. The centering
+   * offset follows the widest variant, so it shrinks naturally as the
+   * width narrows (down to zero when the whale fills the inner width). */
   private renderStacked(width: number, lines: string[]): string[] {
     const whale = this.renderWhaleLines()
     const left = Math.max(0, Math.floor((width - WELCOME_WHALE_WIDTH) / 2))
@@ -655,9 +719,14 @@ class WelcomeCard implements Component {
     return lines.flatMap(line => wrapTextWithAnsi(line, width))
   }
 
-  /** The whale rows painted with the fixed brand gradient. */
+  /** The picked whale variant, painted with the fixed brand gradient (rows
+   * beyond the 6-color ramp reuse the last ramp color). */
   private renderWhaleLines(): string[] {
-    return WELCOME_WHALE.map((line, index) => hexPaint(WELCOME_WHALE_COLORS[index]!, line))
+    const whale = WELCOME_WHALES[this.whaleVariant]!
+    return whale.map((line, index) => hexPaint(
+      WELCOME_WHALE_COLORS[Math.min(index, WELCOME_WHALE_COLORS.length - 1)]!,
+      line,
+    ))
   }
 
   /** Session facts in the wide/stacked column layout. */
