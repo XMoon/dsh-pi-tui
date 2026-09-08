@@ -540,14 +540,14 @@ test('nested PTC dispatch supports recursive grandchild topology', () => {
       parentCallId: ToolCallId('code-1:code:1'),
       subCallId: ToolCallId('code-1:code:1:code:1'),
       name: 'read',
-      arguments: { file_path: 'nested.ts', offset: 0, limit: 200 },
+      arguments: { file_path: 'nested.ts', offset: 1, limit: 200 },
     }, 2),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1:code:1'),
       subCallId: ToolCallId('code-1:code:1:code:1'),
       name: 'read',
-      arguments: { file_path: 'nested.ts', offset: 0, limit: 200 },
+      arguments: { file_path: 'nested.ts', offset: 1, limit: 200 },
       isError: false,
       content: [{ type: 'text', text: 'nested content' }],
     }, 3),
@@ -596,7 +596,7 @@ test('nested PTC siblings keep their durable dispatch order', () => {
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'read',
-      arguments: { file_path: 'a.ts', offset: 0, limit: 200 },
+      arguments: { file_path: 'a.ts', offset: 1, limit: 200 },
     }, 1),
     event('tool/code-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
@@ -610,14 +610,14 @@ test('nested PTC siblings keep their durable dispatch order', () => {
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:3'),
       name: 'edit',
-      arguments: { file_path: 'b.ts', offset: 0, limit: 200 },
+      arguments: { file_path: 'b.ts', old_string: 'x', new_string: 'y' },
     }, 3),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'read',
-      arguments: { file_path: 'a.ts', offset: 0, limit: 200 },
+      arguments: { file_path: 'a.ts', offset: 1, limit: 200 },
       isError: false,
       content: [{ type: 'text', text: 'a' }],
     }, 4),
@@ -635,7 +635,7 @@ test('nested PTC siblings keep their durable dispatch order', () => {
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:3'),
       name: 'edit',
-      arguments: { file_path: 'b.ts', offset: 0, limit: 200 },
+      arguments: { file_path: 'b.ts', old_string: 'x', new_string: 'y' },
       isError: false,
       content: [{ type: 'text', text: 'c' }],
     }, 6),
@@ -698,10 +698,10 @@ test('nested PTC dispatch with an error outcome keeps the durable error status',
   assert.equal(bash.result, 'command failed: boom')
 })
 
-test('a real alpha.2 spilled result never infers a terminal failure', () => {
+test('a spilled result with an exit marker still parses the terminal failure', () => {
   // The official spill format carries the truncation notice AND the exit
-  // marker; the presenter contract routes spilled output through the
-  // generic fallback — no exit-status inference.
+  // marker; parseExitStatus only cares about the LAST marker line, so a
+  // truncated output with a nonzero exit is still a terminal failure.
   const messages = foldTranscript([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
     event('tool/code-dispatch-start', {
@@ -733,8 +733,8 @@ test('a real alpha.2 spilled result never infers a terminal failure', () => {
   assert.ok(code !== undefined && code.kind === 'tool')
   const bash = code.subCalls?.[0]
   assert.ok(bash !== undefined)
-  assert.equal(bash.status, 'ok')
-  assert.equal(subCallDisplayStatus(bash), 'ok', 'spilled output goes through the generic fallback, never inferred as failed')
+  assert.equal(bash.status, 'ok', 'the durable lifecycle status stays ok (isError: false)')
+  assert.equal(subCallDisplayStatus(bash), 'error', 'the display status parses the exit marker even after a truncation notice')
   assert.ok(bash.result.includes('[output truncated; full output: /tmp/run-1.log]'), 'the spill notice stays in the body')
 })
 
@@ -928,14 +928,14 @@ test('a nested PTC read child never joins the top-level read grouping', () => {
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'read',
-      arguments: { file_path: 'nested.ts', offset: 0, limit: 200 },
+      arguments: { file_path: 'nested.ts', offset: 1, limit: 200 },
     }, 2),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'read',
-      arguments: { file_path: 'nested.ts', offset: 0, limit: 200 },
+      arguments: { file_path: 'nested.ts', offset: 1, limit: 200 },
       isError: false,
       content: [{ type: 'text', text: 'nested content' }],
     }, 3),
@@ -1197,7 +1197,7 @@ test('a conflicting PTC sub-call identity fails fast', () => {
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId('code-1:code:1'),
     name: 'read',
-    arguments: { file_path: 'x', offset: 0, limit: 200 },
+    arguments: { file_path: 'x', offset: 1, limit: 200 },
   }, 3)]), /conflicting PTC sub-call identity/u)
   // A settle whose durable identity disagrees with the mounted child also
   // fails fast.
@@ -1206,7 +1206,7 @@ test('a conflicting PTC sub-call identity fails fast', () => {
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId('code-1:code:1'),
     name: 'read',
-    arguments: { file_path: 'x', offset: 0, limit: 200 },
+    arguments: { file_path: 'x', offset: 1, limit: 200 },
     isError: false,
     content: [{ type: 'text', text: 'x' }],
   }, 4)]), /conflicting PTC sub-call settle identity/u)
