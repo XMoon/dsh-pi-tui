@@ -184,6 +184,11 @@ export interface TranscriptToolMessage {
   subCalls?: TranscriptToolMessage[]
   /** PTC sub-call identity (the durable `subCallId`), for tree rebuilds. */
   subCallId?: string
+  /** PTC sub-call topology: the immediate parent call identity and the
+   * outer `run_code` call identity, preserved from the durable event
+   * payload so replay and tree rebuilds keep the full parent chain. */
+  parentCallId?: string
+  rootCallId?: string
   /**
    * Workflow run cards only: the run's member rows, folded into the card
    * (Web WorkflowRunPanel parity) instead of standalone member cards.
@@ -214,9 +219,16 @@ export interface TranscriptSearchMatch {
 /** The searchable text of one message — the SINGLE source of truth for the
  * search corpus (the legacy full-history search semantics: tools search
  * `name args result`, every other kind searches `text`). `summary` rows
- * never reach `items`, so the projection never indexes them. */
+ * never reach `items`, so the projection never indexes them. A PTC root
+ * card's corpus recursively includes its sub-call descendants (their
+ * name/args/result), so nested output stays searchable and matches locate
+ * the root Code card. */
 export function transcriptSearchText(message: TranscriptMessage): string {
-  if (message.kind === 'tool') return `${message.name} ${message.args} ${message.result}`
+  if (message.kind === 'tool') {
+    const own = `${message.name} ${message.args} ${message.result}`
+    if (message.subCalls === undefined || message.subCalls.length === 0) return own
+    return `${own} ${message.subCalls.map(transcriptSearchText).join(' ')}`
+  }
   return message.text ?? ''
 }
 
@@ -281,6 +293,10 @@ export interface TurnActivity {
     readonly name: string
     readonly args: string
     readonly status: 'running' | 'ok' | 'error'
+    /** PTC active descendants (running sub-calls), aggregated by tool
+     * name in durable dispatch order — presentation metadata ONLY: never
+     * part of the tool stats, never the root Tool slot. */
+    readonly activeSubCalls?: readonly { readonly name: string; readonly count: number }[]
   }
   /** The per-turn token totals (committed steps + open steps' current
    * usage); absent when the turn has no usage fact at all. */
@@ -354,6 +370,10 @@ interface MutableTurnActivity {
     name: string
     args: string
     status: 'running' | 'ok' | 'error'
+    /** PTC active descendants (running sub-calls), aggregated by tool
+     * name in durable dispatch order — presentation metadata ONLY: never
+     * part of the tool stats, never the root Tool slot. */
+    activeSubCalls?: readonly { name: string; count: number }[]
   }
   /** The per-turn token totals (committed + open steps' current usage). */
   usage?: TokenUsageTotals
@@ -894,6 +914,13 @@ export class TranscriptFolder {
   /** Every mounted PTC sub-call card by subCallId, for parent lookup of
    * deeper nesting (a sub-call's parent may itself be a sub-call). */
   private readonly subCallIndex = new Map<string, TranscriptToolMessage>()
+  /** PTC sub-call events whose parent is not yet mounted (an incomplete
+   * replay fragment): start/settle facts are parked here and connected
+   * when the parent appears — never promoted to top-level surface rows. */
+  private readonly orphanSubCalls = new Map<string, {
+    start?: { rootCallId: string; parentCallId: string; name: string; arguments: unknown }
+    settle?: { isError: boolean; content: readonly ContentBlock[] }
+  }>()
   /** Tool names by callId, for result pairing. */
   private readonly callNames = new Map<string, string>()
   /** Command names by commandId, from command/run events. */
@@ -1021,6 +1048,89 @@ export class TranscriptFolder {
       this.activityByTurn.set(turn, activity)
     }
     return activity
+  }
+
+  /** Attach one PTC sub-call to its real parent card (never the top-level
+   * surface flow), then connect any parked orphans waiting for it. */
+  private attachSubCall(
+    parent: TranscriptToolMessage,
+    data: { rootCallId: string; parentCallId: string; subCallId: string; name: string; arguments: unknown },
+  ): void {
+    const child: TranscriptToolMessage = {
+      kind: 'tool',
+      turn: parent.turn,
+      name: data.name,
+      args: JSON.stringify(data.arguments),
+      result: '',
+      status: 'running',
+      subCallId: data.subCallId,
+      parentCallId: data.parentCallId,
+      rootCallId: data.rootCallId,
+    }
+    if (parent.subCalls === undefined) parent.subCalls = []
+    parent.subCalls.push(child)
+    this.pendingSubCalls.set(data.subCallId, child)
+    this.subCallIndex.set(data.subCallId, child)
+    this.attachPendingOrphans(child, data.subCallId)
+    this.refreshActiveSubCallsFor(child)
+  }
+
+  /** Connect parked PTC orphans whose parent just became available. */
+  private attachPendingOrphans(parent: TranscriptToolMessage, parentId: string): void {
+    for (const [id, orphan] of [...this.orphanSubCalls]) {
+      if (orphan.start !== undefined && orphan.start.parentCallId === parentId) {
+        this.orphanSubCalls.delete(id)
+        this.attachSubCall(parent, { ...orphan.start, subCallId: id })
+        if (orphan.settle !== undefined) this.settleSubCall(id, orphan.settle)
+      }
+    }
+  }
+
+  /** Settle one PTC sub-call by subCallId; a settle without a mounted child
+   * is parked and applied when its start/parent appears. */
+  private settleSubCall(subCallId: string, data: { isError: boolean; content: readonly ContentBlock[] }): void {
+    const child = this.pendingSubCalls.get(subCallId)
+    if (child !== undefined) {
+      child.status = data.isError === true ? 'error' : 'ok'
+      child.result = textOf(data.content ?? [])
+      child.resultBlocks = data.content
+      this.pendingSubCalls.delete(subCallId)
+      this.refreshActiveSubCallsFor(child)
+      return
+    }
+    const orphan = this.orphanSubCalls.get(subCallId)
+    if (orphan !== undefined) orphan.settle = data
+    else this.orphanSubCalls.set(subCallId, { settle: data })
+  }
+
+  /** Recompute the Focus active-descendant projection for the root card of
+   * one PTC sub-call, and bump the owning activity's revision so the Focus
+   * render cache refreshes. Tool stats are NEVER touched. */
+  private refreshActiveSubCallsFor(child: TranscriptToolMessage): void {
+    const root = child.rootCallId === undefined
+      ? undefined
+      : this.pendingCalls.get(child.rootCallId)?.card ?? this.subCallIndex.get(child.rootCallId)
+    if (root === undefined) return
+    const activity = this.activityFor(root.turn)
+    if (activity.tool === undefined) return
+    const counts = new Map<string, number>()
+    const order: string[] = []
+    const visit = (card: TranscriptToolMessage): void => {
+      for (const sub of card.subCalls ?? []) {
+        if (sub.status === 'running') {
+          if (!counts.has(sub.name)) order.push(sub.name)
+          counts.set(sub.name, (counts.get(sub.name) ?? 0) + 1)
+        }
+        visit(sub)
+      }
+    }
+    visit(root)
+    if (order.length === 0) {
+      activity.tool.activeSubCalls = undefined
+    } else {
+      activity.tool.activeSubCalls = order.map(name => ({ name, count: counts.get(name)! }))
+    }
+    activity.revision += 1
   }
 
   /** The Focus activity of one turn (read-only view; the same object the
@@ -3085,6 +3195,9 @@ export class TranscriptFolder {
           card,
           index: this.items.length - 1,
         })
+        // PTC replay fragments may have parked sub-call starts/settles for
+        // this call before its tool/call arrived; connect them now.
+        this.attachPendingOrphans(card, key)
         // Focus aggregation: count calls ONLY here (a call/result pair is
         // ONE call — plan §10.4), confirm the current message candidate
         // (a tool call after text proves the text was intermediate — plan
@@ -3192,8 +3305,8 @@ export class TranscriptFolder {
       // output). Sub-calls NEVER join the top-level surface flow: the child
       // card is attached to its parent card's `subCalls` tree (the parent is
       // the pending run_code call or a deeper pending sub-call). A start
-      // without a known parent (an incomplete replay fragment) creates no
-      // surface node.
+      // without a known parent (an incomplete replay fragment) is parked in
+      // the private orphan index and connected when the parent appears.
       case 'tool/code-dispatch-start': {
         const data = event.data as {
           rootCallId: string
@@ -3204,38 +3317,28 @@ export class TranscriptFolder {
         }
         const parent = this.pendingCalls.get(data.parentCallId)?.card
           ?? this.subCallIndex.get(data.parentCallId)
-        if (parent === undefined) break
-        const child: TranscriptToolMessage = {
-          kind: 'tool',
-          turn: parent.turn,
-          name: data.name,
-          args: JSON.stringify(data.arguments),
-          result: '',
-          status: 'running',
-          subCallId: data.subCallId,
+        if (parent !== undefined) {
+          this.attachSubCall(parent, data)
+        } else {
+          const orphan = this.orphanSubCalls.get(data.subCallId)
+          if (orphan === undefined) this.orphanSubCalls.set(data.subCallId, { start: data })
+          else if (orphan.start === undefined) orphan.start = data
+          // A conflicting duplicate start (different parent/root/name) is
+          // impossible on a valid alpha.2 durable stream; keep the first.
         }
-        if (parent.subCalls === undefined) parent.subCalls = []
-        parent.subCalls.push(child)
-        this.pendingSubCalls.set(data.subCallId, child)
-        this.subCallIndex.set(data.subCallId, child)
         break
       }
       // One nested PTC sub-dispatch SETTLING: pair with the start by
       // subCallId; the status comes from the durable isError flag (never
-      // invented from spilled/truncated content). An orphan settle (no
-      // matching start) creates no surface node.
+      // invented from spilled/truncated content). An orphan settle is
+      // parked and applied when its start/parent appears.
       case 'tool/code-dispatch': {
         const data = event.data as {
           subCallId: string
           isError: boolean
           content: readonly ContentBlock[]
         }
-        const child = this.pendingSubCalls.get(data.subCallId)
-        if (child === undefined) break
-        child.status = data.isError === true ? 'error' : 'ok'
-        child.result = textOf(data.content ?? [])
-        child.resultBlocks = data.content
-        this.pendingSubCalls.delete(data.subCallId)
+        this.settleSubCall(data.subCallId, { isError: data.isError, content: data.content })
         break
       }
       case 'turn/end': {
@@ -3562,6 +3665,24 @@ export function renderTranscriptMarkdown(session: {
         const block = event.data.message.content[0]
         const text = markdownContent(block?.content ?? [])
         if (text !== '') lines.push(`<details><summary>result</summary>\n\n${text}\n\n</details>\n`)
+        break
+      }
+      // PTC nested sub-dispatches (alpha.2 log-only events): the outer
+      // curated result may not carry the nested output, so the export
+      // keeps the sub-call args and rendered content (simple indented
+      // form — no new export format).
+      case 'tool/code-dispatch-start': {
+        const data = event.data as { name: string; arguments: unknown }
+        const args = typeof data.arguments === 'string' ? data.arguments : JSON.stringify(data.arguments)
+        lines.push(`### Nested tool ${data.name}\n\n\`\`\`json\n${args}\n\`\`\`\n`)
+        break
+      }
+      case 'tool/code-dispatch': {
+        const data = event.data as { isError: boolean; content: readonly ContentBlock[] }
+        const text = markdownContent(data.content ?? [])
+        if (text !== '') {
+          lines.push(`<details><summary>${data.isError === true ? 'nested error' : 'nested result'}</summary>\n\n${text}\n\n</details>\n`)
+        }
         break
       }
       case 'command/run': {

@@ -1420,6 +1420,147 @@ test('the collapsed body renders the three slots in fixed order — Think, Tool,
   }
 })
 
+// ── PTC active-child projection (supplement plan §5-§6) ─────────────────
+
+/** A run_code turn with the given nested dispatch events folded in. */
+function ptcActivity(events: SessionEvent[]): NonNullable<ReturnType<TranscriptFolder['turnActivity']>> {
+  return activityOf(0, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: JSON.stringify({ code: 'print(1)' }) }, 1001, 1),
+    ...events,
+  ])!
+}
+
+function dispatchStart(seq: number, subCallId: string, name: string, args: Record<string, unknown>): SessionEvent {
+  return eventAt('tool/code-dispatch-start', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId('code-1'),
+    subCallId: ToolCallId(subCallId),
+    name,
+    arguments: args,
+  }, 1_700_000_000_000 + seq, seq)
+}
+
+function dispatchSettle(seq: number, subCallId: string, name: string, isError: boolean, text: string): SessionEvent {
+  return eventAt('tool/code-dispatch', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId('code-1'),
+    subCallId: ToolCallId(subCallId),
+    name,
+    arguments: {},
+    isError,
+    content: [{ type: 'text', text }],
+  }, 1_700_000_000_000 + seq, seq)
+}
+
+test('PTC active child: header stats stay 1 tool while the Tool line shows the running child', () => {
+  const activity = ptcActivity([dispatchStart(2, 'code-1:code:1', 'bash', { cmd: 'run tests' })])
+  assert.equal(activity.toolCalls, 1, 'nested dispatch must not count as a model tool call')
+  assert.deepEqual([...activity.tools.keys()], ['run_code'], 'the tool stats stay run_code-only')
+  const body = focusCollapsedBody(activity, 80, focusToolDisplay(activity.tool!, {}))
+  const toolLine = body.find(line => line.startsWith('Tool:'))
+  assert.ok(toolLine !== undefined && toolLine.includes('Code'), toolLine)
+  assert.ok(toolLine.includes('Bash running'), `active child suffix:\n${toolLine}`)
+})
+
+test('PTC active child disappears once the child settles', () => {
+  const activity = ptcActivity([
+    dispatchStart(2, 'code-1:code:1', 'bash', { cmd: 'run tests' }),
+    dispatchSettle(3, 'code-1:code:1', 'bash', false, '128 passed'),
+  ])
+  const body = focusCollapsedBody(activity, 80, focusToolDisplay(activity.tool!, {}))
+  const toolLine = body.find(line => line.startsWith('Tool:'))
+  assert.ok(toolLine !== undefined)
+  assert.ok(!toolLine.includes('running'), `no active suffix after settle:\n${toolLine}`)
+  assert.ok(toolLine.includes('Code'), toolLine)
+})
+
+test('PTC parallel same-type children aggregate as Bash ×2 running', () => {
+  const activity = ptcActivity([
+    dispatchStart(2, 'code-1:code:1', 'bash', { cmd: 'a' }),
+    dispatchStart(3, 'code-1:code:2', 'bash', { cmd: 'b' }),
+  ])
+  const body = focusCollapsedBody(activity, 80, focusToolDisplay(activity.tool!, {}))
+  const toolLine = body.find(line => line.startsWith('Tool:'))
+  assert.ok(toolLine !== undefined && toolLine.includes('Bash ×2 running'), toolLine)
+})
+
+test('PTC mixed parallel children pick the first type stably and show the remainder', () => {
+  const activity = ptcActivity([
+    dispatchStart(2, 'code-1:code:1', 'bash', { cmd: 'a' }),
+    dispatchStart(3, 'code-1:code:2', 'read', { file: 'x' }),
+  ])
+  const body = focusCollapsedBody(activity, 80, focusToolDisplay(activity.tool!, {}))
+  const toolLine = body.find(line => line.startsWith('Tool:'))
+  assert.ok(toolLine !== undefined && toolLine.includes('Bash +1 running'), toolLine)
+})
+
+test('PTC dispatch start/settle bump the Focus revision without touching tool stats', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{}' }, 1001, 1),
+  ])
+  const before = folder.turnActivity(0)!
+  const revisionBefore = before.revision
+  const toolCallsBefore = before.toolCalls
+  folder.apply([dispatchStart(2, 'code-1:code:1', 'bash', { cmd: 'a' })])
+  const afterStart = folder.turnActivity(0)!
+  assert.ok(afterStart.revision > revisionBefore, 'dispatch-start must bump the Focus revision')
+  assert.equal(afterStart.toolCalls, toolCallsBefore, 'toolCalls must not change')
+  // turnActivity returns the SAME live object; snapshot the revision before
+  // the settle mutates it again.
+  const revisionAfterStart = afterStart.revision
+  folder.apply([dispatchSettle(3, 'code-1:code:1', 'bash', false, 'ok')])
+  const afterSettle = folder.turnActivity(0)!
+  assert.ok(afterSettle.revision > revisionAfterStart, 'dispatch-settle must bump the Focus revision')
+  assert.equal(afterSettle.toolCalls, toolCallsBefore, 'toolCalls must not change')
+})
+
+test('PTC child error never marks the root; the outer result decides', () => {
+  const failedChild = ptcActivity([
+    dispatchStart(2, 'code-1:code:1', 'bash', { cmd: 'boom' }),
+    dispatchSettle(3, 'code-1:code:1', 'bash', true, 'failed'),
+  ])
+  const body = focusCollapsedBody(failedChild, 80, focusToolDisplay(failedChild.tool!, {}))
+  const toolLine = body.find(line => line.startsWith('Tool:'))
+  assert.ok(toolLine !== undefined && !toolLine.includes('✗'), `child failure must not mark the root:\n${toolLine}`)
+  // Root success after a failed child: ✓ Code.
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{}' }, 1001, 1),
+    dispatchStart(2, 'code-1:code:1', 'bash', { cmd: 'boom' }),
+    dispatchSettle(3, 'code-1:code:1', 'bash', true, 'failed'),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('m'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('code-1') },
+      },
+    }, 1004, 4),
+  ])
+  const settled = folder.turnActivity(0)!
+  const settledBody = focusCollapsedBody(settled, 80, focusToolDisplay(settled.tool!, {}))
+  const settledLine = settledBody.find(line => line.startsWith('Tool:'))
+  assert.ok(settledLine !== undefined && settledLine.includes('✓'), `root success wins:\n${settledLine}`)
+})
+
+test('PTC active-child suffix degrades by width instead of being truncated away', () => {
+  const activity = ptcActivity([dispatchStart(2, 'code-1:code:1', 'bash', { cmd: 'run tests' })])
+  const display = 'Code · Inspect project and run the focused test suite'
+  const wide = focusCollapsedBody(activity, 100, display)
+  const wideLine = wide.find(line => line.startsWith('Tool:'))
+  assert.ok(wideLine !== undefined && wideLine.includes('Bash running'), `wide keeps the suffix:\n${wideLine}`)
+  const narrow = focusCollapsedBody(activity, 30, display)
+  const narrowLine = narrow.find(line => line.startsWith('Tool:'))
+  assert.ok(narrowLine !== undefined && narrowLine.includes('Bash running'), `narrow degrades but keeps the suffix:\n${narrowLine}`)
+  const tiny = focusCollapsedBody(activity, 12, display)
+  const tinyLine = tiny.find(line => line.startsWith('Tool:'))
+  assert.ok(tinyLine !== undefined && visibleWidth(tinyLine) <= 12, `tiny stays in bounds:\n${tinyLine}`)
+})
+
 // ── Message slot: the third process slot, latest up to 3 visual rows ────
 
 /** A running activity whose Message candidate streams the given text. */
