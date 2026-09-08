@@ -46,7 +46,6 @@ test('the TUI overlay keeps the complete agent-plane disable closure', () => {
     'tool-jobs',
     'tool-fs',
     'tool-fs-search',
-    'tool-str-replace-editor',
     'skill-filesystem',
     'tool-skill',
     'command-goal',

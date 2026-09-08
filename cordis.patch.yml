@@ -110,9 +110,6 @@
 - id: tool-fs-search
   disabled: true
 
-- id: tool-str-replace-editor
-  disabled: true
-
 - id: skill-filesystem
   disabled: true
 
