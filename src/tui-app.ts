@@ -133,7 +133,7 @@ import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
-import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type TranscriptMessage, type TurnActivity } from './transcript.ts'
+import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type TranscriptMessage, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
 import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
@@ -235,8 +235,36 @@ export interface TranscriptViewportAnchor {
 function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
   return message.kind === 'thinking'
     || message.kind === 'tool'
+    || message.kind === 'workflow'
     || message.kind === 'system'
     || message.kind === 'compaction'
+}
+
+/** The Workflow run header pill: the REAL status (plan §7.1 — the run's
+ * state must be perceivable in the header). The old three-state
+ * ok/error/running chrome is a generic-tool presentation; the Workflow card
+ * is its own kind and never collapses cancelled/interrupted into error. */
+function workflowStatusPill(status: WorkflowRunStatus): string {
+  switch (status) {
+    case 'running': return color.textDim('[running]')
+    case 'completed': return color.success('[completed]')
+    case 'failed':
+    case 'cancelled':
+    case 'interrupted': return color.error(`[${status}]`)
+  }
+}
+
+/** The Workflow member row mark: completed → success, running → primary,
+ * failed/cancelled/interrupted → error (the old chrome mapping, kept only
+ * at this presentation boundary — never written back into the model). */
+function workflowMemberMark(status: WorkflowRunStatus): string {
+  switch (status) {
+    case 'completed': return color.success('•')
+    case 'running': return color.primary('●')
+    case 'failed':
+    case 'cancelled':
+    case 'interrupted': return color.error('✗')
+  }
 }
 
 /** The compaction lifecycle phase the working row advertises: idle (no
@@ -8581,6 +8609,10 @@ export class TuiApp {
       }
       case 'summary':
         return { kind: 'summary', turn: 0, text: message.text }
+      case 'workflow':
+        // Host-owned card: extension renderers never present workflow
+        // records (the host fallback below renders them).
+        return undefined
       case 'compaction':
         // Host-owned card: extension renderers never present compaction
         // records (the host fallback below renders them).
@@ -8669,7 +8701,7 @@ export class TuiApp {
       }
       return this.toolOutputExpanded || this.expandedOverride.get(message) === true
     }
-    return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
+    return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'workflow' || message.kind === 'compaction')
       && (message.turn >= boundary || this.expandedOverride.get(message) === true)
   }
 
@@ -8807,7 +8839,7 @@ export class TuiApp {
       // on a resize.
       return message.kind === 'tool' && (message.name === 'edit' || (message.subCalls?.length ?? 0) > 0)
     }
-    return message.kind === 'system' || message.kind === 'compaction'
+    return message.kind === 'system' || message.kind === 'compaction' || message.kind === 'workflow'
       || (message.kind === 'tool' && !isCompactActionTool(message.name, message.args))
   }
 
@@ -8892,11 +8924,17 @@ export class TuiApp {
         entry.args = message.args
         entry.result = message.result
         entry.meta = message.meta
-        entry.members = message.members
         entry.subCalls = message.subCalls
         entry.subtreeRevision = message.subtreeRevision
         entry.error = message.error
         entry.resultBlocks = message.resultBlocks
+        break
+      case 'workflow':
+        // The run status and the members array reference (replaced on every
+        // visible member/status change — plan §6.2) drive the staleness
+        // check; the run name is durable and never changes.
+        entry.status = message.status
+        entry.members = message.members
         break
       case 'summary':
         break
@@ -8926,11 +8964,16 @@ export class TuiApp {
         return entry.text !== message.text || entry.label !== message.label || entry.summary !== message.summary
       case 'tool':
         return entry.status !== message.status || entry.args !== message.args
-          || entry.result !== message.result || entry.meta !== message.meta || entry.members !== message.members
+          || entry.result !== message.result || entry.meta !== message.meta
           || entry.subCalls !== message.subCalls
           || entry.subtreeRevision !== message.subtreeRevision
           || ((message.subCalls?.length ?? 0) > 0 && entry.subCallExpandedRev !== this.subCallExpandedRevision)
           || entry.error !== message.error || entry.resultBlocks !== message.resultBlocks
+      case 'workflow':
+        // The members array reference is replaced on every visible change
+        // (plan §6.2), so reference comparison is the reliable invalidation
+        // evidence — never an in-place-mutation coincidence.
+        return entry.status !== message.status || entry.members !== message.members
       case 'summary':
         return false
       case 'compaction':
@@ -9247,6 +9290,9 @@ export class TuiApp {
         ), 0, 0))
       }
       return card
+    }
+    if (message.kind === 'workflow') {
+      return this.renderWorkflowCard(message, expanded, width)
     }
     // Tool card: the Web row-model header (design title + relativized args
     // summary + status pill), with the result body when expanded. The whole
@@ -9711,6 +9757,53 @@ export class TuiApp {
   }
 
   /**
+   * Render one Workflow run card (plan §7.1): the run header with the REAL
+   * status pill (running/completed/failed/cancelled/interrupted), and the
+   * member tree grouped by phase identity — `null` (absent) and `''`
+   * (explicit empty) are distinct groups via {@link workflowPhaseKey}, never
+   * merged by `phase ?? ''`. PR1 keeps the single-card disclosure shape;
+   * nested Run/Phase disclosure and child navigation are PR2.
+   */
+  private renderWorkflowCard(
+    message: Extract<TranscriptMessage, { kind: 'workflow' }>,
+    expanded: boolean,
+    width: number,
+  ): Component {
+    const card = new Container()
+    const icon = iconPrefix('workflow', this.iconStyle)
+    const head = `${color.textDim(`${icon}Workflow ${message.name}`)} ${workflowStatusPill(message.status)}`
+    if (expanded) {
+      card.addChild(new Text(head, 0, 0))
+      // Phase grouping over the durable arrival-ordered rows (Web
+      // WorkflowRunPanel parity). The phase identity key keeps absent and
+      // explicit-empty phases in separate groups (plan §4.2).
+      const groups = new Map<string, WorkflowMemberView[]>()
+      for (const member of message.members) {
+        const key = workflowPhaseKey(member.phase)
+        const list = groups.get(key)
+        if (list === undefined) groups.set(key, [member])
+        else list.push(member)
+      }
+      for (const members of groups.values()) {
+        const phase = members[0]?.phase
+        if (phase !== null && phase !== '') card.addChild(new Text(color.textMuted(`  ${phase}`), 0, 0))
+        for (const member of members) {
+          card.addChild(new Text(
+            `  ${workflowMemberMark(member.status)} ${member.label} — ${color.textDim(member.status)}`,
+            0,
+            0,
+          ))
+        }
+      }
+    } else {
+      // The folded row truncates to the content width (same rule as the
+      // folded tool cards — the width-baking cache contract).
+      card.addChild(new Text(truncateToWidth(head, width, '…'), 0, 0))
+    }
+    return card
+  }
+
+  /**
    * Render one expanded tool card's body. When the runner wired a presenter,
    * the body follows the tool's own render intent (presentResult): a read
    * card shows numbered lines plus the relativized path and total line
@@ -9786,35 +9879,8 @@ export class TuiApp {
         return
       }
     }
-    // Workflow run cards: the body is the run's member tree, grouped by phase
-    // in arrival order (Web WorkflowRunPanel parity). Rows render even while
-    // the run is still streaming (members land incrementally).
-    if (message.name === 'workflow' && message.members !== undefined) {
-      const groups = new Map<string, NonNullable<Extract<TranscriptMessage, { kind: 'tool' }>['members']>>()
-      for (const member of message.members) {
-        const key = member.phase ?? ''
-        const list = groups.get(key)
-        if (list === undefined) groups.set(key, [member])
-        else list.push(member)
-      }
-      for (const [phase, members] of groups) {
-        if (phase !== '') card.addChild(new Text(color.textMuted(`  ${phase}`), 0, 0))
-        for (const member of members) {
-          const mark = member.status === 'ok'
-            ? color.success('•')
-            : member.status === 'error'
-              ? color.error('✗')
-              : color.primary('●')
-          const statusText = member.status === 'ok'
-            ? 'completed'
-            : member.status === 'error'
-              ? 'failed'
-              : 'running'
-          card.addChild(new Text(`  ${mark} ${member.label} — ${color.textDim(statusText)}`, 0, 0))
-        }
-      }
-      return
-    }
+    // Workflow run cards are their own semantic kind and render through
+    // renderWorkflowCard — they never reach the generic tool body.
     // Running: surface the pending call's salient raw input when the tool
     // offered one (e.g. a background job id); edit/write calls render their
     // call-time diff (old_string → new_string / the written content) right

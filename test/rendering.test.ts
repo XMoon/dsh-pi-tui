@@ -20,7 +20,7 @@ import { color, currentPalette, darkColors, lightColors, setTheme } from '../src
 import { iconFor } from '../src/icons.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent, type TranscriptViewportAnchor } from '../src/tui-app.ts'
 import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
-import { TranscriptFolder, type TranscriptMessage, type TurnActivity } from '../src/transcript.ts'
+import { TranscriptFolder, type TranscriptMessage, type TurnActivity, type WorkflowRunId } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
 import { Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -2776,7 +2776,7 @@ test('tool and context cards render the symbols palette', async (t) => {
     { kind: 'tool', turn: 0, name: 'edit', args: '', result: '', status: 'ok' },
     { kind: 'tool', turn: 0, name: 'unknown-thing', args: '', result: '', status: 'ok' },
     { kind: 'tool', turn: 0, name: 'subagent', args: '', result: '', status: 'ok' },
-    { kind: 'tool', turn: 0, name: 'workflow', args: '', result: '', status: 'ok' },
+    { kind: 'workflow', turn: 0, runId: 'run-1' as WorkflowRunId, name: 'audit', status: 'completed', members: [] },
     // The ERROR semantic belongs to the synthetic error card (the
     // `error`-named tool); an ordinary tool that FAILED keeps its own
     // variant icon — the status pill carries the failure.
@@ -2810,7 +2810,7 @@ test('minimal hides decorative icons with no dangling whitespace', async (t) => 
   app.setTranscript([
     { kind: 'tool', turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' },
     { kind: 'tool', turn: 0, name: 'subagent', args: '', result: '', status: 'ok' },
-    { kind: 'tool', turn: 0, name: 'workflow', args: '', result: '', status: 'ok' },
+    { kind: 'workflow', turn: 0, runId: 'run-1' as WorkflowRunId, name: 'audit', status: 'completed', members: [] },
     { kind: 'tool', turn: 0, name: 'some-tool', args: '', result: 'boom', status: 'error' },
     { kind: 'tool', turn: 0, name: 'error', args: '', result: '', status: 'error' },
     { kind: 'tool', turn: 0, name: '/compact', args: '', result: 'executed', status: 'ok' },
@@ -3677,21 +3677,20 @@ test('workflow runs expand into a phase-grouped member tree', async () => {
   const { vt, app } = startApp()
   app.setToolOutputExpanded(true)
   app.setTranscript([{
-    kind: 'tool',
+    kind: 'workflow',
     turn: 0,
-    name: 'workflow',
-    args: 'audit',
-    result: 'stop: completed',
-    status: 'ok',
+    runId: 'run-1' as WorkflowRunId,
+    name: 'audit',
+    status: 'completed',
     members: [
-      { label: 'checker', phase: 'review', status: 'ok' },
-      { label: 'patcher', phase: 'review', status: 'error' },
-      { label: 'reporter', phase: 'report', status: 'ok' },
-      { label: 'live-agent', status: 'running' },
+      { seq: 0, label: 'checker', phase: 'review', childId: 'session-x' as never, status: 'completed' },
+      { seq: 1, label: 'patcher', phase: 'review', childId: 'session-y' as never, status: 'failed' },
+      { seq: 2, label: 'reporter', phase: 'report', childId: 'session-z' as never, status: 'completed' },
+      { seq: 3, label: 'live-agent', phase: null, childId: 'session-w' as never, status: 'running' },
     ],
   }])
   const view = await viewport(vt)
-  assert.ok(view.includes('Workflow audit [ok]'), `run header missing:\n${view}`)
+  assert.ok(view.includes('Workflow audit [completed]'), `run header missing:\n${view}`)
   assert.ok(view.includes('  review'), `phase header missing:\n${view}`)
   assert.ok(view.includes('checker — completed'), `completed member missing:\n${view}`)
   assert.ok(view.includes('patcher — failed'), `failed member missing:\n${view}`)
@@ -3703,17 +3702,55 @@ test('workflow runs expand into a phase-grouped member tree', async () => {
 test('workflow runs stay a single folded row until expanded', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{
-    kind: 'tool',
+    kind: 'workflow',
     turn: 0,
-    name: 'workflow',
-    args: 'audit',
-    result: 'stop: completed',
-    status: 'ok',
-    members: [{ label: 'checker', phase: 'review', status: 'ok' }],
+    runId: 'run-1' as WorkflowRunId,
+    name: 'audit',
+    status: 'completed',
+    members: [{ seq: 0, label: 'checker', phase: 'review', childId: 'session-x' as never, status: 'completed' }],
   }])
   const view = await viewport(vt)
-  assert.ok(view.includes('Workflow audit [ok]'), `folded header missing:\n${view}`)
+  assert.ok(view.includes('Workflow audit [completed]'), `folded header missing:\n${view}`)
   assert.ok(!view.includes('checker — completed'), `members leaked while folded:\n${view}`)
+})
+
+test('workflow live member/status updates invalidate the cached card (plan §8.11)', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
+  ])
+  const { vt, app } = startApp()
+  app.setToolOutputExpanded(true)
+  app.setTranscript(folder.messages())
+  const cache = (app as unknown as { messageComponents: Map<object, { component: object }> }).messageComponents
+  const first = folder.messages()[0]
+  assert.ok(first !== undefined && first.kind === 'workflow')
+  const firstComponent = cache.get(first)?.component
+  assert.ok(firstComponent !== undefined)
+  let view = await viewport(vt)
+  assert.ok(!view.includes('checker'), `no member before agent-start:\n${view}`)
+  // agent-start: the members array reference changes → the card rebuilds.
+  folder.apply([
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'checker', childId: 'session-x' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  const secondComponent = cache.get(first)?.component
+  assert.notStrictEqual(secondComponent, firstComponent, 'agent-start must invalidate the cached workflow card')
+  view = await viewport(vt)
+  assert.ok(view.includes('checker — running'), `live member row missing:\n${view}`)
+  // agent-end: the member status changes → rebuild.
+  folder.apply([
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  const thirdComponent = cache.get(first)?.component
+  assert.notStrictEqual(thirdComponent, secondComponent, 'agent-end must invalidate the cached workflow card')
+  view = await viewport(vt)
+  assert.ok(view.includes('checker — completed'), `live member status missing:\n${view}`)
+  // An unchanged re-render keeps the component.
+  app.setTranscript(folder.messages())
+  assert.strictEqual(cache.get(first)?.component, thirdComponent, 'an unchanged workflow card must not churn the component')
 })
 
 test('askQuestions marks recommended options and renders detail blocks', async () => {
