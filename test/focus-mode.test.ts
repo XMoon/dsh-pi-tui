@@ -1426,7 +1426,7 @@ test('the collapsed body renders the three slots in fixed order — Think, Tool,
 function ptcActivity(events: SessionEvent[]): NonNullable<ReturnType<TranscriptFolder['turnActivity']>> {
   return activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: JSON.stringify({ code: 'print(1)' }) }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: JSON.stringify({ code: 'print(1)', description: 'Inspect project and run tests' }) }, 1001, 1),
     ...events,
   ])!
 }
@@ -1487,12 +1487,14 @@ test('PTC parallel same-type children aggregate as Bash ×2 running', () => {
 
 test('PTC mixed parallel children pick the first type stably and show the remainder', () => {
   const activity = ptcActivity([
-    dispatchStart(2, 'code-1:code:1', 'bash', { cmd: 'a' }),
-    dispatchStart(3, 'code-1:code:2', 'read', { file: 'x' }),
+    dispatchStart(2, 'code-1:code:1', 'bash', { command: 'a', description: 'A' }),
+    dispatchStart(3, 'code-1:code:2', 'bash', { command: 'b', description: 'B' }),
+    dispatchStart(4, 'code-1:code:3', 'read', { file: 'x' }),
   ])
   const body = focusCollapsedBody(activity, 80, focusToolDisplay(activity.tool!, {}))
   const toolLine = body.find(line => line.startsWith('Tool:'))
-  assert.ok(toolLine !== undefined && toolLine.includes('Bash +1 running'), toolLine)
+  assert.ok(toolLine !== undefined && toolLine.includes('Bash ×2 +1 running'), `mixed parallel count:
+${toolLine}`)
 })
 
 test('PTC dispatch start/settle bump the Focus revision without touching tool stats', () => {

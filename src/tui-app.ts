@@ -2082,6 +2082,10 @@ interface MessageComponentEntry {
   members?: unknown
   /** PTC nested sub-calls (the parent card's `subCalls` tree). */
   subCalls?: unknown
+  /** The sub-call disclosure revision at build time (cache key). */
+  subCallExpandedRev?: number
+  /** The PTC subtree mutation revision at build time (cache key). */
+  subtreeRevision?: number
   error?: { name: string; code: string }
   /** Compaction card facts (kind 'compaction'). */
   items?: number
@@ -2517,6 +2521,15 @@ export class TuiApp {
    * regardless of the fold or the override.
    */
   private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
+  /** PTC sub-call bodies the user expanded by subCallId (stable across
+   * live updates, replay and sibling insertion — never an array index). */
+  private readonly subCallExpanded = new Set<string>()
+  /** Bumped on every sub-call disclosure toggle: the render cache key for
+   * tool cards with sub-calls (their body rows depend on it). */
+  private subCallExpandedRevision = 0
+  /** The block-relative sub-call hit rows recorded at render time, keyed by
+   * the root message object (the renderer knows the exact layout). */
+  private readonly subCallHitsByMessage = new Map<TranscriptMessage, { hits: ReadonlyArray<{ top: number; height: number; subCallId: string }>; total: number }>()
   /**
    * Focus Mode (plan): the persisted preference is applied through
    * {@link setFocusMode}; while ON, the transcript projection replaces each
@@ -2583,6 +2596,9 @@ export class TuiApp {
      * assistant never carry it — clicking them must not collapse the
      * Thought. */
     collapseFocusOwnerOnClick?: number
+    /** The row span (block-relative) of every PTC sub-call header's click
+     * region, keyed by the durable subCallId. */
+    subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
     /** Whether this entry's height includes the trailing inter-block
      * spacer (a blank visual row — the plan §9 blank-row collapse
      * target). Never set on the projection's LAST block or on skipped
@@ -5888,6 +5904,7 @@ export class TuiApp {
       height: number
       attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
       collapseFocusOwnerOnClick?: number
+      subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
       hasTrailingSpacer: boolean
     }> = []
     // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
@@ -5900,6 +5917,7 @@ export class TuiApp {
       let rendered: string[]
       let truncatedMarker = false
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
+      let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
       const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
       if (block.kind === 'activity') {
         // The live Thought disclosure; the hidden process rows (if any)
@@ -5927,6 +5945,10 @@ export class TuiApp {
         rendered = component.render(width)
         truncatedMarker = block.truncated === true
         attachments = this.attachmentRangesOf(component, width)
+        const subCallInfo = this.subCallHitsByMessage.get(block.message)
+        subCallHits = subCallInfo === undefined
+          ? undefined
+          : subCallInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - subCallInfo.total }))
       }
       if (rendered.length === 0 && !truncatedMarker) {
         // A zero-row block must not occupy a spacer row: the image
@@ -5974,6 +5996,7 @@ export class TuiApp {
           : {}),
         height,
         attachments,
+        ...(subCallHits === undefined ? {} : { subCallHits }),
         hasTrailingSpacer: index < blocks.length - 1,
       })
       if (index < blocks.length - 1) this.messagesView.addChild(new Spacer())
@@ -6103,6 +6126,7 @@ export class TuiApp {
       let rendered: string[]
       let truncatedMarker = false
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
+      let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
       const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
       if (block.kind === 'activity') {
         component = this.focusActivityComponentFor(
@@ -6122,6 +6146,10 @@ export class TuiApp {
         rendered = component.render(width)
         truncatedMarker = block.truncated === true
         attachments = this.attachmentRangesOf(component, width)
+        const subCallInfo = this.subCallHitsByMessage.get(block.message)
+        subCallHits = subCallInfo === undefined
+          ? undefined
+          : subCallInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - subCallInfo.total }))
       }
       if (rendered.length === 0 && !truncatedMarker) {
         // Same zero-row rule as rebuildMessages: no spacer row, no height —
@@ -6149,6 +6177,7 @@ export class TuiApp {
           : {}),
         height,
         attachments,
+        ...(subCallHits === undefined ? {} : { subCallHits }),
         hasTrailingSpacer: index < blocks.length - 1,
       })
     })
@@ -6618,6 +6647,16 @@ export class TuiApp {
         // optional message for the attachment/message toggles below.
         const message = entry.message
         if (message === undefined) return
+        // PTC sub-call header rows win FIRST (their own disclosure is
+        // independent of the root card): a click on a child header toggles
+        // THAT child's body, never the parent card.
+        if (entry.subCallHits !== undefined) {
+          const hit = entry.subCallHits.find(candidate => inMessage >= candidate.top && inMessage < candidate.top + candidate.height)
+          if (hit !== undefined) {
+            this.toggleSubCallExpanded(hit.subCallId)
+            return
+          }
+        }
         // Attachment rows win FIRST (plan §8.3): a click on an image's
         // info bar or its image rows toggles THAT OCCURRENCE's display —
         // the identity stays, the picture collapses/expands, and a
@@ -8645,6 +8684,7 @@ export class TuiApp {
       keymapRev: this.keybindings.revision(),
       rendererId: rendered?.rendererId,
       rendererRevision: registry === undefined ? undefined : registry.snapshot().revision,
+      subCallExpandedRev: this.subCallExpandedRevision,
     }
   }
 
@@ -8671,6 +8711,7 @@ export class TuiApp {
         entry.meta = message.meta
         entry.members = message.members
         entry.subCalls = message.subCalls
+        entry.subtreeRevision = message.subtreeRevision
         entry.error = message.error
         entry.resultBlocks = message.resultBlocks
         break
@@ -8704,6 +8745,8 @@ export class TuiApp {
         return entry.status !== message.status || entry.args !== message.args
           || entry.result !== message.result || entry.meta !== message.meta || entry.members !== message.members
           || entry.subCalls !== message.subCalls
+          || entry.subtreeRevision !== message.subtreeRevision
+          || entry.subCallExpandedRev !== this.subCallExpandedRevision
           || entry.error !== message.error || entry.resultBlocks !== message.resultBlocks
       case 'summary':
         return false
@@ -9241,25 +9284,39 @@ export class TuiApp {
     // PTC nested sub-calls (alpha.2 tool/code-dispatch events): recursively
     // attached to the parent card, never top-level surface items. The child
     // tree is ALWAYS visible under the parent — the root Code disclosure
-    // only controls the run_code program/details, never the sub-calls.
+    // only controls the run_code program/details, never the sub-calls. The
+    // hit rows are recorded at render time (the renderer owns the exact
+    // layout) and consumed by the fullscreen click map.
     if (message.subCalls !== undefined && message.subCalls.length > 0) {
+      const hits: Array<{ top: number; height: number; subCallId: string }> = []
+      let row = 0
+      let total = 0
       for (const child of message.subCalls) {
-        this.renderSubCall(card, child, width, 2)
+        const rows = this.renderSubCall(card, child, width, 2, hits, row)
+        row += rows
+        total += rows
       }
+      this.subCallHitsByMessage.set(message, { hits, total })
     }
     return card
   }
 
   /** One PTC nested sub-call row group inside its parent tool card. The
    * child reuses the ordinary tool-card header semantics (toolCardHeader +
-   * status pill + icon) and its raw result text; deeper nesting indents
-   * further. Child content is independent of the root disclosure state. */
+   * status pill + icon); its body (the raw result text) is hidden unless
+   * the user expanded THIS child (per-subCallId disclosure, default
+   * collapsed). Grandchildren stay visible regardless of the parent
+   * child's body disclosure. Returns the number of rows rendered and
+   * records the header hit row. */
   private renderSubCall(
     card: Container,
     child: Extract<TranscriptMessage, { kind: 'tool' }>,
     width: number,
     indent: number,
-  ): void {
+    hits: Array<{ top: number; height: number; subCallId: string }>,
+    row: number,
+  ): number {
+    let rows = 1
     const header = toolCardHeader(child.name, child.args, this.workspaceRoot)
     const pill = child.status === 'ok'
       ? color.success('[ok]')
@@ -9270,16 +9327,33 @@ export class TuiApp {
     const head = color.textDim(`${icon}${header.title}${header.summary === '' ? '' : ` ${header.summary}`}`)
     const pad = ' '.repeat(indent)
     card.addChild(new Text(truncateToWidth(`${pad}${head} ${pill}`, width, '…'), 0, 0))
-    if (child.result !== '') {
+    hits.push({ top: row, height: 1, subCallId: child.subCallId ?? '' })
+    if (this.subCallExpanded.has(child.subCallId ?? '') && child.result !== '') {
       for (const line of child.result.split('\n')) {
         card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
+        rows += 1
       }
     }
     if (child.subCalls !== undefined) {
       for (const grand of child.subCalls) {
-        this.renderSubCall(card, grand, width, indent + 2)
+        rows += this.renderSubCall(card, grand, width, indent + 2, hits, row + rows)
       }
     }
+    return rows
+  }
+
+  /** The block-relative row spans of every PTC sub-call header inside one
+   * tool card, mirroring {@link renderSubCall}'s layout exactly (header
+   * row, then the expanded body rows, then grandchildren). Keyed by the
+   * durable subCallId so live updates, replay and sibling insertion never
+   * shift the disclosure state. */
+  /** Toggle one PTC sub-call body's disclosure (mouse click on its header
+   * row). The state is keyed by the durable subCallId. */
+  private toggleSubCallExpanded(subCallId: string): void {
+    if (this.subCallExpanded.has(subCallId)) this.subCallExpanded.delete(subCallId)
+    else this.subCallExpanded.add(subCallId)
+    this.subCallExpandedRevision += 1
+    this.rebuildMessages()
   }
 
   /**
