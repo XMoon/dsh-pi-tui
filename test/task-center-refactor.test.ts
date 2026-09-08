@@ -219,3 +219,63 @@ test('a STABLE id re-entering failure is exposed again (P2 edge: id reuse)', () 
     'the second failure of the same id must be exposed again (the runtime treats it as new)')
   panel.dispose()
 })
+
+test('search mode renders its own hint — query actions, never the task actions', () => {
+  const panel = new TaskBrowserPanel([
+    { ...job('stop-me'), label: 'build' },
+    { ...job('job:2'), status: 'completed' },
+  ], 10, {
+    mode: 'full', enableSearch: true, header: 'Tasks',
+  }, () => {}, () => {}, () => {})
+  panel.handleInput('/')
+  const view = panel.render(100).join('\n')
+  // esc back leads the verb list: a 1-line hint on an 80-column terminal
+  // truncates its tail, so the escape verb must never be the clipped part.
+  const searchHint = 'type filter · esc back · ←→ edit · ↑↓ navigate · pgup/pgdn page · tab type · enter open'
+  assert.ok(view.includes(searchHint), `search-mode hint must advertise the query actions:\n${view}`)
+  for (const stale of ['A active/all', 'N next running', 'S stop', 'R refresh', '←→ tree']) {
+    assert.ok(!view.includes(stale), `search-mode hint must not advertise '${stale}':\n${view}`)
+  }
+  panel.dispose()
+})
+
+test('search-mode hint keeps esc back visible at 80 columns', () => {
+  const panel = new TaskBrowserPanel([job('build')], 10, {
+    mode: 'full', enableSearch: true, header: 'Tasks',
+  }, () => {}, () => {}, () => {})
+  panel.handleInput('/')
+  const view = panel.render(80).join('\n')
+  const hintRow = view.split('\n').find(line => line.includes('type filter'))
+  assert.ok(hintRow !== undefined, `search hint missing at 80 cols:\n${view}`)
+  assert.ok(hintRow.includes('esc back'), `esc back must survive the 80-column hint:\n${view}`)
+  // The ordinary task actions stay out of search mode here too.
+  assert.ok(!view.includes('A active/all') && !view.includes('S stop'), `no task actions in search mode:\n${view}`)
+  panel.dispose()
+})
+
+test('search mode: A/S/R/N are query text, ←→ edit the query (never tree actions)', () => {
+  const panel = new TaskBrowserPanel([job('stop-me')], 10, {
+    mode: 'full', enableSearch: true, header: 'Tasks',
+  }, () => {}, () => {}, () => {})
+  panel.handleInput('/')
+  // Every ordinary task action letter is a query character in search mode.
+  for (const key of ['A', 'S', 'R', 'N', 's', 'a', 'n', 'r']) panel.handleInput(key)
+  assert.equal(panel.getFilter(), 'ASRNsanr')
+  assert.deepEqual(panel.visibleItems(), [],
+    'a non-matching query filters the list (no task action side effects)')
+  // ←→ edit the query text (cursor movement), never tree expand/collapse.
+  panel.handleInput('\x1b[D') // Left
+  panel.handleInput('X')
+  assert.equal(panel.getFilter(), 'ASRNsanXr', 'Left + X must insert before the last character')
+  const expandedBefore = [...panel.visibleItems()]
+  panel.handleInput('\x1b[C') // Right — moves the cursor, no tree action
+  assert.equal(panel.getFilter(), 'ASRNsanXr', 'Right must not alter the query')
+  assert.deepEqual(panel.visibleItems(), expandedBefore, 'Right must not expand/collapse rows')
+  // Esc still exits search mode (query kept) and the normal task hint
+  // returns (the search-mode hint is gone).
+  panel.handleInput('\x1b')
+  const afterEsc = panel.render(100).join('\n')
+  assert.ok(!afterEsc.includes('type filter · ←→ edit'), `first Esc must leave search mode:\n${afterEsc}`)
+  assert.ok(afterEsc.includes('A active/all'), `normal task actions return after Esc:\n${afterEsc}`)
+  panel.dispose()
+})

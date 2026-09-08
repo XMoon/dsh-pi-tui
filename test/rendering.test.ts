@@ -1703,6 +1703,75 @@ test('ctrl+f opens and closes the transcript search (no fullscreen toggle)', asy
   assert.ok(!view.includes('Find transcript'), `search bar still open:\n${view}`)
 })
 
+test('transcript search: Ctrl+C closes the overlay and the hint advertises next/prev/close', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
+  await viewport(vt)
+  vt.sendInput('\x06') // ctrl+f opens search
+  let view = await viewport(vt)
+  assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
+  // The next/prev/close hint rides under the input (fixed non-configurable
+  // overlay keys — no effective binding to render).
+  assert.ok(view.includes('↵ next'), `search hint must advertise next:\n${view}`)
+  assert.ok(view.includes('prev'), `search hint must advertise previous:\n${view}`)
+  assert.ok(view.includes('esc/ctrl+c close'), `search hint must advertise esc/ctrl+c close:\n${view}`)
+  // Ctrl+C closes search (the old behavior: the overlay's shared Input
+  // swallowed Ctrl+C as its generic cancel and search stayed open).
+  vt.sendInput('\x03') // ctrl+c
+  view = await viewport(vt)
+  assert.ok(!view.includes('Find transcript'), `Ctrl+C must close search:\n${view}`)
+  // Esc still closes, Enter/Shift+Enter still navigate (semantic close
+  // keeps both routes — no regression).
+  vt.sendInput('\x06')
+  await viewport(vt)
+  vt.sendInput('\x1b')
+  view = await viewport(vt)
+  assert.ok(!view.includes('Find transcript'), `Esc must still close search:\n${view}`)
+})
+
+test('transcript search hint stays on one line at min-width (no layout break)', async () => {
+  const { vt, app } = startApp(24, 24) // the overlay minWidth
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
+  await viewport(vt)
+  vt.sendInput('\x06')
+  const view = await viewport(vt)
+  assert.ok(view.includes('Find transcript'), `search bar missing at min width:\n${view}`)
+  const hintRow = view.split('\n').find(line => line.includes('next'))
+  assert.ok(hintRow !== undefined, `hint must render at min width:\n${view}`)
+  assert.ok((hintRow ?? '').length <= 24, `hint must not overflow the overlay width:\n${view}`)
+})
+
+test('transcript search: Left/Right/Home/End edit the query inside the overlay', async () => {
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const vt = new VirtualTerminal(100, 24)
+  const queries: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSearchQuery: (query) => queries.push(query),
+  })
+  app.start()
+  startedApps.add(app)
+  app.startTranscriptSearch()
+  await viewport(vt)
+  vt.sendInput('abc')
+  await viewport(vt)
+  vt.sendInput('\x1b[D') // Left
+  vt.sendInput('X')
+  await viewport(vt)
+  assert.ok(queries.includes('abXc'), `Left+X must insert mid-query: ${JSON.stringify(queries)}`)
+  vt.sendInput('\x1bOH') // Home
+  vt.sendInput('Z')
+  await viewport(vt)
+  assert.ok(queries.includes('ZabXc'), `Home+Z must prefix: ${JSON.stringify(queries)}`)
+  vt.sendInput('\x1bOF') // End
+  vt.sendInput('Y')
+  await viewport(vt)
+  assert.ok(queries.includes('ZabXcY'), `End+Y must append: ${JSON.stringify(queries)}`)
+  app.closeTranscriptSearch()
+})
+
 test('fullscreen Ctrl+F and Ctrl+Shift+F search the full folder and re-window to an old match', async () => {
   const folder = new TranscriptFolder()
   folder.apply(Array.from({ length: 100 }, (_, turn) => ({
@@ -3544,13 +3613,20 @@ test('askQuestions skip pages through and preserves drafts', async () => {
   await viewport(vt)
   view = await viewport(vt)
   assert.ok(view.includes('Second?'), `back to the second question:\n${view}`)
-  vt.sendInput('\x1b[D') // Q2 text mode: ← pages back to Q1
+  assert.ok(view.includes('hello'), `the committed draft survives the review round trip:\n${view}`)
+  // Q2 is an OPTIONLESS question: ←/→ are TEXT cursor keys in edit mode —
+  // they never page back to Q1, commit or advance (the WP1 ownership fix).
+  vt.sendInput('\x1b[D') // ← moves the text cursor (no page-back)
   await viewport(vt)
   view = await viewport(vt)
-  assert.ok(view.includes('First?'), `back to the first question:\n${view}`)
-  vt.sendInput('\x1b[C') // back to Q2
+  assert.ok(view.includes('Second?'), `← must stay on the optionless question:\n${view}`)
+  assert.ok(!view.includes('First?'), `← must not page back to Q1 in text mode:\n${view}`)
+  vt.sendInput('\x1b[C') // → moves the text cursor (no commit/advance)
   await viewport(vt)
-  vt.sendInput('\x1b[C') // Q2 → review
+  view = await viewport(vt)
+  assert.ok(view.includes('Second?'), `→ must stay on the optionless question:\n${view}`)
+  assert.ok(!view.includes('Review your answer'), `→ must not advance in text mode:\n${view}`)
+  vt.sendInput('\r') // Enter commits → review
   await viewport(vt)
   vt.sendInput('\r') // submit
   assert.deepEqual(await promise, [

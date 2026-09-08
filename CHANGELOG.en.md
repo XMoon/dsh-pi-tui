@@ -16,6 +16,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Text-input keyboard ownership is corrected.** Free-text editing no
+  longer loses its line-editing keys to the parent: in Question's “Type
+  something.” edit, `←/→` are the text cursor (previously they could
+  commit and move on, or page back), and `Home/End/Ctrl+A/E/B/F/Delete`
+  etc. all reach the shared Input. Optionless questions now use an
+  explicit two-layer state: in the EDIT layer `←/→` move the text
+  cursor, `↵` commits, and `Esc/Ctrl+C` only leave the edit for the
+  NAVIGATION layer, where `↵` re-enters the edit, `←/→` page between
+  questions (or skip), and `Esc/Ctrl+C` cancel the whole flow (previously
+  Esc either stranded such a question in a half-dead, uneditable state
+  or cancelled the whole flow outright). The Question edit-mode and Task
+  Center search-mode footers only advertise what the current mode
+  actually does (no more `↑↓ select` / `A active/all` list actions while
+  typing). Transcript search now closes on Esc or Ctrl+C (the
+  `app.transcript.search.close` defaults were extended — previously the
+  overlay's Input swallowed Ctrl+C), and shows a
+  `↵ next · ⇧↵ prev · esc/ctrl+c close` hint under the input. The
+  `/keybindings` search box is rendered by the shared Input: full
+  cursor/Home/End/Delete/word-move editing works, and the hint flips
+  between `Esc: clear` (non-empty query) and `Esc: close`.
 - **Direct sessions are now fully retired on exit.** Exiting the TUI now
   retires the main Agent, its continuable subagents and Agent-scoped
   background jobs in a fixed order: cancel the main Agent and await

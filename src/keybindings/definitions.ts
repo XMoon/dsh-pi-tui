@@ -123,7 +123,10 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   },
   'app.transcript.search.close': {
     id: 'app.transcript.search.close',
-    defaultKeys: ['escape'],
+    // Ctrl+C is the Input's generic cancel (tui.select.cancel) — without
+    // this key the overlay's own shared Input swallows it and search stays
+    // open. The semantic close keeps ownership: Esc AND Ctrl+C both close.
+    defaultKeys: ['escape', 'ctrl+c'],
     description: 'Close transcript search',
     category: 'Transcript',
     scope: 'search',

@@ -3,7 +3,8 @@
  * the shared detail/editor child view.
  */
 
-import { decodePrintableKey, matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
+import { matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
+import { Input } from '@xmoon76/pi-tui'
 import { color } from '../theme.ts'
 import { formatKeyId } from '../keybindings/hints.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
@@ -35,16 +36,6 @@ type ListEntry =
 
 function commandKey(data: string, key: string): boolean {
   return matchesKey(data, key as KeyId) || (data.length === 1 && data.toLowerCase() === key.toLowerCase())
-}
-
-function printableChunk(data: string): string | undefined {
-  const decoded = decodePrintableKey(data)
-  if (decoded !== undefined) return decoded
-  if (data === '' || data.includes('\x1b')) return undefined
-  for (const character of data) {
-    if (character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) return undefined
-  }
-  return data
 }
 
 function statusMarkers(row: KeybindingEditorRow): string {
@@ -106,7 +97,15 @@ export class KeybindingEditorPanel implements Component {
   private readonly onDispose: () => void
   private readonly requestRender: () => void
   private readonly maxRows: () => number
-  private query = ''
+  /** The shared Input is the ONLY query source of truth (left/right/Home/
+   * End/Ctrl+A/E/B/F/delete/kill/undo all work here — the old hand-rolled
+   * `query += chunk` string editing could only append and Backspace). */
+  private readonly searchInput = new Input()
+  /** Read-only query view (the render + filtering read this; the Input
+   * alone mutates it). */
+  private get query(): string {
+    return this.searchInput.getValue()
+  }
   private selectedId = 'leader'
   private selectedIndex = 0
   private actionEditor: ActionEditorPanel | undefined
@@ -141,7 +140,7 @@ export class KeybindingEditorPanel implements Component {
         ]
         : []),
       color.textDim(`Search actions, descriptions, IDs, categories, or keys · ${this.model.summary}`),
-      `${color.text('Search: ')}${this.query === '' ? color.textDim('type to filter') : color.text(this.query)}`,
+      this.searchRow(safeWidth),
       '',
     ]
     const entries = this.displayEntries()
@@ -169,8 +168,29 @@ export class KeybindingEditorPanel implements Component {
     if (start > 0) lines.push(color.textDim(`↑ ${start} more`))
     if (end < entries.length) lines.push(color.textDim(`↓ ${entries.length - end} more`))
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, safeWidth)))
-    lines.push('', color.textDim('Enter: details · type: search · ↑↓: move · Esc: close'))
+    // The Esc verb follows the two-stage lifecycle: a non-empty query
+    // clears first, an empty query closes the panel.
+    const escVerb = this.query === '' ? 'close' : 'clear'
+    lines.push('', color.textDim(`Enter: details · type: search · ←→: edit · ↑↓: move · Esc: ${escVerb}`))
     return lines.slice(0, Math.max(1, this.maxRows()))
+  }
+
+  /** The search row: the `Search: ` label combined with the shared
+   * Input's real render (the user sees the actual cursor position while
+   * editing the query). An empty query keeps the dim placeholder. The
+   * combined row is truncated to the panel width (ANSI-safe — the Input's
+   * fake cursor rides inside, and truncateToWidth preserves escape
+   * sequences), so a very narrow terminal can never overflow. */
+  private searchRow(width: number): string {
+    const label = 'Search: '
+    const labelWidth = visibleWidth(label)
+    const inputLines = this.searchInput.render(Math.max(1, width - labelWidth))
+    const inputLine = inputLines[0] ?? ''
+    const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
+    const content = this.query === ''
+      ? `${color.text(label)}${color.textDim('type to filter')}`
+      : `${color.text(label)}${color.text(stripped)}`
+    return truncateToWidth(content, Math.max(1, width), '…')
   }
 
   handleInput(data: string): void {
@@ -185,7 +205,7 @@ export class KeybindingEditorPanel implements Component {
     }
     if (matchesKey(data, 'escape')) {
       if (this.query !== '') {
-        this.query = ''
+        this.searchInput.setValue('')
         this.selectedId = 'leader'
         this.selectedIndex = 0
         this.message = undefined
@@ -198,6 +218,10 @@ export class KeybindingEditorPanel implements Component {
     }
     const selectable = this.selectableEntries(this.displayEntries())
     this.ensureSelection(selectable)
+    // The parent owns ONLY the list/control keys; EVERY other key —
+    // printable text, ←→/Home/End cursor movement, Ctrl+A/E/B/F/W/U/K/Y,
+    // Backspace/Delete, word moves, undo, paste — goes to the shared
+    // Input, the single query source of truth.
     if (matchesKey(data, 'up')) {
       this.moveSelection(-1, selectable)
       return
@@ -214,22 +238,14 @@ export class KeybindingEditorPanel implements Component {
       this.moveSelection(Math.max(1, this.maxRows() - 6), selectable)
       return
     }
-    if (matchesKey(data, 'backspace')) {
-      if (this.query !== '') {
-        this.query = this.query.slice(0, -1)
-        this.selectedId = 'leader'
-        this.selectedIndex = 0
-        this.requestRender()
-      }
-      return
-    }
     if (matchesKey(data, 'enter') || data === '\n' || data === '\r') {
       this.openSelected(selectable)
       return
     }
-    const chunk = printableChunk(data)
-    if (chunk !== undefined) {
-      this.query += chunk
+    const before = this.searchInput.getValue()
+    this.searchInput.handleInput(data)
+    if (this.searchInput.getValue() !== before) {
+      // The query changed: filter again and reset the selection to the top.
       this.selectedId = 'leader'
       this.selectedIndex = 0
       this.message = undefined
@@ -239,6 +255,7 @@ export class KeybindingEditorPanel implements Component {
 
   invalidate(): void {
     this.actionEditor?.invalidate?.()
+    this.searchInput.invalidate()
   }
 
   dispose(): void {

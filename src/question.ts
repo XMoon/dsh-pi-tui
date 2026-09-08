@@ -11,7 +11,7 @@
  * @module @xmoon76/dsh-pi-tui/question
  */
 
-import { Input, type KeyId } from '@xmoon76/pi-tui'
+import { Input, matchesKey, type KeyId } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { componentKeymap } from './keybindings/component-keymap.ts'
@@ -219,7 +219,23 @@ export class QuestionFlow implements Component, Focusable {
   private cursor = 0
   /** Free-text editing mode (the "Type something." row or an optionless question). */
   private editingOther = false
-  private readonly otherInput = new Input()
+  /**
+   * The free-text edit Input. REPLACED by a fresh instance whenever the
+   * edit moves to a different question (see {@link otherInputTab}): the
+   * Input's undo stack and kill ring are per-instance state, so reusing
+   * one instance across questions would let the previous question's
+   * editing history leak into the next row (round-3 finding — Ctrl+-
+   * undo / Ctrl+Y yank resurrected the previous question's text).
+   */
+  private otherInput = new Input()
+  /**
+   * The tab whose draft/in-progress text the {@link otherInput} currently
+   * holds. Entering a DIFFERENT question's edit replaces the Input and
+   * re-seeds from that question's draft; an Esc → navigation → ↵ round
+   * trip on the SAME question keeps the live Input and its in-progress
+   * text.
+   */
+  private otherInputTab = -1
   /**
    * Current content-row budget (8..38). The editor-seat QuestionFrame in
    * tui-app.ts re-derives it from the terminal height on every render and
@@ -273,7 +289,12 @@ export class QuestionFlow implements Component, Focusable {
     this.drafts = questions.map(() => ({ selected: new Set<string>(), custom: '', skipped: false }))
     // The free-text input keeps the last answer for re-entry.
     this.otherInput.onSubmit = (value) => this.commitOther(value)
-    this.otherInput.onEscape = () => this.exitOther()
+    // The Input's generic cancel (Esc/Ctrl+C) ALWAYS leaves the text
+    // edit back to the outer layer (option list for choices, navigation
+    // state for optionless) — the flow itself cancels only from that
+    // outer state (handleOtherEscape → exitOther; question.cancel /
+    // navigation-state Ctrl+C → onCancel).
+    this.otherInput.onEscape = () => this.handleOtherEscape()
     // An optionless first question edits text from the start.
     this.syncEditMode()
   }
@@ -505,6 +526,19 @@ export class QuestionFlow implements Component, Focusable {
     return rows
   }
 
+  /** Whether the current question has NO selectable choices — pure free
+   * text (an optionless question or a questions page whose only row is the
+   * free-text row). Such a question has no list mode to fall back to: the
+   * EDIT layer's Esc leaves for its NAVIGATION state (↵ re-enters the
+   * edit, ←/→ page, Esc cancels the flow) instead of an option list. The
+   * REVIEW page (tab past the last question) has no rows at all and must
+   * never read as an edit page — syncEditMode runs on every advance,
+   * review page included. */
+  private isOptionless(rows: Row[] = this.rows()): boolean {
+    if (this.tab >= this.questions.length) return false
+    return rows.length === 0 || (rows.length === 1 && rows[0]?.key === OTHER_ROW)
+  }
+
   /** The current question's draft. */
   private draft(): Draft | undefined {
     return this.drafts[this.tab]
@@ -527,6 +561,15 @@ export class QuestionFlow implements Component, Focusable {
   private confirm(): void {
     const draft = this.draft()
     if (draft === undefined) return
+    // An OPTIONLESS question in the NAVIGATION state (Esc left the edit):
+    // there are no rows to confirm — Enter re-enters the free-text edit
+    // (this is the re-entry path that keeps pure-text questions
+    // editable; without it a navigation-state optionless question would
+    // be a dead end).
+    if (this.isOptionless()) {
+      this.enterOther()
+      return
+    }
     const rows = this.rows()
     const row = rows[this.cursor]
     if (row !== undefined && row.key !== OTHER_ROW) {
@@ -561,12 +604,27 @@ export class QuestionFlow implements Component, Focusable {
   /** Optionless questions edit text directly; options start in list mode. */
   private syncEditMode(): void {
     this.resetBodyView()
-    const question = this.questions[this.tab]
-    const optionless = question !== undefined && (question.options?.length ?? 0) === 0
+    // Tab-change contract: in-progress free-text survives ONLY an Esc →
+    // navigation → ↵ round trip on the SAME question. The moment the
+    // user actually moves to ANOTHER question (←/→/skip/commit advance),
+    // the uncommitted edit is DROPPED — invalidate the Input's owner so
+    // the re-entry reseeds from the committed draft. This must happen on
+    // EVERY tab change regardless of the NEXT question's type (a choices
+    // stopover used to leave the old owner alive, so whether the text
+    // survived depended on the intermediate question's kind — round
+    // finding).
+    if (this.otherInputTab !== -1 && this.otherInputTab !== this.tab) {
+      this.otherInputTab = -1
+    }
+    const optionless = this.isOptionless()
     this.editingOther = optionless
     if (optionless) {
+      // A DIFFERENT question's edit gets a FRESH Input seeded from that
+      // question's committed draft (the Input's undo/kill history is
+      // per-instance, so reuse would leak the previous question's
+      // editing state — see resetOtherInput).
       const draft = this.draft()
-      this.otherInput.setValue(draft?.custom ?? '')
+      this.resetOtherInput(draft?.custom ?? '')
     } else {
       // The recommended row (intent.approve or a label suffix) is the default
       // highlight, so Enter adopts it directly (pi/questionnaire parity).
@@ -576,6 +634,18 @@ export class QuestionFlow implements Component, Focusable {
     this.otherInput.focused = this.focused && this.editingOther
   }
 
+  /** Esc inside the free-text edit ALWAYS leaves the text edit back to the
+   * outer layer — for a choices question back to its option list, for an
+   * OPTIONLESS question back to the question's navigation state (where
+   * Enter re-enters the edit, ←/→ page between questions, and Esc cancels
+   * the flow). The flow's cancel only ever fires from that outer state, so
+   * a pure-text question can never be stranded uneditable again. Shared by
+   * the flow's question.cancel match and the Input's generic cancel
+   * (tui.select.cancel: Esc/Ctrl+C). */
+  private handleOtherEscape(): void {
+    this.exitOther()
+  }
+
   /** Skip the current question (empty answer) and move on. */
   private skip(): void {
     const draft = this.draft()
@@ -583,15 +653,41 @@ export class QuestionFlow implements Component, Focusable {
     draft.selected.clear()
     draft.custom = ''
     draft.skipped = true
+    // The skip's advance() runs syncEditMode, which invalidates the
+    // free-text Input's owner on the tab change — a later re-entry
+    // reseeds from the EMPTY draft, so the (skipped) row never shows
+    // stale in-progress text beside it.
     this.advance()
   }
 
-  /** Enter the free-text editing mode for the current question. */
+  /** Enter the free-text editing mode for the current question. The shared
+   * Input keeps in-progress text across an Esc → navigation → ↵ round
+   * trip on the SAME question; entering a DIFFERENT question's edit (or a
+   * fresh entry) seeds from that question's committed draft — the
+   * previous question's text must never leak into the new row. */
   private enterOther(): void {
     this.editingOther = true
-    const draft = this.draft()
-    this.otherInput.setValue(draft?.custom ?? '')
+    if (this.otherInputTab !== this.tab) {
+      const draft = this.draft()
+      this.resetOtherInput(draft?.custom ?? '')
+    }
     this.otherInput.focused = this.focused
+  }
+
+  /** (Re)create the free-text Input for a NEW question owner and seed it
+   * with `value`. The Input's undo stack / kill ring / paste buffer are
+   * PER-INSTANCE state, so a cross-question ownership change must start
+   * from a fresh instance — reusing one Input across questions let
+   * Ctrl+- (undo) / Ctrl+Y (yank) resurrect the previous question's text
+   * in the new row (round-3 finding). */
+  private resetOtherInput(value: string): void {
+    const input = new Input()
+    input.onSubmit = (next) => this.commitOther(next)
+    input.onEscape = () => this.handleOtherEscape()
+    input.setValue(value)
+    input.focused = this.focused && this.editingOther
+    this.otherInput = input
+    this.otherInputTab = this.tab
   }
 
   /** Leave text mode back to the option list. */
@@ -654,25 +750,23 @@ export class QuestionFlow implements Component, Focusable {
     // silently dropped every key on terminals that report CSI-u (the
     // zellij + Kitty-protocol case).
     if (this.editingOther) {
+      // Text mode: EVERY editing key — Left/Right cursor movement,
+      // Home/End, Ctrl+A/E/B/F, Backspace/Delete, word moves, kill/undo —
+      // belongs to the shared Input (the flow previously intercepted
+      // question.previous/next, so → committed+advanced and ← could page
+      // back, stealing the text cursor). The flow keeps only its own
+      // mode verbs: Enter commits, Esc leaves the edit (back to the
+      // option list for choices, to the NAVIGATION state for optionless
+      // — the second Esc there cancels the flow), PageUp/PageDown scroll
+      // the body ('e' stays a letter here — expand is a list-mode verb).
       if (componentKeymap.matches(data, 'question.confirm')) {
         this.commitOther(this.otherInput.getValue())
       } else if (componentKeymap.matches(data, 'question.cancel')) {
-        this.exitOther()
+        this.handleOtherEscape()
       } else if (componentKeymap.matches(data, 'question.pageUp')) {
         this.scrollBody(-1)
       } else if (componentKeymap.matches(data, 'question.pageDown')) {
         this.scrollBody(1)
-      } else if (componentKeymap.matches(data, 'question.previous')) {
-        if (this.tab > 0) {
-          this.tab -= 1
-          this.cursor = 0
-          this.syncEditMode()
-        }
-      } else if (componentKeymap.matches(data, 'question.next')) {
-        // → in text mode: same "move on" verb as in list mode — commit the
-        // typed answer (an empty one counts as skipped) and advance. Enter
-        // stays the primary save key; → never discards in-progress text.
-        this.commitOther(this.otherInput.getValue())
       } else {
         this.otherInput.handleInput(data)
       }
@@ -685,7 +779,7 @@ export class QuestionFlow implements Component, Focusable {
       // the whole batch, Esc cancels the flow, ← returns to the last
       // question (drafts survive). The keys match user intuition and the
       // page carries one less state machine. `h` stays the vim alias for
-      // ← (as in list mode).
+      // ← (the review page has no text input to steal from).
       if (componentKeymap.matches(data, 'question.confirm')) {
         this.submit()
       } else if (componentKeymap.matches(data, 'question.cancel')) {
@@ -699,7 +793,10 @@ export class QuestionFlow implements Component, Focusable {
       return
     }
     const digit = /^[1-9]$/.exec(data)
-    if (digit !== null) {
+    if (digit !== null && !this.isOptionless()) {
+      // A digit in an OPTIONLESS question's navigation state is text —
+      // the option-choice shortcut does not exist without options (the
+      // fall-through re-enters the edit below).
       const row = rows[Number(digit[0]) - 1]
       if (row !== undefined) {
         this.cursor = rows.indexOf(row)
@@ -709,40 +806,50 @@ export class QuestionFlow implements Component, Focusable {
       return
     }
     if (componentKeymap.matches(data, 'question.cursorUp') || data === 'k') {
-      if (rows.length === 0) return
-      if (this.cursor === 0 && this.bodyScroll > 0) {
+      if (rows.length === 0) {
+        // An OPTIONLESS navigation state has no list: the PHYSICAL ↑ is a
+        // no-op here (no selection to move, and it must not bounce the
+        // user into the edit for nothing); the vim 'k' alias is plain
+        // text and falls through to the auto re-enter below.
+        if (componentKeymap.matches(data, 'question.cursorUp')) return
+      } else if (this.cursor === 0 && this.bodyScroll > 0) {
         // ↑ at the FIRST row with the page scrolled: scroll the body UP so
         // the question overview comes back into view (the pointer stays on
         // the first row — it is already visible, so no cursor follow).
         this.scrollBody(-1)
         return
+      } else {
+        this.cursor = (this.cursor - 1 + rows.length) % rows.length
+        this.pendingCursorScroll = true
+        return
       }
-      this.cursor = (this.cursor - 1 + rows.length) % rows.length
-      this.pendingCursorScroll = true
-      return
     }
     if (componentKeymap.matches(data, 'question.cursorDown') || data === 'j') {
-      if (rows.length === 0) return
-      const atLastRow = this.cursor === rows.length - 1
-      const scrolled = this.lastExpandable && this.lastContentRows > this.bodyScroll + this.lastVisibleRows
-      if (atLastRow && scrolled) {
+      if (rows.length === 0) {
+        // Same optionless rule: physical ↓ no-ops, 'j' is text.
+        if (componentKeymap.matches(data, 'question.cursorDown')) return
+      } else if (this.cursor === rows.length - 1
+        && this.lastExpandable && this.lastContentRows > this.bodyScroll + this.lastVisibleRows) {
         // ↓ at the LAST row with more page content below: scroll the body
         // DOWN (the pointer stays on the last row). Only when the page
         // actually overflows — otherwise ↓ keeps the wrap-around.
         this.scrollBody(1)
         return
+      } else {
+        this.cursor = (this.cursor + 1) % rows.length
+        this.pendingCursorScroll = true
+        return
       }
-      this.cursor = (this.cursor + 1) % rows.length
-      this.pendingCursorScroll = true
-      return
     }
     if (componentKeymap.matches(data, 'question.pageUp') || componentKeymap.matches(data, 'question.pageDown')) {
       // PageUp/PageDown: scroll the body scrollport (no-op when it fits).
       this.scrollBody(componentKeymap.matches(data, 'question.pageUp') ? -1 : 1)
       return
     }
-    if (componentKeymap.matches(data, 'question.toggleExpand')) {
+    if (componentKeymap.matches(data, 'question.toggleExpand') && !this.isOptionless()) {
       // Expand/collapse the body region (the scroll marker's keyboard twin).
+      // In an OPTIONLESS navigation state 'e' is plain text (no list to
+      // expand) — it falls through and re-enters the edit below.
       this.toggleExpanded()
       return
     }
@@ -750,7 +857,13 @@ export class QuestionFlow implements Component, Focusable {
       this.confirm()
       return
     }
-    if (componentKeymap.matches(data, 'question.previous') || data === 'h') {
+    // ←/→ back/next (the physical arrows own these verbs). The vim h/l
+    // aliases are LIST-mode conveniences only: they must NOT eat 'h'/'l'
+    // inside an OPTIONLESS question's NAVIGATION state, where every
+    // printable (h/l included) is text that auto-re-enters the edit
+    // below (round finding — typing 'hello'/'linux' was hijacked).
+    if (componentKeymap.matches(data, 'question.previous')
+      || (!this.isOptionless() && data === 'h')) {
       // ← back: previous question (keeps the draft).
       if (this.tab > 0) {
         this.tab -= 1
@@ -759,7 +872,8 @@ export class QuestionFlow implements Component, Focusable {
       }
       return
     }
-    if (componentKeymap.matches(data, 'question.next') || data === 'l') {
+    if (componentKeymap.matches(data, 'question.next')
+      || (!this.isOptionless() && data === 'l')) {
       // → move on (the arrows own back/skip now, replacing the old 's'
       // skip key): an UNANSWERED question is marked skipped and advances
       // (web QuestionComposer skip parity); an ANSWERED one keeps its draft
@@ -783,6 +897,24 @@ export class QuestionFlow implements Component, Focusable {
     }
     if (componentKeymap.matches(data, 'question.cancel')) {
       this.onCancel()
+      return
+    }
+    // An OPTIONLESS question in its NAVIGATION state (Esc left the edit):
+    // every key that is not one of the flow's navigation verbs (← back,
+    // → skip/next, ↵ re-edit, esc cancel, PgUp/PgDn scroll) is the user
+    // typing again — re-enter the text edit and hand the key to the
+    // shared Input (search-box semantics: no Enter prefix needed, and
+    // digits/'e' are text here, not list-mode verbs).
+    if (this.isOptionless()) {
+      // Ctrl+C mirrors Esc's two-stage lifecycle: the FIRST press exits
+      // the edit (the Input's tui.select.cancel → handleOtherEscape),
+      // the SECOND press here cancels the flow.
+      if (matchesKey(data, 'ctrl+c')) {
+        this.onCancel()
+        return
+      }
+      this.enterOther()
+      this.otherInput.handleInput(data)
     }
   }
 
@@ -882,7 +1014,7 @@ export class QuestionFlow implements Component, Focusable {
     const rows = this.rows()
     const multi = question.multiSelect === true
     const skippedRow = draft.skipped ? 1 : 0
-    const optionless = rows.length === 0 || (rows.length === 1 && rows[0]?.key === OTHER_ROW)
+    const optionless = this.isOptionless(rows)
     // Required tail — the rows that must render below the scrollport:
     //   choice page: (skipped) note + trailing blank + hint = 2 + skippedRow
     //   optionless:  input row + (skipped) note + trailing blank + hint =
@@ -967,26 +1099,64 @@ export class QuestionFlow implements Component, Focusable {
       lines.push(color.textDim('(skipped)'))
     }
     lines.push('')
-    // The hint composes from the parts that FIT: low-priority verbs drop out
-    // instead of the whole line being ellipsized by the frame. 'esc cancel'
-    // is the escape hatch and ALWAYS survives (it is reserved first — the
-    // verbs drop from the end, so e.g. '→ skip' goes before 'esc cancel').
-    // Scroll and expand are advertised only when the page overflows the
-    // scrollport; once expanded, 'e' always collapses (frame 80% -> 60%).
-    const optionCount = Math.min(rows.length, 9)
+    // The hint describes the CURRENT mode, never a generic list-mode verb
+    // set:
+    // - text EDIT (choices or optionless): ←→ are the TEXT cursor, Enter
+    //   confirms, Esc LEAVES the edit back to the navigation layer
+    //   (esc back — for choices its option list, for optionless its
+    //   navigation state);
+    // - optionless NAVIGATION state (after Esc): ↵ re-enters the edit,
+    //   ← back / → skip page between questions, esc cancels the flow;
+    // - choices list mode: ↑↓/digits/Enter select, ← back → skip, e
+    //   expand, esc cancel.
+    // List-only verbs (↑↓ select, 1-N choose, ↵ toggle, → next, e expand)
+    // are never advertised while editing.
+    // The hint composes from the parts that FIT: low-priority verbs drop
+    // out instead of the whole line being ellipsized by the frame. The
+    // escape verb ALWAYS survives (it is reserved first — the verbs drop
+    // from the end, so e.g. '→ skip' goes before 'esc cancel').
     const scrollable = this.lastExpandable
-    // Text mode commits on → (empty = skipped), list mode skips/moves on —
-    // the verb is advertised per mode ('→ next' vs '→ skip').
-    const arrowVerb = this.editingOther ? '→ next' : '→ skip'
+    if (this.editingOther) {
+      const editParts = [
+        '←→ edit',
+        '↵ confirm',
+        scrollable ? 'pgup/pgdn scroll' : '',
+      ].filter(part => part !== '')
+      const cancel = 'esc back'
+      let hint = ''
+      for (const part of editParts) {
+        const next = hint === '' ? part : `${hint} · ${part}`
+        if (visibleWidth(`${next} · ${cancel}`) > safeWidth) break
+        hint = next
+      }
+      lines.push(color.textDim(hint === '' ? cancel : `${hint} · ${cancel}`))
+      return lines
+    }
+    if (optionless) {
+      // Navigation state of an OPTIONLESS question: no list, no choice
+      // verbs — ↵ re-enters the text edit, arrows page, Esc cancels.
+      const navParts = [
+        '↵ edit',
+        this.questions.length > 1 || this.tab > 0 ? '← back · → skip' : '→ skip',
+      ].filter(part => part !== '')
+      const cancel = 'esc cancel'
+      let hint = ''
+      for (const part of navParts) {
+        const next = hint === '' ? part : `${hint} · ${part}`
+        if (visibleWidth(`${next} · ${cancel}`) > safeWidth) break
+        hint = next
+      }
+      lines.push(color.textDim(hint === '' ? cancel : `${hint} · ${cancel}`))
+      return lines
+    }
+    const optionCount = Math.min(rows.length, 9)
     const hintParts = [
       '↑↓ select',
       optionCount > 0 ? `1-${optionCount} choose` : '',
       multi ? '↵ toggle' : '↵ confirm',
       scrollable ? 'pgup/pgdn scroll' : '',
-      !this.editingOther
-        ? (this.bodyExpanded ? 'e collapse' : scrollable ? 'e expand' : '')
-        : '',
-      this.questions.length > 1 ? `← back · ${arrowVerb}` : arrowVerb,
+      this.bodyExpanded ? 'e collapse' : scrollable ? 'e expand' : '',
+      this.questions.length > 1 ? '← back · → skip' : '→ skip',
       'esc cancel',
     ].filter(part => part !== '')
     const cancel = 'esc cancel'
