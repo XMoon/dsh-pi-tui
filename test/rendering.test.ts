@@ -1500,7 +1500,7 @@ function ptcCodeCard(): Extract<TranscriptMessage, { kind: 'tool' }> {
         subCallId: 'code-1:code:1', parentCallId: 'code-1', rootCallId: 'code-1',
       },
       {
-        kind: 'tool', turn: 0, name: 'read', args: '{"file_path":"a.ts","offset":1,"limit":200,"description":"Read source"}',
+        kind: 'tool', turn: 0, name: 'read', args: '{"file_path":"a.ts","offset":1,"limit":200}',
         result: 'file content', status: 'ok',
         subCallId: 'code-1:code:2', parentCallId: 'code-1', rootCallId: 'code-1',
       },
