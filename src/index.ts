@@ -901,6 +901,18 @@ function packageVersion(): string {
 }
 
 /**
+ * The welcome card's version line: the installed dsh version plus the
+ * bundle's own version (header-badge parity — `dsh-0.1.3-alpha.2 ·
+ * tui-v0.4.3-alpha.2`). Without a resolvable dsh launcher it degrades to
+ * the bundle version alone.
+ * @returns the combined version string.
+ */
+function versionDisplay(): string {
+  const dsh = dshVersion()
+  return dsh === undefined ? `tui-v${bundleVersion()}` : `dsh-${dsh} · tui-v${bundleVersion()}`
+}
+
+/**
  * The BUNDLE's OWN version (`@xmoon76/dsh-pi-tui`'s package.json),
  * INDEPENDENT of the installed dsh version. The status snapshot's
  * host.tuiVersion and the footer's `version(format=tui)` item must report
@@ -2355,7 +2367,7 @@ export function apply(ctx: Context, config: Config): void {
         cwd: sessionCwd(),
         sessionId: liveAgent.session.id,
         model: `${provider}/${model}`,
-        version: packageVersion(),
+        version: versionDisplay(),
         ...currentPreset() === undefined ? {} : { preset: currentPreset() },
       })
     }

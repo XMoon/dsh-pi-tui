@@ -665,8 +665,8 @@ class WelcomeCard implements Component {
   private buildRows(layoutWidth: number, width: number): string[] {
     if (this.idle) {
       const lines = width < WELCOME_STACKED_MIN_WIDTH
-        ? [color.textMuted('🐋 dsh-pi-tui'), color.textMuted('type a message to start a session')]
-        : [color.textMuted('dsh-pi-tui'), color.textMuted('type a message to start a session')]
+        ? [color.textStrong('🐋 dsh-pi-tui'), color.textDim('type a message to start a session')]
+        : [color.textStrong('dsh-pi-tui'), color.textDim('type a message to start a session')]
       return this.layout(layoutWidth, width, lines)
     }
     if (this.facts === undefined) return []
@@ -729,16 +729,18 @@ class WelcomeCard implements Component {
     ))
   }
 
-  /** Session facts in the wide/stacked column layout. */
+  /** Session facts in the wide/stacked column layout. The title reads
+   * strong, the version muted, labels dim, and values in the body text —
+   * the whale's saturated gradient is balanced by readable facts. */
   private factLines(): string[] {
     const facts = this.facts!
     const label = (text: string): string => `${text}${' '.repeat(Math.max(0, WELCOME_FACT_LABEL_WIDTH - text.length))}`
     return [
-      color.textMuted(`dsh-pi-tui  v${facts.version}`),
-      `${label('model')}${color.textMuted(facts.model)}`,
-      ...(facts.preset === undefined ? [] : [`${label('preset')}${color.textMuted(facts.preset)}`]),
-      `${label('cwd')}${color.textMuted(facts.cwd)}`,
-      `${label('session')}${color.textMuted(facts.sessionId)}`,
+      `${color.textStrong('dsh-pi-tui')}  ${color.textMuted(facts.version)}`,
+      `${color.textDim(label('model'))}${color.text(facts.model)}`,
+      ...(facts.preset === undefined ? [] : [`${color.textDim(label('preset'))}${color.text(facts.preset)}`]),
+      `${color.textDim(label('cwd'))}${color.text(facts.cwd)}`,
+      `${color.textDim(label('session'))}${color.text(facts.sessionId)}`,
     ]
   }
 
@@ -746,13 +748,13 @@ class WelcomeCard implements Component {
   private compactFactLines(): string[] {
     const facts = this.facts!
     return [
-      color.textMuted(`🐋 dsh-pi-tui v${facts.version}`),
+      `${color.textStrong('🐋 dsh-pi-tui')} ${color.textMuted(facts.version)}`,
       [
-        color.textMuted(facts.model),
-        facts.preset === undefined ? '' : `preset ${color.textMuted(facts.preset)}`,
+        color.text(facts.model),
+        facts.preset === undefined ? '' : `preset ${color.text(facts.preset)}`,
       ].filter(part => part !== '').join(' · '),
-      color.textMuted(facts.cwd),
-      `session ${color.textMuted(facts.sessionId)}`,
+      color.text(facts.cwd),
+      `${color.textDim('session')} ${color.text(facts.sessionId)}`,
     ]
   }
 }
