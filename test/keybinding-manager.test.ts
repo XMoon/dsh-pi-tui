@@ -141,7 +141,8 @@ test('keysLabelFor falls back to an overlay action default (the /help source)', 
   // '—' for Enter submission and the fixed overlay controls.
   const manager = managerWith({})
   assert.equal(manager.keysLabelFor('app.input.submit'), 'Enter', 'submit keeps its default label')
-  assert.equal(manager.keysLabelFor('app.transcript.search.close'), 'Esc')
+  assert.equal(manager.keysLabelFor('app.transcript.search.close'), 'Esc / Ctrl+C',
+    'search close advertises its full default set (the overlay Input swallows Ctrl+C otherwise)')
   assert.equal(manager.keysLabelFor('app.transcript.search.next'), 'Enter')
   assert.equal(manager.keysLabelFor('app.transcript.search.previous'), 'Shift+Enter')
   // Disabled actions still advertise nothing.

@@ -140,7 +140,9 @@ test('budget matrix: optionless free-text question keeps the question and hint',
   for (const budget of BUDGETS) {
     for (const width of WIDTHS) {
       const f = makeFlow([{ id: 'q1', question: 'Type your answer to this long free-text question that wraps across rows. '.repeat(2).trim() }], budget)
-      assertPage(render(f, width), budget, width, 'Type your answer', { hint: 'esc cancel' })
+      // An optionless question OPENS in the text edit (esc back = leave
+      // the edit for the navigation layer).
+      assertPage(render(f, width), budget, width, 'Type your answer', { hint: 'esc back' })
     }
   }
 })
@@ -210,11 +212,12 @@ test('→ skips only unanswered questions; answered drafts advance untouched', (
   ])
 })
 
-test('text-mode → with an empty input never wipes an existing selection', () => {
-  // Regression for the arrow-key move-on invariant: entering the "Type
-  // something." row and pressing → with EMPTY text used to set skipped=true,
+test('Enter on empty custom text never wipes an existing selection', () => {
+  // Regression: committing EMPTY custom text used to set skipped=true,
   // and the skipped mark wins at submit (returns selected: []) — the
   // selection was silently destroyed. An answered draft must survive.
+  // (The old text-mode → move-on verb is gone — → is the text cursor now —
+  // so Enter is the commit key this invariant rides on.)
   // Single-select case.
   let done: unknown
   const f = new QuestionFlow([
@@ -232,9 +235,9 @@ test('text-mode → with an empty input never wipes an existing selection', () =
   render(f, 100)
   f.handleInput('\r') // enter the free-text row
   render(f, 100)
-  f.handleInput('\x1b[C') // → with EMPTY text: must NOT wipe the selection
+  f.handleInput('\r') // Enter with EMPTY text: must NOT wipe the selection
   const review = render(f, 100).join('\n')
-  assert.ok(review.includes('Submit'), `→ must reach the review page:\n${review}`)
+  assert.ok(review.includes('Submit'), `Enter must reach the review page:\n${review}`)
   assert.ok(!review.includes('(skipped)'), `the answered question must not become (skipped):\n${review}`)
   f.handleInput('\r') // submit
   assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }])
@@ -247,16 +250,16 @@ test('text-mode → with an empty input never wipes an existing selection', () =
   render(g, 100)
   g.handleInput('\r') // toggle X (multi-select stays on the question)
   render(g, 100)
-  // Cursor onto "Type something." (last row), enter text mode, → empty.
+  // Cursor onto "Type something." (last row), enter text mode, Enter empty.
   g.handleInput('\x1b[B')
   g.handleInput('\x1b[B')
   render(g, 100)
   g.handleInput('\r')
   render(g, 100)
-  g.handleInput('\x1b[C') // → with EMPTY text on the answered multi-select
+  g.handleInput('\r') // Enter with EMPTY text on the answered multi-select
   // Single-question flow: commitOther advances straight to the review page.
   const review2 = render(g, 100).join('\n')
-  assert.ok(review2.includes('Submit'), `→ must reach the review page:\n${review2}`)
+  assert.ok(review2.includes('Submit'), `Enter must reach the review page:\n${review2}`)
   assert.ok(!review2.includes('(skipped)'), `the multi-select answer must not become (skipped):\n${review2}`)
   g.handleInput('\r') // submit
   assert.deepEqual(done2, [{ id: 'q1', selected: ['X'] }])
@@ -305,9 +308,10 @@ test('review page: Enter submits, ↓ never cancels, ← goes back to the last q
   assert.ok(render(g, 100).join('\n').includes('Two?'), `← must return to the last question:\n${render(g, 100).join('\n')}`)
 })
 
-test('→ in text mode commits the typed answer (empty counts as skipped)', () => {
-  // Text mode (optionless): → is the same "move on" verb — it commits the
-  // typed text and advances; an empty input counts as skipped (Enter parity).
+test('Enter in text mode commits the typed answer (empty counts as skipped)', () => {
+  // Text mode (optionless): Enter commits the typed text and advances; an
+  // empty input counts as skipped (the old → move-on verb is now the text
+  // cursor's key in edit mode — Enter is the commit path).
   let done: unknown
   const f = new QuestionFlow([
     { id: 'q1', question: 'Name?' },
@@ -316,8 +320,8 @@ test('→ in text mode commits the typed answer (empty counts as skipped)', () =
   f.setMaxRows(24)
   render(f, 100)
   f.handleInput('alice')
-  f.handleInput('\x1b[C') // → commits the typed answer
-  assert.ok(render(f, 100).join('\n').includes('Second?'), `→ must advance from text mode:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\r') // Enter commits the typed answer
+  assert.ok(render(f, 100).join('\n').includes('Second?'), `Enter must advance from text mode:\n${render(f, 100).join('\n')}`)
   f.handleInput('\x1b[C') // → on unanswered q2 → review (skipped)
   render(f, 100)
   f.handleInput('\r') // submit
@@ -335,11 +339,31 @@ test('the hint advertises ← back · → skip instead of the old letters', () =
   const questionPage = render(f, 100).join('\n')
   assert.ok(questionPage.includes('← back · → skip'), `hint must advertise the arrow verbs:\n${questionPage}`)
   assert.ok(!questionPage.includes('s skip'), `the old 's skip' verb must be gone:\n${questionPage}`)
-  // Text mode commits on → (empty = skipped), so the verb is '→ next' there.
+  // Text mode edits text: ←→ belong to the text cursor (edit hint), and
+  // the edit hint always says esc back (leave the edit).
   const g = makeFlow([{ id: 'q1', question: 'Your name?' }], 24)
   const textMode = render(g, 100).join('\n')
-  assert.ok(textMode.includes('→ next'), `text-mode hint must advertise → next:\n${textMode}`)
+  assert.ok(textMode.includes('←→ edit'), `text-mode hint must advertise ←→ edit:\n${textMode}`)
+  assert.ok(textMode.includes('esc back'), `edit hint must advertise esc back:\n${textMode}`)
+  assert.ok(!textMode.includes('esc cancel'), `edit hint must not advertise esc cancel:\n${textMode}`)
+  assert.ok(!textMode.includes('→ next'), `text-mode hint must not advertise → next:\n${textMode}`)
   assert.ok(!textMode.includes('→ skip'), `text-mode hint must not say → skip:\n${textMode}`)
+  assert.ok(!textMode.includes('↑↓ select'), `text-mode hint must not advertise ↑↓ select:\n${textMode}`)
+  assert.ok(!textMode.includes('1-1 choose'), `text-mode hint must not advertise digit choose:\n${textMode}`)
+  // The NAVIGATION state after Esc advertises the optionless verbs:
+  // ↵ re-enters the edit, ← back / → skip page (a multi-question flow),
+  // esc cancels the flow.
+  const g2 = makeFlow([
+    { id: 'q1', question: 'First?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Your name?' },
+  ], 24)
+  g2.handleInput('1') // answer Q1 → Q2 (optionless, edit layer)
+  g2.handleInput('\x1b') // Esc → navigation state
+  const navMode = render(g2, 100).join('\n')
+  assert.ok(navMode.includes('↵ edit'), `navigation hint must advertise ↵ edit:\n${navMode}`)
+  assert.ok(navMode.includes('← back · → skip'), `navigation hint must advertise the arrow verbs:\n${navMode}`)
+  assert.ok(navMode.includes('esc cancel'), `navigation hint must advertise esc cancel:\n${navMode}`)
+  assert.ok(!navMode.includes('←→ edit'), `navigation hint must not advertise ←→ edit:\n${navMode}`)
   f.handleInput('1')
   render(f, 100)
   f.handleInput('1') // → review
@@ -794,4 +818,484 @@ test('Kitty CSI-u Esc cancels and CSI-u Tab/Enter work', () => {
   render(legacy, 100)
   legacy.handleInput('\x1b')
   assert.equal(cancelled, 3, `legacy Esc must still cancel: got ${cancelled}`)
+})
+
+// ── WP1: free-text edit keyboard ownership (plan §2) ─────────────────────
+
+/** Enter the free-text edit of a question WITH options: walk the cursor to
+ *  the "Type something." row (the last row) and confirm it. */
+function enterOtherEdit(f: QuestionFlow, optionCount: number): void {
+  render(f, 100)
+  for (let i = 0; i < optionCount; i++) f.handleInput('\x1b[B')
+  render(f, 100)
+  f.handleInput('\r') // confirm the OTHER row
+  render(f, 100)
+}
+
+test('edit mode: Left + X inserts mid-text and never commits/advances', () => {
+  // The headline regressions: → used to commit+advance and ← used to page
+  // back — the parent stole the text cursor. Now BOTH arrows go to the
+  // shared Input, so abc + Left + X must yield abXc and stay put.
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Name?', options: [{ label: 'A' }, { label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  enterOtherEdit(f, 2)
+  f.handleInput('abc')
+  f.handleInput('\x1b[D') // Left
+  f.handleInput('X')
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('abXc'), `Left+X must insert mid-text:\n${view}`)
+  assert.ok(!view.includes('Review your answer'), `Left must not commit/advance:\n${view}`)
+  assert.ok(done === undefined, `Left must not submit the draft`)
+  // Right moves the cursor only (never commit/next).
+  f.handleInput('\x1b[C') // Right — back to the end
+  f.handleInput('Y')
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('abXcY'), `Right must move the cursor only:\n${view}`)
+  assert.ok(!view.includes('Review your answer'), `Right must not commit/advance:\n${view}`)
+  assert.ok(done === undefined, `Right must not submit the draft`)
+  // The double-left-right variant from the plan.
+  const g = new QuestionFlow([
+    { id: 'q1', question: 'Name?', options: [{ label: 'A' }] },
+  ], () => {}, () => {})
+  g.setMaxRows(24)
+  enterOtherEdit(g, 1)
+  g.handleInput('abc')
+  g.handleInput('\x1b[D')
+  g.handleInput('\x1b[D')
+  g.handleInput('\x1b[C')
+  g.handleInput('X')
+  view = render(g, 100).join('\n')
+  assert.ok(view.includes('abXc'), `Left Left Right + X must land between b and c:\n${view}`)
+  assert.ok(!view.includes('Review your answer'), `no advance in the double-arrow variant:\n${view}`)
+})
+
+test('edit mode: Home/End and Ctrl+A/E/B/F reach the shared Input', () => {
+  const f = makeFlow([{ id: 'q1', question: 'Name?' }], 24) // optionless → already editing
+  render(f, 100)
+  f.handleInput('abc')
+  f.handleInput('\x1bOH') // Home
+  f.handleInput('X')
+  assert.ok(render(f, 100).join('\n').includes('Xabc'), `Home + X must prepend:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x1bOF') // End
+  f.handleInput('Y')
+  assert.ok(render(f, 100).join('\n').includes('XabcY'), `End + Y must append:\n${render(f, 100).join('\n')}`)
+  // Ctrl+A / Ctrl+E (Emacs line home/end).
+  f.handleInput('\x01') // Ctrl+A
+  f.handleInput('Z')
+  assert.ok(render(f, 100).join('\n').includes('ZXabcY'), `Ctrl+A + Z must prepend:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x05') // Ctrl+E
+  f.handleInput('W')
+  assert.ok(render(f, 100).join('\n').includes('ZXabcYW'), `Ctrl+E + W must append:\n${render(f, 100).join('\n')}`)
+  // Ctrl+B / Ctrl+F (Emacs char movement).
+  f.handleInput('\x02') // Ctrl+B — one left from the end
+  f.handleInput('V')
+  assert.ok(render(f, 100).join('\n').includes('ZXabcYVW'), `Ctrl+B + V must insert before W:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x06') // Ctrl+F — back to the end
+  f.handleInput('U')
+  assert.ok(render(f, 100).join('\n').includes('ZXabcYVWU'), `Ctrl+F + U must append:\n${render(f, 100).join('\n')}`)
+})
+
+test('edit mode: Backspace/Delete, word movement and kill/undo reach the Input', () => {
+  const f = makeFlow([{ id: 'q1', question: 'Name?' }], 24)
+  render(f, 100)
+  f.handleInput('abc')
+  f.handleInput('\x7f') // Backspace
+  assert.ok(render(f, 100).join('\n').includes('ab'), `Backspace must delete backward:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x1bOH') // Home
+  f.handleInput('\x1b[3~') // Delete
+  assert.ok(render(f, 100).join('\n').includes('b'), `Delete must delete forward:\n${render(f, 100).join('\n')}`)
+  // Word movement: Alt+Left from the end lands at the previous word start.
+  const g = makeFlow([{ id: 'q1', question: 'Words?' }], 24)
+  render(g, 100)
+  g.handleInput('hello world')
+  g.handleInput('\x1bB') // Alt+Left
+  g.handleInput('X')
+  assert.ok(render(g, 100).join('\n').includes('hello Xworld'), `Alt+Left + X must insert at the word boundary:\n${render(g, 100).join('\n')}`)
+  // Kill/undo: Ctrl+U kills to line start, undo restores it.
+  const h = makeFlow([{ id: 'q1', question: 'Kill?' }], 24)
+  render(h, 100)
+  h.handleInput('abc')
+  h.handleInput('\x15') // Ctrl+U
+  assert.ok(!render(h, 100).join('\n').includes('abc'), `Ctrl+U must kill to line start:\n${render(h, 100).join('\n')}`)
+  h.handleInput('\x1f') // Ctrl+- undo
+  assert.ok(render(h, 100).join('\n').includes('abc'), `undo must restore the killed text:\n${render(h, 100).join('\n')}`)
+})
+
+test('edit mode: Enter confirms, Esc backs to choices (draft kept), PgUp/PgDn scroll the body', () => {
+  // Enter confirms the custom answer (parent-owned).
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Name?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  enterOtherEdit(f, 1)
+  f.handleInput('alice')
+  f.handleInput('\r') // Enter commits
+  assert.ok(render(f, 100).join('\n').includes('Second?'), `Enter must commit and advance:\n${render(f, 100).join('\n')}`)
+  // Esc with choices: back to the option list, the COMMITTED draft survives.
+  const g = new QuestionFlow([
+    { id: 'q1', question: 'Name?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  g.setMaxRows(24)
+  enterOtherEdit(g, 1)
+  g.handleInput('alice')
+  g.handleInput('\r') // Enter commits → advances to q2
+  assert.ok(render(g, 100).join('\n').includes('Second?'), `precondition — committed custom advances:\n${render(g, 100).join('\n')}`)
+  g.handleInput('\x1b[D') // ← back to q1 (answered, custom 'alice')
+  enterOtherEdit(g, 1) // walk to the OTHER row and enter edit mode
+  const beforeEsc = render(g, 100).join('\n')
+  assert.ok(beforeEsc.includes('alice'), `precondition — draft text visible in the edit row:\n${beforeEsc}`)
+  g.handleInput('\x1b') // Esc → option mode
+  const backToChoices = render(g, 100).join('\n')
+  assert.ok(backToChoices.includes('↑↓ select'), `Esc must return to the option list:\n${backToChoices}`)
+  // Re-enter the edit: Esc leaves the cursor on the OTHER row, so Enter
+  // goes straight back in — the COMMITTED draft text must still be there.
+  render(g, 100)
+  g.handleInput('\r')
+  const reentered = render(g, 100).join('\n')
+  assert.ok(reentered.includes('alice'), `the committed draft must survive Esc and re-entry:\n${reentered}`)
+  // PgUp/PgDn still scroll the body while editing (a long detail).
+  const h = makeFlow([{ id: 'q1', question: 'Pick a side', detail: longDetail(60) }], 12)
+  const top = render(h, 100).join('\n')
+  assert.ok(top.includes('detail-00'), `precondition — body top visible:\n${top}`)
+  h.handleInput('\x1b[6~') // PageDown while editing
+  const scrolled = render(h, 100).join('\n')
+  assert.ok(!scrolled.includes('detail-00') || scrolled.includes('↑ '),
+    `PageDown must scroll the body while editing:\n${scrolled}`)
+  h.handleInput('\x1b[5~') // PageUp
+  const back = render(h, 100).join('\n')
+  assert.ok(back.includes('detail-00'), `PageUp must scroll the body back:\n${back}`)
+})
+
+test('optionless question: Esc enters the navigation state, Esc again cancels the flow', () => {
+  // Two-layer state machine: the EDIT layer owns the text; Esc leaves it
+  // for the navigation layer (← back / → skip / ↵ re-edit); ONLY the
+  // navigation layer's Esc cancels the whole flow. A single Esc must
+  // never cancel and must never strand the question uneditable.
+  let cancelled = 0
+  const f = new QuestionFlow([{ id: 'q1', question: 'Name?' }], () => {}, () => { cancelled += 1 })
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('alice')
+  f.handleInput('\x1b') // Esc: leave the edit — NOT a cancel
+  assert.equal(cancelled, 0, `first Esc must not cancel: got ${cancelled}`)
+  const nav = render(f, 100).join('\n')
+  assert.ok(nav.includes('↵ edit'), `after Esc the navigation hint must advertise ↵ edit:\n${nav}`)
+  assert.ok(nav.includes('esc cancel'), `navigation hint must advertise esc cancel:\n${nav}`)
+  f.handleInput('\x1b') // navigation-state Esc cancels the flow
+  assert.equal(cancelled, 1, `navigation Esc must cancel the flow once: got ${cancelled}`)
+  // The Input's generic cancel (Ctrl+C) mirrors the same two-stage
+  // lifecycle: first press leaves the edit, second press cancels.
+  const g = new QuestionFlow([{ id: 'q1', question: 'Name?' }], () => {}, () => { cancelled += 1 })
+  g.setMaxRows(24)
+  render(g, 100)
+  g.handleInput('\x03') // Ctrl+C → navigation state (like Esc)
+  assert.equal(cancelled, 1, `first Ctrl+C must leave the edit, not cancel: got ${cancelled}`)
+  g.handleInput('\x03') // navigation-state Ctrl+C cancels
+  assert.equal(cancelled, 2, `navigation Ctrl+C must cancel the flow: got ${cancelled}`)
+})
+
+test('optionless navigation state: Enter and printable keys re-enter the edit', () => {
+  // After Esc leaves the edit, the question is NOT editable in place —
+  // the edit layer must be re-entered explicitly (Enter) or implicitly
+  // (any typing key drops straight back into the Input).
+  let cancelled = 0
+  const f = new QuestionFlow([{ id: 'q1', question: 'Name?' }], () => {}, () => { cancelled += 1 })
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('ali')
+  f.handleInput('\x1b') // navigation state
+  const before = render(f, 100).join('\n')
+  assert.ok(!before.includes('←→ edit'), `navigation state must not advertise the edit hint:\n${before}`)
+  f.handleInput('\r') // ↵ re-enters the edit
+  const editing1 = render(f, 100).join('\n')
+  assert.ok(editing1.includes('←→ edit'), `↵ must re-enter the edit:\n${editing1}`)
+  f.handleInput('x') // typing inside the edit appends
+  assert.ok(render(f, 100).join('\n').includes('alix'), `edit must accept text after ↵:\n${render(f, 100).join('\n')}`)
+  // A printable key from the NAVIGATION state re-enters immediately with
+  // the key delivered to the Input (search-box semantics).
+  const g = new QuestionFlow([{ id: 'q1', question: 'Name?' }], () => {}, () => {})
+  g.setMaxRows(24)
+  render(g, 100)
+  g.handleInput('abc')
+  g.handleInput('\x1b') // navigation state
+  g.handleInput('Z') // typing while navigating → straight into the edit
+  const view = render(g, 100).join('\n')
+  assert.ok(view.includes('abcZ'), `a typed key from navigation must re-enter the edit with the key:\n${view}`)
+  assert.ok(view.includes('←→ edit'), `the hint must flip back to the edit after typing:\n${view}`)
+  assert.equal(cancelled, 0, `typing must never cancel the flow`)
+})
+
+test('optionless question: Esc-back navigation reaches the previous question (P1 regression)', () => {
+  // Q1 (choices) → Q2 (optionless) → review → ← back to Q2 → Esc leaves
+  // the edit → ← pages back to Q1. Previously Esc on optionless Q2
+  // cancelled the WHOLE flow, so the user could never keyboard back to
+  // Q1 to fix an answer.
+  let cancelled = 0
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'First?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?' },
+  ], () => {}, () => { cancelled += 1 })
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('1') // answer Q1 → Q2 (optionless, opens in edit mode)
+  render(f, 100)
+  f.handleInput('hello')
+  f.handleInput('\r') // Enter commits Q2 → review page
+  assert.ok(render(f, 100).join('\n').includes('Review your answer'), `precondition — review page:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x1b[D') // ← back to Q2 (drafts survive)
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('Second?'), `← must return to Q2:\n${view}`)
+  assert.ok(view.includes('←→ edit'), `Q2 must be in the edit layer after ← from review:\n${view}`)
+  f.handleInput('\x1b') // Esc: leave Q2's edit (navigation layer)
+  assert.equal(cancelled, 0, `Esc on Q2 edit must NOT cancel the flow: got ${cancelled}`)
+  f.handleInput('\x1b[D') // ← pages back to Q1 (navigation layer)
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('First?'), `← from Q2 navigation must reach Q1:\n${view}`)
+  assert.equal(cancelled, 0, `navigation must never cancel the flow: got ${cancelled}`)
+})
+
+test('edit mode hint is mode-specific: esc back everywhere in the edit, esc cancel in navigation', () => {
+  // Choices + Other editing: esc BACK (leave the edit for the option list).
+  const f = makeFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] }], 24)
+  enterOtherEdit(f, 2)
+  const choicesEdit = render(f, 100).join('\n')
+  assert.ok(choicesEdit.includes('←→ edit'), `edit hint must advertise ←→ edit:\n${choicesEdit}`)
+  assert.ok(choicesEdit.includes('↵ confirm'), `edit hint must advertise ↵ confirm:\n${choicesEdit}`)
+  assert.ok(choicesEdit.includes('esc back'), `choices edit hint must say esc back:\n${choicesEdit}`)
+  assert.ok(!choicesEdit.includes('esc cancel'), `choices edit hint must not say esc cancel:\n${choicesEdit}`)
+  assert.ok(!choicesEdit.includes('↑↓ select'), `edit hint must not advertise ↑↓ select:\n${choicesEdit}`)
+  assert.ok(!choicesEdit.includes('1-2 choose'), `edit hint must not advertise digit choose:\n${choicesEdit}`)
+  assert.ok(!choicesEdit.includes('↵ toggle'), `edit hint must not advertise ↵ toggle (Enter confirms custom text):\n${choicesEdit}`)
+  assert.ok(!choicesEdit.includes('→ next'), `edit hint must not advertise → next:\n${choicesEdit}`)
+  // Optionless EDIT layer: same esc back (leave the edit for the
+  // navigation layer) — NOT esc cancel (that lives in navigation).
+  const g = makeFlow([{ id: 'q1', question: 'Name?', options: [] }, { id: 'q2', question: 'Second?' }], 24)
+  const optionless = render(g, 100).join('\n')
+  assert.ok(optionless.includes('←→ edit'), `optionless edit hint must advertise ←→ edit:\n${optionless}`)
+  assert.ok(optionless.includes('esc back'), `optionless edit hint must say esc back:\n${optionless}`)
+  assert.ok(!optionless.includes('esc cancel'), `optionless edit hint must not say esc cancel:\n${optionless}`)
+  // The optionless NAVIGATION layer (after Esc): ↵ re-enters the edit,
+  // arrows page, esc cancels.
+  g.handleInput('\x1b')
+  const nav = render(g, 100).join('\n')
+  assert.ok(nav.includes('↵ edit'), `navigation hint must advertise ↵ edit:\n${nav}`)
+  assert.ok(nav.includes('← back · → skip'), `navigation hint must advertise the arrow verbs:\n${nav}`)
+  assert.ok(nav.includes('esc cancel'), `navigation hint must advertise esc cancel:\n${nav}`)
+  assert.ok(!nav.includes('←→ edit'), `navigation hint must not advertise ←→ edit:\n${nav}`)
+  // List mode keeps its own hint (regression guard).
+  const list = render(makeFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }], 24), 100).join('\n')
+  assert.ok(list.includes('↑↓ select'), `list mode must keep ↑↓ select:\n${list}`)
+  assert.ok(list.includes('↵ confirm'), `list mode must keep ↵ confirm:\n${list}`)
+  assert.ok(list.includes('esc cancel'), `list mode must keep esc cancel:\n${list}`)
+})
+
+test('free-text input never leaks across questions (round-3 P1)', () => {
+  // Q1 choices → Other edit commits 'abc' → advance to Q2 (choices) →
+  // entering Q2's OTHER edit must start EMPTY, not show Q1's text.
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'A' }, { label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('\x1b[B'); f.handleInput('\x1b[B') // to Q1 OTHER row
+  render(f, 100)
+  f.handleInput('\r') // enter Q1 edit
+  f.handleInput('abc')
+  f.handleInput('\r') // commit → advance to Q2 (list)
+  assert.ok(render(f, 100).join('\n').includes('Two?'), `precondition — Q2 shown:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x1b[B'); f.handleInput('\x1b[B') // to Q2 OTHER row
+  render(f, 100)
+  f.handleInput('\r') // enter Q2 edit
+  const q2Edit = render(f, 100).join('\n')
+  assert.ok(!q2Edit.includes('abc'), `Q2 edit must not show Q1's committed text:\n${q2Edit}`)
+})
+
+test('clearing a committed free-text answer is not resurrected by Esc→navigation→re-edit', () => {
+  // An optionless question with a COMMITTED 'abc': revisit the edit,
+  // clear it (Ctrl+A + Delete), Esc to navigation, re-enter with ↵ —
+  // the deleted text must stay deleted (the shared Input's ownership is
+  // tracked per question, not by value emptiness).
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two?' },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('1') // answer Q1 → Q2 (optionless, edit layer)
+  f.handleInput('abc')
+  f.handleInput('\r') // commit Q2 → review
+  render(f, 100)
+  f.handleInput('\x1b[D') // ← back to Q2
+  assert.ok(render(f, 100).join('\n').includes('abc'), `precondition — committed text visible:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x01') // Ctrl+A (line start)
+  f.handleInput('\x1b[3~') // Delete clears 'abc'
+  assert.ok(!render(f, 100).join('\n').includes('abc'), `precondition — text cleared:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x1b') // Esc → navigation
+  f.handleInput('\r') // ↵ re-enters the edit
+  const reentered = render(f, 100).join('\n')
+  assert.ok(!reentered.includes('abc'), `cleared text must not be resurrected:\n${reentered}`)
+  // The SAME round trip still keeps genuine in-progress text.
+  f.handleInput('xyz')
+  f.handleInput('\x1b') // Esc → navigation
+  f.handleInput('\r') // ↵ re-enter
+  assert.ok(render(f, 100).join('\n').includes('xyz'), `in-progress text must survive the round trip:\n${render(f, 100).join('\n')}`)
+})
+
+test('free-text undo/yank history never leaks across questions', () => {
+  // The free-text Input's undo stack and kill ring are PER-INSTANCE: a
+  // cross-question ownership change must rebuild the Input (resetOtherInput),
+  // so Ctrl+- (undo) / Ctrl+Y (yank) in a later question cannot resurrect
+  // the previous question's editing history.
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'A' }, { label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  // Q1 OTHER: type abc, Backspace → 'ab', commit → advance to Q2.
+  f.handleInput('\x1b[B'); f.handleInput('\x1b[B')
+  render(f, 100)
+  f.handleInput('\r') // enter Q1 edit
+  f.handleInput('abc')
+  f.handleInput('\x7f') // backspace → 'ab'
+  f.handleInput('\r') // commit → Q2 (list)
+  render(f, 100)
+  f.handleInput('\x1b[B'); f.handleInput('\x1b[B')
+  render(f, 100)
+  f.handleInput('\r') // enter Q2 edit (seeded empty)
+  assert.ok(!render(f, 100).join('\n').includes('ab'), `precondition — Q2 edit blank:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x1f') // Ctrl+- undo
+  assert.ok(!render(f, 100).join('\n').includes('ab'), `undo must not resurrect Q1's text:\n${render(f, 100).join('\n')}`)
+  f.handleInput('\x19') // Ctrl+Y yank
+  assert.ok(!render(f, 100).join('\n').includes('ab'), `yank must not paste Q1's killed history:\n${render(f, 100).join('\n')}`)
+})
+
+test('optionless navigation: h and l are TEXT, not vim page aliases', () => {
+  // Typing 'h'/'l' from the navigation state must re-enter the edit with
+  // the letter — never page back (h) or skip-and-advance (l). The vim
+  // aliases stay LIST-mode conveniences only (the review page has no
+  // input to steal from and keeps h).
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'First?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?' },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('1') // answer Q1 → Q2 (optionless, edit layer)
+  render(f, 100)
+  f.handleInput('abc')
+  f.handleInput('\x1b') // → navigation state
+  f.handleInput('h') // 'h' must be text, NOT ← back
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('abch'), `h must append to the edit:\n${view}`)
+  assert.ok(view.includes('←→ edit'), `h must re-enter the edit layer:\n${view}`)
+  assert.ok(!view.includes('First?'), `h must not page back to Q1:\n${view}`)
+  f.handleInput('\x1b') // → navigation again
+  f.handleInput('l') // 'l' must be text, NOT → skip
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('abchl'), `l must append to the edit:\n${view}`)
+  assert.ok(view.includes('←→ edit'), `l must re-enter the edit layer:\n${view}`)
+  assert.ok(!view.includes('Review your answer'), `l must not skip-and-advance:\n${view}`)
+  assert.ok(done === undefined, `l must not submit anything`)
+  // The physical arrows still page from the navigation layer.
+  f.handleInput('\x1b')
+  f.handleInput('\x1b[D') // ← pages back to Q1
+  assert.ok(render(f, 100).join('\n').includes('First?'), `← must still page back:\n${render(f, 100).join('\n')}`)
+})
+
+test('optionless navigation: physical ↑/↓ stay no-ops, j/k are text', () => {
+  const f = makeFlow([{ id: 'q1', question: 'Name?' }], 24)
+  render(f, 100)
+  f.handleInput('abc')
+  f.handleInput('\x1b') // navigation state
+  f.handleInput('\x1b[A') // physical ↑ — no-op, stays in navigation
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('↵ edit'), `↑ must stay in the navigation layer:\n${view}`)
+  assert.ok(!view.includes('←→ edit'), `↑ must not bounce into the edit:\n${view}`)
+  f.handleInput('\x1b[B') // physical ↓ — no-op
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('↵ edit'), `↓ must stay in the navigation layer:\n${view}`)
+  f.handleInput('j') // 'j' IS text
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('abcj'), `j must append to the edit:\n${view}`)
+  assert.ok(view.includes('←→ edit'), `j must re-enter the edit layer:\n${view}`)
+})
+
+test('skip invalidates the free-text Input owner (no stale text beside (skipped))', () => {
+  // Q1 (optionless) has uncommitted 'abc' in the Input; → skip advances.
+  // Returning to Q1 must re-seed from the CLEARED draft — the (skipped)
+  // row must never show stale 'abc' next to it (the Input instance and
+  // ownership survive the skip otherwise, because Q2 never touches it).
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'First?' },
+    { id: 'q2', question: 'Second?', options: [{ label: 'A' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('abc') // Q1 edit (uncommitted)
+  f.handleInput('\x1b') // navigation state
+  f.handleInput('\x1b[C') // → skip Q1 → Q2 (choices list)
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('Second?'), `precondition — Q2 shown:\n${view}`)
+  f.handleInput('\x1b[D') // ← back to Q1
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('First?'), `← must return to Q1:\n${view}`)
+  assert.ok(view.includes('(skipped)'), `Q1 must stay skipped:\n${view}`)
+  assert.ok(!view.includes('abc'), `the stale Input text must not show beside (skipped):\n${view}`)
+  // The skip ALSO cleared the draft: committing empty then re-entering
+  // still shows nothing stale.
+  f.handleInput('\x1b') // Q1 navigation (re-entered from Q2)
+  f.handleInput('\r') // ↵ re-enter the edit
+  view = render(f, 100).join('\n')
+  assert.ok(!view.includes('abc'), `re-entering the edit must not resurrect the skipped text:\n${view}`)
+})
+
+test('uncommitted edit is dropped on a real tab change regardless of the next question type', () => {
+  // Contract: in-progress free-text survives ONLY an Esc → navigation →
+  // ↵ round trip on the SAME question. Once the user actually pages to
+  // another question (←/→/skip/commit-advance), the uncommitted edit is
+  // dropped and re-entry reseeds from the committed draft — the outcome
+  // must NOT depend on whether the intermediate question itself uses the
+  // free-text Input (round finding: a choices stopover used to leave the
+  // old owner alive, so the text survived only for that path).
+  const scenarios: Array<{ label: string; second: QuestionFlowQuestion }> = [
+    { label: 'choices stopover', second: { id: 'q2', question: 'Second?', options: [{ label: 'B' }] } },
+    { label: 'optionless stopover', second: { id: 'q2', question: 'Second?' } },
+  ]
+  for (const scenario of scenarios) {
+    const f = new QuestionFlow([
+      { id: 'q1', question: 'First?' },
+      scenario.second,
+    ], () => {}, () => {})
+    f.setMaxRows(24)
+    render(f, 100)
+    f.handleInput('abc') // Q1 uncommitted
+    f.handleInput('\r') // commit → advance to Q2
+    assert.ok(render(f, 100).join('\n').includes('Second?'), `${scenario.label} — precondition Q2 shown`)
+    // ← back to Q1 (an optionless Q2 sits in its EDIT layer, where ← is
+    // the text cursor — leave it for the navigation layer first).
+    if (scenario.second.options === undefined) f.handleInput('\x1b')
+    f.handleInput('\x1b[D')
+    render(f, 100)
+    f.handleInput('X') // edit the committed draft: abcX (uncommitted)
+    assert.ok(render(f, 100).join('\n').includes('abcX'), `${scenario.label} — precondition abcX typed:\n${render(f, 100).join('\n')}`)
+    f.handleInput('\x1b') // Esc → navigation (Q1)
+    f.handleInput('\x1b[C') // → moves to Q2 (REAL tab change)
+    render(f, 100)
+    // ← back to Q1 (leave Q2's layer accordingly).
+    if (scenario.second.options === undefined) f.handleInput('\x1b')
+    f.handleInput('\x1b[D')
+    const back = render(f, 100).join('\n')
+    assert.ok(back.includes('abc'), `${scenario.label} — the committed draft survives the trip:\n${back}`)
+    assert.ok(!back.includes('abcX'), `${scenario.label} — the uncommitted X must be dropped on a REAL tab change:\n${back}`)
+  }
 })

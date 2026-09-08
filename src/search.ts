@@ -7,9 +7,17 @@
  * @module @xmoon76/dsh-pi-tui/search
  */
 
-import { Input } from '@xmoon76/pi-tui'
+import { Input, truncateToWidth } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { visibleWidth } from '@xmoon76/pi-tui'
+import { color } from './theme.ts'
+
+/** The one-line navigation hint under the search input: Enter/S⇧Enter step
+ * through matches, Esc/Ctrl+C close. Fixed text — the close/next/previous
+ * keys are NON-configurable overlay contracts (scope 'search'), so there is
+ * no effective binding to render (a remap of the configurable search TOGGLE
+ * is deliberately not shown here). */
+const SEARCH_HINT = '↵ next · ⇧↵ prev · esc/ctrl+c close'
 
 /** One-line search input with a "Find transcript" title and N/M counter. */
 export class TranscriptSearchComponent implements Component, Focusable {
@@ -63,6 +71,7 @@ export class TranscriptSearchComponent implements Component, Focusable {
     const gap = ' '.repeat(Math.max(1, safeWidth - labelWidth - statusWidth))
     const title = `${label}${gap}${status}`.slice(0, Math.max(1, safeWidth))
     const padding = ' '.repeat(Math.max(0, safeWidth - visibleWidth(title)))
-    return [`\x1b[7m${title}${padding}\x1b[27m`, ...this.input.render(safeWidth)]
+    const hint = color.textDim(truncateToWidth(SEARCH_HINT, safeWidth, '…'))
+    return [`\x1b[7m${title}${padding}\x1b[27m`, ...this.input.render(safeWidth), hint]
   }
 }

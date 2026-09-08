@@ -1088,9 +1088,17 @@ export class TaskBrowserPanel implements Component, Focusable {
       const interrupt = this.filtered.some(item => item.interruptible === true) ? 'i interrupt · ' : ''
       return `${search}${type}${interrupt}↑↓ navigate · enter open · esc close`
     }
+    if (this.searchMode) {
+      // Search mode owns every printable key as query text — A/S/N/R and
+      // the tree arrows are QUERY characters now, never the ordinary task
+      // actions. Advertise only what search mode actually does, with the
+      // ESCAPE verb FIRST: the hint is one line and a default 80-column
+      // terminal truncates the tail — esc back is the most important
+      // verb, so it must never be the piece that gets cut off.
+      return 'type filter · esc back · ←→ edit · ↑↓ navigate · pgup/pgdn page · tab type · enter open'
+    }
     const parts: string[] = []
-    if (this.searchMode) parts.push('search mode')
-    else if (this.searchEnabled) parts.push('/ search')
+    if (this.searchEnabled) parts.push('/ search')
     parts.push('A active/all', 'Tab type', '←→ tree', 'N next running', 'S stop', 'Enter open', 'R refresh')
     if (this.mode === 'quick') parts.push('T Task Center')
     parts.push('Esc back')

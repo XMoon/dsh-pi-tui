@@ -8,6 +8,7 @@ import { ActionEditorPanel } from '../src/keybinding-ui/action-editor.ts'
 import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../src/keybinding-ui/list.ts'
 import type { KeybindingMutationResult } from '../src/keybinding-ui/controller.ts'
 import { buildKeybindingEditorModel } from '../src/keybinding-ui/model.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -511,5 +512,140 @@ test('Enter opens the selected action detail without making category headers sel
     assert.match(view, /Default: Enter/)
   } finally {
     manager.dispose()
+  }
+})
+
+// ── WP4: /keybindings search uses the shared Input (plan §5) ────────────
+
+test('editor search query edits mid-text with Left/Home/End/Delete', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.handleInput('abc')
+    panel.handleInput('\x1b[D') // Left
+    panel.handleInput('X')
+    assert.match(plain(panel.render(88).join('\n')), /Search: abXc/, 'Left + X must insert mid-query')
+    // Home / End.
+    panel.handleInput('\x1bOH') // Home
+    panel.handleInput('Z')
+    assert.match(plain(panel.render(88).join('\n')), /Search: ZabXc/, 'Home + Z must prefix')
+    panel.handleInput('\x1bOF') // End
+    panel.handleInput('Y')
+    assert.match(plain(panel.render(88).join('\n')), /Search: ZabXcY/, 'End + Y must append')
+    // Delete removes forward; Backspace backward.
+    panel.handleInput('\x1bOH') // Home
+    panel.handleInput('\x1b[3~') // Delete removes Z
+    assert.match(plain(panel.render(88).join('\n')), /Search: abXcY/, 'Delete must remove forward')
+    panel.handleInput('\x7f') // Backspace — cursor is at index 0, no-op
+    assert.match(plain(panel.render(88).join('\n')), /Search: abXcY/, 'Backspace at the start is a no-op')
+    panel.handleInput('\x1bOF') // End
+    panel.handleInput('\x7f') // Backspace removes Y
+    assert.match(plain(panel.render(88).join('\n')), /Search: abXc/, 'Backspace must remove backward')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('editor search query responds to Ctrl+A/E/B/F and word movement', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.handleInput('hello world')
+    // Ctrl+A / Ctrl+E (Emacs line home/end).
+    panel.handleInput('\x01') // Ctrl+A
+    panel.handleInput('Z')
+    assert.match(plain(panel.render(88).join('\n')), /Search: Zhello world/, 'Ctrl+A + Z must prefix')
+    panel.handleInput('\x05') // Ctrl+E
+    panel.handleInput('Y')
+    assert.match(plain(panel.render(88).join('\n')), /Search: Zhello worldY/, 'Ctrl+E + Y must append')
+    // Ctrl+B / Ctrl+F (Emacs char movement).
+    panel.handleInput('\x02') // Ctrl+B — one left from the end
+    panel.handleInput('X')
+    assert.match(plain(panel.render(88).join('\n')), /Search: Zhello worldXY/, 'Ctrl+B + X must insert before Y')
+    panel.handleInput('\x06') // Ctrl+F — back to the end
+    panel.handleInput('W')
+    assert.match(plain(panel.render(88).join('\n')), /Search: Zhello worldXYW/, 'Ctrl+F + W must append')
+    // Word move: Alt+Left lands at the previous word start.
+    panel.handleInput('\x1bB') // Alt+Left
+    panel.handleInput('V')
+    // Zhello worldXYW → Alt+Left from the end lands before 'world', so V
+    // inserts there: Zhello VworldXYW.
+    assert.match(plain(panel.render(88).join('\n')), /Search: Zhello VworldXYW/, 'Alt+Left + V must insert at the word boundary')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('editor search hint switches between Esc clear and Esc close', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    let view = plain(panel.render(88).join('\n'))
+    assert.match(view, /Esc: close/, 'empty query advertises Esc: close')
+    panel.handleInput('todo')
+    view = plain(panel.render(88).join('\n'))
+    assert.match(view, /Esc: clear/, 'non-empty query advertises Esc: clear')
+    assert.doesNotMatch(view, /Esc: close/, 'non-empty query must not advertise Esc: close')
+    // First Esc clears (not closes); the hint flips back to close.
+    panel.handleInput('\x1b')
+    view = plain(panel.render(88).join('\n'))
+    assert.match(view, /Esc: close/, 'after clear the hint returns to Esc: close')
+    // Second Esc closes.
+    let closed = 0
+    const { manager: m2, panel: p2 } = makePanel(() => { closed += 1 })
+    try {
+      p2.handleInput('todo')
+      p2.handleInput('\x1b') // clear
+      p2.handleInput('\x1b') // close
+      assert.equal(closed, 1, 'second Esc must close the panel (query was cleared first)')
+    } finally {
+      p2.dispose()
+      m2.dispose()
+    }
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('editor search: list navigation keys stay parent-owned while editing', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.handleInput('submit')
+    // A filtered list: the matching action row is present.
+    assert.match(plain(panel.render(88).join('\n')), /Submit draft/, 'search must filter to submit')
+    // Up/Down move the selection through the filtered list (not query text).
+    panel.handleInput('\x1b[B')
+    panel.handleInput('\r') // Enter opens the selected action (not a newline)
+    const detail = plain(panel.render(88).join('\n'))
+    assert.match(detail, /shortcut/i, 'Enter must open the selected action details')
+    assert.doesNotMatch(detail, /Search:/, 'the detail view replaces the list (search row gone)')
+    // Esc back: the list returns with the query preserved.
+    panel.handleInput('\x1b')
+    assert.match(plain(panel.render(88).join('\n')), /Search: submit/, 'query must survive the detail round trip')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('editor search row never overflows the panel width (narrow terminals)', () => {
+  // The search row combines the 'Search: ' label with the shared Input's
+  // render; at narrow widths the joined row must still fit the panel
+  // (the Input's own render pads to its granted width, and the stripped
+  // prompt re-added to the label used to exceed the request).
+  for (const width of [4, 8, 10, 12, 20, 40]) {
+    const { manager, panel } = makePanel(() => {})
+    try {
+      panel.handleInput('abc')
+      panel.handleInput('\x1b[D') // a cursor position inside the text
+      for (const line of panel.render(width)) {
+        if (!line.includes('Search:')) continue
+        assert.ok(visibleWidth(line) <= width,
+          `search row overflows width ${width} (visible ${visibleWidth(line)}): ${JSON.stringify(line)}`)
+      }
+    } finally {
+      panel.dispose()
+      manager.dispose()
+    }
   }
 })

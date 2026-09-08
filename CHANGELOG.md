@@ -16,6 +16,20 @@
 
 ### 修复
 
+- **文本输入态的键盘所有权修正。** 自由输入编辑不再被父层抢走行编辑键:
+  Question 的“Type something.”自由输入里 `←/→` 现在是文本光标(此前会误
+  提交或翻页),`Home/End/Ctrl+A/E/B/F/Delete` 等编辑键统一进入共享输入;
+  无选项的纯文本问题改为明确的两层状态:编辑层里 `←/→` 编辑文本、`↵` 提交、
+  `Esc/Ctrl+C` 只退出编辑回到导航层,导航层里 `↵` 重新进入编辑、`←/→` 翻题
+  (或跳过)、`Esc/Ctrl+C` 才取消整个流程(此前按 Esc 会把这类问题困在无法
+  重新编辑的半死状态,或直接取消整个提问);Question 编辑态与 Task Center
+  搜索态的底部提示改为只描述当前模式真实行为(不再宣传 `↑↓ select` /
+  `A active/all` 等列表动作)。Transcript 搜索现在可用 Esc 或 Ctrl+C 关闭
+  (`app.transcript.search.close` 默认键扩充,Ctrl+C 此前被搜索输入框吞掉),
+  并在输入框下显示 `↵ next · ⇧↵ prev · esc/ctrl+c close` 指引。
+  `/keybindings` 的搜索框改为共享 Input 渲染:支持光标移动/Home/End/删除/
+  词移动等完整行编辑,提示随查询是否为空在 `Esc: clear` 与 `Esc: close` 间
+  切换。
 - **退出时完整回收 Direct 会话。** 退出 TUI 时,主 Agent、continuable
   subagent 与 Agent 作用域后台任务现在按固定顺序回收:取消主 Agent 并等待
   静默 → 排空 continuable 后代 → 最终持久化 flush → 释放 AgentHandle。
