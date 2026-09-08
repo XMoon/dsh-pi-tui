@@ -1489,7 +1489,7 @@ test('PTC mixed parallel children pick the first type stably and show the remain
   const activity = ptcActivity([
     dispatchStart(2, 'code-1:code:1', 'bash', { command: 'a', description: 'A' }),
     dispatchStart(3, 'code-1:code:2', 'bash', { command: 'b', description: 'B' }),
-    dispatchStart(4, 'code-1:code:3', 'read', { file_path: 'x', offset: 0, limit: 200 }),
+    dispatchStart(4, 'code-1:code:3', 'read', { file_path: 'x', offset: 1, limit: 200 }),
   ])
   const body = focusCollapsedBody(activity, 80, focusToolDisplay(activity.tool!, {}))
   const toolLine = body.find(line => line.startsWith('Tool:'))

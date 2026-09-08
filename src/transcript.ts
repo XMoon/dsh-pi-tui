@@ -16,6 +16,7 @@
  * @module @xmoon76/dsh-pi-tui/transcript
  */
 
+import { parseExitStatus } from '@deepseek-ai/dsh-shell'
 import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expandAssistantStream, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
@@ -228,11 +229,11 @@ export interface TranscriptSearchMatch {
  * card's corpus recursively includes its sub-call descendants (their
  * name/args/result), so nested output stays searchable and matches locate
  * the root Code card. */
-export function transcriptSearchText(message: TranscriptMessage): string {
+export function transcriptSearchText(message: TranscriptMessage, depth = 0): string {
   if (message.kind === 'tool') {
     const own = `${message.name} ${message.args} ${message.result}`
-    if (message.subCalls === undefined || message.subCalls.length === 0) return own
-    return `${own} ${message.subCalls.map(transcriptSearchText).join(' ')}`
+    if (message.subCalls === undefined || message.subCalls.length === 0 || depth >= PTC_MAX_DEPTH) return own
+    return `${own} ${message.subCalls.map(child => transcriptSearchText(child, depth + 1)).join(' ')}`
   }
   return message.text ?? ''
 }
@@ -422,20 +423,22 @@ export function textOf(blocks: readonly ContentBlock[]): string {
     .join('')
 }
 
-/** Parse the alpha.2 terminal result tail marker: `[exit code: N]` (N≠0)
- * or `[killed by signal: ...]` — the durable terminal failure evidence a
- * bash/pwsh call carries even when the tool call itself settled with
- * `isError: false` (a nonzero command exit is a normal settled outcome).
- * A spilled/truncated result (`[output truncated; full output: …]`) goes
- * through the generic fallback: no exit-status inference (alpha.2
- * presenter contract). A missing marker (spill notice, generic output) is
- * NOT a failure: the status is never invented from text. */
+/** Whether the alpha.2 terminal result tail marker marks a failure: the
+ * official `parseExitStatus` recovers the terminal exit code or signal
+ * from the LAST marker line (a preceding truncation notice does not affect
+ * parsing). A nonzero exit or a signal is a terminal failure even when the
+ * tool call itself settled with `isError: false`; a missing marker is
+ * NOT a failure — the status is never invented from text. */
+/** The PTC sub-call tree depth cap (upstream alpha.2 Web MAX_DEPTH): every
+ * recursive consumer stops below this depth so a corrupted/replayed input
+ * can never overflow the stack. */
+export const PTC_MAX_DEPTH = 256
+
 export function terminalFailureFromResult(result: string): boolean {
-  if (/\[output truncated; full output: [^\]]+\]/.test(result)) return false
-  const last = result.trimEnd().split('\n').pop()?.trim() ?? ''
-  const exit = /^\[exit code: (-?\d+)\]$/.exec(last)
-  if (exit !== null) return Number(exit[1]) !== 0
-  return /^\[killed by signal: .+\]$/.test(last)
+  const parsed = parseExitStatus(result)
+  if ('signal' in parsed) return true
+  if ('exitCode' in parsed) return parsed.exitCode !== 0
+  return false
 }
 
 /** The DISPLAY status of one PTC sub-call: the durable lifecycle status
@@ -1105,11 +1108,15 @@ export class TranscriptFolder {
     if (parent.rootCallId === undefined && data.rootCallId !== parentId) {
       throw new Error(`cross-root PTC sub-call ${data.subCallId}: parent ${parentId} is the root call, event claims root ${data.rootCallId}`)
     }
+    if (parent.rootCallId === undefined && parent.name !== 'run_code') {
+      throw new Error(`PTC sub-call ${data.subCallId}: top-level parent ${parentId} is ${parent.name}, expected run_code`)
+    }
     const existing = this.subCallIndex.get(data.subCallId)
     if (existing !== undefined) {
       if (existing.rootCallId !== data.rootCallId
         || existing.parentCallId !== data.parentCallId
-        || existing.name !== data.name) {
+        || existing.name !== data.name
+        || existing.args !== JSON.stringify(data.arguments)) {
         throw new Error(`conflicting PTC sub-call identity for ${data.subCallId}: start root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}, mounted root=${existing.rootCallId} parent=${existing.parentCallId} name=${existing.name}`)
       }
       return
@@ -1199,16 +1206,17 @@ export class TranscriptFolder {
     if (activity.tool === undefined) return
     const counts = new Map<string, number>()
     const order: string[] = []
-    const visit = (card: TranscriptToolMessage): void => {
+    const visit = (card: TranscriptToolMessage, depth: number): void => {
+      if (depth >= PTC_MAX_DEPTH) return
       for (const sub of card.subCalls ?? []) {
         if (sub.status === 'running') {
           if (!counts.has(sub.name)) order.push(sub.name)
           counts.set(sub.name, (counts.get(sub.name) ?? 0) + 1)
         }
-        visit(sub)
+        visit(sub, depth + 1)
       }
     }
-    visit(root)
+    visit(root, 0)
     if (order.length === 0) {
       activity.tool.activeSubCalls = undefined
     } else {
@@ -3409,7 +3417,8 @@ export class TranscriptFolder {
           else if (orphan.start === undefined) orphan.start = data
           else if (orphan.start.rootCallId !== data.rootCallId
             || orphan.start.parentCallId !== data.parentCallId
-            || orphan.start.name !== data.name) {
+            || orphan.start.name !== data.name
+            || JSON.stringify(orphan.start.arguments) !== JSON.stringify(data.arguments)) {
             // A conflicting duplicate start is impossible on a valid
             // alpha.2 durable stream — fail fast instead of silently
             // keeping one.

@@ -1500,7 +1500,7 @@ function ptcCodeCard(): Extract<TranscriptMessage, { kind: 'tool' }> {
         subCallId: 'code-1:code:1', parentCallId: 'code-1', rootCallId: 'code-1',
       },
       {
-        kind: 'tool', turn: 0, name: 'read', args: '{"file_path":"a.ts","offset":0,"limit":200,"description":"Read source"}',
+        kind: 'tool', turn: 0, name: 'read', args: '{"file_path":"a.ts","offset":1,"limit":200,"description":"Read source"}',
         result: 'file content', status: 'ok',
         subCallId: 'code-1:code:2', parentCallId: 'code-1', rootCallId: 'code-1',
       },
@@ -1508,18 +1508,17 @@ function ptcCodeCard(): Extract<TranscriptMessage, { kind: 'tool' }> {
   }
 }
 
-test('PTC sub-call rows stay visible under a collapsed Code card with a bounded preview', async () => {
+test('PTC sub-call rows stay visible under a collapsed Code card, header-only', async () => {
   const { vt, app } = startApp()
   app.setTranscript([ptcCodeCard()])
   const view = await viewport(vt)
   assert.ok(view.includes('Code'), `root Code card missing:\n${view}`)
   assert.ok(view.includes('Bash'), `child header must stay visible under a collapsed Code card:\n${view}`)
   assert.ok(view.includes('Read'), `child header must stay visible under a collapsed Code card:\n${view}`)
-  // Regular mode: the child body shows a BOUNDED preview (never the full
-  // long output) while the root stays collapsed.
-  assert.ok(view.includes('1 failed'), `the bounded preview shows the first rows:\n${view}`)
-  assert.ok(!view.includes('4 failed'), `the preview must not dump the full body:\n${view}`)
-  assert.ok(view.includes('more lines'), `the preview marks the truncation:\n${view}`)
+  // Regular mode: collapsed children are header-only (no body rows at all)
+  // so long nested output never floods the transcript; Ctrl+O on the root
+  // reveals everything.
+  assert.ok(!view.includes('1 failed'), `no child body rows while the root stays collapsed:\n${view}`)
   assert.ok(view.includes('▶'), `the child header carries a disclosure affordance:\n${view}`)
 })
 

@@ -132,7 +132,7 @@ import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { MentionProvider } from './mentions.ts'
-import { assistantPresentationRevision, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type TranscriptMessage, type TurnActivity } from './transcript.ts'
+import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type TranscriptMessage, type TurnActivity } from './transcript.ts'
 import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
@@ -266,9 +266,6 @@ export interface StreamingToolPreview {
  * width 12 / block 3, the same visual weight as the footer context bar. */
 const COMPACTION_PROGRESS_FRAMES = indeterminateProgressFrames()
 
-/** The bounded preview rows a PTC sub-call body shows in regular mode while
- * the root Code card stays collapsed (full content is one Ctrl+O away). */
-const SUB_CALL_PREVIEW_LINES = 3
 /** The compact todo panel cap: at most this many rows before the panel
  * gains a DISTINCT full state. With ≤ this many items the compact and
  * full lists are visually identical, so the state machine skips the
@@ -5670,6 +5667,10 @@ export class TuiApp {
     for (const [message, entry] of this.messageComponents) {
       if (live.has(message)) continue
       this.messageComponents.delete(message)
+      // The PTC sub-call hit map holds the same message objects: prune it
+      // with the component so a long session never retains the sub-call
+      // trees of cards that left the live window.
+      this.subCallHitsByMessage.delete(message)
       const component = entry.component as { dispose?: () => void } | undefined
       if (component?.dispose !== undefined) {
         try {
@@ -9314,7 +9315,7 @@ export class TuiApp {
       let row = 0
       let total = 0
       for (const child of message.subCalls) {
-        const rows = this.renderSubCall(card, child, width, 2, hits, row, expanded)
+        const rows = this.renderSubCall(card, child, width, 2, hits, row, expanded, 0)
         row += rows
         total += rows
       }
@@ -9338,7 +9339,9 @@ export class TuiApp {
     hits: Array<{ top: number; height: number; subCallId: string }>,
     row: number,
     rootExpanded: boolean,
+    depth: number,
   ): number {
+    if (depth >= PTC_MAX_DEPTH) return 0
     let rows = 1
     const header = toolCardHeader(child.name, child.args, this.workspaceRoot)
     // The DISPLAY status: the durable lifecycle status plus the alpha.2
@@ -9377,24 +9380,10 @@ export class TuiApp {
           rows += 1
         }
       }
-    } else if (this.fullscreen === undefined && child.result !== '') {
-      // Regular mode, root collapsed: a bounded preview so long nested
-      // output never floods the transcript; the full body is one Ctrl+O
-      // away.
-      const lines = child.result.split('\n')
-      const shown = lines.slice(0, SUB_CALL_PREVIEW_LINES)
-      for (const line of shown) {
-        card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
-        rows += 1
-      }
-      if (lines.length > SUB_CALL_PREVIEW_LINES) {
-        card.addChild(new Text(truncateToWidth(`${pad}  ${color.textMuted(`… ${lines.length - SUB_CALL_PREVIEW_LINES} more lines`)}`, width, '…'), 0, 0))
-        rows += 1
-      }
     }
     if (child.subCalls !== undefined) {
       for (const grand of child.subCalls) {
-        rows += this.renderSubCall(card, grand, width, indent + 2, hits, row + rows, rootExpanded)
+        rows += this.renderSubCall(card, grand, width, indent + 2, hits, row + rows, rootExpanded, depth + 1)
       }
     }
     return rows
